@@ -44,6 +44,12 @@ Contains a specialized commit history that:
 3. Contains complete structure, without overwriting cstrike with cstrike15 content
 - This is primarily directories of interest to me for back-porting maps and other various curiosities.
 
+### `fgd\`
+
+Contains a specialized commit history that:
+1. Starts with CS:S FGD files.
+2. Updates to CS:GO FGD files.
+
 ## Usage
 
 1. Browse the commit history in each directory to see step-by-step changes.
