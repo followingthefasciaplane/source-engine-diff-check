@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -22,8 +22,8 @@ extern IGameMovement *g_pGameMovement;
 extern CMoveData *g_pMoveData;	// This is a global because it is subclassed by each game.
 extern ConVar sv_noclipduringpause;
 
-ConVar sv_maxusrcmdprocessticks_warning( "sv_maxusrcmdprocessticks_warning", "-1", FCVAR_NONE, "Print a warning when user commands get dropped due to insufficient usrcmd ticks allocated, number of seconds to throttle, negative disabled" );
-static ConVar sv_maxusrcmdprocessticks_holdaim( "sv_maxusrcmdprocessticks_holdaim", "1", FCVAR_CHEAT, "Hold client aim for multiple server sim ticks when client-issued usrcmd contains multiple actions (0: off; 1: hold this server tick; 2+: hold multiple ticks)" );
+ConVar sv_maxusrcmdprocessticks_warning( "sv_maxusrcmdprocessticks_warning", "-1", FCVAR_RELEASE, "Print a warning when user commands get dropped due to insufficient usrcmd ticks allocated, number of seconds to throttle, negative disabled" );
+static ConVar sv_maxusrcmdprocessticks_holdaim( "sv_maxusrcmdprocessticks_holdaim", "1", FCVAR_RELEASE, "Hold client aim for multiple server sim ticks when client-issued usrcmd contains multiple actions (0: off; 1: hold this server tick; 2+: hold multiple ticks)" );
 
 //-----------------------------------------------------------------------------
 // Purpose: 
@@ -42,7 +42,7 @@ void CPlayerMove::StartCommand( CBasePlayer *player, CUserCmd *cmd )
 {
 	VPROF( "CPlayerMove::StartCommand" );
 
-#if !defined( NO_ENTITY_PREDICTION )
+#if !defined( NO_ENTITY_PREDICTION ) && defined( USE_PREDICTABLEID )
 	CPredictableId::ResetInstanceCounters();
 #endif
 
@@ -57,7 +57,7 @@ void CPlayerMove::StartCommand( CBasePlayer *player, CUserCmd *cmd )
 	for (i = 0; i < cmd->entitygroundcontact.Count(); i++)
 	{
 		int entindex =  cmd->entitygroundcontact[i].entindex;
-		CBaseEntity *pEntity = CBaseEntity::Instance( engine->PEntityOfEntIndex( entindex) );
+		CBaseEntity *pEntity = CBaseEntity::Instance( INDEXENT( entindex) );
 		if (pEntity)
 		{
 			CBaseAnimating *pAnimating = pEntity->GetBaseAnimating();
@@ -178,7 +178,6 @@ void CPlayerMove::SetupMove( CBasePlayer *player, CUserCmd *ucmd, IMoveHelper *p
 	// Prepare remaining fields
 	move->m_flClientMaxSpeed		= player->m_flMaxspeed;
 	move->m_nOldButtons			= player->m_Local.m_nOldButtons;
-	move->m_flOldForwardMove = player->m_Local.m_flOldForwardMove;
 	move->m_vecAngles			= player->pl.v_angle;
 
 	move->m_vecVelocity			= player->GetAbsVelocity();
@@ -195,6 +194,9 @@ void CPlayerMove::SetupMove( CBasePlayer *player, CUserCmd *ucmd, IMoveHelper *p
 	move->m_flConstraintRadius = player->m_flConstraintRadius;
 	move->m_flConstraintWidth = player->m_flConstraintWidth;
 	move->m_flConstraintSpeedFactor = player->m_flConstraintSpeedFactor;
+	move->m_bConstraintPastRadius = player->m_bConstraintPastRadius;
+	// setup trace optimization
+	g_pGameMovement->SetupMovementBounds( move );
 }
 
 //-----------------------------------------------------------------------------
@@ -208,8 +210,7 @@ void CPlayerMove::FinishMove( CBasePlayer *player, CUserCmd *ucmd, CMoveData *mo
 {
 	VPROF( "CPlayerMove::FinishMove" );
 
-	// NOTE: Don't copy this.  the movement code modifies its local copy but is not expecting to be authoritative
-	//player->m_flMaxspeed			= move->m_flClientMaxSpeed;
+	player->m_flMaxspeed			= move->m_flClientMaxSpeed;
 	player->SetAbsOrigin( move->GetAbsOrigin() );
 	player->SetAbsVelocity( move->m_vecVelocity );
 	player->SetPreviouslyPredictedOrigin( move->GetAbsOrigin() );
@@ -222,13 +223,13 @@ void CPlayerMove::FinishMove( CBasePlayer *player, CUserCmd *ucmd, CMoveData *mo
 	{
 		pitch -= 360.0f;
 	}
-	pitch = clamp( pitch, -90.f, 90.f );
+	pitch = clamp( pitch, -90, 90 );
 
 	move->m_vecAngles[ PITCH ] = pitch;
 
 	player->SetBodyPitch( pitch );
 
-	player->SetLocalAngles( move->m_vecAngles );
+	// player->SetLocalAngles( move->m_vecAngles );
 
 	// The class had better not have changed during the move!!
 	if ( player->m_hConstraintEntity )
@@ -238,6 +239,7 @@ void CPlayerMove::FinishMove( CBasePlayer *player, CUserCmd *ucmd, CMoveData *mo
 	Assert( move->m_flConstraintRadius == player->m_flConstraintRadius );
 	Assert( move->m_flConstraintWidth == player->m_flConstraintWidth );
 	Assert( move->m_flConstraintSpeedFactor == player->m_flConstraintSpeedFactor );
+	Assert( move->m_bConstraintPastRadius == player->m_bConstraintPastRadius );
 }
 
 //-----------------------------------------------------------------------------
@@ -318,7 +320,7 @@ void CPlayerMove::RunCommand ( CBasePlayer *player, CUserCmd *ucmd, IMoveHelper 
 	const float playerCurTime = player->m_nTickBase * TICK_INTERVAL; 
 	const float playerFrameTime = player->m_bGamePaused ? 0 : TICK_INTERVAL;
 	const float flTimeAllowedForProcessing = player->ConsumeMovementTimeForUserCmdProcessing( playerFrameTime );
-	if ( !player->IsBot() && ( flTimeAllowedForProcessing < playerFrameTime ) )
+	if ( !player->IsBot() && !player->IsHLTV() && ( flTimeAllowedForProcessing < playerFrameTime ) )
 	{
 		// Make sure that the activity in command is erased because player cheated or dropped too many packets
 		double dblWarningFrequencyThrottle = sv_maxusrcmdprocessticks_warning.GetFloat();
@@ -338,14 +340,10 @@ void CPlayerMove::RunCommand ( CBasePlayer *player, CUserCmd *ucmd, IMoveHelper 
 	StartCommand( player, ucmd );
 
 	// Set globals appropriately
+	const float serverCurTime = gpGlobals->curtime;
+	const float serverFrameTime = gpGlobals->frametime;
 	gpGlobals->curtime		=  playerCurTime;
 	gpGlobals->frametime	=  playerFrameTime;
-
-	// Prevent hacked clients from sending us invalid view angles to try to get leaf server code to crash
-	if ( !ucmd->viewangles.IsValid() || !IsEntityQAngleReasonable(ucmd->viewangles) )
-	{
-		ucmd->viewangles = vec3_angle;
-	}
 
 	// Add and subtract buttons we're forcing on the player
 	ucmd->buttons |= player->m_afButtonForced;
@@ -419,6 +417,13 @@ void CPlayerMove::RunCommand ( CBasePlayer *player, CUserCmd *ucmd, IMoveHelper 
 		player->pl.v_angle = ucmd->viewangles + player->pl.anglechange;
 	}
 
+	// TrackIR
+	player->SetEyeAngleOffset(ucmd->headangles);
+	player->SetEyeOffset(ucmd->headoffset);
+	// TrackIR
+
+	player->SetAimDirection(ucmd->aimdirection);
+
 	// Call standard client pre-think
 	RunPreThink( player );
 
@@ -445,19 +450,27 @@ void CPlayerMove::RunCommand ( CBasePlayer *player, CUserCmd *ucmd, IMoveHelper 
 	FinishMove( player, ucmd, g_pMoveData );
 
 	// If we have to restore the view angle then do so right now
-	if ( !player->IsBot() && ( gpGlobals->tickcount - player->GetLockViewanglesTickNumber() < sv_maxusrcmdprocessticks_holdaim.GetInt() ) )
+	if ( !player->IsBot() &&
+		( gpGlobals->tickcount - player->GetLockViewanglesTickNumber() < sv_maxusrcmdprocessticks_holdaim.GetInt() ) )
 	{
 		player->pl.v_angle = player->GetLockViewanglesData();
 	}
 
+	// Restore server time temporarily before processing impacts,
+	// so timestamps are all in the same time space
+	gpGlobals->curtime = serverCurTime;
+	gpGlobals->frametime = serverFrameTime;
 	// Let server invoke any needed impact functions
 	VPROF_SCOPE_BEGIN( "moveHelper->ProcessImpacts" );
 	moveHelper->ProcessImpacts();
 	VPROF_SCOPE_END();
+	gpGlobals->curtime = playerCurTime;
+	gpGlobals->frametime = playerFrameTime;
 
 	RunPostThink( player );
 
 	g_pGameMovement->FinishTrackPredictionErrors( player );
+	g_pGameMovement->Reset();
 
 	FinishCommand( player );
 

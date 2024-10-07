@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: The 360 VTF file format I/O class to help simplify access to 360 VTF files.
 // 360 Formatted VTF's are stored ascending 1x1 up to NxN. Disk format and unserialized
@@ -172,7 +172,7 @@ bool CVTFTexture::ReadHeader( CUtlBuffer &buf, VTFFileHeaderX360_t &header )
 		return false;
 	}
 
-	if ( header.version[0] != VTF_X360_MAJOR_VERSION && header.version[1] != VTF_X360_MINOR_VERSION )
+	if ( header.version[0] != VTF_X360_MAJOR_VERSION || header.version[1] != VTF_X360_MINOR_VERSION )
 	{
 		Warning( "*** Encountered X360 VTF file with an invalid version!\n" );
 		return false;
@@ -227,7 +227,7 @@ bool CVTFTexture::UnserializeFromBuffer( CUtlBuffer &buf, bool bBufferIsVolatile
 	m_Format = header.imageFormat;
 	m_nFlags = header.flags;
 	m_nFrameCount = header.numFrames;
-	m_nFaceCount = ( m_nFlags & TEXTUREFLAGS_ENVMAP ) ? CUBEMAP_FACE_COUNT-1 : 1;
+	m_nFaceCount = ( m_nFlags & TEXTUREFLAGS_ENVMAP ) ? CUBEMAP_FACE_COUNT : 1;
 	m_nMipCount = ComputeMipCount();
 	m_nMipSkipCount = header.mipSkipCount;
 	m_vecReflectivity = header.reflectivity;

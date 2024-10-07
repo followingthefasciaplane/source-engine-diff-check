@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -13,21 +13,11 @@
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
-static const char g_EffectName[] = "Quad";
-
 CFXQuad::CFXQuad( const FXQuadData_t &data )
-	: CClientSideEffect( g_EffectName )
+
+: CClientSideEffect( "Quad" )
 {
 	m_FXData = data;
-
-	if ( data.m_pMaterial != NULL )
-	{
-		// If we've got a material, use that as our effectname instead of just "Quad".
-		//  This should hopefully help narrow down messages like "No room for effect Quad".
-		const char *szMaterialName = data.m_pMaterial->GetName();
-		if ( szMaterialName )
-			SetEffectName( szMaterialName );
-	}
 }
 
 CFXQuad::~CFXQuad( void )
@@ -49,35 +39,43 @@ void CFXQuad::Draw( double frametime )
 	float	scaleTimePerc, alphaTimePerc;
 
 	//Determine the scale
-	if ( m_FXData.m_uiFlags & FXQUAD_BIAS_SCALE )
+	if ( m_FXData.m_flDieTime == 0.0f )
 	{
-		scaleTimePerc = Bias( ( m_FXData.m_flLifeTime / m_FXData.m_flDieTime ), m_FXData.m_flScaleBias );
+		scaleTimePerc = 1.0f;	// don't divide by 0...
 	}
 	else
 	{
-		scaleTimePerc = ( m_FXData.m_flLifeTime / m_FXData.m_flDieTime );
+		if ( m_FXData.m_uiFlags & FXQUAD_BIAS_SCALE )
+		{
+			scaleTimePerc = Bias( ( m_FXData.m_flLifeTime / m_FXData.m_flDieTime ), m_FXData.m_flScaleBias );
+		}
+		else
+		{
+			scaleTimePerc = ( m_FXData.m_flLifeTime / m_FXData.m_flDieTime );
+		}
 	}
 
 	float scale = m_FXData.m_flStartScale + ( ( m_FXData.m_flEndScale - m_FXData.m_flStartScale ) * scaleTimePerc );
 
 	//Determine the alpha
-	if ( m_FXData.m_uiFlags & FXQUAD_BIAS_ALPHA )
+	if ( m_FXData.m_flDieTime == 0.0f )
 	{
-		alphaTimePerc = Bias( ( m_FXData.m_flLifeTime / m_FXData.m_flDieTime ), m_FXData.m_flAlphaBias );
+		alphaTimePerc = 1.0f;	// don't divide by 0...
 	}
 	else
 	{
-		alphaTimePerc = ( m_FXData.m_flLifeTime / m_FXData.m_flDieTime );
+		if ( m_FXData.m_uiFlags & FXQUAD_BIAS_ALPHA )
+		{
+			alphaTimePerc = Bias( ( m_FXData.m_flLifeTime / m_FXData.m_flDieTime ), m_FXData.m_flAlphaBias );
+		}
+		else
+		{
+			alphaTimePerc = ( m_FXData.m_flLifeTime / m_FXData.m_flDieTime );
+		}
 	}
 
 	float alpha = m_FXData.m_flStartAlpha + ( ( m_FXData.m_flEndAlpha - m_FXData.m_flStartAlpha ) * alphaTimePerc );
 	alpha = clamp( alpha, 0.0f, 1.0f );
-
-	// PASSTIME don't bother if alpha is 0
-	if ( alpha == 0 )
-	{
-		return;
-	}
 	
 	CMatRenderContextPtr pRenderContext( materials );
 
@@ -168,8 +166,6 @@ bool CFXQuad::IsActive( void )
 //-----------------------------------------------------------------------------
 void CFXQuad::Destroy( void )
 {
-	SetEffectName( g_EffectName );
-
 	//Release the material
 	if ( m_FXData.m_pMaterial != NULL )
 	{

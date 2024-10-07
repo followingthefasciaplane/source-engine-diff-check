@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: gameeventmanager.h: interface for the CGameEventManager class.
 //
@@ -15,12 +15,14 @@
 
 #include <igameevents.h>
 #include <utlvector.h>
-#include <KeyValues.h>
+#include <keyvalues.h>
 #include <networkstringtabledefs.h>
 #include <utlsymbol.h>
+#include <utldict.h>
+#include "netmessages.h"
 
-class SVC_GameEventList;
-class CLC_ListenEvents;
+class CSVCMsg_GameEventList;
+class CCLCMsg_ListenEvents;
 
 class CGameEventCallback
 {
@@ -34,48 +36,69 @@ class CGameEventDescriptor
 public:
 	CGameEventDescriptor()
 	{
-		name[0] = 0;
 		eventid = -1;
 		keys = NULL;
 		local = false;
 		reliable = true;
+		elementIndex = -1;
+
+		numSerialized = 0;
+		numUnSerialized = 0;
+		totalSerializedBits = 0;
+		totalUnserializedBits = 0;
 	}
 
 public:
-	char		name[MAX_EVENT_NAME_LENGTH];	// name of this event
 	int			eventid;	// network index number, -1 = not networked
+	int			elementIndex;
 	KeyValues	*keys;		// KeyValue describing data types, if NULL only name 
+    CUtlVector<CGameEventCallback*>	listeners;	// registered listeners
 	bool		local;		// local event, never tell clients about that
 	bool		reliable;	// send this event as reliable message
-    CUtlVector<CGameEventCallback*>	listeners;	// registered listeners
+
+	// Extra data for network monitoring
+	int numSerialized;
+	int numUnSerialized;
+	int totalSerializedBits;
+	int totalUnserializedBits;
 };
 
 class CGameEvent : public IGameEvent
 {
 public:
-
-	CGameEvent( CGameEventDescriptor *descriptor );
+	CGameEvent( CGameEventDescriptor *descriptor, const char *name );
 	virtual ~CGameEvent();
 
-	const char *GetName() const;
-	bool  IsEmpty(const char *keyName = NULL);
-	bool  IsLocal() const;
-	bool  IsReliable() const;
+	virtual const char *GetName() const OVERRIDE;
+	virtual bool  IsEmpty(const char *keyName = NULL) const OVERRIDE;
+	virtual bool  IsLocal() const OVERRIDE;
+	virtual bool  IsReliable() const OVERRIDE;
 
-	bool  GetBool( const char *keyName = NULL, bool defaultValue = false );
-	int   GetInt( const char *keyName = NULL, int defaultValue = 0 );
-	float GetFloat( const char *keyName = NULL, float defaultValue = 0.0f );
-	const char *GetString( const char *keyName = NULL, const char *defaultValue = "" );
+	virtual bool  GetBool( const char *keyName = NULL, bool defaultValue = false ) const OVERRIDE;
+	virtual int   GetInt( const char *keyName = NULL, int defaultValue = 0 ) const OVERRIDE;
+	virtual uint64 GetUint64( const char *keyName = NULL, uint64 defaultValue = 0 ) const OVERRIDE;
+	virtual float GetFloat( const char *keyName = NULL, float defaultValue = 0.0f ) const OVERRIDE;
+	virtual const char *GetString( const char *keyName = NULL, const char *defaultValue = "" ) const OVERRIDE;
+	virtual const wchar_t *GetWString( const char *keyName = NULL, const wchar_t *defaultValue = L"" ) const OVERRIDE;
+	virtual const void *GetPtr( const char *keyName = NULL ) const OVERRIDE;
 
-	void SetBool( const char *keyName, bool value );
-	void SetInt( const char *keyName, int value );
-	void SetFloat( const char *keyName, float value );
-	void SetString( const char *keyName, const char *value );
-	
+	virtual void SetBool( const char *keyName, bool value ) OVERRIDE;
+	virtual void SetInt( const char *keyName, int value ) OVERRIDE;
+	virtual void SetUint64( const char *keyName, uint64 value ) OVERRIDE;
+	virtual void SetFloat( const char *keyName, float value ) OVERRIDE;
+	virtual void SetString( const char *keyName, const char *value ) OVERRIDE;
+	virtual void SetWString( const char *keyName, const wchar_t *value ) OVERRIDE;
+	virtual void SetPtr( const char *keyName, const void * value ) OVERRIDE;
+
+	virtual bool ForEventData( IGameEventVisitor2* visitor ) const OVERRIDE;
+
 	CGameEventDescriptor	*m_pDescriptor;
 	KeyValues				*m_pDataKeys;
 };
 
+
+// NOTE: Every non-threadsafe externally-callable function must lock m_mutex before modifying the event manager
+// member variables.  Client & server threads can call into this class simultaneously
 class CGameEventManager : public IGameEventManager2
 {
 	friend class CGameEventManagerOld;
@@ -99,7 +122,10 @@ public:	// IGameEventManager functions
 		TYPE_LONG,		// signed int 32 bit
 		TYPE_SHORT,		// signed int 16 bit
 		TYPE_BYTE,		// unsigned int 8 bit
-		TYPE_BOOL		// unsigned int 1 bit
+		TYPE_BOOL,		// unsigned int 1 bit
+		TYPE_UINT64,	// unsigned int 64 bit
+		TYPE_WSTRING,	// zero terminated wide char string
+		TYPE_COUNT, 
 	};
 
 	CGameEventManager();
@@ -111,15 +137,21 @@ public:	// IGameEventManager functions
 	bool AddListener( IGameEventListener2 *listener, const char *name, bool bServerSide );
 	bool FindListener( IGameEventListener2 *listener, const char *name );
 	void RemoveListener( IGameEventListener2 *listener);
+
+	virtual bool AddListenerGlobal( IGameEventListener2 *listener, bool bServerSide );
 		
-	IGameEvent *CreateEvent( const char *name, bool bForce = false );
+	IGameEvent *CreateEvent( const char *name, bool bForce = false, int *pCookie = NULL );
 	IGameEvent *DuplicateEvent( IGameEvent *event);
 	bool FireEvent( IGameEvent *event, bool bDontBroadcast = false );
 	bool FireEventClientSide( IGameEvent *event );
 	void FreeEvent( IGameEvent *event );
 
-	bool SerializeEvent( IGameEvent *event, bf_write *buf );
-	IGameEvent *UnserializeEvent( bf_read *buf );
+	bool SerializeEvent( IGameEvent *event, CSVCMsg_GameEvent *eventMsg );
+	IGameEvent *UnserializeEvent( const CSVCMsg_GameEvent& eventMsg );
+
+	virtual KeyValues* GetEventDataTypes( IGameEvent* event );
+
+	void DumpEventNetworkStats();
 
 public:
 	bool Init();
@@ -127,14 +159,14 @@ public:
 	void ReloadEventDefinitions();	// called by server on new map
 	bool AddListener( void *listener, CGameEventDescriptor *descriptor, int nListenerType );
 
-    CGameEventDescriptor *GetEventDescriptor( const char *name );
+    CGameEventDescriptor *GetEventDescriptor( const char *name, int *pCookie = NULL );
 	CGameEventDescriptor *GetEventDescriptor( IGameEvent *event );
 	CGameEventDescriptor *GetEventDescriptor( int eventid );
 
-	void WriteEventList(SVC_GameEventList *msg);
-	bool ParseEventList(SVC_GameEventList *msg);
+	void WriteEventList(CSVCMsg_GameEventList *msg);
+	bool ParseEventList(const CSVCMsg_GameEventList& msg);
 
-	void WriteListenEventList(CLC_ListenEvents *msg);
+	void WriteListenEventList(CCLCMsg_ListenEvents *msg);
 	bool HasClientListenersChanged( bool bReset = true );
 	void ConPrintEvent( IGameEvent *event);
 	
@@ -142,10 +174,12 @@ public:
 	bool AddListenerAll( void *listener, int nListenerType );
 	void RemoveListenerOld( void *listener);
 	
+	// Debug!
+	void VerifyListenerList( void );
 	
 protected:
 
-	IGameEvent *CreateEvent( CGameEventDescriptor *descriptor );
+	IGameEvent *CreateEvent( CGameEventDescriptor *descriptor, const char *name );
 	bool RegisterEvent( KeyValues * keys );
 	void UnregisterEvent(int index);
 	bool FireEventIntern( IGameEvent *event, bool bServerSide, bool bClientOnly );
@@ -155,6 +189,8 @@ protected:
 	CUtlVector<CGameEventCallback*>		m_Listeners;	// list of all registered listeners
 	CUtlSymbolTable						m_EventFiles;	// list of all loaded event files
 	CUtlVector<CUtlSymbol>				m_EventFileNames; 
+	CUtlDict<int, int>					m_EventMap;
+	CThreadFastMutex					m_mutex;		// lock this when modifying the event table
 
 	bool	m_bClientListenersChanged;	// true every time client changed listeners
 };

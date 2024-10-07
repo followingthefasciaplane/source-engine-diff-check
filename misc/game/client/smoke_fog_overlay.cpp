@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -10,8 +10,7 @@
 #include "materialsystem/imaterial.h"
 #include "materialsystem/imesh.h"
 #include "view.h"
-#include "clienteffectprecachesystem.h"
-#include "tier0/vprof.h"
+#include "precache_register.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -22,15 +21,16 @@ static IMaterial *g_pSmokeFogMaterial = NULL;
 float		g_SmokeFogOverlayAlpha;
 Vector		g_SmokeFogOverlayColor;
 
-CLIENTEFFECT_REGISTER_BEGIN( PrecacheSmokeFogOverlay )
-CLIENTEFFECT_MATERIAL( "particle/screenspace_fog" )
-CLIENTEFFECT_REGISTER_END()
+PRECACHE_REGISTER_BEGIN( GLOBAL, PrecacheSmokeFogOverlay )
+PRECACHE( MATERIAL, "particle/screenspace_fog" )
+PRECACHE_REGISTER_END()
 
 void InitSmokeFogOverlay()
 {
 	TermSmokeFogOverlay();
 	
 	g_SmokeFogOverlayAlpha = 0;
+	g_SmokeFogOverlayColor.Init( 0.0f, 0.0f, 0.0f );
 
 	if(materials)
 	{
@@ -55,13 +55,9 @@ void DrawSmokeFogOverlay()
 {
 	if(g_SmokeFogOverlayAlpha == 0 || !g_pSmokeFogMaterial || !materials)
 		return;
-
-	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
-
-	// Hard-coded for now..
-	g_SmokeFogOverlayColor.Init( 0.3, 0.3, 0.3 );
 	
 	CMatRenderContextPtr pRenderContext( materials );
+	PIXEVENT( pRenderContext, "DrawSmokeFogOverlay()" );
 
 	pRenderContext->MatrixMode( MATERIAL_PROJECTION );
 	pRenderContext->LoadIdentity();
@@ -78,7 +74,11 @@ void DrawSmokeFogOverlay()
 
 	static float dist = 10;
 
-	Vector vColor = g_SmokeFogOverlayColor;
+	// g_SmokeFogOverlayColor is the sum total of all the smoke colors weighted by their alpha contribution and added.
+	// Dividing by the g_SmokeFogOverlayAlpha gives us the weighted average color of all the smoke plumes that are influencing
+	// the fog overlay. 
+	Vector vColor = g_SmokeFogOverlayColor/* / g_SmokeFogOverlayAlpha*/;
+
 	vColor.x = MIN(MAX(vColor.x, 0), 1);
 	vColor.y = MIN(MAX(vColor.y, 0), 1);
 	vColor.z = MIN(MAX(vColor.z, 0), 1);

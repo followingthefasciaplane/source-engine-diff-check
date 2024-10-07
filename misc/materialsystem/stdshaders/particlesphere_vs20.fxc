@@ -10,7 +10,6 @@ const float4 g_vLightPosition : register( SHADER_SPECIFIC_CONST_0 );
 const float4 g_vLightColor : register( SHADER_SPECIFIC_CONST_1 );		// range 0-1
 const float  g_flLightIntensity : register( SHADER_SPECIFIC_CONST_2 );	// scales g_vLightColor
 
-
 struct VS_INPUT
 {
 	// If this is float4, and the input is float3, the w component default to one.
@@ -22,19 +21,14 @@ struct VS_INPUT
 struct VS_OUTPUT
 {
     float4 projPos					: POSITION;	
-#if !defined( _X360 )
+#if !defined( _X360 ) && !defined( SHADER_MODEL_VS_3_0 )
 	float  fog						: FOG;
 #endif
 	float2 vBumpTexCoord			: TEXCOORD0;
 	float3 vTangentSpaceLightDir	: TEXCOORD1;
 	float3 vAmbientColor			: TEXCOORD2;
 	
-#if defined( _X360 )
-	float4 vScreenPos_ReverseZ		: TEXCOORD3;
-#else
-	float4 vScreenPos				: TEXCOORD3;
-#endif
-
+	float4 vIteratedProjPos			: TEXCOORD3;
 	
 	float4 vDirLightScale			: COLOR0;
 	
@@ -43,32 +37,24 @@ struct VS_OUTPUT
 
 VS_OUTPUT main( const VS_INPUT v )
 {
-	VS_OUTPUT o;
+	VS_OUTPUT o = (VS_OUTPUT)0;
 
 	// Transform the input position.
 	float4 projPos = mul( v.vPos, cModelViewProj );
 	o.projPos = projPos;
-	projPos.z = dot( v.vPos, cModelViewProjZ );
 	
-#if defined( _X360 )
-	o.vScreenPos_ReverseZ.x = projPos.x;
-	o.vScreenPos_ReverseZ.y = -projPos.y; // invert Y
-	o.vScreenPos_ReverseZ.xy = (o.vScreenPos_ReverseZ.xy + projPos.w) * 0.5f;
-	o.vScreenPos_ReverseZ.z = projPos.w - projPos.z;
-	o.vScreenPos_ReverseZ.w = projPos.w;
-#else	
-	o.vScreenPos.x = projPos.x;
-	o.vScreenPos.y = -projPos.y; // invert Y
-	o.vScreenPos.xy = (o.vScreenPos.xy + projPos.w) * 0.5f;
-	o.vScreenPos.z = projPos.z;
-	o.vScreenPos.w = projPos.w;
-#endif
-	
+#ifdef _PS3
+	// Account for OpenGL's flipped y coordinate and expanded z range [-1,1] instead of [0,1]
+	o.projPos.y = -o.projPos.y;
+	o.projPos.z = 2.0f * o.projPos.z - o.projPos.w;
+#endif // _PS3
+
+	o.vIteratedProjPos = projPos;
+
 	o.worldPos_projPosZ = float4( v.vPos.xyz, projPos.z );
 
-#if !defined( _X360 )
-	// Setup fog.
-	o.fog = CalcFog( mul( v.vPos, cModel[0] ), projPos, g_FogType );
+#if !defined( _X360 ) && !defined( SHADER_MODEL_VS_3_0 )
+	o.fog = CalcFixedFunctionFog( mul4x3( v.vPos, cModel[0] ), g_FogType );
 #endif
 
 	// Copy texcoords over.
@@ -106,7 +92,7 @@ VS_OUTPUT main( const VS_INPUT v )
 	float4 vTangentSpaceLight = vRight*vToLight.x + vUp*vToLight.y + vForward*vToLight.z;
 
 	// Output texcoord 1 holds the normalized transformed light direction.
-	o.vTangentSpaceLightDir = normalize( vTangentSpaceLight ) * 0.5 + 0.5; // make it 0-1 for the pixel shader
+	o.vTangentSpaceLightDir = normalize( vTangentSpaceLight ).xyz * 0.5 + 0.5; // make it 0-1 for the pixel shader
 	
 	
 	// Handle oversaturation here. The shader code already scaled the light color so its max value is 1,
@@ -115,11 +101,11 @@ VS_OUTPUT main( const VS_INPUT v )
 	float flScaledIntensity = g_flLightIntensity / flTransposedLenSqr;
 	if ( flScaledIntensity > 1 )
 	{
-		o.vDirLightScale.xyz = g_vLightColor;
+		o.vDirLightScale.xyz = g_vLightColor.xyz;
 	}
 	else
 	{
-		o.vDirLightScale.xyz = g_vLightColor * flScaledIntensity;
+		o.vDirLightScale.xyz = g_vLightColor.xyz * flScaledIntensity.xxx;
 	}
 	
 	// Alpha comes right from the vertex color.

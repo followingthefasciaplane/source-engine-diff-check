@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -15,6 +15,7 @@
 #include "cmd.h"
 #include "convar.h"
 #include "vstdlib/random.h"
+#include "host.h"
 #include <stdlib.h>
 #if defined( _X360 )
 #include "xbox/xbox_win32stubs.h"
@@ -23,19 +24,28 @@
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
+#define TESTSCRIPT_COLOR	Color( 0, 255, 255 )
+
 CTestScriptMgr g_TestScriptMgr;
 
 ConVar testscript_debug( "testscript_debug", "0", 0, "Debug test scripts." );
+ConVar testscript_running( "testscript_running", "0", 0, "Set to true when test scripts are running" );
 
-#ifdef _DEBUG
+
 // --------------------------------------------------------------------------------------------------- //
 // Global console commands the test script manager implements.
 // --------------------------------------------------------------------------------------------------- //
-CON_COMMAND_EXTERN( Test_Wait, Test_Wait, "" )
+CON_COMMAND_EXTERN_F( Test_Wait, Test_Wait, "", FCVAR_CHEAT )
 {
+	if ( !CommandLine()->FindParm("-insecure") )
+	{
+		Warning( "Tests require that you launch the game with -insecure flag." );
+		return;
+	}
+
 	if ( args.ArgC() < 2 )
 	{
-		Error( "Test_Wait: requires seconds parameter." );
+		Warning( "Test_Wait: requires seconds parameter." );
 		return;
 	}
 
@@ -43,16 +53,28 @@ CON_COMMAND_EXTERN( Test_Wait, Test_Wait, "" )
 	GetTestScriptMgr()->SetWaitTime( flSeconds );
 }
 
-CON_COMMAND_EXTERN( Test_RunFrame, Test_RunFrame, "" )
+CON_COMMAND_EXTERN_F( Test_RunFrame, Test_RunFrame, "", FCVAR_CHEAT )
 {
+	if ( !CommandLine()->FindParm( "-insecure" ) )
+	{
+		Warning( "Tests require that you launch the game with -insecure flag." );
+		return;
+	}
+
 	GetTestScriptMgr()->SetWaitCheckPoint( "frame_end" );
 }
 
-CON_COMMAND_EXTERN( Test_WaitForCheckPoint, Test_WaitForCheckPoint, "" )
+CON_COMMAND_EXTERN_F( Test_WaitForCheckPoint, Test_WaitForCheckPoint, "", FCVAR_CHEAT )
 {
+	if ( !CommandLine()->FindParm( "-insecure" ) )
+	{
+		Warning( "Tests require that you launch the game with -insecure flag." );
+		return;
+	}
+
 	if ( args.ArgC() < 2 )
 	{
-		Error( "Test_WaitForCheckPoint <checkpoint name> [once]: requires checkpoint name." );
+		Warning( "Test_WaitForCheckPoint <checkpoint name> [once]: requires checkpoint name." );
 		return;
 	}
 
@@ -60,55 +82,86 @@ CON_COMMAND_EXTERN( Test_WaitForCheckPoint, Test_WaitForCheckPoint, "" )
 	GetTestScriptMgr()->SetWaitCheckPoint( args[ 1 ], bOnce );
 }
 
-CON_COMMAND_EXTERN( Test_StartLoop, Test_StartLoop, "Test_StartLoop <loop name> - Denote the start of a loop. Really just defines a named point you can jump to." )
+CON_COMMAND_EXTERN_F( Test_StartLoop, Test_StartLoop, "Test_StartLoop <loop name> - Denote the start of a loop. Really just defines a named point you can jump to.", FCVAR_CHEAT )
 {
+	if ( !CommandLine()->FindParm( "-insecure" ) )
+	{
+		Warning( "Tests require that you launch the game with -insecure flag." );
+		return;
+	}
+
 	if ( args.ArgC() < 2 )
 	{
-		Error( "Test_StartLoop: requires a loop name." );
+		Warning( "Test_StartLoop: requires a loop name." );
 		return;
 	}
 
 	GetTestScriptMgr()->StartLoop( args[ 1 ] );
 }
 
-CON_COMMAND_EXTERN( Test_LoopCount, Test_LoopCount, "Test_LoopCount <loop name> <count> - loop back to the specified loop start point the specified # of times." )
+CON_COMMAND_EXTERN_F( Test_LoopCount, Test_LoopCount, "Test_LoopCount <loop name> <count> - loop back to the specified loop start point the specified # of times.", FCVAR_CHEAT )
 {
+	if ( !CommandLine()->FindParm( "-insecure" ) )
+	{
+		Warning( "Tests require that you launch the game with -insecure flag." );
+		return;
+	}
+
 	if ( args.ArgC() < 3 )
 	{
-		Error( "Test_LoopCount: requires a loop name and number of times to loop." );
+		Warning( "Test_LoopCount: requires a loop name and number of times to loop." );
 		return;
 	}
 
 	GetTestScriptMgr()->LoopCount( args[ 1 ], atoi( args[ 2 ] ) );
 }
 
-CON_COMMAND_EXTERN( Test_Loop, Test_Loop, "Test_Loop <loop name> - loop back to the specified loop start point unconditionally." )
+CON_COMMAND_EXTERN_F( Test_Loop, Test_Loop, "Test_Loop <loop name> - loop back to the specified loop start point unconditionally.", FCVAR_CHEAT )
 {
+	if ( !CommandLine()->FindParm( "-insecure" ) )
+	{
+		Warning( "Tests require that you launch the game with -insecure flag." );
+		return;
+	}
+
 	if ( args.ArgC() < 2 )
 	{
-		Error( "Test_Loop: requires a loop name." );
+		Warning( "Test_Loop: requires a loop name." );
 		return;
 	}
 
 	GetTestScriptMgr()->LoopCount( args[ 1 ], -1 );
 }
 
-CON_COMMAND_EXTERN( Test_LoopForNumSeconds, Test_LoopForNumSeconds, "Test_LoopForNumSeconds <loop name> <time> - loop back to the specified start point for the specified # of seconds." )
+CON_COMMAND_EXTERN_F( Test_LoopForNumSeconds, Test_LoopForNumSeconds, "Test_LoopForNumSeconds <loop name> <time> - loop back to the specified start point for the specified # of seconds.", FCVAR_CHEAT )
 {
+	if ( !CommandLine()->FindParm( "-insecure" ) )
+	{
+		Warning( "Tests require that you launch the game with -insecure flag." );
+		return;
+	}
+
 	if ( args.ArgC() < 3 )
 	{
-		Error( "Test_LoopLoopForNumSeconds: requires a loop name and number of seconds to loop." );
+		Warning( "Test_LoopLoopForNumSeconds: requires a loop name and number of seconds to loop." );
 		return;
 	}
 
 	GetTestScriptMgr()->LoopForNumSeconds( args[ 1 ], atof( args[ 2 ] ) );
 }
 
-CON_COMMAND( Test_RandomChance, "Test_RandomChance <percent chance, 0-100> <token1> <token2...> - Roll the dice and maybe run the command following the percentage chance." )
+CON_COMMAND_F( Test_RandomChance, "Test_RandomChance <percent chance, 0-100> <token1> <token2...> - Roll the dice and maybe run the command following the percentage chance.", FCVAR_CHEAT )
 {
+	if ( !CommandLine()->FindParm( "-insecure" ) )
+	{
+		Warning( "Tests require that you launch the game with -insecure flag." );
+		return;
+	}
+
 	if ( args.ArgC() < 3 )
 	{
-		Error( "Test_RandomChance: requires percentage chance parameter (0-100) followed by command to execute." );
+		Warning( "Test_RandomChance: requires percentage chance parameter (0-100) followed by command to execute." );
+		return;
 	}
 
 	float flPercent = atof( args[ 1 ] );
@@ -123,31 +176,45 @@ CON_COMMAND( Test_RandomChance, "Test_RandomChance <percent chance, 0-100> <toke
 			Q_strncat( newString, " ", sizeof( newString ), COPY_ALL_CHARACTERS );
 		}
 
-		Cbuf_InsertText( newString );
+		Cbuf_InsertText( Cbuf_GetCurrentPlayer(), newString, args.Source() );
 	}
 }
 
 
-CON_COMMAND( Test_SendKey, "" )
+CON_COMMAND_F( Test_SendKey, "", FCVAR_CHEAT )
 {
+	if ( !CommandLine()->FindParm( "-insecure" ) )
+	{
+		Warning( "Tests require that you launch the game with -insecure flag." );
+		return;
+	}
+
 	if ( args.ArgC() < 2 )
 	{
-		Error( "Test_SendKey: requires key to send." );
+		Warning( "Test_SendKey: requires key to send.\n" );
+		return;
 	}
+
 	Sys_TestSendKey( args[1] );
 }
 
-CON_COMMAND( Test_StartScript, "Start a test script running.." )
+CON_COMMAND_F( Test_StartScript, "Start a test script running..", FCVAR_CHEAT )
 {
+	if ( !CommandLine()->FindParm( "-insecure" ) )
+	{
+		Warning( "Tests require that you launch the game with -insecure flag." );
+		return;
+	}
+
 	if ( args.ArgC() < 2 )
 	{
 		Warning( "Test_StartScript: requires filename of script to start (file must be under testscripts directory).\n" );
+		return;
 	}
 
-	if ( !GetTestScriptMgr()->StartTestScript( args[1] ) )
-		Warning( "Error starting testscript '%s'\n", args[1] );
+	GetTestScriptMgr()->StartTestScript( args[1] );
 }
-#endif
+
 
 // --------------------------------------------------------------------------------------------------- //
 // CTestScriptMgr implementation.
@@ -168,17 +235,29 @@ CTestScriptMgr::~CTestScriptMgr()
 
 bool CTestScriptMgr::StartTestScript( const char *pFilename )
 {
-	Term();
+	StopTestScript();
 
-	char fullName[512];
-	Q_snprintf( fullName, sizeof( fullName ), "testscripts\\%s", pFilename );
+	char fullName[MAX_PATH];
+ 	Q_snprintf( fullName, sizeof( fullName ), "testscripts\\%s", pFilename );	 
+	V_DefaultExtension( fullName, ".vtest", sizeof( fullName ) );
 
-	m_hFile = g_pFileSystem->Open( fullName, "rt" );
+	m_hFile = g_pFileSystem->Open( fullName, "rt", "GAME" ); 
 	if ( m_hFile == FILESYSTEM_INVALID_HANDLE )
+	{
+		Warning( "StartTestScript( %s ) failed.\n", fullName );
 		return false;
+	}
 
+	testscript_running.SetValue( 1 );
 	RunCommands();	
 	return true;
+}
+
+
+void CTestScriptMgr::StopTestScript( void )
+{
+	testscript_running.SetValue( 0 );
+	Term();
 }
 
 
@@ -203,11 +282,12 @@ void CTestScriptMgr::CheckPoint( const char *pName )
 	if ( !IsInitted() || IsTimerWaiting() )
 		return;
 
+	MEM_ALLOC_CREDIT();
 	if ( testscript_debug.GetInt() )
 	{
 		if ( stricmp( pName, "frame_end" ) != 0 )
 		{
-			Msg( "TESTSCRIPT: CheckPoint -> '%s'.\n", pName );
+			ConColorMsg( TESTSCRIPT_COLOR, "TESTSCRIPT: CheckPoint -> '%s'.\n", pName );
 		}
 	}
 
@@ -231,6 +311,16 @@ void CTestScriptMgr::CheckPoint( const char *pName )
 void CTestScriptMgr::RunCommands()
 {
 	Assert( IsInitted() );
+
+	if ( Cbuf_IsProcessingCommands( Cbuf_GetCurrentPlayer() ) )
+	{
+		// Too bad, we got here from a concommand handler, any test script commands you think should be executed won't be executed correctly.
+		// Cbuf_Execute() is not re-entrant, it won't crash, but it won't do the correct thing from the test script as
+		// the commands get deferred causing the scripts to break/crash.
+		// RunCommands() really can be only validly "ticked" from at least the CheckPoint( "frame_end" ) to be adherent
+		// to the delays and still let frames pass.
+		return;
+	}
 
 	while ( !IsTimerWaiting() && !IsCheckPointWaiting() )
 	{
@@ -282,7 +372,7 @@ void CTestScriptMgr::RunCommands()
 		{
 			if ( g_pFileSystem->EndOfFile( m_hFile ) )
 			{
-				Term();
+				StopTestScript();
 				break;
 			}
 			else
@@ -290,8 +380,13 @@ void CTestScriptMgr::RunCommands()
 				continue;
 			}			
 		}
+		
+		if ( developer.GetBool() || testscript_debug.GetInt() )
+		{
+			ConColorMsg( TESTSCRIPT_COLOR, "TESTSCRIPT: Executing command from script: %s\n", curCommand );
+		}
 
-		Cbuf_AddText( curCommand );
+		Cbuf_AddText( Cbuf_GetCurrentPlayer(), curCommand );
 		Cbuf_Execute();
 	}
 }
@@ -358,12 +453,16 @@ void CTestScriptMgr::LoopCount( const char *pLoopName, int nTimes )
 	CLoopInfo *pLoop = FindLoop( pLoopName );
 	if ( !pLoop )
 	{
-		Error( "CTestScriptMgr::LoopCount( %s ): no loop with this name exists.", pLoopName );
+		Warning( "CTestScriptMgr::LoopCount( %s ): no loop with this name exists.", pLoopName );
+		return;
 	}
 
 	++pLoop->m_nCount;
 	if ( pLoop->m_nCount < nTimes || nTimes == -1 )
 	{
+		ConColorMsg( TESTSCRIPT_COLOR, "***************************************************\n" );
+		ConColorMsg( TESTSCRIPT_COLOR, "TESTSCRIPT: Performing loop to %s (%d iterations)\n", pLoopName, pLoop->m_nCount );
+		ConColorMsg( TESTSCRIPT_COLOR, "***************************************************\n" );
 		g_pFileSystem->Seek( m_hFile, pLoop->m_iNextCommandPos, FILESYSTEM_SEEK_HEAD );
 	}
 	else
@@ -386,6 +485,9 @@ void CTestScriptMgr::LoopForNumSeconds( const char *pLoopName, double nSeconds )
 
 	if ( Sys_FloatTime() - pLoop->m_flStartTime < nSeconds )
 	{
+		ConColorMsg( TESTSCRIPT_COLOR, "***************************************************\n" );
+		ConColorMsg( TESTSCRIPT_COLOR, "TESTSCRIPT: Performing loop to %s\n", pLoopName );
+		ConColorMsg( TESTSCRIPT_COLOR, "***************************************************\n" );
 		g_pFileSystem->Seek( m_hFile, pLoop->m_iNextCommandPos, FILESYSTEM_SEEK_HEAD );
 	}
 	else
@@ -411,7 +513,7 @@ void CTestScriptMgr::SetWaitCheckPoint( const char *pCheckPointName, bool bOnce 
 	{
 		if ( stricmp( pCheckPointName, "frame_end" ) != 0 )
 		{
-			Msg( "TESTSCRIPT: waiting for checkpoint '%s'%s\n", pCheckPointName, bOnce ? " (once)." : "." );
+			ConColorMsg( TESTSCRIPT_COLOR, "TESTSCRIPT: waiting for checkpoint '%s'%s\n", pCheckPointName, bOnce ? " (once)." : "." );
 		}
 	}
 	
@@ -421,3 +523,5 @@ void CTestScriptMgr::SetWaitCheckPoint( const char *pCheckPointName, bool bOnce 
 
 	Q_strncpy( m_NextCheckPoint, pCheckPointName, sizeof( m_NextCheckPoint ) );
 }
+
+

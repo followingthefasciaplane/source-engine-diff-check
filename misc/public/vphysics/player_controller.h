@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -14,6 +14,12 @@ class IPhysicsPlayerControllerEvent
 {
 public:
 	virtual int	ShouldMoveTo( IPhysicsObject *pObject, const Vector &position ) = 0;
+};
+
+enum PlayerContactState_t
+{
+	PLAYER_CONTACT_PHYSICS = 1,
+	PLAYER_CONTACT_GAMEOBJECT = 2,
 };
 
 class IPhysicsPlayerController
@@ -42,6 +48,8 @@ public:
 	virtual float GetPushMassLimit() = 0;
 	virtual float GetPushSpeedLimit() = 0;
 	virtual bool WasFrozen() = 0;
+	// returns bitfield e.g. 0 (no contacts), 1 (has physics contact), 2 (contact matching nGameFlags), 3 (both 1 & 2)
+	virtual uint32 GetContactState( uint16 nGameFlags ) = 0;
 };
 
 #endif // PLAYER_CONTROLLER_H

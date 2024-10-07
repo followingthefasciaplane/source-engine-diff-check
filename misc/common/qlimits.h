@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose:
 //
@@ -24,6 +24,7 @@
 
 
 // Resource counts;
+// Must have this value in sync(-1) with const.h and effect_dispatch_data.cpp
 #define MAX_MODEL_INDEX_BITS	12   // sent as a short
 #define	MAX_MODELS				(1<<MAX_MODEL_INDEX_BITS)
 

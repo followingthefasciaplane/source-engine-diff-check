@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =======
 //
 // A class representing a transform
 //
@@ -12,12 +12,14 @@
 
 #include "datamodel/dmelement.h"
 
+static const char TRANSFORM_POSITION[] = "position";
+static const char TRANSFORM_ORIENTATION[] = "orientation";
 
 //-----------------------------------------------------------------------------
 // Forward declarations
 //-----------------------------------------------------------------------------
 struct matrix3x4_t;
-
+class CDmeDag;
 
 //-----------------------------------------------------------------------------
 // A class representing a transformation matrix
@@ -27,8 +29,8 @@ class CDmeTransform : public CDmElement
 	DEFINE_ELEMENT( CDmeTransform, CDmElement );
 
 public:
-	// FIXME: Replace this with actual methods to do editing
-	// (scale/shear, etc.)
+	virtual void OnAttributeChanged( CDmAttribute *pAttribute );
+
 	void SetTransform( const matrix3x4_t &transform );
 	void GetTransform( matrix3x4_t &transform );
 
@@ -39,6 +41,9 @@ public:
 
 	CDmAttribute *GetPositionAttribute();
 	CDmAttribute *GetOrientationAttribute();
+
+	// If transform is contained inside some kind of CDmeDag, return that (it's "parent")
+	CDmeDag *GetDag();
 
 private:
 	CDmaVar<Vector> m_Position;

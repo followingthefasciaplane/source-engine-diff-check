@@ -1,11 +1,14 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =====//
 //
 // Dme version of a hitbox set
 //
 //===========================================================================//
 
-#include "mdlobjects/dmehitboxset.h"
+
 #include "datamodel/dmelementfactoryhelper.h"
+#include "mdlobjects/dmehitbox.h"
+#include "mdlobjects/dmehitboxset.h"
+
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -18,15 +21,17 @@ IMPLEMENT_ELEMENT_FACTORY( DmeHitboxSet, CDmeHitboxSet );
 
 
 //-----------------------------------------------------------------------------
-// Purpose: 
+//
 //-----------------------------------------------------------------------------
 void CDmeHitboxSet::OnConstruction()
 {
-	m_Hitboxes.Init( this, "hitboxes" );
+	m_HitboxList.Init( this, "hitboxList" );
 }
 
+
+//-----------------------------------------------------------------------------
+//
+//-----------------------------------------------------------------------------
 void CDmeHitboxSet::OnDestruction()
 {
 }
-
-

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -6,8 +6,12 @@
 
 #include "audio_pch.h"
 #include "tier0/platform.h"
-#include "MPAFile.h"	// also includes vbrheader.h
+#include "MPAFile.h"		// also includes vbrheader.h
 #include "tier0/dbg.h"
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
 
 #ifndef MAKEFOURCC
     #define MAKEFOURCC(ch0, ch1, ch2, ch3)                              \

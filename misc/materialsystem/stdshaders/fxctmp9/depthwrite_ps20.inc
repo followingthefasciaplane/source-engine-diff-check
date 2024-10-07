@@ -1,3 +1,4 @@
+// ALL SKIP STATEMENTS THAT AFFECT THIS SHADER!!!
 #include "shaderlib/cshader.h"
 class depthwrite_ps20_Static_Index
 {
@@ -17,13 +18,15 @@ public:
 	}
 	void SetCOLOR_DEPTH( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nCOLOR_DEPTH = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bCOLOR_DEPTH = true;
 #endif
 	}
 public:
-	depthwrite_ps20_Static_Index( )
+	// CONSTRUCTOR
+	depthwrite_ps20_Static_Index( IShaderShadow *pShaderShadow, IMaterialVar **params )
 	{
 #ifdef _DEBUG
 		m_bCOLOR_DEPTH = false;
@@ -60,13 +63,15 @@ public:
 	}
 	void SetALPHACLIP( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nALPHACLIP = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bALPHACLIP = true;
 #endif
 	}
 public:
-	depthwrite_ps20_Dynamic_Index()
+	// CONSTRUCTOR
+	depthwrite_ps20_Dynamic_Index( IShaderDynamicAPI *pShaderAPI )
 	{
 #ifdef _DEBUG
 		m_bALPHACLIP = false;
@@ -85,3 +90,28 @@ public:
 	}
 };
 #define shaderDynamicTest_depthwrite_ps20 psh_forgot_to_set_dynamic_ALPHACLIP + 0
+
+static const ShaderComboInformation_t s_DynamicComboArray_depthwrite_ps20[1] = 
+{
+	{ "ALPHACLIP", 0, 1 },
+};
+
+static const ShaderComboInformation_t s_StaticComboArray_depthwrite_ps20[1] = 
+{
+	{ "COLOR_DEPTH", 0, 1 },
+};
+static const ShaderComboSemantics_t depthwrite_ps20_combos =
+{
+	"depthwrite_ps20", s_DynamicComboArray_depthwrite_ps20, 1, s_StaticComboArray_depthwrite_ps20, 1 
+};
+
+class ConstructMe_depthwrite_ps20
+{
+public:
+	ConstructMe_depthwrite_ps20()
+	{
+		GetShaderDLL()->AddShaderComboInformation( &depthwrite_ps20_combos );
+	}
+};
+
+static ConstructMe_depthwrite_ps20 s_ConstructMe_depthwrite_ps20;

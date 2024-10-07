@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -7,7 +7,7 @@
 //===========================================================================//
 #include "cbase.h"
 #include "c_te_particlesystem.h"
-#include "tier1/KeyValues.h"
+#include "tier1/keyvalues.h"
 #include "toolframework_client.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
@@ -114,7 +114,7 @@ void TE_BloodStream( IRecipientFilter& filter, float delay,
 	float		arc = 0.05;
 	int			count, count2;
 	float		num;
-	float		speedCopy = amount;
+	int			speedCopy = amount;
 	
 	Vector dir;
 	VectorCopy( *direction, dir );
@@ -173,18 +173,18 @@ void TE_BloodStream( IRecipientFilter& filter, float delay,
 			// 'chunkier' appearance.
 			for (count2 = 0; count2 < 2; count2++)
 			{
-				StandardParticle_t *pChunky = pRen->AddParticle();
-				if( pChunky )
+				StandardParticle_t *p = pRen->AddParticle();
+				if(p)
 				{
-					pRen->SetParticleLifetime( pChunky, 3);
-					pChunky->SetColor(random->RandomFloat(0.7, 1.0), g, b);
-					pChunky->SetAlpha(a);
-					pChunky->m_Pos.Init(
+					pRen->SetParticleLifetime(p, 3);
+					p->SetColor(random->RandomFloat(0.7, 1.0), g, b);
+					p->SetAlpha(a);
+					p->m_Pos.Init(
 						(*org)[0] + random->RandomFloat(-1,1),
 						(*org)[1] + random->RandomFloat(-1,1),
 						(*org)[2] + random->RandomFloat(-1,1));
 					
-					pRen->SetParticleType( pChunky, pt_vox_slowgrav);
+					pRen->SetParticleType(p, pt_vox_slowgrav);
 					
 					VectorCopy (dir, dirCopy);
 					
@@ -192,7 +192,7 @@ void TE_BloodStream( IRecipientFilter& filter, float delay,
 					
 					VectorScale (dirCopy, num, dirCopy);// randomize a bit
 					
-					pChunky->m_Velocity = dirCopy * speedCopy;
+					p->m_Velocity = dirCopy * speedCopy;
 				}
 			}
 		}

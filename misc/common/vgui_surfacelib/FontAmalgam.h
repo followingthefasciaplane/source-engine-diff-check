@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -24,9 +24,6 @@ public:
 	CFontAmalgam();
 	~CFontAmalgam();
 
-	const char *Name();
-	void SetName(const char *name);
-
 	// adds a font to the amalgam
 	void AddFont( font_t *font, int lowRange, int highRange);
 
@@ -36,9 +33,6 @@ public:
 	// returns the max height of the font set
 	int GetFontHeight();
 
-	// returns height requested
-	int GetFontHeightRequested();
-
 	// returns the maximum width of a character in a font
 	int GetFontMaxWidth();
 
@@ -47,7 +41,6 @@ public:
 
 	// returns the windows name for the font
 	const char *GetFontName(int i);
-	const char *GetFontFamilyName(int i);
 
 	// returns the number of fonts in this amalgam
 	int GetCount();
@@ -66,11 +59,10 @@ private:
 	{
 		int lowRange;
 		int highRange;
-		font_t *font;
+		font_t *pWin32Font;
 	};
 
 	CUtlVector<TFontRange> m_Fonts;
-	char m_szName[32];
 	int m_iMaxWidth;
 	int m_iMaxHeight;
 };

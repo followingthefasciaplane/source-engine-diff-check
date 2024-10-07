@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2007, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -29,9 +29,9 @@
 #include "cmd.h"
 #include "protocol.h"
 #include "render.h"
-#include "screen.h"
 
-#include "appframework/ilaunchermgr.h"
+
+#include "screen.h"
 
 #include "gl_shader.h"
 
@@ -48,11 +48,9 @@
 #include "host.h"
 #include "filesystem.h"
 #include "filesystem_engine.h"
-#include "proto_version.h"
 #include "sys.h"
 
-//#ifndef SWDS            these are all fine under linux now afaik
-
+#ifndef DEDICATED
 #include "vgui_basepanel.h"
 #include "vgui_baseui_interface.h"
 #include "vgui/IVGui.h"
@@ -70,4 +68,4 @@
 #include "vgui_controls/FileOpenDialog.h"
 #include "vgui_controls/ScrollBar.h"
 #include "vgui_controls/TreeView.h"
-//#endif
+#endif

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -101,7 +101,7 @@ int Interpolator_CurveTypeForName( const char *name )
 
 	int skip = Q_strlen( "curve_" );
 
-	if ( !Q_strnicmp( sz, "curve_", skip ) )
+	if ( StringHasPrefix( sz, "curve_" ) )
 	{
 		char *p = sz + skip;
 		char *second = Q_stristr( p, "_to_curve_" );
@@ -273,7 +273,7 @@ void Interpolator_CurveInterpolate( int interpolationType,
 	case INTERPOLATE_KOCHANEK_BARTELS_EARLY:
 	case INTERPOLATE_KOCHANEK_BARTELS_LATE:
 		{
-			float t, b, c;
+			float t = 0, b = 0, c = 0;
 			Interpolator_GetKochanekBartelsParams( interpolationType, t, b, c );
 			Kochanek_Bartels_Spline_NormalizeX
 			( 
@@ -385,7 +385,7 @@ void Interpolator_CurveInterpolate_NonNormalized( int interpolationType,
 	case INTERPOLATE_KOCHANEK_BARTELS_EARLY:
 	case INTERPOLATE_KOCHANEK_BARTELS_LATE:
 		{
-			float t, b, c;
+			float t = 0, b = 0, c = 0;
 			Interpolator_GetKochanekBartelsParams( interpolationType, t, b, c );
 			Kochanek_Bartels_Spline
 			( 

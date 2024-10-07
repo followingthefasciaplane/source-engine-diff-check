@@ -1,10 +1,11 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
 // $NoKeywords: $
 //
 //=============================================================================//
+
 #include "cbase.h"
 #include "c_vguiscreen.h"
 #include "vgui_controls/Label.h"
@@ -14,6 +15,10 @@
 #include "ienginevgui.h"
 #include "fmtstr.h"
 #include "vgui_controls/ImagePanel.h"
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
 
 using namespace vgui;
 

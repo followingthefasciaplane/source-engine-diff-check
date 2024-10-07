@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =====//
 //
 // Dme version of a joint of a skeletal model (gets compiled into a MDL)
 //
@@ -11,10 +11,16 @@
 #pragma once
 #endif
 
-#include "movieobjects/dmedag.h"
-#include "materialsystem/MaterialSystemUtil.h"
 
+// Valve includes
+#include "movieobjects/dmedag.h"
+#include "materialsystem/imaterial.h"
+#include "materialsystem/materialsystemutil.h"
+
+
+// Forward declarations
 class CDmeDrawSettings;
+
 
 //-----------------------------------------------------------------------------
 // A class representing a skeletal model
@@ -31,8 +37,9 @@ public:
 private:
 	void DrawJoints();
 
-	CMaterialReference m_JointMaterial;
-	static bool s_bDrawJoints;
+	static bool sm_bDrawJoints;
+	static IMaterial *sm_pMatJoint;
+	CMaterialReference m_MatRefJoint;
 };
 
 

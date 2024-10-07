@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -7,7 +7,7 @@
 //
 // This file contains a little interface to deal with static prop collisions
 //
-//=============================================================================//
+//===========================================================================//
 
 #ifndef STATICPROPMGR_H
 #define STATICPROPMGR_H
@@ -26,6 +26,7 @@ class ICollideable;
 FORWARD_DECLARE_HANDLE( LightCacheHandle_t );
 class IPooledVBAllocator;
 
+DECLARE_LOGGING_CHANNEL( LOG_StaticPropManager );
 
 //-----------------------------------------------------------------------------
 // The engine's static prop manager
@@ -55,6 +56,9 @@ public:
 	// Check if a static prop is in a particular PVS.
 	virtual bool IsPropInPVS( IHandleEntity *pHandleEntity, const byte *pVis ) const = 0;
 
+	// temp - loadtime setting of flag to disable CSM rendering for static prop.
+	virtual void DisableCSMRenderingForStaticProp( int staticPropIndex ) = 0;
+
 	// returns a collideable interface to static props
 	virtual ICollideable *GetStaticProp( IHandleEntity *pHandleEntity ) = 0;
 
@@ -68,7 +72,9 @@ public:
 	// Returns the static prop index (useful for networking)
 	virtual int GetStaticPropIndex( IHandleEntity *pHandleEntity ) const = 0;
 
-	virtual bool PropHasBakedLightingDisabled( IHandleEntity *pHandleEntity) const = 0;
+	virtual void ConfigureSystemLevel( int nCPULevel, int nGPULevel ) = 0;
+
+	virtual void RestoreStaticProps() = 0;
 };
 
 

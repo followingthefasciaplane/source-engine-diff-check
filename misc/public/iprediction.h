@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -45,7 +45,7 @@ public:
 
 	// We are about to get a network update from the server.  We know the update #, so we can pull any
 	//  data purely predicted on the client side and transfer it to the new from data state.
-	virtual void	PreEntityPacketReceived( int commands_acknowledged, int current_world_update_packet ) = 0;
+	virtual void	PreEntityPacketReceived( int commands_acknowledged, int current_world_update_packet, int server_ticks_elapsed ) = 0;
 	virtual void	PostEntityPacketReceived( void ) = 0;
 	virtual void	PostNetworkDataReceived( int commands_acknowledged ) = 0;
 
@@ -65,3 +65,4 @@ extern IPrediction *g_pClientSidePrediction;
 #define VCLIENT_PREDICTION_INTERFACE_VERSION	"VClientPrediction001"
 
 #endif // IPREDICTION_H
+

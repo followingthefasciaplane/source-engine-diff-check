@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: VProf engine integration
 //
@@ -16,7 +16,7 @@
 #include "con_nprint.h"
 #include "tier0/vprof.h"
 #include "materialsystem/imaterialsystem.h"
-#ifndef SWDS
+#ifndef DEDICATED
 #include "vgui_baseui_interface.h"
 #include "vgui_vprofpanel.h"
 #endif
@@ -27,27 +27,21 @@
 #include "filesystem_engine.h"
 #include "tier1/utlstring.h"
 #include "tier1/utlvector.h"
-#include "tier0/etwprof.h"
+#include "debugoverlay.h"
+#include "fmtstr.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
-
-#ifdef _XBOX
-#ifdef VPROF_ENABLED
-CVProfile *g_pVProfileForDisplay = &g_VProfCurrentProfile;
-#endif
-#endif
 
 #ifdef VPROF_ENABLED
 void VProfExport_StartOrStop();
 
 static ConVar vprof_dump_spikes( "vprof_dump_spikes","0", 0, "Framerate at which vprof will begin to dump spikes to the console. 0 = disabled, negative to reset after dump" );
+static ConVar vprof_dump_spikes_terse( "vprof_dump_spikes_terse","0", 0, "Whether to use most terse output" );
+static ConVar vprof_dump_spikes_hierarchy( "vprof_dump_spikes_hiearchy","0", 0, "Set to 1 to get a hierarchy report whith vprof_dump_spikes" );
 static ConVar vprof_dump_spikes_node( "vprof_dump_spikes_node","", 0, "Node to start report from when doing a dump spikes" );
 static ConVar vprof_dump_spikes_budget_group( "vprof_dump_spikes_budget_group","", 0, "Budget gtNode to start report from when doing a dump spikes" );
 static ConVar vprof_dump_oninterval( "vprof_dump_oninterval", "0", 0, "Interval (in seconds) at which vprof will batch up data and dump it to the console." );
-// vprof_report_oninterval gives more detail. If both vprof_report_oninterval and vprof_dump_oninterval
-// are set then vprof_report_oninterval wins.
-static ConVar vprof_report_oninterval( "vprof_report_oninterval", "0", 0, "Interval (in seconds) at which vprof will batch up a full report to the console -- more detailed than vprof_dump_oninterval." );
 
 static void (*g_pfnDeferredOp)();
 
@@ -59,26 +53,28 @@ static void ExecuteDeferredOp()
 		g_pfnDeferredOp = NULL;
 	}
 }
+
+unsigned g_VProfTargetThread = ThreadGetCurrentId();
 	
 const double MAX_SPIKE_REPORT = 1.0;
 const int MAX_SPIKE_REPORT_FRAMES = 10;
 static double LastSpikeTime = 0;
 static int LastSpikeFrame = 0;
-//bool g_VProfSignalSpike; // used by xbox
-static ConVar vprof_counters( "vprof_counters", "0" );
+static ConVar vprof_counters( "vprof_counters", "0", 0 );
+static ConVar vprof_counters_show_minmax( "vprof_counters_show_minmax", "0", 0 );
 
 extern bool con_debuglog;
 extern ConVar con_logfile;
 static bool g_fVprofOnByUI;
 static bool g_bVProfNoVSyncOff = false;
-static bool g_fVprofToVTrace = false;
 
 class ConsoleLogger
 {
 public:
 	ConsoleLogger( void )
 	{
-#if !defined( SWDS )
+#ifndef _X360
+#if !defined( DEDICATED )
 		m_condebugEnabled = con_debuglog;
 #else
 		m_condebugEnabled = false;
@@ -95,22 +91,25 @@ public:
 					continue;
 				}
 
-#if !defined( SWDS )
+#if !defined( DEDICATED )
 				con_logfile.SetValue( fname );
 #endif
 				break;
 			}
 		}
+#endif
 	}
 
 	~ConsoleLogger()
 	{
+#ifndef _X360
 		if ( !m_condebugEnabled )
 		{
-#if !defined( SWDS )
+#if !defined( DEDICATED )
 			con_logfile.SetValue( "" );
 #endif
 		}
+#endif
 	}
 
 private:
@@ -121,6 +120,12 @@ private:
 int ConsoleLogger::m_index = 0;
 
 static float s_flIntervalStartTime = 0.0f;
+static bool g_bDumpCounters = false;
+
+CON_COMMAND(vprof_dump_counters, "Dump vprof counters to the console" )
+{
+	g_bDumpCounters = true;
+}
 
 void PreUpdateProfile( float filteredtime )
 {
@@ -130,42 +135,30 @@ void PreUpdateProfile( float filteredtime )
 	VProfExport_StartOrStop();
 	VProfRecord_StartOrStop();
 
+	if ( g_VProfCurrentProfile.GetTargetThreadId() != g_VProfTargetThread )
+	{
+		g_VProfCurrentProfile.SetTargetThreadId( g_VProfTargetThread );
+	}
+
 	// Check to see if it is time to dump the data and restart collection.
-	if ( g_VProfCurrentProfile.IsEnabled() )
+	if ( g_VProfCurrentProfile.IsEnabled() && ( vprof_dump_oninterval.GetFloat() != 0.0f ) )
 	{
 		float flCurrentTime = eng->GetCurTime();
 		float flIntervalTime = vprof_dump_oninterval.GetFloat();
-		// vprof_report_oninterval trumps vprof_dump_oninterval
-		if ( vprof_report_oninterval.GetFloat() != 0.0f )
-			flIntervalTime = vprof_report_oninterval.GetFloat();
 
 		g_VProfCurrentProfile.MarkFrame();
 
 		if ( ( s_flIntervalStartTime + flIntervalTime ) < flCurrentTime )
 		{
-			if ( vprof_report_oninterval.GetFloat() != 0.0f )
-			{
-				// Detailed report.
-				g_VProfCurrentProfile.Pause();
-				ConsoleLogger consoleLog;
-				// Just do one report in order to avoid excessive overhead when this is
-				// called on a timer. Each report can take about 1.5 ms on a fast machine.
-				g_VProfCurrentProfile.OutputReport( VPRT_LIST_BY_TIME, NULL );
-				g_VProfCurrentProfile.Resume();
-			}
-			else if ( vprof_dump_oninterval.GetFloat() != 0.0f )
-			{
-				// Dump the current profile.
-				g_VProfCurrentProfile.OutputReport( VPRT_SUMMARY | VPRT_LIST_BY_TIME | VPRT_LIST_BY_AVG_TIME | VPRT_LIST_BY_TIME_LESS_CHILDREN | VPRT_LIST_TOP_ITEMS_ONLY );
+			// Dump the current profile.
+			g_VProfCurrentProfile.OutputReport( VPRT_SUMMARY | VPRT_LIST_BY_TIME | VPRT_LIST_BY_AVG_TIME | VPRT_LIST_BY_TIME_LESS_CHILDREN | VPRT_LIST_TOP_ITEMS_ONLY );
 
-				// Stop the current profile.
-				g_VProfCurrentProfile.Stop();
+			// Stop the current profile.
+			g_VProfCurrentProfile.Stop();
 
-				// Reset and restart the current profile.
-				g_VProfCurrentProfile.Reset();
-				g_VProfCurrentProfile.Start();
-			}
-
+			// Reset and restart the current profile.
+			g_VProfCurrentProfile.Reset();
+			g_VProfCurrentProfile.Start();
 			s_flIntervalStartTime = flCurrentTime;
 		}
 	}
@@ -180,16 +173,29 @@ void PreUpdateProfile( float filteredtime )
 			if( g_VProfSignalSpike || ( Sys_FloatTime() - LastSpikeTime > MAX_SPIKE_REPORT && g_ServerGlobalVariables.framecount > LastSpikeFrame + MAX_SPIKE_REPORT_FRAMES ) )
 			{
 				ConsoleLogger consoleLog;
-				// Print a message so that spikes can be seen even when going to VTrace.
-				if ( g_fVprofToVTrace )
-					Msg( "%1.3f ms spike detected.\n", eng->GetFrameTime() * 1000.0f );
-				g_VProfCurrentProfile.OutputReport( VPRT_SUMMARY | VPRT_LIST_BY_TIME | VPRT_LIST_BY_TIME_LESS_CHILDREN | VPRT_LIST_TOP_ITEMS_ONLY,
-													( vprof_dump_spikes_node.GetString()[0] ) ? vprof_dump_spikes_node.GetString() : NULL,
-													( vprof_dump_spikes_budget_group.GetString()[0] ) ? g_VProfCurrentProfile.BudgetGroupNameToBudgetGroupID( vprof_dump_spikes_budget_group.GetString() ) : -1 );
-#ifdef _XBOX // X360TBD
-				if ( GetLastProfileFileRead() )
-					Msg( "******* %s\n", GetLastProfileFileRead() );
-#endif
+				Msg( "******** Spike on frame %d at time %.3f ", g_ServerGlobalVariables.framecount, Plat_FloatTime() );
+				if ( vprof_dump_spikes_hierarchy.GetBool() )
+				{
+					g_VProfCurrentProfile.OutputReport( VPRT_HIERARCHY_TIME_PER_FRAME_AND_COUNT_ONLY,
+						( vprof_dump_spikes_node.GetString()[0] ) ? vprof_dump_spikes_node.GetString() : NULL,
+						( vprof_dump_spikes_budget_group.GetString()[0] ) ? g_VProfCurrentProfile.BudgetGroupNameToBudgetGroupID( vprof_dump_spikes_budget_group.GetString() ) : -1 );
+				}
+				else
+				{
+					int flags;
+					if ( !vprof_dump_spikes_terse.GetBool() )
+					{
+						flags = VPRT_SUMMARY | VPRT_LIST_BY_TIME | VPRT_LIST_BY_AVG_TIME | VPRT_LIST_BY_TIME_LESS_CHILDREN | VPRT_LIST_TOP_ITEMS_ONLY;
+					}
+					else
+					{
+						flags = VPRT_LIST_BY_TIME | VPRT_LIST_TOP_ITEMS_ONLY;
+					}
+					g_VProfCurrentProfile.OutputReport( flags,
+						( vprof_dump_spikes_node.GetString()[0] ) ? vprof_dump_spikes_node.GetString() : NULL,
+						( vprof_dump_spikes_budget_group.GetString()[0] ) ? g_VProfCurrentProfile.BudgetGroupNameToBudgetGroupID( vprof_dump_spikes_budget_group.GetString() ) : -1 );
+				}
+
 				LastSpikeTime = Sys_FloatTime();
 				LastSpikeFrame = g_ServerGlobalVariables.framecount;
 
@@ -227,24 +233,70 @@ void PreUpdateProfile( float filteredtime )
 	}
 
 	int nCounterType = vprof_counters.GetInt();
-	if( nCounterType )
+	if ( nCounterType || g_bDumpCounters )
 	{
 		int i;
 		int n = g_VProfCurrentProfile.GetNumCounters();
 		int nprintIndex = 0;
-		for( i = 0; i < n; i++ )
+		int static nCycle = 0;
+		for ( i = 0; i < n; i++ )
 		{
-			if( g_VProfCurrentProfile.GetCounterGroup( i ) != ( nCounterType - 1 ) )
+			if ( g_VProfCurrentProfile.GetCounterGroup( i ) != ( nCounterType - 1 ) )
 				continue;
 			const char *pName;
 			int val;
 			pName = g_VProfCurrentProfile.GetCounterNameAndValue( i, val );
-			Con_NPrintf( nprintIndex, "%s = %d\n", pName, val );
+			if ( g_bDumpCounters )
+			{
+				Msg("VPROF: %s = %d\n", pName, val );
+			}
+			if ( !vprof_counters_show_minmax.GetBool() )
+			{
+				if ( IsPC() )
+				{
+					Con_NPrintf( nprintIndex, "%s = %d\n", pName, val );
+				}
+				else if ( IsGameConsole() )
+				{
+#ifndef DEDICATED
+					CDebugOverlay::AddScreenTextOverlay( 0.05f, 0.05f, nprintIndex, 0.001f, 255, 255, 255, 255,  CFmtStr( "%s = %d", pName, val ) );
+#endif
+				}
+			}
+			else
+			{
+				static CUtlVector<int> history[30];
+
+				history[nCycle].EnsureCount( n );
+				history[nCycle][i] = val;
+
+				int valMin = val;
+				int valMax = val;
+				for (int j = 0; j < 30; j++)
+				{
+					history[j].EnsureCount( n );
+					valMin = MIN( valMin, history[j][i] );
+					valMax = MAX( valMax, history[j][i] );
+				}
+
+				if ( IsPC() )
+				{
+					Con_NPrintf( nprintIndex, "%s = %6d (%6d:%6d)\n", pName, val, valMin, valMax );
+				}
+				else if ( IsGameConsole() )
+				{
+#ifndef DEDICATED
+					CDebugOverlay::AddScreenTextOverlay( 0.05f, 0.05f, nprintIndex, 0.001f, 255, 255, 255, 255,  CFmtStr( "%s = %6d (%6d:%6d)", pName, val, valMin, valMax ) );
+#endif
+				}
+			}
 			nprintIndex++;
 		}
+		nCycle = (nCycle + 1) % 30;
 	}
 	g_VProfCurrentProfile.ResetCounters( COUNTER_GROUP_DEFAULT );
 	g_VProfCurrentProfile.ResetCounters( COUNTER_GROUP_TEXTURE_PER_FRAME );
+	g_VProfCurrentProfile.ResetCounters( COUNTER_GROUP_GRAPHICS_PER_FRAME );
 
 	// This MUST come before GetVProfPanel()->UpdateProfile(), because UpdateProfile uses the data we snapshot here.
 	VProfExport_SnapshotVProfHistory();
@@ -252,11 +304,12 @@ void PreUpdateProfile( float filteredtime )
 	VProfRecord_Snapshot();
 #endif
 
-#ifndef SWDS
+#ifndef DEDICATED
 	// Update the vgui panel
 	if ( GetVProfPanel() )
 		GetVProfPanel()->UpdateProfile( filteredtime );
 #endif
+	g_bDumpCounters = false;
 }
 
 void PostUpdateProfile()
@@ -267,7 +320,7 @@ void PostUpdateProfile()
 	}
 }
 
-#if defined( _X360 )
+#if defined( VPROF_VXCONSOLE_EXISTS )
 void UpdateVXConsoleProfile()
 {
 	g_VProfCurrentProfile.VXProfileUpdate();
@@ -275,24 +328,17 @@ void UpdateVXConsoleProfile()
 #endif
 
 static bool g_fVprofCacheMissOnByUI = false;
-
-// When a DEFERRED_CON_COMMAND is called these will contain the first and
-// second arguments, or zero-length strings if these arguments don't exist.
 static char g_szDefferedArg1[128];
 static char g_szDefferedArg2[128];
 
-// Con commands that are defined with DEFERRED_CON_COMMAND are called by PreUpdateProfile()
-// which calls ExecuteDeferredOp(). This ensures that vprof operations are done at the appropriate
-// time in the frame loop. Note that only one deferred command can be set at a time, so only one
-// deferred command can be on the command line.
-#define DEFERRED_CON_COMMAND( cmd, help )				\
-	static void cmd##_Impl();							\
-	CON_COMMAND(cmd, help)								\
-	{													\
-		g_pfnDeferredOp = cmd##_Impl;					\
-		V_strcpy_safe( g_szDefferedArg1, args[1] );		\
-		V_strcpy_safe( g_szDefferedArg2, args[2] );		\
-	}													\
+#define DEFERRED_CON_COMMAND( cmd, help )									\
+	static void cmd##_Impl();												\
+	CON_COMMAND(cmd, help)													\
+	{																		\
+		g_pfnDeferredOp = cmd##_Impl;										\
+		Q_strncpy( g_szDefferedArg1, args[1], sizeof(g_szDefferedArg1) );	\
+		Q_strncpy( g_szDefferedArg2, args[2], sizeof(g_szDefferedArg2) );	\
+	}																		\
 	static void cmd##_Impl()
 
 CON_COMMAND_F( spike,"generates a fake spike", FCVAR_CHEAT )
@@ -380,37 +426,19 @@ DEFERRED_CON_COMMAND( vprof, "Toggle VProf profiler" )
 	}
 }
 
-#ifdef	ETW_MARKS_ENABLED
-CON_COMMAND( vprof_vtrace, "Toggle whether vprof data is sent to VTrace" )
-{
-	if ( g_fVprofToVTrace )
-	{
-		Msg("Vprof data now returns to the console.\n");
-		g_VProfCurrentProfile.SetOutputStream( NULL );
-	}
-	else
-	{
-		Msg("VProf data is now being sent to vtrace.\n");
-		g_VProfCurrentProfile.SetOutputStream( ETWMarkPrintf );
-	}
-	g_fVprofToVTrace = !g_fVprofToVTrace;
-}
-#endif
-
 #ifdef _X360
-
-DEFERRED_CON_COMMAND( vprof_novsync_off, "Leaves vsync on when vxconsole brings up showbudget." )
+DEFERRED_CON_COMMAND( vprof_360_novsync_off, "Leaves vsync on when vxconsole brings up showbudget." )
 {
 	g_bVProfNoVSyncOff = !g_bVProfNoVSyncOff;
 	Msg("VProf novsync auto setting %s.\n", g_bVProfNoVSyncOff ? "disabled" : "enabled" );
 }
 
-DEFERRED_CON_COMMAND( vprof_show_time, "Shows time in vprof" )
+DEFERRED_CON_COMMAND( vprof_360_show_time, "Shows time in vprof" )
 {
 	g_VProfCurrentProfile.VXConsoleReportMode( CVProfile::VXCONSOLE_REPORT_TIME );
 }
 
-DEFERRED_CON_COMMAND( vprof_show_cachemiss, "Shows cachemisses in vprof" )
+DEFERRED_CON_COMMAND( vprof_360_show_cachemiss, "Shows cachemisses in vprof" )
 {
 	if ( !g_fVprofCacheMissOnByUI )
 	{
@@ -422,7 +450,7 @@ DEFERRED_CON_COMMAND( vprof_show_cachemiss, "Shows cachemisses in vprof" )
 	g_VProfCurrentProfile.VXConsoleReportMode( CVProfile::VXCONSOLE_REPORT_L2CACHE_MISSES );
 }
 
-DEFERRED_CON_COMMAND( vprof_show_loadhitstore, "Shows load-hit-stores in vprof" )
+DEFERRED_CON_COMMAND( vprof_360_show_loadhitstore, "Shows load-hit-stores in vprof" )
 {
 	if ( !g_fVprofCacheMissOnByUI )
 	{
@@ -434,7 +462,7 @@ DEFERRED_CON_COMMAND( vprof_show_loadhitstore, "Shows load-hit-stores in vprof" 
 	g_VProfCurrentProfile.VXConsoleReportMode( CVProfile::VXCONSOLE_REPORT_LOAD_HIT_STORE );
 }
 
-DEFERRED_CON_COMMAND( vprof_time_scale, "Scale used when displaying time (0 = use default)" )
+DEFERRED_CON_COMMAND( vprof_360_time_scale, "Scale used when displaying time (0 = use default)" )
 {
 	float flScale = atof(g_szDefferedArg1);
 	if ( flScale <= 0.0f )
@@ -444,7 +472,7 @@ DEFERRED_CON_COMMAND( vprof_time_scale, "Scale used when displaying time (0 = us
 	g_VProfCurrentProfile.VXConsoleReportScale( CVProfile::VXCONSOLE_REPORT_TIME, flScale );
 }
 
-DEFERRED_CON_COMMAND( vprof_cachemiss_scale, "Scale used when displaying cachemisses (0 = use default)" )
+DEFERRED_CON_COMMAND( vprof_360_cachemiss_scale, "Scale used when displaying cachemisses (0 = use default)" )
 {
 	float flScale = atof(g_szDefferedArg1);
 	if ( flScale <= 0.0f )
@@ -454,7 +482,7 @@ DEFERRED_CON_COMMAND( vprof_cachemiss_scale, "Scale used when displaying cachemi
 	g_VProfCurrentProfile.VXConsoleReportScale( CVProfile::VXCONSOLE_REPORT_L2CACHE_MISSES, flScale );
 }
 
-DEFERRED_CON_COMMAND( vprof_loadhitstore_scale, "Scale used when displaying load-hit-stores (0 = use default)" )
+DEFERRED_CON_COMMAND( vprof_360_loadhitstore_scale, "Scale used when displaying load-hit-stores (0 = use default)" )
 {
 	float flScale = atof(g_szDefferedArg1);
 	if ( flScale <= 0.0f )
@@ -463,7 +491,6 @@ DEFERRED_CON_COMMAND( vprof_loadhitstore_scale, "Scale used when displaying load
 	}
 	g_VProfCurrentProfile.VXConsoleReportScale( CVProfile::VXCONSOLE_REPORT_LOAD_HIT_STORE, flScale );
 }
-
 #endif // 360
 
 DEFERRED_CON_COMMAND( vprof_on, "Turn on VProf profiler" )
@@ -471,6 +498,7 @@ DEFERRED_CON_COMMAND( vprof_on, "Turn on VProf profiler" )
 	if ( !g_fVprofOnByUI )
 	{
 		Msg("VProf enabled.\n");
+
 		g_VProfCurrentProfile.Start();
 		g_fVprofOnByUI = true;
 		if ( IsX360() && !g_bVProfNoVSyncOff )
@@ -502,37 +530,6 @@ CON_COMMAND( budget_toggle_group, "Turn a budget group on/off" )
 	g_VProfCurrentProfile.HideBudgetGroup( budgetGroup, !(g_VProfCurrentProfile.GetBudgetGroupFlags( budgetGroup ) & BUDGETFLAG_HIDDEN) );
 }
 
-
-#if defined( _X360 )
-CON_COMMAND( vprof_update, "" )
-{
-	if ( args.ArgC() < 2 )
-		return;
-
-	const char *pArg = args[1];
-	if ( !Q_stricmp( pArg, "cpu" ) )
-	{
-		g_VProfCurrentProfile.VXEnableUpdateMode(VPROF_UPDATE_BUDGET, true);
-	}
-	else if ( !Q_stricmp( pArg, "texture" ) )
-	{
-		g_VProfCurrentProfile.VXEnableUpdateMode(VPROF_UPDATE_TEXTURE_GLOBAL, true);
-		g_VProfCurrentProfile.VXEnableUpdateMode(VPROF_UPDATE_TEXTURE_PERFRAME, false);
-	}
-	else if ( !Q_stricmp( pArg, "texture_frame" ) )
-	{
-		g_VProfCurrentProfile.VXEnableUpdateMode(VPROF_UPDATE_TEXTURE_PERFRAME, true);
-		g_VProfCurrentProfile.VXEnableUpdateMode(VPROF_UPDATE_TEXTURE_GLOBAL, false);
-	}
-}
-#endif
-
-void VProfOn( void )
-{
-	CCommand args;
-	vprof_on( args );
-}
-
 DEFERRED_CON_COMMAND( vprof_off, "Turn off VProf profiler" )
 {
 	if ( g_fVprofOnByUI )
@@ -540,6 +537,14 @@ DEFERRED_CON_COMMAND( vprof_off, "Turn off VProf profiler" )
 		Msg("VProf disabled.\n");
 		g_VProfCurrentProfile.Stop();
 		g_fVprofOnByUI = false;
+
+		// alien swarm has special behavior for certain testing scenarios: 
+		// generate a report after turning off vprof
+		if ( g_szDefferedArg1[0] && stricmp("infested",g_szDefferedArg1) == 0 )
+		{
+			ConsoleLogger consoleLog;
+			g_VProfCurrentProfile.OutputReport( VPRT_FULL & ~VPRT_HIERARCHY, NULL );
+		}
 
 #if defined( _X360 )
 		// disable all updating
@@ -553,7 +558,7 @@ DEFERRED_CON_COMMAND( vprof_reset, "Reset the stats in VProf profiler" )
 	Msg("VProf reset.\n");
 	g_VProfCurrentProfile.Reset();
 
-#ifndef SWDS
+#ifndef DEDICATED
 	if ( GetVProfPanel() )
 	{
 		GetVProfPanel()->Reset();
@@ -571,9 +576,7 @@ DEFERRED_CON_COMMAND(vprof_generate_report, "Generate a report to the console.")
 {
 	g_VProfCurrentProfile.Pause();
 	ConsoleLogger consoleLog;
-	// This used to generate six different reports, which is expensive and hard to read. Default to
-	// two to save time and space.
-	g_VProfCurrentProfile.OutputReport( VPRT_LIST_BY_TIME | VPRT_LIST_BY_TIME_LESS_CHILDREN, (g_szDefferedArg1[0]) ? g_szDefferedArg1 : NULL );
+	g_VProfCurrentProfile.OutputReport( VPRT_FULL & ~VPRT_HIERARCHY, (g_szDefferedArg1[0]) ? g_szDefferedArg1 : NULL );
 	g_VProfCurrentProfile.Resume();
 }
 
@@ -593,7 +596,15 @@ DEFERRED_CON_COMMAND(vprof_generate_report_hierarchy, "Generate a report to the 
 {
 	g_VProfCurrentProfile.Pause();
 	ConsoleLogger consoleLog;
-	g_VProfCurrentProfile.OutputReport( VPRT_HIERARCHY );
+	g_VProfCurrentProfile.OutputReport( VPRT_HIERARCHY, (g_szDefferedArg1[0]) ? g_szDefferedArg1 : NULL );
+	g_VProfCurrentProfile.Resume();
+}
+
+DEFERRED_CON_COMMAND(vprof_generate_report_hierarchy_per_frame_and_count_only, "Generate a minimal hiearchical report to the console.")
+{
+	g_VProfCurrentProfile.Pause();
+	ConsoleLogger consoleLog;
+	g_VProfCurrentProfile.OutputReport( VPRT_HIERARCHY_TIME_PER_FRAME_AND_COUNT_ONLY );
 	g_VProfCurrentProfile.Resume();
 }
 
@@ -624,140 +635,166 @@ DEFERRED_CON_COMMAND(vprof_generate_report_map_load, "Generate a report to the c
 	g_VProfCurrentProfile.Resume();
 }
 
+#ifdef VPROF_VXCONSOLE_EXISTS
+
+CON_COMMAND( vx_vprof_update, "" )
+{
+	if ( args.ArgC() < 2 )
+		return;
+
+	const char *pArg = args[1];
+	if ( !Q_stricmp( pArg, "cpu" ) )
+	{
+		g_VProfCurrentProfile.VXEnableUpdateMode( VPROF_UPDATE_BUDGET, true );
+	}
+	else if ( !Q_stricmp( pArg, "texture" ) )
+	{
+		g_VProfCurrentProfile.VXEnableUpdateMode( VPROF_UPDATE_TEXTURE_GLOBAL, true );
+		g_VProfCurrentProfile.VXEnableUpdateMode( VPROF_UPDATE_TEXTURE_PERFRAME, false );
+	}
+	else if ( !Q_stricmp( pArg, "texture_frame" ) )
+	{
+		g_VProfCurrentProfile.VXEnableUpdateMode( VPROF_UPDATE_TEXTURE_PERFRAME, true );
+		g_VProfCurrentProfile.VXEnableUpdateMode( VPROF_UPDATE_TEXTURE_GLOBAL, false );
+	}
+}
+
+CON_COMMAND( vx_vprof_nodeslist, "" )
+{
+	g_VProfCurrentProfile.VXSendNodes();
+}
+#endif
+
 #ifdef _X360
-DEFERRED_CON_COMMAND(vprof_360_enable_counters, "Enable 360 L2 and LHS counters for a node")
+DEFERRED_CON_COMMAND( vprof_360_enable_counters, "Enable 360 L2 and LHS counters for a node" )
 {
 	g_VProfCurrentProfile.Pause();
-	if (g_VProfCurrentProfile.PMCEnableL2Upon(g_szDefferedArg1))
+	if ( g_VProfCurrentProfile.PMCEnableL2Upon(g_szDefferedArg1 ) )
 	{
 		g_VProfCurrentProfile.DumpEnabledPMCNodes();
 		// Msg("PMC enabled for only node %s\n", g_szDefferedArg1);
 	}
 	else
 	{
-		Msg("Node not found.\n");
+		Warning( "Node not found.\n" );
 	}
 	g_VProfCurrentProfile.Resume();
 }
 
-DEFERRED_CON_COMMAND(vprof_360_enable_counters_recursive, "Enable 360 L2 and LHS counters for a node and all subnodes")
+DEFERRED_CON_COMMAND( vprof_360_enable_counters_recursive, "Enable 360 L2 and LHS counters for a node and all subnodes" )
 {
 	g_VProfCurrentProfile.Pause();
-	if (g_VProfCurrentProfile.PMCEnableL2Upon(g_szDefferedArg1,true))
+	if ( g_VProfCurrentProfile.PMCEnableL2Upon( g_szDefferedArg1, true ) )
 	{
 		g_VProfCurrentProfile.DumpEnabledPMCNodes();
 		// Msg("PMC enabled for only node %s\n", g_szDefferedArg1);
 	}
 	else
 	{
-		Msg("Node not found.\n");
+		Warning( "Node not found.\n" );
 	}
 	g_VProfCurrentProfile.Resume();
 }
 
-DEFERRED_CON_COMMAND(vprof_360_disable_counters, "Disable 360 L2 and LHS counters for a node. Specify 'all' to mean all nodes.")
+DEFERRED_CON_COMMAND( vprof_360_disable_counters, "Disable 360 L2 and LHS counters for a node. Specify 'all' to mean all nodes." )
 {
 	g_VProfCurrentProfile.Pause();
-	if (stricmp(g_szDefferedArg1,"all") == 0)
+	if ( stricmp( g_szDefferedArg1, "all" ) == 0 )
 	{
 		g_VProfCurrentProfile.PMCDisableAllNodes();
 	}
 	else
 	{
-		if (g_VProfCurrentProfile.PMCDisableL2Upon(g_szDefferedArg1,false))
+		if ( g_VProfCurrentProfile.PMCDisableL2Upon( g_szDefferedArg1, false ) )
 		{
 			g_VProfCurrentProfile.DumpEnabledPMCNodes();
 			// Msg("PMC enabled for only node %s\n", g_szDefferedArg1);
 		}
 		else
 		{
-			Msg("Node not found.\n");
+			Warning( "Node not found.\n" );
 		}
 	}
 	g_VProfCurrentProfile.Resume();
 }
 
-DEFERRED_CON_COMMAND(vprof_360_disable_counters_recursive, "Disable 360 L2 and LHS counters for a node and all children.")
+DEFERRED_CON_COMMAND( vprof_360_disable_counters_recursive, "Disable 360 L2 and LHS counters for a node and all children." )
 {
 	g_VProfCurrentProfile.Pause();
 
-	if ( g_VProfCurrentProfile.PMCDisableL2Upon(g_szDefferedArg1,true) )
+	if ( g_VProfCurrentProfile.PMCDisableL2Upon( g_szDefferedArg1, true) )
 	{
 		g_VProfCurrentProfile.DumpEnabledPMCNodes();
 		// Msg("PMC enabled for only node %s\n", g_szDefferedArg1);
 	}
 	else
 	{
-		Msg("Node not found.\n");
+		Warning( "Node not found.\n" );
 	}
 
 	g_VProfCurrentProfile.Resume();
 }
 
-DEFERRED_CON_COMMAND(vprof_360_report_counters, "Report L2/LHS info for specified node")
+DEFERRED_CON_COMMAND( vprof_360_report_counters, "Report L2/LHS info for specified node" )
 {
 	g_VProfCurrentProfile.Pause();
 	ConsoleLogger consoleLog;
 
 	CVProfNode *pNode = g_VProfCurrentProfile.FindNode( g_VProfCurrentProfile.GetRoot(), g_szDefferedArg1 );
-	if (pNode)
+	if ( pNode )
 	{
-		Msg("NODE %s\n\tL2 misses: %d\n\tLHS misses: %d\n", g_szDefferedArg1, pNode->GetL2CacheMisses(), pNode->GetLoadHitStores() );
+		Msg( "NODE %s\n\tL2 misses: %d\n\tLHS misses: %d\n", g_szDefferedArg1, pNode->GetL2CacheMisses(), pNode->GetLoadHitStores() );
 	}
 	else
 	{
-		Msg("Node %s not found.", g_szDefferedArg1);
+		Warning( "Node %s not found.", g_szDefferedArg1 );
 	}
 
 	g_VProfCurrentProfile.Resume();
 }
 
-
-DEFERRED_CON_COMMAND(vprof_360_cpu_trace_enable, "Enable CPU tracing: it will begin when specified node starts, and end when it stops. Do this before calling vprof_360_cpu_trace_go.")
+DEFERRED_CON_COMMAND( vprof_360_cpu_trace_enable, "Usage: vprof_360_cpu_trace_enable <\"node\">. Enable CPU tracing during scope of node. Do this before calling vprof_360_cpu_trace_go." )
 {	
-	CVProfNode * RESTRICT upon = g_VProfCurrentProfile.CPUTraceEnableForNode(g_szDefferedArg1);
-	if (upon != NULL)
+	CVProfNode *RESTRICT upon = g_VProfCurrentProfile.CPUTraceEnableForNode( g_szDefferedArg1 );
+	if ( upon )
 	{
 		Msg( "%s will be traced from start to end. Make sure vprof is enabled, and enter \nvprof_360_cpu_trace_go <filename> to engage!\n", upon->GetName() );
 	}
 	else
 	{
-		Msg( "Could not find node %s. Maybe you need to run vprof for a bit so I can know about that node? Or, you might need to wrap it in \"double-quotes\". \n", g_szDefferedArg1 );
+		Warning( "Missing node %s. Run VProf to instance the node and wrap in \"double-quotes\". \n", g_szDefferedArg1 );
 	}
 }
 
-
-DEFERRED_CON_COMMAND(vprof_360_cpu_trace_disable, "Disable CPU tracing on all nodes.")
+DEFERRED_CON_COMMAND( vprof_360_cpu_trace_disable, "Disable CPU tracing on all nodes." )
 {
 	g_VProfCurrentProfile.CPUTraceDisableAllNodes();
-	g_VProfCurrentProfile.SetCPUTraceEnabled(CVProfile::kDisabled);
+	g_VProfCurrentProfile.SetCPUTraceEnabled( CVProfile::kDisabled );
 }
 
-DEFERRED_CON_COMMAND(vprof_360_cpu_trace_go, "syntax: vprof_360_cpu_trace_go <filename>. Will record one CPU trace of the node specified in vprof_360_cpu_trace_enable, dumping it to e:/filename.pix2.")
+DEFERRED_CON_COMMAND( vprof_360_cpu_trace_go, "Usage: vprof_360_cpu_trace_go <filename>. Will record one CPU trace of the node specified in vprof_360_cpu_trace_enable, dumping it to e:/filename.pix2." )
 {
 	if ( !g_fVprofOnByUI )
 	{
-		Msg("VProf enabled.\n");
+		Msg( "VProf enabled.\n" );
 		g_VProfCurrentProfile.Start();
 		g_fVprofOnByUI = true;
-		if ( IsX360() )
+
+		ConVarRef mat_vsyncref( "mat_vsync" );
+		if ( mat_vsyncref.GetBool() )
 		{
-			ConVarRef mat_vsyncref( "mat_vsync" );
-			if ( mat_vsyncref.GetBool() )
-			{
-				Warning( "Disabling vsync (via mat_vsync) to increase profiling accuracy.\n" );
-				mat_vsyncref.SetValue( false );
-			}
+			Warning( "Disabling vsync (via mat_vsync) to increase profiling accuracy.\n" );
+			mat_vsyncref.SetValue( false );
 		}
 	}
 
-	if (g_VProfCurrentProfile.CPUTraceGetEnabledNode() == NULL || g_VProfCurrentProfile.CPUTraceGetEnabledNode() == g_VProfCurrentProfile.GetRoot() )
+	if ( g_VProfCurrentProfile.CPUTraceGetEnabledNode() == NULL || g_VProfCurrentProfile.CPUTraceGetEnabledNode() == g_VProfCurrentProfile.GetRoot() )
 	{
 		Msg( "Defaulting PIX trace node to CEngine::Frame\n" );
 		g_VProfCurrentProfile.CPUTraceEnableForNode( "CEngine::Frame" );
 	}
 
-	if (g_VProfCurrentProfile.CPUTraceGetEnabledNode() != NULL)
+	if ( g_VProfCurrentProfile.CPUTraceGetEnabledNode() != NULL )
 	{
 		if ( !g_szDefferedArg1[0] )
 		{
@@ -765,28 +802,61 @@ DEFERRED_CON_COMMAND(vprof_360_cpu_trace_go, "syntax: vprof_360_cpu_trace_go <fi
 			GetLocalTime( &systemTime );
 			V_snprintf( g_szDefferedArg1, ARRAYSIZE(g_szDefferedArg1), "vprof_%d_%d_%d_%d_%d_%d", systemTime.wMonth, systemTime.wDay, systemTime.wHour, systemTime.wMinute, systemTime.wSecond, systemTime.wMilliseconds );
 		}
-		const char *filename = g_VProfCurrentProfile.SetCPUTraceFilename(g_szDefferedArg1);
-		g_VProfCurrentProfile.SetCPUTraceEnabled(CVProfile::kFirstHitNode);
+		const char *filename = g_VProfCurrentProfile.SetCPUTraceFilename( g_szDefferedArg1 );
+		g_VProfCurrentProfile.SetCPUTraceEnabled( CVProfile::kFirstHitNode );
 		Msg( "Trace will be written to %s\n", filename );
 	}
 	else
 	{
-		Msg( "Please specify a node to profile with vprof_360_cpu_trace_enable <node>.\n" );
+		Warning( "Usage: vprof_360_cpu_trace_enable <\"node\">.\n" );
 	}
 }
 
-DEFERRED_CON_COMMAND(vprof_360_cpu_trace_go_repeat, "syntax: vprof_360_cpu_trace_go_repeat <filename>. For each time the node specified in vprof_360_cpu_trace_enable is hit during the next frame, dump a CPU trace to e:/filenameXXXX.pix2.")
+DEFERRED_CON_COMMAND( vprof_360_cpu_trace_go_repeat, "Usage: vprof_360_cpu_trace_go_repeat <filename>. For each time the node specified in vprof_360_cpu_trace_enable is hit during the next frame, dump a CPU trace to e:/filenameXXXX.pix2." )
 {
-	if (g_VProfCurrentProfile.CPUTraceGetEnabledNode() != NULL)
+	if ( g_VProfCurrentProfile.CPUTraceGetEnabledNode() != NULL )
 	{
-		const char *filename = g_VProfCurrentProfile.SetCPUTraceFilename(g_szDefferedArg1);
-		g_VProfCurrentProfile.SetCPUTraceEnabled(CVProfile::kAllNodesInFrame_WaitingForMark);
+		const char *filename = g_VProfCurrentProfile.SetCPUTraceFilename( g_szDefferedArg1 );
+		g_VProfCurrentProfile.SetCPUTraceEnabled( CVProfile::kAllNodesInFrame_WaitingForMark );
 		Msg( "Trace will be written to %s%.4d ... \n", filename, g_VProfCurrentProfile.GetMultiTraceIndex() );
 	}
 	else
 	{
-		Msg( "Please specify a node to profile with vprof_360_cpu_trace_enable <node>.\n" );
+		Warning( "Usage: vprof_360_cpu_trace_enable <\"node\">.\n" );
 	}
+}
+
+
+DEFERRED_CON_COMMAND( vprof_360_cpu_trace_go_multiframe, "Usage: vprof_360_cpu_trace_go_multiframe <framecount> <filename>. For each time the node specified in vprof_360_cpu_trace_enable is hit during the next frame, dump a CPU trace to e:/filenameXXXX.pix2." )
+{
+	int nNumFrames = Q_atoi( g_szDefferedArg1 );
+	if ( nNumFrames >= 1 && nNumFrames < 1000 )
+	{
+		if ( g_VProfCurrentProfile.CPUTraceGetEnabledNode() != NULL )
+		{
+			const char *filename = g_VProfCurrentProfile.SetCPUTraceFilename( g_szDefferedArg2 );
+			g_VProfCurrentProfile.SetCPUTraceEnabled( CVProfile::kAllNodesInFrame_WaitingForMarkMultiFrame, true, nNumFrames );
+			Msg( "Trace will be written to %s%.4d ... \n", filename, g_VProfCurrentProfile.GetMultiTraceIndex() );
+			return;
+		}
+	}
+	
+	Warning( "Usage: vprof_360_cpu_trace_go_multiframe <framecount> <filename>.\n" );
+}
+
+
+DEFERRED_CON_COMMAND( vx_vprof_trace, "" )
+{
+	CVProfNode *RESTRICT pNode = g_VProfCurrentProfile.CPUTraceEnableForNode( g_szDefferedArg1 );
+	if ( !pNode )
+	{
+		Warning( "vx_vprof_trace: Missing Node %s\n", g_szDefferedArg1 );
+		return;
+	}
+
+	vprof_on_Impl();
+	g_VProfCurrentProfile.SetCPUTraceFilename( "capture" );
+	g_VProfCurrentProfile.SetCPUTraceEnabled( CVProfile::kFirstHitNode, true );
 }
 #endif
 
@@ -837,7 +907,7 @@ public:
 
 	virtual int GetNumBudgetGroups()
 	{
-		int nTotalGroups = min( m_Times.Count(), GetActiveVProfile()->GetNumBudgetGroups() );
+		int nTotalGroups = MIN( m_Times.Count(), GetActiveVProfile()->GetNumBudgetGroups() );
 		int nRet = 0;
 		for ( int i=0; i < nTotalGroups; i++ )
 		{
@@ -850,7 +920,7 @@ public:
 	virtual void GetBudgetGroupInfos( CExportedBudgetGroupInfo *pInfos )
 	{
 		int iOut = 0;
-		int nTotalGroups = min( m_Times.Count(), GetActiveVProfile()->GetNumBudgetGroups() );
+		int nTotalGroups = MIN( m_Times.Count(), GetActiveVProfile()->GetNumBudgetGroups() );
 		for ( int i=0; i < nTotalGroups; i++ )
 		{
 			if ( CanShowBudgetGroup( i ) )
@@ -869,8 +939,8 @@ public:
 
 	virtual void GetBudgetGroupTimes( float times[IVProfExport::MAX_BUDGETGROUP_TIMES] )
 	{
-		int nTotalGroups = min( m_Times.Count(), GetActiveVProfile()->GetNumBudgetGroups() );
-		int nGroups = min( nTotalGroups, (int)IVProfExport::MAX_BUDGETGROUP_TIMES );
+		int nTotalGroups = MIN( m_Times.Count(), GetActiveVProfile()->GetNumBudgetGroups() );
+		int nGroups = MIN( nTotalGroups, IVProfExport::MAX_BUDGETGROUP_TIMES );
 		memset( times, 0, sizeof( times[0] ) * nGroups );
 
 		int iOut = 0;
@@ -940,7 +1010,7 @@ public:
 
 		int groupID = pTestNode->GetBudgetGroupID();
 		double nodeTime = pNode->GetPrevTimeLessChildren();
-		if ( groupID >= 0 && groupID < min( m_Times.Count(), (int)IVProfExport::MAX_BUDGETGROUP_TIMES ) )
+		if ( groupID >= 0 && groupID < MIN( m_Times.Count(), IVProfExport::MAX_BUDGETGROUP_TIMES ) )
 		{
 			m_Times[groupID] += nodeTime;
 		}

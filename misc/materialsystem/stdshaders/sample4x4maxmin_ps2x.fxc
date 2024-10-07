@@ -1,9 +1,7 @@
-// STATIC: "CONVERT_TO_SRGB" "0..1"	[ps20b][= g_pHardwareConfig->NeedsShaderSRGBConversion()] [PC]
-// STATIC: "CONVERT_TO_SRGB" "0..0"	[= 0] [XBOX]
+//========== Copyright (c) Valve Corporation, All rights reserved. ==========//
 
 #define HDRTYPE HDR_TYPE_NONE
 #include "common_ps_Fxc.h"
-
 
 sampler TexSampler	: register( s0 );
 
@@ -29,4 +27,3 @@ float4 main( PS_INPUT i ) : COLOR
 	s3 = tex2D( TexSampler, i.coordTap3);
 	return FinalOutput( float4(0.25*(s0.xyz+s1.xyz+s2.xyz+s3.xzy),1), 0, PIXEL_FOG_TYPE_NONE, TONEMAP_SCALE_NONE );
 }
-

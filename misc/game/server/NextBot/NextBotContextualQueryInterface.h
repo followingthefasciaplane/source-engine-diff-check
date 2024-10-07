@@ -1,7 +1,7 @@
 // NextBotContextualQueryInterface.h
 // Queries within the context of the bot's current behavior state
 // Author: Michael Booth, June 2007
-//========= Copyright Valve Corporation, All rights reserved. ============//
+// Copyright (c) 2007 Turtle Rock Studios, Inc. - All Rights Reserved
 
 #ifndef _NEXT_BOT_CONTEXTUAL_QUERY_H_
 #define _NEXT_BOT_CONTEXTUAL_QUERY_H_
@@ -40,7 +40,6 @@ public:
 	virtual QueryResultType			ShouldPickUp( const INextBot *me, CBaseEntity *item ) const;		// if the desired item was available right now, should we pick it up?
 	virtual QueryResultType			ShouldHurry( const INextBot *me ) const;							// are we in a hurry?
 	virtual QueryResultType			ShouldRetreat( const INextBot *me ) const;							// is it time to retreat?
-	virtual QueryResultType			ShouldAttack( const INextBot *me, const CKnownEntity *them ) const;	// should we attack "them"?
 	virtual QueryResultType			IsHindrance( const INextBot *me, CBaseEntity *blocker ) const;		// return true if we should wait for 'blocker' that is across our path somewhere up ahead.
 
 	virtual Vector					SelectTargetPoint( const INextBot *me, const CBaseCombatCharacter *subject ) const;		// given a subject, return the world space position we should aim at
@@ -69,11 +68,6 @@ inline QueryResultType IContextualQuery::ShouldHurry( const INextBot *me ) const
 }
 
 inline QueryResultType IContextualQuery::ShouldRetreat( const INextBot *me ) const
-{
-	return ANSWER_UNDEFINED;
-}
-
-inline QueryResultType IContextualQuery::ShouldAttack( const INextBot *me, const CKnownEntity *them ) const
 {
 	return ANSWER_UNDEFINED;
 }

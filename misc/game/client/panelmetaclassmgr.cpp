@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: A panel "metaclass" is a name given to a particular type of 
 // panel with particular instance data. Such panels tend to be dynamically
@@ -9,11 +9,11 @@
 //=============================================================================//
 #include "cbase.h"
 #include "panelmetaclassmgr.h"
-#include <KeyValues.h>
+#include <keyvalues.h>
 #include <vgui_controls/Panel.h>
 #include "utldict.h"
 #include "filesystem.h"
-#include <KeyValues.h>
+#include <keyvalues.h>
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -409,7 +409,18 @@ vgui::Panel *CPanelMetaClassMgrImp::CreatePanelMetaClass( const char* pMetaClass
 	// Now that we've got the metaclass, we can figure out what kind of
 	// panel to instantiate...
 	MetaClassDict_t &metaClass = m_MetaClassDict[i];
+	
+	if ( metaClass.m_TypeIndex == m_MetaClassDict.InvalidIndex() )
+	{
+		AssertMsg( "Type Index invalid for Meta class %s in m_MetaClassDict.", pMetaClassName );
+		return NULL;
+	}
 	IPanelFactory* pFactory = m_PanelTypeDict[metaClass.m_TypeIndex];
+	if ( pFactory == NULL )
+	{
+		AssertMsg( "Null factory found for Meta class %s in m_PanelTypeDict.", pMetaClassName );
+		return NULL;
+	}
 
 	// Set up the key values for use in initialization
 	if (pChainName)

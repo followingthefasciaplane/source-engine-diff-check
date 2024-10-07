@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -9,6 +9,11 @@
 #include "vphysics/friction.h"
 #include "ai_basenpc.h"
 #include "movevars_shared.h"
+
+#ifdef PORTAL2
+	#include "portal_player.h"
+	#include "portal_grabcontroller_shared.h"
+#endif
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -300,7 +305,13 @@ IMotionEvent::simresult_e CPhysicsNPCSolver::Simulate( IPhysicsMotionController 
 			CBasePlayer *pPlayer = UTIL_GetLocalPlayer();
 			if ( pPlayer )
 			{
-				pPlayer->ForceDropOfCarriedPhysObjects( m_hEntity );
+#ifdef PORTAL2
+				CPortal_Player *pPortalPlayer = (CPortal_Player*)pPlayer;
+				if ( !pPortalPlayer->IsUsingVMGrab() )
+				{
+					pPlayer->ForceDropOfCarriedPhysObjects( m_hEntity );
+				}
+#endif
 			}
 		}
 
@@ -337,7 +348,7 @@ IMotionEvent::simresult_e CPhysicsNPCSolver::Simulate( IPhysicsMotionController 
 			linear = pushImpulse;
 			if ( pObject->GetContactPoint(NULL,NULL) )
 			{
-				linear.z += GetCurrentGravity();
+				linear.z += sv_gravity.GetFloat();
 			}
 		}
 		return SIM_GLOBAL_ACCELERATION;

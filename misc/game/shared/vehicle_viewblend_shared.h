@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -74,6 +74,6 @@ void SharedVehicleViewSmoothing(CBasePlayer *pPlayer,
 								bool bEnterAnimOn, bool bExitAnimOn, 
 								const Vector &vecEyeExitEndpoint, 
 								ViewSmoothingData_t *pData, 
-								float *pFOV );
+								float *pFOV, bool bForceViewToAttachment = false );
 
 #endif // VEHICLE_VIEWBLEND_SHARED_H

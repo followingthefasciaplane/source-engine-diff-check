@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -39,6 +39,12 @@ public:
 
 	// This uses the standard windows file open dialog.
 	virtual bool DoModal_WindowsDialog() = 0;
+
+	// Mark the dialog as allowing us to multi-select
+	virtual void AllowMultiSelect( bool bAllow ) = 0;
+
+	// Request the length of the buffer sufficient enough to hold the entire filename result
+	virtual int GetFilenameBufferSize() const = 0;
 };
 
 

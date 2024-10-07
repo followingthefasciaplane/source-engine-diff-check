@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -12,9 +12,8 @@
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
-LINK_ENTITY_TO_CLASS(env_detail_controller,	CEnvDetailController);
-
 IMPLEMENT_NETWORKCLASS_ALIASED( EnvDetailController, DT_DetailController )
+LINK_ENTITY_TO_CLASS_ALIASED(env_detail_controller,	EnvDetailController);
 
 BEGIN_NETWORK_TABLE_NOBASE( CEnvDetailController, DT_DetailController )
 	#ifdef CLIENT_DLL

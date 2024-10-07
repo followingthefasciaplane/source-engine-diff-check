@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -7,16 +7,15 @@
 #include "net_ws_headers.h"
 #include "net_ws_queued_packet_sender.h"
 
+#include "tier0/vprof.h"
 #include "tier1/utlvector.h"
 #include "tier1/utlpriorityqueue.h"
-
-#include "tier0/etwprof.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
 ConVar net_queued_packet_thread( "net_queued_packet_thread", "1", 0, "Use a high priority thread to send queued packets out instead of sending them each frame." );
-ConVar net_queue_trace( "net_queue_trace", "0", 0 );
+ConVar net_queue_trace( "net_queue_trace", "0", FCVAR_ACCESSIBLE_FROM_THREADS );
 
 class CQueuedPacketSender : public CThread, public IQueuedPacketSender
 {
@@ -31,7 +30,7 @@ public:
 	virtual bool IsRunning() { return CThread::IsAlive(); }
 
 	virtual void ClearQueuedPacketsForChannel( INetChannel *pChan );
-	virtual void QueuePacket( INetChannel *pChan, SOCKET s, const char FAR *buf, int len, const struct sockaddr FAR * to, int tolen, uint32 msecDelay );
+	virtual void QueuePacket( INetChannel *pChan, SOCKET s, const char FAR *buf, int len, const ns_address &to, uint32 msecDelay );
 	virtual bool HasQueuedPackets( const INetChannel *pChan ) const;
 private:
 
@@ -47,7 +46,7 @@ private:
 		uint32				m_unSendTime;
 		const void 			*m_pChannel;  // We don't actually use the channel
 		SOCKET				m_Socket;
-		CUtlVector<char>	to;	// sockaddr
+		ns_address			to;
 		CUtlVector<char>	buf;
 
 		// We want the list sorted in ascending order, so note that we return > rather than <
@@ -93,10 +92,13 @@ bool CQueuedPacketSender::Start( unsigned nBytesStack )
 		// Ahhh the perfect cross-platformness of the threads library.
 #ifdef IS_WINDOWS_PC
 		SetPriority( THREAD_PRIORITY_HIGHEST );
+		ThreadSetDebugName( GetThreadHandle(), "CQueuedPacketSender" );
 #elif POSIX
 		//SetPriority( PRIORITY_MAX );
 #endif
+
 		m_bThreadShouldExit = false;
+
 		return true;
 	}
 	else
@@ -110,6 +112,13 @@ void CQueuedPacketSender::Shutdown()
 	if ( !IsAlive() )
 		return;
 		
+#ifdef _WIN32
+	if ( !GetThreadHandle() )
+	{
+		Msg( "-->Shutdown %p\n", GetThreadHandle() );
+	}
+#endif
+
 	m_bThreadShouldExit = true;
 	m_hThreadEvent.Set();
 	
@@ -153,7 +162,8 @@ bool CQueuedPacketSender::HasQueuedPackets( const INetChannel *pChan ) const
 
 	return false;
 }
-void CQueuedPacketSender::QueuePacket( INetChannel *pChan, SOCKET s, const char FAR *buf, int len, const struct sockaddr FAR * to, int tolen, uint32 msecDelay )
+
+void CQueuedPacketSender::QueuePacket( INetChannel *pChan, SOCKET s, const char FAR *buf, int len, const ns_address &to, uint32 msecDelay )
 {
 	AUTO_LOCK( m_QueuedPacketsCS );
 
@@ -169,7 +179,7 @@ void CQueuedPacketSender::QueuePacket( INetChannel *pChan, SOCKET s, const char 
 		pPacket->m_Socket = s;
 		pPacket->m_pChannel = pChan;
 		pPacket->buf.CopyArray( (char*)buf, len );
-		pPacket->to.CopyArray( (char*)to, tolen );
+		pPacket->to = to;
 		m_QueuedPackets.Insert( pPacket );
 	}
 	else
@@ -185,16 +195,16 @@ void CQueuedPacketSender::QueuePacket( INetChannel *pChan, SOCKET s, const char 
 	m_hThreadEvent.Set();
 }
 
-extern int NET_SendToImpl( SOCKET s, const char FAR * buf, int len, const struct sockaddr FAR * to, int tolen, int iGameDataLength );
+extern int NET_SendToImpl( SOCKET s, const char FAR * buf, int len, const ns_address &to, int iGameDataLength );
 
 int CQueuedPacketSender::Run()
 {
-	 // Normally TT_INFINITE but we wakeup every 50ms just in case.
-	uint32 waitIntervalNoPackets = 50;
+	 // Normally TT_INFINITE but we wakeup every 500ms just in case.
+	uint32 waitIntervalNoPackets = 500;
 	uint32 waitInterval = waitIntervalNoPackets;
 	while ( 1 )
 	{
-		if ( m_hThreadEvent.Wait( waitInterval ) )
+		m_hThreadEvent.Wait( waitInterval );
 		{
 			// Someone signaled the thread. Either we're being told to exit or 
 			// we're being told that a packet was just queued.
@@ -207,6 +217,7 @@ int CQueuedPacketSender::Run()
 
 		// OK, now send a packet.
 		{
+            SNPROF("NET_SendToImpl");
 			AUTO_LOCK( m_QueuedPacketsCS );
 		
 			// We'll pull all packets we should have sent by now and send them out right away
@@ -221,9 +232,6 @@ int CQueuedPacketSender::Run()
 				{
 					// Sleep until next we need this packet
 					waitInterval = pPacket->m_unSendTime - msNow;
-					// Emit ETW events to help with diagnosing network throttling issues as
-					// these often have a severe effect on load times in Dota.
-					ETWMark1I( "CQueuedPacketSender::Run sleeping (ms)", waitInterval );
 					if ( bTrace )
 					{
 						Warning( "SQ:  sleeping for %u msecs at %f\n", waitInterval, Plat_FloatTime() );
@@ -234,13 +242,7 @@ int CQueuedPacketSender::Run()
 				// If it's a bot, don't do anything. Note: we DO want this code deep here because bots only
 				// try to send packets when sv_stressbots is set, in which case we want it to act as closely
 				// as a real player as possible.
-				sockaddr_in *pInternetAddr = (sockaddr_in*)pPacket->to.Base();
-			#ifdef _WIN32
-				if ( pInternetAddr->sin_addr.S_un.S_addr != 0
-			#else
-				if ( pInternetAddr->sin_addr.s_addr != 0 
-			#endif
-					&& pInternetAddr->sin_port != 0 )
+				if ( !pPacket->to.IsNull() )
 				{		
 					if ( bTrace )
 					{
@@ -252,8 +254,7 @@ int CQueuedPacketSender::Run()
 						pPacket->m_Socket, 
 						pPacket->buf.Base(), 
 						pPacket->buf.Count(), 
-						(sockaddr*)pPacket->to.Base(),
-						pPacket->to.Count(), 
+						pPacket->to,
 						-1 
 					);
 				}	

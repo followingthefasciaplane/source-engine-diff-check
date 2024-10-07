@@ -1,9 +1,9 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
 // $NoKeywords: $
-//=============================================================================//
+//===========================================================================//
 
 #include "cbase.h"
 #include "te.h"
@@ -61,7 +61,7 @@ void TE_Decal( IRecipientFilter& filter, float delay,
 void TE_DynamicLight( IRecipientFilter& filter, float delay,
 	const Vector* org, int r, int g, int b, int exponent, float radius, float time, float decay );
 void TE_Explosion( IRecipientFilter& filter, float delay,
-	const Vector* pos, int modelindex, float scale, int framerate, int flags, int radius, int magnitude, const Vector* normal = NULL, unsigned char materialType = 'C' );
+	const Vector& pos, int modelindex, float scale, int framerate, int flags, int radius, int magnitude, const Vector& normal, unsigned char materialType = 'C' );
 void TE_ShatterSurface( IRecipientFilter& filter, float delay,
 	const Vector* pos, const QAngle* angle, const Vector* vForce, const Vector* vForcePos, 
 	float width, float height, float shardsize, ShatterSurface_t surfacetype,
@@ -81,7 +81,7 @@ void TE_MetalSparks( IRecipientFilter& filter, float delay,
 void TE_EnergySplash( IRecipientFilter& filter, float delay,
 	const Vector* pos, const Vector* dir, bool bExplosive );
 void TE_PlayerDecal( IRecipientFilter& filter, float delay,
-	const Vector* pos, int player, int entity );
+	const Vector* pos, const Vector* start, const Vector* right, int player, int entity, int hitbox );
 void TE_ShowLine( IRecipientFilter& filter, float delay,
 	const Vector* start, const Vector* end );
 void TE_Smoke( IRecipientFilter& filter, float delay,
@@ -98,10 +98,8 @@ void TE_MuzzleFlash( IRecipientFilter& filter, float delayt,
 	const Vector &start, const QAngle &angles, float scale, int type );
 void TE_Dust( IRecipientFilter& filter, float delayt,
 			 const Vector &pos, const Vector &dir, float size, float speed );
-void TE_DispatchEffect( IRecipientFilter& filter, float delay,
-				const Vector &pos, const char *pName, const CEffectData &data );
 void TE_PhysicsProp( IRecipientFilter& filter, float delay,
-	int modelindex, int skin, const Vector& pos, const QAngle &angles, const Vector& vel, int flags, int effects );
+	int modelindex, int skin, const Vector& pos, const QAngle &angles, const Vector& vel, int flags, int effects, color24 color );
 void TE_ClientProjectile( IRecipientFilter& filter, float delay,
 	 const Vector* vecOrigin, const Vector* vecVelocity, int modelindex, int lifetime, CBaseEntity *pOwner );
 
@@ -112,7 +110,6 @@ void TE_GaussExplosion( IRecipientFilter& filter, float delayt,
 
 class CTempEntsSystem : public ITempEntsSystem
 {
-private:
 	//-----------------------------------------------------------------------------
 	// Purpose: Returning true means don't even call TE func
 	// Input  : filter - 
@@ -318,10 +315,11 @@ public:
 		}
 	}
 	virtual void Explosion( IRecipientFilter& filter, float delay,
-		const Vector* pos, int modelindex, float scale, int framerate, int flags, int radius, int magnitude, const Vector* normal = NULL, unsigned char materialType = 'C' )
+		const Vector& pos, int modelindex, float scale, int framerate, int flags, int radius, int magnitude, const Vector* pNormal = NULL, unsigned char materialType = 'C' )
 	{
 		if ( !SuppressTE( filter ) )
 		{
+			Vector normal = pNormal ? *pNormal : Vector( 0, 0, 1 );
 			TE_Explosion( filter, delay, pos, modelindex, scale, framerate, flags, radius, magnitude, normal, materialType );
 		}
 	}
@@ -396,12 +394,12 @@ public:
 		}
 	}
 	virtual void PlayerDecal( IRecipientFilter& filter, float delay,
-		const Vector* pos, int player, int entity )
+		const Vector* pos, const Vector *start, const Vector* right, int player, int entity, int hitbox )
 	{
 		if ( !SuppressTE( filter ) )
 		{
 			TE_PlayerDecal( filter, delay,
-				pos, player, entity );
+				pos, start, right, player, entity, hitbox );
 		}
 	}
 	virtual void ShowLine( IRecipientFilter& filter, float delay,
@@ -487,21 +485,12 @@ public:
 #endif
 	}
 
-	virtual void DispatchEffect( IRecipientFilter& filter, float delay,
-				const Vector &pos, const char *pName, const CEffectData &data )
-	{
-		if ( !SuppressTE( filter ) )
-		{
-			TE_DispatchEffect( filter, delay, pos, pName, data );
-		}
-	}
-
 	virtual void PhysicsProp( IRecipientFilter& filter, float delay, int modelindex, int skin,
-		const Vector& pos, const QAngle &angles, const Vector& vel, int flags, int effects )
+		const Vector& pos, const QAngle &angles, const Vector& vel, int flags, int effects, color24 renderColor )
 	{
 		if ( !SuppressTE( filter ) )
 		{
-			TE_PhysicsProp( filter, delay, modelindex, skin, pos, angles, vel, flags, effects );
+			TE_PhysicsProp( filter, delay, modelindex, skin, pos, angles, vel, flags, effects, renderColor );
 		}
 	}
 

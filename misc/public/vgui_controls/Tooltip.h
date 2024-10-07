@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Creates a Message box with a question in it and yes/no buttons
 //
@@ -12,7 +12,7 @@
 #pragma once
 #endif
 
-#include <vgui/VGUI.h>
+#include <vgui/vgui.h>
 #include <vgui_controls/Controls.h>
 #include <utlvector.h>
 
@@ -44,10 +44,8 @@ public:
 	int GetTooltipDelay();
 	void SetEnabled( bool bState );
 
-private:
-	Panel *m_pParent;
-	virtual void ApplySchemeSettings(IScheme *pScheme) {};
 protected:
+	Panel *m_pParent;
 	CUtlVector<char> m_Text;
 	int _delay;			// delay that counts down
 	int _tooltipDelay;	// delay before tooltip comes up.
@@ -68,7 +66,6 @@ public:
 	virtual void HideTooltip();
 	virtual void SizeTextWindow();
 	virtual void PerformLayout();
-	virtual void ApplySchemeSettings(IScheme *pScheme);
 };
 
 };

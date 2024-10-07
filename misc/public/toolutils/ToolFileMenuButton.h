@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Standard file menu
 //
@@ -41,8 +41,7 @@ public:
 		FILE_SAVEAS = 0x08,
 		FILE_CLOSE	= 0x10,
 		FILE_RECENT	= 0x20,
-		FILE_CLEAR_RECENT	= 0x40,
-		FILE_EXIT	= 0x80,
+		FILE_EXIT	= 0x40,
 
 		FILE_ALL = 0xFFFFFFFF
 	};

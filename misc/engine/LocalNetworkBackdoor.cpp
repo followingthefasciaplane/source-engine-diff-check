@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -16,44 +16,25 @@
 
 CLocalNetworkBackdoor *g_pLocalNetworkBackdoor = NULL;
 
-#ifndef SWDS
+#ifndef DEDICATED
 // This is called 
 void CLocalNetworkBackdoor::InitFastCopy()
 {
-	if ( !cl.m_NetChannel->IsLoopback() )
+	if ( !GetBaseLocalClient().m_NetChannel->IsLoopback() )
 		return;
 
 
-	const CStandardSendProxies *pSendProxies = NULL;
-
-	// If the game server is greater than v4, then it is using the new proxy format.
-	if ( g_iServerGameDLLVersion >= 5 ) // check server version
-	{
-		pSendProxies = serverGameDLL->GetStandardSendProxies();
-	}
-	else
-	{
-		// If the game server is older than v4, it is using the old proxy; we set the new proxy members to the 
-		// engine's copy.
-		static CStandardSendProxies compatSendProxy = *serverGameDLL->GetStandardSendProxies();
-
-		compatSendProxy.m_DataTableToDataTable = g_StandardSendProxies.m_DataTableToDataTable;
-		compatSendProxy.m_SendLocalDataTable = g_StandardSendProxies.m_SendLocalDataTable;
-		compatSendProxy.m_ppNonModifiedPointerProxies = g_StandardSendProxies.m_ppNonModifiedPointerProxies;
-
-		pSendProxies = &compatSendProxy;
-	} 
-
+	const CStandardSendProxies *pSendProxies = serverGameDLL->GetStandardSendProxies();
 	const CStandardRecvProxies *pRecvProxies = g_ClientDLL->GetStandardRecvProxies();
 
 	int nFastCopyProps = 0;
 	int nSlowCopyProps = 0;
 
-	for ( int iClass=0; iClass < cl.m_nServerClasses; iClass++ )
+	for ( int iClass=0; iClass < GetBaseLocalClient().m_nServerClasses; iClass++ )
 	{
-		ClientClass *pClientClass = cl.GetClientClass(iClass);
+		ClientClass *pClientClass = GetBaseLocalClient().GetClientClass(iClass);
 		if ( !pClientClass ) 
-			Error( "InitFastCopy - missing client class %d (Should be equivelent of server class: %s)", iClass, cl.m_pServerClasses[iClass].m_ClassName );
+			Error( "InitFastCopy - missing client class %d (Should be equivelent of server class: %s)", iClass, GetBaseLocalClient().m_pServerClasses[iClass].m_ClassName );
 
 		ServerClass *pServerClass = SV_FindServerClass( pClientClass->GetName() );
 		if ( !pServerClass )
@@ -70,7 +51,7 @@ void CLocalNetworkBackdoor::InitFastCopy()
 	}
 
 	int percentFast = (nFastCopyProps * 100 ) / (nSlowCopyProps + nFastCopyProps + 1);
-	if ( percentFast <= 55 )
+	if ( percentFast <= 45 )
 	{
 		// This may not be a real problem, but at the time this code was added, 67% of the
 		// properties were able to be copied without proxies. If percentFast goes to 0 or some
@@ -79,7 +60,7 @@ void CLocalNetworkBackdoor::InitFastCopy()
 		Warning( "InitFastCopy: only %d%% fast props. Bug?\n", percentFast );
 	}
 } 
-#endif
+#endif //DEDICATED
 
 void CLocalNetworkBackdoor::StartEntityStateUpdate()
 {
@@ -93,14 +74,13 @@ void CLocalNetworkBackdoor::StartEntityStateUpdate()
 
 void CLocalNetworkBackdoor::EndEntityStateUpdate()
 {
+	MDLCACHE_CRITICAL_SECTION_( g_pMDLCache );
 	ClientDLL_FrameStageNotify( FRAME_NET_UPDATE_POSTDATAUPDATE_START );
 
 	// Handle entities created.
 	int i;
 	for ( i=0; i < m_nEntsCreated; i++ )
 	{
-		MDLCACHE_CRITICAL_SECTION_( g_pMDLCache );
-
 		int iEdict = m_EntsCreatedIndices[i];
 		CCachedEntState *pCached = &m_CachedEntState[iEdict];
 		IClientNetworkable *pNet = pCached->m_pNetworkable;
@@ -113,8 +93,6 @@ void CLocalNetworkBackdoor::EndEntityStateUpdate()
 	// Handle entities changed.
 	for ( i=0; i < m_nEntsChanged; i++ )
 	{
-		MDLCACHE_CRITICAL_SECTION_( g_pMDLCache );
-
 		int iEdict = m_EntsChangedIndices[i];
 		m_CachedEntState[iEdict].m_pNetworkable->PostDataUpdate( DATA_UPDATE_DATATABLE_CHANGED );
 	}
@@ -138,7 +116,7 @@ void CLocalNetworkBackdoor::EndEntityStateUpdate()
 				if ( toDelete & (1 << iBit) )
 				{
 					int iEdict = (i<<5) + iBit;
-					if ( iEdict >= 0 && iEdict < MAX_EDICTS )
+					if ( iEdict < MAX_EDICTS )
 					{
 						if ( m_CachedEntState[iEdict].m_pNetworkable )
 						{
@@ -260,12 +238,13 @@ void CLocalNetworkBackdoor::EntState(
 					 bool bChanged,
 					 bool bShouldTransmit )
 {
+#ifndef DEDICATED
 	CCachedEntState *pCached = &m_CachedEntState[iEnt];
 
 	// Remember that this ent is alive.
 	m_EntsAlive.Set(iEnt);
 
-	ClientClass *pClientClass = cl.GetClientClass(iClass);
+	ClientClass *pClientClass = GetBaseLocalClient().GetClientClass(iClass);
 	if ( !pClientClass )
 		Error( "CLocalNetworkBackdoor::EntState - missing client class %d", iClass );
 
@@ -373,6 +352,7 @@ void CLocalNetworkBackdoor::EntState(
 			}
 		}
 	}
+#endif
 }
 	
 
@@ -416,5 +396,19 @@ void CLocalNetworkBackdoor::StartBackdoorMode()
 void CLocalNetworkBackdoor::StopBackdoorMode()
 {
 	ClearState();
+}
+
+
+void CLocalNetworkBackdoor::ForceFlushEntity( int iEntity )
+{
+	CCachedEntState *pCached = &m_CachedEntState[iEntity];
+	
+	if ( pCached->m_pNetworkable )
+		pCached->m_pNetworkable->Release();
+
+	pCached->m_pNetworkable = NULL;
+	pCached->m_iSerialNumber = -1;
+	pCached->m_bDormant = false;
+	pCached->m_pDataPointer = NULL;
 }
 

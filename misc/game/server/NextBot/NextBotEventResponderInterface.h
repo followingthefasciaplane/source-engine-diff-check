@@ -1,7 +1,7 @@
 // NextBotEventResponderInterface.h
 // Interface for propagating and responding to events
 // Author: Michael Booth, May 2006
-//========= Copyright Valve Corporation, All rights reserved. ============//
+// Copyright (c) 2006 Turtle Rock Studios, Inc. - All Rights Reserved
 
 #ifndef _NEXT_BOT_EVENT_RESPONDER_INTERFACE_H_
 #define _NEXT_BOT_EVENT_RESPONDER_INTERFACE_H_
@@ -81,7 +81,6 @@ public:
 
 	virtual void OnPickUp( CBaseEntity *item, CBaseCombatCharacter *giver );	// when something is added to our inventory
 	virtual void OnDrop( CBaseEntity *item );									// when something is removed from our inventory
-	virtual void OnActorEmoted( CBaseCombatCharacter *emoter, int emote );			// when "emoter" does an "emote" (ie: manual voice command, etc)
 
 	virtual void OnCommandAttack( CBaseEntity *victim );	// attack the given entity
 	virtual void OnCommandApproach( const Vector &pos, float range = 0.0f );	// move to within range of the given position
@@ -310,14 +309,6 @@ inline void INextBotEventResponder::OnDrop( CBaseEntity *item )
 	for ( INextBotEventResponder *sub = FirstContainedResponder(); sub; sub = NextContainedResponder( sub ) )
 	{
 		sub->OnDrop( item );
-	}	
-}
-
-inline void INextBotEventResponder::OnActorEmoted( CBaseCombatCharacter *emoter, int emote )
-{
-	for ( INextBotEventResponder *sub = FirstContainedResponder(); sub; sub = NextContainedResponder( sub ) )
-	{
-		sub->OnActorEmoted( emoter, emote );
 	}	
 }
 

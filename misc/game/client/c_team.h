@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Client side CTeam class
 //
@@ -32,7 +32,15 @@ public:
 
 	// Data Handling
 	virtual char	*Get_Name( void );
-	virtual int		Get_Score( void );
+	virtual char	*Get_ClanName( void );
+	virtual char	*Get_FlagImageString( void );
+	virtual char	*Get_LogoImageString( void );
+	int				Get_Score( void )				{ return m_scoreTotal; }
+	int				Get_Score_First_Half( void )	{ return m_scoreFirstHalf; }
+	int				Get_Score_Second_Half( void )	{ return m_scoreSecondHalf; }	
+	int				Get_Score_Overtime( void )		{ return m_scoreOvertime; }
+	uint32			GetClanID( void )				{ return m_iClanID; }
+	
 	virtual int		Get_Deaths( void );
 	virtual int		Get_Ping( void );
 
@@ -44,9 +52,9 @@ public:
 	// for shared code, use the same function name
 	virtual int		GetNumPlayers( void ) { return Get_Number_Players(); }
 
-	int		GetTeamNumber() const;
+	virtual int		GetGGLeader( int nTeam );
 
-	int		GetRoundsWon(void) { return m_iRoundsWon; }
+	int		GetTeamNumber() const;
 
 	void	RemoveAllPlayers();
 
@@ -62,14 +70,25 @@ public:
 	// Data received from the server
 	CUtlVector< int > m_aPlayers;
 	char	m_szTeamname[ MAX_TEAM_NAME_LENGTH ];
-	int		m_iScore;
-	int		m_iRoundsWon;
+	char	m_szClanTeamname[ MAX_TEAM_NAME_LENGTH ];
+	char	m_szTeamFlagImage[ MAX_TEAM_FLAG_ICON_LENGTH ];
+	char	m_szTeamLogoImage[ MAX_TEAM_LOGO_ICON_LENGTH ];
+	char	m_szTeamMatchStat[ MAX_PATH ];
+	int		m_scoreTotal;
+	int		m_scoreFirstHalf;
+	int		m_scoreSecondHalf;	
+	int		m_scoreOvertime;
+	int		m_nGGLeaderEntIndex_CT;
+	int		m_nGGLeaderEntIndex_T;
+	uint32	m_iClanID;
 
 	// Data for the scoreboard
 	int		m_iDeaths;
 	int		m_iPing;
 	int		m_iPacketloss;
 	int		m_iTeamNum;
+	int		m_bSurrendered;
+	int		m_numMapVictories;
 };
 
 

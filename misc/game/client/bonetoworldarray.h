@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========== Copyright © 2006, Valve Corporation, All rights reserved. ========
 //
 // Purpose:
 //
@@ -67,5 +67,7 @@ private:
 	CTSListBase m_Free;
 	matrix3x4_t *m_pBase;
 };
+
+#include "tier0/memdbgoff.h" // for _aligned_malloc usage above
 
 #endif // BONETOWORLDARRAY_H

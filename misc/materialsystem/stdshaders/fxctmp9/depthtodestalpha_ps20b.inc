@@ -1,8 +1,15 @@
+// ALL SKIP STATEMENTS THAT AFFECT THIS SHADER!!!
+// defined $PIXELFOGTYPE && defined $WRITEWATERFOGTODESTALPHA && ( $PIXELFOGTYPE != 1 ) && $WRITEWATERFOGTODESTALPHA
+// defined $LIGHTING_PREVIEW && defined $FASTPATHENVMAPTINT && $LIGHTING_PREVIEW && $FASTPATHENVMAPTINT
+// defined $LIGHTING_PREVIEW && defined $FASTPATHENVMAPCONTRAST && $LIGHTING_PREVIEW && $FASTPATHENVMAPCONTRAST
+// defined $LIGHTING_PREVIEW && defined $FASTPATH && $LIGHTING_PREVIEW && $FASTPATH
+// ($FLASHLIGHT || $FLASHLIGHTSHADOWS) && $LIGHTING_PREVIEW
 #include "shaderlib/cshader.h"
 class depthtodestalpha_ps20b_Static_Index
 {
 public:
-	depthtodestalpha_ps20b_Static_Index( )
+	// CONSTRUCTOR
+	depthtodestalpha_ps20b_Static_Index( IShaderShadow *pShaderShadow, IMaterialVar **params )
 	{
 	}
 	int GetIndex()
@@ -18,7 +25,8 @@ public:
 class depthtodestalpha_ps20b_Dynamic_Index
 {
 public:
-	depthtodestalpha_ps20b_Dynamic_Index()
+	// CONSTRUCTOR
+	depthtodestalpha_ps20b_Dynamic_Index( IShaderDynamicAPI *pShaderAPI )
 	{
 	}
 	int GetIndex()
@@ -31,3 +39,18 @@ public:
 	}
 };
 #define shaderDynamicTest_depthtodestalpha_ps20b 0
+static const ShaderComboSemantics_t depthtodestalpha_ps20b_combos =
+{
+	"depthtodestalpha_ps20b", NULL, 0, NULL, 0 
+};
+
+class ConstructMe_depthtodestalpha_ps20b
+{
+public:
+	ConstructMe_depthtodestalpha_ps20b()
+	{
+		GetShaderDLL()->AddShaderComboInformation( &depthtodestalpha_ps20b_combos );
+	}
+};
+
+static ConstructMe_depthtodestalpha_ps20b s_ConstructMe_depthtodestalpha_ps20b;

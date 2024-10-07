@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -14,16 +14,14 @@
 
 #include <utlvector.h>
 #include <utllinkedlist.h>
-#include <vgui/VGUI.h>
+#include <vgui/vgui.h>
 #include <vgui_controls/Panel.h>
 #include <vgui_controls/PHandle.h>
-#include <vgui_controls/Label.h>
 
 namespace vgui
 {
 
-class SectionedListPanel;
-class SectionedListPanelHeader;
+class CSectionHeader;
 class CItemButton;
 
 // sorting function, should return true if itemID1 should be displayed before itemID2
@@ -43,7 +41,6 @@ public:
 	// adds a new section; returns false if section already exists
 	virtual void AddSection(int sectionID, const char *name, SectionSortFunc_t sortFunc = NULL);
 	virtual void AddSection(int sectionID, const wchar_t *name, SectionSortFunc_t sortFunc = NULL);
-	virtual void AddSection(int sectionID, SectionedListPanelHeader *pHeader, SectionSortFunc_t sortFunc = NULL);
 
 	// clears all the sections - leaves the items in place
 	virtual void RemoveAllSections();
@@ -53,7 +50,6 @@ public:
 	virtual void SetSectionDividerColor( int sectionID, Color color);
 	// forces a section to always be visible
 	virtual void SetSectionAlwaysVisible(int sectionID, bool visible = true);
-	virtual void SetSectionMinimumHeight(int sectionID, int iMinimumHeight);
 
 	// adds a new column to a section
 	enum ColumnFlags_e
@@ -97,7 +93,6 @@ public:
 	// HPE_END
 	//=============================================================================
 	virtual void SetItemFont( int itemID, HFont font );
-	virtual void SetItemEnabled( int itemID, bool bEnabled );
 
 	/* MESSAGES SENT:
 		"RowSelected"
@@ -155,9 +150,6 @@ public:
 	// gets the local coordinates of a cell
 	virtual bool GetCellBounds(int itemID, int column, int &x, int &y, int &wide, int &tall);
 
-	// Gets the coordinates of a section header
-	virtual bool GetSectionHeaderBounds(int sectionID, int &x, int &y, int &wide, int &tall);
-
 	//=============================================================================
 	// HPE_BEGIN:
 	// [menglish] Get the bounds of an item or column.
@@ -210,10 +202,6 @@ public:
 	void MoveSelectionDown( void );
 	void MoveSelectionUp( void );
 
-	ScrollBar *GetScrollBar( void ) { return m_pScrollBar; }
-
-	void SetColumnWidthBySection(int sectionID, const char *columnName, int iWidth);
-
 protected:
 	virtual void PerformLayout();
 	virtual void ApplySchemeSettings(IScheme *pScheme);
@@ -221,32 +209,15 @@ protected:
 	virtual void OnSizeChanged(int wide, int tall);
 	virtual void OnMouseWheeled(int delta);
 	virtual void OnMousePressed( MouseCode code);
-	virtual void NavigateTo( void );
-	virtual void OnKeyCodePressed( KeyCode code );
+	virtual void OnKeyCodeTyped( KeyCode code);
 	virtual void OnSetFocus();						// called after the panel receives the keyboard focus
 
 public:
 	virtual void SetFontSection(int sectionID, HFont font);
-	virtual void SetItemBgHorizFillInset( int itemID, int nInset );
-	void SetColorOverrideForCell( int sectionID, int itemID, int columnID, Color clrOverride );
-	Color *GetColorOverrideForCell( int sectionID, int itemID, int columnID );
-	void ClearAllColorOverrideForCell(){ m_ColorOverrides.Purge(); }
-
-	enum
-	{
-		BUTTON_HEIGHT_DEFAULT = 20,
-		BUTTON_HEIGHT_SPACER = 7,
-		DEFAULT_LINE_SPACING = 20,
-		DEFAULT_SECTION_GAP = 8,
-		COLUMN_DATA_INDENT = 6,
-		COLUMN_DATA_GAP = 2,
-	};
-
-	virtual void SetSectionDrawDividerBar( int sectionID, bool bDraw );
-
 private:
 	MESSAGE_FUNC( OnSliderMoved, "ScrollBarSliderMoved" );
 
+	void AddSectionHelper(int sectionID, CSectionHeader *header, SectionSortFunc_t sortFunc);
 	int GetSectionTall();
 	void LayoutPanels(int &contentTall);
 
@@ -256,14 +227,6 @@ private:
 	friend class CItemButton;
 	void SetSelectedItem(CItemButton *item);
 	DHANDLE<CItemButton> m_hSelectedItem;
-
-	struct color_override_t
-	{
-		int m_SectionID;
-		int m_ItemID;
-		int m_ColumnID;
-		Color m_clrOverride;
-	};
 
 	struct column_t
 	{
@@ -277,10 +240,9 @@ private:
 	{
 		int m_iID;
 		bool m_bAlwaysVisible;
-		SectionedListPanelHeader *m_pHeader;
+		CSectionHeader *m_pHeader;
 		CUtlVector<column_t> m_Columns;
 		SectionSortFunc_t m_pSortFunc;
-		int m_iMinimumHeight;
 	};
 
 	CUtlVector<section_t> 				m_Sections;
@@ -288,15 +250,11 @@ private:
 	CUtlLinkedList<CItemButton *, int> 	m_FreeItems;
     CUtlVector<CItemButton *> 			m_SortedItems;
 
-	CUtlVector<color_override_t> 		m_ColorOverrides;
-
 	PHandle m_hEditModePanel;
 	int m_iEditModeItemID;
 	int m_iEditModeColumn;
 	int m_iContentHeight;
-	int m_iLineSpacing;	// row height
-	int m_iLineGap;		// gap between rows
-	int m_iSectionGap;
+	int m_iLineSpacing;
 
 	int FindSectionIndexByID(int sectionID);
     void ReSortList();
@@ -307,8 +265,6 @@ private:
 	bool m_bSortNeeded;
 	bool m_bVerticalScrollbarEnabled;
 
-	HFont m_hHeaderFont;
-	HFont m_hRowFont;
 	//=============================================================================
 	// HPE_BEGIN:	
 	//=============================================================================
@@ -319,31 +275,10 @@ private:
 	//=============================================================================
 	// HPE_END
 	//=============================================================================
+	HFont m_hHeaderFont;
+	HFont m_hRowFont;
 
 	CPanelAnimationVar( bool, m_bShowColumns, "show_columns", "false" );
-};
-
-class SectionedListPanelHeader : public Label
-{
-	DECLARE_CLASS_SIMPLE( SectionedListPanelHeader, Label );
-
-public:
-	SectionedListPanelHeader(SectionedListPanel *parent, const char *name, int sectionID);
-	SectionedListPanelHeader(SectionedListPanel *parent, const wchar_t *name, int sectionID);
-
-	virtual void ApplySchemeSettings(IScheme *pScheme) OVERRIDE;
-	virtual void Paint() OVERRIDE;
-	virtual void PerformLayout() OVERRIDE;
-
-	void SetColor(Color col);
-	void SetDividerColor(Color col );
-	void DrawDividerBar(bool bDraw){ m_bDrawDividerBar = bDraw; }
-
-protected:
-	int m_iSectionID;
-	Color m_SectionDividerColor;
-	SectionedListPanel *m_pListPanel;
-	bool m_bDrawDividerBar;
 };
 
 } // namespace vgui

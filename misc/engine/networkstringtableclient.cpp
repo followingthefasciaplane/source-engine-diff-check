@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -24,9 +24,11 @@
 //-----------------------------------------------------------------------------
 void CL_PrintStringTables( void )
 {
-	if ( cl.m_StringTableContainer )
+#ifndef DEDICATED
+	if ( GetBaseLocalClient().m_StringTableContainer )
 	{
-		cl.m_StringTableContainer->Dump();
+		GetBaseLocalClient().m_StringTableContainer->Dump();
 	}
+#endif
 }
 

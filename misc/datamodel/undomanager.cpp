@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -8,9 +8,6 @@
 #include "datamodel.h"
 
 extern CDataModel *g_pDataModelImp;
-
-CUtlSymbolTableMT CUndoManager::s_UndoSymbolTable;
-
 
 CUndoManager::CUndoManager( ) :
 	m_bEnabled( true ),
@@ -133,7 +130,9 @@ void CUndoManager::PopNotificationScope( bool bAbort )
 	Assert( m_nNotifyNesting >= 0 );
 	if ( m_nNotifyNesting == 0 )
 	{
-		if ( !m_bSuppressingNotify && ( ( m_nNotifyFlags & NOTIFY_CHANGE_MASK ) != 0 ) )
+		if ( !bAbort && // If aborting, then everything should be unchanged, so no need to notify.
+			 !m_bSuppressingNotify && 
+			 ( ( m_nNotifyFlags & NOTIFY_CHANGE_MASK ) != 0 ) )
 		{
 			int nNotifyCount = m_Notifiers.Count();
 			for( int i = 0; i < nNotifyCount; ++i )
@@ -159,8 +158,8 @@ void CUndoManager::PushUndo( const char *udesc, const char *rdesc, int nChaining
 	{
 		m_PreviousChainingID = m_nChainingID;
 		m_nChainingID = nChainingID;
-		m_UndoDesc = s_UndoSymbolTable.AddString( udesc );
-		m_RedoDesc = ( udesc == rdesc ) ? m_UndoDesc : s_UndoSymbolTable.AddString( rdesc );
+		m_UndoDesc = g_pDataModel->GetSymbol( udesc );
+		m_RedoDesc = ( udesc == rdesc ) ? m_UndoDesc : g_pDataModel->GetSymbol( rdesc );
 		m_bStreamStart = true;
 		m_nItemsAddedSinceStartOfStream = 0;
 	}
@@ -171,7 +170,7 @@ void CUndoManager::PushRedo()
 	if ( !IsEnabled() )
 		return;
 
-	Trace( "[%d] Popping undo '%s'\n", m_nNesting, s_UndoSymbolTable.String( m_UndoDesc ) );
+	Trace( "[%d] Popping undo '%s'\n", m_nNesting, m_UndoDesc.String() );
 
 	--m_nNesting;
 	Assert( m_nNesting >= 0 );
@@ -211,7 +210,7 @@ void CUndoManager::AbortUndoableOperation()
 
 	bool hasItems = m_nItemsAddedSinceStartOfStream > 0 ? true : false;
 	
-	Trace( "[%d] Aborting undo '%s'\n", m_nNesting, s_UndoSymbolTable.String( m_UndoDesc )  );
+	Trace( "[%d] Aborting undo '%s'\n", m_nNesting, m_UndoDesc.String() );
 
 	// Close off context
 	PushRedo();
@@ -376,7 +375,7 @@ const char *CUndoManager::RedoDesc() const
 	return action->RedoDesc();
 }
 
-UtlSymId_t CUndoManager::GetUndoDescInternal( const char *context )
+CUtlSymbolLarge CUndoManager::GetUndoDescInternal( const char *context )
 {
 	if ( m_nNesting <= 0 )
 	{
@@ -388,17 +387,17 @@ UtlSymId_t CUndoManager::GetUndoDescInternal( const char *context )
 			Warning( "CUndoManager::GetUndoDescInternal:  undoable operation missing CUndoScopeGuard in application\nContext( %s )\n", context );
 			s_DescErrors.AddToTail( sym );
 		}
-		return s_UndoSymbolTable.AddString( context );
+		return g_pDataModel->GetSymbol( context );
 	}
 	return m_UndoDesc;
 }
 
-UtlSymId_t CUndoManager::GetRedoDescInternal( const char *context )
+CUtlSymbolLarge CUndoManager::GetRedoDescInternal( const char *context )
 {
 	if ( m_nNesting <= 0 )
 	{
 		// Warning( "CUndoManager::GetRedoDescInternal:  undoable operation missing CUndoScopeGuard in application\nContext( %s )", context );
-		return s_UndoSymbolTable.AddString( context );
+		return g_pDataModel->GetSymbol( context );
 	}
 	return m_RedoDesc;
 }

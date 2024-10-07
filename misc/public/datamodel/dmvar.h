@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -76,18 +76,31 @@ protected:
 //-----------------------------------------------------------------------------
 // Specialization for string
 //-----------------------------------------------------------------------------
-class CDmaString : public CDmaVar< CUtlString >
+class CDmaString : public CDmaVar< CUtlSymbolLarge >
 {
 public:
+	const char *GetString() const;
 	const char *Get( ) const;
 	operator const char*() const;
 
+	void InitAndSet( CDmElement *pOwner, const char *pAttributeName, const char *pValue, int flags = 0 );
 	void Set( const char *pValue );
 	CDmaString &operator=( const char *src );
 	const CDmaString& operator=( const CDmaString& src );
 
 	// Returns strlen
 	int	Length() const;
+	bool IsEmpty() const;
 };
 
+//-----------------------------------------------------------------------------
+//
+// Inline methods for CDmaString
+//
+//-----------------------------------------------------------------------------
+
+inline const char *CDmaString::GetString() const
+{
+	return this->Value().String();
+}
 #endif // DMVAR_H

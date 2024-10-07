@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -763,7 +763,7 @@ bool CNPC_VehicleDriver::OverridePathMove( float flInterval )
 	float flIncrement = flIncTime * (flSpeed / pCurrentSplineBeingTraversed->GetLength());
 
 	// Now advance our point along the spline
-	m_flDistanceAlongSpline = clamp( m_flDistanceAlongSpline + flIncrement, 0.f, 2.f);
+	m_flDistanceAlongSpline = clamp( m_flDistanceAlongSpline + flIncrement, 0, 2);
 	if ( m_flDistanceAlongSpline > 1 )
 	{
 		// We crossed the spline boundary
@@ -951,7 +951,7 @@ void CNPC_VehicleDriver::CheckForTeleport( void )
 	// Does it have the teleport flag set?
 	if ( pTrack->HasSpawnFlags( SF_PATH_TELEPORT ) )
 	{
-		IncrementInterpolationFrame();
+		AddEffects( EF_NOINTERP );
 
 		// Teleport the vehicle to the pathcorner
 		Vector vecMins, vecMaxs;

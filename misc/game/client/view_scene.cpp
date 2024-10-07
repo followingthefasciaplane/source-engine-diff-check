@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: Responsible for drawing the scene
 //
@@ -11,8 +11,6 @@
 #include "rendertexture.h"
 #include "view_scene.h"
 #include "viewrender.h"
-#include "sourcevr/isourcevirtualreality.h"
-#include "client_virtualreality.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -24,10 +22,18 @@ ConVar r_updaterefracttexture( "r_updaterefracttexture", "1", FCVAR_CHEAT );
 ConVar r_depthoverlay( "r_depthoverlay", "0", FCVAR_CHEAT, "Replaces opaque objects with their grayscaled depth values. r_showz_power scales the output." );
 
 
+// frame we last updated the refract texture in (compared to gpGlobals->framecount)
 int g_viewscene_refractUpdateFrame = 0;
+
+// an index which is incremented once per portal render
+int g_nCurrentPortalRender = 0;
+// the value of g_nCurrentPortalRender when we last updated the refract texture 
+// (basically, portal renders invalidate the refract texture)
+int g_nRefractUpdatePortalRender = 0;
+
 bool g_bAllowMultipleRefractUpdatesPerScenePerFrame = false;
 
-#if defined( _X360 )
+#if defined( _GAMECONSOLE )
 class CAllowMultipleRefractsLogic : public CAutoGameSystem
 {
 public:
@@ -48,19 +54,22 @@ void ViewTransform( const Vector &worldSpace, Vector &viewSpace )
 }
 
 
-
 //-----------------------------------------------------------------------------
-// Purpose: Transforms a world-space position into a 2D position inside a supplied frustum.
+// Purpose: UNDONE: Clean this up some, handle off-screen vertices
+// Input  : *point - 
+//			*screen - 
+// Output : int
 //-----------------------------------------------------------------------------
-int FrustumTransform( const VMatrix &worldToSurface, const Vector& point, Vector& screen )
+int ScreenTransform( const Vector& point, Vector& screen )
 {
 	// UNDONE: Clean this up some, handle off-screen vertices
 	float w;
+	const VMatrix &worldToScreen = engine->WorldToScreenMatrix();
 
-	screen.x = worldToSurface[0][0] * point[0] + worldToSurface[0][1] * point[1] + worldToSurface[0][2] * point[2] + worldToSurface[0][3];
-	screen.y = worldToSurface[1][0] * point[0] + worldToSurface[1][1] * point[1] + worldToSurface[1][2] * point[2] + worldToSurface[1][3];
-	//	z		 = worldToSurface[2][0] * point[0] + worldToSurface[2][1] * point[1] + worldToSurface[2][2] * point[2] + worldToSurface[2][3];
-	w		 = worldToSurface[3][0] * point[0] + worldToSurface[3][1] * point[1] + worldToSurface[3][2] * point[2] + worldToSurface[3][3];
+	screen.x = worldToScreen[0][0] * point[0] + worldToScreen[0][1] * point[1] + worldToScreen[0][2] * point[2] + worldToScreen[0][3];
+	screen.y = worldToScreen[1][0] * point[0] + worldToScreen[1][1] * point[1] + worldToScreen[1][2] * point[2] + worldToScreen[1][3];
+	//	z		 = worldToScreen[2][0] * point[0] + worldToScreen[2][1] * point[1] + worldToScreen[2][2] * point[2] + worldToScreen[2][3];
+	w		 = worldToScreen[3][0] * point[0] + worldToScreen[3][1] * point[1] + worldToScreen[3][2] * point[2] + worldToScreen[3][3];
 
 	// Just so we have something valid here
 	screen.z = 0.0f;
@@ -84,59 +93,31 @@ int FrustumTransform( const VMatrix &worldToSurface, const Vector& point, Vector
 }
 
 
-//-----------------------------------------------------------------------------
-// Purpose: UNDONE: Clean this up some, handle off-screen vertices
-// Input  : *point - 
-//			*screen - 
-// Output : int
-//-----------------------------------------------------------------------------
-int ScreenTransform( const Vector& point, Vector& screen )
-{
-	// UNDONE: Clean this up some, handle off-screen vertices
-	return FrustumTransform ( engine->WorldToScreenMatrix(), point, screen );
-}
-
-//-----------------------------------------------------------------------------
-// Purpose: Same as ScreenTransform, but transforms to HUD space.
-//			These are totally different things in VR mode!
-//-----------------------------------------------------------------------------
-int HudTransform( const Vector& point, Vector& screen )
-{
-	if ( UseVR() )
-	{
-		return FrustumTransform ( g_ClientVirtualReality.GetHudProjectionFromWorld(), point, screen );
-	}
-	else
-	{
-		return FrustumTransform ( engine->WorldToScreenMatrix(), point, screen );
-	}
-}
-
-
-
 void UpdateFullScreenDepthTexture( void )
 {
-	if( !g_pMaterialSystemHardwareConfig->SupportsPixelShaders_2_b() )
+	if ( g_pMaterialSystemHardwareConfig->GetDXSupportLevel() <= 90 )
 		return;
 
 	ITexture *pDepthTex = GetFullFrameDepthTexture();
 	CMatRenderContextPtr pRenderContext( materials );
 
-	if( IsX360() )
+	Rect_t viewportRect;
+	pRenderContext->GetViewport( viewportRect.x, viewportRect.y, viewportRect.width, viewportRect.height );
+
+	if ( IsGameConsole() )
 	{	
-		pRenderContext->CopyRenderTargetToTextureEx( pDepthTex, -1, NULL, NULL );
+		pRenderContext->CopyRenderTargetToTextureEx( pDepthTex, -1, &viewportRect, &viewportRect );
 	}
 	else
 	{
-		pRenderContext->CopyRenderTargetToTextureEx( pDepthTex, 0, NULL, NULL );
+		pRenderContext->CopyRenderTargetToTextureEx( pDepthTex, -1, NULL, NULL );
 	}
 
 	pRenderContext->SetFullScreenDepthTextureValidityFlag( true );
 
-	if( r_depthoverlay.GetBool() )
+	if ( r_depthoverlay.GetBool() )
 	{
 		IMaterial *pMaterial = materials->FindMaterial( "debug/showz", TEXTURE_GROUP_OTHER, true );
-		pMaterial->IncrementReferenceCount();
 		IMaterialVar *BaseTextureVar = pMaterial->FindVar( "$basetexture", NULL, false );
 		IMaterialVar *pDepthInAlpha = NULL;
 		if( IsPC() )
@@ -150,6 +131,5 @@ void UpdateFullScreenDepthTexture( void )
 		pRenderContext->OverrideDepthEnable( true, false ); //don't write to depth, or else we'll never see translucents
 		pRenderContext->DrawScreenSpaceQuad( pMaterial );
 		pRenderContext->OverrideDepthEnable( false, true );
-		pMaterial->DecrementReferenceCount();
 	}
 }

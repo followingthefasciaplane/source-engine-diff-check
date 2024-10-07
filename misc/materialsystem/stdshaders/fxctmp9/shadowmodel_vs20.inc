@@ -1,8 +1,11 @@
+// ALL SKIP STATEMENTS THAT AFFECT THIS SHADER!!!
+// defined $LIGHTING_PREVIEW && defined $FASTPATH && $LIGHTING_PREVIEW && $FASTPATH
 #include "shaderlib/cshader.h"
 class shadowmodel_vs20_Static_Index
 {
 public:
-	shadowmodel_vs20_Static_Index( )
+	// CONSTRUCTOR
+	shadowmodel_vs20_Static_Index( IShaderShadow *pShaderShadow, IMaterialVar **params )
 	{
 	}
 	int GetIndex()
@@ -33,6 +36,7 @@ public:
 	}
 	void SetDOWATERFOG( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nDOWATERFOG = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bDOWATERFOG = true;
@@ -54,13 +58,15 @@ public:
 	}
 	void SetSKINNING( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nSKINNING = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bSKINNING = true;
 #endif
 	}
 public:
-	shadowmodel_vs20_Dynamic_Index()
+	// CONSTRUCTOR
+	shadowmodel_vs20_Dynamic_Index( IShaderDynamicAPI *pShaderAPI )
 	{
 #ifdef _DEBUG
 		m_bDOWATERFOG = false;
@@ -83,3 +89,24 @@ public:
 	}
 };
 #define shaderDynamicTest_shadowmodel_vs20 vsh_forgot_to_set_dynamic_DOWATERFOG + vsh_forgot_to_set_dynamic_SKINNING + 0
+
+static const ShaderComboInformation_t s_DynamicComboArray_shadowmodel_vs20[2] = 
+{
+	{ "DOWATERFOG", 0, 1 },
+	{ "SKINNING", 0, 1 },
+};
+static const ShaderComboSemantics_t shadowmodel_vs20_combos =
+{
+	"shadowmodel_vs20", s_DynamicComboArray_shadowmodel_vs20, 2, NULL, 0 
+};
+
+class ConstructMe_shadowmodel_vs20
+{
+public:
+	ConstructMe_shadowmodel_vs20()
+	{
+		GetShaderDLL()->AddShaderComboInformation( &shadowmodel_vs20_combos );
+	}
+};
+
+static ConstructMe_shadowmodel_vs20 s_ConstructMe_shadowmodel_vs20;

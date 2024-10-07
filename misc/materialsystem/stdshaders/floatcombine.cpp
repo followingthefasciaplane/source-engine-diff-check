@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -10,6 +10,10 @@
 #include "screenspaceeffect_vs20.inc"
 #include "floatcombine_ps20.inc"
 #include "floatcombine_ps20b.inc"
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
 
 BEGIN_VS_SHADER_FLAGS( floatcombine, "Help for floatcombine", SHADER_NOT_EDITABLE )
 	BEGIN_SHADER_PARAMS
@@ -38,12 +42,6 @@ BEGIN_VS_SHADER_FLAGS( floatcombine, "Help for floatcombine", SHADER_NOT_EDITABL
 	
 	SHADER_FALLBACK
 	{
-		// Requires DX9 + above
-		if ( g_pHardwareConfig->GetDXSupportLevel() < 90 )
-		{
-//			Assert( 0 );
-			return "Wireframe";
-		}
 		return 0;
 	}
 
@@ -89,14 +87,14 @@ BEGIN_VS_SHADER_FLAGS( floatcombine, "Help for floatcombine", SHADER_NOT_EDITABL
 						 params[EDGE_SOFTNESS]->GetFloatValue()};
 			pShaderAPI->SetPixelShaderConstant( 0, c0, 1 );
 			pShaderAPI->SetPixelShaderConstant( 1, c1, 1 );
-			BindTexture( SHADER_SAMPLER0, BASETEXTURE, -1 );
-			BindTexture( SHADER_SAMPLER1, BLOOMTEXTURE, -1 );
+			BindTexture( SHADER_SAMPLER0, TEXTURE_BINDFLAGS_NONE, BASETEXTURE, -1 );
+			BindTexture( SHADER_SAMPLER1, TEXTURE_BINDFLAGS_NONE, BLOOMTEXTURE, -1 );
 
 			ITexture *base_texture=params[BASETEXTURE]->GetTextureValue();
 			ITexture *bloom_texture=params[BLOOMTEXTURE]->GetTextureValue();
 
-			float v0[4]={ (float)(1.0/base_texture->GetActualWidth()), (float)(1.0/base_texture->GetActualHeight()),
-				      (float)(1.0/bloom_texture->GetActualWidth()), (float)(1.0/bloom_texture->GetActualHeight()) };
+			float v0[4]={1.0/base_texture->GetActualWidth(),1.0/base_texture->GetActualHeight(),
+						 1.0/bloom_texture->GetActualWidth(),1.0/bloom_texture->GetActualHeight()};
 			pShaderAPI->SetVertexShaderConstant( VERTEX_SHADER_SHADER_SPECIFIC_CONST_0, v0, 1 );
 
 			DECLARE_DYNAMIC_VERTEX_SHADER( screenspaceeffect_vs20 );

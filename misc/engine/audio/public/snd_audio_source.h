@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright  1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -15,7 +15,7 @@
 #define SND_AUDIO_SOURCE_H
 #pragma once
 
-#if !defined( _X360 )
+#if !defined( _GAMECONSOLE )
 #define MP3_SUPPORT	1
 #endif
 
@@ -30,6 +30,7 @@ class IAudioDevice;
 class CUtlBuffer;
 
 #include "tier0/vprof.h"
+#include "utlhandletable.h"
 
 //-----------------------------------------------------------------------------
 // Purpose: This is an instance of an audio source.
@@ -44,7 +45,7 @@ public:
 	virtual ~CAudioMixer( void ) {}
 
 	// return number of samples mixed
-	virtual int MixDataToDevice( IAudioDevice *pDevice, channel_t *pChannel, int sampleCount, int outputRate, int outputOffset ) = 0;
+	virtual int MixDataToDevice( channel_t *pChannel, int sampleCount, int outputRate, int outputOffset ) = 0;
 	virtual int SkipSamples( channel_t *pChannel, int sampleCount, int outputRate, int outputOffset ) = 0;
 	virtual bool ShouldContinueMixing( void ) = 0;
 
@@ -61,6 +62,8 @@ public:
 	// NOTE: Playback is optimized for linear streaming.  These calls will usually cost performance
 	// It is currently optimal to call them before any playback starts, but some audio sources may not
 	// guarantee this.  Also, some mixers may choose to ignore these calls for internal reasons (none do currently).
+
+	virtual bool IsSetSampleStartSupported() const = 0;
 
 	// Move the current position to newPosition 
 	// BUGBUG: THIS CALL DOES NOT SUPPORT MOVING BACKWARD, ONLY FORWARD!!!
@@ -85,9 +88,9 @@ public:
 	virtual void SetPositionFromSaved( int savedPosition ) = 0;
 };
 
-inline int CalcSampleSize( int bitsPerSample, int _channels ) 
+inline int CalcSampleSize( int bitsPerSample, int channels ) 
 {
-	return (bitsPerSample >> 3) * _channels;
+	return (bitsPerSample >> 3) * channels;
 }
 
 #include "UtlCachedFileData.h"
@@ -138,9 +141,9 @@ public:
 	{
 		return info.m_channels;
 	}
-	void	SetChannels( int _channels )
+	void	SetChannels( int channels )
 	{
-		info.m_channels = _channels;
+		info.m_channels = channels;
 	}
 
 	inline int		SampleSize() const
@@ -304,17 +307,19 @@ public:
 	virtual void LevelInit( char const *mapname ) = 0;
 	virtual void LevelShutdown() = 0;
 
-	// This invalidates the cached size/date info for sounds so it'll regenerate that next time it's accessed.
-	// Used when you connect to a pure server.
-	virtual void ForceRecheckDiskInfo() = 0;
-
 	virtual CAudioSourceCachedInfo	*GetInfo( int audiosourcetype, bool soundisprecached, CSfxTable *sfx ) = 0;
+	virtual CAudioSourceCachedInfo	*GetInfoByName( const char *soundName ) = 0;
 	virtual void RebuildCacheEntry( int audiosourcetype, bool soundisprecached, CSfxTable *sfx ) = 0;
 };
 
 extern IAudioSourceCache *audiosourcecache;
 
-FORWARD_DECLARE_HANDLE( memhandle_t );
+typedef UtlHandle_t WaveCacheHandle_t;
+enum
+{
+	// purposely 0
+	INVALID_WAVECACHE_HANDLE = (UtlHandle_t)0 
+};
 
 typedef int StreamHandle_t;
 enum
@@ -334,6 +339,21 @@ enum
 	STREAMED_FROMDVD    = 0x00000001,		// stream buffers are compliant to dvd sectors
 	STREAMED_SINGLEPLAY = 0x00000002,		// non recurring data, buffers don't need to persist and can be recycled
 	STREAMED_QUEUEDLOAD = 0x00000004,		// hint the streamer to load using the queued loader system
+	STREAMED_TRANSIENT  = 0x00000008,		// hint the streamer to pool memory buffers according to dynamic nature
+};
+
+enum SoundError
+{
+	SE_NO_STREAM_BUFFER	=	-1000,
+	SE_FILE_NOT_FOUND,
+	SE_CANT_GET_NAME,
+	SE_SKIPPED,
+	SE_NO_SOURCE_SETUP,
+	SE_CANT_CREATE_MIXER,
+
+	// Avoid 0 on purpose, to avoid ambiguity on the meaning
+
+	SE_OK	=	1,
 };
 
 abstract_class IAsyncWavDataCache
@@ -343,27 +363,31 @@ public:
 	virtual void			Shutdown() = 0;
 
 	// implementation that treats file as monolithic
-	virtual memhandle_t		AsyncLoadCache( char const *filename, int datasize, int startpos, bool bIsPrefetch = false ) = 0;
+	virtual WaveCacheHandle_t	AsyncLoadCache( char const *filename, int datasize, int startpos, bool bIsPrefetch = false ) = 0;
 	virtual void			PrefetchCache( char const *filename, int datasize, int startpos ) = 0;
 	virtual bool			CopyDataIntoMemory( char const *filename, int datasize, int startpos, void *buffer, int bufsize, int copystartpos, int bytestocopy, bool *pbPostProcessed ) = 0;
-	virtual bool			CopyDataIntoMemory( memhandle_t& handle, char const *filename, int datasize, int startpos, void *buffer, int bufsize, int copystartpos, int bytestocopy, bool *pbPostProcessed ) = 0;
-	virtual bool			IsDataLoadCompleted( memhandle_t handle, bool *pIsValid ) = 0;
-	virtual void			RestartDataLoad( memhandle_t *pHandle, const char *pFilename, int dataSize, int startpos ) = 0;
-	virtual bool			GetDataPointer( memhandle_t& handle, char const *filename, int datasize, int startpos, void **pData, int copystartpos, bool *pbPostProcessed ) = 0;
-	virtual void			SetPostProcessed( memhandle_t handle, bool proc ) = 0;
-	virtual void			Unload( memhandle_t handle ) = 0;
+	virtual bool			CopyDataIntoMemory( WaveCacheHandle_t& handle, char const *filename, int datasize, int startpos, void *buffer, int bufsize, int copystartpos, int bytestocopy, bool *pbPostProcessed ) = 0;
+	virtual bool			IsDataLoadCompleted( WaveCacheHandle_t handle, bool *pIsValid, bool *pIsMissing = NULL ) = 0;
+	virtual void			RestartDataLoad( WaveCacheHandle_t *pHandle, const char *pFilename, int dataSize, int startpos ) = 0;
+	virtual bool			GetDataPointer( WaveCacheHandle_t& handle, char const *filename, int datasize, int startpos, void **pData, int copystartpos, bool *pbPostProcessed ) = 0;
+	virtual void			SetPostProcessed( WaveCacheHandle_t handle, bool proc ) = 0;
+	virtual void			Unload( WaveCacheHandle_t handle ) = 0;
 
 	// alternate multi-buffer streaming implementation
-	virtual StreamHandle_t	OpenStreamedLoad( char const *pFileName, int dataSize, int dataStart, int startPos, int loopPos, int bufferSize, int numBuffers, streamFlags_t flags ) = 0;
+	virtual StreamHandle_t	OpenStreamedLoad( char const *pFileName, int dataSize, int dataStart, int startPos, int loopPos, int bufferSize, int numBuffers, streamFlags_t flags, SoundError &soundError ) = 0;
 	virtual void			CloseStreamedLoad( StreamHandle_t hStream ) = 0;
 	virtual int				CopyStreamedDataIntoMemory( StreamHandle_t hStream, void *pBuffer, int buffSize, int copyStartPos, int bytesToCopy ) = 0;
 	virtual bool			IsStreamedDataReady( StreamHandle_t hStream ) = 0;
 	virtual void			MarkBufferDiscarded( BufferHandle_t hBuffer ) = 0;
 	virtual void			*GetStreamedDataPointer( StreamHandle_t hStream, bool bSync ) = 0;
-	virtual bool			IsDataLoadInProgress( memhandle_t handle ) = 0;
-	virtual void			Flush() = 0;
-	virtual void			OnMixBegin() = 0;
-	virtual void			OnMixEnd() = 0;
+	virtual bool			IsDataLoadInProgress( WaveCacheHandle_t handle ) = 0;
+
+	virtual void			Flush( bool bTearDownStaticPool = false ) = 0;
+
+	// This can get called by some implementation when a more accurate loop position has been found later in the process.
+	// For example, the initial loop can be the position in bytes in decompressed samples.
+	// But later, while the sound is being decompressed, a more accurate loop can be set based on the position in the compressed samples.
+	virtual void			UpdateLoopPosition( StreamHandle_t hStream, int nLoopPosition ) = 0;
 };
 
 extern IAsyncWavDataCache *wavedatacache;
@@ -388,9 +412,9 @@ struct CAudioSourceCachedInfoHandle_t
 			// Reacquire
 			info = audiosourcecache->GetInfo( audiosourcetype, soundisprecached, sfx );
 
-			if ( pcacheddatasize )
+			if ( pcacheddatasize && info )
 			{
-				*pcacheddatasize = info ? info->CachedDataSize() : 0;
+				*pcacheddatasize = info->CachedDataSize();
 			}
 
 			// Tag as current
@@ -440,14 +464,15 @@ public:
 	enum
 	{
 		AUDIO_NOT_LOADED = 0,
-		AUDIO_IS_LOADED = 1,
-		AUDIO_LOADING = 2,
+		AUDIO_IS_LOADED,
+		AUDIO_LOADING,
+		AUDIO_ERROR_LOADING,
 	};
 
 	virtual ~CAudioSource( void ) {}
 
 	// Create an instance (mixer) of this audio source
-	virtual CAudioMixer			*CreateMixer( int initialStreamPosition = 0 ) = 0;
+	virtual CAudioMixer			*CreateMixer( int initialStreamPosition, int skipInitialSamples, bool bUpdateDelayForChoreo, SoundError &soundError, struct hrtf_info_t *pHRTFPos ) = 0;
 
 	// Serialization for caching
 	virtual int					GetType( void ) = 0;
@@ -455,7 +480,7 @@ public:
 
 	// Provide samples for the mixer. You can point pData at your own data, or if you prefer to copy the data,
 	// you can copy it into copyBuf and set pData to copyBuf.
-	virtual int					GetOutputData( void **pData, int samplePosition, int sampleCount, char copyBuf[AUDIOSOURCE_COPYBUF_SIZE] ) = 0;
+	virtual int					GetOutputData( void **pData, int64 samplePosition, int sampleCount, char copyBuf[AUDIOSOURCE_COPYBUF_SIZE] ) = 0;
 	
 	virtual int					SampleRate( void ) = 0;
 
@@ -463,6 +488,9 @@ public:
 	// This affects the voice_overdrive behavior (all sounds get quieter when
 	// someone is speaking).
 	virtual bool				IsVoiceSource() = 0;
+
+	// Returns true if this sound comes from player voice chat
+	virtual bool				IsPlayerVoice()				{return true;}
 	
 	// Sample size is in bytes.  It will not be accurate for compressed audio.  This is a best estimate.
 	// The compressed audio mixers understand this, but in general do not assume that SampleSize() * SampleCount() = filesize
@@ -484,6 +512,7 @@ public:
 	virtual void				CacheLoad( void ) = 0;
 	virtual void				CacheUnload( void ) = 0;
 	virtual CSentence			*GetSentence( void ) = 0;
+	virtual int					GetQuality( void ) = 0;
 
 	// these are used to find good splice/loop points.
 	// If not implementing these, simply return sample
@@ -504,7 +533,7 @@ public:
 	// Make sure our data is rebuilt into the per-level cache
 	virtual void				CheckAudioSourceCache() = 0;
 
-	virtual char const			*GetFileName() = 0;
+	virtual char const			*GetFileName(char *pBuf, size_t bufLen) = 0;
 
 	virtual void				SetPlayOnce( bool ) = 0;
 	virtual bool				IsPlayOnce() = 0;

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -13,7 +13,6 @@
 #endif
 
 #include "inputsystem/InputEnums.h"
-#include "mathlib/mathlib.h"
 
 //-----------------------------------------------------------------------------
 // Button enum. "Buttons" are binary-state input devices (mouse buttons, keyboard keys)
@@ -33,6 +32,7 @@ enum
 #define JOYSTICK_POV_BUTTON( _joystick, _button ) ( (ButtonCode_t)JOYSTICK_POV_BUTTON_INTERNAL( _joystick, _button ) )
 #define JOYSTICK_AXIS_BUTTON( _joystick, _button ) ( (ButtonCode_t)JOYSTICK_AXIS_BUTTON_INTERNAL( _joystick, _button ) )
 
+
 //-----------------------------------------------------------------------------
 // Button enum. "Buttons" are binary-state input devices (mouse buttons, keyboard keys)
 //-----------------------------------------------------------------------------
@@ -47,6 +47,7 @@ enum
 
 #define STEAMCONTROLLER_BUTTON( _joystick, _button ) ( (ButtonCode_t)STEAMCONTROLLER_BUTTON_INTERNAL( _joystick, _button ) )
 #define STEAMCONTROLLER_AXIS_BUTTON( _joystick, _button ) ( (ButtonCode_t)STEAMCONTROLLER_AXIS_BUTTON_INTERNAL( _joystick, _button ) )
+
 
 enum ButtonCode_t
 {
@@ -192,30 +193,15 @@ enum ButtonCode_t
 
 	JOYSTICK_LAST = JOYSTICK_LAST_AXIS_BUTTON,
 
-#if !defined ( _X360 )
-	NOVINT_FIRST = JOYSTICK_LAST + 2, // plus 1 missing key. +1 seems to cause issues on the first button.
-	
-	NOVINT_LOGO_0 = NOVINT_FIRST,
-	NOVINT_TRIANGLE_0,
-	NOVINT_BOLT_0,
-	NOVINT_PLUS_0,
-	NOVINT_LOGO_1,
-	NOVINT_TRIANGLE_1,
-	NOVINT_BOLT_1,
-	NOVINT_PLUS_1,
-	
-	NOVINT_LAST = NOVINT_PLUS_1,
-	STEAMCONTROLLER_FIRST = NOVINT_LAST + 1,
-#else
-	STEAMCONTROLLER_FIRST = JOYSTICK_LAST + 1
-#endif
+	STEAMCONTROLLER_FIRST = JOYSTICK_LAST + 1,
 
-	// Steam Controller
 	STEAMCONTROLLER_FIRST_BUTTON = STEAMCONTROLLER_FIRST,
-	STEAMCONTROLLER_LAST_BUTTON = STEAMCONTROLLER_BUTTON_INTERNAL( MAX_STEAM_CONTROLLERS - 1, STEAMCONTROLLER_MAX_BUTTON_COUNT - 1 ),
+	STEAMCONTROLLER_LAST_BUTTON = STEAMCONTROLLER_BUTTON_INTERNAL( MAX_STEAM_CONTROLLERS-1, STEAMCONTROLLER_MAX_BUTTON_COUNT-1 ),
 	STEAMCONTROLLER_FIRST_AXIS_BUTTON,
-	STEAMCONTROLLER_LAST_AXIS_BUTTON = STEAMCONTROLLER_AXIS_BUTTON_INTERNAL( MAX_STEAM_CONTROLLERS - 1, STEAMCONTROLLER_AXIS_BUTTON_COUNT - 1 ),
+	STEAMCONTROLLER_LAST_AXIS_BUTTON = STEAMCONTROLLER_AXIS_BUTTON_INTERNAL( MAX_STEAM_CONTROLLERS-1, STEAMCONTROLLER_AXIS_BUTTON_COUNT-1 ),
+
 	STEAMCONTROLLER_LAST = STEAMCONTROLLER_LAST_AXIS_BUTTON,
+
 
 	BUTTON_CODE_LAST,
 	BUTTON_CODE_COUNT = BUTTON_CODE_LAST - KEY_FIRST + 1,
@@ -236,6 +222,15 @@ enum ButtonCode_t
 	KEY_XBUTTON_START,
 	KEY_XBUTTON_STICK1,
 	KEY_XBUTTON_STICK2,
+	KEY_XBUTTON_INACTIVE_START,
+	KEY_XBUTTON_FIREMODE_SELECTOR_1,
+	KEY_XBUTTON_FIREMODE_SELECTOR_2,
+	KEY_XBUTTON_FIREMODE_SELECTOR_3,
+	KEY_XBUTTON_RELOAD,
+	KEY_XBUTTON_TRIGGER,
+	KEY_XBUTTON_PUMP_ACTION,
+	KEY_XBUTTON_ROLL_RIGHT,
+	KEY_XBUTTON_ROLL_LEFT,
 
 	KEY_XSTICK1_RIGHT = JOYSTICK_FIRST_AXIS_BUTTON,	// XAXIS POSITIVE
 	KEY_XSTICK1_LEFT,							// XAXIS NEGATIVE
@@ -279,18 +274,6 @@ enum ButtonCode_t
 	STEAMCONTROLLER_START,
 	STEAMCONTROLLER_STEAM,
 	STEAMCONTROLLER_INACTIVE_START,
-	STEAMCONTROLLER_F1,
-	STEAMCONTROLLER_F2,
-	STEAMCONTROLLER_F3,
-	STEAMCONTROLLER_F4,
-	STEAMCONTROLLER_F5,
-	STEAMCONTROLLER_F6,
-	STEAMCONTROLLER_F7,
-	STEAMCONTROLLER_F8,
-	STEAMCONTROLLER_F9,
-	STEAMCONTROLLER_F10,
-	STEAMCONTROLLER_F11,
-	STEAMCONTROLLER_F12,
 };
 
 inline bool IsAlpha( ButtonCode_t code )
@@ -328,32 +311,15 @@ inline bool IsMouseCode( ButtonCode_t code )
 	return ( code >= MOUSE_FIRST ) && ( code <= MOUSE_LAST );
 }
 
-inline bool IsNovintCode( ButtonCode_t code )
-{
-#if !defined ( _X360 )
-	return ( ( code >= NOVINT_FIRST ) && ( code <= NOVINT_LAST ) );
-#else
-	return false;
-#endif
-}
-
-inline bool IsNovintButtonCode( ButtonCode_t code )
-{
-#if !defined ( _X360 )
-	return IsNovintCode( code );
-#else
-	return false;
-#endif
-}
-
 inline bool IsJoystickCode( ButtonCode_t code )
 {
-	return ( (( code >= JOYSTICK_FIRST ) && ( code <= JOYSTICK_LAST )) || ((code >= STEAMCONTROLLER_FIRST_BUTTON) && (code <= STEAMCONTROLLER_LAST_BUTTON)) );
+	return ( ( code >= JOYSTICK_FIRST ) && ( code <= JOYSTICK_LAST ) ) ||
+	       ( ( code >= STEAMCONTROLLER_FIRST ) && ( code <= STEAMCONTROLLER_LAST ) );
 }
 
 inline bool IsJoystickButtonCode( ButtonCode_t code )
 {
-	return ( ( ( code >= JOYSTICK_FIRST_BUTTON ) && ( code <= JOYSTICK_LAST_BUTTON ) ) || IsNovintButtonCode( code ) );
+	return ( code >= JOYSTICK_FIRST_BUTTON ) && ( code <= JOYSTICK_LAST_BUTTON );
 }
 
 inline bool IsJoystickPOVCode( ButtonCode_t code )
@@ -404,13 +370,13 @@ inline ButtonCode_t GetBaseButtonCode( ButtonCode_t code )
 	if ( IsSteamControllerButtonCode( code ) )
 	{
 		int offset = ( code - STEAMCONTROLLER_FIRST_BUTTON ) % STEAMCONTROLLER_MAX_BUTTON_COUNT;
-		return ( ButtonCode_t )( STEAMCONTROLLER_FIRST_BUTTON + offset );
+		return (ButtonCode_t)( STEAMCONTROLLER_FIRST_BUTTON + offset );
 	}
 
 	if ( IsSteamControllerAxisCode( code ) )
 	{
 		int offset = ( code - STEAMCONTROLLER_FIRST_AXIS_BUTTON ) % STEAMCONTROLLER_AXIS_BUTTON_COUNT;
-		return ( ButtonCode_t )( STEAMCONTROLLER_FIRST_AXIS_BUTTON + offset );
+		return (ButtonCode_t)( STEAMCONTROLLER_FIRST_AXIS_BUTTON + offset );
 	}
 
 	return code;
@@ -452,13 +418,10 @@ inline int GetJoystickForCode( ButtonCode_t code )
 
 inline ButtonCode_t ButtonCodeToJoystickButtonCode( ButtonCode_t code, int nDesiredJoystick )
 {
-	if ( ( !IsJoystickCode( code ) && !IsSteamControllerCode( code ) ) || nDesiredJoystick == 0 )
+	if ( !IsJoystickCode( code ) || nDesiredJoystick == 0 )
 		return code;
 
-	if ( IsJoystickCode( code ) && !IsSteamControllerCode( code ) )
-		nDesiredJoystick = clamp( nDesiredJoystick, 0, MAX_JOYSTICKS - 1 );
-	else
-		nDesiredJoystick = clamp( nDesiredJoystick, 0, MAX_STEAM_CONTROLLERS - 1 );
+	nDesiredJoystick = clamp( nDesiredJoystick, 0, MAX_JOYSTICKS - 1 );
 
 	code = GetBaseButtonCode( code );
 

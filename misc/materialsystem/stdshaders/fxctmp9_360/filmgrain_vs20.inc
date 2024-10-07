@@ -1,8 +1,11 @@
+// ALL SKIP STATEMENTS THAT AFFECT THIS SHADER!!!
+// defined $LIGHTING_PREVIEW && defined $FASTPATH && $LIGHTING_PREVIEW && $FASTPATH
 #include "shaderlib/cshader.h"
 class filmgrain_vs20_Static_Index
 {
 public:
-	filmgrain_vs20_Static_Index( )
+	// CONSTRUCTOR
+	filmgrain_vs20_Static_Index( IShaderShadow *pShaderShadow, IMaterialVar **params )
 	{
 	}
 	int GetIndex()
@@ -18,7 +21,8 @@ public:
 class filmgrain_vs20_Dynamic_Index
 {
 public:
-	filmgrain_vs20_Dynamic_Index()
+	// CONSTRUCTOR
+	filmgrain_vs20_Dynamic_Index( IShaderDynamicAPI *pShaderAPI )
 	{
 	}
 	int GetIndex()
@@ -31,3 +35,18 @@ public:
 	}
 };
 #define shaderDynamicTest_filmgrain_vs20 0
+static const ShaderComboSemantics_t filmgrain_vs20_combos =
+{
+	"filmgrain_vs20", NULL, 0, NULL, 0 
+};
+
+class ConstructMe_filmgrain_vs20
+{
+public:
+	ConstructMe_filmgrain_vs20()
+	{
+		GetShaderDLL()->AddShaderComboInformation( &filmgrain_vs20_combos );
+	}
+};
+
+static ConstructMe_filmgrain_vs20 s_ConstructMe_filmgrain_vs20;

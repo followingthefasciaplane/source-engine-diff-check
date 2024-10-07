@@ -1,11 +1,11 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2002, Valve LLC, All rights reserved. ============
 //
 // Purpose: 
 //
 // $NoKeywords: $
 //=============================================================================
 
-#include "BaseVSShader.h"
+#include "basevsshader.h"
 
 #ifdef STDSHADER_DX9_DLL_EXPORT
 #include "screenspaceeffect_vs20.inc"
@@ -90,7 +90,7 @@ BEGIN_VS_SHADER_FLAGS( FilmGrain_dx8, "Help for FilmGrain", SHADER_NOT_EDITABLE 
 		}
 		DYNAMIC_STATE
 		{
-			BindTexture( SHADER_SAMPLER0, GRAIN_TEXTURE, -1 );
+			BindTexture( SHADER_SAMPLER0, false, GRAIN_TEXTURE, -1 );
 						
 			SetPixelShaderConstant( 0, NOISESCALE );
 

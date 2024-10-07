@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright � 1996-2003, Valve LLC, All rights reserved. ============
 //
 // Purpose: 
 //
@@ -13,21 +13,24 @@
 #include "econ_gcmessages.h"
 #include "shareddefs.h"
 #include "filesystem.h"
-#include "econ_item_description.h"				// only for CSteamAccountIDAttributeCollector
+#include "econ/econ_coupons.h"
+#include "econ/econ_item_view_helpers.h"
+#include "cdll_int.h"
+
+#include "cs_econ_item_string_table.h"
+#include "econ_game_account_client.h"
 
 #ifdef CLIENT_DLL
 #include <igameevents.h>
-#include "econ_game_account_client.h"
 #include "ienginevgui.h"
-#include "econ_ui.h"
-#include "item_pickup_panel.h"
-#include "econ/econ_item_preset.h"
-#include "econ/confirm_dialog.h"
-#include "tf_xp_source.h"
-#include "tf_notification.h"
+#include "clientmode_csnormal.h"
 #else
 #include "props_shared.h"
 #include "basemultiplayerplayer.h"
+#endif
+
+#if defined( CSTRIKE15 )
+#include "cs_gamerules.h"
 #endif
 
 #if defined(TF_CLIENT_DLL) || defined(TF_DLL)
@@ -36,14 +39,10 @@
 #include "econ_contribution.h"
 #include "tf_player_info.h"
 #include "econ/econ_claimcode.h"
-#include "tf_wardata.h"
-#include "tf_ladder_data.h"
-#include "tf_rating_data.h"
 #endif
 
 #if defined(TF_DLL) && defined(GAME_DLL)
 #include "tf_gc_api.h"
-#include "econ/econ_game_account_server.h"
 #endif
 
 // memdbgon must be the last include file in a .cpp file!!!
@@ -55,15 +54,17 @@ using namespace GCSDK;
 ConVar item_inventory_debug( "item_inventory_debug", "0", FCVAR_REPLICATED | FCVAR_CHEAT );
 #endif
 
+#ifdef CLIENT_DLL
+extern ConVar econ_debug_loadout_ui;
+#endif
+
 #ifdef USE_DYNAMIC_ASSET_LOADING
 //extern ConVar item_dynamicload;
 #endif
 
-#define ITEM_CLIENTACK_FILE			"item_clientacks.txt"
-
 #ifdef _DEBUG
 #ifdef CLIENT_DLL
-ConVar item_debug_clientacks( "item_debug_clientacks", "0", FCVAR_CLIENTDLL | FCVAR_ARCHIVE );
+ConVar item_debug_clientacks( "item_debug_clientacks", "0", FCVAR_CLIENTDLL );
 #endif
 #endif // _DEBUG
 
@@ -80,30 +81,67 @@ const char* GCResultString[8] =
 	"k_EGCMsgResponseNotLoggedOn",	// Client not logged on to steam
 };
 
-CBasePlayer *GetPlayerBySteamID( const CSteamID &steamID )
+
+#ifdef CLIENT_DLL
+
+extern char g_szGeneratingTradingIconPath[ MAX_PATH ];
+int g_nGeneratingTradingIconSpew = -1;
+
+void CInventoryItemUpdateManager::Update( float frametime )
 {
-	CSteamID steamIDPlayer;
-	for ( int i = 1; i <= gpGlobals->maxClients; i++ )
+	// Update items that need fixup
 	{
-		CBasePlayer *pPlayer = UTIL_PlayerByIndex( i );
-		if ( pPlayer == NULL )
-			continue;
+		m_fixupListMutex.Lock();
 
-		if ( pPlayer->GetSteamID( &steamIDPlayer ) == false )
-			continue;
+		int32 nTailIdx = m_fixupList.Count() - 1; 
+		if ( nTailIdx >= 0 )
+		{
+			CEconItemView &item = *m_fixupList[nTailIdx];
+			item.FinishLoadCachedInventoryImage( item.m_inventoryImageRgba.Base(), item.m_nNumAsyncReadBytes, item.m_asyncStatus );
+			m_fixupList.Remove( nTailIdx );
+		}
 
-		if ( steamIDPlayer == steamID )
-			return pPlayer;
+		m_fixupListMutex.Unlock();
 	}
-	return NULL;
+
+	int nTail = m_ManagedItems.Count() - 1;
+	if ( nTail < 0 )
+	{
+		g_nGeneratingTradingIconSpew = -1;
+		return;
+	}
+
+	CEconItemView *pItemView = m_ManagedItems[ nTail ];
+
+	if ( g_szGeneratingTradingIconPath[ 0 ] )
+	{
+		const CPaintKit *pPaintKit = pItemView->GetCustomPaintKit();
+		if ( pPaintKit )
+		{
+			if ( g_nGeneratingTradingIconSpew == -1 || g_nGeneratingTradingIconSpew > m_ManagedItems.Count() )
+			{
+				g_nGeneratingTradingIconSpew = m_ManagedItems.Count();
+				DevMsg( "Generating icon [%s]%s, %i remaining!\n", pPaintKit->sName.Get(), pItemView->GetItemDefinition()->GetDefinitionName(), m_ManagedItems.Count() );
+			}
+		}
+	}
+
+	m_ManagedItems.Remove( nTail );
+
+	pItemView->Update();
 }
+
+CInventoryItemUpdateManager g_InventoryItemUpdateManager;
+
+
+#endif // #ifdef CLIENT_DLL
 
 // Inventory Less function.
 // Used to sort the inventory items into their positions.
-bool CInventoryListLess::Less( const CEconItemView &src1, const CEconItemView &src2, void *pCtx )
+bool CInventoryListLess::Less( CEconItemView* const &src1, CEconItemView *const &src2, void *pCtx )
 {
-	int iPos1 = src1.GetInventoryPosition();
-	int iPos2 = src2.GetInventoryPosition();
+	int iPos1 = src1->GetInventoryPosition();
+	int iPos2 = src2->GetInventoryPosition();
 
 	// Context can be specified to point to a func that extracts the position from the backend position.
 	// Necessary if your inventory packs a bunch of info into the position instead of using it just as a position.
@@ -125,35 +163,21 @@ bool CInventoryListLess::Less( const CEconItemView &src1, const CEconItemView &s
 //-----------------------------------------------------------------------------
 CInventoryManager::CInventoryManager( void )
 #ifdef CLIENT_DLL
-	: m_mapPersonaNamesCache( DefLessFunc( uint32 ) )
-	, m_sPersonaStateChangedCallback( this, &CInventoryManager::OnPersonaStateChanged )
-	, m_personaNameRequests( DefLessFunc( uint64 ) )
+	: m_mapPersonaNamesCache( DefLessFunc( uint32 ) ),
+	  m_mapPredictedFilledSlots( DefLessFunc( uint32 ) )
 #endif
 {
 #ifdef CLIENT_DLL
-	m_pkvItemClientAckFile = NULL;
-	m_bClientAckDirty = false;
 	m_iPredictedDiscards = 0;
-	m_flNextLoadPresetChange = 0.0f;
+	m_bIsBatchingPositions = false;
 #endif
 }
 
 //-----------------------------------------------------------------------------
 // Purpose: 
 //-----------------------------------------------------------------------------
-void CInventoryManager::SteamRequestInventory( CPlayerInventory *pInventory, CSteamID pSteamID, IInventoryUpdateListener *pListener )
+void CInventoryManager::RegisterPlayerInventory( CPlayerInventory *pInventory, IInventoryUpdateListener *pListener /* = NULL */, CSteamID* pSteamID )
 {
-	// SteamID must be valid
-	if ( !pSteamID.IsValid() || !pSteamID.BIndividualAccount() )
-	{
-		if ( !HushAsserts() )
-		{
-			Assert( pSteamID.IsValid() );
-			Assert( pSteamID.BIndividualAccount() );
-		}
-		return;
-	}
-
 	// If we haven't seen this inventory before, register it
 	bool bFound = false;
 	for ( int i = 0; i < m_pInventories.Count(); i++ )
@@ -164,24 +188,34 @@ void CInventoryManager::SteamRequestInventory( CPlayerInventory *pInventory, CSt
 			break;
 		}
 	}
+
 	if ( !bFound )
 	{
 		int iIdx = m_pInventories.AddToTail();
 		m_pInventories[iIdx].pInventory = pInventory;
 		m_pInventories[iIdx].pListener = pListener;
-	}
 
-	// Add the request to our list of pending requests
-	int iIdx = m_hPendingInventoryRequests.AddToTail();
-	m_hPendingInventoryRequests[iIdx].pID = pSteamID;
-	m_hPendingInventoryRequests[iIdx].pInventory = pInventory;
+		if ( pSteamID )
+		{
+			SOID_t ownerSOID = GetSOIDFromSteamID( *pSteamID );
+			pInventory->SetOwner( ownerSOID );
+		}
 
-	pInventory->RequestInventory( pSteamID );
+		if ( pListener )
+		{
+			pInventory->AddListener( pListener );
+		}
+	}	
+}
 
-	if( pListener )
-	{
-		pInventory->AddListener( pListener );
-	}
+//-----------------------------------------------------------------------------
+// Purpose: 
+//-----------------------------------------------------------------------------
+void CInventoryManager::SteamRequestInventory( CPlayerInventory *pInventory, CSteamID pSteamID, IInventoryUpdateListener *pListener )
+{
+	RegisterPlayerInventory( pInventory, pListener, &pSteamID );
+
+	pInventory->RequestInventory( pSteamID );	
 }
 
 
@@ -202,7 +236,8 @@ CPlayerInventory *CInventoryManager::GetInventoryForAccount( uint32 iAccountID )
 {
 	FOR_EACH_VEC( m_pInventories, i )
 	{
-		if ( m_pInventories[i].pInventory->GetOwner().GetAccountID() == iAccountID )
+		CPlayerInventory* pInventory = m_pInventories[i].pInventory;
+		if ( GetSteamIDFromSOID( pInventory->GetOwner() ).GetAccountID() == iAccountID )
 			return m_pInventories[i].pInventory;
 	}
 	return NULL;
@@ -225,44 +260,15 @@ void CInventoryManager::DeregisterInventory( CPlayerInventory *pInventory )
 
 
 #ifdef CLIENT_DLL
-//-----------------------------------------------------------------------------
-// Purpose: 
-//-----------------------------------------------------------------------------
-bool CInventoryManager::IsPresetIndexValid( equipped_preset_t unPreset )
+
+void CInventoryManager::DestroyPlayerInventoryObject( CPlayerInventory *pPlayerInventory ) const
 {
-	const bool bResult = GetItemSchema()->IsValidPreset( unPreset );
-	AssertMsg( bResult, "Invalid preset index!" );
-	return bResult;
-}
-
-//-----------------------------------------------------------------------------
-// Purpose: 
-//-----------------------------------------------------------------------------
-bool CInventoryManager::LoadPreset( equipped_class_t unClass, equipped_preset_t unPreset )
-{
-	if ( !IsValidPlayerClass( unClass ) )
-		return false;
-
-	if ( !IsPresetIndexValid( unPreset ) )
-		return false;
-
-	if ( !GetLocalInventory()->GetSOC() )
-		return false;
-
-	if ( m_flNextLoadPresetChange > gpGlobals->realtime )
+	if ( pPlayerInventory )
 	{
-		Msg( "Loadout change denied. Changing presets too quickly.\n" );
-		return false;
+		pPlayerInventory->Shutdown();
 	}
 
-	m_flNextLoadPresetChange = gpGlobals->realtime + 0.5f;
-
-	GCSDK::CProtoBufMsg<CMsgSelectPresetForClass> msg( k_EMsgGCPresets_SelectPresetForClass );
-	msg.Body().set_class_id( unClass );
-	msg.Body().set_preset_id( unPreset );
-	GCClientSystem()->BSendMessage( msg );
-
-	return true;
+	delete pPlayerInventory;
 }
 
 //-----------------------------------------------------------------------------
@@ -273,22 +279,9 @@ void CInventoryManager::UpdateLocalInventory( void )
 	if ( steamapicontext->SteamUser() && GetLocalInventory() )
 	{
 		CSteamID steamID = steamapicontext->SteamUser()->GetSteamID();
-		if ( steamID.IsValid() ) // make sure we're logged in and we know who we are
-		{
-			SteamRequestInventory( GetLocalInventory(), steamID );
-		}
+		SteamRequestInventory( GetLocalInventory(), steamID );
 	}	
 }
-
-//-----------------------------------------------------------------------------
-// Purpose: 
-//-----------------------------------------------------------------------------
-void CInventoryManager::OnPersonaStateChanged( PersonaStateChange_t *info )
-{
-	if ( ( info->m_nChangeFlags & k_EPersonaChangeName ) != 0 )
-		m_personaNameRequests.InsertOrReplace( info->m_ulSteamID, true );
-}
-
 #endif
 
 //-----------------------------------------------------------------------------
@@ -296,6 +289,22 @@ void CInventoryManager::OnPersonaStateChanged( PersonaStateChange_t *info )
 //-----------------------------------------------------------------------------
 bool CInventoryManager::Init( void )
 {
+	REG_SHARED_OBJECT_SUBCLASS( CEconItem );
+	REG_SHARED_OBJECT_SUBCLASS( CEconDefaultEquippedDefinitionInstanceClient );
+
+#if defined (CLIENT_DLL)
+	REG_SHARED_OBJECT_SUBCLASS( CEconGameAccountClient );
+
+	REG_SHARED_OBJECT_SUBCLASS( CEconCoupon );
+
+	// Make sure the cache directory exists
+	g_pFullFileSystem->CreateDirHierarchy( ECON_ITEM_GENERATED_ICON_DIR, "DEFAULT_WRITE_PATH" );
+#endif
+
+#if defined(GAME_DLL)
+	REG_SHARED_OBJECT_SUBCLASS( CEconPersonaDataPublic );
+#endif
+
 	return true;
 }
 
@@ -314,29 +323,6 @@ void CInventoryManager::PostInit( void )
 //-----------------------------------------------------------------------------
 void CInventoryManager::PreInitGC()
 {
-	REG_SHARED_OBJECT_SUBCLASS( CEconItem );
-	
-#if defined (CLIENT_DLL)
-	REG_SHARED_OBJECT_SUBCLASS( CEconGameAccountClient );
-	REG_SHARED_OBJECT_SUBCLASS( CEconItemPerClassPresetData );
-	REG_SHARED_OBJECT_SUBCLASS( CSOTFMatchResultPlayerInfo );
-	REG_SHARED_OBJECT_SUBCLASS( CXPSource );
-	REG_SHARED_OBJECT_SUBCLASS( CTFNotification );
-#endif
-
-#if defined(TF_CLIENT_DLL) || defined(TF_DLL)
-
-	REG_SHARED_OBJECT_SUBCLASS( CWarData );
-	REG_SHARED_OBJECT_SUBCLASS( CTFDuelSummary );
-	REG_SHARED_OBJECT_SUBCLASS( CTFMapContribution );
-	REG_SHARED_OBJECT_SUBCLASS( CTFPlayerInfo );
-	REG_SHARED_OBJECT_SUBCLASS( CEconClaimCode );
-	REG_SHARED_OBJECT_SUBCLASS( CSOTFLadderData );
-#endif
-
-#ifdef TF_DLL
-	REG_SHARED_OBJECT_SUBCLASS( CEconGameAccountForGameServers );
-#endif // TF_DLL
 }
 
 
@@ -361,7 +347,7 @@ void CInventoryManager::Shutdown()
 		CPlayerInventory *pInventory = m_pInventories[iInventory].pInventory;
 		if ( pInventory )
 		{
-			pInventory->Clear();
+			pInventory->SOClear();
 		}
 	}
 }
@@ -370,10 +356,10 @@ void CInventoryManager::Shutdown()
 //-----------------------------------------------------------------------------
 // Purpose: 
 //-----------------------------------------------------------------------------
-void CInventoryManager::LevelInitPreEntity( void )
+void CInventoryManager::LevelInitPreEntity()
 {
 	// Throw out any testitem definitions
-	for ( int i = 0; i < TI_TYPE_COUNT; i++ )
+	for ( int i = 0; i < TESTITEM_DEFINITIONS_COUNT; i++ )
 	{
 		int iNewDef = TESTITEM_DEFINITIONS_BEGIN_AT + i;
 		ItemSystem()->GetItemSchema()->ItemTesting_DiscardTestDefinition( iNewDef );
@@ -381,7 +367,7 @@ void CInventoryManager::LevelInitPreEntity( void )
 
 	// Precache all item models we've got
 #ifdef GAME_DLL
-	CUtlVector<const char *> vecPrecacheModelStrings;
+	CUtlVector<const char *> vecPrecacheStrings;
 #endif // GAME_DLL
 	const CEconItemSchema::ItemDefinitionMap_t& mapItemDefs = ItemSystem()->GetItemSchema()->GetItemDefinitionMap();
 	FOR_EACH_MAP_FAST( mapItemDefs, i )
@@ -392,37 +378,70 @@ void CInventoryManager::LevelInitPreEntity( void )
 
 #ifdef GAME_DLL
 		bool bDynamicLoad = false;
+
 #ifdef USE_DYNAMIC_ASSET_LOADING
 		bDynamicLoad = true;//item_dynamicload.GetBool();
 #endif // USE_DYNAMIC_ASSET_LOADING
-		pData->GeneratePrecacheModelStrings( bDynamicLoad, &vecPrecacheModelStrings );
+
+		// Robin: Don't precache all assets up front.
+		bDynamicLoad = true;
+
+		pData->GeneratePrecacheModelStrings( bDynamicLoad, &vecPrecacheStrings );
 
 		// Precache the models and the gibs for everything the definition requested.
-		FOR_EACH_VEC( vecPrecacheModelStrings, i )
+		FOR_EACH_VEC( vecPrecacheStrings, i )
 		{
 			// Ignore any objects which requested an empty precache string for whatever reason.
-			if ( vecPrecacheModelStrings[i] && vecPrecacheModelStrings[i][0] )
+			if ( vecPrecacheStrings[i] && vecPrecacheStrings[i][0] )
 			{
-				int iModelIndex = CBaseEntity::PrecacheModel( vecPrecacheModelStrings[i] );
+				int iModelIndex = CBaseEntity::PrecacheModel( vecPrecacheStrings[i] );
 				PrecacheGibsForModel( iModelIndex );
 			}
 		}
 
-		vecPrecacheModelStrings.RemoveAll();
+		vecPrecacheStrings.RemoveAll();
 
-		pData->GeneratePrecacheSoundStrings( bDynamicLoad, &vecPrecacheModelStrings );
+		pData->GeneratePrecacheSoundStrings( &vecPrecacheStrings );
 
 		// Precache the sounds for everything
-		FOR_EACH_VEC( vecPrecacheModelStrings, i )
+		FOR_EACH_VEC( vecPrecacheStrings, i )
 		{
 			// Ignore any objects which requested an empty precache string for whatever reason.
-			if ( vecPrecacheModelStrings[i] && vecPrecacheModelStrings[i][0] )
+			if ( vecPrecacheStrings[i] && vecPrecacheStrings[i][0] )
 			{
-				CBaseEntity::PrecacheScriptSound( vecPrecacheModelStrings[i] );
+				CBaseEntity::PrecacheScriptSound( vecPrecacheStrings[i] );
 			}
 		}
 
-		vecPrecacheModelStrings.RemoveAll();
+		vecPrecacheStrings.RemoveAll();
+
+		pData->GeneratePrecacheEffectStrings( &vecPrecacheStrings );
+
+		// Precache the sounds for everything
+		FOR_EACH_VEC( vecPrecacheStrings, i )
+		{
+			// Ignore any objects which requested an empty precache string for whatever reason.
+			if ( vecPrecacheStrings[i] && vecPrecacheStrings[i][0] )
+			{
+				PrecacheEffect( vecPrecacheStrings[i] );
+			}
+		}
+
+		vecPrecacheStrings.RemoveAll();
+#endif //#ifdef GAME_DLL
+
+#if defined(CSTRIKE15) && ( defined( CLIENT_DLL ) || defined( GAME_DLL ) )
+		const char *szSlot = pData->GetRawDefinition()->GetString("item_slot");
+		if ( szSlot && (
+			!V_stricmp( szSlot, "secondary" ) ||
+			!V_stricmp( szSlot, "smg" ) ||
+			!V_stricmp( szSlot, "heavy" ) ||
+			!V_stricmp( szSlot, "rifle" )
+			) )
+		{
+			extern void GenerateWeaponRecoilPatternForItemDefinition( item_definition_index_t idx );
+			GenerateWeaponRecoilPatternForItemDefinition( pData->GetDefinitionIndex() );
+		}
 #endif
 	}
 
@@ -437,11 +456,41 @@ void CInventoryManager::LevelInitPreEntity( void )
 //-----------------------------------------------------------------------------
 // Purpose: 
 //-----------------------------------------------------------------------------
-void CInventoryManager::LevelShutdownPostEntity( void )
+void CInventoryManager::LevelShutdownPostEntity()
 {
 	// We reset the cached attribute class strings, since it's invalidated by level changes
 	ItemSystem()->ResetAttribStringCache();
 }
+
+#ifdef CLIENT_DLL
+
+void CInventoryManager::ClearLocalInventoryImages( const CCommand &args )
+{
+	CPlayerInventory *pInventory = GetLocalInventory();
+	if ( !pInventory )
+		return;
+
+	for ( int i = 0; i < pInventory->GetItemCount(); i++ )
+	{
+		CEconItemView *pItem = pInventory->GetItem(i);
+		if ( pItem )
+		{
+			pItem->ClearInventoryImageRgba();
+		}
+	}
+}
+
+void CInventoryManager::InsertMaterialGenerationJob( CEconItemView *pItemView )
+{
+	g_InventoryItemUpdateManager.AddItemView( pItemView );
+}
+
+void CInventoryManager::OnDestroyEconItemView( CEconItemView *pItemView )
+{
+	g_InventoryItemUpdateManager.RemoveItemView( pItemView );
+}
+
+#endif
 
 
 //-----------------------------------------------------------------------------
@@ -457,80 +506,14 @@ void CInventoryManager::SendGCConnectedEvent( void )
 	}
 }
 #endif
-
-
-#if !defined(NO_STEAM)
-//-----------------------------------------------------------------------------
-// Purpose: GC Msg handler to receive the dev "new item" response
-//-----------------------------------------------------------------------------
-class CGCDev_NewItemRequestResponse : public GCSDK::CGCClientJob
-{
-public:
-	CGCDev_NewItemRequestResponse( GCSDK::CGCClient *pClient ) : GCSDK::CGCClientJob( pClient ) {}
-
-	virtual bool BYieldingRunGCJob( GCSDK::IMsgNetPacket *pNetPacket )
-	{
-		GCSDK::CGCMsg<MsgGCStandardResponse_t> msg( pNetPacket );
-
-		if ( msg.Body().m_eResponse == k_EGCMsgResponseOK )
-		{
-			Msg("Received new item acknowledgement: %s\n", GCResultString[msg.Body().m_eResponse] );
-		}
-		else
-		{
-			Warning("Failed to generate new item: %s\n", GCResultString[msg.Body().m_eResponse] );
-		}
-		return true;
-	}
-
-};
-GC_REG_JOB( GCSDK::CGCClient, CGCDev_NewItemRequestResponse, "CGCDev_NewItemRequestResponse", k_EMsgGCDev_NewItemRequestResponse, GCSDK::k_EServerTypeGCClient );
-
-#endif	// NO_STEAM
-
-//-----------------------------------------------------------------------------
-// Purpose: 
-//-----------------------------------------------------------------------------
-void CInventoryManager::RemovePendingRequest( CSteamID *pSteamID )
-{
-#ifdef CLIENT_DLL
-	// Only the client, all requests are for the local player. Clear them all.
-	m_hPendingInventoryRequests.Purge();
-	return;
-#endif
-
-	// On the server, remove all requests for the specified steam id
-	int iCount = m_hPendingInventoryRequests.Count();
-	for ( int i = iCount-1; i >= 0; i-- )
-	{
-		if ( m_hPendingInventoryRequests[i].pID == *pSteamID )
-		{
-			m_hPendingInventoryRequests.Remove(i);
-		}
-	}
-}
-
+ 
 #ifdef CLIENT_DLL
 //-----------------------------------------------------------------------------
 // Purpose: 
 //-----------------------------------------------------------------------------
-void CInventoryManager::DropItem( itemid_t iItemID )
+void CInventoryManager::DeleteItem( itemid_t iItemID, bool bRecycle )
 {
-	static CSchemaAttributeDefHandle pAttrDef_NoDelete( "cannot delete" );
-
-	// Double check that this item can be delete
-	CEconItemView *pItem = GetLocalInventory()->GetInventoryItemByItemID( iItemID );
-	if ( !pItem || !pAttrDef_NoDelete || pItem->FindAttribute( pAttrDef_NoDelete ) )
-	{
-		return;
-	}
-	
-	GCSDK::CGCMsg<MsgGCDelete_t> msg( k_EMsgGCDelete );
-	msg.Body().m_unItemID = iItemID;
-	GCClientSystem()->BSendMessage( msg );
-
-	// Keep track of how many items we've discarded, but haven't received responses for.
-	m_iPredictedDiscards++;
+	/** Removed for partner depot **/
 }
 
 //-----------------------------------------------------------------------------
@@ -552,10 +535,10 @@ int	CInventoryManager::DeleteUnknowns( CPlayerInventory *pInventory )
 				CEconItem *pItem = (CEconItem *)pTypeCache->GetObject( unItem );
 				if ( pItem )
 				{
-					CEconItemDefinition *pData = ItemSystem()->GetStaticDataForItemByDefIndex( pItem->GetDefinitionIndex() );
+					const CEconItemDefinition *pData = ItemSystem()->GetStaticDataForItemByDefIndex( pItem->GetDefinitionIndex() );
 					if ( !pData )
 					{
-						DropItem( pItem->GetItemID() );
+						DeleteItem( pItem->GetItemID() );
 						iBadItems++;
 					}
 				}
@@ -602,10 +585,18 @@ bool CInventoryManager::SetItemBackpackPosition( CEconItemView *pItem, uint32 iP
 		}
 
 		// Add predicted filled slots
-		for ( int i = 0; i < m_PredictedFilledSlots.Count(); i++ )
+		for ( int i = m_mapPredictedFilledSlots.FirstInorder(); i != m_mapPredictedFilledSlots.InvalidIndex(); i = m_mapPredictedFilledSlots.NextInorder( i ) )
 		{
-			int iBackpackPos = m_PredictedFilledSlots[i];
-			if ( iBackpackPos >= 0 && iBackpackPos < bFilledSlots.Count() )
+			uint32 iBackpackPos = m_mapPredictedFilledSlots.Key( i );
+			uint64 ullItemID = m_mapPredictedFilledSlots.Element( i );
+
+			if ( ullItemID == pItem->GetItemID() )
+			{
+				// We already predicted the location of this item.
+				return !(iBackpackPos > (uint32)iMaxItems);
+			}
+
+			if ( iBackpackPos < (uint32) bFilledSlots.Count() )
 			{
 				bFilledSlots[iBackpackPos] = true;
 			}
@@ -634,8 +625,17 @@ bool CInventoryManager::SetItemBackpackPosition( CEconItemView *pItem, uint32 iP
 	SetBackpackPosition( &iBackendPosition, iPosition );
 	UpdateInventoryPosition( pInventory, pItem->GetItemID(), iBackendPosition );
 
-	m_PredictedFilledSlots.AddToTail( iPosition );
+	m_mapPredictedFilledSlots.Insert( iPosition, pItem->GetItemID() );
 	return true;
+}
+
+void CInventoryManager::PredictedBackpackPosFilled( int iBackpackPos )
+{
+	int idx = m_mapPredictedFilledSlots.Find( iBackpackPos );
+	if ( m_mapPredictedFilledSlots.IsValidIndex( idx ) )
+	{
+		m_mapPredictedFilledSlots.Remove( iBackpackPos );
+	}
 }
 
 //-----------------------------------------------------------------------------
@@ -658,6 +658,7 @@ void CInventoryManager::MoveItemToBackpackPosition( CEconItemView *pItem, int iB
 	//Warning("Moved item %llu to backpack slot: %d\n", pItem->GetItemID(), iBackpackPosition );
 }
 
+#ifdef TF_DLL
 //-----------------------------------------------------------------------------
 // Purpose: 
 //-----------------------------------------------------------------------------
@@ -674,18 +675,14 @@ protected:
 		InventoryManager()->SortBackpackFinished();
 	}
 };
+#endif
 
 //-----------------------------------------------------------------------------
 // Purpose: 
 //-----------------------------------------------------------------------------
 void CInventoryManager::SortBackpackBy( uint32 iSortType )
 {
-	GCSDK::CProtoBufMsg<CMsgSortItems> msg( k_EMsgGCSortItems );
-	msg.Body().set_sort_type( iSortType );
-	GCClientSystem()->BSendMessage( msg );
-
-	ShowWaitingDialog( new CWaitForBackpackSortFinishDialog( NULL ), "#BackpackSortExplanation_Title", true, false, 3.0f );
-	m_bInBackpackSort = true;
+	/** Removed for partner depot **/
 }
 
 //-----------------------------------------------------------------------------
@@ -699,109 +696,75 @@ void CInventoryManager::SortBackpackFinished( void )
 }
 
 //-----------------------------------------------------------------------------
-// Purpose: GC Msg handler to receive the sort finished message
-//-----------------------------------------------------------------------------
-class CGBackpackSortFinished : public GCSDK::CGCClientJob
+void CInventoryManager::BeginBackpackPositionTransaction()
 {
-public:
-	CGBackpackSortFinished( GCSDK::CGCClient *pClient ) : GCSDK::CGCClientJob( pClient ) {}
+	Assert( !m_bIsBatchingPositions );
 
-	virtual bool BYieldingRunGCJob( GCSDK::IMsgNetPacket *pNetPacket )
-	{
-		CloseWaitingDialog();
-		InventoryManager()->SortBackpackFinished();
-		return true;
-	}
+	m_itemPositions.Clear();
+	m_bIsBatchingPositions = true;
+}
 
-};
-GC_REG_JOB( GCSDK::CGCClient, CGBackpackSortFinished, "CGBackpackSortFinished", k_EMsgGCBackpackSortFinished, GCSDK::k_EServerTypeGCClient );
+//-----------------------------------------------------------------------------
+void CInventoryManager::EndBackpackPositionTransaction()
+{
+	/** Removed for partner depot **/
+}
 
 //-----------------------------------------------------------------------------
 // Purpose: 
 //-----------------------------------------------------------------------------
 void CInventoryManager::UpdateInventoryPosition( CPlayerInventory *pInventory, uint64 ulItemID, uint32 unNewInventoryPos )
 {
-	if ( !pInventory->GetInventoryItemByItemID( ulItemID ) )
-	{
-		Warning("Attempt to update inventory position failure: %s.\n", "could not find matching item ID");
-		return;
-	}
-	if ( !pInventory->GetSOCDataForItem( ulItemID ) )
-	{
-		Warning("Attempt to update inventory position failure: %s\n", "could not find SOC data for item");
-		return;
-	}
-
-	// In the incredibly rare case where the GC crashed while sorting our backpack, we won't have gotten
-	// a k_EMsgGCBackpackSortFinished message. Assume that if we're requesting a manual move of an item, we're not sorting anymore.
-	m_bInBackpackSort = false;
-
-	// TF has multiple ways of using the inventory position bits. For all inventory positions moving forward, assume
-	// they're in the new format.
-#if defined(TF_CLIENT_DLL) || defined(TF_DLL)
-	if ( unNewInventoryPos != 0 )
-	{
-		unNewInventoryPos |= kBackendPosition_NewFormat;
-	}
-#endif // defined(TF_CLIENT_DLL) || defined(TF_DLL)
-
-	// Queue a message to be sent to the GC
-	CMsgSetItemPositions_ItemPosition *pMsg = m_msgPendingSetItemPositions.add_item_positions();
-	pMsg->set_item_id( ulItemID );
-	pMsg->set_position( unNewInventoryPos );
-}
-
-void CInventoryManager::Update( float frametime )
-{
-
-	// Check if we have any pending item position changes that we need to flush out
-	if ( m_msgPendingSetItemPositions.item_positions_size() > 0 )
-	{
-		// !KLUDGE! It would be nice if we could just send this in one line instead of making a copy
-		CProtoBufMsg<CMsgSetItemPositions> msg( k_EMsgGCSetItemPositions );
-		msg.Body() = m_msgPendingSetItemPositions;
-		GCClientSystem()->BSendMessage( msg );
-
-		m_msgPendingSetItemPositions.Clear();
-	}
-
-	// Check if we have any pending account lookups to batch up
-	if ( m_msgPendingLookupAccountNames.accountids_size() > 0 )
-	{
-		// !KLUDGE! It would be nice if we could just send this in one line instead of making a copy
-		CProtoBufMsg< CMsgLookupMultipleAccountNames > msg( k_EMsgGCLookupMultipleAccountNames );
-		msg.Body() = m_msgPendingLookupAccountNames;
-		GCClientSystem()->BSendMessage( msg );
-
-		m_msgPendingLookupAccountNames.Clear();
-	}
+	/** Removed for partner depot **/
 }
 
 //-----------------------------------------------------------------------------
 // Purpose: 
 //-----------------------------------------------------------------------------
-void CInventoryManager::UpdateInventoryEquippedState( CPlayerInventory *pInventory, uint64 ulItemID, equipped_class_t unClass, equipped_slot_t unSlot )
+void CInventoryManager::UpdateInventoryEquippedState( CPlayerInventory *pInventory, uint64 ulItemID, equipped_class_t unClass, equipped_slot_t unSlot, bool bSwap /*= false*/ )
 {
-	// passing in INVALID_ITEM_ID means "unequip from this slot"
-	if ( ulItemID != INVALID_ITEM_ID )
+	C_EconItemView *pItem = pInventory->GetInventoryItemByItemID( ulItemID );
+
+	bool bIsBaseItem = false;
+
+	const CEconItemDefinition *pItemDef = NULL;
+
+	// The Item isn't in the inventory, test for base item.
+	if ( !pItem )
 	{
-		if ( !pInventory->GetInventoryItemByItemID( ulItemID ) )
-		{
-			//Warning("Attempt to update equipped state failure: %s.\n", "could not find matching item ID");
+		//Warning("Attempt to update equipped state failure: %s.\n", "could not find matching item ID");
+		if ( !CombinedItemIdIsDefIndexAndPaint( ulItemID ) )
 			return;
-		}
-		if ( !pInventory->GetSOCDataForItem( ulItemID ) )
-		{
-			//Warning("Attempt to update equipped state failure: %s\n", "could not find SOC data for item");
+
+		pItemDef = GetItemSchema()->GetItemDefinition( CombinedItemIdGetDefIndex( ulItemID ) ) ; 
+		if ( !pItemDef )
 			return;
-		}
+
+		bIsBaseItem = pItemDef->IsBaseItem();
 	}
 
-	CProtoBufMsg<CMsgAdjustItemEquippedState> msg( k_EMsgGCAdjustItemEquippedState );
-	msg.Body().set_item_id( ulItemID );
-	msg.Body().set_new_class( unClass );
-	msg.Body().set_new_slot( unSlot );
-	GCClientSystem()->BSendMessage( msg );
+	if ( !bIsBaseItem && !pInventory->GetSOCDataForItem( ulItemID ) )
+	{
+		//Warning("Attempt to update equipped state failure: %s\n", "could not find SOC data for item");
+		return;
+	}
+
+#ifdef CLIENT_DLL
+	// If this is a set item, other owned items in the set need their descriptions updated
+
+	if ( pItem )
+	{
+		int nSetIndex = pItem->GetItemSetIndex();
+		if ( nSetIndex >= 0 )
+		{
+			const CEconItemSetDefinition *pItemSetDef = GetItemSchema()->GetItemSetByIndex( nSetIndex );
+			if ( pItemSetDef && !pItemSetDef->m_bIsCollection )
+			{
+				pInventory->MarkSetItemDescriptionsDirty( nSetIndex );
+			}
+		}
+	}
+#endif
 }
 
 //-----------------------------------------------------------------------------
@@ -809,76 +772,7 @@ void CInventoryManager::UpdateInventoryEquippedState( CPlayerInventory *pInvento
 //-----------------------------------------------------------------------------
 bool CInventoryManager::ShowItemsPickedUp( bool bForce, bool bReturnToGame, bool bNoPanel )
 {
-	CPlayerInventory *pLocalInv = GetLocalInventory();
-	if ( !pLocalInv )
-		return false;
-
-	// Don't bring it up if we're already browsing something in the gameUI
-	vgui::VPANEL gameuiPanel = enginevgui->GetPanel( PANEL_GAMEUIDLL );
-	if ( !bForce && vgui::ipanel()->IsVisible( gameuiPanel ) )
-		return false;
-
-	CUtlVector<CEconItemView*> aItemsFound;
-
-	// Go through the root inventory and find any items that are in the "found" position
-	int iCount = pLocalInv->GetItemCount();
-	for ( int i = 0; i < iCount; i++ )
-	{
-		CEconItemView *pTmp = pLocalInv->GetItem(i);
-		if ( !pTmp )
-			continue;
-
-		if ( pTmp->GetStaticData()->IsHidden() )
-			continue;
-
-		uint32 iPosition = pTmp->GetInventoryPosition();
-		if ( IsUnacknowledged(iPosition) == false )
-			continue;
-		if ( GetBackpackPositionFromBackend(iPosition) != 0 )
-			continue;
-
-		// Now make sure we haven't got a clientside saved ack for this item.
-		// This makes sure we don't show multiple pickups for items that we've found,
-		// but haven't been able to move out of unack'd position due to the GC being unavailable.
-		if ( HasBeenAckedByClient( pTmp ) )
-			continue;
-
-		aItemsFound.AddToTail( pTmp );
-	}
-
-	if ( !aItemsFound.Count() )
-		return CheckForRoomAndForceDiscard();
-
-	// We're not forcing the player to make room yet. Just show the pickup panel.
-	CItemPickupPanel *pItemPanel = bNoPanel ? NULL : EconUI()->OpenItemPickupPanel();
-
-	if ( pItemPanel )
-	{
-		pItemPanel->SetReturnToGame( bReturnToGame );
-	}
-
-	for ( int i = 0; i < aItemsFound.Count(); i++ )
-	{
-		if ( pItemPanel )
-		{
-			pItemPanel->AddItem( aItemsFound[i] );
-		}
-		else 
-		{
-			AcknowledgeItem( aItemsFound[i] );
-		}
-	}
-
-	if ( pItemPanel )
-	{
-		pItemPanel->MoveToFront();
-	}
-	else
-	{
-		SaveAckFile();
-	}
-
-	aItemsFound.Purge();
+	/** Removed for partner depot **/
 	return true;
 }
 
@@ -887,65 +781,8 @@ bool CInventoryManager::ShowItemsPickedUp( bool bForce, bool bReturnToGame, bool
 //-----------------------------------------------------------------------------
 bool CInventoryManager::CheckForRoomAndForceDiscard( void )
 {
-	CPlayerInventory *pLocalInv = GetLocalInventory();
-	if ( !pLocalInv )
-		return false;
-
-	// Go through the inventory and attempt to move any items outside the backpack into valid positions.
-	// Remember the first item that we failed to move, so we can force a discard later.
-	CEconItemView *pItem = NULL;
-	const int iMaxItems = pLocalInv->GetMaxItemCount();
-	int iCount = pLocalInv->GetItemCount();
-	for ( int i = 0; i < iCount; i++ )
-	{
-		CEconItemView *pTmp = pLocalInv->GetItem(i);
-		if ( !pTmp )
-			continue;
-
-		if ( pTmp->GetStaticData()->IsHidden() )
-			continue;
-
-		uint32 iPosition = pTmp->GetInventoryPosition();
-		if ( IsUnacknowledged(iPosition) || GetBackpackPositionFromBackend(iPosition) > iMaxItems )
-		{
-			if ( !SetItemBackpackPosition( pTmp, 0, false, false ) )
-			{
-				pItem = pTmp;
-				break;
-			}
-		}
-	}
-
-	// If we're not over the limit, we're done.
-	if ( ( iCount - m_iPredictedDiscards ) <= iMaxItems )
-		return false;
-
-	if ( !pItem )
-		return false;
-
-	// We're forcing the player to make room for items he's found. Bring up that panel with the first item over the limit.
-	CItemDiscardPanel *pDiscardPanel = EconUI()->OpenItemDiscardPanel();
-	pDiscardPanel->SetItem( pItem );
+	/** Removed for partner depot **/
 	return true;
-}
-
-//-----------------------------------------------------------------------------
-// Purpose: Client Acknowledges an item and moves it in to the backpack
-//-----------------------------------------------------------------------------
-void CInventoryManager::AcknowledgeItem ( CEconItemView *pItem, bool bMoveToBackpack /* = true */ )
-{
-	SetAckedByClient( pItem );
-
-	int iMethod = GetUnacknowledgedReason( pItem->GetInventoryPosition() ) - 1;
-	if ( iMethod >= ARRAYSIZE( g_pszItemPickupMethodStringsUnloc ) || iMethod < 0 )
-		iMethod = 0;
-	EconUI()->Gamestats_ItemTransaction( IE_ITEM_RECEIVED, pItem, g_pszItemPickupMethodStringsUnloc[iMethod] );
-
-	// Then move it to the first empty backpack position
-	if ( bMoveToBackpack )
-	{
-		SetItemBackpackPosition( pItem, 0, false, true );
-	}
 }
 
 //-----------------------------------------------------------------------------
@@ -958,7 +795,11 @@ CEconItemView *CInventoryManager::GetItemByBackpackPosition( int iBackpackPositi
 		return NULL;
 
 	// Backpack positions start from 1
-	Assert( iBackpackPosition > 0 && iBackpackPosition <= pInventory->GetMaxItemCount() );
+	if ( iBackpackPosition <= 0 || iBackpackPosition >= pInventory->GetMaxItemCount() )
+	{
+		return NULL;
+	}
+
 	for ( int i = 0; i < pInventory->GetItemCount(); i++ )
 	{
 		CEconItemView *pItem = pInventory->GetItem(i);
@@ -974,7 +815,7 @@ CEconItemView *CInventoryManager::GetItemByBackpackPosition( int iBackpackPositi
 //-----------------------------------------------------------------------------
 bool CInventoryManager::HasBeenAckedByClient( CEconItemView *pItem )
 {
-	return ( GetAckKeyForItem( pItem ) != NULL );
+	return ( m_rbItemIdsClientAck.Find( pItem->GetItemID() ) != m_rbItemIdsClientAck.InvalidIndex() );
 }
 
 //-----------------------------------------------------------------------------
@@ -982,13 +823,7 @@ bool CInventoryManager::HasBeenAckedByClient( CEconItemView *pItem )
 //-----------------------------------------------------------------------------
 void CInventoryManager::SetAckedByClient( CEconItemView *pItem )
 {
-	VerifyAckFileLoaded();
-
-	static char szTmp[128];
-	Q_snprintf( szTmp, sizeof(szTmp), "%llu", pItem->GetItemID() );
-	m_pkvItemClientAckFile->SetInt( szTmp, 1 );
-
-	m_bClientAckDirty = true;
+	m_rbItemIdsClientAck.InsertIfNotFound( pItem->GetItemID() );
 }
 
 //-----------------------------------------------------------------------------
@@ -996,274 +831,307 @@ void CInventoryManager::SetAckedByClient( CEconItemView *pItem )
 //-----------------------------------------------------------------------------
 void CInventoryManager::SetAckedByGC( CEconItemView *pItem, bool bSave )
 {
-	KeyValues *pkvItem = GetAckKeyForItem( pItem );
-	if ( pkvItem )
-	{
-		m_pkvItemClientAckFile->RemoveSubKey( pkvItem );
-		pkvItem->deleteThis();
-
-		m_bClientAckDirty = true;
-
-		if ( bSave )
-		{
-			SaveAckFile();
-		}
-	}
+	m_rbItemIdsClientAck.Remove( pItem->GetItemID() );
 }
 
-//-----------------------------------------------------------------------------
-// Purpose: 
-//-----------------------------------------------------------------------------
-KeyValues *CInventoryManager::GetAckKeyForItem( CEconItemView *pItem )
+bool CInventoryManager::BGetPlayerQuestIdPointsRemaining( uint16 unQuestID, uint32 &numPointsRemaining, uint32 &numPointsUncommitted )
 {
-	VerifyAckFileLoaded();
-
-	static char szTmp[128];
-	Q_snprintf( szTmp, sizeof(szTmp), "%llu", pItem->GetItemID() );
-	return m_pkvItemClientAckFile->FindKey( szTmp );
+	/** Removed for partner depot **/
+	return true;
 }
 
-//-----------------------------------------------------------------------------
-// Purpose: 
-//-----------------------------------------------------------------------------
-void CInventoryManager::VerifyAckFileLoaded( void )
+CEconItemView* CInventoryManager::CreateReferenceEconItem( item_definition_index_t iDefIndex, int iPaintIndex, uint8 ub1 )
 {
-	if ( m_pkvItemClientAckFile )
-		return;
+	int iNewItem = m_pTempReferenceItems.AddToTail( new CEconItemView );
+	CEconItemView *pItemView = m_pTempReferenceItems[ iNewItem ];
 
-	m_pkvItemClientAckFile = new KeyValues( ITEM_CLIENTACK_FILE );
+	pItemView->Init( iDefIndex, AE_UNIQUE, AE_USE_SCRIPT_VALUE, true );
 
-	ISteamRemoteStorage *pRemoteStorage = SteamClient()?(ISteamRemoteStorage *)SteamClient()->GetISteamGenericInterface(
-		SteamAPI_GetHSteamUser(), SteamAPI_GetHSteamPipe(), STEAMREMOTESTORAGE_INTERFACE_VERSION ):NULL;
+	static CSchemaItemDefHandle hItemDefSticker( "sticker" );
+	static CSchemaItemDefHandle hItemDefSpray( "spray" );
+	static CSchemaItemDefHandle hItemDefSprayPaint( "spraypaint" );
 
-	if ( pRemoteStorage )
+	static CSchemaItemDefHandle hItemDefQuest( "quest" );
+	static CSchemaAttributeDefHandle pAttr_QuestID( "quest id" );
+
+	static CSchemaItemDefHandle hItemDefMusicKit( "musickit" );
+	static CSchemaAttributeDefHandle pAttr_MusicID( "music id" );
+
+	if ( !pItemView->IsValid() )
+		return NULL;
+
+	if ( iPaintIndex > 0 )
 	{
-		if ( pRemoteStorage->FileExists(ITEM_CLIENTACK_FILE) )
+		if ( ( hItemDefSticker && iDefIndex == hItemDefSticker->GetDefinitionIndex() )
+			|| ( hItemDefSpray && iDefIndex == hItemDefSpray->GetDefinitionIndex() )
+			|| ( hItemDefSprayPaint && iDefIndex == hItemDefSprayPaint->GetDefinitionIndex() ) )
 		{
-			int32 nFileSize = pRemoteStorage->GetFileSize( ITEM_CLIENTACK_FILE );
+			float flStickerID = *((float*)&iPaintIndex);
+			pItemView->SetOrAddAttributeValueByName( "sticker slot 0 id", flStickerID );
 
-			if ( nFileSize > 0 )
+			if ( ub1 )
 			{
-				CUtlBuffer buf( 0, nFileSize );
-				if ( pRemoteStorage->FileRead( ITEM_CLIENTACK_FILE, buf.Base(), nFileSize ) == nFileSize )
-				{
-					buf.SeekPut( CUtlBuffer::SEEK_HEAD, nFileSize );
-					m_pkvItemClientAckFile->ReadAsBinary( buf );
+				uint32 ub1_32 = ub1;
+				float flub1_fl = *( ( float* ) &ub1_32 );
+				pItemView->SetOrAddAttributeValueByName( "spray tint id", flub1_fl );
+			}
 
-#ifdef _DEBUG
-					if ( item_debug_clientacks.GetBool() )
-					{
-						m_pkvItemClientAckFile->SaveToFile( g_pFullFileSystem, "cfg/tmp_readack.txt", "MOD" );
-					}
-#endif
+			const CEconItemDefinition *pItemDef = GetItemSchema()->GetItemDefinition( iDefIndex );
+			const CStickerKit *pStickerKit = GetItemSchema()->GetStickerKitDefinition( iPaintIndex );
+
+			pItemView->SetItemRarityOverride( EconRarity_CombinedItemAndPaintRarity( pItemDef->GetRarity(), pStickerKit->nRarity ) );
+		}
+		else if ( hItemDefQuest && pAttr_QuestID && iDefIndex == hItemDefQuest->GetDefinitionIndex() )
+		{
+			int iQuestID = iPaintIndex;
+
+			if ( iQuestID )
+			{
+				uint32 numPointsRemaining = 0;
+				uint32 numPointsUncommitted = 0;
+				if ( BGetPlayerQuestIdPointsRemaining( iQuestID, numPointsRemaining, numPointsUncommitted ) && numPointsRemaining )
+				{
+					float flPointsRemaining = *( ( float* ) &numPointsRemaining );
+					pItemView->SetOrAddAttributeValueByName( "quest points remaining", flPointsRemaining );
+
+					float flPointsUncommitted = *( ( float* ) &numPointsUncommitted );
+					pItemView->SetOrAddAttributeValueByName( "operation points", flPointsUncommitted );
+				}
+
+				float flQuestID = *( ( float* )&iQuestID );
+				pItemView->SetOrAddAttributeValueByName( "quest id", flQuestID );
+
+			}
+
+
+			pItemView->SetItemRarityOverride( 1 ); // TODO: different missions rarity?
+		}
+		else if ( hItemDefMusicKit && pAttr_MusicID && iDefIndex == hItemDefMusicKit->GetDefinitionIndex() )
+		{
+			if ( iPaintIndex )
+			{
+				float flMusicID = *( ( float* )&iPaintIndex );
+				pItemView->SetOrAddAttributeValueByName( "music id", flMusicID );
+
+				if ( ub1 )
+				{	// This is how StatTrak Music Kits are made
+					Assert( ub1 == AE_STRANGE );
+					pItemView->SetItemQualityOverride( ub1 );
 				}
 			}
 		}
-	}
-}
-
-//-----------------------------------------------------------------------------
-// Purpose: Clean up any item references that we no longer have items for.
-//			This ensures that if we delete an item on the backend, we remove it from the ack file.
-//-----------------------------------------------------------------------------
-void CInventoryManager::CleanAckFile( void )
-{
-	CPlayerInventory *pInventory = InventoryManager()->GetLocalInventory();
-	if ( !pInventory )
-		return;
-
-	if ( !pInventory->RetrievedInventoryFromSteam() )
-		return;
-
-	if ( m_pkvItemClientAckFile )
-	{
-		KeyValues *pKVItem = m_pkvItemClientAckFile->GetFirstSubKey();
-		while ( pKVItem != NULL )
+		else
 		{
-			itemid_t ulID = (itemid_t)Q_atoi64( pKVItem->GetName() );
-			if ( pInventory->GetInventoryItemByItemID(ulID) == NULL )
+			pItemView->SetOrAddAttributeValueByName( "set item texture prefab", iPaintIndex );
+
+			const CEconItemDefinition *pItemDef = GetItemSchema()->GetItemDefinition( iDefIndex );
+
+			AssertMsg1( pItemDef, "Failed to get item definition for index: %i\n", iDefIndex );
+			if ( !pItemDef )
+				return NULL;
+
+			const CPaintKit *pPaintKit = GetItemSchema()->GetPaintKitDefinition( iPaintIndex );
+
+			AssertMsg1( pPaintKit, "Failed to get paintkit definition for index: %i\n", iPaintIndex );
+			if ( !pPaintKit )
+				return NULL;
+
+			pItemView->SetItemRarityOverride( EconRarity_CombinedItemAndPaintRarity( pItemDef->GetRarity(), pPaintKit->nRarity ) );
+		}
+
+#ifdef CLIENT_DLL
+		InsertMaterialGenerationJob( pItemView );
+#endif // #ifdef CLIENT_DLL
+	}
+	else
+	{
+		if ( pItemView->GetItemDefinition() && !pItemView->GetItemDefinition()->IsBaseItem() )
+		{
+			pItemView->SetItemRarityOverride( pItemView->GetItemDefinition()->GetRarity() );
+
+			// Genuine collectibles will force the item quality
+			uint8 unDefinitionQuality = pItemView->GetItemDefinition()->GetQuality();
+			if ( unDefinitionQuality == AE_GENUINE )
 			{
-				KeyValues *pTmp = pKVItem->GetNextKey();
-				m_pkvItemClientAckFile->RemoveSubKey( pKVItem );
-				pKVItem->deleteThis();
-
-				m_bClientAckDirty = true;
-
-				pKVItem = pTmp;
+				pItemView->SetItemQualityOverride( unDefinitionQuality );
 			}
-			else
+		}
+		else
+		{
+			pItemView->SetItemRarityOverride( 0 /* default aka stock */ );
+		}
+	}
+
+	return pItemView;
+}
+
+void CInventoryManager::RemoveReferenceEconItem( item_definition_index_t iDefIndex, int iPaintIndex, uint8 ub1 )
+{
+	static CSchemaItemDefHandle hItemDefSticker( "sticker" );
+	static CSchemaItemDefHandle hItemDefSpray( "spray" );
+	static CSchemaItemDefHandle hItemDefSprayPaint( "spraypaint" );
+	static CSchemaAttributeDefHandle pAttr_SprayTintID( "spray tint id" );
+
+	static CSchemaItemDefHandle hItemDefQuest( "quest" );
+	static CSchemaAttributeDefHandle pAttr_QuestID( "quest id" );
+
+	static CSchemaItemDefHandle hItemDefMusicKit( "musickit" );
+	static CSchemaAttributeDefHandle pAttr_MusicID( "music id" );
+
+	static CSchemaItemDefHandle hItemDefWearable( "wearable" );
+
+	FOR_EACH_VEC( m_pTempReferenceItems, i )
+	{
+		CEconItemView *pItem = m_pTempReferenceItems[ i ];
+
+		if ( pItem->GetItemIndex() == iDefIndex )
+		{
+			if ( ( hItemDefSticker && iDefIndex == hItemDefSticker->GetDefinitionIndex() )
+				|| ( hItemDefSpray && iDefIndex == hItemDefSpray->GetDefinitionIndex() )
+				|| ( hItemDefSprayPaint && iDefIndex == hItemDefSprayPaint->GetDefinitionIndex() ) )
 			{
-				pKVItem = pKVItem->GetNextKey();
-			}
-		}
-	}
-}
-
-//-----------------------------------------------------------------------------
-// Purpose: 
-//-----------------------------------------------------------------------------
-void CInventoryManager::SaveAckFile( void )
-{
-	if ( !m_bClientAckDirty )
-		return;
-	m_bClientAckDirty = false;
-
-	ISteamRemoteStorage *pRemoteStorage = SteamClient()?(ISteamRemoteStorage *)SteamClient()->GetISteamGenericInterface(
-		SteamAPI_GetHSteamUser(), SteamAPI_GetHSteamPipe(), STEAMREMOTESTORAGE_INTERFACE_VERSION ):NULL;
-
-	if ( pRemoteStorage )
-	{
-		CUtlBuffer buf;
-		m_pkvItemClientAckFile->WriteAsBinary( buf );
-		pRemoteStorage->FileWrite( ITEM_CLIENTACK_FILE, buf.Base(), buf.TellPut() );
-
-#ifdef _DEBUG
-		if ( item_debug_clientacks.GetBool() )
-		{
-			m_pkvItemClientAckFile->SaveToFile( g_pFullFileSystem, "cfg/tmp_saveack.txt", "MOD" );
-		}
-#endif
-	}
-}
-
-//-----------------------------------------------------------------------------
-// Purpose: GC sent name of account down
-//-----------------------------------------------------------------------------
-class CGCLookupAccountNameResponse : public GCSDK::CGCClientJob
-{
-public:
-	CGCLookupAccountNameResponse( GCSDK::CGCClient *pClient ) : GCSDK::CGCClientJob( pClient ) {}
-	virtual bool BYieldingRunGCJob( GCSDK::IMsgNetPacket *pNetPacket )
-	{
-		GCSDK::CGCMsg<MsgGCLookupAccountNameResponse_t> msg( pNetPacket );
-
-		CUtlString playerName;
-		if ( msg.BReadStr( &playerName ) )
-		{
-			InventoryManager()->PersonaName_Store( msg.Body().m_unAccountID, playerName.Get() );
-		}
-		return true;
-	}
-};
-GC_REG_JOB( GCSDK::CGCClient, CGCLookupAccountNameResponse, "CGCLookupAccountNameResponse", k_EMsgGCLookupAccountNameResponse, GCSDK::k_EServerTypeGCClient );
-
-class CGCLookupMultipleAccountsNameResponse : public GCSDK::CGCClientJob
-{
-public:
-	CGCLookupMultipleAccountsNameResponse( GCSDK::CGCClient *pClient ) : GCSDK::CGCClientJob( pClient ) {}
-	virtual bool BYieldingRunGCJob( GCSDK::IMsgNetPacket *pNetPacket )
-	{
-		CProtoBufMsg<CMsgLookupMultipleAccountNamesResponse> msg( pNetPacket );
-		for ( int i = 0 ; i < msg.Body().accounts_size() ; ++i )
-		{
-			const CMsgLookupMultipleAccountNamesResponse_Account &account = msg.Body().accounts( i );
-			InventoryManager()->PersonaName_Store( account.accountid(), account.persona().c_str() );
-		}
-
-		return true;
-	}
-};
-GC_REG_JOB( GCSDK::CGCClient, CGCLookupMultipleAccountsNameResponse, "CGCLookupMultipleAccountsNameResponse", k_EMsgGCLookupMultipleAccountNamesResponse, GCSDK::k_EServerTypeGCClient );
-
-void CInventoryManager::PersonaName_Precache( uint32 unAccountID )
-{
-	const char *pszName = PersonaName_Get( unAccountID );
-	if ( pszName == NULL )
-	{
-		// Queue request name from GC
-		m_msgPendingLookupAccountNames.add_accountids( unAccountID );
-
-		// insert empty string so we don't ask again
-		m_mapPersonaNamesCache.Insert( unAccountID, "" );
-	}
-}
-
-const char *CInventoryManager::PersonaName_Get( uint32 unAccountID )
-{
-	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
-
-	// First ask Steam if this is one of friends -- if so we can get an up-to-date persona name.
-	{
-		const char *pszName = NULL;
-
-		if ( steamapicontext && steamapicontext->SteamUser() && steamapicontext->SteamFriends() )
-		{
-			CSteamID steamID = steamapicontext->SteamUser()->GetSteamID();
-			steamID.SetAccountID( unAccountID );
-			uint64 u64AccountId = steamID.ConvertToUint64();
-
-			// We're covering three states here:
-			// 1. We've never asked before. We need to queue up a RequestUserInformation.
-			// 2. We've asked before, and we haven't heard back yet
-			// 3. We've asked before, we heard back. Don't re-request user information.
-			auto index = m_personaNameRequests.Find( u64AccountId );
-			if ( !m_personaNameRequests.IsValidIndex( index ) )
-			{
-				// This is case 1--we've never asked before.
-
-				// If RequestUserInformation returns false, the information is already available.
-				// Otherwise, it will arrive later and we need to rebuild the description at that time.
-				if ( !steamapicontext->SteamFriends()->RequestUserInformation( steamID, true ) )
+				uint32 unTintID = 0;
+				if ( ( pItem->GetStickerAttributeBySlotIndexInt( 0, k_EStickerAttribute_ID, 0 ) == uint32( iPaintIndex ) ) &&
+					pAttr_SprayTintID && ( pItem->FindAttribute( pAttr_SprayTintID, &unTintID ), ( unTintID == ub1 ) )
+					)
 				{
-					pszName = steamapicontext->SteamFriends()->GetFriendPersonaName( steamID );
-					Assert( pszName ); // Guaranteed by the steam api
-
-					if ( Q_strncmp( pszName, "[unknown]", ARRAYSIZE( "[unknown]" ) ) != 0 )
-					{
-						m_mapPersonaNamesCache.InsertOrReplace( unAccountID, pszName );
-						return pszName;
-					}
-				}
-				else
-				{
-					// This is case 2, we've asked above. 
-					m_personaNameRequests.Insert( u64AccountId, false );
+					m_pTempReferenceItems.Remove( i );
+					return;
 				}
 			}
-			else
+			else if ( hItemDefQuest && pAttr_QuestID && iDefIndex == hItemDefQuest->GetDefinitionIndex() )
 			{
-				if ( m_personaNameRequests[ index ] )
+				uint32 unQuestID = 0;
+				if ( pItem->FindAttribute( pAttr_QuestID, &unQuestID ) && ( unQuestID == uint32( iPaintIndex ) ) )
 				{
-					// This is case 3.
-					pszName = steamapicontext->SteamFriends()->GetFriendPersonaName( steamID );
-					Assert( pszName ); // Guaranteed by the steam api
-
-					if ( Q_strncmp( pszName, "[unknown]", ARRAYSIZE( "[unknown]" ) ) != 0 )
+					m_pTempReferenceItems.Remove( i );
+					return;
+				}
+			}
+			else if ( hItemDefMusicKit && pAttr_MusicID && iDefIndex == hItemDefMusicKit->GetDefinitionIndex() )
+			{
+				uint32 unMusicID = 0;
+				if ( pItem->FindAttribute( pAttr_MusicID, &unMusicID ) && ( unMusicID == uint32( iPaintIndex ) ) )
+				{	// Music Kits can be regular or StatTrak
+					int iQualityNeeded = ub1 ? ub1 : AE_UNIQUE;
+					if ( iQualityNeeded == pItem->GetQuality() )
 					{
-						m_mapPersonaNamesCache.InsertOrReplace( unAccountID, pszName );
-						return pszName;
+						m_pTempReferenceItems.Remove( i );
+						return;
 					}
 				}
 			}
+			else // code is currently valid for both wearables and weapons with paint kits
+			{
+				if ( pItem->GetCustomPaintKitIndex() == iPaintIndex )
+				{
+					m_pTempReferenceItems.Remove( i );
+					return;
+				}
+			}
 		}
 	}
-
-	// If that didn't work, ask the server we're playing on if they know this account ID.
-	CBasePlayer *pPlayer = GetPlayerByAccountID( unAccountID );
-	if ( pPlayer )
-	{
-		const char *pszPlayerName = pPlayer->GetPlayerName();
-		if ( pszPlayerName )
-		{
-			m_mapPersonaNamesCache.InsertOrReplace( unAccountID, pszPlayerName );
-			return pszPlayerName;
-		}
-	}
-
-	// If *that* didn't work, look in our cache populated by the GC (or the above paths). This
-	// might be out of date but it's better than nothing.
-	int idx = m_mapPersonaNamesCache.Find( unAccountID );
-	if ( m_mapPersonaNamesCache.IsValidIndex( idx ) )
-	{
-		return m_mapPersonaNamesCache[idx].Get();
-	}
-
-	return "[unknown]";
 }
 
-void CInventoryManager::PersonaName_Store( uint32 unAccountID, const char *pPersonaName )
+CEconItemView* CInventoryManager::FindReferenceEconItem( item_definition_index_t iDefIndex, int iPaintIndex, uint8 ub1 )
 {
-	m_mapPersonaNamesCache.InsertOrReplace( unAccountID, pPersonaName );
+	static CSchemaItemDefHandle hItemDefSticker( "sticker" );
+	static CSchemaItemDefHandle hItemDefSpray( "spray" );
+	static CSchemaItemDefHandle hItemDefSprayPaint( "spraypaint" );
+	static CSchemaAttributeDefHandle pAttr_SprayTintID( "spray tint id" );
+
+	static CSchemaItemDefHandle hItemDefQuest( "quest" );
+	static CSchemaAttributeDefHandle pAttr_QuestID( "quest id" );
+
+	static CSchemaItemDefHandle hItemDefMusicKit( "musickit" );
+	static CSchemaAttributeDefHandle pAttr_MusicID( "music id" );
+
+	FOR_EACH_VEC( m_pTempReferenceItems, i )
+	{
+		CEconItemView *pItem = m_pTempReferenceItems[ i ];
+
+		if ( pItem->GetItemIndex() == iDefIndex )
+		{
+			if ( ( hItemDefSticker && iDefIndex == hItemDefSticker->GetDefinitionIndex() )
+				|| ( hItemDefSpray && iDefIndex == hItemDefSpray->GetDefinitionIndex() )
+				|| ( hItemDefSprayPaint && iDefIndex == hItemDefSprayPaint->GetDefinitionIndex() ) )
+			{
+				uint32 unTintID = 0;
+				if ( ( pItem->GetStickerAttributeBySlotIndexInt( 0, k_EStickerAttribute_ID, 0 ) == uint32( iPaintIndex ) ) &&
+					pAttr_SprayTintID && ( pItem->FindAttribute( pAttr_SprayTintID, &unTintID ), ( unTintID == ub1 ) )
+					)
+				{
+					return pItem;
+				}
+			}
+			else if ( hItemDefQuest && pAttr_QuestID && iDefIndex == hItemDefQuest->GetDefinitionIndex() )
+			{
+				uint32 unQuestID = 0;
+				if ( pItem->FindAttribute( pAttr_QuestID, &unQuestID ) && ( unQuestID == uint32( iPaintIndex ) ) )
+				{
+					// Ensure that the points remaining attribute is correct, just always stomp it
+					uint32 numPointsRemaining = 0;
+					uint32 numPointsUncommitted = 0;
+					if ( BGetPlayerQuestIdPointsRemaining( unQuestID, numPointsRemaining, numPointsUncommitted ) && numPointsRemaining )
+					{
+						float flPointsRemaining = *( ( float* ) &numPointsRemaining );
+						pItem->SetOrAddAttributeValueByName( "quest points remaining", flPointsRemaining );
+
+						float flPointsUncommitted = *( ( float* ) &numPointsUncommitted );
+						pItem->SetOrAddAttributeValueByName( "operation points", flPointsUncommitted );
+					}
+					return pItem;
+				}
+			}
+			else if ( hItemDefMusicKit && pAttr_MusicID && iDefIndex == hItemDefMusicKit->GetDefinitionIndex() )
+			{
+				uint32 unMusicID = 0;
+				if ( pItem->FindAttribute( pAttr_MusicID, &unMusicID ) && ( unMusicID == uint32( iPaintIndex ) ) )
+				{	// Music Kits can be regular or StatTrak
+					int iQualityNeeded = ub1 ? ub1 : AE_UNIQUE;
+					if ( iQualityNeeded == pItem->GetQuality() )
+						return pItem;
+				}
+			}
+			else   // code is currently valid for both wearables and weapons with paint kits
+			{
+				if ( pItem->GetCustomPaintKitIndex() == iPaintIndex )
+				{
+					return pItem;
+				}
+			}
+		}
+	}
+
+	return NULL;
+}
+
+CEconItemView* CInventoryManager::FindOrCreateReferenceEconItem( item_definition_index_t iDefIndex, int iPaintIndex, uint8 ub1 )
+{
+	CEconItemView *pItem = FindReferenceEconItem( iDefIndex, iPaintIndex, ub1 );
+
+	if ( !pItem )
+	{
+		pItem = CreateReferenceEconItem( iDefIndex, iPaintIndex, ub1 );
+	}
+
+	return pItem;
+}
+
+
+CEconItemView* CInventoryManager::FindOrCreateReferenceEconItem( itemid_t ullFauxItemId )
+{
+	if ( !CombinedItemIdIsDefIndexAndPaint( ullFauxItemId) )
+	{
+		Assert(0);
+		return NULL;
+	}
+
+	item_definition_index_t nDefIndex = CombinedItemIdGetDefIndex( ullFauxItemId );
+	uint16 nPaintIndex = CombinedItemIdGetPaint( ullFauxItemId );
+	uint8 ub1 = CombinedItemIdGetUB1( ullFauxItemId );
+
+	return FindOrCreateReferenceEconItem( nDefIndex, nPaintIndex, ub1 );
 }
 
 #endif // CLIENT_DLL
@@ -1277,10 +1145,11 @@ void CInventoryManager::PersonaName_Store( uint32 unAccountID, const char *pPers
 //-----------------------------------------------------------------------------
 CPlayerInventory::CPlayerInventory( void )
 {
-	m_bGotItemsFromSteam = false;
-	m_iPendingRequests = 0;
-	m_aInventoryItems.Purge();
+	m_bGotItemsFromSteamAtLeastOnce = false;
+	m_bCurrentlySubscribedToSteam = false;
+	
 	m_pSOCache = NULL;
+	m_nTargetRecipe = -1;
 }
 
 //-----------------------------------------------------------------------------
@@ -1288,18 +1157,10 @@ CPlayerInventory::CPlayerInventory( void )
 //-----------------------------------------------------------------------------
 CPlayerInventory::~CPlayerInventory()
 {
-	FOR_EACH_VEC( m_vecItemHandles, i )
-	{
-		m_vecItemHandles[ i ]->InventoryIsBeingDeleted();
-	}
-	m_vecItemHandles.Purge();
+}
 
-	if ( m_iPendingRequests )
-	{
-		InventoryManager()->RemovePendingRequest( &m_OwnerID );
-		m_iPendingRequests = 0;
-	}
-
+void CPlayerInventory::Shutdown()
+{
 	SOClear();
 
 	InventoryManager()->DeregisterInventory( this );
@@ -1311,18 +1172,6 @@ CPlayerInventory::~CPlayerInventory()
 //-----------------------------------------------------------------------------
 void CPlayerInventory::SOClear()
 {
-	if ( m_OwnerID.IsValid() )
-	{
-		CGCClientSystem *pClientSystem = GCClientSystem();
-		Assert ( pClientSystem != NULL );
-		if ( pClientSystem != NULL )
-		{
-			CGCClient *pClient = pClientSystem->GetGCClient();
-			Assert ( pClient != NULL );
-			pClient->RemoveSOCacheListener( m_OwnerID, this );
-		}
-	}
-
 	// Somebody registered as a listener through us, but now our Steam ID
 	// is changing?  This is bad news.
 	Assert( m_vecListeners.Count() == 0 );
@@ -1333,85 +1182,38 @@ void CPlayerInventory::SOClear()
 
 	// If we were subscribed, we should have gotten our unsubscribe message,
 	// and that should have cleared the pointer
-	Assert( m_pSOCache == NULL);
+	// [ when we unsubscribe we no longer remove all references, so the assert is no longer valid ]
+	// Assert( m_pSOCache == NULL);
 	m_pSOCache = NULL;
+	m_Items.Purge();
+	m_aDefaultEquippedDefinitionItems.PurgeAndDeleteElements();
 }
+
 
 //-----------------------------------------------------------------------------
 // Purpose: 
 //-----------------------------------------------------------------------------
-void CPlayerInventory::AddItemHandle( CEconItemViewHandle* pHandle )
-{
-	FOR_EACH_VEC( m_vecItemHandles, i )
-	{
-		if ( m_vecItemHandles[ i ] == pHandle )
-		{
-			Assert( !"Item handle already in list to track!" );
-			return;
-		}
-	}
-
-	m_vecItemHandles.AddToTail( pHandle );
-}
-
-//-----------------------------------------------------------------------------
-// Purpose: 
-//-----------------------------------------------------------------------------
-void CPlayerInventory::RemoveItemHandle( CEconItemViewHandle* pHandle )
-{
-	FOR_EACH_VEC( m_vecItemHandles, i )
-	{
-		if ( m_vecItemHandles[ i ] == pHandle )
-		{
-			m_vecItemHandles.Remove( i );
-			return;
-		}
-	}
-
-	Assert( !"Could not find item handle to remove!" );
-}
-
-
-void	CPlayerInventory::Clear()
-{
-	SOClear();
-	m_OwnerID = CSteamID();
-}
-
-//-----------------------------------------------------------------------------
-// Purpose: 
-//-----------------------------------------------------------------------------
-void CPlayerInventory::RequestInventory( CSteamID pSteamID )
+void CPlayerInventory::RequestInventory( SOID_t ID )
 {
 	// Make sure we don't already have somebody else's stuff
 	// on hand
-	if ( m_OwnerID != pSteamID )
+	if ( m_OwnerID != ID )
 		SOClear();
 
 	// Remember whose inventory we're looking at
-	m_OwnerID = pSteamID; 
-
-	// SteamID must be valid
-	if ( !m_OwnerID.IsValid() || !m_OwnerID.BIndividualAccount() )
-	{
-		Assert( m_OwnerID.IsValid() );
-		Assert( m_OwnerID.BIndividualAccount() );
-		return;
-	}
-
-	// If we don't already have an SO cache, then ask the GC for one,
-	// and start listening to it.  We will receive our "subscribed" message
-	// when the data is valid
-	GCClientSystem()->GetGCClient()->AddSOCacheListener( m_OwnerID, this );
+	m_OwnerID = ID; 
 }
 
 void CPlayerInventory::AddListener( GCSDK::ISharedObjectListener *pListener )
 {
 	Assert( m_OwnerID.IsValid() );
-	if ( m_vecListeners.Find( pListener ) < 0 )
+	if ( m_vecListeners.Find( pListener ) >= 0 )
+	{
+		Assert( !"CPlayerInventory::AddListener - added multiple times" );
+	}
+	else
 	{
 		m_vecListeners.AddToTail( pListener );
-		GCClientSystem()->GetGCClient()->AddSOCacheListener( m_OwnerID, pListener );
 	}
 }
 
@@ -1421,7 +1223,6 @@ void CPlayerInventory::RemoveListener( GCSDK::ISharedObjectListener *pListener )
 	if ( m_OwnerID.IsValid() )
 	{
 		m_vecListeners.FindAndFastRemove( pListener );
-		GCClientSystem()->GetGCClient()->RemoveSOCacheListener( m_OwnerID, pListener );
 	}
 	else
 	{
@@ -1435,17 +1236,38 @@ void CPlayerInventory::RemoveListener( GCSDK::ISharedObjectListener *pListener )
 //-----------------------------------------------------------------------------
 bool CPlayerInventory::AddEconItem( CEconItem * pItem, bool bUpdateAckFile, bool bWriteAckFile, bool bCheckForNewItems )
 {
-	CEconItemView newItem;
-	if( !FilloutItemFromEconItem( &newItem, pItem ) )
+	CEconItemView *pNewItem = new CEconItemView;
+	if( !FilloutItemFromEconItem( pNewItem, pItem ) )
 	{
 		return false;
 	}
 
-	int iIdx = m_aInventoryItems.Insert( newItem );
+#ifndef CLIENT_DLL
+	CEconItemView::s_mapLookupByID.InsertOrReplace( pItem->GetItemID(),
+			CombinedItemIdMakeFromDefIndexAndPaint(
+				pItem->GetDefinitionIndex(), pItem->GetCustomPaintKitIndex() )
+		);
+	// Also insert the fact that this account owns an item of this defindex
+	CEconItemView::s_mapLookupByID.InsertOrReplace(
+			(1ull << 63)
+			| ( uint64( GetSteamIDFromSOID( GetOwner() ).GetAccountID() & 0x7FFFFFFF ) << 32 )
+			| pItem->GetDefinitionIndex(),
+			0ull
+		);
+#endif
 
-	DirtyItemHandles();
+	m_Items.Add( pNewItem );
+	ItemHasBeenUpdated( pNewItem, bUpdateAckFile, bWriteAckFile, k_EInventoryItemCreated );
 
-	ItemHasBeenUpdated( &m_aInventoryItems[iIdx], bUpdateAckFile, bWriteAckFile );
+	int nItemSet = pItem->GetItemSetIndex();
+	if ( nItemSet )
+	{
+		const CEconItemSetDefinition *pItemSetDef = GetItemSchema()->GetItemSetByIndex( nItemSet );
+		if ( pItemSetDef && pItemSetDef->m_bIsCollection )
+		{
+			MarkSetItemDescriptionsDirty( nItemSet );
+		}
+	}
 
 #ifdef CLIENT_DLL
 	if ( bCheckForNewItems && InventoryManager()->GetLocalInventory() == this )
@@ -1455,25 +1277,12 @@ bool CPlayerInventory::AddEconItem( CEconItem * pItem, bool bUpdateAckFile, bool
 		bNotify &= pItem->GetOrigin() != kEconItemOrigin_HalloweenDrop;
 		// only notify for specific reasons
 		unacknowledged_item_inventory_positions_t reason = GetUnacknowledgedReason( pItem->GetInventoryToken() );
-		switch ( reason )
-		{
-			case UNACK_ITEM_UNKNOWN:
-			case UNACK_ITEM_DROPPED:
-			case UNACK_ITEM_SUPPORT:
-			case UNACK_ITEM_EARNED:
-			case UNACK_ITEM_REFUNDED:
-			case UNACK_ITEM_COLLECTION_REWARD:
-			case UNACK_ITEM_TRADED:
-			case UNACK_ITEM_GIFTED:
-			case UNACK_ITEM_QUEST_LOANER:
-			case UNACK_ITEM_VIRAL_COMPETITIVE_BETA_PASS_SPREAD:
-				break;
-			default:
-				bNotify = false;
-				break;
-		}
-
-		if ( bNotify && !pItem->GetItemDefinition()->IsHidden() )
+		bNotify &= 
+			reason == UNACK_ITEM_DROPPED || reason == UNACK_ITEM_SUPPORT || 
+			reason == UNACK_ITEM_EARNED || reason == UNACK_ITEM_REFUNDED || 
+			reason == UNACK_ITEM_COLLECTION_REWARD || reason == UNACK_ITEM_TRADED ||
+			reason == UNACK_ITEM_RECYCLING || reason == UNACK_ITEM_PURCHASED;
+		if ( bNotify )
 		{
 			OnHasNewItems();
 		}		
@@ -1482,18 +1291,27 @@ bool CPlayerInventory::AddEconItem( CEconItem * pItem, bool bUpdateAckFile, bool
 	return true;
 }
 
+bool CPlayerInventory::AddEconDefaultEquippedDefinition( CEconDefaultEquippedDefinitionInstanceClient *pDefaultEquippedDefinition )
+{
+	int nItemDef = pDefaultEquippedDefinition->Obj().item_definition();
+	int nClassID = pDefaultEquippedDefinition->Obj().class_id();
+	int nSlotID = pDefaultEquippedDefinition->Obj().slot_id();
+
+	SetDefaultEquippedDefinitionItemBySlot( nClassID, nSlotID, nItemDef );
+
+	return true;
+}
 
 //-----------------------------------------------------------------------------
 // Purpose: Creates a script item and associates it with this econ item
 //-----------------------------------------------------------------------------
-void CPlayerInventory::SOCreated( const CSteamID & steamIDOwner, const GCSDK::CSharedObject *pObject, GCSDK::ESOCacheEvent eEvent )
+void CPlayerInventory::SOCreated( SOID_t owner, const GCSDK::CSharedObject *pObject, GCSDK::ESOCacheEvent eEvent )
 {
-	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
+#ifdef _DEBUG
+	Msg("CPlayerInventory::SOCreated %s [event = %u]\n", CSteamID( owner.ID() ).Render(), eEvent );
+#endif
 
-	if( pObject->GetTypeID() != CEconItem::k_nTypeID )
-		return;
-	Assert( steamIDOwner == m_OwnerID );
-	if ( steamIDOwner != m_OwnerID )
+	if ( owner != m_OwnerID )
 		return;
 
 	// We shouldn't get these notifications unless we're subscribed, right?
@@ -1511,8 +1329,22 @@ void CPlayerInventory::SOCreated( const CSteamID & steamIDOwner, const GCSDK::CS
 		return;
 	}
 
-	CEconItem *pItem = (CEconItem *)pObject;
-	AddEconItem( pItem, true, true, true );
+	if ( pObject->GetTypeID() == CEconItem::k_nTypeID )
+	{
+		CEconItem *pItem = (CEconItem *)pObject;
+		AddEconItem( pItem, true, true, true );
+		
+	}
+	else if ( pObject->GetTypeID() == CEconDefaultEquippedDefinitionInstanceClient::k_nTypeID )
+	{
+		CEconDefaultEquippedDefinitionInstanceClient *pDefaultEquippedDefinitionInstance = (CEconDefaultEquippedDefinitionInstanceClient *)pObject;
+		AddEconDefaultEquippedDefinition( pDefaultEquippedDefinitionInstance );
+	}
+	else
+	{
+		return;
+	}
+
 	SendInventoryUpdateEvent();
 }
 
@@ -1520,12 +1352,30 @@ void CPlayerInventory::SOCreated( const CSteamID & steamIDOwner, const GCSDK::CS
 //-----------------------------------------------------------------------------
 // Purpose: Updates the script item associated with this econ item
 //-----------------------------------------------------------------------------
-void CPlayerInventory::SOUpdated( const CSteamID & steamIDOwner, const GCSDK::CSharedObject *pObject, GCSDK::ESOCacheEvent eEvent )
+void CPlayerInventory::SOUpdated( SOID_t owner, const GCSDK::CSharedObject *pObject, GCSDK::ESOCacheEvent eEvent )
 {
-	if( pObject->GetTypeID() != CEconItem::k_nTypeID )
-		return;
-	Assert( steamIDOwner == m_OwnerID );
-	if ( steamIDOwner != m_OwnerID )
+#ifdef _DEBUG
+	{
+		CSteamID steamIDOwner( owner.ID() );
+
+		static CSteamID spewSteamID;
+		static GCSDK::ESOCacheEvent spewEvent;
+		static double spewTime = 0;
+		if ( spewSteamID.IsValid() && spewSteamID == steamIDOwner && spewEvent == eEvent && Plat_FloatTime() - spewTime < 3.0f )
+		{
+			; // same event
+		}
+		else
+		{
+			spewSteamID = steamIDOwner;
+			spewEvent = eEvent;
+			spewTime = Plat_FloatTime();
+			Msg("CPlayerInventory::SOUpdated %s [event = %u]\n", steamIDOwner.Render(), eEvent );
+		}
+	}
+#endif
+
+	if ( owner != m_OwnerID )
 		return;
 
 	// We shouldn't get these notifications unless we're subscribed, right?
@@ -1543,32 +1393,68 @@ void CPlayerInventory::SOUpdated( const CSteamID & steamIDOwner, const GCSDK::CS
 		return;
 	}
 
-	CEconItem *pEconItem = (CEconItem *)pObject;
 
 	bool bChanged = false;
-	CEconItemView *pScriptItem = GetInventoryItemByItemID( pEconItem->GetItemID() );
-	if ( pScriptItem )
-	{
-		if ( FilloutItemFromEconItem( pScriptItem, pEconItem ) )
-		{
-			ItemHasBeenUpdated( pScriptItem, false, false );
-		}
 
-		bChanged = true;
-	}
-	else
+	switch ( pObject->GetTypeID() )
 	{
-		// The item isn't in this inventory right now. But it may need to be 
-		// after the update, so try adding it and see if the inventory wants it.
-		bChanged = AddEconItem( pEconItem, false, false, false );
+	case CEconItem::k_nTypeID:
+	{
+		CEconItem *pEconItem = (CEconItem *)pObject;
+
+		CEconItemView *pScriptItem = GetInventoryItemByItemID( pEconItem->GetItemID() );
+		if ( pScriptItem )
+		{
+			if ( FilloutItemFromEconItem( pScriptItem, pEconItem ) )
+			{
+				ItemHasBeenUpdated( pScriptItem, false, false, k_EInventoryItemUpdated );
+			}
+
+			bChanged = true;
+		}
+		else
+		{
+			// The item isn't in this inventory right now. But it may need to be 
+			// after the update, so try adding it and see if the inventory wants it.
+			bChanged = AddEconItem( pEconItem, false, false, false );
+		}
+	}
+	break;
+	case CEconDefaultEquippedDefinitionInstanceClient::k_nTypeID:
+	{
+		CEconDefaultEquippedDefinitionInstanceClient *pDefaultEquippedDefinitionInstance = (CEconDefaultEquippedDefinitionInstanceClient *)pObject;
+		SetDefaultEquippedDefinitionItemBySlot( pDefaultEquippedDefinitionInstance->Obj().class_id(), 
+												pDefaultEquippedDefinitionInstance->Obj().slot_id(), 
+												pDefaultEquippedDefinitionInstance->Obj().item_definition() );
+
+		DefaultEquippedDefinitionHasBeenUpdated( pDefaultEquippedDefinitionInstance );
+
+#ifdef CLIENT_DLL
+		if ( econ_debug_loadout_ui.GetBool() )
+		{
+			const CEconItemDefinition *pDef = GetItemSchema()->GetItemDefinition( pDefaultEquippedDefinitionInstance->Obj().item_definition() );
+			if ( pDef )
+			{
+				ConColorMsg( Color( 205, 0, 205, 255 ), "LOADOUT GC UPDATE BaseItem \"%s\" to slot: %i\n", pDef->GetDefinitionName(), pDefaultEquippedDefinitionInstance->Obj().slot_id() );
+			}
+		}
+#endif
+#ifdef GAME_DLL
+		bChanged = true;
+#endif
+	}
+	break;
+	case CEconPersonaDataPublic::k_nTypeID:
+	{
+#ifdef GAME_DLL
+		bChanged = true;
+#endif
+	}
+	break;
 	}
 
 	if ( bChanged )
 	{
-		ResortInventory();
-
-		DirtyItemHandles();
-
 #ifdef CLIENT_DLL
 		// Client doesn't update inventory while items are moving in a backpack sort. Does it once at the sort end instead.
 		if ( !InventoryManager()->IsInBackpackSort() )
@@ -1589,12 +1475,15 @@ void CPlayerInventory::SOUpdated( const CSteamID & steamIDOwner, const GCSDK::CS
 //-----------------------------------------------------------------------------
 // Purpose: Removes the script item associated with this econ item
 //-----------------------------------------------------------------------------
-void CPlayerInventory::SODestroyed( const CSteamID & steamIDOwner, const GCSDK::CSharedObject *pObject, GCSDK::ESOCacheEvent eEvent )
+void CPlayerInventory::SODestroyed( SOID_t owner, const GCSDK::CSharedObject *pObject, GCSDK::ESOCacheEvent eEvent )
 {
+#ifdef _DEBUG
+	Msg("CPlayerInventory::SODestroyed %s [event = %u]\n", CSteamID( owner.ID() ).Render(), eEvent );
+#endif
+
 	if( pObject->GetTypeID() != CEconItem::k_nTypeID )
 		return;
-	Assert( steamIDOwner == m_OwnerID );
-	if ( steamIDOwner != m_OwnerID )
+	if ( owner != m_OwnerID )
 		return;
 
 	// We shouldn't get these notifications unless we're subscribed, right?
@@ -1627,70 +1516,23 @@ void CPlayerInventory::SODestroyed( const CSteamID & steamIDOwner, const GCSDK::
 // Purpose: This is our initial notification that this cache has been received
 //			from the server.
 //-----------------------------------------------------------------------------
-void CPlayerInventory::SOCacheSubscribed( const CSteamID & steamIDOwner, GCSDK::ESOCacheEvent eEvent )
+void CPlayerInventory::SOCacheSubscribed( SOID_t owner, GCSDK::ESOCacheEvent eEvent )
 {
-	// Make sure we expect notifications about this guy
-	Assert( steamIDOwner == m_OwnerID );
-	if ( steamIDOwner != m_OwnerID )
-		return;
-
-	#ifdef _DEBUG
-		Msg("CPlayerInventory::SOCacheSubscribed\n");
-	#endif
-
-	// Clear our old inventory
-	m_aInventoryItems.Purge();
-
-	DirtyItemHandles();
-
-	// Locate the cache that was just subscribed to
-	m_pSOCache = GCClientSystem()->GetSOCache( m_OwnerID );
-	if ( m_pSOCache == NULL )
-	{
-		Assert( m_pSOCache != NULL );
-		return;
-	}
-
-	// add all the items already in the inventory
-	CSharedObjectTypeCache *pTypeCache = m_pSOCache->FindTypeCache( CEconItem::k_nTypeID );
-	if( pTypeCache )
-	{
-		for( uint32 unItem = 0; unItem < pTypeCache->GetCount(); unItem++ )
-		{
-			CEconItem *pItem = (CEconItem *)pTypeCache->GetObject( unItem );
-			AddEconItem(pItem, true, false, true );
-		}
-	}
-
-	m_bGotItemsFromSteam = true;
-
-#ifdef CLIENT_DLL
-	if ( InventoryManager()->GetLocalInventory() == this )
-	{
-		// Only validate the local player inventory
-		ValidateInventoryPositions();
-
-		// tell the entire client that we're 'connected' to the GC now
-		CInventoryManager::SendGCConnectedEvent();
-	}
-#endif
-
-	ResortInventory();
-
-#ifdef CLIENT_DLL
-	// Now that we've read all the items in, write out the ack file (only if we're the local inventory)
-	if ( InventoryManager()->GetLocalInventory() == this )
-	{
-		InventoryManager()->CleanAckFile();
-		InventoryManager()->SaveAckFile();
-	}
-#endif
+	/** Removed for partner depot **/
+	return;
 }
 
 bool CInventoryManager::IsValidPlayerClass( equipped_class_t unClass )
 {
 	const bool bResult = ItemSystem()->GetItemSchema()->IsValidClass( unClass );
 	AssertMsg( bResult, "Invalid player class!" );
+	return bResult;
+}
+
+bool CInventoryManager::IsValidSlot( equipped_slot_t unSlot )
+{
+	const bool bResult = ItemSystem()->GetItemSchema()->IsValidItemSlot( unSlot );
+	AssertMsg( bResult, "Invalid item slot!" );
 	return bResult;
 }
 
@@ -1710,7 +1552,7 @@ void CPlayerInventory::ValidateInventoryPositions( void )
 //-----------------------------------------------------------------------------
 // Purpose: 
 //-----------------------------------------------------------------------------
-void CPlayerInventory::ItemHasBeenUpdated( CEconItemView *pItem, bool bUpdateAckFile, bool bWriteAckFile )
+void CPlayerInventory::ItemHasBeenUpdated( CEconItemView *pItem, bool bUpdateAckFile, bool bWriteAckFile, EInventoryItemEvent eEventType )
 {
 #ifdef CLIENT_DLL
 	// Handle the clientside ack file
@@ -1724,16 +1566,49 @@ void CPlayerInventory::ItemHasBeenUpdated( CEconItemView *pItem, bool bUpdateAck
 #endif
 }
 
+void CPlayerInventory::DefaultEquippedDefinitionHasBeenUpdated( CEconDefaultEquippedDefinitionInstanceClient *pDefaultEquippedDefinition )
+{
+}
+
+void CPlayerInventory::MarkSetItemDescriptionsDirty( int nItemSetIndex )
+{
+	int nInventoryCount = GetItemCount();
+	for ( int i = 0; i < nInventoryCount; i++ )
+	{
+		CEconItemView *pPotentialSetItem = GetItem( i );
+		if ( !pPotentialSetItem )
+			continue;
+
+		if ( pPotentialSetItem->GetItemSetIndex() == nItemSetIndex )
+		{
+			pPotentialSetItem->MarkDescriptionDirty();
+		}
+	}
+}
+
 //-----------------------------------------------------------------------------
 // Purpose:
 //-----------------------------------------------------------------------------
-void CPlayerInventory::SOCacheUnsubscribed( const CSteamID & steamIDOwner, GCSDK::ESOCacheEvent eEvent )
+void CPlayerInventory::SOCacheUnsubscribed( GCSDK::SOID_t ID, GCSDK::ESOCacheEvent eEvent )
 {
-	m_pSOCache = NULL;
-	m_bGotItemsFromSteam = false;
-	m_aInventoryItems.Purge();
+#ifdef _DEBUG
+	Msg("CPlayerInventory::SOCacheUnsubscribed %s [event = %u]\n", CSteamID( ID.ID() ).Render(), eEvent );
+#endif
 
-	DirtyItemHandles();
+	if ( ID != m_OwnerID )
+		return;
+
+	m_bCurrentlySubscribedToSteam = false;
+
+	/*
+	[ Vitaliy / Oct-2015 ] --- no longer dropping all references to everything just because we got unsubscribed of our
+	user's Steam SO cache. All the items are still valid to be used even though we might not be getting updates of new items.
+	This can happen if user's GC session drops for some reason, but GS session is still active.
+	m_pSOCache = NULL;
+	m_pRecipeCache = NULL;
+	m_Items.Purge();
+	m_aDefaultEquippedDefinitionItems.PurgeAndDeleteElements();
+	*/
 }
 
 
@@ -1744,14 +1619,15 @@ void CPlayerInventory::SOCacheUnsubscribed( const CSteamID & steamIDOwner, GCSDK
 void CPlayerInventory::SendInventoryUpdateEvent()
 {
 #ifdef CLIENT_DLL
-	if( InventoryManager()->GetLocalInventory() == this )
+	IGameEvent *event = gameeventmanager->CreateEvent( "inventory_updated" );
+	if ( event )
 	{
-		IGameEvent *event = gameeventmanager->CreateEvent( "inventory_updated" );
-		if ( event )
-		{
-			gameeventmanager->FireEventClientSide( event );
-		}
+		gameeventmanager->FireEventClientSide( event );
 	}
+#endif
+#if defined( GAME_DLL ) && !defined( NO_STEAM_GAMECOORDINATOR )
+	extern void OnInventoryUpdatedForSteamID( CSteamID steamID );
+	OnInventoryUpdatedForSteamID( GetSteamIDFromSOID( m_OwnerID ) );
 #endif
 }
 
@@ -1773,7 +1649,7 @@ bool CPlayerInventory::FilloutItemFromEconItem( CEconItemView *pScriptItem, CEco
 		if ( bWasInThisBag )
 		{
 			// We need to update it before it's removed.
-			ItemHasBeenUpdated( pScriptItem, false, false );
+			ItemHasBeenUpdated( pScriptItem, false, false, k_EInventoryItemDestroyed );
 
 			RemoveItem( pEconItem->GetItemID() );
 		}
@@ -1790,22 +1666,6 @@ bool CPlayerInventory::FilloutItemFromEconItem( CEconItemView *pScriptItem, CEco
 	pScriptItem->SetInventoryPosition( pEconItem->GetInventoryToken() );
 	OnItemChangedPosition( pScriptItem, iOldPos );
 
-#if BUILD_ITEM_NAME_AND_DESC
-	// Precache account names if we have any. We do this way in advance of any code that might
-	// use it (ie., description text building) so that by the time we try that we already have
-	// the data setup.
-	//
-	// We don't worry about yielding here because this inventory code only runs on game
-	// clients/servers, not the GC.
-	CSteamAccountIDAttributeCollector AccountIDCollector;
-	pEconItem->IterateAttributes( &AccountIDCollector );
-
-	FOR_EACH_VEC( AccountIDCollector.GetAccountIDs(), i )
-	{
-		InventoryManager()->PersonaName_Precache( (AccountIDCollector.GetAccountIDs())[i] );
-	}
-#endif
-
 	return true;
 }
 
@@ -1820,16 +1680,23 @@ void CPlayerInventory::DumpInventoryToConsole( bool bRoot )
 #ifdef CLIENT_DLL
 		Msg("(CLIENT) Inventory:\n");
 #else
-		Msg("(SERVER) Inventory for account (%d):\n", m_OwnerID.GetAccountID() );
+		Msg("(SERVER) Inventory for account (%d):\n", GetSteamIDFromSOID( m_OwnerID ).GetAccountID() );
 #endif
 		Msg("  Version: %llu:\n", m_pSOCache ? m_pSOCache->GetVersion() : -1 );
 	}
 
-	int iCount = m_aInventoryItems.Count();
+	int iCount = m_Items.GetItemVector().Count();
 	Msg("   Num items: %d\n", iCount );
 	for ( int i = 0; i < iCount; i++ )
 	{
-		Msg("      %s (ID %llu)\n", m_aInventoryItems[i].GetStaticData()->GetDefinitionName(), m_aInventoryItems[i].GetItemID() );
+		Msg( "      %s (ID %llu)\n", m_Items.GetItemVector()[ i ]->GetStaticData()->GetDefinitionName(), m_Items.GetItemVector()[ i ]->GetItemID() );
+	}
+
+	iCount = m_aDefaultEquippedDefinitionItems.Count();
+	Msg("   Default equipped definitions: %d\n", iCount );
+	for ( int i = 0; i < iCount; i++ )
+	{
+		Msg( "      %s (ID %llu)\n", m_aDefaultEquippedDefinitionItems[ i ]->GetStaticData()->GetDefinitionName(), m_Items.GetItemVector()[ i ]->GetItemID() );
 	}
 }
 
@@ -1838,19 +1705,20 @@ void CPlayerInventory::DumpInventoryToConsole( bool bRoot )
 //-----------------------------------------------------------------------------
 void CPlayerInventory::RemoveItem( itemid_t iItemID )
 {
-	int iIndex;
-	CEconItemView *pItem = GetInventoryItemByItemID( iItemID, &iIndex );
+	CEconItemView *pItem = GetInventoryItemByItemID( iItemID );
 	if ( pItem )
 	{
-		ItemIsBeingRemoved( pItem );
-
-		FOR_EACH_VEC( m_vecItemHandles, i )
+		int nItemSet = pItem->GetItemSetIndex();
+		if ( nItemSet )
 		{
-			m_vecItemHandles[ i ]->MarkDirty();
-			m_vecItemHandles[ i ]->ItemIsBeingDeleted( pItem );
+			const CEconItemSetDefinition *pItemSetDef = GetItemSchema()->GetItemSetByIndex( nItemSet );
+			if ( pItemSetDef && pItemSetDef->m_bIsCollection )
+			{
+				MarkSetItemDescriptionsDirty( nItemSet );
+			}
 		}
 
-		m_aInventoryItems.Remove(iIndex);
+		m_Items.Remove( iItemID );
 
 #ifdef _DEBUG
 		if ( item_inventory_debug.GetBool() )
@@ -1866,46 +1734,42 @@ void CPlayerInventory::RemoveItem( itemid_t iItemID )
 //-----------------------------------------------------------------------------
 // Purpose: Finds the item in our inventory that matches the specified global index
 //-----------------------------------------------------------------------------
-CEconItemView *CPlayerInventory::GetInventoryItemByItemID( itemid_t iIndex, int *pIndex )
+CEconItemView *CPlayerInventory::GetInventoryItemByItemID( itemid_t iIndex ) const
 {
+	// Early out for weapon ID 0
+	if ( iIndex == 0 )
+		return NULL;
+
+	ItemIdToItemMap_t::IndexType_t idx  = m_Items.GetItemMap().Find( iIndex );
+	return m_Items.GetItemMap().IsValidIndex( idx ) ? m_Items.GetItemMap()[ idx ] : NULL;
+	/*
 	int iCount = m_aInventoryItems.Count();
 	for ( int i = 0; i < iCount; i++ )
 	{
-		if ( m_aInventoryItems[i].GetItemID() == iIndex )
+		if ( m_aInventoryItems[i]->GetItemID() == iIndex )
 		{
 			if ( pIndex )
 			{
 				*pIndex = i;
 			}
 
-			return &m_aInventoryItems[i];
+			return m_aInventoryItems[i];
 		}
 	}
 
 	return NULL;
+	*/
 }
 
-//-----------------------------------------------------------------------------
-// Finds the item in our inventory that matches the specified global original id
-//-----------------------------------------------------------------------------
-CEconItemView *CPlayerInventory::GetInventoryItemByOriginalID( itemid_t iOriginalID, int *pIndex /*= NULL*/ )
+void CPlayerInventory::FindItemsByType( EItemType eType, CUtlVector< CEconItemView* >& outVec )
 {
-	int iCount = m_aInventoryItems.Count();
-	for ( int i = 0; i < iCount; i++ )
+	for ( int i = 0; i < m_Items.GetItemVector().Count(); ++i )
 	{
-		CEconItem *pItem = m_aInventoryItems[i].GetSOCData();
-		if ( pItem && pItem->GetOriginalID() == iOriginalID )
+		if ( m_Items.GetItemVector()[ i ]->GetItemDefinition()->GetItemType() == eType )
 		{
-			if ( pIndex )
-			{
-				*pIndex = i;
-			}
-
-			return &m_aInventoryItems[i];
+			outVec.AddToTail( m_Items.GetItemVector()[ i ] );
 		}
 	}
-
-	return NULL;
 }
 
 //-----------------------------------------------------------------------------
@@ -1913,39 +1777,21 @@ CEconItemView *CPlayerInventory::GetInventoryItemByOriginalID( itemid_t iOrigina
 //-----------------------------------------------------------------------------
 CEconItemView *CPlayerInventory::GetItemByPosition( int iPosition, int *pIndex )
 {
-	int iCount = m_aInventoryItems.Count();
+	int iCount = m_Items.GetItemVector().Count();
 	for ( int i = 0; i < iCount; i++ )
 	{
-		if ( m_aInventoryItems[i].GetInventoryPosition() == (unsigned int)iPosition )
+		if ( m_Items.GetItemVector()[ i ]->GetInventoryPosition() == ( unsigned int ) iPosition )
 		{
 			if ( pIndex )
 			{
 				*pIndex = i;
 			}
 
-			return &m_aInventoryItems[i];
+			return m_Items.GetItemVector()[ i ];
 		}
 	}
 
 	return NULL;
-}
-
-// Finds the first item in our backpack with match itemdef
-//-----------------------------------------------------------------------------
-CEconItemView *CPlayerInventory::FindFirstItembyItemDef( item_definition_index_t iItemDef )
-{
-	int iCount = m_aInventoryItems.Count();
-	for ( int i = 0; i < iCount; i++ )
-	{
-		//GetItemDefIndex()
-		if ( m_aInventoryItems[i].GetItemDefIndex() == iItemDef )
-		{
-			return &m_aInventoryItems[i];
-		}
-	}
-
-	return NULL;
-
 }
 
 //-----------------------------------------------------------------------------
@@ -1953,10 +1799,10 @@ CEconItemView *CPlayerInventory::FindFirstItembyItemDef( item_definition_index_t
 //-----------------------------------------------------------------------------
 int	CPlayerInventory::GetIndexForItem( CEconItemView *pItem )
 {
-	int iCount = m_aInventoryItems.Count();
+	int iCount = m_Items.GetItemVector().Count();
 	for ( int i = 0; i < iCount; i++ )
 	{
-		if ( m_aInventoryItems[i].GetItemID() == pItem->GetItemID() )
+		if ( m_Items.GetItemVector()[ i ]->GetItemID() == pItem->GetItemID() )
 			return i;
 	}
 
@@ -1964,27 +1810,55 @@ int	CPlayerInventory::GetIndexForItem( CEconItemView *pItem )
 }
 
 //-----------------------------------------------------------------------------
-// Purpose: Dirty all the item handles that are registered with us
-//-----------------------------------------------------------------------------
-void CPlayerInventory::DirtyItemHandles()
-{
-	FOR_EACH_VEC( m_vecItemHandles, i )
-	{
-		m_vecItemHandles[ i ]->MarkDirty();
-	}
-}
-
-//-----------------------------------------------------------------------------
 // Purpose: Get the item object cache data for the specified item
 //-----------------------------------------------------------------------------
-CEconItem	*CPlayerInventory::GetSOCDataForItem( itemid_t iItemID ) 
-{ 
-	if ( !m_pSOCache )
+CEconItem *CPlayerInventory::GetSOCDataForItem( itemid_t iItemID ) 
+{
+	if ( iItemID == 0 )
 		return NULL;
 
-	CEconItem soIndex;
-	soIndex.SetItemID( iItemID );
-	return (CEconItem *)m_pSOCache->FindSharedObject( soIndex );
+	CEconItem* pData = NULL;
+	if ( !m_pSOCache )
+	{
+		pData = GetEconItemFromStringTable( iItemID );
+	}
+
+#ifdef CLIENT_DLL
+	// Don't access the live inventory data when playing a demo
+	bool bIsLiveBroadcast = engine->GetDemoPlaybackParameters() && engine->GetDemoPlaybackParameters()->m_bPlayingLiveRemoteBroadcast;
+	if ( ( engine->IsPlayingDemo() && !bIsLiveBroadcast ) || ( engine->IsHLTV() && this != InventoryManager()->GetLocalInventory() ) )
+		return pData;
+#endif
+
+	if ( m_pSOCache && !pData )
+	{
+		CEconItem soIndex;
+		soIndex.SetItemID( iItemID );
+		pData = (CEconItem*) m_pSOCache->FindSharedObject( soIndex );
+	}
+
+	return pData;
+}
+
+const CEconItem *CPlayerInventory::GetSOCDataForItem( itemid_t iItemID ) const
+{ 
+	if ( iItemID == 0 )
+		return NULL;
+
+	CEconItem* pData = NULL;
+	if ( !m_pSOCache )
+	{
+		pData = GetEconItemFromStringTable( iItemID );
+	}
+
+	if ( m_pSOCache && !pData )
+	{
+		CEconItem soIndex;
+		soIndex.SetItemID( iItemID );
+		pData = (CEconItem*) m_pSOCache->FindSharedObject( soIndex );
+	}
+
+	return pData;
 }
 
 #if defined (_DEBUG) && defined(CLIENT_DLL)
@@ -2000,7 +1874,7 @@ CON_COMMAND_F( item_deleteall, "WARNING: Removes all of the items in your invent
 		CEconItemView *pItem = pInventory->GetItem(i);
 		if ( pItem )
 		{
-			InventoryManager()->DropItem( pItem->GetItemID() );
+			InventoryManager()->DeleteItem( pItem->GetItemID() );
 		}
 	}
 
@@ -2011,9 +1885,99 @@ CON_COMMAND_F( item_deleteall, "WARNING: Removes all of the items in your invent
 //-----------------------------------------------------------------------------
 // Purpose: 
 //-----------------------------------------------------------------------------
+uint32 CPlayerInventory::GetItemCount( uint32 unItemDef )
+{
+	int iOwnedCount = 0;
+
+	int iCount = GetItemCount();
+	for ( int i = 0; i < iCount; i++ )
+	{
+		CEconItemView *pTmp = GetItem( i );
+		if ( !pTmp )
+			continue;
+
+		if ( pTmp->GetItemDefinition()->GetDefinitionIndex() == unItemDef )
+			iOwnedCount++;
+	}
+
+	return iOwnedCount;
+}
+
+CEconItemView* CPlayerInventory::FindDefaultEquippedDefinitionItemBySlot( int iClass, int iSlot ) const
+{
+	uint32 nSlotValue = iClass * LOADOUT_POSITION_COUNT + iSlot;
+
+	FOR_EACH_VEC( m_aDefaultEquippedDefinitionItems, i )
+	{
+		if ( m_aDefaultEquippedDefinitionItems[ i ]->GetInventoryPosition() == nSlotValue )
+		{
+			return m_aDefaultEquippedDefinitionItems[ i ];
+		}
+	}
+
+	return NULL;
+}
+
+bool CPlayerInventory::GetDefaultEquippedDefinitionItemSlotByDefinitionIndex( item_definition_index_t nDefIndex, int nClass, int &nSlot )
+{
+	FOR_EACH_VEC( m_aDefaultEquippedDefinitionItems, i )
+	{
+		if ( m_aDefaultEquippedDefinitionItems[ i ]->GetItemDefinition()->GetDefinitionIndex() == nDefIndex )
+		{
+			int nClassTemp = m_aDefaultEquippedDefinitionItems[ i ]->GetInventoryPosition() / LOADOUT_POSITION_COUNT;
+			if ( nClassTemp == nClass )
+			{
+				nSlot = m_aDefaultEquippedDefinitionItems[ i ]->GetInventoryPosition() - nClass * LOADOUT_POSITION_COUNT;
+				return true;
+			}
+		}
+	}
+
+	return false;
+}
+
+void CPlayerInventory::SetDefaultEquippedDefinitionItemBySlot( int iClass, int iSlot, item_definition_index_t iDefIndex )
+{
+	uint32 nInventoryPosition = iClass * LOADOUT_POSITION_COUNT + iSlot;
+
+	FOR_EACH_VEC( m_aDefaultEquippedDefinitionItems, i )
+	{
+		CEconItemView *pItemView = m_aDefaultEquippedDefinitionItems[ i ];
+		if ( pItemView->GetInventoryPosition() == nInventoryPosition )
+		{
+			if ( iDefIndex == 0 )
+			{
+				delete m_aDefaultEquippedDefinitionItems[ i ];
+				m_aDefaultEquippedDefinitionItems.Remove( i );
+				return;
+			}
+			else
+			{
+				pItemView->Init( iDefIndex, AE_UNIQUE, AE_USE_SCRIPT_VALUE, true );
+				return;
+			}
+		}
+	}
+
+	if ( iDefIndex == 0 || iSlot == INVALID_EQUIPPED_SLOT )
+		return;
+
+	CEconItemView *pNewItem = new CEconItemView;
+	pNewItem->Init( iDefIndex, AE_UNIQUE, AE_USE_SCRIPT_VALUE, true );
+
+	if ( !pNewItem->IsValid() )
+		return;
+
+	int nIndex = m_aDefaultEquippedDefinitionItems.AddToTail( pNewItem );
+	m_aDefaultEquippedDefinitionItems[ nIndex ]->SetInventoryPosition( nInventoryPosition );
+}
+
+//-----------------------------------------------------------------------------
+// Purpose: 
+//-----------------------------------------------------------------------------
 int CPlayerInventory::GetRecipeCount() const
 {
-	const CUtlMap<int, CEconCraftingRecipeDefinition *, int>& mapRecipes = ItemSystem()->GetItemSchema()->GetRecipeDefinitionMap();
+	const CUtlMap<int, CEconCraftingRecipeDefinition *, int, CDefLess<int> >& mapRecipes = ItemSystem()->GetItemSchema()->GetRecipeDefinitionMap();
 
 	return mapRecipes.Count();
 }
@@ -2021,7 +1985,7 @@ int CPlayerInventory::GetRecipeCount() const
 //-----------------------------------------------------------------------------
 // Purpose: 
 //-----------------------------------------------------------------------------
-const CEconCraftingRecipeDefinition *CPlayerInventory::GetRecipeDef( int iIndex )
+const CEconCraftingRecipeDefinition *CPlayerInventory::GetRecipeDef( int iIndex ) const
 {
 	if ( !m_pSOCache )
 		return NULL;
@@ -2029,8 +1993,8 @@ const CEconCraftingRecipeDefinition *CPlayerInventory::GetRecipeDef( int iIndex 
 	if ( iIndex < 0 || iIndex >= GetRecipeCount() )
 		return NULL;
 
-	const CEconItemSchema::RecipeDefinitionMap_t& mapRecipes = GetItemSchema()->GetRecipeDefinitionMap();
-	
+	const CUtlMap<int, CEconCraftingRecipeDefinition *, int, CDefLess<int> >& mapRecipes = ItemSystem()->GetItemSchema()->GetRecipeDefinitionMap();
+
 	// Store off separate index for "number of items iterated over" in case something
 	// deletes from the recipes map out from under us.
 	int j = 0;
@@ -2048,293 +2012,535 @@ const CEconCraftingRecipeDefinition *CPlayerInventory::GetRecipeDef( int iIndex 
 //-----------------------------------------------------------------------------
 // Purpose: 
 //-----------------------------------------------------------------------------
-const CEconCraftingRecipeDefinition *CPlayerInventory::GetRecipeDefByDefIndex( uint16 iDefIndex )
+const CEconCraftingRecipeDefinition *CPlayerInventory::GetRecipeDefByDefIndex( uint16 iDefIndex ) const
 {
 	if ( !m_pSOCache )
 		return NULL;
 
 	// check always-known recipes
-	const CUtlMap<int, CEconCraftingRecipeDefinition *, int>& mapRecipes = ItemSystem()->GetItemSchema()->GetRecipeDefinitionMap();
+	const CUtlMap<int, CEconCraftingRecipeDefinition *, int, CDefLess<int> >& mapRecipes = ItemSystem()->GetItemSchema()->GetRecipeDefinitionMap();
 	int i = mapRecipes.Find( iDefIndex );
 	if ( i != mapRecipes.InvalidIndex() )
 		return mapRecipes[i];
 
-	// there are no more SO recipes
 	return NULL;
 }
 
-//-----------------------------------------------------------------------------
-// Purpose: 
-//-----------------------------------------------------------------------------
-void CEconItemViewHandle::SetItem( CEconItemView* pItem )
+int CPlayerInventory::GetMaxCraftIngredientsNeeded( const CUtlVector< itemid_t >& vecCraftItems ) const
 {
-	m_pItem = pItem;
+	int nMax = 0;
+	int nPossible = GetPossibleCraftResultsCount( vecCraftItems );
 
-	if ( pItem )
+	for ( int i = 0; i < nPossible; ++i )
 	{
-		// Cache the item_id for lookup when our pointer gets dirtied
-		m_nItemID = pItem->GetItemID();
-		auto* pInv = InventoryManager()->GetInventoryForAccount( pItem->GetAccountID() );
-		Assert( pInv );
-		if ( m_pInv != pInv )
+		const CEconCraftingRecipeDefinition *pRecipe = GetPossibleCraftResult( vecCraftItems, i );
+		if ( nMax < pRecipe->GetTotalInputItemsRequired() )
 		{
-			// If this is a different inventory, unsubscribe.  This can happen if the
-			// handle gets reused
-			if ( m_pInv )
-			{
-				m_pInv->RemoveItemHandle( this );
-			}
-
-			m_pInv = pInv;
-
-			// Subscribe to the new inventory
-			m_pInv->AddItemHandle( this );
-		}
-	}
-}
-
-//-----------------------------------------------------------------------------
-// Purpose: Return a pointer to a CEconItemView
-//-----------------------------------------------------------------------------
-CEconItemView* CEconItemViewHandle::Get() const
-{
-	// If our pointer is dirty, we need to go get a new pointer
-	if ( m_bPointerDirty )
-	{
-		if ( m_pInv )
-		{
-			m_pItem = m_pInv->GetInventoryItemByItemID( m_nItemID );
-			m_bPointerDirty = false;
+			nMax = pRecipe->GetTotalInputItemsRequired();
 		}
 	}
 
-	return m_pItem;
+	return nMax;
 }
 
-
-//-----------------------------------------------------------------------------
-// Purpose: Unsubscribe us from future updates
-//-----------------------------------------------------------------------------
-CEconItemHandle::~CEconItemHandle()
+void CPlayerInventory::GetMarketCraftCompletionLink( const CUtlVector< itemid_t >& vecCraftItems, char *pchLink, int nNumChars ) const
 {
-	UnsubscribeFromSOEvents();
-}
+	int nCollection = -2;
 
-
-//-----------------------------------------------------------------------------
-// Purpose: Save a pointer to the item and register us for SOCache events
-//-----------------------------------------------------------------------------
-void CEconItemHandle::SetItem( CEconItem* pItem )
-{
-	UnsubscribeFromSOEvents();
-
-	m_pItem = NULL;
-	m_iItemID = INVALID_ITEM_ID;
-
-	if ( pItem )
+	bool bWeapons = false;
+	bool bNonWeapons = false;
+	bool bStatTrak = false;
+	FOR_EACH_VEC( vecCraftItems, nCraftItem )
 	{
-		auto* pInv = InventoryManager()->GetInventoryForAccount( pItem->GetAccountID() );
-		if ( pInv )
+		const CEconItem *pEconItem = GetSOCDataForItem( vecCraftItems[ nCraftItem ] );
+		if ( !pEconItem )
+			continue;
+
+		if ( ( StringHasPrefix( pEconItem->GetItemDefinition()->GetDefinitionName(), "weapon_" ) ) )
 		{
-			m_OwnerSteamID.SetFromUint64( pInv->GetOwner().ConvertToUint64() );
-			GCClientSystem()->GetGCClient()->AddSOCacheListener( m_OwnerSteamID, this );
-		}
-
-		m_pItem = pItem;
-		m_iItemID = pItem->GetID();
-	}
-}
-
-
-//-----------------------------------------------------------------------------
-// Purpose: Check if out item got deleted.  If it did, mark our pointer as NULL
-//			so future dereferences will get NULL instead of a stale pointer.
-//-----------------------------------------------------------------------------
-void CEconItemHandle::SODestroyed( const CSteamID & steamIDOwner, const GCSDK::CSharedObject *pObject, GCSDK::ESOCacheEvent eEvent )
-{ 
-	if( pObject->GetTypeID() != CEconItem::k_nTypeID || m_pItem == NULL )
-		return;
-
-	const CEconItem *pItem = (CEconItem *)pObject;
-
-	if ( m_iItemID == pItem->GetID() )
-	{
-		UnsubscribeFromSOEvents();
-		m_pItem = NULL;
-		m_iItemID = INVALID_ITEM_ID;
-	}
-}
-
-void CEconItemHandle::SOCreated( const CSteamID & steamIDOwner, const GCSDK::CSharedObject *pObject, GCSDK::ESOCacheEvent eEvent )
-{
-	if( pObject->GetTypeID() != CEconItem::k_nTypeID )
-		return;
-	
-	CEconItem *pItem = (CEconItem *)pObject;
-
-	if ( m_iItemID == pItem->GetID() )
-	{
-		SetItem( pItem );
-	}
-}
-
-void CEconItemHandle::SOUpdated( const CSteamID & steamIDOwner, const GCSDK::CSharedObject *pObject, GCSDK::ESOCacheEvent eEvent )
-{
-	if ( pObject->GetTypeID() != CEconItem::k_nTypeID )
-		return;
-
-	CEconItem *pItem = (CEconItem *)pObject;
-
-	if ( m_iItemID == pItem->GetID() )
-	{
-		SetItem( pItem );
-	}
-}
-
-void CEconItemHandle::SOCacheUnsubscribed( const CSteamID & steamIDOwner, GCSDK::ESOCacheEvent eEvent )
-{
-	UnsubscribeFromSOEvents();
-}
-
-void CEconItemHandle::UnsubscribeFromSOEvents()
-{
-	if ( m_OwnerSteamID.GetAccountID() != 0 )
-	{
-		GCClientSystem()->GetGCClient()->RemoveSOCacheListener( m_OwnerSteamID, this );
-	}
-}
-
-
-#if defined( STAGING_ONLY ) || defined( _DEBUG )
-#if defined(CLIENT_DLL)
-CON_COMMAND_F( item_dumpinv, "Dumps the contents of a specified client inventory.", FCVAR_CHEAT )
-#else
-CON_COMMAND_F( item_dumpinv_sv, "Dumps the contents of a specified server inventory.", FCVAR_CHEAT )
-#endif
-{
-#if defined(CLIENT_DLL)
-	CPlayerInventory *pInventory = InventoryManager()->GetLocalInventory();
-#else
-	CSteamID steamID;
-	CBaseMultiplayerPlayer *pPlayer = ToBaseMultiplayerPlayer( UTIL_GetCommandClient() ); 
-	pPlayer->GetSteamID( &steamID );
-	CPlayerInventory *pInventory = InventoryManager()->GetInventoryForAccount( steamID.GetAccountID() );
-#endif
-	if ( !pInventory )
-	{
-		Msg("No inventory found.\n");
-		return;
-	}
-
-	pInventory->DumpInventoryToConsole( true );
-}
-
-#if defined (CLIENT_DLL)
-
-CON_COMMAND_F( item_dumpschema, "Dump the expanded schema for items to a file in sorted order suitable for diffs. Format: item_dumpschema <filename>", FCVAR_CHEAT )
-{
-	if ( args.ArgC() != 2 )
-	{
-		Msg("Usage: item_dumpschema <filename>\n");
-		return;
-	}
-
-	if ( GetItemSchema()->DumpItems(args[1]) )
-		Msg("Dump complete, saved in game/tf/%s\n", args[1]);
-	else
-		Msg("Dump failed (?)\n");
-}
-
-CON_COMMAND_F( item_giveitem, "Give an item to the local player. Format: item_giveitem <item definition name> or <item def index>", FCVAR_NONE )
-{
-	if ( !steamapicontext || !steamapicontext->SteamUser() )
-	{
-		Msg("Not connected to Steam.\n");
-		return;
-	}
-	CSteamID steamIDForPlayer = steamapicontext->SteamUser()->GetSteamID();
-	if ( !steamIDForPlayer.IsValid() )
-	{
-		Msg("Failed to find a valid steamID for the local player.\n");
-		return;
-	}
-
-	int iItemCount = args.ArgC();
-	for ( int i = 1; i < iItemCount; ++i )
-	{
-		// Check to see if args[1] is a number (itemdefid) and if so, translate it to actual itemname
-		const char *pszItemname = NULL;
-		if ( V_isdigit( args[i][0] ) )
-		{
-			int iDef = V_atoi( args[i] );
-			CEconItemDefinition *pItemDef = GetItemSchema()->GetItemDefinition( iDef );
-			if ( pItemDef )
-			{
-				pszItemname = pItemDef->GetItemDefinitionName();
-			}
+			bWeapons = true;
 		}
 		else
 		{
-			pszItemname = args[i];
+			bNonWeapons = true;
 		}
 
-		Msg("Sending request to generate '%s' for Local Player (%llu)\n", pszItemname, steamIDForPlayer.ConvertToUint64() );
-
-		CItemSelectionCriteria criteria;
-
-		GCSDK::CProtoBufMsg<CMsgDevNewItemRequest> msg( k_EMsgGCDev_NewItemRequest );
-		msg.Body().set_receiver( steamIDForPlayer.ConvertToUint64() );
-
-		criteria.SetIgnoreEnabledFlag( true );
-		if ( !criteria.BAddCondition( "name", k_EOperator_String_EQ, pszItemname, true ) ||
-			!criteria.BSerializeToMsg( *msg.Body().mutable_criteria() ) )
+		if ( !bStatTrak )
 		{
-			Msg("Failed to add condition and/or serialize item grant request. This is probably caused by having a string that's too long.\n" );
-			return;
+			static CSchemaAttributeDefHandle pAttr_KillEater( "kill eater" );
+			if ( pEconItem->FindAttribute( pAttr_KillEater ) )
+				bStatTrak = true;
 		}
-		GCClientSystem()->BSendMessage( msg );
+
+		if ( nCollection )
+		{
+			// Found the first collection type
+			nCollection = pEconItem->GetItemSetIndex();
+		}
+		else if ( nCollection != pEconItem->GetItemSetIndex() )
+		{
+			// Found more than 1 collection type
+			nCollection = -1;
+		}
 	}
+
+	int nRarity = -2;
+	int nPossibleCount = GetPossibleCraftResultsCount( vecCraftItems );
+
+	// We can only match a collection if all the items have a matching collection and there's at leas 1 possible craft outcome
+	bool bMatchCollection = nCollection > 0 && nPossibleCount > 0;
+
+	for ( int i = 0; i < nPossibleCount; ++i )
+	{
+		const CEconCraftingRecipeDefinition *pRecipe = GetPossibleCraftResult( vecCraftItems, i );
+
+		// Can only do a rarity if everything is all weapons or all non-weapons since they localize differently
+		if ( ( bWeapons && !bNonWeapons ) || ( !bWeapons && bNonWeapons ) )
+		{
+			const CUtlVector< CItemSelectionCriteria > *pInputItems = pRecipe->GetInputItems();
+			FOR_EACH_VEC( *pInputItems, nInput )
+			{
+				const CItemSelectionCriteria *pInput = &((*pInputItems)[ nInput ]);
+
+				// RARITY
+
+				int nTempRarity = -1;
+
+				if ( pInput->BRaritySet() )
+				{
+					nTempRarity = pInput->GetRarity();
+				}
+				else
+				{
+					const char *pchRarity = pInput->GetValueForFirstConditionOfFieldName( "*rarity" );
+					if ( pchRarity )
+					{
+						const CEconItemRarityDefinition *pRarity = GetItemSchema()->GetRarityDefinitionByName( pchRarity );
+						if ( pRarity )
+						{
+							nTempRarity = pRarity->GetDBValue();
+						}
+					}
+				}
+
+				if ( nRarity == -2 )
+				{
+					nRarity = nTempRarity;
+				}
+				else if ( nRarity != nTempRarity )
+				{
+					nRarity = -1;
+				}
+			}
+		}
+
+		if ( bMatchCollection )
+		{
+			const CUtlVector< CItemSelectionCriteria > *pOutputItems = &(pRecipe->GetOutputItems());
+			FOR_EACH_VEC( *pOutputItems, nOutput )
+			{
+				const CItemSelectionCriteria *pOutput = &((*pOutputItems)[ nOutput ]);
+
+				if ( pOutput->GetValueForFirstConditionOfFieldName( "*match_set_rarity" ) == NULL )
+				{
+					bMatchCollection = false;
+				}
+			}
+		}
+	}
+
+	V_snprintf( pchLink, nNumChars, "http://%ssteamcommunity.com/market/search?appid=730&lock_appid=730&q=",
+		( steamapicontext->SteamUtils()->GetConnectedUniverse() == k_EUniversePublic ) ? "" : "beta." );
+
+	if ( nRarity >= 0 || bMatchCollection || bStatTrak )
+	{
+		// Special search tags
+		// http://steamcommunity.com/market/search?appid=730&q=%22The+Arms+Deal+Collection%22+%22Mil-Spec+Grade%22
+		const CEconItemRarityDefinition *pRarity = GetItemSchema()->GetRarityDefinition( nRarity );
+		if ( pRarity )
+		{	// see "econ_assetapi_context.cpp : Rarity Tag"
+			// &category_730_Rarity%5B%5D=tag_Rarity_Ancient_Weapon
+			V_strncat( pchLink, "&category_730_Rarity%5B%5D=tag_", nNumChars );
+			const char *pchLocKey = pRarity->GetLocKey();
+			if ( ( nRarity != 7 ) && bWeapons )
+				pchLocKey = pRarity->GetWepLocKey();
+			V_strncat( pchLink, pchLocKey, nNumChars );
+		}
+
+		if ( bMatchCollection )
+		{
+			// &category_730_ItemSet%5B%5D=tag_set_bravo_i
+			const IEconItemSetDefinition *pCollection = GetItemSchema()->GetItemSet( nCollection );
+			if ( pCollection )
+			{	// see "econ_assetapi_context.cpp : ItemSet"
+				char const *pchName = pCollection->GetName();
+				V_strncat( pchLink, "&category_730_ItemSet%5B%5D=tag_", nNumChars );
+				V_strncat( pchLink, pchName, nNumChars );
+			}
+		}
+
+		if ( bStatTrak )
+		{
+			V_strncat( pchLink, "&category_730_Quality%5B%5D=tag_strange", nNumChars );
+		}
+
+		// Replace spaces with +
+		char *pCurrentChar = pchLink;
+		while ( *pCurrentChar != '\0' )
+		{
+			if ( *pCurrentChar == ' ' )
+			{
+				*pCurrentChar = '+';
+			}
+
+			pCurrentChar++;
+		}
+	}
+
+	V_strncat( pchLink, "&", nNumChars ); // this allows us to defeat PHP redirects duplicating GETPARAMS!
 }
 
-CON_COMMAND_F( item_rolllootlist, "Force a loot list rool for the local player. Format: item_rolllootlist <loot list definition name>", FCVAR_NONE )
+int CPlayerInventory::GetPossibleCraftResultsCount( const CUtlVector< itemid_t >& vecCraftItems ) const
 {
-	if ( !steamapicontext || !steamapicontext->SteamUser() )
+	if ( m_nTargetRecipe >= 0 )
+		return 1;
+
+	CUtlVector< CEconItem* > vecCraftEconItems;
+	FOR_EACH_VEC( vecCraftItems, i )
 	{
-		Msg("Not connected to Steam.\n");
-		return;
-	}
-	CSteamID steamIDForPlayer = steamapicontext->SteamUser()->GetSteamID();
-	if ( !steamIDForPlayer.IsValid() )
-	{
-		Msg("Failed to find a valid steamID for the local player.\n");
-		return;
+		const CEconItem *pEconItem = GetSOCDataForItem( vecCraftItems[ i ] );
+		if ( !pEconItem )
+			continue;
+
+		vecCraftEconItems.AddToTail( const_cast< CEconItem* >( pEconItem ) );
 	}
 
-	Msg("Sending request to roll '%s' for Local Player (%llu)\n", args[1], steamIDForPlayer.ConvertToUint64() );
-
-	GCSDK::CProtoBufMsg<CMsgDevDebugRollLootRequest> msg( k_EMsgGCDev_DebugRollLootRequest );
-	msg.Body().set_receiver( steamIDForPlayer.ConvertToUint64() );
-	msg.Body().set_loot_list_name( args[1] );
-	GCClientSystem()->BSendMessage( msg );
+	return GetPossibleCraftResultsCount( vecCraftEconItems );
 }
 
-#include "econ_item_description.h"
-#include "localization_provider.h"
-
-CON_COMMAND_F( item_generate_all_descriptions, "Generate full item descriptions for every item in your backpack. Meant as a code test.", FCVAR_CHEAT )
+int CPlayerInventory::GetPossibleCraftResultsCount( const CUtlVector< CEconItem* >& vecCraftEconItems ) const
 {
-	CPlayerInventory *pInventory = InventoryManager()->GetLocalInventory();
+	if ( m_nTargetRecipe >= 0 )
+		return 1;
 
-	for ( int i = 0; i < pInventory->GetItemCount(); i++ )
+	int nPossibleRecipes = 0;
+
+	int nRecipeCount = GetRecipeCount();
+	for ( int i = 0; i < nRecipeCount; ++i )
 	{
-		CEconItemDescription desc;
-		IEconItemDescription::YieldingFillOutEconItemDescription( &desc, GLocalizationProvider(), pInventory->GetItem( i ) );
+		const CEconCraftingRecipeDefinition *pRecipe = GetRecipeDef( i );
+		if ( !pRecipe || pRecipe->IsDisabled() )
+			continue;
+
+		if ( m_nTargetRecipe < -1 && m_nTargetRecipe != pRecipe->GetFilter() )
+			continue;
+
+		// Early out if it uses less items than we're crafting
+		if ( pRecipe->GetTotalInputItemsRequired() < vecCraftEconItems.Count() )
+			continue;
+
+		// If it has any items do they conflict?
+		if ( vecCraftEconItems.Count() > 0 && !pRecipe->ItemListMatchesInputs( vecCraftEconItems, true ) )
+			continue;
+
+		nPossibleRecipes++;
 	}
 
-	Msg("Done.\n");
+	return nPossibleRecipes;
 }
-#endif // CLIENT_DLL
 
-#endif // STAGING_ONLY || _DEBUG
+const CEconCraftingRecipeDefinition *CPlayerInventory::GetPossibleCraftResult( const CUtlVector< itemid_t >& vecCraftItems, int nIndex ) const
+{
+	if ( m_nTargetRecipe >= 0 )
+	{
+		if ( nIndex > 0 )
+			return NULL;
+
+		return GetRecipeDef( m_nTargetRecipe );
+	}
+
+	int nPossibleRecipes = 0;
+
+	CUtlVector< CEconItem* > vecCraftEconItems;
+	FOR_EACH_VEC( vecCraftItems, i )
+	{
+		const CEconItem *pEconItem = GetSOCDataForItem( vecCraftItems[ i ] );
+		if ( !pEconItem )
+			continue;
+
+		vecCraftEconItems.AddToTail( const_cast< CEconItem* >( pEconItem ) );
+	}
+
+	int nRecipeCount = GetRecipeCount();
+	for ( int i = 0; i < nRecipeCount; ++i )
+	{
+		const CEconCraftingRecipeDefinition *pRecipe = GetRecipeDef( i );
+		if ( !pRecipe || pRecipe->IsDisabled() )
+			continue;
+
+		if ( m_nTargetRecipe < -1 && m_nTargetRecipe != pRecipe->GetFilter() )
+			continue;
+
+		// Early out if it uses less items than we're crafting
+		if ( pRecipe->GetTotalInputItemsRequired() < vecCraftEconItems.Count() )
+			continue;
+
+		// If it has any items do they conflict?
+		if ( vecCraftEconItems.Count() > 0 && !pRecipe->ItemListMatchesInputs( vecCraftEconItems, true ) )
+			continue;
+
+		if ( nPossibleRecipes == nIndex )
+		{
+			return pRecipe;
+		}
+
+		nPossibleRecipes++;
+	}
+
+	return NULL;
+}
+
+int CPlayerInventory::GetPossibleCraftResultID( const CUtlVector< itemid_t >& vecCraftItems, int nIndex ) const
+{
+	const CEconCraftingRecipeDefinition *pRecipe = GetPossibleCraftResult( vecCraftItems, nIndex );
+	if ( !pRecipe )
+		return -1;
+
+	return pRecipe->GetDefinitionIndex();
+}
+
+const wchar_t* CPlayerInventory::GetPossibleCraftResultName( const CUtlVector< itemid_t >& vecCraftItems, int nIndex ) const
+{
+	const CEconCraftingRecipeDefinition *pRecipe = GetPossibleCraftResult( vecCraftItems, nIndex );
+	if ( !pRecipe )
+		return L"";
+
+	return pRecipe->GetLocName();
+}
+
+const wchar_t* CPlayerInventory::GetPossibleCraftResultDescription( const CUtlVector< itemid_t >& vecCraftItems, int nIndex ) const
+{
+	const CEconCraftingRecipeDefinition *pRecipe = GetPossibleCraftResult( vecCraftItems, nIndex );
+	if ( !pRecipe )
+		return L"";
+
+	return pRecipe->GetLocDescription();
+}
+
+bool CPlayerInventory::CanAddToCraftTarget( const CUtlVector< itemid_t >& vecCraftItems, itemid_t nNewItem ) const
+{
+	const CEconCraftingRecipeDefinition *pRecipe = NULL;
+
+	if ( m_nTargetRecipe < 0 )
+	{
+		if ( m_nTargetRecipe != CRAFT_FILTER_COLLECT && m_nTargetRecipe != CRAFT_FILTER_TRADEUP )
+		{
+			return true;
+		}
+	}
+	else
+	{
+		pRecipe = GetRecipeDef( m_nTargetRecipe );
+		if ( !pRecipe || pRecipe->IsDisabled() )
+			return false;
+	}
+
+	const CEconItem *pEconItem = GetSOCDataForItem( nNewItem );
+	if ( !pEconItem )
+		return false;
+
+	int nSet = pEconItem->GetItemSetIndex();
+
+	CUtlVector< CEconItem* > vecCraftEconItems;
+	FOR_EACH_VEC( vecCraftItems, i )
+	{
+		const CEconItem *pTempEconItem = GetSOCDataForItem( vecCraftItems[ i ] );
+		if ( !pTempEconItem )
+			continue;
+
+		// You can't put an item in twice!
+		if ( vecCraftItems[ i ] == nNewItem )
+			return false;
+
+		if ( m_nTargetRecipe == CRAFT_FILTER_COLLECT )
+		{
+			// Collecting requires items from the same set!
+			if ( nSet != pTempEconItem->GetItemSetIndex() )
+			{
+				return false;
+			}
+		}
+		else if ( m_nTargetRecipe == CRAFT_FILTER_TRADEUP )
+		{
+			// Trading up requires items from the same rarity!
+			if ( pEconItem->GetRarity() != pTempEconItem->GetRarity() )
+			{
+				return false;
+			}
+		}
+
+		vecCraftEconItems.AddToTail( const_cast< CEconItem* >( pTempEconItem ) );
+	}
+
+	vecCraftEconItems.AddToTail( const_cast< CEconItem* >( pEconItem ) );
+
+	if ( !pRecipe )
+	{
+		return GetPossibleCraftResultsCount( vecCraftEconItems ) > 0;
+	}
+
+	// Early out if we already have enough items in the recipe
+	if ( pRecipe->GetTotalInputItemsRequired() < vecCraftEconItems.Count() )
+		return false;
+	
+	// Does the items + the new one work for the target?
+	return pRecipe->ItemListMatchesInputs( vecCraftEconItems, true );
+}
+
+bool CPlayerInventory::IsCraftReady( const CUtlVector< itemid_t >& vecCraftItems, int16 &nRecipe ) const
+{
+	CUtlVector< CEconItem* > vecCraftEconItems;
+	FOR_EACH_VEC( vecCraftItems, i )
+	{
+		const CEconItem *pEconItem = GetSOCDataForItem( vecCraftItems[ i ] );
+		if ( !pEconItem )
+			continue;
+
+		vecCraftEconItems.AddToTail( const_cast< CEconItem* >( pEconItem ) );
+	}
+
+	if ( m_nTargetRecipe >= 0 )
+	{
+		const CEconCraftingRecipeDefinition *pRecipe = GetRecipeDef( m_nTargetRecipe );
+		if ( !pRecipe || pRecipe->IsDisabled() )
+			return false;
+
+		// Early out if it uses less items than we're crafting
+		if ( pRecipe->GetTotalInputItemsRequired() < vecCraftEconItems.Count() )
+			return false;
+
+		// If it has any items do they conflict?
+		if ( vecCraftEconItems.Count() > 0 && !pRecipe->ItemListMatchesInputs( vecCraftEconItems ) )
+			return false;
+
+		nRecipe = m_nTargetRecipe;
+		return true;
+	}
+
+	bool bIsReady = false;
+
+	int nRecipeCount = GetRecipeCount();
+	for ( int i = 0; i < nRecipeCount; ++i )
+	{
+		const CEconCraftingRecipeDefinition *pRecipe = GetRecipeDef( i );
+		if ( !pRecipe || pRecipe->IsDisabled() )
+			continue;
+
+		// Early out if it uses less items than we're crafting
+		if ( pRecipe->GetTotalInputItemsRequired() < vecCraftEconItems.Count() )
+			continue;
+
+		// If it has any items do they conflict?
+		if ( vecCraftEconItems.Count() > 0 && !pRecipe->ItemListMatchesInputs( vecCraftEconItems ) )
+			continue;
+
+		if ( !bIsReady )
+		{
+			bIsReady = true;
+			nRecipe = pRecipe->GetDefinitionIndex();
+		}
+		else
+		{
+			// Found 2 valid recipes!
+			return false;
+		}
+	}
+
+	return bIsReady;
+}
+
+void CPlayerInventory::CraftIngredients( const CUtlVector< itemid_t >& vecCraftItems ) const
+{
+	/** Removed for partner depot **/
+}
+
+void CPlayerInventory::ClearItemCustomName( itemid_t iIndex )
+{
+	/** Removed for partner depot **/
+}
+
+void CPlayerInventory::WearItemSticker( itemid_t iIndex, int nSlot, float flStickerWearCurrent )
+{
+	/** Removed for partner depot **/
+}
 
 
+void CPlayerInventory::CItemContainers::Add( CEconItemView* pItem )
+{
+	Assert( DbgValidate() );
+	m_vecInventoryItems.AddToTail( pItem );
+	m_mapItemIDToItemView.Insert( pItem->GetItemID(), pItem );
+	Assert( DbgValidate() );
+}
+
+void CPlayerInventory::CItemContainers::Remove( itemid_t ullItemID )
+{
+	Assert( DbgValidate() );
+	CUtlVectorFixedGrowable< CEconItemView *, 2 > arrPurgeAndDeleteItems;
+	for ( ItemIdToItemMap_t::IndexType_t uiMapIdx = m_mapItemIDToItemView.Find( ullItemID );
+		( uiMapIdx != m_mapItemIDToItemView.InvalidIndex() ) &&
+		( m_mapItemIDToItemView.Key( uiMapIdx ) == ullItemID );
+	)
+	{
+		arrPurgeAndDeleteItems.AddToTail( m_mapItemIDToItemView.Element( uiMapIdx ) );
+		ItemIdToItemMap_t::IndexType_t uiNextMapIdx = m_mapItemIDToItemView.NextInorder( uiMapIdx );
+		m_vecInventoryItems.FindAndRemove( m_mapItemIDToItemView.Element( uiMapIdx ) );
+		m_mapItemIDToItemView.RemoveAt( uiMapIdx );
+		uiMapIdx = uiNextMapIdx;
+	}
+	arrPurgeAndDeleteItems.PurgeAndDeleteElements();
+	Assert( DbgValidate() );
+}
+
+void CPlayerInventory::CItemContainers::Purge()
+{
+	m_mapItemIDToItemView.Purge();
+	m_vecInventoryItems.PurgeAndDeleteElements();
+}
+
+// Make sure each element in vector can be found in map and the pointers match, vise versa
+// If we add more containers this will need to be rewritten to require all are synced.
+bool CPlayerInventory::CItemContainers::DbgValidate() const
+{
+	CUtlRBTree< CEconItemView *, int, CDefLess< CEconItemView * > > rbItems;
+	FOR_EACH_VEC( m_vecInventoryItems, i )
+	{
+		int idx = rbItems.InsertIfNotFound( m_vecInventoryItems[ i ] );
+		if ( idx == rbItems.InvalidIndex() )
+		{
+			DebuggerBreakIfDebugging();
+			return false;
+		}
+	}
+	FOR_EACH_MAP( m_mapItemIDToItemView, i )
+	{
+		CEconItemView *pElem = m_mapItemIDToItemView.Element( i );
+		if ( pElem->GetItemID() != m_mapItemIDToItemView.Key( i ) )
+		{
+			DebuggerBreakIfDebugging();
+			return false;
+		}
+		if ( !rbItems.Remove( pElem ) )
+		{
+			DebuggerBreakIfDebugging();
+			return false;
+		}
+	}
+	if ( rbItems.Count() )
+	{
+		DebuggerBreakIfDebugging();
+		return false;
+	}
+
+	return true;
+}

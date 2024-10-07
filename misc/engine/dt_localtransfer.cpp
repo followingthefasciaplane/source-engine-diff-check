@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -13,12 +13,12 @@
 #include "convar.h"
 #include "con_nprint.h"
 #include "utldict.h"
+#include "dt_localtransfer.h"
+#include "networkvar.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
-
-#define PROP_INDEX_VECTOR_ELEM_MARKER 0x8000
 
 
 static ConVar dt_UsePartialChangeEnts( 
@@ -68,7 +68,7 @@ inline void LocalTransfer_FastType(
 	}
 }
 
-void AddPropOffsetToMap( CSendTablePrecalc *pPrecalc, int iInProp, int iInOffset )
+void AddPropOffsetToMap( CSendTablePrecalc *pPrecalc, int iInProp, int iInOffset, const char *pszPropName )
 {
 	Assert( iInProp < 0xFFFF && iInOffset < 0xFFFF );	
 	unsigned short iProp = (unsigned short)iInProp;
@@ -76,12 +76,43 @@ void AddPropOffsetToMap( CSendTablePrecalc *pPrecalc, int iInProp, int iInOffset
 	
 	unsigned short iOldIndex = pPrecalc->m_PropOffsetToIndexMap.Find( iOffset );
 
-	if ( iOldIndex != pPrecalc->m_PropOffsetToIndexMap.InvalidIndex() )
+	if ( iOldIndex == pPrecalc->m_PropOffsetToIndexMap.InvalidIndex() )
 	{
-		return;
+		PropIndicesCollection_t coll;
+		coll.m_Indices[0] = iProp;
+		for ( int i=1; i < ARRAYSIZE( coll.m_Indices ); i++ )
+		{
+			coll.m_Indices[i] = 0xFFFF;
+		}
+
+		pPrecalc->m_PropOffsetToIndexMap.Insert( iOffset, coll );
 	}
-		
-	pPrecalc->m_PropOffsetToIndexMap.Insert( iOffset, iProp );
+	else
+	{
+		// At least one SendProp is pointing at this offset. No problem. We'll
+		// remember all of them and trigger a change in all the SendProps attached
+		// to this offset.
+		//
+		// Look for a slot in the PropIndicesCollection_t to hold the prop index.
+		PropIndicesCollection_t &coll = pPrecalc->m_PropOffsetToIndexMap[iOldIndex];
+		int i;
+		for ( i=0; i < ARRAYSIZE( coll.m_Indices ); i++ )
+		{
+			if ( coll.m_Indices[i] == 0xFFFF )
+			{
+				coll.m_Indices[i] = iProp;
+				break;
+			}
+		}
+
+		if ( i >= ARRAYSIZE( coll.m_Indices ) )
+		{
+			// If there wasn't enough space to hold this SendProp index, then we have a CNetworkVar that won't 
+			// cause this SendProp to get sent. The fixes are to increase the length of PropIndicesCollection_t::m_Indices
+			// or to have less references to this SendProp in the class' tree.
+			Error( "Overflowed a PropIndicesCollection_t on %s\n", pPrecalc->m_pSendTable->GetName() );
+		}
+	}
 }
 
 // This helps us figure out which properties can use the super-optimized mode
@@ -100,8 +131,7 @@ public:
 
 	bool IsNonPointerModifyingProxy( SendTableProxyFn fn, const CStandardSendProxies *pSendProxies )
 	{
-		if ( fn == m_pSendProxies->m_DataTableToDataTable ||
-			 fn == m_pSendProxies->m_SendLocalDataTable )
+		if ( fn == m_pSendProxies->m_DataTableToDataTable )
 		{
 			return true;
 		}
@@ -166,7 +196,7 @@ public:
 void BuildPropOffsetToIndexMap( CSendTablePrecalc *pPrecalc, const CStandardSendProxies *pSendProxies )
 {
 	CPropMapStack pmStack( pPrecalc, pSendProxies );
-	pmStack.Init();
+	pmStack.Init( false, false );
 	
 	for ( int i=0; i < pPrecalc->m_Props.Count(); i++ )
 	{
@@ -175,12 +205,12 @@ void BuildPropOffsetToIndexMap( CSendTablePrecalc *pPrecalc, const CStandardSend
 		{
 			const SendProp *pProp = pPrecalc->m_Props[i];
 			
-			int offset = pProp->GetOffset() + (int)pmStack.GetCurStructBase() - 1;
+			int offset = size_cast< int >( pProp->GetOffset() + (intp)pmStack.GetCurStructBase() - 1 );
 			int elementCount = 1;
 			int elementStride = 0;
 			if ( pProp->GetType() == DPT_Array )
 			{
-				offset = pProp->GetArrayProp()->GetOffset() + (int)pmStack.GetCurStructBase() - 1;
+				offset = size_cast< int >( pProp->GetArrayProp()->GetOffset() + (intp)pmStack.GetCurStructBase() - 1 );
 				elementCount = pProp->m_nElements;
 				elementStride = pProp->m_ElementStride;
 			}
@@ -188,13 +218,65 @@ void BuildPropOffsetToIndexMap( CSendTablePrecalc *pPrecalc, const CStandardSend
 			{
 				for ( int j = 0; j < elementCount; j++ )
 				{
-					if ( pProp->GetFlags() & SPROP_IS_A_VECTOR_ELEM )
+					if ( pProp->GetType() == DPT_Vector )
 					{
-						AddPropOffsetToMap( pPrecalc, i | PROP_INDEX_VECTOR_ELEM_MARKER, offset );
+						/*
+						// Disabled this, the warning is benign -Zoid
+						if ( !pProp->AreNetworkVarFlagsSet( NETWORKVAR_IS_A_VECTOR ) )
+						{
+							// TODO: This warning can probably go away. It shows up frequently when using SENDINFO_STRUCTARRAYELEM
+							// or a CNetworkArray of Vectors, which aren't using CNetworkVector but will report their change offsets properly.
+							Warning( "SendProp %s::%s is referencing a non-CNetworkVector-based network var\n", pPrecalc->m_pSendTable->GetName(), pProp->GetName() );
+						}
+						*/
+
+						if ( pProp->AreNetworkVarFlagsSet( NETWORKVAR_VECTOR_XYZ_FLAG ) )
+						{
+							// The CNetworkVarXYZ will generate change offsets for each component of the vector,
+							// and we want all 3 change offsets to point right back to us.
+							AddPropOffsetToMap( pPrecalc, i, offset, pProp->m_pVarName );
+							AddPropOffsetToMap( pPrecalc, i, offset + sizeof(float), pProp->m_pVarName );
+							AddPropOffsetToMap( pPrecalc, i, offset + sizeof(float) * 2, pProp->m_pVarName );
+						}
+						else if ( pProp->AreNetworkVarFlagsSet( NETWORKVAR_VECTOR_XY_SEPARATEZ_FLAG ) )
+						{
+							// The CNetworkVarXY_SeparateZ will generate change offsets for &x (which represents changes to X or Y),
+							// and &z. We want both change offsets to point right back to us.
+							AddPropOffsetToMap( pPrecalc, i, offset, pProp->m_pVarName );
+							AddPropOffsetToMap( pPrecalc, i, offset + sizeof(float) * 2, pProp->m_pVarName );
+						}
+						else
+						{
+							// We're referenced by a CNetworkVector, which will only generate change offsets
+							// at the offset of the variable itself (not for each component).
+							AddPropOffsetToMap( pPrecalc, i, offset, pProp->m_pVarName );
+						}
+					}
+					else if ( pProp->GetType() == DPT_VectorXY )
+					{
+						if ( pProp->AreNetworkVarFlagsSet( NETWORKVAR_VECTOR_XYZ_FLAG ) )
+						{
+							// The CNetworkVarXYZ will generate change offsets for each component of the vector,
+							// and we want the first 2 change offsets to point right back to us.
+							AddPropOffsetToMap( pPrecalc, i, offset, pProp->m_pVarName );
+							AddPropOffsetToMap( pPrecalc, i, offset + sizeof(float), pProp->m_pVarName );
+						}
+						else if ( pProp->AreNetworkVarFlagsSet( NETWORKVAR_VECTOR_XY_SEPARATEZ_FLAG ) )
+						{
+							// The CNetworkVarXY_SeparateZ will generate change offsets for &x (which represents changes to X or Y),
+							// and &z. We care about X and Y so we'll use the first one.
+							AddPropOffsetToMap( pPrecalc, i, offset, pProp->m_pVarName );
+						}
+						else
+						{
+							// We're referenced by a CNetworkVector, which will only generate change offsets
+							// at the offset of the variable itself (not for each component).
+							AddPropOffsetToMap( pPrecalc, i, offset, pProp->m_pVarName );
+						}
 					}
 					else
 					{
-						AddPropOffsetToMap( pPrecalc, i, offset );
+						AddPropOffsetToMap( pPrecalc, i, offset, pProp->m_pVarName );
 					}
 
 					offset += elementStride;
@@ -291,6 +373,19 @@ void LocalTransfer_InitFastCopy(
 }
 
 
+
+static inline bool FindInList( uint16 *pList, int nCount, uint16 lookFor )
+{
+	for ( int i=0; i < nCount; i++ )
+	{
+		if ( pList[i] == lookFor )
+			return true;
+	}
+	return false;
+}
+
+
+// This returns at most MAX_PROP_OFFSET_TO_INDICES_RESULTS results into pOut, so make sure it has at least that much room.
 inline int MapPropOffsetsToIndices( 
 	const CBaseEdict *pEdict,
 	CSendTablePrecalc *pPrecalc, 
@@ -298,7 +393,10 @@ inline int MapPropOffsetsToIndices(
 	unsigned short nOffsets,
 	unsigned short *pOut )
 {
-	int iOut = 0;
+	// We could get an overflow if this happens.
+	Assert( nOffsets <= MAX_CHANGE_OFFSETS );
+
+	int nOut = 0;
 	
 	for ( unsigned short i=0; i < nOffsets; i++ )
 	{
@@ -332,37 +430,30 @@ inline int MapPropOffsetsToIndices(
 		}
 		else
 		{
-			unsigned short propIndex = pPrecalc->m_PropOffsetToIndexMap[index];
-	
-			if ( propIndex & PROP_INDEX_VECTOR_ELEM_MARKER )
+			const PropIndicesCollection_t &coll = pPrecalc->m_PropOffsetToIndexMap[index];
+			
+			for ( int nIndex=0; nIndex < ARRAYSIZE( coll.m_Indices ); nIndex++ )
 			{
-				// Look for all 3 vector elems here.
-				unsigned short curOffset = pOffsets[i];
-				for ( int iVectorElem=0; iVectorElem < 3; iVectorElem++ )
+				unsigned short propIndex = coll.m_Indices[nIndex];
+				if ( propIndex == 0xFFFF )
 				{
-					index = pPrecalc->m_PropOffsetToIndexMap.Find( curOffset );
-					if ( index == 0xFFFF )
+					continue;
+				}		
+				else
+				{
+					if ( !FindInList( pOut, nOut, propIndex ) )
 					{
-						break;
+						if ( nOut >= MAX_PROP_OFFSET_TO_INDICES_RESULTS )
+							Error( "Overflowed output list in MapPropOffsetsToIndices" );
+
+						pOut[nOut++] = propIndex;
 					}
-					else
-					{
-						propIndex = pPrecalc->m_PropOffsetToIndexMap[index];
-						if ( propIndex & PROP_INDEX_VECTOR_ELEM_MARKER )
-							pOut[iOut++] = (propIndex & ~PROP_INDEX_VECTOR_ELEM_MARKER);
-					}
-				
-					curOffset += sizeof( float );
 				}
-			}
-			else
-			{
-				pOut[iOut++] = propIndex;
 			}
 		}
 	}
 	
-	return iOut;
+	return nOut;
 }
 
 
@@ -398,13 +489,11 @@ inline void AddToPartialChangeEntsList( int iEnt, bool bPartial )
 	if ( !dt_ShowPartialChangeEnts.GetInt() )
 		return;
 
-#if !defined( _XBOX )
 	if ( !bPartial )
 		iEnt = -iEnt;
 	
 	if ( g_PartialChangeEnts.Find( iEnt ) == -1 )
 		g_PartialChangeEnts.AddToTail( iEnt );
-#endif
 }
 
 
@@ -413,7 +502,6 @@ void PrintPartialChangeEntsList()
 	if ( !dt_ShowPartialChangeEnts.GetInt() )
 		return;
 
-#if !defined( _XBOX )
 	int iCurRow = 15;
 	Con_NPrintf( iCurRow++, "----- dt_ShowPartialChangeEnts -----" );
 	Con_NPrintf( iCurRow++, "" );
@@ -467,7 +555,6 @@ void PrintPartialChangeEntsList()
 	
 	g_PartialChangeEnts.Purge();
 	g_nTotalPropChanges = g_nTotalEntChanges = 0;
-#endif
 }
 
 
@@ -484,8 +571,11 @@ void LocalTransfer_TransferEntity(
 	++g_nTotalEntChanges;
 	CEdictChangeInfo *pCI = &g_pSharedChangeInfo->m_ChangeInfos[pEdict->GetChangeInfo()];
 
-	unsigned short propIndices[MAX_CHANGE_OFFSETS*3];
+	unsigned short propIndices[MAX_PROP_OFFSET_TO_INDICES_RESULTS];
 	
+	unsigned char tempData[ sizeof( CSendProxyRecipients ) * MAX_DATATABLE_PROXIES ];
+	CUtlMemory< CSendProxyRecipients > recip( (CSendProxyRecipients*)tempData, pSendTable->m_pPrecalc->GetNumDataTableProxies() );
+
 	// This code tries to only copy fields expressly marked as "changed" (by having the field offsets added to the changeoffsets vectors)
 	if ( pEdict->GetChangeInfoSerialNumber() == g_pSharedChangeInfo->m_iSerialNumber &&
 		 !bNewlyCreated &&
@@ -504,14 +594,14 @@ void LocalTransfer_TransferEntity(
 
 		// Setup the structure to traverse the source tree.
 		ErrorIfNot( pPrecalc, ("SendTable_Encode: Missing m_pPrecalc for SendTable %s.", pSendTable->m_pNetTableName) );
-		CServerDatatableStack serverStack( pPrecalc, (unsigned char*)pSrcEnt, objectID );
-		serverStack.Init( true );
+		CServerDatatableStack serverStack( pPrecalc, (unsigned char*)pSrcEnt, objectID, &recip );
+		serverStack.Init( true, true );
 
 		// Setup the structure to traverse the dest tree.
 		CRecvDecoder *pDecoder = pRecvTable->m_pDecoder;
 		ErrorIfNot( pDecoder, ("RecvTable_Decode: table '%s' missing a decoder.", pRecvTable->GetName()) );
 		CClientDatatableStack clientStack( pDecoder, (unsigned char*)pDestEnt, objectID );
-		clientStack.Init( true );
+		clientStack.Init( true, true );
 
 		// Cool. We can get away with just transferring a few.
 		for ( int iChanged=0; iChanged < nChangeOffsets; iChanged++ )
@@ -544,14 +634,14 @@ void LocalTransfer_TransferEntity(
 		// Setup the structure to traverse the source tree.
 		CSendTablePrecalc *pPrecalc = pSendTable->m_pPrecalc;
 		ErrorIfNot( pPrecalc, ("SendTable_Encode: Missing m_pPrecalc for SendTable %s.", pSendTable->m_pNetTableName) );
-		CServerDatatableStack serverStack( pPrecalc, (unsigned char*)pSrcEnt, objectID );
-		serverStack.Init();
+		CServerDatatableStack serverStack( pPrecalc, (unsigned char*)pSrcEnt, objectID, &recip );
+		serverStack.Init( false, true );
 
 		// Setup the structure to traverse the dest tree.
 		CRecvDecoder *pDecoder = pRecvTable->m_pDecoder;
 		ErrorIfNot( pDecoder, ("RecvTable_Decode: table '%s' missing a decoder.", pRecvTable->GetName()) );
 		CClientDatatableStack clientStack( pDecoder, (unsigned char*)pDestEnt, objectID );
-		clientStack.Init();
+		clientStack.Init( false, true );
 
 		AddToPartialChangeEntsList( (edict_t*)pEdict - sv.edicts, false );
 

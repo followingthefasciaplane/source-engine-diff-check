@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2004, Valve LLC, All rights reserved. ============
 //
 // Purpose: 
 //
@@ -12,6 +12,10 @@
 #include "HDRCombineTo16Bit_vs20.inc"
 #include "convar.h"
 
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
+
 BEGIN_VS_SHADER_FLAGS( HDRCombineTo16Bit, "Help for HDRCombineTo16Bit", SHADER_NOT_EDITABLE )
 	BEGIN_SHADER_PARAMS
 		SHADER_PARAM( SOURCEMRTRENDERTARGET, SHADER_PARAM_TYPE_TEXTURE, "", "" )
@@ -24,12 +28,6 @@ BEGIN_VS_SHADER_FLAGS( HDRCombineTo16Bit, "Help for HDRCombineTo16Bit", SHADER_N
 	
 	SHADER_FALLBACK
 	{
-		// Requires DX9 + above
-		if (!g_pHardwareConfig->SupportsVertexAndPixelShaders())
-		{
-			Assert( 0 );
-			return "Wireframe";
-		}
 		return 0;
 	}
 
@@ -63,7 +61,7 @@ BEGIN_VS_SHADER_FLAGS( HDRCombineTo16Bit, "Help for HDRCombineTo16Bit", SHADER_N
 
 		DYNAMIC_STATE
 		{
-			BindTexture( SHADER_SAMPLER0, SOURCEMRTRENDERTARGET, -1 );
+			BindTexture( SHADER_SAMPLER0, TEXTURE_BINDFLAGS_NONE, SOURCEMRTRENDERTARGET, -1 );
 			DECLARE_DYNAMIC_VERTEX_SHADER( hdrcombineto16bit_vs20 );
 			SET_DYNAMIC_VERTEX_SHADER( hdrcombineto16bit_vs20 );
 

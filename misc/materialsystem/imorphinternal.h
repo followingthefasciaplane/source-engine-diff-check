@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -39,7 +39,7 @@ abstract_class IMorphInternal : public IMorph
 {
 public:
 	virtual void Init( MorphFormat_t format, const char *pDebugName ) = 0;
-	virtual void Bind( IMorphMgrRenderContext *pRenderContext ) = 0;
+	virtual bool Bind( IMorphMgrRenderContext *pRenderContext ) = 0;
 	virtual MorphFormat_t GetMorphFormat() const = 0;
 };
 

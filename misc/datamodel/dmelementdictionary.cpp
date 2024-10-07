@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -30,6 +30,7 @@ void CDmElementDictionary::Clear()
 	m_Attributes.Purge();
 	m_ArrayAttributes.Purge();
 	m_elementsToDelete.Purge();
+	m_idmap.Purge();
 }
 
 	
@@ -64,7 +65,7 @@ void CDmElementDictionary::AddAttribute( CDmAttribute *pAttribute, const DmObjec
 		return; // don't add attributes if their element is being deleted
 
 	int i = m_Attributes.AddToTail();
-	m_Attributes[i].m_nType = AT_OBJECTID;
+	m_Attributes[i].m_bId = true;
 	m_Attributes[i].m_pAttribute = pAttribute;
 	CopyUniqueId( objectId, &m_Attributes[i].m_ObjectId );
 }
@@ -79,7 +80,7 @@ void CDmElementDictionary::AddArrayAttribute( CDmAttribute *pAttribute, DmElemen
 		return; // don't add attributes if their element is being deleted
 
 	int i = m_ArrayAttributes.AddToTail();
-	m_ArrayAttributes[i].m_nType = AT_ELEMENT;
+	m_ArrayAttributes[i].m_bId = false;
 	m_ArrayAttributes[i].m_pAttribute = pAttribute;
 	m_ArrayAttributes[i].m_hElement = hElement;
 }
@@ -90,7 +91,7 @@ void CDmElementDictionary::AddArrayAttribute( CDmAttribute *pAttribute, const Dm
 		return; // don't add attributes if their element is being deleted
 
 	int i = m_ArrayAttributes.AddToTail();
-	m_ArrayAttributes[i].m_nType = AT_OBJECTID;
+	m_ArrayAttributes[i].m_bId = true;
 	m_ArrayAttributes[i].m_pAttribute = pAttribute;
 	CopyUniqueId( objectId, &m_ArrayAttributes[i].m_ObjectId );
 }
@@ -203,7 +204,7 @@ void CDmElementDictionary::HookUpElementAttributes()
 	for ( int i = 0; i < n; ++i )
 	{
 		Assert( m_Attributes[i].m_pAttribute->GetType() == AT_ELEMENT );
-		Assert( m_Attributes[i].m_nType == AT_OBJECTID );
+		Assert( m_Attributes[i].m_bId );
 
 		UtlHashHandle_t h = m_idmap.Find( DmIdPair_t( m_Attributes[i].m_ObjectId ) );
 		DmObjectId_t &id = h == m_idmap.InvalidHandle() ? m_Attributes[i].m_ObjectId : m_idmap[ h ].m_newId;
@@ -242,7 +243,7 @@ void CDmElementDictionary::HookUpElementArrayAttributes()
 
 		CDmrElementArray<> array( m_ArrayAttributes[i].m_pAttribute );
 
-		if ( m_ArrayAttributes[i].m_nType == AT_ELEMENT )
+		if ( !m_ArrayAttributes[i].m_bId )
 		{
 			CDmElement *pElement = GetElement( m_ArrayAttributes[i].m_hElement );
 			array.AddToTail( pElement );
@@ -337,6 +338,9 @@ void CDmElementSerializationDictionary::BuildElementList_R( CDmElement *pElement
 	info.m_pElement = pElement;
 	m_Dict.Insert( info );
 
+	// Tell the element we're about to serialize it
+	pElement->OnElementSerialized();
+
 	for ( CDmAttribute *pAttribute = pElement->FirstAttribute(); pAttribute; pAttribute = pAttribute->NextAttribute() )
 	{
 		if ( pAttribute->IsFlagSet( FATTRIB_DONTSAVE ) )
@@ -362,7 +366,7 @@ void CDmElementSerializationDictionary::BuildElementList_R( CDmElement *pElement
 				{
 					CDmElement *pChild = array[i];
 					if ( !pChild || pChild->GetFileId() != pElement->GetFileId() )
-						break;
+						continue;
 
 					BuildElementList_R( pChild, bFlatMode, false );
 				}

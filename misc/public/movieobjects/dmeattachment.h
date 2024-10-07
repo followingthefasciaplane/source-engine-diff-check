@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =====//
 //
 // Dme version of a model attachment point
 //
@@ -11,8 +11,12 @@
 #pragma once
 #endif
 
+
+// Valve includes
 #include "movieobjects/dmeshape.h"
-#include "materialsystem/MaterialSystemUtil.h"
+#include "materialsystem/imaterialsystem.h"
+#include "materialsystem/materialsystemutil.h"
+
 
 //-----------------------------------------------------------------------------
 // Forward Declarations
@@ -34,7 +38,9 @@ public:
 	CDmaVar< bool > m_bIsWorldAligned;	// Is the attachment world-aligned?
 
 private:
-	CMaterialReference m_AttachmentMaterial;
+	static IMaterial *sm_pMatAttachment;
+	CMaterialReference m_MatRefAttachment;
+
 };
 
 

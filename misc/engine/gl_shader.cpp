@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright (c) 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -95,7 +95,7 @@ void Shader_Disconnect( void )
 
 
 
-#ifndef SWDS
+#ifndef DEDICATED
 
 void Shader_SwapBuffers( void )
 {

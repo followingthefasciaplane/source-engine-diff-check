@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -8,8 +8,12 @@
 #include "BaseVSShader.h"
 #include "common_hlsl_cpp_consts.h"
 
-#include "Downsample_ps20.inc"
-#include "Downsample_ps20b.inc"
+#include "downsample_nohdr_ps20.inc"
+#include "downsample_nohdr_ps20b.inc"
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
 
 BEGIN_VS_SHADER_FLAGS( sfm_downsample_shader, "Help for Downsample", SHADER_NOT_EDITABLE )
 	BEGIN_SHADER_PARAMS
@@ -22,12 +26,6 @@ BEGIN_VS_SHADER_FLAGS( sfm_downsample_shader, "Help for Downsample", SHADER_NOT_
 	
 	SHADER_FALLBACK
 	{
-		// Requires DX9 + above
-		if (!g_pHardwareConfig->SupportsVertexAndPixelShaders())
-		{
-			Assert( 0 );
-			return "Wireframe";
-		}
 		return 0;
 	}
 
@@ -37,66 +35,53 @@ BEGIN_VS_SHADER_FLAGS( sfm_downsample_shader, "Help for Downsample", SHADER_NOT_
 		{
 			pShaderShadow->EnableDepthWrites( false );
 			pShaderShadow->EnableAlphaWrites( true );
-
 			pShaderShadow->EnableTexture( SHADER_SAMPLER0, true );
-			int fmt = VERTEX_POSITION;
-			pShaderShadow->VertexShaderVertexFormat( fmt, 1, 0, 0 );
+			pShaderShadow->EnableSRGBRead( SHADER_SAMPLER0, false );
+			pShaderShadow->EnableSRGBWrite( false );
+
+			pShaderShadow->VertexShaderVertexFormat( VERTEX_POSITION, 1, 0, 0 );
 
 			pShaderShadow->SetVertexShader( "downsample_vs20", 0 );
 
-			if( g_pHardwareConfig->SupportsPixelShaders_2_b() )
-			{
-				DECLARE_STATIC_PIXEL_SHADER( downsample_ps20b );
-				SET_STATIC_PIXEL_SHADER( downsample_ps20b );
-			}
-			else
-			{
-				DECLARE_STATIC_PIXEL_SHADER( downsample_ps20 );
-				SET_STATIC_PIXEL_SHADER( downsample_ps20 );
-			}
+			DECLARE_STATIC_PIXEL_SHADER( downsample_nohdr_ps20b );
+			SET_STATIC_PIXEL_SHADER_COMBO( BLOOMTYPE, 0 );
+			SET_STATIC_PIXEL_SHADER_COMBO( PS3REGCOUNT48, 0 );
+			SET_STATIC_PIXEL_SHADER_COMBO( SRGB_INPUT_ADAPTER, 0 ); // Mac sRGB insanity			
+			SET_STATIC_PIXEL_SHADER( downsample_nohdr_ps20b );
 		}
 
 		DYNAMIC_STATE
 		{
-			BindTexture( SHADER_SAMPLER0, BASETEXTURE, -1 );
+			BindTexture( SHADER_SAMPLER0, TEXTURE_BINDFLAGS_NONE, BASETEXTURE, -1 );
 
-			ITexture *src_texture=params[BASETEXTURE]->GetTextureValue();
-			int width  = src_texture->GetActualWidth();
-			int height = src_texture->GetActualHeight();
+			int width, height;
+			pShaderAPI->GetCurrentRenderTargetDimensions( width, height );
 
-			float v[4];
-			float dX = 1.0f / width;
-			float dY = 1.0f / height;
+			float v[4][4];
+			float dX = 1.0f / (float) width;
+			float dY = 1.0f / (float) height;
 
-			v[0] = -dX;
-			v[1] = -dY;
-			pShaderAPI->SetVertexShaderConstant( VERTEX_SHADER_SHADER_SPECIFIC_CONST_0, v, 1 );
-			v[0] = -dX;
-			v[1] = dY;
-			pShaderAPI->SetVertexShaderConstant( VERTEX_SHADER_SHADER_SPECIFIC_CONST_1, v, 1 );
-			v[0] = dX;
-			v[1] = -dY;
-			pShaderAPI->SetVertexShaderConstant( VERTEX_SHADER_SHADER_SPECIFIC_CONST_2, v, 1 );
-			v[0] = dX;
-			v[1] = dY;
-			pShaderAPI->SetVertexShaderConstant( VERTEX_SHADER_SHADER_SPECIFIC_CONST_3, v, 1 );
-
-			// Setup luminance threshold (all values are scaled down by max luminance)
-//			v[0] = 1.0f / MAX_HDR_OVERBRIGHT;
-			v[0] = 0.0f;
-			pShaderAPI->SetPixelShaderConstant( 0, v, 1 );
+			v[0][0] = 0.5 * dX;
+			v[0][1] = 0.5 * dY;
+			v[1][0] = 2.5 * dX;
+			v[1][1] = 0.5 * dY;
+			v[2][0] = 0.5 * dX;
+			v[2][1] = 2.5 * dY;
+			v[3][0] = 2.5 * dX;
+			v[3][1] = 2.5 * dY;
+			pShaderAPI->SetVertexShaderConstant( VERTEX_SHADER_SHADER_SPECIFIC_CONST_0, &v[0][0], 4 );
 
 			pShaderAPI->SetVertexShaderIndex( 0 );
-			if( g_pHardwareConfig->SupportsPixelShaders_2_b() )
-			{
-				DECLARE_DYNAMIC_PIXEL_SHADER( downsample_ps20b );
-				SET_DYNAMIC_PIXEL_SHADER( downsample_ps20b );
-			}
-			else
-			{
-				DECLARE_DYNAMIC_PIXEL_SHADER( downsample_ps20 );
-				SET_DYNAMIC_PIXEL_SHADER( downsample_ps20 );
-			}
+
+			float flPixelShaderParams[4] = { 1.0f, 1.0f, 1.0f, 2.2f };
+			pShaderAPI->SetPixelShaderConstant( 0, flPixelShaderParams, 1 );
+
+			float vPsConst1[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+			pShaderAPI->SetPixelShaderConstant( 1, vPsConst1, 1 );
+
+			DECLARE_DYNAMIC_PIXEL_SHADER( downsample_nohdr_ps20b );
+			SET_DYNAMIC_PIXEL_SHADER_COMBO( FLOAT_BACK_BUFFER, 1 );
+			SET_DYNAMIC_PIXEL_SHADER( downsample_nohdr_ps20b );
 		}
 		Draw();
 	}

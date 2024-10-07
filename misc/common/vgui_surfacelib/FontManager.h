@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -11,8 +11,9 @@
 #pragma once
 #endif
 
-#include <vgui/VGUI.h>
+#include "vgui/vgui.h"
 #include "vgui_surfacelib/FontAmalgam.h"
+#include "vgui_surfacelib/ifontsurface.h"
 #include "materialsystem/imaterialsystem.h"
 #include "filesystem.h"
 #include "vguifont.h"
@@ -20,7 +21,7 @@
 #ifdef LINUX
 #include <ft2build.h>
 #include FT_FREETYPE_H
-typedef void *(*FontDataHelper)( const char *pchFontName, int &size, const char *fontFileName );
+typedef void *(*FontDataHelper)( const char *pchFontName, int &size );
 #endif
 
 #ifdef CreateFont
@@ -40,6 +41,7 @@ public:
 	~CFontManager();
 
 	void SetLanguage(const char *language);
+	const char *GetLanguage();
 
 	// clears the current font list, frees any resources
 	void ClearAllFonts();
@@ -50,10 +52,8 @@ public:
 	bool SetBitmapFontGlyphSet(HFont font, const char *windowsFontName, float scalex, float scaley, int flags);
 	void SetFontScale(HFont font, float sx, float sy);
 	const char *GetFontName( HFont font );
-	const char *GetFontFamilyName( HFont font );
 	void GetCharABCwide(HFont font, int ch, int &a, int &b, int &c);
 	int GetFontTall(HFont font);
-	int GetFontTallRequested(HFont font);
 	int GetFontAscent(HFont font, wchar_t wch);
 	int GetCharacterWidth(HFont font, int ch);
 	bool GetFontUnderlined( HFont font );
@@ -73,7 +73,7 @@ public:
 
 #ifdef LINUX
 	FT_Library GetFontLibraryHandle() { return library; }
-	void SetFontDataHelper( FontDataHelper helper ) { m_pFontDataHelper = helper; }
+	void SetFontDataHelper( FontDataHelper helper ) { pFontDataHelper = helper; }
 #endif
 
 #if defined( _X360 )
@@ -98,7 +98,7 @@ private:
 
 #ifdef LINUX
 	FT_Library library; 
-	FontDataHelper m_pFontDataHelper;
+	FontDataHelper pFontDataHelper;		
 #endif
 	char m_szLanguage[64];
 	IFileSystem		*m_pFileSystem;

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -10,182 +10,173 @@
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
+#include "tier0/microprofiler.h"
 
-void RegisterUserMessages( void );
+static ConVar cl_show_usermessage( "cl_show_usermessage", "0", 0, "Shows the incoming user messages for this client and dumps them out the type and size of the messages to the console. Setting this to 2 will display message contents as well" ); // filter incoming voice data
 
 //-----------------------------------------------------------------------------
-// Purpose: Force registration on .dll load
-// FIXME:  Should this be a client/server system?
+IUserMessageBinder::~IUserMessageBinder()
+{
+}
+
+
 //-----------------------------------------------------------------------------
 CUserMessages::CUserMessages()
 {
-	// Game specific registration function;
-	RegisterUserMessages();
+	SetDefLessFunc( m_UserMessageBinderMap );
 }
 
+//-----------------------------------------------------------------------------
 CUserMessages::~CUserMessages()
 {
-	int c = m_UserMessages.Count();
-	for ( int i = 0; i < c; ++i )
-	{
-		delete m_UserMessages[ i ];
-	}
-	m_UserMessages.RemoveAll();
+	m_UserMessageBinderMap.Purge();
 }
 
+// we might wanna move this definition here::
+// template< int msgType, typename PB_OBJECT_TYPE, int32 nExpectedPassthroughInReplay >
+// virtual ::google::protobuf::Message * CUserMessageBinder::BindParams<msgType, PB_OBJECT_TYPE, nExpectedPassthroughInReplay >::Parse( int32 nPassthroughFlags, const void *msg, int size )
+
 //-----------------------------------------------------------------------------
-// Purpose: 
-// Input  : *name - 
-// Output : int
-//-----------------------------------------------------------------------------
-int CUserMessages::LookupUserMessage( const char *name )
+bool CUserMessages::DispatchUserMessage( int msg_type, int32 nPassthroughFlags, int size, const void *msg )
 {
-	int idx = m_UserMessages.Find( name );
-	if ( idx == m_UserMessages.InvalidIndex() )
+	UserMessageHandlerMap_t::IndexType_t index = m_UserMessageBinderMap.Find( msg_type );
+	if ( index == UserMessageHandlerMap_t::InvalidIndex() )
 	{
-		return -1;
+		DevMsg( "CUserMessages::DispatchUserMessage:  Unknown msg type %i\n", msg_type );
+		return true;
 	}
+		
+	int nSlot = GET_ACTIVE_SPLITSCREEN_SLOT();
 
-	return idx;
-}
-
-//-----------------------------------------------------------------------------
-// Purpose: 
-// Input  : index - 
-// Output : int
-//-----------------------------------------------------------------------------
-int CUserMessages::GetUserMessageSize( int index )
-{
-	if ( index < 0 || index >= (int)m_UserMessages.Count() )
+	if ( m_UserMessageBinderMap.Element( index )[ nSlot ].Count() == 0 )
 	{
-		Error( "CUserMessages::GetUserMessageSize( %i ) out of range!!!\n", index );
+		// not hooking a usermessage is acceptable, pretend we parsed it
+		return true;
 	}
 
-	CUserMessage *e = m_UserMessages[ index ];
-	return e->size;
-}
-
-//-----------------------------------------------------------------------------
-// Purpose: 
-// Input  : index - 
-// Output : char const
-//-----------------------------------------------------------------------------
-const char *CUserMessages::GetUserMessageName( int index )
-{
-	if ( index < 0 || index >= (int)m_UserMessages.Count() )
+	IUserMessageBinder *pHandler = m_UserMessageBinderMap.Element( index )[ nSlot ][0];
+	if ( !pHandler )
 	{
-		Error( "CUserMessages::GetUserMessageSize( %i ) out of range!!!\n", index );
+		// not hooking a usermessage is acceptable, pretend we parsed it
+		return true;
 	}
 
-	return m_UserMessages.GetElementName( index );
-}
+	bool bSilentIgnore = false;
+	::google::protobuf::Message *pMsg = pHandler->Parse( nPassthroughFlags, msg, size, bSilentIgnore );
 
-//-----------------------------------------------------------------------------
-// Purpose: 
-// Input  : index - 
-// Output : Returns true on success, false on failure.
-//-----------------------------------------------------------------------------
-bool CUserMessages::IsValidIndex( int index )
-{
-	return m_UserMessages.IsValidIndex( index );
-}
-
-//-----------------------------------------------------------------------------
-// Purpose: 
-// Input  : *name - 
-//			size - -1 for variable size
-//-----------------------------------------------------------------------------
-void CUserMessages::Register( const char *name, int size )
-{
-	Assert( name );
-	int idx = m_UserMessages.Find( name );
-	if ( idx != m_UserMessages.InvalidIndex() )
+	if ( bSilentIgnore )
 	{
-		Error( "CUserMessages::Register '%s' already registered\n", name );
+		if ( pMsg )
+			delete pMsg;
+		//DevMsg( "CUserMessages::DispatchUserMessage: Silently ignoring alt-timeline msg type %i\n", msg_type );
+		return true;
 	}
 
-	CUserMessage * entry = new CUserMessage;
-	entry->size = size;
-	entry->name = name;
-
-	m_UserMessages.Insert( name, entry );
-}
-
-//-----------------------------------------------------------------------------
-// Purpose: 
-// Input  : *name - 
-//			hook - 
-//-----------------------------------------------------------------------------
-void CUserMessages::HookMessage( const char *name, pfnUserMsgHook hook )
-{
-#if defined( CLIENT_DLL )
-	Assert( name );
-	Assert( hook );
-
-	int idx = m_UserMessages.Find( name );
-	if ( idx == m_UserMessages.InvalidIndex() )
+	if ( !pMsg )
 	{
-		DevMsg( "CUserMessages::HookMessage:  no such message %s\n", name );
+		DevMsg( "CUserMessages::DispatchUserMessage:  Parse error msg type=%i\n", msg_type );
 		Assert( 0 );
+		return false;
+	}
+
+	//handle logging to the console if this is enabled
+	if ( cl_show_usermessage.GetBool() )
+	{
+		Msg("DispatchUserMessage - %s(%d) bytes: %d\n", pMsg->GetTypeName().c_str(), msg_type, pMsg->ByteSize() );
+		//handle message content display if they have it set to a value > 1
+		if( cl_show_usermessage.GetInt() > 1 )
+			Msg("%s", pMsg->DebugString().c_str() );
+	}
+
+	bool result = true;
+	FOR_EACH_VEC( m_UserMessageBinderMap.Element( index )[ nSlot ], i )
+	{
+		IUserMessageBinder *h = m_UserMessageBinderMap.Element( index )[ nSlot ][i];
+		if ( h )
+		{
+			result = h->Invoke( pMsg );
+		}
+
+		if ( !result )
+		{
+			break;
+		}
+	}
+
+	delete pMsg;
+
+	return result;
+}
+
+//-----------------------------------------------------------------------------
+void CUserMessages::BindMessage( IUserMessageBinder *pMessageBinder )
+{
+	if ( !pMessageBinder )
+	{
 		return;
 	}
 
-	int i = m_UserMessages[ idx ]->clienthooks.AddToTail();
-	m_UserMessages[ idx ]->clienthooks[i] = hook;
+	int message = pMessageBinder->GetType();
 
-#else
-	Error( "CUserMessages::HookMessage called from server code!!!\n" );
+	UserMessageHandlerMap_t::IndexType_t index = m_UserMessageBinderMap.Find( message );
+	if ( index == UserMessageHandlerMap_t::InvalidIndex() )
+	{
+		index = m_UserMessageBinderMap.Insert( message );
+		m_UserMessageBinderMap.Element( index ).SetCount( MAX_SPLITSCREEN_PLAYERS );
+	}
+
+	ASSERT_LOCAL_PLAYER_RESOLVABLE();
+
+#ifdef DEBUG
+	FOR_EACH_VEC( m_UserMessageBinderMap.Element( index )[ GET_ACTIVE_SPLITSCREEN_SLOT() ], j )
+	{
+		if( m_UserMessageBinderMap.Element( index )[ GET_ACTIVE_SPLITSCREEN_SLOT() ][ j ]->GetAbstractDelegate().IsEqual( pMessageBinder->GetAbstractDelegate() ) )
+		{
+			DevMsg( "CUserMessages::BindMessage called duplicate %d!!!\n", pMessageBinder->GetType() );
+		}
+	}
 #endif
+
+	m_UserMessageBinderMap.Element( index )[ GET_ACTIVE_SPLITSCREEN_SLOT() ].AddToTail( pMessageBinder );
 }
 
 //-----------------------------------------------------------------------------
-// Purpose: 
-// Input  : *pszName - 
-//			iSize - 
-//			*pbuf - 
-// Output : Returns true on success, false on failure.
-//-----------------------------------------------------------------------------
-bool CUserMessages::DispatchUserMessage( int msg_type, bf_read &msg_data )
+bool CUserMessages::UnbindMessage( IUserMessageBinder *pMessageBinder )
 {
-#if defined( CLIENT_DLL )
-	if ( msg_type < 0 || msg_type >= (int)m_UserMessages.Count() )
+	if ( !pMessageBinder )
 	{
-		DevMsg( "CUserMessages::DispatchUserMessage:  Bogus msg type %i (max == %i)\n", msg_type, m_UserMessages.Count() );
-		Assert( 0 );
+		return true;
+	}
+
+	int message = pMessageBinder->GetType();
+
+	UserMessageHandlerMap_t::IndexType_t index = m_UserMessageBinderMap.Find( message );
+	
+	if ( index == UserMessageHandlerMap_t::InvalidIndex() )
+	{
 		return false;
 	}
 
-	CUserMessage *entry = m_UserMessages[ msg_type ];
-
-	if ( !entry )
+	for ( int split = 0; split < MAX_SPLITSCREEN_PLAYERS; ++split )
 	{
-		DevMsg( "CUserMessages::DispatchUserMessage:  Missing client entry for msg type %i\n", msg_type );
-		Assert( 0 );
-		return false;
+		FOR_EACH_VEC( m_UserMessageBinderMap.Element( index )[ split ], i )
+		{
+			if ( m_UserMessageBinderMap.Element( index )[ split ][i] == pMessageBinder )
+			{
+				m_UserMessageBinderMap.Element( index )[ split ].Remove(i);
+				return true;
+			}
+		}
 	}
-
-	if ( entry->clienthooks.Count() == 0 )
-	{
-		DevMsg( "CUserMessages::DispatchUserMessage:  missing client hook for %s\n", GetUserMessageName(msg_type) );
-		Assert( 0 );
-		return false;
-	}
-
-	for (int i = 0; i < entry->clienthooks.Count(); i++  )
-	{
-		bf_read msg_copy = msg_data;
-
-		pfnUserMsgHook hook = entry->clienthooks[i];
-		(*hook)( msg_copy );
-	}
-	return true;
-#else
-	Error( "CUserMessages::DispatchUserMessage called from server code!!!\n" );
 	return false;
-#endif
 }
 
+
+//-----------------------------------------------------------------------------
 // Singleton
-static CUserMessages g_UserMessages;
-// Expose to rest of .dll
-CUserMessages *usermessages = &g_UserMessages;
+CUserMessages *UserMessages()
+{
+	static CUserMessages g_UserMessages;
+	return &g_UserMessages;
+}
+

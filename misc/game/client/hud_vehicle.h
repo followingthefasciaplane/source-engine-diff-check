@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -26,7 +26,7 @@ class CHudVehicle : public CHudElement, public vgui::Panel
 {
 	DECLARE_CLASS_SIMPLE( CHudVehicle, vgui::Panel );
 public:
-	CHudVehicle( const char *pElementName );
+	explicit CHudVehicle( const char *pElementName );
 
 	virtual bool	ShouldDraw();
 

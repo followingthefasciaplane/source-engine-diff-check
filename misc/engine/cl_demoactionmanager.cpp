@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -6,7 +6,7 @@
 //=============================================================================//
 
 #include "client_pch.h"
-#include <vgui/VGUI.h>
+#include <vgui/vgui.h>
 #include <vgui_controls/Controls.h>
 #include "cl_demoaction.h"
 #include "cl_demoactionmanager.h"
@@ -197,7 +197,7 @@ void CDemoActionManager::StartPlaying( char const *demfilename )
 	// Clear anything currently pending
 	StopPlaying();
 
-	bool changedfile = Q_strcasecmp( demfilename, m_szCurrentFile ) != 0;
+	bool changedfile = Q_strcasecmp( demfilename, m_szCurrentFile ) != 0 ? true : false;
 
 	Q_strncpy( m_szCurrentFile, demfilename, sizeof( m_szCurrentFile ) );
 
@@ -357,16 +357,17 @@ void CDemoActionManager::SaveToFile( void )
 void CDemoActionManager::OnVDMLoaded( char const *demfilename )
 {
 	// Notify UI?
-
+#if !defined (LINUX)
 	if ( g_pDemoUI )
 	{
 		g_pDemoUI->OnVDMChanged();
 	}
 
-	if ( g_pDemoUI2 )
-	{
-		g_pDemoUI2->OnVDMChanged();
-	}
+	//if ( g_pDemoUI2 )
+	//{
+	//	g_pDemoUI2->OnVDMChanged();
+	//}
+#endif
 }
 
 

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -33,7 +33,7 @@ public:
 // Functions.
 // ---------------------------------------------------------------------------- //
 
-// Copies cl.pAreaBits, finds the area the viewer is in, and figures out what
+// Copies GetBaseLocalClient().pAreaBits, finds the area the viewer is in, and figures out what
 // other areas are visible. The new bits are placed in g_RenderAreaBits.
 void R_SetupAreaBits( int iForceViewLeaf = -1, const VisOverrideData_t* pVisData = NULL, float *pWaterReflectionHeight = NULL );
 
@@ -43,33 +43,48 @@ unsigned char R_IsAreaVisible( int area );
 void R_Areaportal_LevelInit();
 void R_Areaportal_LevelShutdown();
 
+inline bool CullNodeSIMD( const Frustum_t &frustum, mnode_t *pNode )
+{
+	fltx4 center4 = LoadAlignedSIMD( pNode->m_vecCenter );
+	fltx4 centerx = SplatXSIMD(center4);
+	fltx4 centery = SplatYSIMD(center4);
+	fltx4 centerz = SplatZSIMD(center4);
+	fltx4 extents4 = LoadAlignedSIMD( pNode->m_vecHalfDiagonal );
+	fltx4 extx = SplatXSIMD(extents4);
+	fltx4 exty = SplatYSIMD(extents4);
+	fltx4 extz = SplatZSIMD(extents4);
+
+	// compute the dot product of the normal and the farthest corner
+	for ( int i = 0; i < 2; i++ )
+	{
+		fltx4 xTotalBack = AddSIMD( MulSIMD( frustum.planes[i].nX, centerx ), MulSIMD(frustum.planes[i].nXAbs, extx ) );
+		fltx4 yTotalBack = AddSIMD( MulSIMD( frustum.planes[i].nY, centery ), MulSIMD(frustum.planes[i].nYAbs, exty ) );
+		fltx4 zTotalBack = AddSIMD( MulSIMD( frustum.planes[i].nZ, centerz ), MulSIMD(frustum.planes[i].nZAbs, extz ) );
+		fltx4 dotBack = AddSIMD( xTotalBack, AddSIMD(yTotalBack, zTotalBack) );
+		// if plane of the farthest corner is behind the plane, then the box is completely outside this plane
+#if defined( _X360 )
+		if  ( !XMVector3GreaterOrEqual( dotBack, frustum.planes[i].dist ) )
+			return true;
+#elif defined( _PS3 )
+		if ( vec_any_lt( dotBack, frustum.planes[i].dist ) )
+			return true;
+#else
+		fltx4 isOut = ( fltx4 ) CmpLtSIMD( dotBack, frustum.planes[i].dist );
+		if ( IsAnyTrue( isOut ) )
+			return true;
+#endif
+	}
+	return false; 
+}
+
 // Decides if the node can be seen through the area portals (ie: if you're
 // looking out a window with an areaportal in it, this will clip out the
 // stuff to the sides).
-enum
-{
-	FRUSTUM_CLIP_RIGHT = (1 << FRUSTUM_RIGHT),
-	FRUSTUM_CLIP_LEFT = (1 << FRUSTUM_LEFT),
-	FRUSTUM_CLIP_TOP = (1 << FRUSTUM_TOP),
-	FRUSTUM_CLIP_BOTTOM = (1 << FRUSTUM_BOTTOM),
-
-	FRUSTUM_CLIP_MASK = FRUSTUM_CLIP_RIGHT | FRUSTUM_CLIP_LEFT | FRUSTUM_CLIP_TOP | FRUSTUM_CLIP_BOTTOM,
-
-	// This mask is used to reset the clip flags when we first enter an area
-	FRUSTUM_CLIP_IN_AREA = 0x80000000,
-
-	// Set the clipmask to this to cause it to clip against all frustum planes
-	FRUSTUM_CLIP_ALL = FRUSTUM_CLIP_MASK,
-
-	// Set the clipmask to this to suppress all future clipping
-	FRUSTUM_SUPPRESS_CLIPPING = FRUSTUM_CLIP_IN_AREA,
-};
-
-
-bool R_CullNode( Frustum_t *pAreaFrustum, mnode_t *pNode, int &nClipMask );
-
+bool R_CullNode( mnode_t *pNode );
 const Frustum_t* GetAreaFrustum( int area );
-
+// get a list of all area frustums
+int GetAllAreaFrustums( Frustum_t **pFrustumList, int listMax );
+bool R_ShouldUseAreaFrustum( int area );
 
 // ---------------------------------------------------------------------------- //
 // Globals.
@@ -89,8 +104,7 @@ extern CUtlVector<CPortalRect> g_PortalRects;
 inline unsigned char R_IsAreaVisible( int area )
 {
 	extern unsigned char g_RenderAreaBits[32];
-	return g_RenderAreaBits[area>>3] & (1 << (area&7));
+	return g_RenderAreaBits[area>>3] & GetBitForBitnum(area&7);
 }
-
 
 #endif // R_AREAPORTAL_H

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright (c) 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -13,6 +13,7 @@
 #include "characterset.h"
 #include "mem_fgets.h"
 #include "tier0/icommandline.h"
+#include "tier0/platform.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -33,7 +34,7 @@ const char *gNetworkMessageNames[MAX_NETMESSAGE] = { NETWORK_MESSAGE1, NETWORK_M
 
 client_textmessage_t	gNetworkTextMessage[MAX_NETMESSAGE] = 
 {
-	{ 0, // effect
+	0, // effect
 	255,255,255,255,
 	255,255,255,255,
 	-1.0f, // x
@@ -44,7 +45,7 @@ client_textmessage_t	gNetworkTextMessage[MAX_NETMESSAGE] =
 	0.0f, // fxTime,
 	NULL,//pVGuiSchemeFontName (NULL == default)
 	NETWORK_MESSAGE1,  // pName message name.
-	gNetworkTextMessageBuffer[0] }    // pMessage
+	gNetworkTextMessageBuffer[0]    // pMessage
 };
 
 char	gDemoMessageBuffer[512];
@@ -192,7 +193,7 @@ int ParseString( char const *pText, char *buf, size_t bufsize )
 		char const *pStart = pTemp;
 		pTemp = SkipText( pTemp );
 
-		int len =  min( pTemp - pStart + 1, (int)bufsize - 1 );
+		int len =  MIN( pTemp - pStart + 1, (int)bufsize - 1 );
 		Q_strncpy( buf, pStart, len );
 		buf[ len ] = 0;
 		return 1;
@@ -235,7 +236,7 @@ int IsToken( const char *pText, const char *pTokenName )
 	if ( !pText || !pTokenName )
 		return 0;
 
-	if ( !Q_strnicmp( pText+1, pTokenName, strlen(pTokenName) ) )
+	if ( StringHasPrefix( pText+1, pTokenName ) )
 		return 1;
 	
 	return 0;
@@ -367,7 +368,8 @@ void TextMessageParse( byte *pMemFile, int fileSize )
 
 	client_textmessage_t	textMessages[ MAX_MESSAGES ];
 	
-	int			i, nameHeapSize, textHeapSize, messageSize, nameOffset;
+	int			i, nameHeapSize, textHeapSize, messageSize;
+	intp   nameOffset;
 
 	lastNamePos = 0;
 	lineNumber = 0;

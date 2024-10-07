@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Implements visual effects entities: sprites, beams, bubbles, etc.
 //
@@ -7,6 +7,10 @@
 
 #include "cbase.h"
 #include "shake.h"
+#ifdef INFESTED_DLL
+#include "asw_marine.h"
+#include "asw_player.h"
+#endif
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -22,8 +26,14 @@ private:
 
 	DECLARE_DATADESC();
 
+	float m_flFadeStartTime;
+	float m_flReverseFadeStartTime;
+	float m_flReverseFadeDuration;
+
 public:
 	DECLARE_CLASS( CEnvFade, CLogicalEntity );
+
+	CEnvFade();
 
 	virtual void Spawn( void );
 
@@ -37,6 +47,7 @@ public:
 
 	// Inputs
 	void InputFade( inputdata_t &inputdata );
+	void InputReverseFade( inputdata_t &inputdata );
 };
 
 LINK_ENTITY_TO_CLASS( env_fade, CEnvFade );
@@ -45,8 +56,10 @@ BEGIN_DATADESC( CEnvFade )
 
 	DEFINE_KEYFIELD( m_Duration, FIELD_FLOAT, "duration" ),
 	DEFINE_KEYFIELD( m_HoldTime, FIELD_FLOAT, "holdtime" ),
+	DEFINE_KEYFIELD( m_flReverseFadeDuration, FIELD_FLOAT, "ReverseFadeDuration" ),
 
 	DEFINE_INPUTFUNC( FIELD_VOID, "Fade", InputFade ),
+	DEFINE_INPUTFUNC( FIELD_VOID, "FadeReverse", InputReverseFade ),
 
 	DEFINE_OUTPUT( m_OnBeginFade, "OnBeginFade"),
 
@@ -58,6 +71,12 @@ END_DATADESC()
 #define SF_FADE_MODULATE		0x0002		// Modulate, don't blend
 #define SF_FADE_ONLYONE			0x0004
 #define SF_FADE_STAYOUT			0x0008
+
+CEnvFade::CEnvFade()
+		: m_flFadeStartTime(0.0f),
+		  m_flReverseFadeStartTime(0.0f)
+{
+}
 
 //-----------------------------------------------------------------------------
 // Purpose: 
@@ -93,17 +112,98 @@ void CEnvFade::InputFade( inputdata_t &inputdata )
 		fadeFlags |= FFADE_STAYOUT;
 	}
 
+	//color32 fadeColor = m_clrRender;
+
+	//if( m_flReverseFadeStartTime != 0.0f )
+	//{
+	//	float flCurrentFadeTime = gpGlobals->curtime - m_flReverseFadeStartTime;
+
+	//	//Change the fade alpha to match the alpha of the current fade to prevent a pop
+	//	if( flCurrentFadeTime < m_Duration )
+	//	{
+	//		fadeColor.a = m_clrRender.GetA() * ( flCurrentFadeTime )/ m_flReverseFadeDuration;
+	//	}
+	//}
+
 	if ( m_spawnflags & SF_FADE_ONLYONE )
 	{
-		if ( inputdata.pActivator && inputdata.pActivator->IsNetClient() )
+#ifdef INFESTED_DLL
+		if ( inputdata.pActivator->Classify() == CLASS_ASW_MARINE )
+		{
+			CASW_Marine *pMarine = static_cast<CASW_Marine*>( inputdata.pActivator );
+			CASW_Player *pPlayer = pMarine->GetCommander();
+			if ( pPlayer && pMarine->IsInhabited() )
+			{
+				UTIL_ScreenFade( pPlayer, m_clrRender, Duration(), HoldTime(), fadeFlags );
+			}
+		}
+#else
+		if ( inputdata.pActivator->IsNetClient() )
 		{
 			UTIL_ScreenFade( inputdata.pActivator, m_clrRender, Duration(), HoldTime(), fadeFlags );
 		}
+#endif
 	}
 	else
 	{
 		UTIL_ScreenFadeAll( m_clrRender, Duration(), HoldTime(), fadeFlags|FFADE_PURGE );
 	}
+
+	m_flFadeStartTime = gpGlobals->curtime;
+
+	m_OnBeginFade.FireOutput( inputdata.pActivator, this );
+}
+
+
+void CEnvFade::InputReverseFade( inputdata_t &inputdata )
+{
+	int fadeFlags = 0;
+
+	if ( m_spawnflags & SF_FADE_IN )
+	{
+		fadeFlags |= FFADE_OUT;
+	}
+	else
+	{
+		fadeFlags |= FFADE_IN;
+	}
+
+	if ( m_spawnflags & SF_FADE_MODULATE )
+	{
+		fadeFlags |= FFADE_MODULATE;
+	}
+
+	if ( m_spawnflags & SF_FADE_STAYOUT )
+	{
+		fadeFlags |= FFADE_STAYOUT;
+	}
+
+	color32 fadeColor = m_clrRender;
+
+	if( m_flFadeStartTime != 0.0f )
+	{
+		float flCurrentFadeTime = gpGlobals->curtime - m_flFadeStartTime;
+
+		//Change the fade alpha to match the alpha of the current fade to prevent a pop
+		if( flCurrentFadeTime < m_Duration )
+		{
+			fadeColor.a = m_clrRender.GetA() * ( flCurrentFadeTime )/ m_Duration;
+		}
+	}
+
+	if ( m_spawnflags & SF_FADE_ONLYONE )
+	{
+		if ( inputdata.pActivator->IsNetClient() )
+		{
+			UTIL_ScreenFade( inputdata.pActivator, fadeColor, m_flReverseFadeDuration, HoldTime(), fadeFlags );
+		}
+	}
+	else
+	{
+		UTIL_ScreenFadeAll( fadeColor, m_flReverseFadeDuration, HoldTime(), fadeFlags|FFADE_PURGE );
+	}
+
+	m_flReverseFadeStartTime = gpGlobals->curtime;
 
 	m_OnBeginFade.FireOutput( inputdata.pActivator, this );
 }

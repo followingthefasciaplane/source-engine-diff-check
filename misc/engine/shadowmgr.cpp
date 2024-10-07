@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright (c) 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -18,6 +18,7 @@
 #include "filesystem.h"
 #include "utlbidirectionalset.h"
 #include "l_studio.h"
+#include "shaderapi/ishaderapi.h"
 #include "istudiorender.h"
 #include "engine/ivmodelrender.h"
 #include "collisionutils.h"
@@ -32,6 +33,8 @@
 #include "cdll_engine_int.h"
 #include "sys_dll.h"
 #include "render.h"
+#include "vstdlib/jobthread.h"
+#include "tier1/utlstack.h"
 
 
 // memdbgon must be the last include file in a .cpp file!!!
@@ -66,10 +69,9 @@
 // forward decarations
 //-----------------------------------------------------------------------------
 extern int r_surfacevisframe;
-extern IStudioRender *g_pStudioRender;
 
 
-#define BACKFACE_EPSILON	0.01f
+#define SHADOW_BACKFACE_EPSILON	0.01f
 
 
 // Max number of vertices per shadow decal
@@ -77,7 +79,6 @@ enum
 {
 	SHADOW_VERTEX_SMALL_CACHE_COUNT = 8,
 	SHADOW_VERTEX_LARGE_CACHE_COUNT = 32,
-	SHADOW_VERTEX_TEMP_COUNT = 48,
 	MAX_CLIP_PLANE_COUNT = 4,
 	SURFACE_BOUNDS_CACHE_COUNT = 1024,
 	//=============================================================================
@@ -91,18 +92,6 @@ enum
 	//=============================================================================
 };
 
-//-----------------------------------------------------------------------------
-// Used to clip the shadow decals
-//-----------------------------------------------------------------------------
-struct ShadowClipState_t
-{
-	int m_CurrVert;
-	int	m_TempCount;
-	int	m_ClipCount;
-	ShadowVertex_t	m_pTempVertices[SHADOW_VERTEX_TEMP_COUNT];
-	ShadowVertex_t*	RESTRICT m_ppClipVertices[2][SHADOW_VERTEX_TEMP_COUNT];
-};
-
 
 //-----------------------------------------------------------------------------
 // ConVars (must be defined before CShadowMgr is instanced!)
@@ -112,17 +101,19 @@ ConVar r_shadows_gamecontrol("r_shadows_gamecontrol", "-1", FCVAR_CHEAT );	// Sh
 static ConVar r_shadowwireframe("r_shadowwireframe", "0", FCVAR_CHEAT );
 static ConVar r_shadowids("r_shadowids", "0", FCVAR_CHEAT );
 static ConVar r_flashlightdrawsweptbbox( "r_flashlightdrawsweptbbox", "0" );
-static ConVar r_flashlightdrawfrustumbbox( "r_flashlightdrawfrustumbbox", "0" );
 static ConVar r_flashlightnodraw( "r_flashlightnodraw", "0" );
 
 static ConVar r_flashlightupdatedepth( "r_flashlightupdatedepth", "1" );
 static ConVar r_flashlightdrawdepth( "r_flashlightdrawdepth", "0" );
+static ConVar r_flashlightdrawdepthres( "r_flashlightdrawdepthres", "256" );
 static ConVar r_flashlightrenderworld(  "r_flashlightrenderworld", "1" );
 static ConVar r_flashlightrendermodels(  "r_flashlightrendermodels", "1" );
 static ConVar r_flashlightrender( "r_flashlightrender", "1" );
 static ConVar r_flashlightculldepth( "r_flashlightculldepth", "1" );
-ConVar r_flashlight_version2( "r_flashlight_version2", "0", FCVAR_CHEAT | FCVAR_DEVELOPMENTONLY );
 
+static ConVar r_threaded_shadow_clip( "r_threaded_shadow_clip", "0" );
+
+static ConVar r_flashlight_always_cull_for_single_pass( "r_flashlight_always_cull_for_single_pass", "0" );
 
 //-----------------------------------------------------------------------------
 // Implementation of IShadowMgr
@@ -135,7 +126,7 @@ public:
 
 	// Methods inherited from IShadowMgr
 	virtual ShadowHandle_t CreateShadow( IMaterial* pMaterial, IMaterial* pModelMaterial, void* pBindProxy, int creationFlags );
-	virtual ShadowHandle_t CreateShadowEx( IMaterial* pMaterial, IMaterial* pModelMaterial, void* pBindProxy, int creationFlags );
+	virtual ShadowHandle_t CreateShadowEx( IMaterial* pMaterial, IMaterial* pModelMaterial, void* pBindProxy, int creationFlags, int nEntIndex );
 	virtual void DestroyShadow( ShadowHandle_t handle );
 	virtual void SetShadowMaterial( ShadowHandle_t handle, IMaterial* pMaterial, IMaterial* pModelMaterial, void* pBindProxy );
 	virtual void EnableShadow( ShadowHandle_t handle, bool bEnable );
@@ -155,6 +146,12 @@ public:
 	virtual void RemoveAllShadowsFromModel( ModelInstanceHandle_t handle );
  	virtual const ShadowInfo_t& GetInfo( ShadowHandle_t handle );
 	virtual void SetFlashlightRenderState( ShadowHandle_t handle );
+	virtual int GetNumShadowsOnModel( ModelInstanceHandle_t instance );
+	virtual int GetShadowsOnModel( ModelInstanceHandle_t instance, ShadowHandle_t* pShadowArray, bool bNormalShadows, bool bFlashlightShadows );
+	virtual void FlashlightDrawCallback( ShadowDrawCallbackFn_t pCallback, void *pData );
+	virtual void SetSinglePassFlashlightRenderState( ShadowHandle_t handle );
+	virtual void PushSinglePassFlashlightStateEnabled( bool bEnable );
+	virtual void PopSinglePassFlashlightStateEnabled( void );
 
 	// Methods inherited from IShadowMgrInternal
 	virtual void LevelInit( int nSurfCount );
@@ -166,7 +163,7 @@ public:
 	virtual unsigned short InvalidShadowIndex( );
 
 	// Methods of ISpatialLeafEnumerator
-	virtual bool EnumerateLeaf( int leaf, int context );
+	virtual bool EnumerateLeaf( int leaf, intp context );
 
 	// Sets the texture coordinate range for a shadow...
 	virtual void SetShadowTexCoord( ShadowHandle_t handle, float x, float y, float w, float h );
@@ -188,17 +185,32 @@ public:
 	// Update the state for a flashlight.
 	virtual void UpdateFlashlightState( ShadowHandle_t shadowHandle, const FlashlightState_t &lightState );
 
-	virtual void DrawFlashlightDecals( int sortGroup, bool bDoMasking );
-	virtual void DrawFlashlightDecalsOnSingleSurface( SurfaceHandle_t surfID, bool bDoMasking );
+	virtual void DrawFlashlightDecals( IMatRenderContext *pRenderContext, int sortGroup, bool bDoMasking, float flFade );
+	virtual void DrawFlashlightDecalsOnSurfaceList( IMatRenderContext *pRenderContext, SurfaceHandle_t *pList, int listCount, bool bDoMasking );
 
-	virtual void DrawFlashlightOverlays( int sortGroup, bool bDoMasking );
+	virtual void DrawFlashlightOverlays( IMatRenderContext *pRenderContext, int sortGroup, bool bDoMasking );
 
 	virtual void DrawFlashlightDepthTexture( );
 	virtual void SetFlashlightDepthTexture( ShadowHandle_t shadowHandle, ITexture *pFlashlightDepthTexture, unsigned char ucShadowStencilBit );
 
-	virtual void AddFlashlightRenderable( ShadowHandle_t shadow, IClientRenderable *pRenderable );
-	virtual void DrawFlashlightDecalsOnDisplacements( int sortGroup, CDispInfo **visibleDisps, int nVisibleDisps, bool bDoMasking );
+	virtual void DrawFlashlightDecalsOnDisplacements( IMatRenderContext *pRenderContext, int sortGroup, CDispInfo **visibleDisps, int nVisibleDisps, bool bDoMasking );
 	virtual bool ModelHasShadows( ModelInstanceHandle_t instance );
+
+	virtual void DrawVolumetrics();
+	virtual int ProjectAndClipVerticesEx( ShadowHandle_t handle, int count, 
+		Vector** ppPosition, ShadowVertex_t*** ppOutVertex, ShadowClipState_t& clip );
+
+	virtual bool SinglePassFlashlightModeEnabled( void );
+	virtual int SetupFlashlightRenderInstanceInfo( ShadowHandle_t *pFlashlights, uint32 *pModelUsageMask, int nUsageStride, int nInstanceCount, const ModelInstanceHandle_t *pInstance );
+	virtual void GetFlashlightRenderInfo( FlashlightInstance_t *pFlashlightState, int nCount, const ShadowHandle_t *pHandles );
+
+	virtual void RemoveAllDecalsFromShadow( ShadowHandle_t handle );
+
+	virtual void SkipShadowForEntity( int nEntIndex );
+
+	virtual void PushFlashlightScissorBounds( void );
+	virtual void PopFlashlightScissorBounds( void );
+	virtual void DisableDropShadows();
 
 private:
 	enum
@@ -267,6 +279,8 @@ private:
 		
 		// Stencil bit used to mask this shadow
 		unsigned char	m_ucShadowStencilBit;
+
+		int				m_nEntIndex;
 	};
 
 	// Each surface has one of these, they reference the main shadow
@@ -312,7 +326,7 @@ private:
 	// Structures used to assign sort order handles
 	struct SortOrderInfo_t
 	{
-		int	m_MaterialEnum;
+		intp	m_MaterialEnum;
 		int	m_RefCount;
 	};
 
@@ -321,15 +335,25 @@ private:
 	// m_FlashlightWorldMaterialBuckets is where surfaces are stored per flashlight each frame.
 	typedef CUtlVector<FlashlightHandle_t> WorldMaterialBuckets_t;
 
+#pragma pack(16)
 	struct FlashlightInfo_t
 	{
+		Frustum_t m_Frustum;
 		FlashlightState_t m_FlashlightState;
 		unsigned short m_Shadow;
-		Frustum_t m_Frustum;
 		CMaterialsBuckets<SurfaceHandle_t> m_MaterialBuckets;
 		CMaterialsBuckets<SurfaceHandle_t> m_OccluderBuckets;
 
-		CUtlVector< IClientRenderable *> m_Renderables;
+		int m_nSplitscreenOwner;
+	};
+#pragma pack()
+
+	struct DispDecalWorkItem_t
+	{
+		ShadowDecalHandle_t h;
+		bool bKeepShadow;
+		int vertCount;
+		int indexCount;
 	};
 
 private:
@@ -355,7 +379,7 @@ private:
 
 	// Actually projects + clips vertices
 	int ProjectAndClipVertices( const Shadow_t& shadow, const VMatrix& worldToShadow, 
-		const VMatrix *pWorldToModel, int count, Vector** ppPosition, ShadowVertex_t*** ppOutVertex );
+		const VMatrix *pWorldToModel, int count, Vector** ppPosition, ShadowVertex_t*** ppOutVertex, ShadowClipState_t& clip );
 
 	// These functions hook/unhook shadows up to surfaces + vice versa
 	void AddSurfaceToShadow( ShadowHandle_t handle, SurfaceHandle_t surfID );
@@ -379,7 +403,7 @@ private:
 	bool ShouldCacheVertices( const ShadowDecal_t& decal );
 
 	// Generates a list displacement shadow vertices to render
-	bool GenerateDispShadowRenderInfo( IMatRenderContext *pRenderContext, ShadowDecal_t& decal, ShadowRenderInfo_t& info );
+	bool GenerateDispShadowRenderInfo( ShadowDecal_t& decal, ShadowRenderInfo_t& info );
 
 	// Generates a list shadow vertices to render
 	bool GenerateNormalShadowRenderInfo( IMatRenderContext *pRenderContext, ShadowDecal_t& decal, ShadowRenderInfo_t& info );
@@ -395,7 +419,7 @@ private:
 	bool ComputeShadowVertices( ShadowDecal_t& decal, const VMatrix* pModelToWorld, const VMatrix* pWorldToModel, ShadowVertexCache_t* pVertexCache );
 
 	// Project vertices into shadow space
-	bool ProjectVerticesIntoShadowSpace( const VMatrix& modelToShadow, 
+	bool ProjectVerticesIntoShadowSpace( const VMatrix * RESTRICT modelToShadow, 
 		float maxDist, int count, Vector** RESTRICT ppPosition, ShadowClipState_t& clip );
 
 	// Copies vertex info from the clipped vertices
@@ -420,9 +444,9 @@ private:
 	void AllocFlashlightMaterialBuckets( FlashlightHandle_t flashlightID );
 
 	// Render all projected textures (including shadows and flashlights)
-	void RenderProjectedTextures( const VMatrix* pModelToWorld );
+	void RenderProjectedTextures( IMatRenderContext *pRenderContext, const VMatrix* pModelToWorld );
 
-	void RenderFlashlights( bool bDoMasking, const VMatrix* pModelToWorld );
+	void RenderFlashlights( bool bDoMasking, bool bDoSimpleProjections, const VMatrix* pModelToWorld );
 
 	void SetFlashlightStencilMasks( bool bDoMasking );
 
@@ -430,12 +454,15 @@ private:
 
 	void EnableStencilAndScissorMasking( IMatRenderContext *pRenderContext, const FlashlightInfo_t &flashlightInfo, bool bDoMasking );
 
-	void DisableStencilAndScissorMasking( IMatRenderContext *pRenderContext );
+	void DisableStencilAndScissorMasking( IMatRenderContext *pRenderContext, const FlashlightInfo_t &flashlightInfo, bool bDoMasking );
 
-	void RenderShadows( const VMatrix* pModelToWorld );
+	void RenderShadows( IMatRenderContext *pRenderContext, const VMatrix* pModelToWorld );
 
 	// Generates a list shadow vertices to render
 	void GenerateShadowRenderInfo( IMatRenderContext *pRenderContext, ShadowDecalHandle_t decalHandle, ShadowRenderInfo_t& info );
+	void GenerateShadowRenderInfoThreaded( IMatRenderContext *pRenderContext, ShadowDecalHandle_t decalHandle, ShadowRenderInfo_t& info );
+
+	void ProcessDispDecalWorkItem( DispDecalWorkItem_t& wi );
 
 	// Methods related to the surface bounds cache
 	void ComputeSurfaceBounds( SurfaceBounds_t* pBounds, SurfaceHandle_t nSurfID );
@@ -481,7 +508,8 @@ private:
 	// The number of decals we're gonna need to render
 	int	m_DecalsToRender;
 
-	CUtlLinkedList<FlashlightInfo_t> m_FlashlightStates;
+	typedef CUtlLinkedList< FlashlightInfo_t, unsigned short, false, unsigned short, CUtlMemoryAligned< UtlLinkedListElem_t< FlashlightInfo_t,unsigned short > ,16 > > FlashlightList_t;
+	FlashlightList_t m_FlashlightStates;
 	int m_NumWorldMaterialBuckets;
 	bool m_bInitialized;
 
@@ -494,6 +522,28 @@ private:
 	//=============================================================================
 	// HPE_END
 	//=============================================================================
+	
+	ShadowHandle_t	m_hSinglePassFlashlightState;
+	bool			m_bSinglePassFlashlightStateEnabled;
+	bool			m_bShadowsDisabled;
+	CUtlStack<bool> m_bStack_SinglePassFlashlightStateEnabled;
+
+	int m_nSkipShadowForEntIndex;
+
+	struct FlashLightScissorStateBackup_t
+	{
+		int m_nLeft;
+		int m_nTop;
+		int m_nRight;
+		int m_nBottom;
+		bool m_bScissor;
+#if defined( DBGFLAG_ASSERT )
+		int m_iFlashLightID;
+#endif
+	};
+
+	CUtlVector<FlashLightScissorStateBackup_t> m_ScissorStateBackups;
+	CUtlVector<int> m_ScissorStateEntryStart;
 };
 
 
@@ -526,6 +576,7 @@ unsigned short& FirstModelInShadow( ShadowHandle_t h )
 //-----------------------------------------------------------------------------
 CShadowMgr::CShadowMgr()
 {
+	m_bShadowsDisabled = false;
 	m_ShadowSurfaces.SetGrowSize( 4096 );
 	m_ShadowDecals.SetGrowSize( 4096 );
 
@@ -533,6 +584,11 @@ CShadowMgr::CShadowMgr()
 	m_NumWorldMaterialBuckets = 0;
 	m_pSurfaceBounds = NULL;
 	m_bInitialized = false;
+	m_hSinglePassFlashlightState = SHADOW_HANDLE_INVALID;
+	m_bSinglePassFlashlightStateEnabled = IsGameConsole();
+	
+	m_nSkipShadowForEntIndex = INT_MIN;
+
 	ClearShadowRenderList();
 
 	//=============================================================================
@@ -562,6 +618,8 @@ void CShadowMgr::LevelInit( int nSurfCount )
 		return;
 	m_bInitialized = true;
 
+	materials->GetRenderContext()->EnableSinglePassFlashlightMode( m_bSinglePassFlashlightStateEnabled );
+
 	m_pSurfaceBounds = new SurfaceBoundsCacheIndex_t[nSurfCount];
 
 	// NOTE: Need to memset to 0 if we switch to integer SurfaceBoundsCacheIndex_t here
@@ -586,6 +644,30 @@ void CShadowMgr::LevelShutdown()
 
 
 //-----------------------------------------------------------------------------
+// Track growth of shadow-related linked lists, warn when things grow significantly
+//-----------------------------------------------------------------------------
+#if defined( LEFT4DEAD )
+	// GrowSpew is causing unnecessary overhead on the L4D 360 build
+	#define GrowSpew( ... )
+#else
+	static int m_ShadowSurfacesMax  = 0, m_ShadowDecalsMax = 0, m_SortOrderIdsMax = 0, m_SmallVertexListMax = 0, m_LargeVertexListMax = 0;
+	static int m_ShadowsOnModelsMax = 0, m_RenderQueueMax  = 0, m_VertexCacheMax  = 0, m_TempVertexCacheMax = 0;
+	static void GrowSpew( int numAlloc, int &maxCounter, const char *array, int spewFreq = 1000 )
+	{
+		if ( numAlloc <= maxCounter ) return;
+		if ( ( maxCounter / spewFreq ) != ( numAlloc / spewFreq ) )
+			Warning( "Shadow memory (%s) growing [%d]\n", array, numAlloc );
+		maxCounter = numAlloc;
+	}
+#endif
+
+
+void CShadowMgr::DisableDropShadows()
+{
+	m_bShadowsDisabled = true;
+}
+
+//-----------------------------------------------------------------------------
 // Create, destroy material sort order ids...
 //-----------------------------------------------------------------------------
 void CShadowMgr::SetMaterial( Shadow_t& shadow, IMaterial* pMaterial, IMaterial* pModelMaterial, void *pBindProxy )
@@ -605,9 +687,8 @@ void CShadowMgr::SetMaterial( Shadow_t& shadow, IMaterial* pMaterial, IMaterial*
 	}
 
 	// Search the sort order handles for an enumeration id match
-	int materialEnum = (int)pMaterial;
-	for (unsigned short i = m_SortOrderIds.Head(); i != m_SortOrderIds.InvalidIndex();
-		i = m_SortOrderIds.Next(i) )
+	intp materialEnum = (intp)pMaterial;
+	for (int i = m_SortOrderIds.Head(); i != m_SortOrderIds.InvalidIndex(); i = m_SortOrderIds.Next(i) )
 	{
 		// Found a match, lets increment the refcount of this sort order id
 		if (m_SortOrderIds[i].m_MaterialEnum == materialEnum)
@@ -619,12 +700,15 @@ void CShadowMgr::SetMaterial( Shadow_t& shadow, IMaterial* pMaterial, IMaterial*
 	}
 
 	// Didn't find it, lets assign a new sort order ID, with a refcount of 1
+	GrowSpew( m_SortOrderIds.Count(), m_SortOrderIdsMax, "m_SortOrderIds" );
 	shadow.m_SortOrder = m_SortOrderIds.AddToTail();
 	m_SortOrderIds[shadow.m_SortOrder].m_MaterialEnum  = materialEnum;
 	m_SortOrderIds[shadow.m_SortOrder].m_RefCount = 1;
 
+
 	// Make sure the render queue has as many entries as the max sort order id.
 	int count = m_RenderQueue.Count();
+	GrowSpew( m_RenderQueue.Count(), m_RenderQueueMax, "m_RenderQueue" );
 	while( count < m_SortOrderIds.MaxElementIndex() )
 	{
 		MEM_ALLOC_CREDIT();
@@ -663,18 +747,24 @@ unsigned short CShadowMgr::InvalidShadowIndex( )
 	return m_ShadowsOnModels.InvalidIndex();
 }
 
+void CShadowMgr::RemoveAllDecalsFromShadow( ShadowHandle_t handle )
+{
+	RemoveAllSurfacesFromShadow( handle );
+	RemoveAllModelsFromShadow( handle );
+}
+
 //-----------------------------------------------------------------------------
 // Create, destroy shadows
 //-----------------------------------------------------------------------------
 ShadowHandle_t CShadowMgr::CreateShadow( IMaterial* pMaterial, IMaterial* pModelMaterial, void* pBindProxy, int creationFlags )
 {
-	return CreateShadowEx( pMaterial, pModelMaterial, pBindProxy, creationFlags );
+	return CreateShadowEx( pMaterial, pModelMaterial, pBindProxy, creationFlags, -1 );
 }
 
 
-ShadowHandle_t CShadowMgr::CreateShadowEx( IMaterial* pMaterial, IMaterial* pModelMaterial, void* pBindProxy, int creationFlags )
+ShadowHandle_t CShadowMgr::CreateShadowEx( IMaterial* pMaterial, IMaterial* pModelMaterial, void* pBindProxy, int creationFlags, int nEntIndex )
 {
-#ifndef SWDS
+#ifndef DEDICATED
 	ShadowHandle_t h = m_Shadows.AddToTail();
 	//=============================================================================
 	// HPE_BEGIN:
@@ -701,12 +791,17 @@ ShadowHandle_t CShadowMgr::CreateShadowEx( IMaterial* pMaterial, IMaterial* pMod
 	shadow.m_FalloffBias = 0;
 	shadow.m_pFlashlightDepthTexture = NULL;
 	shadow.m_FlashlightHandle = m_FlashlightStates.InvalidIndex();
+	shadow.m_nEntIndex = nEntIndex;
 
-	if ( ( creationFlags & SHADOW_FLASHLIGHT ) != 0 )
+	if ( ( creationFlags & ( SHADOW_FLASHLIGHT | SHADOW_SIMPLE_PROJECTION ) ) != 0 )
 	{
 		shadow.m_FlashlightHandle = m_FlashlightStates.AddToTail();
 		m_FlashlightStates[shadow.m_FlashlightHandle].m_Shadow = h;
-		if ( !IsX360() && !r_flashlight_version2.GetInt() )
+		
+		ASSERT_LOCAL_PLAYER_RESOLVABLE();
+		m_FlashlightStates[ shadow.m_FlashlightHandle ].m_nSplitscreenOwner = ( creationFlags & SHADOW_ANY_SPLITSCREEN_SLOT ) ? -1 : GET_ACTIVE_SPLITSCREEN_SLOT();
+		
+		if ( !m_bSinglePassFlashlightStateEnabled )
 		{
 			AllocFlashlightMaterialBuckets( shadow.m_FlashlightHandle );
 		}
@@ -810,12 +905,14 @@ inline ShadowVertex_t* CShadowMgr::AllocateVertices( ShadowVertexCache_t& cache,
 	if (count <= SHADOW_VERTEX_SMALL_CACHE_COUNT)
 	{
 		cache.m_Count = count;
+		GrowSpew( m_SmallVertexList.NumAllocated(), m_SmallVertexListMax, "m_SmallVertexList" );
 		cache.m_CachedVerts = m_SmallVertexList.AddToTail( );
 		return m_SmallVertexList[cache.m_CachedVerts].m_Verts;
 	}
 	else if (count <= SHADOW_VERTEX_LARGE_CACHE_COUNT)
 	{
 		cache.m_Count = count;
+		GrowSpew( m_LargeVertexList.NumAllocated(), m_LargeVertexListMax, "m_LargeVertexList" );
 		cache.m_CachedVerts = m_LargeVertexList.AddToTail( );
 		return m_LargeVertexList[cache.m_CachedVerts].m_Verts;
 	}
@@ -863,14 +960,14 @@ void CShadowMgr::ClearTempCache( )
 	m_TempVertexCache.RemoveAll();
 }
 
-
 //-----------------------------------------------------------------------------
 // Adds the surface to the list for this shadow
 //-----------------------------------------------------------------------------
 bool CShadowMgr::AddDecalToShadowList( ShadowHandle_t handle, ShadowDecalHandle_t decalHandle )
 {
 	// Add the shadow to the list of surfaces affected by this shadow
-	ShadowSurfaceIndex_t idx = m_ShadowSurfaces.Alloc( true );
+	GrowSpew( m_ShadowSurfaces.NumAllocated(), m_ShadowSurfacesMax, "m_ShadowSurfaces", 8192 );
+  	ShadowSurfaceIndex_t idx = m_ShadowSurfaces.Alloc( true );
 	if ( idx == m_ShadowSurfaces.InvalidIndex() )
 	{
 		ExecuteNTimes( 10, Warning( "CShadowMgr::AddDecalToShadowList - overflowed m_ShadowSurfaces linked list!\n" ) );
@@ -1035,6 +1132,7 @@ bool CShadowMgr::IsShadowNearSurface( ShadowHandle_t h, SurfaceHandle_t nSurfID,
 //-----------------------------------------------------------------------------
 inline ShadowDecalHandle_t CShadowMgr::AddShadowDecalToSurface( SurfaceHandle_t surfID, ShadowHandle_t handle )
 {
+	GrowSpew( m_ShadowDecals.NumAllocated(), m_ShadowDecalsMax, "m_ShadowDecals", 8192 );
 	ShadowDecalHandle_t decalHandle = m_ShadowDecals.Alloc( true );
 	if ( decalHandle == m_ShadowDecals.InvalidIndex() )
 	{
@@ -1043,7 +1141,6 @@ inline ShadowDecalHandle_t CShadowMgr::AddShadowDecalToSurface( SurfaceHandle_t 
 	}
 
 	ShadowDecal_t& decal = m_ShadowDecals[decalHandle];
-
 	decal.m_SurfID = surfID;
 	m_ShadowDecals.LinkBefore( MSurf_ShadowDecals( surfID ), decalHandle );
 	MSurf_ShadowDecals( surfID ) = decalHandle;
@@ -1111,12 +1208,22 @@ inline void CShadowMgr::RemoveShadowDecalFromSurface( SurfaceHandle_t surfID, Sh
 
 void CShadowMgr::AddSurfaceToFlashlightMaterialBuckets( ShadowHandle_t handle, SurfaceHandle_t surfID )
 {
+	if ( m_bSinglePassFlashlightStateEnabled )
+		return;
+
 	// Make sure that this is a flashlight.
-	Assert( m_Shadows[handle].m_Flags & SHADOW_FLASHLIGHT );
+	Assert( m_Shadows[handle].m_Flags & ( SHADOW_FLASHLIGHT | SHADOW_SIMPLE_PROJECTION ) );
 	
 	// Get the flashlight id for this particular shadow handle and make sure that it's valid.
 	FlashlightHandle_t flashlightID = m_Shadows[handle].m_FlashlightHandle;
 	Assert( flashlightID != m_FlashlightStates.InvalidIndex() );
+	
+	if ( m_FlashlightStates[ flashlightID ].m_nSplitscreenOwner >= 0 )
+	{
+		ASSERT_LOCAL_PLAYER_RESOLVABLE();
+		if ( m_FlashlightStates[ flashlightID ].m_nSplitscreenOwner != GET_ACTIVE_SPLITSCREEN_SLOT() )
+			return;
+	}
 
 	m_FlashlightStates[flashlightID].m_MaterialBuckets.AddElement( MSurf_MaterialSortID( surfID ), surfID );
 }
@@ -1134,15 +1241,9 @@ void CShadowMgr::AddSurfaceToShadow( ShadowHandle_t handle, SurfaceHandle_t surf
 	// material alpha would have to be taken into account, so that
 	// no multiplication occurs where the alpha == 0
 	// FLASHLIGHTFIXME: get rid of some of these checks for the ones that will work just fine with the flashlight.	
-	bool bIsFlashlight = ( ( m_Shadows[handle].m_Flags & SHADOW_FLASHLIGHT ) != 0 );
+	bool bIsFlashlight = ( ( m_Shadows[handle].m_Flags & ( SHADOW_FLASHLIGHT | SHADOW_SIMPLE_PROJECTION ) ) != 0 );
 	if ( !bIsFlashlight && MSurf_Flags(surfID) & (SURFDRAW_TRANS | SURFDRAW_ALPHATEST | SURFDRAW_NOSHADOWS) )
 		return;
-
-#ifdef _XBOX
-	// Don't let the flashlight get on water on XBox
-	if ( bIsFlashlight && ( MSurf_Flags(surfID) & SURFDRAW_WATERSURFACE ) )
-		return;
-#endif
 
 #if 0
 	// Make sure the surface has the shadow on it exactly once...
@@ -1263,9 +1364,8 @@ void CShadowMgr::AddShadowToModel( ShadowHandle_t handle, ModelInstanceHandle_t 
 	if( r_flashlightrender.GetBool()==false )
 		return;
 
+	GrowSpew( m_ShadowsOnModels.NumAllocated(), m_ShadowsOnModelsMax, "m_ShadowsOnModels" );
 	m_ShadowsOnModels.AddElementToBucket( model, handle );
-
-
 }
 
 void CShadowMgr::RemoveAllShadowsFromModel( ModelInstanceHandle_t model )
@@ -1273,36 +1373,63 @@ void CShadowMgr::RemoveAllShadowsFromModel( ModelInstanceHandle_t model )
 	if( model != MODEL_INSTANCE_INVALID )
 	{
 		m_ShadowsOnModels.RemoveBucket( model );
-
-		FOR_EACH_LL( m_FlashlightStates, i )
-		{
-			FlashlightInfo_t &info = m_FlashlightStates[i];
-
-			for( int j=0;j<info.m_Renderables.Count();j++ )
-			{
-				if( info.m_Renderables[j]->GetModelInstance() == model )
-				{
-					info.m_Renderables.Remove( j );
-					break;
-				}
-			}
-		}
 	}
+}
+
+int CShadowMgr::GetNumShadowsOnModel( ModelInstanceHandle_t instance )
+{
+	if (instance == MODEL_INSTANCE_INVALID || r_shadows.GetInt() == 0 || m_bShadowsDisabled )
+	{
+		// no shadows
+		return 0;
+	}
+
+	int i = m_ShadowsOnModels.FirstElement( instance );
+	int nCount = 0;
+
+	// TODO: Add method to query num elements in a bucket to CUtlBidirectionalSet
+	while ( i != m_ShadowsOnModels.InvalidIndex() )
+	{
+		nCount++;
+		i = m_ShadowsOnModels.NextElement(i);
+	}
+
+	return nCount;
+}
+
+int CShadowMgr::GetShadowsOnModel( ModelInstanceHandle_t instance, ShadowHandle_t* pShadowArray, bool bNormalShadows, bool bFlashlightShadows )
+{
+	if (instance == MODEL_INSTANCE_INVALID || r_shadows.GetInt() == 0 || m_bShadowsDisabled )
+	{
+		// no shadows
+		return 0;
+	}
+
+	int i = m_ShadowsOnModels.FirstElement( instance );
+	int nCount = 0;
+
+	while ( i != m_ShadowsOnModels.InvalidIndex() )
+	{
+		Shadow_t& shadow = m_Shadows[m_ShadowsOnModels.Element(i)];
+
+		bool bFlashlight = ( ( shadow.m_Flags & ( SHADOW_FLASHLIGHT | SHADOW_SIMPLE_PROJECTION ) ) != 0 );
+		if ( ( bFlashlight && bFlashlightShadows ) || 
+			 ( !bFlashlight && bNormalShadows ) )
+		{
+			*pShadowArray = m_ShadowsOnModels.Element(i);
+			pShadowArray++;
+			nCount++;
+		}
+
+		i = m_ShadowsOnModels.NextElement(i);
+	}
+
+	return nCount;
 }
 
 void CShadowMgr::RemoveAllModelsFromShadow( ShadowHandle_t handle )
 {
 	m_ShadowsOnModels.RemoveElement( handle );
-
-	FOR_EACH_LL( m_FlashlightStates, i )
-	{
-		FlashlightInfo_t &info = m_FlashlightStates[i];
-
-		if( info.m_Shadow==handle )
-		{
-			info.m_Renderables.RemoveAll();
-		}
-	}
 }						   
 
 
@@ -1311,37 +1438,47 @@ void CShadowMgr::RemoveAllModelsFromShadow( ShadowHandle_t handle )
 //-----------------------------------------------------------------------------
 void CShadowMgr::SetModelShadowState( ModelInstanceHandle_t instance )
 {
-#ifndef SWDS
+#ifndef DEDICATED
+	VPROF_( "CShadowMgr::SetModelShadowState", 2, VPROF_BUDGETGROUP_OTHER_UNACCOUNTED, false, 0 );
 	g_pStudioRender->ClearAllShadows();
-	if (instance != MODEL_INSTANCE_INVALID && r_shadows.GetInt() )
+	if ( ( instance == MODEL_INSTANCE_INVALID ) || ( r_shadows.GetInt() == 0 ) || m_bShadowsDisabled )
+		return;
+
+	bool bWireframe = r_shadowwireframe.GetBool();
+	for ( int i = m_ShadowsOnModels.FirstElement( instance ); i != m_ShadowsOnModels.InvalidIndex(); i = m_ShadowsOnModels.NextElement( i ) )
 	{
-		bool bWireframe = r_shadowwireframe.GetBool();
-		unsigned short i = m_ShadowsOnModels.FirstElement( instance );
-		while ( i != m_ShadowsOnModels.InvalidIndex() )
+		Shadow_t& shadow = m_Shadows[m_ShadowsOnModels.Element(i)];
+
+		if ( shadow.m_Flags & ( SHADOW_FLASHLIGHT | SHADOW_SIMPLE_PROJECTION ) )
 		{
-			Shadow_t& shadow = m_Shadows[m_ShadowsOnModels.Element(i)];
-
-			if( !bWireframe )
+			if ( m_FlashlightStates[ shadow.m_FlashlightHandle ].m_nSplitscreenOwner >= 0 )
 			{
-				if( shadow.m_Flags & SHADOW_FLASHLIGHT )
+				ASSERT_LOCAL_PLAYER_RESOLVABLE();
+				if ( m_FlashlightStates[ shadow.m_FlashlightHandle ].m_nSplitscreenOwner != GET_ACTIVE_SPLITSCREEN_SLOT() )
 				{
-					// NULL means that the models material should be used.
-					// This is what we want in the case of the flashlight
-					// since we need to render the models material again with different lighting.
-					// Need to add something here to specify which flashlight.
-					g_pStudioRender->AddShadow( NULL, NULL, &m_FlashlightStates[shadow.m_FlashlightHandle].m_FlashlightState, &shadow.m_WorldToShadow, shadow.m_pFlashlightDepthTexture );
-				}
-				else if( r_shadows_gamecontrol.GetInt() != 0 )
-				{
-					g_pStudioRender->AddShadow( shadow.m_pModelMaterial, shadow.m_pBindProxy );
+					continue;
 				}
 			}
-			else if( ( shadow.m_Flags & SHADOW_FLASHLIGHT ) || r_shadows_gamecontrol.GetInt() != 0 )
-			{
-				g_pStudioRender->AddShadow( g_pMaterialMRMWireframe, NULL );
-			}
+		}
 
-			i = m_ShadowsOnModels.NextElement(i);
+		if ( !bWireframe )
+		{
+			if ( shadow.m_Flags & ( SHADOW_FLASHLIGHT | SHADOW_SIMPLE_PROJECTION ) )
+			{
+				// NULL means that the models material should be used.
+				// This is what we want in the case of the flashlight
+				// since we need to render the models material again with different lighting.
+				// Need to add something here to specify which flashlight.
+				g_pStudioRender->AddShadow( NULL, NULL, &m_FlashlightStates[shadow.m_FlashlightHandle].m_FlashlightState, &shadow.m_WorldToShadow, shadow.m_pFlashlightDepthTexture );
+			}
+			else if ( r_shadows_gamecontrol.GetInt() != 0 )
+			{
+				g_pStudioRender->AddShadow( shadow.m_pModelMaterial, shadow.m_pBindProxy );
+			}
+		}
+		else if ( ( shadow.m_Flags & ( SHADOW_FLASHLIGHT | SHADOW_SIMPLE_PROJECTION ) ) || r_shadows_gamecontrol.GetInt() != 0 )
+		{
+			g_pStudioRender->AddShadow( g_pMaterialMRMWireframe, NULL );
 		}
 	}
 #endif
@@ -1355,6 +1492,78 @@ bool CShadowMgr::ModelHasShadows( ModelInstanceHandle_t instance )
 			return true;
 	}
 	return false;
+}
+
+
+//-----------------------------------------------------------------------------
+// Builds shadow state information for a set of instances
+//-----------------------------------------------------------------------------
+int CShadowMgr::SetupFlashlightRenderInstanceInfo( ShadowHandle_t *pShadowHandle, uint32 *pModelUsageMask, int nUsageStride, int nInstanceCount, const ModelInstanceHandle_t *pInstance )
+{
+	CMatRenderContextPtr pRenderContext( materials );
+	int nFlashlightCount = 0;
+#ifndef DEDICATED
+	if ( ( SinglePassFlashlightModeEnabled() && !pRenderContext->IsCullingEnabledForSinglePassFlashlight() ) || !r_shadows.GetInt() )
+		return 0;
+
+	for ( int i = 0; i < nInstanceCount; ++i, pModelUsageMask = (uint32*)( (char*)pModelUsageMask + nUsageStride ) )
+	{
+		ModelInstanceHandle_t instance = pInstance[i];
+		*pModelUsageMask = 0;
+		if ( instance == MODEL_INSTANCE_INVALID )
+			continue;
+
+		int j = m_ShadowsOnModels.FirstElement( instance );
+		for ( ; j != m_ShadowsOnModels.InvalidIndex(); j = m_ShadowsOnModels.NextElement(j) )
+		{
+			ShadowHandle_t hFlashlight = m_ShadowsOnModels.Element(j);
+			Shadow_t& shadow = m_Shadows[ hFlashlight ];
+			if ( ( shadow.m_Flags & ( SHADOW_FLASHLIGHT | SHADOW_SIMPLE_PROJECTION ) ) == 0 )
+				continue;
+
+			if ( m_FlashlightStates[ shadow.m_FlashlightHandle ].m_nSplitscreenOwner >= 0 )
+			{
+				ASSERT_LOCAL_PLAYER_RESOLVABLE();
+				if ( m_FlashlightStates[ shadow.m_FlashlightHandle ].m_nSplitscreenOwner != GET_ACTIVE_SPLITSCREEN_SLOT() )
+					continue;
+			}
+
+			// FIXME: is there a faster method?
+			int nFlashlightIndex;
+			for ( nFlashlightIndex = 0; nFlashlightIndex < nFlashlightCount; ++nFlashlightIndex )
+			{
+				if ( pShadowHandle[nFlashlightIndex] == hFlashlight )
+					break;
+			}
+
+			// Indicate the model is using this flashlight
+			*pModelUsageMask |= (1 << nFlashlightIndex);
+
+			if ( nFlashlightIndex != nFlashlightCount )
+				continue;
+
+			// Flashlight not found, add unique flashlight
+			pShadowHandle[nFlashlightIndex] = hFlashlight;
+			++nFlashlightCount;
+		}
+	}
+#endif
+	return nFlashlightCount;
+}
+
+
+void CShadowMgr::GetFlashlightRenderInfo( FlashlightInstance_t *pFlashlightState, int nCount, const ShadowHandle_t *pHandles )
+{
+	bool bWireframe = r_shadowwireframe.GetBool();
+	for ( int i = 0; i < nCount; ++i )
+	{
+		const Shadow_t& shadow = m_Shadows[ pHandles[i] ];
+		FlashlightInstance_t &flashlight = pFlashlightState[i];
+		flashlight.m_FlashlightState = m_FlashlightStates[ shadow.m_FlashlightHandle ].m_FlashlightState;
+		flashlight.m_WorldToTexture = shadow.m_WorldToShadow; 
+		flashlight.m_pDebugMaterial = bWireframe ? g_pMaterialMRMWireframe : NULL;
+		flashlight.m_pFlashlightDepthTexture = shadow.m_pFlashlightDepthTexture;
+	}
 }
 
 
@@ -1417,7 +1626,7 @@ void CShadowMgr::ApplyShadowToDisplacement( ShadowBuildInfo_t& build, IDispInfo 
 	}
 	else
 	{
-		if( R_CullBox( bbMin, bbMax, GetFlashlightFrustum( build.m_Shadow ) ) )
+		if( GetFlashlightFrustum( build.m_Shadow ).CullBox( bbMin, bbMax ) )
 			return;
 	}
 
@@ -1483,7 +1692,7 @@ void CShadowMgr::ProjectShadow( ShadowHandle_t handle, const Vector &origin,
 		return;
 
 	// Don't compute the surface cache if shadows are off..
-	if ( !r_shadows.GetInt() )
+	if ( !r_shadows.GetInt() || m_bShadowsDisabled )
 		return;
 
 	// Set the falloff coefficient
@@ -1536,7 +1745,7 @@ void CShadowMgr::ProjectShadow( ShadowHandle_t handle, const Vector &origin,
 	for ( int i  = 0; i < nLeafCount; ++i )
 	{
 		// NOTE: Scope specifier eliminates virtual function call
-		CShadowMgr::EnumerateLeaf( pLeafList[i], (int)&build );
+		CShadowMgr::EnumerateLeaf( pLeafList[i], (intp)&build );
 	}
 }
 
@@ -1548,7 +1757,10 @@ void DrawFrustum( Frustum_t &frustum )
 	{
 		Vector points[maxPoints];
 		Vector points2[maxPoints];
-		int numPoints = PolyFromPlane( points, frustum.GetPlane( i )->normal, frustum.GetPlane( i )->dist );
+		Vector normal;
+		float dist;
+		frustum.GetPlane( i, &normal, &dist );
+		int numPoints = PolyFromPlane( points, normal, dist );
 		Assert( numPoints <= maxPoints );
 		Vector *in, *out;
 		in = points;
@@ -1560,7 +1772,8 @@ void DrawFrustum( Frustum_t &frustum )
 			{
 				continue;
 			}
-			numPoints = ClipPolyToPlane( in, numPoints, out, frustum.GetPlane( j )->normal, frustum.GetPlane( j )->dist );
+			frustum.GetPlane( j, &normal, &dist );
+			numPoints = ClipPolyToPlane( in, numPoints, out, normal, dist );
 			Assert( numPoints <= maxPoints );
 			V_swap( in, out );
 		}
@@ -1590,9 +1803,10 @@ void CShadowMgr::ProjectFlashlight( ShadowHandle_t handle, const VMatrix& worldT
 {
 	VPROF_BUDGET( "CShadowMgr::ProjectFlashlight", VPROF_BUDGETGROUP_SHADOW_DEPTH_TEXTURING );
 
+	CMatRenderContextPtr pRenderContext( materials );
 	Shadow_t& shadow = m_Shadows[handle];
 
-	if ( !IsX360() && !r_flashlight_version2.GetInt() )
+	if ( !m_bSinglePassFlashlightStateEnabled || pRenderContext->IsCullingEnabledForSinglePassFlashlight() )
 	{
 		// First, we need to remove the shadow from all surfaces it may
 		// currently be in; in other words we're invalidating the shadow surface cache
@@ -1617,12 +1831,16 @@ void CShadowMgr::ProjectFlashlight( ShadowHandle_t handle, const VMatrix& worldT
 	MatrixInverseGeneral( shadow.m_WorldToShadow, shadowToWorld );
 
 	// Set up the frustum for the flashlight so that we can cull each leaf against it.
-	Assert( shadow.m_Flags & SHADOW_FLASHLIGHT );
+	Assert( shadow.m_Flags & ( SHADOW_FLASHLIGHT | SHADOW_SIMPLE_PROJECTION ) );
 	Frustum_t &frustum = m_FlashlightStates[shadow.m_FlashlightHandle].m_Frustum;
 	FrustumPlanesFromMatrix( shadowToWorld, frustum );
 	CalculateSphereFromProjectionMatrixInverse( shadowToWorld, &shadow.m_vecSphereCenter, &shadow.m_flSphereRadius );
 
 	if ( nLeafCount == 0 )
+		return;
+
+	// Don't need to walk the surface list w/ single pass flashlights
+	if ( m_bSinglePassFlashlightStateEnabled )
 		return;
 
 	// We're hijacking the surface vis frame to make sure we enumerate
@@ -1638,19 +1856,11 @@ void CShadowMgr::ProjectFlashlight( ShadowHandle_t handle, const VMatrix& worldT
 	build.m_pVis = NULL;
 	build.m_vecSphereCenter = shadow.m_vecSphereCenter;
 	build.m_flSphereRadius = shadow.m_flSphereRadius;
-
-	if( r_flashlightdrawfrustumbbox.GetBool() )
-	{
-		Vector mins, maxs;
-		CalculateAABBFromProjectionMatrixInverse( shadowToWorld, &mins, &maxs );
-		CDebugOverlay::AddBoxOverlay( Vector( 0.0f, 0.0f, 0.0f ), mins, maxs, QAngle( 0, 0, 0 ), 
-			0, 0, 255, 100, 0.0f );
-	}
 	
 	for ( int i = 0; i < nLeafCount; ++i )
 	{
 		// NOTE: Scope specifier eliminates virtual function call
-		CShadowMgr::EnumerateLeaf( pLeafList[i], (int)&build );
+		CShadowMgr::EnumerateLeaf( pLeafList[i], (intp)&build );
 	}
 }
 
@@ -1666,7 +1876,7 @@ void CShadowMgr::ApplyFlashlightToLeaf( const Shadow_t &shadow, mleaf_t* pLeaf, 
 	VectorSubtract( pLeaf->m_vecCenter, pLeaf->m_vecHalfDiagonal, leafMins );
 
 	// The flashlight frustum didn't intersect the bounding box for this leaf!  Get outta here!
-	if( R_CullBox( leafMins, leafMaxs, GetFlashlightFrustum( pBuild->m_Shadow ) ) )
+	if(  GetFlashlightFrustum( pBuild->m_Shadow ).CullBox( leafMins, leafMaxs ) )
 		return;
 
 	// Iterate over all surfaces in the leaf, check for backfacing
@@ -1716,14 +1926,14 @@ void CShadowMgr::ApplyFlashlightToLeaf( const Shadow_t &shadow, mleaf_t* pLeaf, 
 		{
 			if ( (MSurf_Flags( surfID ) & SURFDRAW_NOCULL) == 0 )
 			{
-				if ( DotProduct(surfPlane.normal, lookdir) < BACKFACE_EPSILON )
+				if ( DotProduct(surfPlane.normal, lookdir) < SHADOW_BACKFACE_EPSILON )
 					continue;
 			}
 			else
 			{
 				// Avoid edge-on shadows regardless.
 				float dot = DotProduct(surfPlane.normal, lookdir);
-				if (fabs(dot) < BACKFACE_EPSILON)
+				if (fabs(dot) < SHADOW_BACKFACE_EPSILON)
 				continue;
 			}
 		}
@@ -1766,7 +1976,7 @@ void CShadowMgr::ApplyShadowToLeaf( const Shadow_t &shadow, mleaf_t* RESTRICT pL
 		bool bInFront;
 		if ( (MSurf_Flags( surfID ) & SURFDRAW_NOCULL) == 0 )
 		{
-			if ( DotProduct( pSurfPlane->normal, pBuild->m_ProjectionDirection) > -BACKFACE_EPSILON )
+			if ( DotProduct( pSurfPlane->normal, pBuild->m_ProjectionDirection) > -SHADOW_BACKFACE_EPSILON )
 				continue;
 			
 			bInFront = true;
@@ -1775,7 +1985,7 @@ void CShadowMgr::ApplyShadowToLeaf( const Shadow_t &shadow, mleaf_t* RESTRICT pL
 		{
 			// Avoid edge-on shadows regardless.
 			float dot = DotProduct( pSurfPlane->normal, pBuild->m_ProjectionDirection );
-			if (fabs(dot) < BACKFACE_EPSILON)
+			if (fabs(dot) < SHADOW_BACKFACE_EPSILON)
 				continue;
 			
 			bInFront = (dot < 0); 
@@ -1809,7 +2019,7 @@ void CShadowMgr::ApplyShadowToLeaf( const Shadow_t &shadow, mleaf_t* RESTRICT pL
 //-----------------------------------------------------------------------------
 // Applies a projected texture to all surfaces in the leaf
 //-----------------------------------------------------------------------------
-bool CShadowMgr::EnumerateLeaf( int leaf, int context )
+bool CShadowMgr::EnumerateLeaf( int leaf, intp context )
 {
 	VPROF( "CShadowMgr::EnumerateLeaf" );
 	ShadowBuildInfo_t* pBuild = (ShadowBuildInfo_t*)context;
@@ -1827,7 +2037,7 @@ bool CShadowMgr::EnumerateLeaf( int leaf, int context )
 	mleaf_t* pLeaf = &host_state.worldbrush->leafs[leaf];
 
 	bool bIsFlashlight;
-	if( shadow.m_Flags & SHADOW_FLASHLIGHT )
+	if( shadow.m_Flags & ( SHADOW_FLASHLIGHT | SHADOW_SIMPLE_PROJECTION ) )
 	{
 		bIsFlashlight = true;
 		ApplyFlashlightToLeaf( shadow, pLeaf, pBuild );
@@ -1870,7 +2080,7 @@ void CShadowMgr::AddShadowToBrushModel( ShadowHandle_t handle, model_t* pModel,
 
 	// Transform the shadow ray direction into model space
 	Vector shadowDirInModelSpace;
-	bool bIsFlashlight = ( pShadow->m_Flags & SHADOW_FLASHLIGHT ) != 0;
+	bool bIsFlashlight = ( pShadow->m_Flags & ( SHADOW_FLASHLIGHT | SHADOW_SIMPLE_PROJECTION ) ) != 0;
 	if( !bIsFlashlight )
 	{
 		// FLASHLIGHTFIXME: should do backface culling for projective light sources.
@@ -1928,21 +2138,23 @@ void CShadowMgr::RemoveAllShadowsFromBrushModel( model_t* pModel )
 void CShadowMgr::AddShadowsOnSurfaceToRenderList( ShadowDecalHandle_t decalHandle )
 {
 	// Don't compute the surface cache if shadows are off..
-	if (!r_shadows.GetInt() )
+	if  ( !r_shadows.GetInt() )
 		return;
 
 	// Add all surface decals into the appropriate render lists
-	while( decalHandle != m_ShadowDecals.InvalidIndex() )
+	while ( decalHandle != m_ShadowDecals.InvalidIndex() )
 	{
 		ShadowDecal_t& shadowDecal = m_ShadowDecals[decalHandle];
-		if( m_Shadows[shadowDecal.m_Shadow].m_Flags & SHADOW_FLASHLIGHT )
+
+		if ( m_Shadows[shadowDecal.m_Shadow].m_Flags & ( SHADOW_FLASHLIGHT | SHADOW_SIMPLE_PROJECTION ) )
 		{
 			AddSurfaceToFlashlightMaterialBuckets( shadowDecal.m_Shadow, shadowDecal.m_SurfID );
 
 			// We've got one more decal to render
 			++m_DecalsToRender;
 		}
-		else if( r_shadows_gamecontrol.GetInt() != 0 )
+		else if (	( r_shadows_gamecontrol.GetInt() != 0 ) &&
+					( m_nSkipShadowForEntIndex != m_Shadows[shadowDecal.m_Shadow].m_nEntIndex ) )
 		{
 			// For shadow rendering, hook the decal into the render list based on the shadow material, not the surface material.
 			int sortOrder = m_Shadows[shadowDecal.m_Shadow].m_SortOrder;
@@ -1970,27 +2182,45 @@ void CShadowMgr::ClearShadowRenderList()
 	ClearAllFlashlightMaterialBuckets();
 }
 
-void CShadowMgr::RenderShadows( const VMatrix* pModelToWorld )
+void CShadowMgr::RenderShadows( IMatRenderContext *pRenderContext, const VMatrix* pModelToWorld )
 {
 	VPROF_BUDGET( "CShadowMgr::RenderShadows", VPROF_BUDGETGROUP_SHADOW_RENDERING );
 	// Iterate through all sort ids and render for regular shadows, which get their materials from the shadow material.
-	CMatRenderContextPtr pRenderContext( materials );
-	int i;
-	for( i = 0; i < m_RenderQueue.Count(); ++i )
+	
+	#if PIX_ENABLE
+		bool bFound = false;
+	#endif
+
+	for ( int i = 0; i < m_RenderQueue.Count(); i++ )
 	{
-		if (m_RenderQueue[i] != m_ShadowDecals.InvalidIndex())
+		if ( m_RenderQueue[i] != m_ShadowDecals.InvalidIndex() )
 		{
-			RenderShadowList(pRenderContext, m_RenderQueue[i], pModelToWorld );
+			#if PIX_ENABLE
+				if ( !bFound )
+				{
+					bFound = true;
+					pRenderContext->BeginPIXEvent( PIX_VALVE_ORANGE, "DECAL_SHADOWS" );
+				}
+			#endif
+
+			RenderShadowList( pRenderContext, m_RenderQueue[i], pModelToWorld );
 		}
 	}
+
+	#if PIX_ENABLE
+		if ( bFound )
+		{
+			pRenderContext->EndPIXEvent();
+		}
+	#endif
 }
 
-void CShadowMgr::RenderProjectedTextures( const VMatrix* pModelToWorld )
+void CShadowMgr::RenderProjectedTextures( IMatRenderContext *pRenderContext, const VMatrix* pModelToWorld )
 {
 	VPROF_BUDGET( "CShadowMgr::RenderProjectedTextures", VPROF_BUDGETGROUP_SHADOW_RENDERING );
 
-	RenderFlashlights( true, pModelToWorld );
-	RenderShadows( pModelToWorld );
+	RenderFlashlights( true, false, pModelToWorld );
+	RenderShadows( pRenderContext, pModelToWorld );
 
 	// Clear out the render list, we've rendered it now
 	ClearShadowRenderList();
@@ -2048,12 +2278,12 @@ public:
 class CClipPlane
 {
 public:
-	static inline bool Inside( ShadowVertex_t const& vert )						
+	inline bool Inside( ShadowVertex_t const& vert )						
 	{
 		return DotProduct( vert.m_Position, *m_pNormal ) < m_Dist;
 	}
 
-	static inline float Clip( const Vector& one, const Vector& two )	
+	inline float Clip( const Vector& one, const Vector& two )	
 	{
 		Vector dir;
 		VectorSubtract( two, one, dir );
@@ -2063,7 +2293,7 @@ public:
 	static inline bool IsAbove()	{return false;}
 	static inline bool IsPlane()	{return true;}
 
-	static void SetPlane( const Vector& normal, float dist )
+	void SetPlane( const Vector& normal, float dist )
 	{
 		m_pNormal = &normal;
 		m_Dist = dist;
@@ -2071,12 +2301,9 @@ public:
 
 
 private:
-	static const Vector *m_pNormal;
-	static float  m_Dist;
+	const Vector *m_pNormal;
+	float  m_Dist;
 };
-
-const Vector *CClipPlane::m_pNormal;
-float  CClipPlane::m_Dist;
 
 static inline void ClampTexCoord( ShadowVertex_t *pInVertex, ShadowVertex_t *pOutVertex )
 {
@@ -2100,13 +2327,13 @@ static inline void Intersect( ShadowVertex_t* pStart, ShadowVertex_t* pEnd, Shad
 		if (!Clipper::IsAbove())
 		{
 			// This is the path the we always take for perspective light volumes.
-			t = Clipper::Clip( pStart->m_ShadowSpaceTexCoord, pEnd->m_ShadowSpaceTexCoord );
+			t = clipper.Clip( pStart->m_ShadowSpaceTexCoord, pEnd->m_ShadowSpaceTexCoord );
 
 			VectorLerp( pStart->m_ShadowSpaceTexCoord, pEnd->m_ShadowSpaceTexCoord, t, pOut->m_ShadowSpaceTexCoord );
 		}
 		else
 		{
-			t = Clipper::Clip( pStart->m_ShadowSpaceTexCoord, pEnd->m_ShadowSpaceTexCoord );
+			t = clipper.Clip( pStart->m_ShadowSpaceTexCoord, pEnd->m_ShadowSpaceTexCoord );
 			VectorLerp( pStart->m_ShadowSpaceTexCoord, pEnd->m_ShadowSpaceTexCoord, t, pOut->m_ShadowSpaceTexCoord );
 
 			// This is a special thing we do here to avoid hard-edged shadows
@@ -2118,7 +2345,7 @@ static inline void Intersect( ShadowVertex_t* pStart, ShadowVertex_t* pEnd, Shad
 	}
 	else
 	{
-		t = Clipper::Clip( pStart->m_Position, pEnd->m_Position );
+		t = clipper.Clip( pStart->m_Position, pEnd->m_Position );
 		VectorLerp( pStart->m_ShadowSpaceTexCoord, pEnd->m_ShadowSpaceTexCoord, t, pOut->m_ShadowSpaceTexCoord );
 	}
 
@@ -2133,16 +2360,16 @@ static void ShadowClip( ShadowClipState_t& clip, Clipper& clipper )
 
 	// Ye Olde Sutherland-Hodgman clipping algorithm
 	int numOutVerts = 0;
-	ShadowVertex_t** pSrcVert = clip.m_ppClipVertices[clip.m_CurrVert];
-	ShadowVertex_t** pDestVert = clip.m_ppClipVertices[!clip.m_CurrVert];
+	ShadowVertex_t** pSrcVert = (ShadowVertex_t **)clip.m_ppClipVertices[clip.m_CurrVert];
+	ShadowVertex_t** pDestVert = (ShadowVertex_t **)clip.m_ppClipVertices[!clip.m_CurrVert];
 
 	int numVerts = clip.m_ClipCount;
 	ShadowVertex_t* pStart = pSrcVert[numVerts-1];
-	bool startInside = Clipper::Inside( *pStart );
+	bool startInside = clipper.Inside( *pStart );
 	for (int i = 0; i < numVerts; ++i)
 	{
 		ShadowVertex_t* pEnd = pSrcVert[i];
-		bool endInside = Clipper::Inside( *pEnd );
+		bool endInside = clipper.Inside( *pEnd );
 		if (endInside)
 		{
 			if (!startInside)
@@ -2187,32 +2414,61 @@ static void ShadowClip( ShadowClipState_t& clip, Clipper& clipper )
 }
 
 
+
 //-----------------------------------------------------------------------------
 // Project vertices into shadow space
 //-----------------------------------------------------------------------------
-bool CShadowMgr::ProjectVerticesIntoShadowSpace( const VMatrix& modelToShadow, 
+
+// a version of this function where I promise that src1, dst, and src2 are all different
+FORCEINLINE void Vector3DMultiplyPositionNoAlias( const VMatrix * RESTRICT src1, 
+											const Vector * RESTRICT src2,
+											Vector * RESTRICT dst )
+{
+	(*dst)[0] = (*src1)[0][0] * (*src2).x + (*src1)[0][1] * (*src2).y + (*src1)[0][2] * (*src2).z + (*src1)[0][3];
+	(*dst)[1] = (*src1)[1][0] * (*src2).x + (*src1)[1][1] * (*src2).y + (*src1)[1][2] * (*src2).z + (*src1)[1][3];
+	(*dst)[2] = (*src1)[2][0] * (*src2).x + (*src1)[2][1] * (*src2).y + (*src1)[2][2] * (*src2).z + (*src1)[2][3];
+}
+bool CShadowMgr::ProjectVerticesIntoShadowSpace( const VMatrix * RESTRICT modelToShadow, 
 	float maxDist, int count, Vector** RESTRICT ppPosition, ShadowClipState_t& clip )
 {
 	bool insideVolume = false;
+
+	// init to frustum box
+	Vector mins( 1.0f, 1.0f, maxDist );
+	Vector maxs( 0.0f, 0.0f, 0.0f );
 
 	// Create vertices to clip to...
 	for (int i = 0; i < count; ++i )
 	{
 		Assert( ppPosition[i] );
 
-		VectorCopy( *ppPosition[i], clip.m_pTempVertices[i].m_Position );
+		Vector * RESTRICT pPos = ppPosition[i];
+		VectorCopy( *pPos, clip.m_pTempVertices[i].m_Position );
 
 		// Project the points into shadow texture space
-		Vector3DMultiplyPosition( modelToShadow, *ppPosition[i], clip.m_pTempVertices[i].m_ShadowSpaceTexCoord );
+		Vector * RESTRICT pShadowSpacePos = &clip.m_pTempVertices[i].m_ShadowSpaceTexCoord;
+		Vector3DMultiplyPositionNoAlias( modelToShadow, pPos, pShadowSpacePos );
 
+		// Update AABB for polygon
+#ifdef _X360
+		// This should be a little better for the 360 than VectorMin()/Max()
+		mins.x = fsel( pShadowSpacePos->x - mins.x, mins.x, pShadowSpacePos->x );
+		mins.y = fsel( pShadowSpacePos->y - mins.y, mins.x, pShadowSpacePos->y );
+		mins.z = fsel( pShadowSpacePos->z - mins.z, mins.x, pShadowSpacePos->z );
+		maxs.x = fsel( pShadowSpacePos->x - maxs.x, pShadowSpacePos->x, maxs.x );
+		maxs.y = fsel( pShadowSpacePos->y - maxs.y, pShadowSpacePos->y, maxs.y );
+		maxs.z = fsel( pShadowSpacePos->z - maxs.z, pShadowSpacePos->z, maxs.z );
+#else
+		VectorMin( mins, *pShadowSpacePos, mins );
+		VectorMax( maxs, *pShadowSpacePos, maxs );
+#endif
 		// Set up clipping coords...
 		clip.m_ppClipVertices[0][i] = &clip.m_pTempVertices[i];
-
-		if (clip.m_pTempVertices[i].m_ShadowSpaceTexCoord[2] < maxDist )
-		{
-			insideVolume = true;
-		}
 	}
+
+	// early out if AABB doesn't intersect frustum box
+	insideVolume = !( ( mins.x >= 1.0f ) || ( maxs.x <= 0.0f ) || ( mins.y >= 1.0f ) ||
+		( maxs.y <= 0.0f ) || ( mins.z >= maxDist ) || ( maxs.z <= 0.0f ) );
 
 	clip.m_TempCount = clip.m_ClipCount = count;
 	clip.m_CurrVert = 0;
@@ -2220,16 +2476,15 @@ bool CShadowMgr::ProjectVerticesIntoShadowSpace( const VMatrix& modelToShadow,
 	return insideVolume;
 }
 
-
 //-----------------------------------------------------------------------------
 // Projects + clips shadows
 //-----------------------------------------------------------------------------
 int CShadowMgr::ProjectAndClipVertices( const Shadow_t& shadow, const VMatrix& worldToShadow,
-	const VMatrix *pWorldToModel, int count, Vector** ppPosition, ShadowVertex_t*** ppOutVertex )
+						 const VMatrix *pWorldToModel, int count, Vector** ppPosition, ShadowVertex_t*** ppOutVertex, ShadowClipState_t& clip )
 {
 	VPROF( "ProjectAndClipVertices" );
-	static ShadowClipState_t clip;
-	if ( !ProjectVerticesIntoShadowSpace( worldToShadow, shadow.m_MaxDist, count, ppPosition, clip ) )
+
+	if ( !ProjectVerticesIntoShadowSpace( &worldToShadow, shadow.m_MaxDist, count, ppPosition, clip ) )
 		return 0;
 
 	// Clippers...
@@ -2245,7 +2500,11 @@ int CShadowMgr::ProjectAndClipVertices( const Shadow_t& shadow, const VMatrix& w
 	ShadowClip( clip, bottom );
 	ShadowClip( clip, left );
 	ShadowClip( clip, right );
-	ShadowClip( clip, above );
+	if ( shadow.m_ClipPlaneCount == 0 )
+	{
+		// only clip above if we don't have any extra clip planes that prevent back-casting
+		ShadowClip( clip, above );
+	}
 
 	// Planes to suppress back-casting
 	for (int i = 0; i < shadow.m_ClipPlaneCount; ++i)
@@ -2270,7 +2529,7 @@ int CShadowMgr::ProjectAndClipVertices( const Shadow_t& shadow, const VMatrix& w
 
 	// Return a pointer to the array of clipped vertices...
 	Assert(ppOutVertex);
-	*ppOutVertex = clip.m_ppClipVertices[clip.m_CurrVert];
+	*ppOutVertex = (ShadowVertex_t **)clip.m_ppClipVertices[clip.m_CurrVert];
 	return clip.m_ClipCount;
 }
 
@@ -2281,10 +2540,20 @@ int CShadowMgr::ProjectAndClipVertices( const Shadow_t& shadow, const VMatrix& w
 int CShadowMgr::ProjectAndClipVertices( ShadowHandle_t handle, int count, 
 	Vector** ppPosition, ShadowVertex_t*** ppOutVertex )
 {
+	static ShadowClipState_t clip;
 	return ProjectAndClipVertices( m_Shadows[handle], 
-		m_Shadows[handle].m_WorldToShadow, NULL, count, ppPosition, ppOutVertex );
+		m_Shadows[handle].m_WorldToShadow, NULL, count, ppPosition, ppOutVertex, clip );
 }
 
+//-----------------------------------------------------------------------------
+// Thread-safe version
+//-----------------------------------------------------------------------------
+int CShadowMgr::ProjectAndClipVerticesEx( ShadowHandle_t handle, int count, 
+									 Vector** ppPosition, ShadowVertex_t*** ppOutVertex, ShadowClipState_t& clip )
+{
+	return ProjectAndClipVertices( m_Shadows[handle], 
+		m_Shadows[handle].m_WorldToShadow, NULL, count, ppPosition, ppOutVertex, clip );
+}
 
 //-----------------------------------------------------------------------------
 // Copies vertex info from the clipped vertices
@@ -2338,8 +2607,9 @@ bool CShadowMgr::ComputeShadowVertices( ShadowDecal_t& decal,
 
 	// Create vertices to clip to...
 	ShadowVertex_t** ppSrcVert;
+	ShadowClipState_t clip;
 	int clipCount = ProjectAndClipVertices( m_Shadows[decal.m_Shadow], *pModelToShadow, pWorldToModel, 
-		MSurf_VertCount( decal.m_SurfID ), ppVec, &ppSrcVert );
+		MSurf_VertCount( decal.m_SurfID ), ppVec, &ppSrcVert, clip );
 	if (clipCount == 0)
 	{
 		pVertexCache->m_Count = 0;
@@ -2374,7 +2644,7 @@ inline bool CShadowMgr::ShouldCacheVertices( const ShadowDecal_t& decal )
 //-----------------------------------------------------------------------------
 // Generates a list displacement shadow vertices to render
 //-----------------------------------------------------------------------------
-inline bool CShadowMgr::GenerateDispShadowRenderInfo( IMatRenderContext *pRenderContext, ShadowDecal_t& decal, ShadowRenderInfo_t& info )
+inline bool CShadowMgr::GenerateDispShadowRenderInfo( ShadowDecal_t& decal, ShadowRenderInfo_t& info )
 {
 	//=============================================================================
 	// HPE_BEGIN:
@@ -2442,12 +2712,14 @@ inline bool CShadowMgr::GenerateNormalShadowRenderInfo( IMatRenderContext *pRend
 		bool shouldCacheVerts = ShouldCacheVertices( decal );
 		if (shouldCacheVerts)
 		{
+			GrowSpew( m_VertexCache.NumAllocated(), m_VertexCacheMax, "m_VertexCache" );
 			decal.m_ShadowVerts = m_VertexCache.AddToTail();
 			info.m_pCache[info.m_Count] = decal.m_ShadowVerts;
 			pVertexCache = &m_VertexCache[decal.m_ShadowVerts];
 		}
 		else
 		{
+			GrowSpew( m_TempVertexCache.NumAllocated(), m_TempVertexCacheMax, "m_TempVertexCache" );
 			int i = m_TempVertexCache.AddToTail();
 			info.m_pCache[info.m_Count] = -i-1;
 			pVertexCache = &m_TempVertexCache[i];
@@ -2482,6 +2754,8 @@ inline bool CShadowMgr::GenerateNormalShadowRenderInfo( IMatRenderContext *pRend
 //-----------------------------------------------------------------------------
 void CShadowMgr::GenerateShadowRenderInfo( IMatRenderContext *pRenderContext, ShadowDecalHandle_t decalHandle, ShadowRenderInfo_t& info )
 {
+	VPROF_BUDGET( __FUNCTION__, VPROF_BUDGETGROUP_SHADOW_RENDERING );
+
 	info.m_VertexCount = 0;
 	info.m_IndexCount = 0;
 	info.m_Count = 0;
@@ -2500,11 +2774,11 @@ void CShadowMgr::GenerateShadowRenderInfo( IMatRenderContext *pRenderContext, Sh
 		if ( shadow.m_FalloffBias == 255 )
 			continue;
 
-		bool keepShadow;
+		bool keepShadow = true;
 		if ( decal.m_DispShadow != DISP_SHADOW_HANDLE_INVALID )
 		{
 			// Handle shadows on displacements...
-			keepShadow = GenerateDispShadowRenderInfo( pRenderContext, decal, info );
+			keepShadow = GenerateDispShadowRenderInfo( decal, info );
 		}
 		else
 		{
@@ -2524,6 +2798,97 @@ void CShadowMgr::GenerateShadowRenderInfo( IMatRenderContext *pRenderContext, Sh
 	}
 }
 
+void CShadowMgr::GenerateShadowRenderInfoThreaded( IMatRenderContext *pRenderContext, ShadowDecalHandle_t decalHandle, ShadowRenderInfo_t& info )
+{
+	info.m_VertexCount = 0;
+	info.m_IndexCount = 0;
+	info.m_Count = 0;
+	info.m_DispCount = 0;
+
+	DispDecalWorkItem_t* pDispDecalWorkItems = static_cast<DispDecalWorkItem_t*>( stackalloc( m_DecalsToRender * sizeof( DispDecalWorkItem_t ) ) );
+	int nNumDispDecals = 0;
+
+	// Keep the lists only full of valid decals; that way we can preserve
+	// the render lists in the case that we discover a shadow isn't needed.
+	ShadowDecalHandle_t next;
+	for ( ; decalHandle != m_ShadowDecals.InvalidIndex(); decalHandle = next )
+	{
+		ShadowDecal_t& decal = m_ShadowDecals[decalHandle];
+		next = m_ShadowDecals[decalHandle].m_NextRender;
+
+		// Skip translucent shadows [ don't add their verts + indices to the render lists ]
+		Shadow_t &shadow = m_Shadows[ decal.m_Shadow ];
+		if ( shadow.m_FalloffBias == 255 )
+			continue;
+
+		bool keepShadow = false;
+		if ( decal.m_DispShadow != DISP_SHADOW_HANDLE_INVALID )
+		{
+			pDispDecalWorkItems[nNumDispDecals].h = decalHandle;
+			nNumDispDecals++;
+			continue;
+		}
+		else
+		{
+			// Handle shadows on normal surfaces
+			keepShadow = GenerateNormalShadowRenderInfo( pRenderContext, decal, info );
+		}
+
+		// Retire the surface if the shadow didn't actually hit it
+		if ( !keepShadow && ShouldCacheVertices( decal ) )
+		{
+			// If no triangles were generated
+			// (the decal was completely clipped off)
+			// In this case, remove the decal from the surface cache
+			// so next time it'll be faster (for cached decals)
+			RemoveShadowDecalFromSurface( decal.m_SurfID, decalHandle );
+		}
+	}
+
+	// threaded displacement decal processing
+	ParallelProcess( pDispDecalWorkItems, nNumDispDecals, this, &CShadowMgr::ProcessDispDecalWorkItem );
+
+	// now go through list of results and do the additional processing from GenereateDispShadowRenderInfo
+	for ( int i = 0; i < nNumDispDecals; i++ )
+	{
+		DispDecalWorkItem_t& wi = pDispDecalWorkItems[i];
+		//ProcessDispDecalWorkItem( wi );
+
+		ShadowDecal_t& decal = m_ShadowDecals[ wi.h ];
+
+		if ( pDispDecalWorkItems[i].bKeepShadow )
+		{
+			// Catch overflows....
+			if ( ( info.m_VertexCount + wi.vertCount >= info.m_nMaxVertices ) || ( info.m_IndexCount + wi.indexCount >= info.m_nMaxIndices ) )
+				continue;
+
+			info.m_VertexCount += wi.vertCount;
+			info.m_IndexCount += wi.indexCount;
+			info.m_pDispCache[info.m_DispCount++] = decal.m_DispShadow;
+		}
+		else
+		{
+			if ( ShouldCacheVertices( decal ) )
+			{
+				RemoveShadowDecalFromSurface( decal.m_SurfID, wi.h );
+			}
+		}
+	}
+}
+
+void CShadowMgr::ProcessDispDecalWorkItem( DispDecalWorkItem_t& wi )
+{
+	// Handle shadows on displacements...
+	ShadowDecal_t& decal = m_ShadowDecals[wi.h];
+	wi.bKeepShadow = MSurf_DispInfo( decal.m_SurfID )->ComputeShadowFragments( decal.m_DispShadow, wi.vertCount, wi.indexCount );
+
+	/*
+	int v, i;
+	if ( ! )
+	return false;
+
+	}	*/
+}
 
 //-----------------------------------------------------------------------------
 // Computes information for rendering
@@ -2533,12 +2898,18 @@ void CShadowMgr::ComputeRenderInfo( ShadowDecalRenderInfo_t* pInfo, ShadowHandle
 	const ShadowInfo_t& i = m_Shadows[handle];
 	pInfo->m_vTexOrigin = i.m_TexOrigin;
 	pInfo->m_vTexSize = i.m_TexSize;
-	pInfo->m_flFalloffOffset = i.m_FalloffOffset;
+	pInfo->m_flFalloffOffset = 0.7f * i.m_FalloffOffset;	// pull the offset in a little to hide the shadow darkness discontinuity
 	pInfo->m_flFalloffAmount = i.m_FalloffAmount;
 	pInfo->m_flFalloffBias = i.m_FalloffBias;
 
-	float flFalloffDist = i.m_MaxDist - i.m_FalloffOffset;
+	float flFalloffDist = i.m_MaxDist - pInfo->m_flFalloffOffset;
 	pInfo->m_flOOZFalloffDist = ( flFalloffDist > 0.0f ) ? 1.0f / flFalloffDist : 1.0f;
+
+	// for use in the shader
+	pInfo->m_vShadowFalloffParams.x = -pInfo->m_flFalloffOffset * pInfo->m_flOOZFalloffDist;
+	pInfo->m_vShadowFalloffParams.y = pInfo->m_flOOZFalloffDist;
+	pInfo->m_vShadowFalloffParams.z = 1.0f/255.0f * i.m_FalloffBias;
+	// we assume that shadow.m_flFalloffAmount is constant
 }
 
 
@@ -2567,7 +2938,6 @@ int CShadowMgr::AddNormalShadowsToMeshBuilder( CMeshBuilder& meshBuilder, Shadow
 		g_pShadowMgr->ComputeRenderInfo( &shadow, pVertexCache->m_Shadow );
 
 		int j;
-		unsigned char c;
 		Vector2D texCoord;
 		int vCount = pVertexCache->m_Count - 2;
 		if ( vCount <= 0 )
@@ -2578,12 +2948,11 @@ int CShadowMgr::AddNormalShadowsToMeshBuilder( CMeshBuilder& meshBuilder, Shadow
 			// Transform + offset the texture coords
 			Vector2DMultiply( pVerts->m_ShadowSpaceTexCoord.AsVector2D(), shadow.m_vTexSize, texCoord );
 			texCoord += shadow.m_vTexOrigin;
-			c = ComputeDarkness( pVerts->m_ShadowSpaceTexCoord.z, shadow );
 
 			meshBuilder.Position3fv( pVerts->m_Position.Base() );
-			meshBuilder.Color4ub( c, c, c, c );
-			meshBuilder.TexCoord2fv( 0, texCoord.Base() );
-			meshBuilder.AdvanceVertex();
+			meshBuilder.TexCoord3f( 0, texCoord.x, texCoord.y, pVerts->m_ShadowSpaceTexCoord.z );
+			meshBuilder.TexCoord3fv( 1, shadow.m_vShadowFalloffParams.Base() );
+			meshBuilder.AdvanceVertexF<VTX_HAVEPOS, 2>();
 
 			meshBuilder.FastIndex( baseIndex );
 			meshBuilder.FastIndex( j + baseIndex + 1 );
@@ -2592,20 +2961,18 @@ int CShadowMgr::AddNormalShadowsToMeshBuilder( CMeshBuilder& meshBuilder, Shadow
 
 		Vector2DMultiply( pVerts->m_ShadowSpaceTexCoord.AsVector2D(), shadow.m_vTexSize, texCoord );
 		texCoord += shadow.m_vTexOrigin;
-		c = ComputeDarkness( pVerts->m_ShadowSpaceTexCoord.z, shadow );
 		meshBuilder.Position3fv( pVerts->m_Position.Base() );
-		meshBuilder.Color4ub( c, c, c, c );
-		meshBuilder.TexCoord2fv( 0, texCoord.Base() );
-		meshBuilder.AdvanceVertex();
+		meshBuilder.TexCoord3f( 0, texCoord.x, texCoord.y, pVerts->m_ShadowSpaceTexCoord.z );
+		meshBuilder.TexCoord3fv( 1, shadow.m_vShadowFalloffParams.Base() );
+		meshBuilder.AdvanceVertexF<VTX_HAVEPOS, 2>();
 		++pVerts;
 
 		Vector2DMultiply( pVerts->m_ShadowSpaceTexCoord.AsVector2D(), shadow.m_vTexSize, texCoord );
 		texCoord += shadow.m_vTexOrigin;
-		c = ComputeDarkness( pVerts->m_ShadowSpaceTexCoord.z, shadow );
 		meshBuilder.Position3fv( pVerts->m_Position.Base() );
-		meshBuilder.Color4ub( c, c, c, c );
-		meshBuilder.TexCoord2fv( 0, texCoord.Base() );
-		meshBuilder.AdvanceVertex();
+		meshBuilder.TexCoord3f( 0, texCoord.x, texCoord.y, pVerts->m_ShadowSpaceTexCoord.z );
+		meshBuilder.TexCoord3fv( 1, shadow.m_vShadowFalloffParams.Base() );
+		meshBuilder.AdvanceVertexF<VTX_HAVEPOS, 2>();
 
 		// Update the base index
 		baseIndex += vCount + 2; 
@@ -2639,7 +3006,7 @@ int CShadowMgr::AddDisplacementShadowsToMeshBuilder( CMeshBuilder& meshBuilder,
 //-----------------------------------------------------------------------------
 static void DrawShadowID( ShadowHandle_t shadowHandle, const Vector &vecCentroid )
 {
-#ifndef SWDS
+#ifndef DEDICATED
 	char buf[32];
 	Q_snprintf(buf, sizeof( buf ), "%d", shadowHandle );
 	CDebugOverlay::AddTextOverlay( vecCentroid, 0, buf );
@@ -2702,7 +3069,7 @@ void CShadowMgr::RenderShadowList( IMatRenderContext *pRenderContext, ShadowDeca
 	if ( m_DecalsToRender > m_ShadowDecalCache.Count() )
 	{
 		// Don't grow past the MAX_SHADOW_DECAL_CACHE_COUNT cap.
-		int diff = min( m_DecalsToRender, (int)MAX_SHADOW_DECAL_CACHE_COUNT ) - m_ShadowDecalCache.Count();
+		int diff = MIN( m_DecalsToRender, MAX_SHADOW_DECAL_CACHE_COUNT ) - m_ShadowDecalCache.Count();
 		if ( diff > 0 )
 		{
 			// Grow the cache.
@@ -2714,7 +3081,7 @@ void CShadowMgr::RenderShadowList( IMatRenderContext *pRenderContext, ShadowDeca
 	if ( m_DecalsToRender > m_DispShadowDecalCache.Count() )
 	{
 		// Don't grow past the MAX_SHADOW_DECAL_CACHE_COUNT cap.
-		int diff = min( m_DecalsToRender, (int)MAX_SHADOW_DECAL_CACHE_COUNT ) - m_DispShadowDecalCache.Count();
+		int diff = MIN( m_DecalsToRender, MAX_SHADOW_DECAL_CACHE_COUNT ) - m_DispShadowDecalCache.Count();
 		if ( diff > 0 )
 		{
 			// Grow the cache.
@@ -2765,7 +3132,14 @@ void CShadowMgr::RenderShadowList( IMatRenderContext *pRenderContext, ShadowDeca
 
 	// Iterate over all decals in the decal list and generate polygon lists
 	// Creating them from scratch if their shadow poly cache is invalid
-	GenerateShadowRenderInfo(pRenderContext, decalHandle, info);
+	if ( r_threaded_shadow_clip.GetBool() )
+	{
+		GenerateShadowRenderInfoThreaded(pRenderContext, decalHandle, info);
+	}
+	else
+	{
+		GenerateShadowRenderInfo(pRenderContext, decalHandle, info);
+	}
 	Assert( info.m_Count <= m_DecalsToRender );
 	Assert( info.m_DispCount <= m_DecalsToRender );
 	//=============================================================================
@@ -2820,7 +3194,7 @@ void CShadowMgr::SetNumWorldMaterialBuckets( int numMaterialSortBins )
 //-----------------------------------------------------------------------------
 void CShadowMgr::ClearAllFlashlightMaterialBuckets( void )
 {
-	if ( IsX360() || r_flashlight_version2.GetInt() )
+	if ( m_bSinglePassFlashlightStateEnabled )
 		return;
 
 	FlashlightHandle_t flashlightID;
@@ -2884,18 +3258,32 @@ bool ScreenSpaceRectFromPoints( IMatRenderContext *pRenderContext, Vector vClipp
 		}
 	}
 
+	// Get render target dimensions
 	int nWidth, nHeight;
-	g_pMaterialSystem->GetBackBufferDimensions( nWidth, nHeight );	// Get render target dimensions
+	g_pMaterialSystem->GetBackBufferDimensions( nWidth, nHeight );
 
-	*nLeft	 = ((fMinX * 0.5f + 0.5f) * (float) nWidth ) - 1;		// Convert to render target pixel units
+	// Convert to render target pixel units
+	*nLeft	 = ((fMinX * 0.5f + 0.5f) * (float) nWidth ) - 1;
 	*nTop    = ((fMinY * 0.5f + 0.5f) * (float) nHeight) - 1; 
 	*nRight  = ((fMaxX * 0.5f + 0.5f) * (float) nWidth ) + 1;
 	*nBottom = ((fMaxY * 0.5f + 0.5f) * (float) nHeight) + 1;  
 
-	*nLeft   = clamp( *nLeft,   0, nWidth  );						// Clamp to render target dimensions
+	// Clamp to render target dimensions
+	*nLeft   = clamp( *nLeft,   0, nWidth  );
 	*nTop    = clamp( *nTop,    0, nHeight );
 	*nRight  = clamp( *nRight,  0, nWidth  );
 	*nBottom = clamp( *nBottom, 0, nHeight );
+
+	// Scale and bias to fit current viewport
+	int nViewportX, nViewportY, nViewportWidth, nViewportHeight;
+	pRenderContext->GetViewport( nViewportX, nViewportY, nViewportWidth, nViewportHeight );
+
+	float flScaleX = ( float )( nViewportWidth ) / ( float )nWidth;
+	float flScaleY = ( float )( nViewportHeight ) / ( float )nHeight;
+	*nLeft   = ( int )( ( float )( *nLeft )   * flScaleX ) + nViewportX;
+	*nRight  = ( int )( ( float )( *nRight )  * flScaleX ) + nViewportX;
+	*nTop    = ( int )( ( float )( *nTop )    * flScaleY ) + nViewportY;
+	*nBottom = ( int )( ( float )( *nBottom ) * flScaleY ) + nViewportY;
 
 	Assert( (*nLeft <= *nRight) && (*nTop <= *nBottom) );
 
@@ -2914,30 +3302,7 @@ bool ScreenSpaceRectFromPoints( IMatRenderContext *pRenderContext, Vector vClipp
 // Turn this optimization off by default
 static ConVar r_flashlightclip("r_flashlightclip", "0", FCVAR_CHEAT );
 static ConVar r_flashlightdrawclip("r_flashlightdrawclip", "0", FCVAR_CHEAT );
-static ConVar r_flashlightscissor( "r_flashlightscissor", "1", 0 );
-
-void ExtractFrustumPlanes( Frustum frustumPlanes, float flPlaneEpsilon )
-{
-	const CViewSetup &view = g_EngineRenderer->ViewGetCurrent();
-
-	float flFOVy = CalcFovY( view.fov, view.m_flAspectRatio );
-
-	Frustum_t frustum;
-
-	Vector vForward, vRight, vUp;
-	AngleVectors( view.angles, &vForward, &vRight, &vUp );
-
-	GeneratePerspectiveFrustum( view.origin, vForward, vRight, vUp,
-								view.zNear + flPlaneEpsilon, view.zFar - flPlaneEpsilon,	// Apply epsilon to near and far
-								view.fov, flFOVy, frustum );
-
-	// Copy out to the planes that the engine renderer uses.
-	for( int i=0; i < FRUSTUM_NUMPLANES; i++ )
-	{
-		frustumPlanes[i].m_Normal = frustum.GetPlane(i)->normal;
-		frustumPlanes[i].m_Dist = frustum.GetPlane(i)->dist;
-	}
-}
+static ConVar r_flashlightscissor( "r_flashlightscissor", "0", FCVAR_MATERIAL_SYSTEM_THREAD );
 
 void ConstructNearAndFarPolygons( Vector *pVecNearPlane, Vector *pVecFarPlane, float flPlaneEpsilon )
 {
@@ -3027,15 +3392,15 @@ void DrawPolygonToStencil( IMatRenderContext *pRenderContext, int nNumVerts, Vec
 	for (int i=1; i<(nNumVerts-1); i++)
 	{
 		meshBuilder.Position3f( pVecPoints[0].x, pVecPoints[0].y, pVecPoints[0].z );
-		meshBuilder.AdvanceVertex();
+		meshBuilder.AdvanceVertexF<VTX_HAVEPOS, 0>();
 
 		int index = bFrontFacing ? i : i+1;
 		meshBuilder.Position3f( pVecPoints[index].x, pVecPoints[index].y, pVecPoints[index].z );
-		meshBuilder.AdvanceVertex();
+		meshBuilder.AdvanceVertexF<VTX_HAVEPOS, 0>();
 
 		index = bFrontFacing ? i+1 : i;
 		meshBuilder.Position3f( pVecPoints[index].x, pVecPoints[index].y, pVecPoints[index].z );
-		meshBuilder.AdvanceVertex();
+		meshBuilder.AdvanceVertexF<VTX_HAVEPOS, 0>();
 	}
 
 	meshBuilder.End( false, true );
@@ -3126,13 +3491,18 @@ void CShadowMgr::SetStencilAndScissor( IMatRenderContext *pRenderContext, Flashl
 	}
 
 	// Express near and far planes of View frustum in world space
-	Frustum frustumPlanes;
+	Vector vNearNormal, vFarNormal;
+	float flNearDist, flFarDist;
 	const float flPlaneEpsilon = 0.4f;
-	ExtractFrustumPlanes( frustumPlanes, flPlaneEpsilon );
-	Vector vNearNormal = frustumPlanes[FRUSTUM_NEARZ].m_Normal;
-	Vector vFarNormal  = frustumPlanes[FRUSTUM_FARZ].m_Normal;
-	float flNearDist   = frustumPlanes[FRUSTUM_NEARZ].m_Dist;
-	float flFarDist    = frustumPlanes[FRUSTUM_FARZ].m_Dist;
+
+	const CViewSetup &view = g_EngineRenderer->ViewGetCurrent();
+	Vector vForward;
+	AngleVectors( view.angles, &vForward, NULL, NULL );
+	float flIntercept = DotProduct( view.origin, vForward );
+	vFarNormal = -vForward;
+	vNearNormal = vForward;
+	flNearDist = (view.zNear + flPlaneEpsilon) + flIntercept;
+	flFarDist = -(view.zFar - flPlaneEpsilon + flIntercept);
 
 	Vector	vTempFace[5];
 	Vector	vClippedFace[6];
@@ -3253,14 +3623,16 @@ TODO: do we even need to do the far plane?
 */
 
 		// Just blast front faces into the stencil buffer no matter what...
-		pRenderContext->SetStencilEnable( true );
-		pRenderContext->SetStencilFailOperation( STENCILOPERATION_REPLACE );					// Stencil fails
-		pRenderContext->SetStencilZFailOperation( STENCILOPERATION_REPLACE );					// Stencil passes but depth fails
-		pRenderContext->SetStencilPassOperation( STENCILOPERATION_REPLACE );					// Z and stencil both pass
-		pRenderContext->SetStencilCompareFunction( STENCILCOMPARISONFUNCTION_ALWAYS );			// Stencil always pass
-		pRenderContext->SetStencilReferenceValue( m_Shadows[flashlightInfo.m_Shadow].m_ucShadowStencilBit );
-		pRenderContext->SetStencilTestMask( m_Shadows[flashlightInfo.m_Shadow].m_ucShadowStencilBit );
-		pRenderContext->SetStencilWriteMask( m_Shadows[flashlightInfo.m_Shadow].m_ucShadowStencilBit );		// Bit mask which is specific to this shadow
+		ShaderStencilState_t state;
+		state.m_bEnable = true;																	
+		state.m_FailOp = SHADER_STENCILOP_KEEP;										// Stencil fails
+		state.m_ZFailOp = SHADER_STENCILOP_SET_TO_REFERENCE;									// Stencil passes but depth fails
+		state.m_PassOp = SHADER_STENCILOP_SET_TO_REFERENCE;										// Z and stencil both pass
+		state.m_CompareFunc = SHADER_STENCILFUNC_ALWAYS;										// Stencil always pass
+		state.m_nReferenceValue = m_Shadows[flashlightInfo.m_Shadow].m_ucShadowStencilBit;
+		state.m_nTestMask = m_Shadows[flashlightInfo.m_Shadow].m_ucShadowStencilBit;
+		state.m_nWriteMask =m_Shadows[flashlightInfo.m_Shadow].m_ucShadowStencilBit;			// Bit mask which is specific to this shadow
+		pRenderContext->SetStencilState( state );
 
 		for ( int i=0; i<nNumPolygons; i++ )													// Set the stencil bit on front facing
 		{
@@ -3276,7 +3648,9 @@ TODO: do we even need to do the far plane?
 		}
 */
 
-		pRenderContext->SetStencilEnable( false );
+		ShaderStencilState_t stateDisable;
+		stateDisable.m_bEnable = false;
+		pRenderContext->SetStencilState( stateDisable );
 	}
 }
 
@@ -3285,9 +3659,9 @@ TODO: do we even need to do the far plane?
 //---------------------------------------------------------------------------------------
 void CShadowMgr::SetFlashlightStencilMasks( bool bDoMasking )
 {
-	VPROF_BUDGET( "CShadowMgr::RenderFlashlights", VPROF_BUDGETGROUP_SHADOW_RENDERING );
+	VPROF_BUDGET( "CShadowMgr::SetFlashlightStencilMasks", VPROF_BUDGETGROUP_SHADOW_RENDERING );
 
-	if ( IsX360() || r_flashlight_version2.GetInt() )
+	if ( m_bSinglePassFlashlightStateEnabled )
 		return;
 
 	// Bail out if we're not doing any of these optimizations
@@ -3306,22 +3680,143 @@ void CShadowMgr::SetFlashlightStencilMasks( bool bDoMasking )
 	{
 		FlashlightInfo_t &flashlightInfo = m_FlashlightStates[flashlightID];
 
+		if ( flashlightInfo.m_nSplitscreenOwner >= 0 )
+		{
+			ASSERT_LOCAL_PLAYER_RESOLVABLE();
+			if ( flashlightInfo.m_nSplitscreenOwner != GET_ACTIVE_SPLITSCREEN_SLOT() )
+				continue;
+		}
+
 		SetStencilAndScissor( pRenderContext, flashlightInfo, m_Shadows[flashlightInfo.m_Shadow].m_pFlashlightDepthTexture != NULL );
 	}
 }
 
 
-void CShadowMgr::DisableStencilAndScissorMasking( IMatRenderContext *pRenderContext )
+void CShadowMgr::PushFlashlightScissorBounds( void )
+{
+	m_ScissorStateEntryStart.AddToTail( m_ScissorStateBackups.Count() ); //push the location of the end of our current backup set
+
+	FlashlightHandle_t flashlightID = m_FlashlightStates.Head();
+	if ( flashlightID != m_FlashlightStates.InvalidIndex() )
+	{
+		ASSERT_LOCAL_PLAYER_RESOLVABLE();
+		int iSplitScreenSlot = GET_ACTIVE_SPLITSCREEN_SLOT();
+		
+		//count the number of entries we need
+		int iStateCount = 0;
+		for( ; 
+			flashlightID != m_FlashlightStates.InvalidIndex(); 
+			flashlightID = m_FlashlightStates.Next( flashlightID ) )
+		{
+			FlashlightInfo_t &flashlightInfo = m_FlashlightStates[flashlightID];
+
+			if ( flashlightInfo.m_nSplitscreenOwner >= 0 )
+			{
+				if ( flashlightInfo.m_nSplitscreenOwner != iSplitScreenSlot )
+					continue;
+			}
+
+			++iStateCount;
+		}
+
+		//add the entry space
+		int iWriteSlot = m_ScissorStateBackups.Count();
+		m_ScissorStateBackups.AddMultipleToTail( iStateCount );
+		FlashLightScissorStateBackup_t *pBackups = m_ScissorStateBackups.Base();
+		
+		//write out the entries
+		flashlightID = m_FlashlightStates.Head();
+		for( ; 
+			flashlightID != m_FlashlightStates.InvalidIndex(); 
+			flashlightID = m_FlashlightStates.Next( flashlightID ) )
+		{
+			FlashlightInfo_t &flashlightInfo = m_FlashlightStates[flashlightID];
+
+			if ( flashlightInfo.m_nSplitscreenOwner >= 0 )
+			{
+				if ( flashlightInfo.m_nSplitscreenOwner != iSplitScreenSlot )
+					continue;
+			}
+
+			//write out state here
+			pBackups[iWriteSlot].m_bScissor = flashlightInfo.m_FlashlightState.m_bScissor;
+			pBackups[iWriteSlot].m_nLeft = flashlightInfo.m_FlashlightState.m_nLeft;
+			pBackups[iWriteSlot].m_nTop = flashlightInfo.m_FlashlightState.m_nTop;
+			pBackups[iWriteSlot].m_nRight = flashlightInfo.m_FlashlightState.m_nRight;
+			pBackups[iWriteSlot].m_nBottom = flashlightInfo.m_FlashlightState.m_nBottom;
+#if defined( DBGFLAG_ASSERT )
+			pBackups[iWriteSlot].m_iFlashLightID = flashlightID;
+#endif
+
+			++iWriteSlot;
+		}
+	}
+}
+void CShadowMgr::PopFlashlightScissorBounds( void )
+{
+	int iPopStart = m_ScissorStateEntryStart.Tail();
+	m_ScissorStateEntryStart.RemoveMultipleFromTail( 1 );
+
+	if( iPopStart == m_ScissorStateBackups.Count() )
+		return; //nothing in the backup
+
+	ASSERT_LOCAL_PLAYER_RESOLVABLE();
+	int iSplitScreenSlot = GET_ACTIVE_SPLITSCREEN_SLOT();
+
+	int iReadSlot = iPopStart;
+	FlashLightScissorStateBackup_t *pBackups = m_ScissorStateBackups.Base();
+
+	//read back the entries
+	FlashlightHandle_t flashlightID = m_FlashlightStates.Head();
+	for( ; 
+		flashlightID != m_FlashlightStates.InvalidIndex(); 
+		flashlightID = m_FlashlightStates.Next( flashlightID ) )
+	{
+		FlashlightInfo_t &flashlightInfo = m_FlashlightStates[flashlightID];
+
+		if ( flashlightInfo.m_nSplitscreenOwner >= 0 )
+		{
+			if ( flashlightInfo.m_nSplitscreenOwner != iSplitScreenSlot )
+				continue;
+		}
+
+		//need a more complex restore system if this ever fails
+		Assert( pBackups[iReadSlot].m_iFlashLightID == flashlightID );
+
+		//read back state here
+		flashlightInfo.m_FlashlightState.m_bScissor = pBackups[iReadSlot].m_bScissor;
+		flashlightInfo.m_FlashlightState.m_nLeft = pBackups[iReadSlot].m_nLeft;
+		flashlightInfo.m_FlashlightState.m_nTop = pBackups[iReadSlot].m_nTop;
+		flashlightInfo.m_FlashlightState.m_nRight = pBackups[iReadSlot].m_nRight;
+		flashlightInfo.m_FlashlightState.m_nBottom = pBackups[iReadSlot].m_nBottom;
+		
+		++iReadSlot;
+	}
+
+	m_ScissorStateBackups.RemoveMultipleFromTail( m_ScissorStateBackups.Count() - iPopStart );
+}
+
+
+void CShadowMgr::DisableStencilAndScissorMasking( IMatRenderContext *pRenderContext, const FlashlightInfo_t &flashlightInfo, bool bDoMasking )
 {
 	if ( r_flashlightclip.GetBool() )
 	{
-		pRenderContext->SetStencilEnable( false );
+		ShaderStencilState_t state;
+		state.m_bEnable = false;
+		pRenderContext->SetStencilState( state );
 	}
 
-	// Scissor even if we're not shadow depth mapping
-	if ( r_flashlightscissor.GetBool() )
+	// Bail out if we're not doing any of these optimizations
+	if ( !( r_flashlightclip.GetBool() || r_flashlightscissor.GetBool()) || !bDoMasking )
+		return;
+
+	// We only scissor when rendering to the back buffer
+	if ( pRenderContext->GetRenderTarget() == NULL )
 	{
-		pRenderContext->SetScissorRect( -1, -1, -1, -1, false );
+		if ( r_flashlightscissor.GetBool() && flashlightInfo.m_FlashlightState.m_bScissor )
+		{
+			pRenderContext->PopScissorRect();
+		}
 	}
 }
 
@@ -3343,27 +3838,26 @@ void CShadowMgr::EnableStencilAndScissorMasking( IMatRenderContext *pRenderConte
 		{
 			unsigned char ucShadowStencilBit = m_Shadows[flashlightInfo.m_Shadow].m_ucShadowStencilBit;
 
-			pRenderContext->SetStencilEnable( true );
-			pRenderContext->SetStencilFailOperation( STENCILOPERATION_KEEP );				// Stencil fails
-			pRenderContext->SetStencilZFailOperation( STENCILOPERATION_KEEP );				// Stencil passes but depth fails
-			pRenderContext->SetStencilPassOperation( STENCILOPERATION_KEEP );				// Z and stencil both pass
+			ShaderStencilState_t state;
+			state.m_bEnable = true;																	
+			state.m_FailOp = SHADER_STENCILOP_KEEP;											// Stencil fails
+			state.m_ZFailOp = SHADER_STENCILOP_KEEP;										// Stencil passes but depth fails
+			state.m_PassOp = SHADER_STENCILOP_KEEP;											// Z and stencil both pass
+			state.m_CompareFunc = SHADER_STENCILFUNC_EQUAL;									// Stencil always pass
 
-			pRenderContext->SetStencilCompareFunction( STENCILCOMPARISONFUNCTION_EQUAL );	// Bit must be set
-			pRenderContext->SetStencilReferenceValue( ucShadowStencilBit );					// Specific bit
-			pRenderContext->SetStencilTestMask( ucShadowStencilBit );						// Specific bit
-			pRenderContext->SetStencilWriteMask( 0x00000000 );
+			state.m_nReferenceValue = ucShadowStencilBit;									// Bit must be set
+			state.m_nTestMask = ucShadowStencilBit;											// Specific bit
+			state.m_nWriteMask = 0x00000000;												// Specific bit
+			pRenderContext->SetStencilState( state );
+
 		}
 
 		// Scissor even if we're not shadow depth mapping
 		if ( r_flashlightscissor.GetBool() && flashlightInfo.m_FlashlightState.m_bScissor )
 		{
-			pRenderContext->SetScissorRect( flashlightInfo.m_FlashlightState.m_nLeft, flashlightInfo.m_FlashlightState.m_nTop,
-											flashlightInfo.m_FlashlightState.m_nRight, flashlightInfo.m_FlashlightState.m_nBottom, true );
+			pRenderContext->PushScissorRect( flashlightInfo.m_FlashlightState.m_nLeft, flashlightInfo.m_FlashlightState.m_nTop,
+											flashlightInfo.m_FlashlightState.m_nRight, flashlightInfo.m_FlashlightState.m_nBottom );
 		}
-	}
-	else // disable
-	{
-		DisableStencilAndScissorMasking( pRenderContext );
 	}
 }
 
@@ -3390,15 +3884,15 @@ void CShadowMgr::SetFlashlightRenderState( ShadowHandle_t handle )
 //---------------------------------------------------------------------------------------
 // Render all of the world and displacement surfaces that need to be drawn for flashlights
 //---------------------------------------------------------------------------------------
-void CShadowMgr::RenderFlashlights( bool bDoMasking, const VMatrix* pModelToWorld )
+void CShadowMgr::RenderFlashlights( bool bDoMasking, bool bDoSimpleProjections, const VMatrix* pModelToWorld )
 {
-#ifndef SWDS
+#ifndef DEDICATED
 	VPROF_BUDGET( "CShadowMgr::RenderFlashlights", VPROF_BUDGETGROUP_SHADOW_RENDERING );
 
-	if ( IsX360() || r_flashlight_version2.GetInt() )
+	if ( m_bSinglePassFlashlightStateEnabled )
 		return;
 
-	if( r_flashlightrender.GetBool()==false )
+	if( r_flashlightrender.GetBool()==false && bDoSimpleProjections == false )
 		return;
 
 	// Draw the projective light sources, which get their material
@@ -3411,26 +3905,61 @@ void CShadowMgr::RenderFlashlights( bool bDoMasking, const VMatrix* pModelToWorl
 	bool bWireframe = r_shadowwireframe.GetBool();
 
 	CMatRenderContextPtr pRenderContext( materials );
-	PIXEVENT( pRenderContext, "CShadowMgr::RenderFlashlights" );
+	PIXEVENT( pRenderContext, "CShadowMgr::RenderFlashlights()" );
 
-	pRenderContext->SetFlashlightMode( true );
+	int nSearchFlags = SHADOW_SIMPLE_PROJECTION;
+	if ( bDoSimpleProjections == false )
+	{
+		pRenderContext->SetFlashlightMode( true );
+		nSearchFlags = SHADOW_FLASHLIGHT;
+	}
+	else
+	{
+		pRenderContext->SetFlashlightMode( false );
+		bDoMasking = false;
+	}
+
+	// PORTAL 2 PAINT RENDERING
+	CUtlVectorFixedGrowable< SurfaceHandle_t, 64 > paintableSurfaces;
+	CUtlVectorFixedGrowable< int, 16 > batchPaintableSurfaceCount;
+	CUtlVectorFixedGrowable< int, 16 > batchPaintableSurfaceIndexCount;
+	CUtlVectorFixedGrowable< FlashlightInfo_t *, 16 > flashlightInfos;
 
 	for( ; 
 		 flashlightID != m_FlashlightStates.InvalidIndex(); 
 		 flashlightID = m_FlashlightStates.Next( flashlightID ) )
 	{
 		FlashlightInfo_t &flashlightInfo = m_FlashlightStates[flashlightID];
+
+		if ( ( m_Shadows[flashlightInfo.m_Shadow].m_Flags & ( SHADOW_FLASHLIGHT | SHADOW_SIMPLE_PROJECTION ) ) != nSearchFlags )
+		{
+			continue;
+		}
+
+		if ( flashlightInfo.m_nSplitscreenOwner >= 0 )
+		{
+			ASSERT_LOCAL_PLAYER_RESOLVABLE();
+			if ( flashlightInfo.m_nSplitscreenOwner != GET_ACTIVE_SPLITSCREEN_SLOT() )
+				continue;
+		}
+
 		CMaterialsBuckets<SurfaceHandle_t> &materialBuckets = flashlightInfo.m_MaterialBuckets;
 		CMaterialsBuckets<SurfaceHandle_t>::SortIDHandle_t sortIDHandle = materialBuckets.GetFirstUsedSortID();
 		if ( sortIDHandle == materialBuckets.InvalidSortIDHandle() )
 			continue;
 
+		flashlightInfos.AddToTail( &flashlightInfo );
+		
 		pRenderContext->SetFlashlightStateEx(flashlightInfo.m_FlashlightState, m_Shadows[flashlightInfo.m_Shadow].m_WorldToShadow, m_Shadows[flashlightInfo.m_Shadow].m_pFlashlightDepthTexture );
 		EnableStencilAndScissorMasking( pRenderContext, flashlightInfo, bDoMasking );
 
 		for( ; sortIDHandle != materialBuckets.InvalidSortIDHandle();
 			 sortIDHandle = materialBuckets.GetNextUsedSortID( sortIDHandle ) )
 		{
+			int nBatchIndex = batchPaintableSurfaceCount.Count();
+			batchPaintableSurfaceCount.AddToTail( 0 );
+			batchPaintableSurfaceIndexCount.AddToTail( 0 );
+
 			int sortID = materialBuckets.GetSortID( sortIDHandle );
 
 			if( bWireframe )
@@ -3439,8 +3968,15 @@ void CShadowMgr::RenderFlashlights( bool bDoMasking, const VMatrix* pModelToWorl
 			}
 			else
 			{
-				pRenderContext->Bind( materialSortInfoArray[sortID].material );
-				pRenderContext->BindLightmapPage( materialSortInfoArray[sortID].lightmapPageID );
+				if ( bDoSimpleProjections == false )
+				{
+					pRenderContext->Bind( materialSortInfoArray[sortID].material );
+					pRenderContext->BindLightmapPage( materialSortInfoArray[sortID].lightmapPageID );
+				}
+				else
+				{
+					pRenderContext->Bind( flashlightInfo.m_FlashlightState.m_pProjectedMaterial );
+				}
 			}
 
 			CMaterialsBuckets<SurfaceHandle_t>::ElementHandle_t elemHandle;
@@ -3451,6 +3987,19 @@ void CShadowMgr::RenderFlashlights( bool bDoMasking, const VMatrix* pModelToWorl
 				 elemHandle = materialBuckets.GetElementListNext( elemHandle ) )
 			{
 				SurfaceHandle_t surfID = materialBuckets.GetElement( elemHandle );
+
+				// PORTAL 2 PAINT RENDERING
+				if ( !SurfaceHasDispInfo( surfID ) && !bWireframe && ( MSurf_Flags( surfID ) & SURFDRAW_PAINTED ) )
+				{
+					paintableSurfaces.AddToTail( surfID );
+					++ batchPaintableSurfaceCount[ nBatchIndex ];
+
+					int nVertCount, nIndexCount;
+
+					Shader_GetSurfVertexAndIndexCount( surfID, &nVertCount, &nIndexCount );
+					batchPaintableSurfaceIndexCount[ nBatchIndex ] += nIndexCount;
+				}
+
 				if( !SurfaceHasDispInfo( surfID ) )
 				{
 					numIndices += 3 * ( MSurf_VertCount( surfID ) - 2 );
@@ -3462,15 +4011,10 @@ void CShadowMgr::RenderFlashlights( bool bDoMasking, const VMatrix* pModelToWorl
 				// NOTE: If we ever need to make this faster, we could get larger
 				// batches here.
 				// Draw this batch.
-#if NEWMESH
-				IIndexBuffer *pIndexBuffer = pRenderContext->GetDynamicIndexBuffer( MATERIAL_INDEX_FORMAT_16BIT );
-				CIndexBufferBuilder indexBufferBuilder;
-				indexBufferBuilder.Begin( pIndexBuffer, numIndices );
-#else
 				IMesh *pMesh = pRenderContext->GetDynamicMesh( false, g_WorldStaticMeshes[sortID], 0 );
 				CMeshBuilder meshBuilder;
 				meshBuilder.Begin( pMesh, MATERIAL_TRIANGLES, 0, numIndices );
-#endif				
+
 				for( elemHandle = materialBuckets.GetElementListHead( sortID );
 					 elemHandle != materialBuckets.InvalidElementHandle();
 					 elemHandle = materialBuckets.GetElementListNext( elemHandle ) )
@@ -3478,24 +4022,11 @@ void CShadowMgr::RenderFlashlights( bool bDoMasking, const VMatrix* pModelToWorl
 					SurfaceHandle_t surfID = materialBuckets.GetElement( elemHandle );
 					if( !SurfaceHasDispInfo( surfID ) )
 					{
-#if NEWMESH
-						BuildIndicesForWorldSurface( indexBufferBuilder, surfID, host_state.worldbrush );
-#else
 						BuildIndicesForWorldSurface( meshBuilder, surfID, host_state.worldbrush );
-#endif				
 					}
 				}
 				// close out the index buffer
-#if NEWMESH
-				indexBufferBuilder.End( false ); // haven't tested this one yet (flashlights)
-				// FIXME: IMaterial::GetVertexFormat() should do this stripping (add a separate 'SupportsCompression' accessor)
-				VertexFormat_t vertexFormat = materialSortInfoArray[sortID].material->GetVertexFormat() & ~VERTEX_FORMAT_COMPRESSED;
-				pRenderContext->BindVertexBuffer( 0, g_WorldStaticMeshes[sortID], 0, materialSortInfoArray[sortID].material->GetVertexFormat() );  // hack fixme. . . use currently bound material format instead of passing in?
-				pRenderContext->BindIndexBuffer( pIndexBuffer, 0 );
-				pRenderContext->Draw( MATERIAL_TRIANGLES, 0, numIndices );
-#else
 				meshBuilder.End( false, true );
-#endif				
 			}
 
 			// NOTE: If we ever need to make this faster, we could get larger batches here.
@@ -3521,35 +4052,377 @@ void CShadowMgr::RenderFlashlights( bool bDoMasking, const VMatrix* pModelToWorl
 				}
 			}
 		 }
+
+		DisableStencilAndScissorMasking( pRenderContext, flashlightInfo, bDoMasking );
+	}
+
+	// PORTAL 2 PAINT RENDERING
+	if ( paintableSurfaces.Count() )
+	{
+		pRenderContext->SetRenderingPaint( true );
+		PIXEVENT( pRenderContext, "Paint" );
+
+		int nBatchIndex = 0;
+		int nSurfaceIndex = 0;
+		for ( int i = 0; i < flashlightInfos.Count(); i++ )
+		{
+			FlashlightInfo_t &flashlightInfo = *( flashlightInfos[ i ] );
+
+			CMaterialsBuckets<SurfaceHandle_t> &materialBuckets = flashlightInfo.m_MaterialBuckets;
+			CMaterialsBuckets<SurfaceHandle_t>::SortIDHandle_t sortIDHandle = materialBuckets.GetFirstUsedSortID();
+			
+			pRenderContext->SetFlashlightStateEx(flashlightInfo.m_FlashlightState, m_Shadows[flashlightInfo.m_Shadow].m_WorldToShadow, m_Shadows[flashlightInfo.m_Shadow].m_pFlashlightDepthTexture );
+			EnableStencilAndScissorMasking( pRenderContext, flashlightInfo, bDoMasking );
+
+			for( ; sortIDHandle != materialBuckets.InvalidSortIDHandle();
+				sortIDHandle = materialBuckets.GetNextUsedSortID( sortIDHandle ) )
+			{
+				int sortID = materialBuckets.GetSortID( sortIDHandle );
+				int nSurfaceCount = batchPaintableSurfaceCount[ nBatchIndex ];
+				if ( nSurfaceCount > 0 )
+				{
+					if ( bDoSimpleProjections == false )
+					{
+						pRenderContext->Bind( materialSortInfoArray[sortID].material );
+						pRenderContext->BindLightmapPage( materialSortInfoArray[sortID].lightmapPageID );
+					}
+					else
+					{
+						pRenderContext->Bind( flashlightInfo.m_FlashlightState.m_pProjectedMaterial );
+					}
+
+					IMesh *pMesh = pRenderContext->GetDynamicMesh( false, g_WorldStaticMeshes[sortID], 0 );
+					CMeshBuilder meshBuilder;
+					meshBuilder.Begin( pMesh, MATERIAL_TRIANGLES, 0, batchPaintableSurfaceIndexCount[ nBatchIndex ] );
+
+					for ( int i = 0; i < nSurfaceCount; ++ i, ++ nSurfaceIndex )
+					{
+						BuildIndicesForWorldSurface( meshBuilder, paintableSurfaces[ nSurfaceIndex ], host_state.worldbrush );
+					}
+
+					meshBuilder.End( false, true );
+				}
+
+				++ nBatchIndex;
+			}
+
+			DisableStencilAndScissorMasking( pRenderContext, flashlightInfo, bDoMasking );
+		}
+		pRenderContext->SetRenderingPaint( false );
 	}
 
 	// Tell the materialsystem that we are finished drawing additive flashlight lighting.
-	pRenderContext->SetFlashlightMode( false );
+	if ( bDoSimpleProjections == false )
+	{
+		pRenderContext->SetFlashlightMode( false );
+	}
+	else
+	{
+		pRenderContext->SetFlashlightMode( false );
+	}
 
-	// Turn off stencil masking
-	DisableStencilAndScissorMasking( pRenderContext );
 #endif
 }
 
+
 const Frustum_t &CShadowMgr::GetFlashlightFrustum( ShadowHandle_t handle )
 {
-	Assert( m_Shadows[handle].m_Flags & SHADOW_FLASHLIGHT );
+	Assert( m_Shadows[handle].m_Flags & ( SHADOW_FLASHLIGHT | SHADOW_SIMPLE_PROJECTION ) );
 	Assert( m_Shadows[handle].m_FlashlightHandle != m_Shadows.InvalidIndex() );
 	return m_FlashlightStates[m_Shadows[handle].m_FlashlightHandle].m_Frustum;
 }
 
 const FlashlightState_t &CShadowMgr::GetFlashlightState( ShadowHandle_t handle )
 {
-	Assert( m_Shadows[handle].m_Flags & SHADOW_FLASHLIGHT );
+	Assert( m_Shadows[handle].m_Flags & ( SHADOW_FLASHLIGHT | SHADOW_SIMPLE_PROJECTION ) );
 	Assert( m_Shadows[handle].m_FlashlightHandle != m_Shadows.InvalidIndex() );
 	return m_FlashlightStates[m_Shadows[handle].m_FlashlightHandle].m_FlashlightState;
 }
 
-void CShadowMgr::DrawFlashlightDecals( int sortGroup, bool bDoMasking )
+
+
+void CShadowMgr::DrawVolumetrics()
+{
+	VPROF_BUDGET( "CShadowMgr::DrawVolumetrics", VPROF_BUDGETGROUP_SHADOW_RENDERING );
+
+	FlashlightHandle_t flashlightID = m_FlashlightStates.Head();
+	if ( flashlightID == m_FlashlightStates.InvalidIndex() )
+		return;
+
+	CMatRenderContextPtr pRenderContext( materials );
+
+	for( ; flashlightID != m_FlashlightStates.InvalidIndex(); 
+		flashlightID = m_FlashlightStates.Next( flashlightID ) )
+	{
+		FlashlightInfo_t &flashlightInfo = m_FlashlightStates[flashlightID];
+
+		if ( flashlightInfo.m_nSplitscreenOwner >= 0 )
+		{
+			ASSERT_LOCAL_PLAYER_RESOLVABLE();
+			if ( flashlightInfo.m_nSplitscreenOwner != GET_ACTIVE_SPLITSCREEN_SLOT() )
+				continue;
+		}
+
+		FlashlightState_t &flashlightState = flashlightInfo.m_FlashlightState;
+
+		// If this flashlight isn't volumetric, bail out here
+		if ( !flashlightState.m_bVolumetric || ( flashlightState.m_flVolumetricIntensity <= 0.0f ) )
+			continue;
+
+		bool foundVar;
+		IMaterial *pMaterial = materials->FindMaterial( "engine/lightshaft", TEXTURE_GROUP_OTHER, true );
+		IMaterialVar *pCookieTextureVar = pMaterial->FindVar( "$COOKIETEXTURE", &foundVar, false );
+		IMaterialVar *pNoiseTextureVar = pMaterial->FindVar( "$NOISETEXTURE", &foundVar, false );
+		IMaterialVar *pCookieFrameNumVar = pMaterial->FindVar( "$COOKIEFRAMENUM", &foundVar, false );
+		IMaterialVar *pShadowDepthTextureVar = pMaterial->FindVar( "$SHADOWDEPTHTEXTURE", &foundVar, false );
+		IMaterialVar *pWorldToTextureVar = pMaterial->FindVar( "$WORLDTOTEXTURE", &foundVar, false );
+		IMaterialVar *pFlashlightColorVar = pMaterial->FindVar( "$FLASHLIGHTCOLOR", &foundVar, false );
+		IMaterialVar *pAttenFactorsVar = pMaterial->FindVar( "$ATTENFACTORS", &foundVar, false );
+		IMaterialVar *pOriginFarZVar = pMaterial->FindVar( "$ORIGINFARZ", &foundVar, false );
+		IMaterialVar *pQuatOrientation = pMaterial->FindVar( "$QUATORIENTATION", &foundVar, false );
+		IMaterialVar *pShadowFilterSizeVar = pMaterial->FindVar( "$SHADOWFILTERSIZE", &foundVar, false );
+		IMaterialVar *pShadowAttenVar = pMaterial->FindVar( "$SHADOWATTEN", &foundVar, false );
+		IMaterialVar *pShadowJitterSeedVar = pMaterial->FindVar( "$SHADOWJITTERSEED", &foundVar, false );
+		IMaterialVar *pUberlightVar = pMaterial->FindVar( "$UBERLIGHT", &foundVar, false );
+		IMaterialVar *pEnableShadowsVar = pMaterial->FindVar( "$ENABLESHADOWS", &foundVar, false );
+		IMaterialVar *pUberNearFarVar = pMaterial->FindVar( "$UBERNEARFAR", &foundVar, false );
+		IMaterialVar *pUberHeightWidthVar = pMaterial->FindVar( "$UBERHEIGHTWIDTH", &foundVar, false );
+		IMaterialVar *pUberRoundnessVar = pMaterial->FindVar( "$UBERROUNDNESS", &foundVar, false );
+		IMaterialVar *pNoiseStrengthVar = pMaterial->FindVar( "$NOISESTRENGTH", &foundVar, false );
+		IMaterialVar *pFlashlighTimeVar = pMaterial->FindVar( "$FLASHLIGHTTIME", &foundVar, false );
+		IMaterialVar *pNumPlanesVar = pMaterial->FindVar( "$NUMPLANES", &foundVar, false );
+		IMaterialVar *pVolumetricIntensityVar = pMaterial->FindVar( "$VOLUMETRICINTENSITY", &foundVar, false );
+
+		if ( m_Shadows[flashlightInfo.m_Shadow].m_pFlashlightDepthTexture && pShadowDepthTextureVar )
+		{
+			pShadowDepthTextureVar->SetTextureValue( m_Shadows[flashlightInfo.m_Shadow].m_pFlashlightDepthTexture );
+		}
+
+		if ( flashlightState.m_pSpotlightTexture && pCookieTextureVar )
+		{
+			pCookieTextureVar->SetTextureValue( flashlightState.m_pSpotlightTexture );
+		}
+
+		if ( pNoiseTextureVar )
+		{
+			pNoiseTextureVar->SetTextureValue( materials->FindTexture( "effects/noise_rg", TEXTURE_GROUP_OTHER, true ) );
+		}
+
+		if ( pCookieFrameNumVar )
+		{
+			pCookieFrameNumVar->SetIntValue( flashlightState.m_nSpotlightTextureFrame );
+		}
+
+		if ( pWorldToTextureVar )
+		{
+			pWorldToTextureVar->SetMatrixValue( m_Shadows[flashlightInfo.m_Shadow].m_WorldToShadow );
+		}
+
+		if ( pFlashlightColorVar )
+		{
+			pFlashlightColorVar->SetVecValue( &(flashlightState.m_Color[0]), 4 );
+		}
+
+		if ( pAttenFactorsVar )
+		{
+			pAttenFactorsVar->SetVecValue( flashlightState.m_fConstantAtten, flashlightState.m_fLinearAtten, flashlightState.m_fQuadraticAtten, flashlightState.m_FarZAtten );
+		}
+
+		if ( pOriginFarZVar )
+		{
+			pOriginFarZVar->SetVecValue( flashlightState.m_vecLightOrigin[0], flashlightState.m_vecLightOrigin[1], flashlightState.m_vecLightOrigin[2], flashlightState.m_FarZ );
+		}
+
+		if ( pQuatOrientation )
+		{
+			pQuatOrientation->SetVecValue( flashlightState.m_quatOrientation.Base(), 4 );
+		}
+
+		if ( pShadowFilterSizeVar )
+		{
+			pShadowFilterSizeVar->SetFloatValue( flashlightState.m_flShadowFilterSize );
+		}
+
+		if ( pShadowAttenVar )
+		{
+			pShadowAttenVar->SetFloatValue( flashlightState.m_flShadowAtten );
+		}
+
+		if ( pShadowJitterSeedVar )
+		{
+			pShadowJitterSeedVar->SetFloatValue( flashlightState.m_flShadowJitterSeed );
+		}
+
+		if ( pUberlightVar )
+		{
+			pUberlightVar->SetIntValue( flashlightState.m_bUberlight ? 1 : 0 );
+		}
+
+		if ( pEnableShadowsVar )
+		{
+			pEnableShadowsVar->SetIntValue( flashlightState.m_bEnableShadows ? 1 : 0 );
+		}
+
+		if ( pUberNearFarVar )
+		{
+			pUberNearFarVar->SetVecValue( flashlightState.m_uberlightState.m_fNearEdge,	flashlightState.m_uberlightState.m_fFarEdge,
+										  flashlightState.m_uberlightState.m_fCutOn, flashlightState.m_uberlightState.m_fCutOff );
+		}
+
+		if ( pUberHeightWidthVar )
+		{
+			pUberHeightWidthVar->SetVecValue( flashlightState.m_uberlightState.m_fWidth, flashlightState.m_uberlightState.m_fWedge,
+											  flashlightState.m_uberlightState.m_fHeight, flashlightState.m_uberlightState.m_fHedge );
+		}
+
+		if ( pUberRoundnessVar )
+		{
+			pUberRoundnessVar->SetFloatValue( flashlightState.m_uberlightState.m_fRoundness );
+		}
+
+		if ( pNoiseStrengthVar )
+		{
+			pNoiseStrengthVar->SetFloatValue( flashlightState.m_flNoiseStrength );
+		}
+
+		if ( pFlashlighTimeVar )
+		{
+			pFlashlighTimeVar->SetFloatValue( flashlightState.m_flFlashlightTime );
+		}
+
+		if ( pNumPlanesVar )
+		{
+			pNumPlanesVar->SetIntValue( flashlightState.m_nNumPlanes );
+		}
+
+		if ( pVolumetricIntensityVar )
+		{
+ 			pVolumetricIntensityVar->SetFloatValue( flashlightState.m_flVolumetricIntensity );
+		}
+
+
+		pRenderContext->Bind( pMaterial );
+
+		// Set up user clip planes to clip to this flashlight's frustum
+		VPlane planes[FRUSTUM_NUMPLANES];
+		flashlightInfo.m_Frustum.GetPlanes( planes );
+
+		for ( int i = 0; i < 6; i++ )
+		{
+			pRenderContext->PushCustomClipPlane( planes[i].m_Normal.Base() );
+		}
+
+		// Flashlight space to world space, then view space
+		VMatrix matWorldToView, matViewToWorld, matFlashlightToView, matViewToFlashlight;
+		pRenderContext->GetMatrix( MATERIAL_VIEW, &matWorldToView );
+		MatrixInverseGeneral( matWorldToView, matViewToWorld );
+		MatrixMultiply( m_Shadows[flashlightInfo.m_Shadow].m_WorldToShadow, matViewToWorld, matViewToFlashlight );
+		MatrixInverseGeneral( matViewToFlashlight, matFlashlightToView );
+
+		// View space AABB
+		Vector vView, vWorld, vViewMins, vViewMaxs;
+		CalculateAABBFromProjectionMatrixInverse( matFlashlightToView, &vViewMins, &vViewMaxs );
+
+		// Distance between planes
+		float zIncrement = ( vViewMaxs.z - vViewMins.z ) / (float) flashlightState.m_nNumPlanes;
+
+		// Base offset for this set of planes (progressive refinement sets this in SFM)
+		vViewMins.z += zIncrement * flashlightState.m_flPlaneOffset;
+
+		IMesh* pMesh = pRenderContext->GetDynamicMesh( true );
+
+		pRenderContext->MatrixMode( MATERIAL_MODEL );
+		pRenderContext->PushMatrix();
+		pRenderContext->LoadIdentity();
+
+		CMeshBuilder meshBuilder;
+		meshBuilder.Begin( pMesh, MATERIAL_QUADS, flashlightState.m_nNumPlanes );
+
+		for (int i = 0; i < flashlightState.m_nNumPlanes; i++ )
+		{
+			vView = Vector( vViewMins.x, vViewMins.y, vViewMins.z + (float)i * zIncrement );// View space
+			Vector3DMultiplyPosition( matViewToWorld, vView, vWorld );						// Transform to world space
+			meshBuilder.Position3fv( vWorld.Base() );
+			meshBuilder.AdvanceVertexF<VTX_HAVEPOS, 0>();
+
+			vView = Vector( vViewMins.x, vViewMaxs.y, vViewMins.z + (float)i * zIncrement );// View space
+			Vector3DMultiplyPosition( matViewToWorld, vView, vWorld );						// Transform to world space
+			meshBuilder.Position3fv( vWorld.Base() );
+			meshBuilder.AdvanceVertexF<VTX_HAVEPOS, 0>();
+
+			vView = Vector( vViewMaxs.x, vViewMaxs.y, vViewMins.z + (float)i * zIncrement );// View space
+			Vector3DMultiplyPosition( matViewToWorld, vView, vWorld );						// Transform to world space
+			meshBuilder.Position3fv( vWorld.Base() );
+			meshBuilder.AdvanceVertexF<VTX_HAVEPOS, 0>();
+
+			vView = Vector( vViewMaxs.x, vViewMins.y, vViewMins.z + (float)i * zIncrement );// View space
+			Vector3DMultiplyPosition( matViewToWorld, vView, vWorld );						// Transform to world space
+			meshBuilder.Position3fv( vWorld.Base() );
+			meshBuilder.AdvanceVertexF<VTX_HAVEPOS, 0>();
+		}
+
+		meshBuilder.End( false, true );
+
+		pRenderContext->PopMatrix();
+
+		// Pop the custom clip planes
+		for ( int i=0; i<6; i++ )
+		{
+			pRenderContext->PopCustomClipPlane();
+		}
+	}
+}
+
+
+
+void CShadowMgr::DrawFlashlightDecals( IMatRenderContext *pRenderContext, int sortGroup, bool bDoMasking, float flFade )
 {
 	VPROF_BUDGET( "CShadowMgr::DrawFlashlightDecals", VPROF_BUDGETGROUP_SHADOW_RENDERING );
 
-	if ( IsX360() || r_flashlight_version2.GetInt() )
+	if ( m_bSinglePassFlashlightStateEnabled )
+		return;
+
+	FlashlightHandle_t flashlightID = m_FlashlightStates.Head();
+	if ( flashlightID == m_FlashlightStates.InvalidIndex() )
+		return;
+
+	pRenderContext->SetFlashlightMode( true );
+
+	for( ; 
+		 flashlightID != m_FlashlightStates.InvalidIndex(); 
+		 flashlightID = m_FlashlightStates.Next( flashlightID ) )
+	{
+		FlashlightInfo_t &flashlightInfo = m_FlashlightStates[flashlightID];
+		if ( ( m_Shadows[flashlightInfo.m_Shadow].m_Flags & ( SHADOW_SIMPLE_PROJECTION ) ) != 0 )
+		{
+			continue;
+		}
+
+		if ( flashlightInfo.m_nSplitscreenOwner >= 0 )
+		{
+			ASSERT_LOCAL_PLAYER_RESOLVABLE();
+			if ( flashlightInfo.m_nSplitscreenOwner != GET_ACTIVE_SPLITSCREEN_SLOT() )
+				continue;
+		}
+
+		pRenderContext->SetFlashlightStateEx( flashlightInfo.m_FlashlightState, m_Shadows[flashlightInfo.m_Shadow].m_WorldToShadow, m_Shadows[flashlightInfo.m_Shadow].m_pFlashlightDepthTexture );
+
+		EnableStencilAndScissorMasking( pRenderContext, flashlightInfo, bDoMasking );
+
+		DecalSurfaceDraw( pRenderContext, sortGroup, flFade );
+
+		DisableStencilAndScissorMasking( pRenderContext, flashlightInfo, bDoMasking );
+	}
+	
+	// Tell the materialsystem that we are finished drawing additive flashlight lighting.
+	pRenderContext->SetFlashlightMode( false );
+}
+
+void CShadowMgr::FlashlightDrawCallback( ShadowDrawCallbackFn_t pCallback, void *pData )
+{
+	VPROF_BUDGET( "CShadowMgr::FlashlightDrawCallback", VPROF_BUDGETGROUP_SHADOW_RENDERING );
+
+	if ( m_bSinglePassFlashlightStateEnabled )
 		return;
 
 	FlashlightHandle_t flashlightID = m_FlashlightStates.Head();
@@ -3561,36 +4434,109 @@ void CShadowMgr::DrawFlashlightDecals( int sortGroup, bool bDoMasking )
 	pRenderContext->SetFlashlightMode( true );
 
 	for( ; 
-		 flashlightID != m_FlashlightStates.InvalidIndex(); 
-		 flashlightID = m_FlashlightStates.Next( flashlightID ) )
+		flashlightID != m_FlashlightStates.InvalidIndex(); 
+		flashlightID = m_FlashlightStates.Next( flashlightID ) )
 	{
 		FlashlightInfo_t &flashlightInfo = m_FlashlightStates[flashlightID];
-		pRenderContext->SetFlashlightState(flashlightInfo.m_FlashlightState, m_Shadows[flashlightInfo.m_Shadow].m_WorldToShadow );
 
-		EnableStencilAndScissorMasking( pRenderContext, flashlightInfo, bDoMasking );
+		if ( flashlightInfo.m_nSplitscreenOwner >= 0 )
+		{
+			ASSERT_LOCAL_PLAYER_RESOLVABLE();
+			if ( flashlightInfo.m_nSplitscreenOwner != GET_ACTIVE_SPLITSCREEN_SLOT() )
+				continue;
+		}
 
-		DecalSurfaceDraw( pRenderContext, sortGroup );
+		pRenderContext->SetFlashlightStateEx( flashlightInfo.m_FlashlightState, m_Shadows[flashlightInfo.m_Shadow].m_WorldToShadow, m_Shadows[flashlightInfo.m_Shadow].m_pFlashlightDepthTexture );
+
+		EnableStencilAndScissorMasking( pRenderContext, flashlightInfo, false );
+
+		pCallback( pData );
+
+		DisableStencilAndScissorMasking( pRenderContext, flashlightInfo, false );
 	}
-	
+
 	// Tell the materialsystem that we are finished drawing additive flashlight lighting.
 	pRenderContext->SetFlashlightMode( false );
-
-	// Turn off stencil masking
-	DisableStencilAndScissorMasking( pRenderContext );
 }
 
-void CShadowMgr::DrawFlashlightDecalsOnDisplacements( int sortGroup, CDispInfo *visibleDisps[MAX_MAP_DISPINFO], int nVisibleDisps, bool bDoMasking )
+void CShadowMgr::SetSinglePassFlashlightRenderState( ShadowHandle_t handle )
+{
+	m_hSinglePassFlashlightState = handle;
+	//materials->GetRenderContext()->Flush();
+	if( m_bSinglePassFlashlightStateEnabled )
+	{
+		SetFlashlightRenderState( m_hSinglePassFlashlightState );
+	}
+	else
+	{
+		//TODO: Look for headaches of changing the handle while we're not supposed to be in control
+		SetFlashlightRenderState( SHADOW_HANDLE_INVALID );
+	}
+}
+
+void CShadowMgr::PushSinglePassFlashlightStateEnabled( bool bEnable )
+{
+	m_bStack_SinglePassFlashlightStateEnabled.Push( bEnable );	
+	if( m_bSinglePassFlashlightStateEnabled != bEnable )
+	{
+		materials->GetRenderContext()->EnableSinglePassFlashlightMode( bEnable );
+
+		if( bEnable )
+			SetFlashlightRenderState( m_hSinglePassFlashlightState );
+		else
+			SetFlashlightRenderState( SHADOW_HANDLE_INVALID );
+
+		m_bSinglePassFlashlightStateEnabled = bEnable;
+	}
+	if ( m_bSinglePassFlashlightStateEnabled )
+	{
+		// Only enable culling for single pass flashlight if NOT in splitscreen
+		materials->GetRenderContext()->EnableCullingForSinglePassFlashlight( r_flashlight_always_cull_for_single_pass.GetBool() || ( GET_NUM_SPLIT_SCREEN_PLAYERS() < 2 ) );
+	}
+}
+
+void CShadowMgr::PopSinglePassFlashlightStateEnabled( void )
+{
+	m_bStack_SinglePassFlashlightStateEnabled.Pop();
+	bool bEnable = IsGameConsole();
+	if( m_bStack_SinglePassFlashlightStateEnabled.Count() != 0 )
+	{
+		bEnable = m_bStack_SinglePassFlashlightStateEnabled.Top();
+	}
+
+	if( m_bSinglePassFlashlightStateEnabled != bEnable )
+	{
+		materials->GetRenderContext()->EnableSinglePassFlashlightMode( bEnable );
+
+		if( bEnable )
+			SetFlashlightRenderState( m_hSinglePassFlashlightState );
+		else
+			SetFlashlightRenderState( SHADOW_HANDLE_INVALID );
+
+		m_bSinglePassFlashlightStateEnabled = bEnable;
+	}
+	if ( m_bSinglePassFlashlightStateEnabled )
+	{
+		// Only enable culling for single pass flashlight if NOT in splitscreen
+		materials->GetRenderContext()->EnableCullingForSinglePassFlashlight( r_flashlight_always_cull_for_single_pass.GetBool() || ( GET_NUM_SPLIT_SCREEN_PLAYERS() < 2 ) );
+	}
+}
+
+bool CShadowMgr::SinglePassFlashlightModeEnabled( void )
+{
+	return m_bSinglePassFlashlightStateEnabled;
+}
+
+void CShadowMgr::DrawFlashlightDecalsOnDisplacements( IMatRenderContext *pRenderContext, int sortGroup, CDispInfo *visibleDisps[MAX_MAP_DISPINFO], int nVisibleDisps, bool bDoMasking )
 {
 	VPROF_BUDGET( "CShadowMgr::DrawFlashlightDecalsOnDisplacements", VPROF_BUDGETGROUP_SHADOW_RENDERING );
 
-	if ( IsX360() || r_flashlight_version2.GetInt() )
+	if ( m_bSinglePassFlashlightStateEnabled )
 		return;
 
 	FlashlightHandle_t flashlightID = m_FlashlightStates.Head();
 	if ( flashlightID == m_FlashlightStates.InvalidIndex() )
 		return;
-
-	CMatRenderContextPtr pRenderContext( materials );
 
 	pRenderContext->SetFlashlightMode( true );
 
@@ -3601,32 +4547,37 @@ void CShadowMgr::DrawFlashlightDecalsOnDisplacements( int sortGroup, CDispInfo *
 		flashlightID = m_FlashlightStates.Next( flashlightID ) )
 	{
 		FlashlightInfo_t &flashlightInfo = m_FlashlightStates[flashlightID];
-		pRenderContext->SetFlashlightState(flashlightInfo.m_FlashlightState, m_Shadows[flashlightInfo.m_Shadow].m_WorldToShadow );
+
+		if ( flashlightInfo.m_nSplitscreenOwner >= 0 )
+		{
+			ASSERT_LOCAL_PLAYER_RESOLVABLE();
+			if ( flashlightInfo.m_nSplitscreenOwner != GET_ACTIVE_SPLITSCREEN_SLOT() )
+				continue;
+		}
+
+		pRenderContext->SetFlashlightStateEx( flashlightInfo.m_FlashlightState, m_Shadows[flashlightInfo.m_Shadow].m_WorldToShadow, m_Shadows[flashlightInfo.m_Shadow].m_pFlashlightDepthTexture );
 
 		EnableStencilAndScissorMasking( pRenderContext, flashlightInfo, bDoMasking );
 
-		DispInfo_DrawDecals( visibleDisps, nVisibleDisps );
+		DispInfo_DrawDecals( pRenderContext, visibleDisps, nVisibleDisps );
+
+		DisableStencilAndScissorMasking( pRenderContext, flashlightInfo, bDoMasking );
 	}
 
 	// Tell the materialsystem that we are finished drawing additive flashlight lighting.
 	pRenderContext->SetFlashlightMode( false );
-
-	// Turn off stencil masking
-	DisableStencilAndScissorMasking( pRenderContext );
 }
 
-void CShadowMgr::DrawFlashlightDecalsOnSingleSurface( SurfaceHandle_t surfID, bool bDoMasking )
+void CShadowMgr::DrawFlashlightDecalsOnSurfaceList( IMatRenderContext *pRenderContext, SurfaceHandle_t *pList, int listCount, bool bDoMasking )
 {
-	VPROF_BUDGET( "CShadowMgr::DrawFlashlightDecalsOnSingleSurface", VPROF_BUDGETGROUP_SHADOW_RENDERING );
+	VPROF_BUDGET( "CShadowMgr::DrawFlashlightDecalsOnSurfaceList", VPROF_BUDGETGROUP_SHADOW_RENDERING );
 
-	if ( IsX360() || r_flashlight_version2.GetInt() )
+	if ( m_bSinglePassFlashlightStateEnabled )
 		return;
 
 	FlashlightHandle_t flashlightID = m_FlashlightStates.Head();
 	if ( flashlightID == m_FlashlightStates.InvalidIndex() )
 		return;
-
-	CMatRenderContextPtr pRenderContext( materials );
 
 	pRenderContext->SetFlashlightMode( true );
 
@@ -3635,25 +4586,38 @@ void CShadowMgr::DrawFlashlightDecalsOnSingleSurface( SurfaceHandle_t surfID, bo
 		 flashlightID = m_FlashlightStates.Next( flashlightID ) )
 	{
 		FlashlightInfo_t &flashlightInfo = m_FlashlightStates[flashlightID];
-		pRenderContext->SetFlashlightState(flashlightInfo.m_FlashlightState, m_Shadows[flashlightInfo.m_Shadow].m_WorldToShadow );
+
+		if ( flashlightInfo.m_nSplitscreenOwner >= 0 )
+		{
+			ASSERT_LOCAL_PLAYER_RESOLVABLE();
+			if ( flashlightInfo.m_nSplitscreenOwner != GET_ACTIVE_SPLITSCREEN_SLOT() )
+				continue;
+		}
+
+		pRenderContext->SetFlashlightStateEx( flashlightInfo.m_FlashlightState, m_Shadows[flashlightInfo.m_Shadow].m_WorldToShadow, m_Shadows[flashlightInfo.m_Shadow].m_pFlashlightDepthTexture );
 
 		EnableStencilAndScissorMasking( pRenderContext, flashlightInfo, bDoMasking );
 
-		DrawDecalsOnSingleSurface( pRenderContext, surfID );
+		for ( int i = 0; i < listCount; i++ )
+		{
+			if ( MSurf_Decals(pList[i]) != WORLD_DECAL_HANDLE_INVALID )
+			{
+				DrawDecalsOnSingleSurface( pRenderContext, pList[i] );
+			}
+		}
+
+		DisableStencilAndScissorMasking( pRenderContext, flashlightInfo, bDoMasking );
 	}
 	
 	// Tell the materialsystem that we are finished drawing additive flashlight lighting.
 	pRenderContext->SetFlashlightMode( false );
-
-	// Turn off stencil masking
-	DisableStencilAndScissorMasking( pRenderContext );
 }
 
-void CShadowMgr::DrawFlashlightOverlays( int nSortGroup, bool bDoMasking )
+void CShadowMgr::DrawFlashlightOverlays( IMatRenderContext *pRenderContext, int nSortGroup, bool bDoMasking )
 {
 	VPROF_BUDGET( "CShadowMgr::DrawFlashlightOverlays", VPROF_BUDGETGROUP_SHADOW_RENDERING );
 
-	if ( IsX360() || r_flashlight_version2.GetInt() )
+	if ( m_bSinglePassFlashlightStateEnabled )
 		return;
 
 	FlashlightHandle_t flashlightID = m_FlashlightStates.Head();
@@ -3663,8 +4627,6 @@ void CShadowMgr::DrawFlashlightOverlays( int nSortGroup, bool bDoMasking )
 	if ( r_flashlightrender.GetBool()==false )
 		return;
 
-	CMatRenderContextPtr pRenderContext( materials );
-
 	pRenderContext->SetFlashlightMode( true );
 
 	for( ; 
@@ -3672,29 +4634,46 @@ void CShadowMgr::DrawFlashlightOverlays( int nSortGroup, bool bDoMasking )
 		 flashlightID = m_FlashlightStates.Next( flashlightID ) )
 	{
 		FlashlightInfo_t &flashlightInfo = m_FlashlightStates[flashlightID];
-		pRenderContext->SetFlashlightState(flashlightInfo.m_FlashlightState, m_Shadows[flashlightInfo.m_Shadow].m_WorldToShadow );
+
+		if ( flashlightInfo.m_nSplitscreenOwner >= 0 )
+		{
+			ASSERT_LOCAL_PLAYER_RESOLVABLE();
+			if ( flashlightInfo.m_nSplitscreenOwner != GET_ACTIVE_SPLITSCREEN_SLOT() )
+				continue;
+		}
+
+		pRenderContext->SetFlashlightStateEx( flashlightInfo.m_FlashlightState, m_Shadows[flashlightInfo.m_Shadow].m_WorldToShadow, m_Shadows[flashlightInfo.m_Shadow].m_pFlashlightDepthTexture );
 
 		EnableStencilAndScissorMasking( pRenderContext, flashlightInfo, bDoMasking );
 
-		OverlayMgr()->RenderOverlays( nSortGroup );
+		OverlayMgr()->RenderOverlays( pRenderContext, nSortGroup );
+
+		DisableStencilAndScissorMasking( pRenderContext, flashlightInfo, bDoMasking );
 	}
 	
 	// Tell the materialsystem that we are finished drawing additive flashlight lighting.
 	pRenderContext->SetFlashlightMode( false );
-
-	// Turn off stencil masking
-	DisableStencilAndScissorMasking( pRenderContext );
 }
 
 void CShadowMgr::DrawFlashlightDepthTexture( )
 {
 	int i = 0;
-	FlashlightHandle_t flashlightID = m_FlashlightStates.Head();
-	while ( flashlightID != m_FlashlightStates.InvalidIndex() )			// Count up the shadows
+	for ( FlashlightHandle_t flashlightID = m_FlashlightStates.Head();
+		  flashlightID != m_FlashlightStates.InvalidIndex();
+		  flashlightID = m_FlashlightStates.Next( flashlightID ) ) // Count up the shadows
 	{
 		FlashlightInfo_t &flashlightInfo = m_FlashlightStates[ flashlightID ];
+		
+		if ( flashlightInfo.m_nSplitscreenOwner >= 0 )
+		{
+			ASSERT_LOCAL_PLAYER_RESOLVABLE();
+			if ( flashlightInfo.m_nSplitscreenOwner != GET_ACTIVE_SPLITSCREEN_SLOT() )
+			{
+				continue;
+			}
+		}
 
-		if( m_Shadows[ flashlightInfo.m_Shadow ].m_pFlashlightDepthTexture )
+		if ( m_Shadows[ flashlightInfo.m_Shadow ].m_pFlashlightDepthTexture )
 		{
 			bool foundVar;
 			IMaterial *pMaterial = materials->FindMaterial( "debug/showz", TEXTURE_GROUP_OTHER, true );
@@ -3705,7 +4684,9 @@ void CShadowMgr::DrawFlashlightDepthTexture( )
 			if (!foundVar)
 				return;
 
-			float w = 256.0f, h = 256.0f;
+			float w, h;
+			w = h = r_flashlightdrawdepthres.GetFloat();
+
 			float wOffset = (i % 2) * 256.0f;	// Even|Odd go left|right
 			float hOffset = (i / 2) * 256.0f;	// Rows of two
 
@@ -3726,7 +4707,7 @@ void CShadowMgr::DrawFlashlightDepthTexture( )
 #else
 			meshBuilder.TexCoord2f( 0, 0.0f, 0.0f );
 #endif
-			meshBuilder.AdvanceVertex();
+			meshBuilder.AdvanceVertexF<VTX_HAVEPOS, 1>();
 
 			meshBuilder.Position3f( wOffset + w, hOffset, 0.0f );
 #ifdef DX_TO_GL_ABSTRACTION
@@ -3734,7 +4715,7 @@ void CShadowMgr::DrawFlashlightDepthTexture( )
 #else
 			meshBuilder.TexCoord2f( 0, 1.0f, 0.0f );
 #endif
-			meshBuilder.AdvanceVertex();
+			meshBuilder.AdvanceVertexF<VTX_HAVEPOS, 1>();
 
 			meshBuilder.Position3f( wOffset + w, hOffset + h, 0.0f );
 #ifdef DX_TO_GL_ABSTRACTION
@@ -3742,7 +4723,7 @@ void CShadowMgr::DrawFlashlightDepthTexture( )
 #else
 			meshBuilder.TexCoord2f( 0, 1.0f, 1.0f );
 #endif
-			meshBuilder.AdvanceVertex();
+			meshBuilder.AdvanceVertexF<VTX_HAVEPOS, 1>();
 
 			meshBuilder.Position3f( wOffset, hOffset + h, 0.0f );
 #ifdef DX_TO_GL_ABSTRACTION
@@ -3750,25 +4731,17 @@ void CShadowMgr::DrawFlashlightDepthTexture( )
 #else
 			meshBuilder.TexCoord2f( 0, 0.0f, 1.0f );
 #endif			
-			meshBuilder.AdvanceVertex();
+			meshBuilder.AdvanceVertexF<VTX_HAVEPOS, 1>();
 
 			meshBuilder.End();
 			pMesh->Draw();
 
 			i++;
 		}
-
-		flashlightID = m_FlashlightStates.Next( flashlightID );
 	}
 }
 
-void CShadowMgr::AddFlashlightRenderable( ShadowHandle_t shadowHandle, IClientRenderable *pRenderable )
+void CShadowMgr::SkipShadowForEntity( int nEntIndex )
 {
-	Shadow_t &shadow = m_Shadows[ shadowHandle ];
-	FlashlightInfo_t &flashlightInfo = m_FlashlightStates[ shadow.m_FlashlightHandle ];
-
-	if( pRenderable->GetModelInstance() != MODEL_INSTANCE_INVALID )
-	{
- 		flashlightInfo.m_Renderables.AddToTail( pRenderable );
-	}
+	m_nSkipShadowForEntIndex = nEntIndex;
 }

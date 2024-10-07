@@ -1,4 +1,3 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
 
 /* libpng STANDARD API DEFINITION */
 

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -10,7 +10,7 @@
 #pragma once
 #endif
 
-#include "tier1/utlsymbol.h"
+#include "tier1/utlsymbollarge.h"
 #include "tier1/utllinkedlist.h"
 #include "tier1/utlstack.h"
 
@@ -56,8 +56,8 @@ public:
 	void			PushRedo();
 	void			AbortUndoableOperation();
 
-	UtlSymId_t		GetUndoDescInternal( const char *context );
-	UtlSymId_t		GetRedoDescInternal( const char *context );
+	CUtlSymbolLarge		GetUndoDescInternal( const char *context );
+	CUtlSymbolLarge		GetRedoDescInternal( const char *context );
 
 	void			GetUndoInfo( CUtlVector< UndoInfo_t >& list );
 
@@ -70,10 +70,8 @@ public:
 
 	void			NotifyState( int nNotifyFlags );
 
-	static const char *GetUndoString( CUtlSymbol sym );
-
 private:
-	void			Trace( PRINTF_FORMAT_STRING const char *fmt, ... );
+	void			Trace( const char *fmt, ... );
 
 	CUtlLinkedList< IUndoElement *, int >	m_UndoList;
 	CUtlStack< IUndoElement * >			m_RedoStack;
@@ -81,8 +79,8 @@ private:
 	int				m_nMaxUndoDepth;
 	int				m_nNesting;
 	int				m_nNotifyNesting;
-	CUtlSymbol		m_UndoDesc;
-	CUtlSymbol		m_RedoDesc;
+	CUtlSymbolLarge		m_UndoDesc;
+	CUtlSymbolLarge		m_RedoDesc;
 	int				m_nNotifySource;
 	int				m_nNotifyFlags;
 	const char*		m_pNotifyReason;
@@ -94,7 +92,6 @@ private:
 	bool			m_bEnabled : 1;
 	bool			m_bSuppressingNotify : 1;
 
-	static CUtlSymbolTableMT s_UndoSymbolTable;
 	int				m_nChainingID;
 	int				m_PreviousChainingID;
 };
@@ -113,11 +110,6 @@ inline void CUndoManager::NotifyState( int nNotifyFlags )
 	// FIXME: Should suppress prevent notification being sent,
 	// or prevent notification flags from being set in the first place?
 	m_nNotifyFlags |= nNotifyFlags;
-}
-
-inline const char *CUndoManager::GetUndoString( CUtlSymbol sym )
-{
-	return s_UndoSymbolTable.String( sym );
 }
 
 

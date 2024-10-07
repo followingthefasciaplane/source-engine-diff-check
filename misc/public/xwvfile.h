@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -27,7 +27,13 @@ enum xwvFormat_t
 	XWV_FORMAT_PCM = 0,
 	XWV_FORMAT_XMA = 1,
 	XWV_FORMAT_ADPCM = 2,
+	XWV_FORMAT_MP3 = 3,
+	// Used to detect MP3 frame issues.
+	XWV_FORMAT_TEMP = 123,
 };
+
+// 1152 samples for one MP3 frame. 2304 bytes in mono, 4608 in stereo.
+#define NUMBER_OF_SAMPLES_PER_MP3_FRAME 1152
 
 // generated in big-endian
 struct xwvHeader_t

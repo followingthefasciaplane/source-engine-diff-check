@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -7,6 +7,7 @@
 #include "tier0/platform.h"
 #include "tier0/dbg.h"
 #include "clientframe.h"
+#include "packed_entity.h"
 #include "framesnapshot.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
@@ -129,19 +130,17 @@ CClientFrame *CClientFrameManager::GetClientFrame( int nTick, bool bExact )
 
 int	CClientFrameManager::CountClientFrames( void )
 {
-
-#if _DEBUG
 	int count = 0;
+
 	CClientFrame *f = m_Frames;
+
 	while ( f )
 	{
 		count++;
 		f = f->m_pNext;
 	}
-	Assert( m_nFrames == count );
-#endif
 
-	return m_nFrames;
+	return count;
 }
 
 //-----------------------------------------------------------------------------
@@ -155,18 +154,24 @@ int CClientFrameManager::AddClientFrame( CClientFrame *frame)
 	if ( !m_Frames )
 	{
 		// first client frame at all
-		Assert( m_LastFrame == NULL && m_nFrames == 0 );
-		m_Frames = frame;
-		m_LastFrame = frame;
-		m_nFrames = 1;
+		m_Frames = frame;	
 		return 1;
 	}
 
-	Assert( m_Frames != NULL && m_nFrames > 0 );
-	Assert( m_LastFrame->m_pNext == NULL );
-	m_LastFrame->m_pNext = frame;
-	m_LastFrame = frame;
-	return ++m_nFrames;
+	CClientFrame *f = m_Frames;
+
+	int count = 1;
+
+	while ( f->m_pNext )
+	{
+		f = f->m_pNext;	
+		++count;
+	}
+
+	++count;
+	f->m_pNext = frame;
+
+	return count;
 }
 
 void CClientFrameManager::RemoveOldestFrame( void )
@@ -176,64 +181,66 @@ void CClientFrameManager::RemoveOldestFrame( void )
 	if ( !frame )
 		return;	// no frames at all
 
-	Assert( m_nFrames > 0 );
 	m_Frames = frame->m_pNext; // unlink head
+
 	// deleting frame will decrease global reference counter
 	FreeFrame( frame );
-
-	if ( --m_nFrames == 0 )
-	{
-		Assert( m_LastFrame == frame && m_Frames == NULL );
-		m_LastFrame = NULL;
-	}
 }
 
 void CClientFrameManager::DeleteClientFrames(int nTick)
 {
-	
-	if ( nTick < 0 )
+	CClientFrame *frame = m_Frames; // first
+	CClientFrame *prev = NULL;	  // last
+
+	while ( frame )
 	{
-		while ( m_nFrames > 0 )
+		// remove frame if tick small nTick
+		// remove all frames if nTick == -1
+
+		if ( (nTick < 0) || (frame->tick_count < nTick) )
 		{
-			RemoveOldestFrame();
-		}
-	}
-	else
-	{
-		CClientFrame *frame = m_Frames;
-		// rebuild m_LastFrame while iterating forward through the list
-		m_LastFrame = NULL;
-		while ( frame )
-		{
-			if ( frame->tick_count < nTick )
+			// removed frame
+
+			if ( prev )
 			{
-				// Delete this frame
-				CClientFrame* next = frame->m_pNext;
-				if ( m_Frames == frame )
-					m_Frames = next;
+				prev->m_pNext = frame->m_pNext;
+				// deleting frame will decrease global reference counter
 				FreeFrame( frame );
-				if ( --m_nFrames == 0 )
-				{
-					Assert( next == NULL );
-					m_LastFrame = m_Frames = NULL;
-					break;
-				}
-				Assert( m_LastFrame != frame && m_nFrames > 0 );
-				frame = next;
-				if ( m_LastFrame )
-					m_LastFrame->m_pNext = next;
+				frame = prev->m_pNext;
 			}
 			else
 			{
-				Assert( m_LastFrame == NULL || m_LastFrame->m_pNext == frame );
-				m_LastFrame = frame;
-				frame = frame->m_pNext;
+				m_Frames = frame->m_pNext;	
+				FreeFrame( frame );
+				frame = m_Frames;
 			}
 		}
+		else
+		{
+			// go to next frame
+			prev = frame;
+			frame = frame->m_pNext;
+		}
+	}
+}
+
+bool CClientFrameManager::DeleteUnusedClientFrame( CClientFrame* pFrameToDelete )
+{
+	// Call this to deallocate an unused frame (this should NOT have been added to m_Frames)
+
+	CClientFrame **ppFrame = &m_Frames;	// address of pointer to first frame
+	while ( *ppFrame )
+	{
+		if ( *ppFrame == pFrameToDelete )
+		{
+			Assert( !"ERROR: DeleteUnusedClientFrame called incorrectly...\n" );
+			return false;
+		}
+		ppFrame = &( (*ppFrame)->m_pNext );
 	}
 
-
-
+	FreeFrame( pFrameToDelete );
+	return true;
 }
 
 
@@ -243,6 +250,22 @@ void CClientFrameManager::DeleteClientFrames(int nTick)
 CClientFrame* CClientFrameManager::AllocateFrame()
 {
 	return m_ClientFramePool.Alloc();
+}
+
+CClientFrame*	CClientFrameManager::AllocateAndInitFrame( int nTick )
+{
+	CClientFrame* pFrame = m_ClientFramePool.Alloc();
+	pFrame->Init( nTick );
+	if ( m_Frames && m_Frames->tick_count > nTick )
+	{
+		while ( m_Frames )
+		{
+			CClientFrame* pNext = m_Frames->m_pNext;
+			FreeFrame( m_Frames );
+			m_Frames = pNext;
+		}
+	}
+	return pFrame;
 }
 
 void CClientFrameManager::FreeFrame( CClientFrame* pFrame )
@@ -255,18 +278,4 @@ void CClientFrameManager::FreeFrame( CClientFrame* pFrame )
 	{
 		delete pFrame;
 	}
-}
-
-CClientFrameManager::CClientFrameManager( void )
-:	m_ClientFramePool( MAX_CLIENT_FRAMES, CUtlMemoryPool::GROW_SLOW ),
-	m_Frames(NULL),
-	m_LastFrame(NULL),
-	m_nFrames(0)
-{
-}
-
-CClientFrameManager::~CClientFrameManager( void )
-{
-	DeleteClientFrames( -1 );
-	Assert( m_nFrames == 0 );
 }

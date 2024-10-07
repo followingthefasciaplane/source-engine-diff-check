@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -77,6 +77,7 @@ public:
 	virtual void			LevelShutdown( void );
 
 	virtual void			ClientActive( edict_t *pEntity, bool bLoadGame );
+	virtual void			ClientFullyConnect( edict_t *pEntity );
 	virtual void			ClientDisconnect( edict_t *pEntity );
 	virtual void			ClientPutInServer( edict_t *pEntity, char const *playername );
 	virtual void			SetCommandClient( int index );
@@ -92,8 +93,6 @@ public:
 	virtual void ClientCommand( edict_t *pEntity, const char *cmd );
 	virtual QueryCvarCookie_t StartQueryCvarValue( edict_t *pEntity, const char *pName );
 
-	int						GetNumLoadedPlugins( void ){ return m_Plugins.Count(); }
-
 private:
 	CUtlVector<CPlugin *>	m_Plugins;
 	IPluginHelpersCheck		*m_PluginHelperCheck;
@@ -102,6 +101,13 @@ public:
 	//New plugin interface callbacks
 	virtual void			OnEdictAllocated( edict_t *edict );
 	virtual void			OnEdictFreed( const edict_t *edict  ); 
+
+	// Allow plugins to validate and configure network encryption keys
+	virtual bool			BNetworkCryptKeyCheckRequired( uint32 unFromIP, uint16 usFromPort, uint32 unAccountIdProvidedByClient,
+		bool bClientWantsToUseCryptKey );
+	virtual bool			BNetworkCryptKeyValidate( uint32 unFromIP, uint16 usFromPort, uint32 unAccountIdProvidedByClient,
+		int nEncryptionKeyIndexFromClient, int numEncryptedBytesFromClient, byte *pbEncryptedBufferFromClient,
+		byte *pbPlainTextKeyForNetchan );
 };
 
 extern CServerPlugin *g_pServerPluginHandler;

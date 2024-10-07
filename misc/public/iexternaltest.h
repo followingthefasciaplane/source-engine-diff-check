@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright ©, Valve Corporation, All rights reserved. =======
 //
 // Purpose: interface to external test DLLs
 //
@@ -13,14 +13,9 @@
 #include "steam/isteamfriends.h"
 #include "clientenums.h"
 
-// An equivalent to EConnectionPriority that can be used in
-// external tests without needing to depend on Steam's version of the enum
-enum EExternalTestConnectionPriority
-{
-	k_EExternalTestConnectionPriorityLow = 0,
-	k_EExternalTestConnectionPriorityMedium = 1,
-	k_EExternalTestConnectionPriorityHigh = 2,
-};
+class ISteamClient;
+class ISteamUserStats;
+class ISteamGameServerStats;
 
 // used to pass arbitrary buffers full of data back to the external test
 typedef uint32 ExternalTestBuffer_t;
@@ -38,17 +33,14 @@ public:
 	virtual void *GetISteamGenericInterface( const char *pchInterfaceVersion ) = 0;
 	virtual ISteamUserStats *GetISteamUserStats( const char *pchVersion ) = 0;
 	virtual ISteamGameServerStats *GetISteamGameServerStats( const char *pchVersion ) = 0;
+	virtual bool BYieldingAwaitNewCallback( void *pCallback, uint32 unCallbackSize, int nCallbackType ) = 0;
 	virtual CSteamID GetSteamID() = 0;
-	virtual bool GetAccountName( char *pchBuf, int cchBuf ) = 0;
 
-	virtual bool BLoggedOn() = 0;
 	virtual void YieldingLogOff() = 0;
 	virtual bool BYieldingLogOn() = 0;
-	virtual void RequestAppInfoUpdate() = 0;
-	virtual bool BGetAppInfoUpdateResult( EResult *peResult, uint32 *punAppsUpdated ) = 0;
+	virtual bool BYieldingAwaitQueuedCallback( void * pCallback, uint32 unCallbackSize, int nCallbackType ) = 0;
 	virtual void GetServerDetails( AppId_t *pnAppIdServed, uint32 *punIPGameServer, uint16 *pusPortGameServer, bool *pbSecure ) = 0;
 	virtual bool BYieldingPrepareForApp( AppId_t unAppID ) = 0;
-	virtual void SetConnectionPriority( EExternalTestConnectionPriority eConnectionPriority ) = 0;
 
 	// methods to manipulate friend/social stuff that isn't in ISteamFriends
 	virtual void SetPersonaState( EPersonaState ePersonaState ) = 0;
@@ -61,25 +53,10 @@ public:
 	// Sets this user as an admin in this universe
 	virtual void YieldingSetAsAdmin() = 0;
 
-	// bans this user for the specified app ID
-	virtual void YieldingBan( AppId_t unAppID, int nDeltaSeconds, bool bOneYearBan ) = 0;
-
-	virtual bool BYieldingAwaitNewCallback( void *pCallback, uint32 unCallbackSize, int nCallbackType ) = 0;
-	virtual bool BYieldingAwaitQueuedCallback( void * pCallback, uint32 unCallbackSize, int nCallbackType ) = 0;
-	virtual bool BGetQueuedCallbackOfType( void * pCallback, uint32 unCallbackSize, int nCallbackType ) = 0;
-
-	// Retrieves the current status of the API call. Returns false if the call is still in progress
-	virtual bool BYieldingGetAPICallResult( SteamAPICall_t hSteamAPICall, void *pCallback, uint32 unCallbackSize, int nCallback, bool *pbAPICallFailed ) = 0;
-
 	template< typename TCallback >
 	inline bool BYieldingAwaitQueuedCallback( TCallback & callback ) { return BYieldingAwaitQueuedCallback( &callback, sizeof(TCallback), TCallback::k_iCallback ); }
 	template< typename TCallback >
 	inline bool BYieldingAwaitNewCallback( TCallback & callback ) { return BYieldingAwaitNewCallback( &callback, sizeof(TCallback), TCallback::k_iCallback ); }
-	template< typename TCallback >
-	inline bool BGetQueuedCallbackOfType( TCallback & callback ) { return BGetQueuedCallbackOfType( &callback, sizeof(TCallback), TCallback::k_iCallback ); }
-
-	// more friends stuff that isnt in ISteamFriends
-	virtual void SetIgnoreFriend( const CSteamID & steamIDFriend ) = 0;
 };
 
 //-----------------------------------------------------------------------------
@@ -139,10 +116,10 @@ public:
 	virtual void MarkTestRunning() = 0;
 
 	// Logs on a bunch of clients all at once and returns when they are all logged on.
-	virtual bool BYieldingCreateUserClientBatch( IExternalTestClient **prClients, int cClients, EExternalTestConnectionPriority eConnectionPriority ) = 0;
+	virtual bool BYieldingCreateUserClientBatch( IExternalTestClient **prClients, int cClients, IExternalTestClient *pGameserver ) = 0;
 
 	// Logs on a bunch of gameservers all at once and returns when they are all logged on.
-	virtual bool BYieldingCreateGameserverClientBatch( IExternalTestClient **prClients, int cClients, EExternalTestConnectionPriority eConnectionPriority ) = 0;
+	virtual bool BYieldingCreateGameserverClientBatch( IExternalTestClient **prClients, int cClients ) = 0;
 
 	// returns true if the test is finished
 	virtual bool BIsStressTestFinished() = 0;
@@ -187,26 +164,19 @@ public:
 	virtual void YieldingVerifySupportEventRecord( const CSteamID & victimID, const CSteamID & actorID, ESupportEvent eAction, GID_t gidTxn, const char *pchNote ) = 0;
 
 	// forces an appinfo update for the specified app. (Pass invalid to use the default app ID
-	virtual void YieldingForceAppInfoUpdate( AppId_t appId ) = 0;
+	virtual void ForceAppInfoUpdate( AppId_t appId ) = 0;
 
 	// returns the stats KV section serialized as a buffer
-	virtual ExternalTestBuffer_t YieldingGetAppInfoStats( AppId_t appId ) = 0;
+	virtual ExternalTestBuffer_t GetAppInfoStats( AppId_t appId ) = 0;
 
 	// makes a web request and returns the result
-	virtual bool BYieldingHTTPRequest( int nWebMethod, bool bUseSSL, const char *pchURL, const KeyValues *pkvPostParams, const char *pchAPIKey, const CSteamID & steamID, ExternalTestBuffer_t *punBuffer, int *pnResultCode ) = 0;
+	virtual bool BYieldingHTTPRequest( int nWebMethod, const char *pchURL, const char *pchAPIKey, const CSteamID & steamID, ExternalTestBuffer_t *punBuffer, int *pnResultCode ) = 0;
 
 	// returns the full path to the DLL that these tests are running from
 	virtual const char *GetPchDllPath() = 0;
 
 	// returns true if these tests are running in dev mode (i.e. the server was started with -etdev)
 	virtual bool BIsDevMode() = 0;
-
-	// Sets the persona name for this user via the wg call so we can actually tell when
-	// it's been set.
-	virtual bool BYieldingSetPersonaName( const CSteamID & steamID, const char *pchPersonaName ) = 0;
-
-	// waits for the writeback queue to clear
-	virtual bool BYieldingWaitForCacheWriteback() = 0;
 };
 
 
@@ -247,21 +217,6 @@ public:
 // flags set by individual tests
 static const uint32 k_unETFlag_ValidForStress		= 1<<0;
 static const uint32 k_unETFlag_ValidForRegression	= 1<<1;
-
-
-//-----------------------------------------------------------------------------
-// Purpose: For one time init of an externaltests dll
-//-----------------------------------------------------------------------------
-class IExternalTestInitialize
-{
-public:
-	virtual bool BDoBundleInit() = 0;	// called once *PER ATS* at DLL Load time
-	virtual bool BDoOneTimeInit( IExternalTestUtils *pExternalTestUtils ) = 0; // called once PER TEST RUN by ATS0
-	virtual bool BDoPerATSInit( IExternalTestUtils *pExternalTestUtils ) = 0; // called once PER TEST RUN PER ATS
-	virtual void Cleanup() = 0;
-};
-#define EXTERNALTEST_INITIALIZE_INTERFACE_VERSION "IExternalTestInitialize001"
-
 
 //-----------------------------------------------------------------------------
 // Purpose: Allows an external test DLL to export its ability to validate its 

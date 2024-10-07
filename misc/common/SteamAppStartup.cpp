@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -24,6 +24,11 @@ bool FileExists(const char *fileName)
 	struct _stat statbuf;
 	return (_stat(fileName, &statbuf) == 0);
 }
+inline bool V_isspace(int c)
+{
+	// The standard white-space characters are the following: space, tab, carriage-return, newline, vertical tab, and form-feed. In the C locale, V_isspace() returns true only for the standard white-space characters. 
+	return c == ' ' || c == 9 /*horizontal tab*/ || c == '\r' || c == '\n' || c == 11 /*vertical tab*/ || c == '\f';
+}
 
 //-----------------------------------------------------------------------------
 // Purpose: Launches steam if necessary
@@ -37,7 +42,7 @@ bool ShouldLaunchAppViaSteam(const char *lpCmdLine, const char *steamFilesystemD
 	if (steamStr)
 	{
 		const char *postChar = steamStr + strlen(STEAM_PARM);
-		if (*postChar == 0 || isspace(*postChar))
+		if (*postChar == 0 || V_isspace(*postChar))
 		{
 			// we're running under steam already, let the app continue
 			return false;

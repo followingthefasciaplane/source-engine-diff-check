@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -38,6 +38,13 @@ inline IHandleEntity* CBaseHandle::Get() const
 
 // -------------------------------------------------------------------------------------------------- //
 // CHandle.
+//
+// Only safe to use in cases where you can statically verify that T* can safely be reinterpret-casted
+// to IHandleEntity*; that is, that it's derived from IHandleEntity and IHandleEntity is the
+// first base class.
+//
+// Unfortunately some classes are forward-declared and the compiler can't determine at compile time
+// how to static_cast<> them to IHandleEntity.
 // -------------------------------------------------------------------------------------------------- //
 template< class T >
 class CHandle : public CBaseHandle
@@ -46,67 +53,77 @@ public:
 
 			CHandle();
 			CHandle( int iEntry, int iSerialNumber );
-			CHandle( const CBaseHandle &handle );
-			CHandle( T *pVal );
+	/*implicit*/ CHandle( T *pVal );
+	/*implicit*/ CHandle( INVALID_EHANDLE_tag );
 
-	// The index should have come from a call to ToInt(). If it hasn't, you're in trouble.
-	static CHandle<T> FromIndex( int index );
+	// NOTE: The following two constructor functions are not type-safe, and can allow creating a
+	// CHandle<T> that doesn't actually point to an object of type T.
+	//
+	// It is your responsibility to ensure that the target of the handle actually points to the
+	// correct type of object before calling these functions.
+
+	static CHandle<T> UnsafeFromBaseHandle( const CBaseHandle& handle );
+
+	// The index should have come from a call to CBaseHandle::ToInt(). If it hasn't, you're in trouble.
+	static CHandle<T> UnsafeFromIndex( int index );
 
 	T*		Get() const;
 	void	Set( const T* pVal );
 
-			operator T*();
-			operator T*() const;
+	/*implicit*/ operator T*();
+	/*implicit*/ operator T*() const;
 
 	bool	operator !() const;
 	bool	operator==( T *val ) const;
 	bool	operator!=( T *val ) const;
-	const CBaseHandle& operator=( const T *val );
+	CHandle& operator=( const T *val );
 
 	T*		operator->() const;
 };
-
 
 // ----------------------------------------------------------------------- //
 // Inlines.
 // ----------------------------------------------------------------------- //
 
 template<class T>
-CHandle<T>::CHandle()
+inline CHandle<T>::CHandle()
 {
 }
 
+template<class T>
+inline CHandle<T>::CHandle( INVALID_EHANDLE_tag )
+	: CBaseHandle( INVALID_EHANDLE )
+{
+}
 
 template<class T>
-CHandle<T>::CHandle( int iEntry, int iSerialNumber )
+inline CHandle<T>::CHandle( int iEntry, int iSerialNumber )
 {
 	Init( iEntry, iSerialNumber );
 }
 
-
 template<class T>
-CHandle<T>::CHandle( const CBaseHandle &handle )
-	: CBaseHandle( handle )
+inline CHandle<T>::CHandle( T *pObj )
+	: CBaseHandle( INVALID_EHANDLE )
 {
-}
-
-
-template<class T>
-CHandle<T>::CHandle( T *pObj )
-{
-	Term();
 	Set( pObj );
 }
 
+template<class T>
+inline CHandle<T> CHandle<T>::UnsafeFromBaseHandle( const CBaseHandle &handle )
+{
+	CHandle<T> ret;
+	ret.m_Index = handle.m_Index;
+	return ret;
+}
 
 template<class T>
-inline CHandle<T> CHandle<T>::FromIndex( int index )
+inline CHandle<T> CHandle<T>::UnsafeFromIndex( int index )
 {
 	CHandle<T> ret;
 	ret.m_Index = index;
 	return ret;
 }
-
 
 template<class T>
 inline T* CHandle<T>::Get() const
@@ -149,11 +166,17 @@ inline bool CHandle<T>::operator!=( T *val ) const
 template<class T>
 void CHandle<T>::Set( const T* pVal )
 {
-	CBaseHandle::Set( reinterpret_cast<const IHandleEntity*>(pVal) );
+	// We can't even verify that the class can successfully reinterpret-cast to IHandleEntity*
+	// because that will cause this function to fail to compile in Debug in the case of forward-declared
+	// pointer types.
+	//Assert( reinterpret_cast< const IHandleEntity* >( pVal ) == static_cast< IHandleEntity* >( pVal ) );
+
+	const IHandleEntity* pValInterface = reinterpret_cast<const IHandleEntity*>( pVal );
+	CBaseHandle::Set( pValInterface );
 }
 
 template<class T>
-inline const CBaseHandle& CHandle<T>::operator=( const T *val )
+inline CHandle<T>& CHandle<T>::operator=( const T *val )
 {
 	Set( val );
 	return *this;
@@ -164,6 +187,10 @@ T* CHandle<T>::operator -> () const
 {
 	return Get();
 }
+
+// specialization of EnsureValidValue for CHandle<T>
+template<typename T>
+FORCEINLINE void EnsureValidValue( CHandle<T> &x ) { x = INVALID_EHANDLE; }
 
 
 #endif // EHANDLE_H

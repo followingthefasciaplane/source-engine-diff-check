@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -10,6 +10,6 @@
 #pragma once
 #endif
 
-#define	SAVEGAME_VERSION	0x0073		// Version 0.73
+#define	SAVEGAME_VERSION	0x0074		// Version 0.74
 
 #endif // SAVEGAME_VERSION_H

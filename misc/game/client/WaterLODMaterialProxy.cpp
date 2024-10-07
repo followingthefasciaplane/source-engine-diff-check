@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -9,13 +9,10 @@
 #include "materialsystem/imaterial.h"
 #include "materialsystem/imaterialvar.h"
 #include "iviewrender.h"
-#include "toolframework_client.h"
 
+#include "imaterialproxydict.h"
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
-
-// forward declarations
-void ToolFramework_RecordMaterialParams( IMaterial *pMaterial );
 
 // no inputs, assumes that the results go into $CHEAPWATERSTARTDISTANCE and $CHEAPWATERENDDISTANCE
 class CWaterLODMaterialProxy : public IMaterialProxy
@@ -68,11 +65,6 @@ void CWaterLODMaterialProxy::OnBind( void *pC_BaseEntity )
 	view->GetWaterLODParams( start, end );
 	m_pCheapWaterStartDistanceVar->SetFloatValue( start );
 	m_pCheapWaterEndDistanceVar->SetFloatValue( end );
-
-	if ( ToolsEnabled() )
-	{
-		ToolFramework_RecordMaterialParams( GetMaterial() );
-	}
 }
 
 IMaterial *CWaterLODMaterialProxy::GetMaterial()
@@ -80,4 +72,4 @@ IMaterial *CWaterLODMaterialProxy::GetMaterial()
 	return m_pCheapWaterStartDistanceVar->GetOwningMaterial();
 }
 
-EXPOSE_INTERFACE( CWaterLODMaterialProxy, IMaterialProxy, "WaterLOD" IMATERIAL_PROXY_INTERFACE_VERSION );
+EXPOSE_MATERIAL_PROXY( CWaterLODMaterialProxy, WaterLOD );

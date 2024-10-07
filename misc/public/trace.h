@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -27,6 +27,8 @@
 #define DISPSURF_FLAG_BUILDABLE		(1<<2)
 #define DISPSURF_FLAG_SURFPROP1		(1<<3)
 #define DISPSURF_FLAG_SURFPROP2		(1<<4)
+#define DISPSURF_FLAG_SURFPROP3		(1<<5)
+#define DISPSURF_FLAG_SURFPROP4		(1<<6)
 
 //=============================================================================
 // Base Trace Structure
@@ -43,6 +45,8 @@ public:
 	bool IsDispSurfaceBuildable( void )		{ return ( ( dispFlags & DISPSURF_FLAG_BUILDABLE ) != 0 ); }
 	bool IsDispSurfaceProp1( void )			{ return ( ( dispFlags & DISPSURF_FLAG_SURFPROP1 ) != 0 ); }
 	bool IsDispSurfaceProp2( void )			{ return ( ( dispFlags & DISPSURF_FLAG_SURFPROP2 ) != 0 ); }
+	bool IsDispSurfaceProp3( void )			{ return ( ( dispFlags & DISPSURF_FLAG_SURFPROP3 ) != 0 ); }
+	bool IsDispSurfaceProp4( void )			{ return ( ( dispFlags & DISPSURF_FLAG_SURFPROP4 ) != 0 ); }
 
 public:
 

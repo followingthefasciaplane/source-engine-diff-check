@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -29,7 +29,7 @@ public:
 		m_Objects.RemoveAll();
 	}
 
-	int	GetObjectCount() { return m_Objects.Size(); }
+	int	GetObjectCount() { return m_Objects.Count(); }
 
 	C_BaseEntity *GetObject( int index )
 	{

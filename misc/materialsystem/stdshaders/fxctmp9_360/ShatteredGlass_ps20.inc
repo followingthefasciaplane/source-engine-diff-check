@@ -1,27 +1,12 @@
+// ALL SKIP STATEMENTS THAT AFFECT THIS SHADER!!!
+// defined $PIXELFOGTYPE && defined $WRITEWATERFOGTODESTALPHA && ( $PIXELFOGTYPE != 1 ) && $WRITEWATERFOGTODESTALPHA
+// defined $LIGHTING_PREVIEW && defined $FASTPATHENVMAPTINT && $LIGHTING_PREVIEW && $FASTPATHENVMAPTINT
+// defined $LIGHTING_PREVIEW && defined $FASTPATHENVMAPCONTRAST && $LIGHTING_PREVIEW && $FASTPATHENVMAPCONTRAST
+// defined $LIGHTING_PREVIEW && defined $FASTPATH && $LIGHTING_PREVIEW && $FASTPATH
+// ($FLASHLIGHT || $FLASHLIGHTSHADOWS) && $LIGHTING_PREVIEW
 #include "shaderlib/cshader.h"
 class shatteredglass_ps20_Static_Index
 {
-private:
-	int m_nCONVERT_TO_SRGB;
-#ifdef _DEBUG
-	bool m_bCONVERT_TO_SRGB;
-#endif
-public:
-	void SetCONVERT_TO_SRGB( int i )
-	{
-		Assert( i >= 0 && i <= 0 );
-		m_nCONVERT_TO_SRGB = i;
-#ifdef _DEBUG
-		m_bCONVERT_TO_SRGB = true;
-#endif
-	}
-	void SetCONVERT_TO_SRGB( bool i )
-	{
-		m_nCONVERT_TO_SRGB = i ? 1 : 0;
-#ifdef _DEBUG
-		m_bCONVERT_TO_SRGB = true;
-#endif
-	}
 private:
 	int m_nCUBEMAP;
 #ifdef _DEBUG
@@ -38,6 +23,7 @@ public:
 	}
 	void SetCUBEMAP( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nCUBEMAP = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bCUBEMAP = true;
@@ -59,6 +45,7 @@ public:
 	}
 	void SetVERTEXCOLOR( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nVERTEXCOLOR = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bVERTEXCOLOR = true;
@@ -80,6 +67,7 @@ public:
 	}
 	void SetENVMAPMASK( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nENVMAPMASK = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bENVMAPMASK = true;
@@ -101,6 +89,7 @@ public:
 	}
 	void SetBASEALPHAENVMAPMASK( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nBASEALPHAENVMAPMASK = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bBASEALPHAENVMAPMASK = true;
@@ -122,18 +111,16 @@ public:
 	}
 	void SetHDRTYPE( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 2 );
 		m_nHDRTYPE = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bHDRTYPE = true;
 #endif
 	}
 public:
-	shatteredglass_ps20_Static_Index( )
+	// CONSTRUCTOR
+	shatteredglass_ps20_Static_Index( IShaderShadow *pShaderShadow, IMaterialVar **params )
 	{
-#ifdef _DEBUG
-		m_bCONVERT_TO_SRGB = true;
-#endif // _DEBUG
-		m_nCONVERT_TO_SRGB =  0;
 #ifdef _DEBUG
 		m_bCUBEMAP = false;
 #endif // _DEBUG
@@ -160,36 +147,15 @@ public:
 		// Asserts to make sure that we aren't using any skipped combinations.
 		// Asserts to make sure that we are setting all of the combination vars.
 #ifdef _DEBUG
-		bool bAllStaticVarsDefined = m_bCONVERT_TO_SRGB && m_bCUBEMAP && m_bVERTEXCOLOR && m_bENVMAPMASK && m_bBASEALPHAENVMAPMASK && m_bHDRTYPE;
+		bool bAllStaticVarsDefined = m_bCUBEMAP && m_bVERTEXCOLOR && m_bENVMAPMASK && m_bBASEALPHAENVMAPMASK && m_bHDRTYPE;
 		Assert( bAllStaticVarsDefined );
 #endif // _DEBUG
-		return ( 4 * m_nCONVERT_TO_SRGB ) + ( 4 * m_nCUBEMAP ) + ( 8 * m_nVERTEXCOLOR ) + ( 16 * m_nENVMAPMASK ) + ( 32 * m_nBASEALPHAENVMAPMASK ) + ( 64 * m_nHDRTYPE ) + 0;
+		return ( 2 * m_nCUBEMAP ) + ( 4 * m_nVERTEXCOLOR ) + ( 8 * m_nENVMAPMASK ) + ( 16 * m_nBASEALPHAENVMAPMASK ) + ( 32 * m_nHDRTYPE ) + 0;
 	}
 };
 #define shaderStaticTest_shatteredglass_ps20 psh_forgot_to_set_static_CUBEMAP + psh_forgot_to_set_static_VERTEXCOLOR + psh_forgot_to_set_static_ENVMAPMASK + psh_forgot_to_set_static_BASEALPHAENVMAPMASK + psh_forgot_to_set_static_HDRTYPE + 0
 class shatteredglass_ps20_Dynamic_Index
 {
-private:
-	int m_nHDRENABLED;
-#ifdef _DEBUG
-	bool m_bHDRENABLED;
-#endif
-public:
-	void SetHDRENABLED( int i )
-	{
-		Assert( i >= 0 && i <= 1 );
-		m_nHDRENABLED = i;
-#ifdef _DEBUG
-		m_bHDRENABLED = true;
-#endif
-	}
-	void SetHDRENABLED( bool i )
-	{
-		m_nHDRENABLED = i ? 1 : 0;
-#ifdef _DEBUG
-		m_bHDRENABLED = true;
-#endif
-	}
 private:
 	int m_nPIXELFOGTYPE;
 #ifdef _DEBUG
@@ -206,32 +172,59 @@ public:
 	}
 	void SetPIXELFOGTYPE( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nPIXELFOGTYPE = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bPIXELFOGTYPE = true;
 #endif
 	}
 public:
-	shatteredglass_ps20_Dynamic_Index()
+	// CONSTRUCTOR
+	shatteredglass_ps20_Dynamic_Index( IShaderDynamicAPI *pShaderAPI )
 	{
 #ifdef _DEBUG
-		m_bHDRENABLED = false;
+		m_bPIXELFOGTYPE = true;
 #endif // _DEBUG
-		m_nHDRENABLED = 0;
-#ifdef _DEBUG
-		m_bPIXELFOGTYPE = false;
-#endif // _DEBUG
-		m_nPIXELFOGTYPE = 0;
+		m_nPIXELFOGTYPE = ( pShaderAPI->GetSceneFogMode() == MATERIAL_FOG_LINEAR_BELOW_FOG_Z ) ;
 	}
 	int GetIndex()
 	{
 		// Asserts to make sure that we aren't using any skipped combinations.
 		// Asserts to make sure that we are setting all of the combination vars.
 #ifdef _DEBUG
-		bool bAllDynamicVarsDefined = m_bHDRENABLED && m_bPIXELFOGTYPE;
+		bool bAllDynamicVarsDefined = m_bPIXELFOGTYPE;
 		Assert( bAllDynamicVarsDefined );
 #endif // _DEBUG
-		return ( 1 * m_nHDRENABLED ) + ( 2 * m_nPIXELFOGTYPE ) + 0;
+		return ( 1 * m_nPIXELFOGTYPE ) + 0;
 	}
 };
-#define shaderDynamicTest_shatteredglass_ps20 psh_forgot_to_set_dynamic_HDRENABLED + psh_forgot_to_set_dynamic_PIXELFOGTYPE + 0
+#define shaderDynamicTest_shatteredglass_ps20 0
+
+static const ShaderComboInformation_t s_DynamicComboArray_ShatteredGlass_ps20[1] = 
+{
+	{ "PIXELFOGTYPE", 0, 1 },
+};
+
+static const ShaderComboInformation_t s_StaticComboArray_ShatteredGlass_ps20[5] = 
+{
+	{ "CUBEMAP", 0, 1 },
+	{ "VERTEXCOLOR", 0, 1 },
+	{ "ENVMAPMASK", 0, 1 },
+	{ "BASEALPHAENVMAPMASK", 0, 1 },
+	{ "HDRTYPE", 0, 2 },
+};
+static const ShaderComboSemantics_t ShatteredGlass_ps20_combos =
+{
+	"ShatteredGlass_ps20", s_DynamicComboArray_ShatteredGlass_ps20, 1, s_StaticComboArray_ShatteredGlass_ps20, 5 
+};
+
+class ConstructMe_ShatteredGlass_ps20
+{
+public:
+	ConstructMe_ShatteredGlass_ps20()
+	{
+		GetShaderDLL()->AddShaderComboInformation( &ShatteredGlass_ps20_combos );
+	}
+};
+
+static ConstructMe_ShatteredGlass_ps20 s_ConstructMe_ShatteredGlass_ps20;

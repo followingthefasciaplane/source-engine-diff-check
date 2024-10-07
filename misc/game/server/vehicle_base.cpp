@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: UNDONE: Rename this to prop_vehicle.cpp !!!
 //
@@ -85,6 +85,17 @@ CPropVehicle::~CPropVehicle ()
 {
 }
 
+
+//-----------------------------------------------------------------------------
+// Precache 
+//-----------------------------------------------------------------------------
+void CPropVehicle::Precache()
+{
+	BaseClass::Precache();
+	GetPhysics()->Precache();
+}
+
+
 //-----------------------------------------------------------------------------
 // Purpose: 
 //-----------------------------------------------------------------------------
@@ -133,12 +144,12 @@ int CPropVehicle::Restore( IRestore &restore )
 //-----------------------------------------------------------------------------
 // Purpose: Tell the vehicle physics system whenever we teleport, so it can fixup the wheels.
 //-----------------------------------------------------------------------------
-void CPropVehicle::Teleport( const Vector *newPosition, const QAngle *newAngles, const Vector *newVelocity )
+void CPropVehicle::Teleport( const Vector *newPosition, const QAngle *newAngles, const Vector *newVelocity, bool bUseSlowHighAccuracyContacts )
 {
 	matrix3x4_t startMatrixInv;
 
 	MatrixInvert( EntityToWorldTransform(), startMatrixInv );
-	BaseClass::Teleport( newPosition, newAngles, newVelocity );
+	BaseClass::Teleport( newPosition, newAngles, newVelocity, bUseSlowHighAccuracyContacts );
 
 	// Calculate the relative transform of the teleport
 	matrix3x4_t xform;
@@ -378,7 +389,7 @@ LINK_ENTITY_TO_CLASS( prop_vehicle_driveable, CPropVehicleDriveable );
 //-----------------------------------------------------------------------------
 CPropVehicleDriveable::CPropVehicleDriveable( void ) :
 	m_pServerVehicle( NULL ),
-	m_hKeepUpright( NULL ),
+	m_hKeepUpright( INVALID_EHANDLE ),
 	m_flTurnOffKeepUpright( 0 ),
 	m_flNoImpactDamageTime( 0 )
 {
@@ -962,7 +973,7 @@ int CPropVehicleDriveable::VPhysicsGetObjectList( IPhysicsObject **pList, int li
 //-----------------------------------------------------------------------------
 // Purpose: Handle trace attacks from the physcannon
 //-----------------------------------------------------------------------------
-void CPropVehicleDriveable::TraceAttack( const CTakeDamageInfo &info, const Vector &vecDir, trace_t *ptr, CDmgAccumulator *pAccumulator )
+void CPropVehicleDriveable::TraceAttack( const CTakeDamageInfo &info, const Vector &vecDir, trace_t *ptr )
 {
 	// If we've just been zapped by the physcannon, try and right ourselves
 	if ( info.GetDamageType() & DMG_PHYSGUN )
@@ -1006,7 +1017,7 @@ void CPropVehicleDriveable::TraceAttack( const CTakeDamageInfo &info, const Vect
 
 	}
 
-	BaseClass::TraceAttack( info, vecDir, ptr, pAccumulator );
+	BaseClass::TraceAttack( info, vecDir, ptr );
 }
 
 //=============================================================================

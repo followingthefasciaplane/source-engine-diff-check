@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2002, Valve LLC, All rights reserved. ============
 //
 // Purpose: 
 //
@@ -20,6 +20,7 @@
 #include "datamodel/dmattribute.h"
 #include "datamodel/dmattributevar.h"
 #include "datamodel/dmehandle.h"
+#include "datamodel/dmattributevar.h"
 #include "tier1/utlntree.h"
 #include "tier1/utlstring.h"
 #include "tier1/utlvector.h"
@@ -66,6 +67,8 @@ public:
 	virtual void	SetFont( vgui::HFont font );
 	virtual int		GetFontSize();
 	virtual void	SetFontSize( int size );
+
+	virtual void	Paint();
 	virtual void	PostChildPaint();
     virtual void	ExpandItem( int itemIndex, bool bExpand );
 	virtual bool	IsItemExpanded( int itemIndex );
@@ -79,8 +82,13 @@ public:
 	virtual void	OnMouseDoublePressed( vgui::MouseCode code );
 	virtual void	OnMouseWheeled( int delta );
 	virtual int		GetScrollBarSize();
+
 	virtual void	ToggleDrawGrid();
 	virtual bool	IsDrawingGrid();
+	virtual void	ToggleDrawAlternatingRowColors();
+	virtual bool	IsDrawingAlternatingRowColors();
+	virtual bool	IsHidingTypeSubColumn();
+	virtual void	ToggleHideSubColumn();
 
 	void			ResizeTreeToExpandedWidth();
 
@@ -131,7 +139,11 @@ private:
 	int		m_iFontSize;  // 1 = verySmall, small, normal, large, verylarge
 	bool	m_bMouseLeftIsDown;
 	bool	m_bMouseIsDragging;
+
 	bool	m_bDrawGrid;
+	bool	m_bDrawAlternatingRowColors;
+	bool	m_bHideTypeSubColumn;
+
 	CUtlRBTree< ColumnPanels_t, int >	m_Panels;
 };
 
@@ -161,14 +173,18 @@ public:
 	virtual void GenerateContextMenu( int itemIndex, int x, int y );
 	virtual void GenerateDragDataForItem( int itemIndex, KeyValues *msg );
 	virtual void OnLabelChanged( int itemIndex, char const *oldString, char const *newString );
-	virtual bool IsItemDroppable( int itemIndex, CUtlVector< KeyValues * >& msglist );
-	virtual void OnItemDropped( int itemIndex, CUtlVector< KeyValues * >& msglist );
+	virtual bool IsItemDroppable( int itemIndex, bool bInsertBefore, CUtlVector< KeyValues * >& msglist );
+	virtual void OnItemDropped( int itemIndex, bool bInsertBefore, CUtlVector< KeyValues * >& msglist );
 	virtual bool GetItemDropContextMenu( int itemIndex, vgui::Menu *menu, CUtlVector< KeyValues * >& msglist );
 	virtual vgui::HCursor GetItemDropCursor( int itemIndex, CUtlVector< KeyValues * >& msglist );
 	virtual void SetObject( CDmElement *object );
 	virtual void OnCommand( const char *cmd );
 
-	MESSAGE_FUNC( OnShowMemoryUsage, "OnShowMemoryUsage" );
+	MESSAGE_FUNC( OnToggleShowMemoryUsage, "OnToggleShowMemoryUsage" );
+	MESSAGE_FUNC( OnToggleShowUniqueID, "OnToggleShowUniqueID" );
+
+	virtual bool IsShowingMemoryUsage();
+	virtual bool IsShowingUniqueID();
 
 	CDmElement *GetObject();
 	bool		IsLabelBeingEdited() const;
@@ -179,12 +195,14 @@ public:
 		DME_PROPERTIESTREE_MENU_BACKWARD = 0,
 		DME_PROPERTIESTREE_MENU_FORWARD,
 		DME_PROPERTIESTREE_MENU_SEARCHHSITORY,
+		DME_PROPERTIESTREE_MENU_UP,
 	};
 
 	virtual void	PopulateHistoryMenu( int whichMenu, vgui::Menu *menu );
 	virtual int		GetHistoryMenuItemCount( int whichMenu );
 	void			AddToSearchHistory( char const *str );
 	void			SetTypeDictionary( CDmeEditorTypeDictionary *pDict );
+	void			SetSortAttributesByName( bool bSortAttributesByName );
 
 	MESSAGE_FUNC_CHARPTR( OnNavSearch, "OnNavigateSearch", text );
 
@@ -258,7 +276,7 @@ protected:
 	};
 
 	bool BuildExpansionListToFindElement_R( CUtlRBTree< CDmElement *, int >& visited, int depth, SearchResult_t& sr, CDmElement *owner, CDmElement *element, char const *attributeName, int arrayIndex, CUtlVector< int >& expandIndices );
-	void FindMatchingElements_R( CUtlRBTree< CDmElement *, int >& visited, char const *searchstr, CDmElement *root, CUtlVector< SearchResult_t >& list );
+	void FindMatchingElements_R( CUtlRBTree< CDmElement *, int >& visited, char const *searchstr, const DmObjectId_t *pSearchId, CDmElement *root, CUtlVector< SearchResult_t >& list );
 	void NavigateToSearchResult();
 
 	void SpewOpenItems( int depth, OpenItemTree_t &tree, int nOpenTreeIndex, int nItemIndex );
@@ -283,8 +301,12 @@ protected:
 	// Adds a single entry into the tree
 	void CreateTreeEntry( int parentNodeIndex, CDmElement* obj, CDmAttribute *pAttribute, int nArrayIndex, AttributeWidgets_t &entry );
 
+	// populate the menu with the element hierarchy of "element_<elementtype>" commands
+	void PopulateMenuWithElementHierarchy_R( vgui::Menu *pMenu, const char *pElementType, CDmElementFactoryHelper *pChildFactory = NULL );
+	void PopulateMenuWithElementHierarchy_R( vgui::Menu *pMenu, CDmElementFactoryHelper *pFactory );
+
 	// Sets up the attribute widget init info for a particular attribute
-	void SetupWidgetInfo( AttributeWidgetInfo_t *pInfo, CDmElement *obj, CDmAttribute *pAttribute, int nArrayIndex = -1 );
+	virtual void SetupWidgetInfo( AttributeWidgetInfo_t *pInfo, CDmElement *obj, CDmAttribute *pAttribute, int nArrayIndex = -1 );
 
 	// Creates an attribute data widget using a specifically requested widget
 	vgui::Panel *CreateAttributeDataWidget( CDmElement *pElement, const char *pWidgetName, CDmElement *obj, CDmAttribute *pAttribute, int nArrayIndex = -1 );
@@ -312,10 +334,13 @@ protected:
 
 	void			UpdateButtonState();
 
+	void			UpdateReferences();
+
 	KEYBINDING_FUNC( ondelete, KEY_DELETE, 0, OnKeyDelete, "#elementpropertiestree_ondelete_help", 0 );
 	KEYBINDING_FUNC( onbackspace, KEY_BACKSPACE, 0, OnKeyBackspace, "#elementpropertiestree_ondelete_help", 0 );
-	KEYBINDING_FUNC( onrefresh, KEY_F5, 0, OnRefresh, "#elementpropertiestree_onrefresh_help", 0 );
+	KEYBINDING_FUNC_NODECLARE( onrefresh, KEY_F5, 0, OnRefresh, "#elementpropertiestree_onrefresh_help", 0 );
 
+	MESSAGE_FUNC( OnEstimateMemory, "OnEstimateMemory" );
 	MESSAGE_FUNC( OnRename, "OnRename" );
 	MESSAGE_FUNC( OnRemove, "OnRemove" );
 	MESSAGE_FUNC( OnClear, "OnClear" );
@@ -326,13 +351,15 @@ protected:
 	MESSAGE_FUNC( OnPaste, "OnPaste" );
 	MESSAGE_FUNC( OnPasteReference, "OnPasteReference" );
 	MESSAGE_FUNC( OnPasteInsert, "OnPasteInsert" );
-	MESSAGE_FUNC( OnDeleteSelected, "OnDelete" );
 
 	MESSAGE_FUNC_INT( OnElementChangedExternally, "ElementChangedExternally", valuesOnly );
+	MESSAGE_FUNC_INT( OnNavUp, "OnNavigateUp", item );
 	MESSAGE_FUNC_INT( OnNavBack, "OnNavigateBack", item );
 	MESSAGE_FUNC_INT( OnNavForward, "OnNavigateForward", item );
 	MESSAGE_FUNC_INT( OnNavigateSearchAgain, "OnNavigateSearchAgain", direction );
 	MESSAGE_FUNC( OnShowSearchResults, "OnShowSearchResults" );
+
+	MESSAGE_FUNC( OnRefresh, "OnRefresh" );
 
 protected:
 
@@ -371,6 +398,9 @@ protected:
 	void						OnImportElement( const char *pFullPath, KeyValues *pContext );
 	void						OnExportElement( const char *pFullPath, KeyValues *pContext );
 
+	template < class C >
+	void CollectSelectedElements( C &container );
+
 	void GetPathToItem( CUtlVector< TreeItem_t > &path, int itemIndex );
 	int OpenPath( const CUtlVector< TreeItem_t > &path );
 
@@ -387,6 +417,7 @@ protected:
 	CElementTreeViewListControl	*m_pTree;
 	bool						m_bAutoApply;
 	bool						m_bShowMemoryUsage;
+	bool						m_bShowUniqueID;
 	vgui::DHANDLE< vgui::Menu >	m_hContextMenu;
 
 	CPropertiesTreeToolbar		*m_pToolBar; // Forward/backward navigation and search fields
@@ -413,6 +444,9 @@ protected:
 	vgui::HCursor							m_hDragCopyCursor;
 	vgui::HCursor							m_hDragLinkCursor;
 	vgui::HCursor							m_hDragMoveCursor;
+
+	bool									m_bSortAttributesByName;
+	CUtlVector< CDmeHandle< CDmElement > >	m_vecDmeReferencesToObject;
 };
 
 

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -11,10 +11,13 @@
 #if defined( CLIENT_DLL )
 
 	#include "vgui/ISurface.h"
-	#include "vgui_controls/Controls.h"
+	#include "vgui_controls/controls.h"
 	#include "hud_crosshair.h"
 
 #endif
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
 
 
 //-----------------------------------------------------------------------------
@@ -67,7 +70,7 @@ void CWeaponIFMBase::OnDataChanged( DataUpdateType_t type )
 
 bool CWeaponIFMBase::ShouldPredict()
 {
-	if ( GetOwner() && GetOwner() == C_BasePlayer::GetLocalPlayer() )
+	if ( C_BasePlayer::IsLocalPlayer( GetOwner() ) )
 		return true;
 
 	return BaseClass::ShouldPredict();

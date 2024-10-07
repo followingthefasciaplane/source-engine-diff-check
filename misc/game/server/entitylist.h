@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -13,8 +13,7 @@
 #pragma once
 #endif
 
-#include "baseentity.h"
-
+class CBaseEntity;
 class IEntityListener;
 
 abstract_class CBaseEntityClassList
@@ -82,6 +81,12 @@ private:
 	CUtlVector<IEntityListener *>	m_entityListeners;
 
 public:
+	CBaseHandle AddNetworkableEntity( IHandleEntity *pEnt, int index, int iForcedSerialNum = -1 );
+	CBaseHandle AddNonNetworkableEntity( IHandleEntity *pEnt );
+
+	void UpdateName( IHandleEntity *pEnt, CBaseHandle hEnt );
+	void UpdateName( IHandleEntity *pEnt );
+
 	IServerNetworkable* GetServerNetworkable( CBaseHandle hEnt ) const;
 	CBaseNetworkable* GetBaseNetworkable( CBaseHandle hEnt ) const;
 	CBaseEntity* GetBaseEntity( CBaseHandle hEnt ) const;
@@ -107,11 +112,14 @@ public:
 	void RemoveListenerEntity( IEntityListener *pListener );
 
 	void ReportEntityFlagsChanged( CBaseEntity *pEntity, unsigned int flagsOld, unsigned int flagsNow );
+	// Schedule this entity for notification once client messages have been sent
+	void AddPostClientMessageEntity( CBaseEntity *pEntity );
+	void PostClientMessagesSent();
 
 	// entity is about to be removed, notify the listeners
 	void NotifyCreateEntity( CBaseEntity *pEnt );
 	void NotifySpawn( CBaseEntity *pEnt );
-	void NotifyRemoveEntity( CBaseHandle hEnt );
+	void NotifyRemoveEntity( CBaseEntity *pEnt );
 	// iteration functions
 
 	// returns the next entity after pCurrentEnt;  if pCurrentEnt is NULL, return the first entity
@@ -142,10 +150,12 @@ public:
 	CBaseEntity *FindEntityInSphere( CBaseEntity *pStartEntity, const Vector &vecCenter, float flRadius );
 	CBaseEntity *FindEntityByTarget( CBaseEntity *pStartEntity, const char *szName );
 	CBaseEntity *FindEntityByModel( CBaseEntity *pStartEntity, const char *szModelName );
+	CBaseEntity	*FindEntityByOutputTarget( CBaseEntity *pStartEntity, string_t iTarget );
 
 	CBaseEntity *FindEntityByNameNearest( const char *szName, const Vector &vecSrc, float flRadius, CBaseEntity *pSearchingEntity = NULL, CBaseEntity *pActivator = NULL, CBaseEntity *pCaller = NULL );
 	CBaseEntity *FindEntityByNameWithin( CBaseEntity *pStartEntity, const char *szName, const Vector &vecSrc, float flRadius, CBaseEntity *pSearchingEntity = NULL, CBaseEntity *pActivator = NULL, CBaseEntity *pCaller = NULL );
 	CBaseEntity *FindEntityByClassnameNearest( const char *szName, const Vector &vecSrc, float flRadius );
+	CBaseEntity *FindEntityByClassnameNearest2D( const char *szName, const Vector &vecSrc, float flRadius );
 	CBaseEntity *FindEntityByClassnameWithin( CBaseEntity *pStartEntity , const char *szName, const Vector &vecSrc, float flRadius );
 	CBaseEntity *FindEntityByClassnameWithin( CBaseEntity *pStartEntity , const char *szName, const Vector &vecMins, const Vector &vecMaxs );
 
@@ -155,9 +165,15 @@ public:
 	
 	CBaseEntity *FindEntityNearestFacing( const Vector &origin, const Vector &facing, float threshold);
 	CBaseEntity *FindEntityClassNearestFacing( const Vector &origin, const Vector &facing, float threshold, char *classname);
+	CBaseEntity *FindEntityByNetname( CBaseEntity *pStartEntity, const char *szModelName );
 
 	CBaseEntity *FindEntityProcedural( const char *szName, CBaseEntity *pSearchingEntity = NULL, CBaseEntity *pActivator = NULL, CBaseEntity *pCaller = NULL );
 	
+	// Fast versions that require a (real) string_t, and won't do wildcarding
+	CBaseEntity *FindEntityByClassnameFast( CBaseEntity *pStartEntity, string_t iszClassname );
+	CBaseEntity *FindEntityByClassnameNearestFast( string_t iszClassname, const Vector &vecSrc, float flRadius );
+	CBaseEntity *FindEntityByNameFast( CBaseEntity *pStartEntity, string_t iszName );
+
 	CGlobalEntityList();
 
 // CBaseEntityList overrides.
@@ -174,6 +190,21 @@ extern CGlobalEntityList gEntList;
 //-----------------------------------------------------------------------------
 // Inlines.
 //-----------------------------------------------------------------------------
+
+inline CBaseHandle CGlobalEntityList::AddNetworkableEntity( IHandleEntity *pEnt, int index, int iForcedSerialNum )
+{
+	CBaseHandle h = CBaseEntityList::AddNetworkableEntity( pEnt, index, iForcedSerialNum );
+	UpdateName( pEnt, h );
+	return h;
+}
+
+inline CBaseHandle CGlobalEntityList::AddNonNetworkableEntity( IHandleEntity *pEnt )
+{
+	CBaseHandle h = CBaseEntityList::AddNonNetworkableEntity( pEnt );
+	UpdateName( pEnt, h );
+	return h;
+}
+
 inline edict_t* CGlobalEntityList::GetEdict( CBaseHandle hEnt ) const
 {
 	IServerUnknown *pUnk = static_cast<IServerUnknown*>(LookupEntity( hEnt ));
@@ -352,8 +383,10 @@ public:
 extern INotify *g_pNotify;
 
 void EntityTouch_Add( CBaseEntity *pEntity );
+void EntityTouch_Remove( CBaseEntity *pEntity );
 int AimTarget_ListCount();
 int AimTarget_ListCopy( CBaseEntity *pList[], int listMax );
+CBaseEntity *AimTarget_ListElement( int iIndex );
 void AimTarget_ForceRepopulateList();
 
 void SimThink_EntityChanged( CBaseEntity *pEntity );

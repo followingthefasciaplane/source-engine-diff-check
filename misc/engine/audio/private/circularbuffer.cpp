@@ -1,10 +1,11 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Circular Buffer
 //
 //=============================================================================//
 
 #include "tier0/dbg.h"
+#include "tier1/mempool.h"
 #include "circularbuffer.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
@@ -152,8 +153,8 @@ int CCircularBuffer::Advance(int nCount)
 	//
 	nCount = MIN(m_nCount, nCount);
 
-	// Advance the read pointer, checking for buffer 
-	//wrap.
+	//
+	// Advance the read pointer, checking for buffer wrap.
 	//
 	m_nRead = (m_nRead + nCount) % m_nSize;
 	m_nCount -= nCount;
@@ -181,28 +182,28 @@ int CCircularBuffer::Advance(int nCount)
 //Output  : Returns the number of bytes placed in the destination buffer.
 //Author  : DSpeyrer
 //------------------------------------------------------------------------------
-int CCircularBuffer::Read(void *pchDestIn, int nCount)
+int CCircularBuffer::Read(void *pchDestIn, int m_nCount)
 {
 	int nPeeked;
-	int nRead;
+	int m_nRead;
 
 	char *pchDest = (char*)pchDestIn;
 
-	nPeeked = Peek(pchDest, nCount);
+	nPeeked = Peek(pchDest, m_nCount);
 
 	if (nPeeked != 0)
 	{
-		nRead = Advance(nPeeked);
+		m_nRead = Advance(nPeeked);
 
-		assert( nRead == nPeeked);
+		assert(m_nRead == nPeeked);
 	}
 	else
 	{
-		nRead = 0;
+		m_nRead = 0;
 	}
 
 	AssertValid();
-	return(nRead);
+	return(m_nRead);
 }
 
 
@@ -254,11 +255,29 @@ int CCircularBuffer::Write(void *pData, int nBytesRequested)
 	return nBytesRequested;
 }
 
+CFixedBudgetMemoryPool<ALIGN_VALUE(sizeof( CCircularBuffer ) + 8820 - 1, TSLIST_NODE_ALIGNMENT ), 24> g_SmallBuffers;
+CFixedBudgetMemoryPool<ALIGN_VALUE(sizeof( CCircularBuffer ) + 17640 - 1, TSLIST_NODE_ALIGNMENT ), 44> g_MediumBuffers;
+CFixedBudgetMemoryPool<ALIGN_VALUE(sizeof( CCircularBuffer ) + 35280 - 1, TSLIST_NODE_ALIGNMENT ), 16> g_LargeBuffers;
+
 CCircularBuffer *AllocateCircularBuffer( int nSize )
 {
-	char *pBuff = (char *)malloc( sizeof( CCircularBuffer ) + nSize - 1 );
-
-	CCircularBuffer *pCCircularBuffer = (CCircularBuffer *)pBuff;
+	CCircularBuffer *pCCircularBuffer;
+	if ( nSize <= 8820 )
+	{
+		pCCircularBuffer = (CCircularBuffer *)g_SmallBuffers.Alloc();
+	}
+	else if ( nSize <= 17640 )
+	{
+		pCCircularBuffer = (CCircularBuffer *)g_MediumBuffers.Alloc();
+	}
+	else if ( nSize <= 35280 )
+	{
+		pCCircularBuffer = (CCircularBuffer *)g_LargeBuffers.Alloc();
+	}
+	else
+	{
+		pCCircularBuffer = (CCircularBuffer *)malloc( sizeof( CCircularBuffer ) + nSize - 1 );
+	}
 
 	pCCircularBuffer->SetSize( nSize );
 	return pCCircularBuffer;
@@ -266,6 +285,23 @@ CCircularBuffer *AllocateCircularBuffer( int nSize )
 
 void FreeCircularBuffer( CCircularBuffer *pCircularBuffer )
 {
-	free( (char*)pCircularBuffer );
+	int nSize = pCircularBuffer->GetSize();	
+
+	if ( nSize <= 8820 )
+	{
+		g_SmallBuffers.Free( pCircularBuffer );
+	}
+	else if ( nSize <= 17640 )
+	{
+		g_MediumBuffers.Free( pCircularBuffer );
+	}
+	else if ( nSize <= 35280 )
+	{
+		g_LargeBuffers.Free( pCircularBuffer );
+	}
+	else
+	{
+		free( pCircularBuffer );
+	}
 }
 

@@ -1,16 +1,18 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
 //=============================================================================
 
 #include "mdllib_common.h"
+#include "tier3/tier3.h"
+
 
 //-----------------------------------------------------------------------------
 // Global instance
 //-----------------------------------------------------------------------------
-CMdlLib mdllib;
-EXPOSE_SINGLE_INTERFACE_GLOBALVAR( CMdlLib, IMdlLib, MDLLIB_INTERFACE_VERSION, mdllib );
+CMdlLib s_Mdllib;
+EXPOSE_SINGLE_INTERFACE_GLOBALVAR( CMdlLib, IMdlLib, MDLLIB_INTERFACE_VERSION, s_Mdllib );
 
 
 

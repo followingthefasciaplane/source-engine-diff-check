@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -18,14 +18,14 @@
 
 #include "utlvector.h"
 #include "userid.h"
-#include "vfilter.h" // Renamed to avoid conflict with Microsoft's filter.h
+#include "ipuserfilter.h"
 
 void Filter_Init( void );
 void Filter_Shutdown( void );
 
 bool Filter_ShouldDiscardID( unsigned int userid );
-bool Filter_ShouldDiscard( const netadr_t& adr );
-void Filter_SendBan( const netadr_t& adr );
+bool Filter_ShouldDiscard( const ns_address& adr );
+void Filter_SendBan( const ns_address& adr );
 const char *GetUserIDString( const USERID_t& id );
 
 bool Filter_IsUserBanned( const USERID_t& userid );

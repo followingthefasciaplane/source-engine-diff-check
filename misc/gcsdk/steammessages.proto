@@ -562,23 +562,9 @@ message CGCSystemMsg_GetAccountDetails_Response
 	optional uint32 two_factor_enabled_time = 30;	// Time two factor was added
 	optional uint32 phone_verification_time = 31;	// Time phone was verified
 	optional uint64 phone_id = 33;					// Phone identifier
-	optional bool is_phone_identifying = 34;		// Phone is useful for identity
+	optional bool is_phone_identifying = 34;		// Phone is identifying
 }
 
-//
-// k_EGCMsgCheckClanMembership
-//
-message CMsgGCCheckClanMembership
-{
-	optional fixed64 steamid = 1;					// [ (description) = "User whose group memberships we want" ];
-	optional uint32 clanid = 2;					// [ (description) = "Clan to check membership against" ];
-
-}
-
-message CMsgGCCheckClanMembership_Response
-{
-	optional bool ismember = 1;					// [ (description) = "Whether the user in question is a member of the group in question" ];
-}
 
 //
 // k_EGCMsgGetPersonaNames
@@ -674,49 +660,6 @@ message CMsgGCHAccountVacStatusChange
 	optional bool is_banned_future = 5;
 }
 
-// k_EMsgGCHAccountTradeBanStatusChange
-message CMsgGCHAccountTradeBanStatusChange
-{
-	optional fixed64 steamid = 1;
-	optional uint32 appid = 2;
-	optional bool is_banned = 3;
-	optional uint32 time_banned_until = 4;
-}
-
-// k_EMsgGCHAccountLockStatusChange
-message CMsgGCHAccountLockStatusChange
-{
-	optional fixed64 steamid = 1;
-	optional uint32 appid = 2;
-	optional bool is_locked = 3;
-}
-
-// k_EMsgGCHVacVerificationChange
-message CMsgGCHVacVerificationChange
-{
-	optional fixed64 steamid = 1;
-	optional uint32 appid = 2;
-	optional bool is_verified = 3;
-}
-
-// k_EMsgGCHAccountPhoneNumberChange
-message CMsgGCHAccountPhoneNumberChange
-{
-	optional fixed64 steamid = 1;
-	optional uint32 appid = 2;
-	optional uint64 phone_id = 3;
-	optional bool is_verified = 4;
-	optional bool is_identifying = 5;
-}
-
-// k_EMsgGCHAccountTwoFactorChange
-message CMsgGCHAccountTwoFactorChange
-{
-	optional fixed64 steamid = 1;
-	optional uint32 appid = 2;
-	optional bool twofactor_enabled = 3;
-}
-
 //
 // k_EGCMsgGetPartnerAccountLink
 //
@@ -808,15 +751,6 @@ message CMsgGCMsgSetOptions
 		required uint32 high = 2;
 	}
 	repeated MessageRange client_msg_ranges = 2;
-
-
-	// The GCSQL version field is only read by the GC.EXE host to determine support for enums, etc; the GCH doesn't care
-	enum GCSQLVersion
-	{
-		GCSQL_VERSION_BASELINE = 1; // baseline
-		GCSQL_VERSION_BOOLTYPE = 2; // added explicit support for bool types (instead of int8)
-	}
-	optional GCSQLVersion gcsql_version = 3;
 }
 
 
@@ -838,6 +772,11 @@ message CMsgGCHUpdateSession
 		optional string value = 2;
 	}
 	repeated ExtraField extra_fields = 9; 
+	optional fixed64 owner_id = 10;						// owner Steam ID, different from player ID if borrowed
+
+	optional uint32 cm_session_sysid = 11;				// routing info for client session that is playing the game
+	optional uint32 cm_session_identifier = 12;
+	repeated uint32 depot_ids = 13;						// list of depots in packages that confer app, if requested k_EGCStreamDepots
 }
 
 //

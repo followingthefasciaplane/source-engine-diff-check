@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright (c) 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose:		Namespace for functions dealing with Debug Overlays
 //
@@ -13,7 +13,7 @@
 #include "ndebugoverlay.h"
 #include "wcedit.h"
 
-#ifdef POSIX
+#if defined( DEDICATED ) || defined( _PS3 ) || defined( POSIX )
 #include "ai_basenpc.h"
 #include "ai_network.h"
 #include "ai_networkmanager.h"
@@ -143,6 +143,7 @@ float GetLongFloorZ(const Vector &origin)
 //------------------------------------------------------------------------------
 void UTIL_DrawPositioningOverlay( float flCrossDistance )
 {
+#ifndef SWDS
 	CBasePlayer* pPlayer = UTIL_PlayerByIndex(CBaseEntity::m_nDebugPlayer);
 
 	if (!pPlayer) 
@@ -211,6 +212,7 @@ void UTIL_DrawPositioningOverlay( float flCrossDistance )
 	Vector textPos = topPos - pRight*16 + Vector(0,0,10);
 	NDebugOverlay::Text( textPos, text, true, 0 );
 	*/
+#endif
 }
 
 //------------------------------------------------------------------------------

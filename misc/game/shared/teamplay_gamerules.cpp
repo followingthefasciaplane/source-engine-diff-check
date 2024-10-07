@@ -1,11 +1,11 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
 // $NoKeywords: $
 //=============================================================================//
 #include "cbase.h"
-#include "KeyValues.h"
+#include "keyvalues.h"
 #include "gamerules.h"
 #include "teamplay_gamerules.h"
 
@@ -28,6 +28,11 @@ static int team_scores[MAX_TEAMS];
 static int num_teams = 0;
 
 extern bool		g_fGameOver;
+extern ConVar sv_allchat;
+extern ConVar spec_replay_bot;
+
+// [jason] Used to allow dead chat as well
+extern ConVar sv_deadtalk;
 
 REGISTER_GAMERULES_CLASS( CTeamplayRules );
 
@@ -53,6 +58,8 @@ CTeamplayRules::CTeamplayRules()
 //-----------------------------------------------------------------------------
 void CTeamplayRules::Precache( void )
 {
+	BaseClass::Precache();
+
 	// Call the Team Manager's precaches
 	for ( int i = 0; i < GetNumberOfTeams(); i++ )
 	{
@@ -63,6 +70,14 @@ void CTeamplayRules::Precache( void )
 
 //-----------------------------------------------------------------------------
 // Purpose: 
+//
+// WARNING - this function is NOT called in CS:GO 
+//
+//  CCSGameRules (which has CTeamplayRules as a baseclass) ::Think() calls
+//    CGameRules::Think() directly, bypassing CTeamplayRules::Think() and 
+//    CMultiplayRules::Think()
+//
+//  Code placed in here is likely to NEVER be called
 //-----------------------------------------------------------------------------
 void CTeamplayRules::Think ( void )
 {
@@ -126,33 +141,7 @@ bool CTeamplayRules::ClientCommand( CBaseEntity *pEdict, const CCommand &args )
 
 const char *CTeamplayRules::SetDefaultPlayerTeam( CBasePlayer *pPlayer )
 {
-	// copy out the team name from the model
-	int clientIndex = pPlayer->entindex();
-	const char *team = (!pPlayer->IsNetClient())?"default":engine->GetClientConVarValue( clientIndex, "cl_team" );
-
-	/* TODO
-
-	pPlayer->SetTeamName( team );
-
-	RecountTeams();
-
-	// update the current player of the team he is joining
-	if ( (pPlayer->TeamName())[0] == '\0' || !IsValidTeam( pPlayer->TeamName() ) || defaultteam.GetFloat() )
-	{
-		const char *pTeamName = NULL;
-		
-		if ( defaultteam.GetFloat() )
-		{
-			pTeamName = team_names[0];
-		}
-		else
-		{
-			pTeamName = TeamWithFewestPlayers();
-		}
-		pPlayer->SetTeamName( pTeamName );
- 	} */
-
-	return team; //pPlayer->TeamName();
+	return "default";
 }
 
 
@@ -164,7 +153,8 @@ void CTeamplayRules::InitHUD( CBasePlayer *pPlayer )
 	SetDefaultPlayerTeam( pPlayer );
 	BaseClass::InitHUD( pPlayer );
 
-	RecountTeams();
+	// this does a string compare and doesn't need to happen every frame
+	//RecountTeams();
 
 	/* TODO this has to be rewritten, maybe add a new USERINFO cvar "team"
 	const char *team = engine->GetClientConVarValue( pPlayer->entindex(), "cl_team" );
@@ -274,27 +264,23 @@ void CTeamplayRules::ClientSettingsChanged( CBasePlayer *pPlayer )
 	const char *pszOldName = pPlayer->GetPlayerName();
 
 	// msg everyone if someone changes their name,  and it isn't the first time (changing no name to current name)
-	// Note, not using FStrEq so that this is case sensitive
-	if ( pszOldName[0] != 0 && Q_strcmp( pszOldName, pszName ) )
+	// Note, this is case sensitive
+	if ( ( Q_strcmp( pszOldName, pszName ) != 0 ) &&
+		CanClientCustomizeOwnIdentity() )
 	{
-		IGameEvent * event = gameeventmanager->CreateEvent( "player_changename" );
-		if ( event )
+		if ( pszOldName[0] != '\0' )
 		{
-			event->SetInt( "userid", pPlayer->GetUserID() );
-			event->SetString( "oldname", pszOldName );
-			event->SetString( "newname", pszName );
-			gameeventmanager->FireEvent( event );
+			IGameEvent * event = gameeventmanager->CreateEvent( "player_changename" );
+			if ( event )
+			{
+				event->SetInt( "userid", pPlayer->GetUserID() );
+				event->SetString( "oldname", pszOldName );
+				event->SetString( "newname", pszName );
+				gameeventmanager->FireEvent( event );
+			}
 		}
-		
-		pPlayer->SetPlayerName( pszName );
-	}
 
-	// NVNT see if this user is still or has began using a haptic device
-	const char *pszHH = engine->GetClientConVarValue( pPlayer->entindex(), "hap_HasDevice" );
-	if(pszHH)
-	{
-		int iHH = atoi(pszHH);
-		pPlayer->SetHaptics(iHH!=0);
+		pPlayer->SetPlayerName( pszName );
 	}
 }
 
@@ -321,7 +307,9 @@ void CTeamplayRules::DeathNotice( CBasePlayer *pVictim, const CTakeDamageInfo &i
 					event->SetInt("killer", pk->GetUserID() );
 					event->SetInt("victim", pVictim->GetUserID() );
 					event->SetInt("priority", 7 );	// HLTV event priority, not transmitted
-					
+					if( !OnReplayPrompt( pVictim, pk ) )
+						event->SetBool( "noreplay", true );
+
 					gameeventmanager->FireEvent( event );
 				}
 				return;
@@ -352,19 +340,19 @@ bool CTeamplayRules::IsTeamplay( void )
 	return true;
 }
 
-bool CTeamplayRules::FPlayerCanTakeDamage( CBasePlayer *pPlayer, CBaseEntity *pAttacker, const CTakeDamageInfo &info )
+bool CTeamplayRules::FPlayerCanTakeDamage( CBasePlayer *pPlayer, CBaseEntity *pAttacker )
 {
-	if ( pAttacker && PlayerRelationship( pPlayer, pAttacker ) == GR_TEAMMATE && !info.IsForceFriendlyFire() )
+	if ( pAttacker && PlayerRelationship( pPlayer, pAttacker ) == GR_TEAMMATE )
 	{
 		// my teammate hit me.
-		if ( (friendlyfire.GetInt() == 0) && (pAttacker != pPlayer) )
+		if ( ( mp_friendlyfire.GetInt() == 0 ) && ( pAttacker != pPlayer ) )
 		{
 			// friendly fire is off, and this hit came from someone other than myself,  then don't get hurt
 			return false;
 		}
 	}
 
-	return BaseClass::FPlayerCanTakeDamage( pPlayer, pAttacker, info );
+	return BaseClass::FPlayerCanTakeDamage( pPlayer, pAttacker );
 }
 
 //=========================================================
@@ -376,7 +364,13 @@ int CTeamplayRules::PlayerRelationship( CBaseEntity *pPlayer, CBaseEntity *pTarg
 	if ( !pPlayer || !pTarget || !pTarget->IsPlayer() )
 		return GR_NOTTEAMMATE;
 
-	if ( (*GetTeamID(pPlayer) != '\0') && (*GetTeamID(pTarget) != '\0') && !stricmp( GetTeamID(pPlayer), GetTeamID(pTarget) ) )
+	// don't do string compares, just compare the team number
+// 	if ( (*GetTeamID(pPlayer) != '\0') && (*GetTeamID(pTarget) != '\0') && !stricmp( GetTeamID(pPlayer), GetTeamID(pTarget) ) )
+// 	{
+// 		return GR_TEAMMATE;
+// 	}
+
+	if ( pPlayer->GetTeamNumber() != TEAM_INVALID && pTarget->GetTeamNumber() != TEAM_INVALID && pPlayer->GetTeamNumber() == pTarget->GetTeamNumber() )
 	{
 		return GR_TEAMMATE;
 	}
@@ -390,8 +384,18 @@ int CTeamplayRules::PlayerRelationship( CBaseEntity *pPlayer, CBaseEntity *pTarg
 //			*pSpeaker - 
 // Output : Returns true on success, false on failure.
 //-----------------------------------------------------------------------------
-bool CTeamplayRules::PlayerCanHearChat( CBasePlayer *pListener, CBasePlayer *pSpeaker )
+bool CTeamplayRules::PlayerCanHearChat( CBasePlayer *pListener, CBasePlayer *pSpeaker, bool bTeamOnly )
 {
+	if ( !bTeamOnly && sv_allchat.GetBool() )
+	{
+		if ( !pSpeaker->IsAlive() )
+		{
+			// [jason] convar allows the dead to speak/chat with the living
+			return ( ( !pListener->IsAlive() || sv_deadtalk.GetBool() ) &&
+					 ( PlayerRelationship( pListener, pSpeaker ) == GR_TEAMMATE ) );
+		}
+	}
+
 	return ( PlayerRelationship( pListener, pSpeaker ) == GR_TEAMMATE );
 }
 
@@ -428,14 +432,14 @@ int CTeamplayRules::IPointsForKill( CBasePlayer *pAttacker, CBasePlayer *pKilled
 
 //=========================================================
 //=========================================================
-const char *CTeamplayRules::GetTeamID( CBaseEntity *pEntity )
-{
-	if ( pEntity == NULL || pEntity->edict() == NULL )
-		return "";
-
-	// return their team name
-	return pEntity->TeamID();
-}
+// const char *CTeamplayRules::GetTeamID( CBaseEntity *pEntity )
+// {
+// 	if ( pEntity == NULL || pEntity->edict() == NULL )
+// 		return "";
+// 
+// 	// return their team name
+// 	return pEntity->TeamID();
+// }
 
 
 int CTeamplayRules::GetTeamIndex( const char *pTeamName )

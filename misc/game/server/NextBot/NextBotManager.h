@@ -1,6 +1,6 @@
 // NextBotManager.h
 // Author: Michael Booth, May 2006
-//========= Copyright Valve Corporation, All rights reserved. ============//
+// Copyright (c) 2006 Turtle Rock Studios, Inc. - All Rights Reserved
 
 #ifndef _NEXT_BOT_MANAGER_H_
 #define _NEXT_BOT_MANAGER_H_
@@ -17,10 +17,10 @@ class NextBotManager
 {
 public:
 	NextBotManager( void );
-	virtual ~NextBotManager();
+	~NextBotManager();
 
 	void Reset( void );								// reset to initial state
-	virtual void Update( void );
+	void Update( void );
 
 	bool ShouldUpdate( INextBot *bot );
 	void NotifyBeginUpdate( INextBot *bot );
@@ -28,15 +28,7 @@ public:
 
 	int GetNextBotCount( void ) const;				// How many nextbots are alive right now?
 
-
 	/**
-	 * Populate given vector with all bots in the system
-	 */
-	void CollectAllBots( CUtlVector< INextBot * > *botVector );
-
-
-	/**
-	 * DEPRECATED: Use CollectAllBots().
 	 * Execute functor for each NextBot in the system.
 	 * If a functor returns false, stop iteration early
 	 * and return false.
@@ -56,7 +48,6 @@ public:
 	}
 
 	/**
-	 * DEPRECATED: Use CollectAllBots().
 	 * Execute functor for each NextBot in the system as 
 	 * a CBaseCombatCharacter.
 	 * If a functor returns false, stop iteration early
@@ -102,9 +93,9 @@ public:
 	/**
 	 * Event propagators
 	 */
-	virtual void OnMapLoaded( void );						// when the server has changed maps
-	virtual void OnRoundRestart( void );					// when the scenario restarts
-	virtual void OnBeginChangeLevel( void );				// when the server is about to change maps
+	void OnMapLoaded( void );						// when the server has changed maps
+	void OnRoundRestart( void );					// when the scenario restarts
+	void OnBeginChangeLevel( void );				// when the server is about to change maps
 	virtual void OnKilled( CBaseCombatCharacter *victim, const CTakeDamageInfo &info );	// when an actor is killed
 	virtual void OnSound( CBaseEntity *source, const Vector &pos, KeyValues *keys );				// when an entity emits a sound
 	virtual void OnSpokeConcept( CBaseCombatCharacter *who, AIConcept_t concept, AI_Response *response );	// when an Actor speaks a concept
@@ -134,12 +125,7 @@ public:
 	//
 	void OnSurvivorVomitedUpon( CTerrorPlayer *victim );	// when a Survivor has been hit by Boomer Vomit
 
-	static void SetInstance( NextBotManager *pInstance ) { sInstance = pInstance; };
-	static NextBotManager* GetInstance() { return sInstance; }
-
-protected:
-	static NextBotManager* sInstance;
-
+private:
 	friend class INextBot;
 
 	int Register( INextBot *bot );
@@ -162,6 +148,7 @@ protected:
 	CUtlVector< DebugFilter > m_debugFilterList;
 
 	INextBot *m_selectedBot;						// selected bot for further debug operations
+
 };
 
 inline int NextBotManager::GetNextBotCount( void ) const

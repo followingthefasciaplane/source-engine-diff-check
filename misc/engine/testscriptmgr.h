@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -38,7 +38,7 @@ public:
 	virtual		~CTestScriptMgr();
 	
 	bool		StartTestScript( const char *pFilename );
-	void		Term();
+	void		StopTestScript( void);
 	bool		IsInitted() const;
 
 	// The engine calls this when it gets to certain points during execution. The 'Test_StepTo' command
@@ -51,6 +51,8 @@ public:
 
 
 private:
+	void		Term( void );
+
 	// Runs until it hits a command that makes the script wait, like 'Test_Wait' or 'Test_StepTo'.
 	void		RunCommands();
 

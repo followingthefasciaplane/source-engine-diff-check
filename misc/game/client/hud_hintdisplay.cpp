@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -29,17 +29,29 @@ class CHudHintDisplay : public vgui::Panel, public CHudElement
 	DECLARE_CLASS_SIMPLE( CHudHintDisplay, vgui::Panel );
 
 public:
-	CHudHintDisplay( const char *pElementName );
+	explicit CHudHintDisplay( const char *pElementName );
 
 	void Init();
 	void Reset();
-	void MsgFunc_HintText( bf_read &msg );
+	bool MsgFunc_HintText( const CCSUsrMsg_HintText &msg );
 	void FireGameEvent( IGameEvent * event);
 
 	bool SetHintText( wchar_t *text );
 	void LocalizeAndDisplay( const char *pszHudTxtMsg, const char *szRawString );
 
 	virtual void PerformLayout();
+
+	virtual bool ShouldDraw()
+	{
+		// [jason] Moving into Scaleform: sfhudinfopanel
+#if defined( CSTRIKE15 )
+		return false;
+#else
+		return Super::ShouldDraw();
+#endif
+	}
+
+	CUserMessageBinder m_UMCMsgHintText;
 
 protected:
 	virtual void ApplySchemeSettings( vgui::IScheme *pScheme );
@@ -70,7 +82,7 @@ DECLARE_HUD_MESSAGE( CHudHintDisplay, HintText );
 //-----------------------------------------------------------------------------
 CHudHintDisplay::CHudHintDisplay( const char *pElementName ) : BaseClass(NULL, "HudHintDisplay"), CHudElement( pElementName )
 {
-	vgui::Panel *pParent = g_pClientMode->GetViewport();
+	vgui::Panel *pParent = GetClientMode()->GetViewport();
 	SetParent( pParent );
 	SetVisible( false );
 	m_pLabel = new vgui::Label( this, "HudHintDisplayLabel", "" );
@@ -93,7 +105,7 @@ void CHudHintDisplay::Init()
 void CHudHintDisplay::Reset()
 {
 	SetHintText( NULL );
-	g_pClientMode->GetViewportAnimationController()->StartAnimationSequence( "HintMessageHide" ); 
+	GetClientMode()->GetViewportAnimationController()->StartAnimationSequence( "HintMessageHide" ); 
 	m_bLastLabelUpdateHack = true;
 }
 
@@ -116,11 +128,6 @@ void CHudHintDisplay::ApplySchemeSettings( vgui::IScheme *pScheme )
 //-----------------------------------------------------------------------------
 bool CHudHintDisplay::SetHintText( wchar_t *text )
 {
-	if ( text == NULL || text[0] == L'\0' )
-	{
-		return false;
-	}
-
 	// clear the existing text
 	for (int i = 0; i < m_Labels.Count(); i++)
 	{
@@ -249,7 +256,7 @@ void CHudHintDisplay::OnThink()
 	// If our label size isn't at the extreme's, we're sliding open / closed
 	// This is a hack to get around InvalideLayout() not getting called when
 	// m_flLabelSizePercentage is changed via a HudAnimation.
-	if ( ( m_flLabelSizePercentage != 0.0 && m_flLabelSizePercentage != 1.0 ) || m_bLastLabelUpdateHack )
+	if ( m_flLabelSizePercentage != 0.0 && m_flLabelSizePercentage != 1.0 || m_bLastLabelUpdateHack )
 	{
 		m_bLastLabelUpdateHack = (m_flLabelSizePercentage != 0.0 && m_flLabelSizePercentage != 1.0);
 		InvalidateLayout();
@@ -259,18 +266,21 @@ void CHudHintDisplay::OnThink()
 //-----------------------------------------------------------------------------
 // Purpose: Activates the hint display
 //-----------------------------------------------------------------------------
-void CHudHintDisplay::MsgFunc_HintText( bf_read &msg )
+bool CHudHintDisplay::MsgFunc_HintText( const CCSUsrMsg_HintText &msg )
 {
-	// Read the string(s)
-	char szString[255];
-	msg.ReadString( szString, sizeof(szString) );
+#if defined( CSTRIKE15 )
+	// csgo handles their hint text in sfhudinfopanel
+	return true;
+#endif
+	
+	char *tmpStr = hudtextmessage->LookupString( msg.text().c_str(), NULL );
+	LocalizeAndDisplay( tmpStr, msg.text().c_str() );
 
-	char *tmpStr = hudtextmessage->LookupString( szString, NULL );
-	LocalizeAndDisplay( tmpStr, szString );
+	return true;
 }
 
 //-----------------------------------------------------------------------------
-// Purpose: Activates the hint display upon receiving a hint
+// Purpose: Activates the hint display upon recieving a hint
 //-----------------------------------------------------------------------------
 void CHudHintDisplay::FireGameEvent( IGameEvent * event)
 {
@@ -279,8 +289,7 @@ void CHudHintDisplay::FireGameEvent( IGameEvent * event)
 	LocalizeAndDisplay( tmpStr, hintmessage );
 }
 
-extern ConVar sv_hudhint_sound;
-ConVar cl_hudhint_sound( "cl_hudhint_sound", "1", FCVAR_CLIENTDLL | FCVAR_ARCHIVE, "Disable hudhint sounds." );
+ConVar sv_hudhint_sound( "sv_hudhint_sound", "1", FCVAR_REPLICATED );
 
 //-----------------------------------------------------------------------------
 // Purpose: Localize, display, and animate the hud element
@@ -288,7 +297,7 @@ ConVar cl_hudhint_sound( "cl_hudhint_sound", "1", FCVAR_CLIENTDLL | FCVAR_ARCHIV
 void CHudHintDisplay::LocalizeAndDisplay( const char *pszHudTxtMsg, const char *szRawString )
 {
 	static wchar_t szBuf[128];
-	wchar_t *pszBuf;
+	static wchar_t *pszBuf;
 
 	// init buffers & pointers
 	szBuf[0] = 0;
@@ -315,13 +324,13 @@ void CHudHintDisplay::LocalizeAndDisplay( const char *pszHudTxtMsg, const char *
 	if ( SetHintText( pszBuf ) )
 	{
 		SetVisible( true );
-		g_pClientMode->GetViewportAnimationController()->StartAnimationSequence( "HintMessageShow" ); 
+		GetClientMode()->GetViewportAnimationController()->StartAnimationSequence( "HintMessageShow" ); 
 
 		C_BasePlayer *pLocalPlayer = C_BasePlayer::GetLocalPlayer();
 		if ( pLocalPlayer )
 		{
 #ifndef HL2MP
-			if ( sv_hudhint_sound.GetBool() && cl_hudhint_sound.GetBool() )
+			if ( sv_hudhint_sound.GetBool() )
 			{
 				pLocalPlayer->EmitSound( "Hud.Hint" );
 			}
@@ -335,7 +344,7 @@ void CHudHintDisplay::LocalizeAndDisplay( const char *pszHudTxtMsg, const char *
 	}
 	else
 	{
-		g_pClientMode->GetViewportAnimationController()->StartAnimationSequence( "HintMessageHide" ); 
+		GetClientMode()->GetViewportAnimationController()->StartAnimationSequence( "HintMessageHide" ); 
 	}
 }
 
@@ -350,13 +359,15 @@ class CHudHintKeyDisplay : public vgui::Panel, public CHudElement
 	DECLARE_CLASS_SIMPLE( CHudHintKeyDisplay, vgui::Panel );
 
 public:
-	CHudHintKeyDisplay( const char *pElementName );
+	explicit CHudHintKeyDisplay( const char *pElementName );
 	void Init();
 	void Reset();
-	void MsgFunc_KeyHintText( bf_read &msg );
+	bool MsgFunc_KeyHintText( const CCSUsrMsg_KeyHintText &msg );
 	bool ShouldDraw();
 
 	bool SetHintText( const char *text );
+
+	CUserMessageBinder m_UMCMsgKeyHintText;
 
 protected:
 	virtual void ApplySchemeSettings( vgui::IScheme *pScheme );
@@ -382,7 +393,7 @@ DECLARE_HUD_MESSAGE( CHudHintKeyDisplay, KeyHintText );
 //-----------------------------------------------------------------------------
 CHudHintKeyDisplay::CHudHintKeyDisplay( const char *pElementName ) : BaseClass(NULL, "HudHintKeyDisplay"), CHudElement( pElementName )
 {
-	vgui::Panel *pParent = g_pClientMode->GetViewport();
+	vgui::Panel *pParent = GetClientMode()->GetViewport();
 	SetParent( pParent );
 	SetVisible( false );
 	SetAlpha( 0 );
@@ -423,6 +434,11 @@ void CHudHintKeyDisplay::ApplySchemeSettings( vgui::IScheme *pScheme )
 //-----------------------------------------------------------------------------
 bool CHudHintKeyDisplay::ShouldDraw( void )
 {
+	// [jason] Moving into Scaleform: sfhudinfopanel
+#if defined( CSTRIKE15 )
+	return false;
+#endif
+
 	return ( ( GetAlpha() > 0 ) && CHudElement::ShouldDraw() );
 }
 
@@ -433,7 +449,7 @@ void CHudHintKeyDisplay::OnThink()
 {
 	for (int i = 0; i < m_Labels.Count(); i++)
 	{
-		if ( IsX360() && ( i & 1 ) == 0 )
+		if ( IsGameConsole() && ( i & 1 ) == 0 )
 		{
 			// Don't change the fg color for buttons (even numbered labels)
 			m_Labels[i]->SetAlpha( GetFgColor().a() );
@@ -456,7 +472,6 @@ bool CHudHintKeyDisplay::SetHintText( const char *text )
 {
 	if ( text == NULL || text[0] == L'\0' )
 		return false;
-
 	// clear the existing text
 	for (int i = 0; i < m_Labels.Count(); i++)
 	{
@@ -466,16 +481,9 @@ bool CHudHintKeyDisplay::SetHintText( const char *text )
 
 	// look up the text string
 	wchar_t *ws = g_pVGuiLocalize->Find( text );
-
 	wchar_t wszBuf[256];
 	if ( !ws || wcslen(ws) <= 0)
 	{
-		if (text[0] == '#')
-		{
-			// We don't want to display a localization placeholder, do we?
-			return false;
-		}
-		// use plain ASCII string 
 		g_pVGuiLocalize->ConvertANSIToUnicode(text, wszBuf, sizeof(wszBuf));
 		ws = wszBuf;
 	}
@@ -530,7 +538,7 @@ bool CHudHintKeyDisplay::SetHintText( const char *text )
 			//!! change some key names into better names
 			char friendlyName[64];
 
-			if ( IsX360() )
+			if ( IsGameConsole() )
 			{
 				int iNumBinds = 0;
 
@@ -573,7 +581,7 @@ bool CHudHintKeyDisplay::SetHintText( const char *text )
 
 					// Turn localized string into icon character
 					Q_snprintf( szBuff, sizeof( szBuff ), "#GameUI_Icons_%s", g_pInputSystem->ButtonCodeToString( static_cast<ButtonCode_t>( iCode ) ) );
-					g_pVGuiLocalize->ConstructString_safe( szWideBuff, g_pVGuiLocalize->Find( szBuff ), 0 );
+					g_pVGuiLocalize->ConstructString( szWideBuff, sizeof( szWideBuff ), g_pVGuiLocalize->Find( szBuff ), 0 );
 					g_pVGuiLocalize->ConvertUnicodeToANSI( szWideBuff, szBuff, sizeof( szBuff ) );
 
 					// Add this icon to our list of keys to display
@@ -616,7 +624,7 @@ bool CHudHintKeyDisplay::SetHintText( const char *text )
 				else
 				{
 					// Assuming localized vars must be using a bitmap image. *May* not be the case, but since
-					// keyboard bindings have never been localized in the past, they probably won't in the future either.
+					// keyboard bindings have never been locaized in the past, they probably won't in the future either.
 					bIsBitmap = true;
 					label->SetText( locName );
 				}
@@ -643,42 +651,6 @@ bool CHudHintKeyDisplay::SetHintText( const char *text )
 		m_Labels.AddToTail( vgui::SETUP_PANEL(label) );
 	}
 
-// Enable this small block of code to test formatting and layout of hint messages
-// with varying numbers of lines
-#define TEST_KEYHINT_DISPLAY 0
-#if TEST_KEYHINT_DISPLAY
-
-	// clear the existing text
-	for (int i = 0; i < m_Labels.Count(); i++)
-	{
-		m_Labels[i]->MarkForDeletion();
-	}
-	m_Labels.RemoveAll();
-
-	const char* sampleText[] = 
-	{
-		"This is a test",
-		"of the hint system\nwith a multi-line hint",
-		"that\ngoes\non\nfor",
-		"several",
-		"lines"
-	};
-
-	for ( int i = 0; i < ARRAYSIZE(sampleText); ++i)
-	{
-		// put it in a label
-		vgui::Label *label = vgui::SETUP_PANEL(new vgui::Label(this, NULL, sampleText[i]));
-
-		label->SetFont( m_hSmallFont );
-		label->SetPaintBackgroundEnabled( false );
-		label->SetPaintBorderEnabled( false );
-		label->SizeToContents();
-		label->SetContentAlignment( vgui::Label::a_west );
-		label->SetFgColor( GetFgColor() );
-		m_Labels.AddToTail( vgui::SETUP_PANEL(label) );
-	}
-#endif
-
 	// find the bounds we need to show
 	int widest1 = 0, widest2 = 0;
 	for (int i = 0; i < m_Labels.Count(); i++)
@@ -703,33 +675,64 @@ bool CHudHintKeyDisplay::SetHintText( const char *text )
 		}
 	}
 
+	int tallest1 = 0, tallest2 = 0;
+	for (int i = 0; i < m_Labels.Count(); i++)
+	{
+		vgui::Label *label = m_Labels[i];
+
+		if (i & 1)
+		{
+			// help text
+			if (label->GetTall() > tallest2)
+			{
+				tallest2 = label->GetTall();
+			}
+		}
+		else
+		{
+			// variable
+			if (label->GetTall() > tallest1)
+			{
+				tallest1 = label->GetTall();
+			}
+		}
+	}
+	int tallest = MAX( tallest1, tallest2 );
+
 	// position the labels
 	int col1_x = m_iTextX;
 	int col2_x = m_iTextX + widest1 + m_iTextGapX;
 	int col_y = m_iTextY;
 
-	for (int i = 0; i < m_Labels.Count(); i += 2)
+	// Difference between the variable and the help text
+	int col_y_extra = ( (tallest1 - tallest2) / 2 );
+	if ( col_y_extra < 0 )
 	{
-		int rowHeight = 0;
-		vgui::Label *label0 = m_Labels[i];
-		int tall0 = label0->GetTall();
-		rowHeight = tall0;
+		// text is taller than the variable (multi-line text).
+		// Push the variable's y down by subtracting the negative value.
+		col_y -= col_y_extra;
+	}
 
-		if (i + 1 < m_Labels.Count())
+	for (int i = 0; i < m_Labels.Count(); i++)
+	{
+		vgui::Label *label = m_Labels[i];
+
+		if (i & 1)
 		{
-			vgui::Label *label1 = m_Labels[i + 1];
-			int tall1 = label1->GetTall();
-			rowHeight = MAX(tall0, tall1);
-			label1->SetPos( col2_x, col_y + (rowHeight - tall1) / 2 );
+			label->SetPos( col2_x, col_y + col_y_extra );
+
+			col_y += tallest;
+			col_y += m_iTextGapY;
 		}
-
-		label0->SetPos( col1_x, col_y + (rowHeight - tall0) / 2 );
-
-		col_y += rowHeight + m_iTextGapY;
+		else
+		{
+			// variable
+			label->SetPos( col1_x, col_y );
+		}
 	}
 
 	// move ourselves relative to our start position
-	int newWide = m_iTextX + col2_x + widest2;
+	int newWide = col2_x + widest2 + m_iTextX;
 	int newTall = col_y;
 	int ox, oy;
 	GetPos(ox, oy);
@@ -749,8 +752,8 @@ bool CHudHintKeyDisplay::SetHintText( const char *text )
 	}
 
 	// set the size of the hint panel to fit
- 	SetPos( ox, oy );
- 	SetSize( newWide, newTall );
+	SetPos( ox, oy );
+	SetSize( newWide, newTall );
 
 	m_iBaseY = oy;
 
@@ -760,31 +763,29 @@ bool CHudHintKeyDisplay::SetHintText( const char *text )
 //-----------------------------------------------------------------------------
 // Purpose: Activates the hint display
 //-----------------------------------------------------------------------------
-void CHudHintKeyDisplay::MsgFunc_KeyHintText( bf_read &msg )
+bool CHudHintKeyDisplay::MsgFunc_KeyHintText( const CCSUsrMsg_KeyHintText &msg )
 {
 	// how many strings do we receive ?
-	int count = msg.ReadByte();
+	int count = msg.hints_size();
 
 	// here we expect only one string
 	if ( count != 1 )
 	{
 		DevMsg("CHudHintKeyDisplay::MsgFunc_KeyHintText: string count != 1.\n");
-		return;
+		return true;
 	}
 
-	// read the string
-	char szString[2048];
-	msg.ReadString( szString, sizeof(szString) );
-
 	// make it visible
-	if ( SetHintText( szString ) )
+	if ( SetHintText( msg.hints(0).c_str() ) )
 	{
 		SetVisible( true );
- 		g_pClientMode->GetViewportAnimationController()->StartAnimationSequence( "KeyHintMessageShow" ); 
+		GetClientMode()->GetViewportAnimationController()->StartAnimationSequence( "KeyHintMessageShow" ); 
 	}
 	else
 	{
 		// it's being cleared, hide the panel
-		g_pClientMode->GetViewportAnimationController()->StartAnimationSequence( "KeyHintMessageHide" ); 
+		GetClientMode()->GetViewportAnimationController()->StartAnimationSequence( "KeyHintMessageHide" ); 
 	}
+
+	return true;
 }

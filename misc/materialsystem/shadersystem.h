@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -16,7 +16,7 @@
 // 3) In general, we try to cache off expensive state pre-processing in
 //		the shader shadow phase (like texture stage pipeline).
 //
-//=============================================================================//
+//===========================================================================//
 
 #ifndef SHADERSYSTEM_H
 #define SHADERSYSTEM_H
@@ -25,7 +25,7 @@
 #pragma once
 #endif
 
-#include "IShaderSystem.h"
+#include "materialsystem/ishadersystem.h"
 #include "shaderlib/BaseShader.h"
 #include "materialsystem/materialsystem_config.h"
 #include "shaderapi/ishaderapi.h"
@@ -75,7 +75,7 @@ enum
 
 enum
 {
-	MAX_RENDER_PASSES = 4
+	MAX_RENDER_PASSES = 3
 };
 
 
@@ -88,6 +88,7 @@ struct RenderPassList_t
 	StateSnapshot_t	m_Snapshot[MAX_RENDER_PASSES];
 	// per material shader-defined state
 	CBasePerMaterialContextData *m_pContextData[MAX_RENDER_PASSES];
+	CBasePerInstanceContextData *m_pInstanceData[MAX_RENDER_PASSES];
 };
 
 struct ShaderRenderState_t
@@ -96,12 +97,9 @@ struct ShaderRenderState_t
 	int				m_Flags;	// Can't shrink this to a short
 	VertexFormat_t	m_VertexFormat;
 	VertexFormat_t	m_VertexUsage;
-	MorphFormat_t	m_MorphFormat;
 
 	// List of all snapshots
 	RenderPassList_t *m_pSnapshots;
-
-
 };
 
 
@@ -110,13 +108,19 @@ struct ShaderRenderState_t
 //-----------------------------------------------------------------------------
 enum
 {
-	SNAPSHOT_COUNT_NORMAL = 16,
-	SNAPSHOT_COUNT_EDITOR = 32,
+	SNAPSHOT_COUNT_NORMAL = 8,
+	SNAPSHOT_COUNT_EDITOR = 16,
+	SNAPSHOT_COUNT_GBUFFER = 64,
 };
 
 inline int SnapshotTypeCount()
 {
-	return MaterialSystem()->CanUseEditorMaterials() ? SNAPSHOT_COUNT_EDITOR : SNAPSHOT_COUNT_NORMAL;
+	int nMaterialUseFlags = MaterialSystem()->GetConfigurationFlags();
+	if ( nMaterialUseFlags & MATCONFIG_FLAGS_SUPPORT_GBUFFER )
+		return SNAPSHOT_COUNT_GBUFFER;
+	if ( nMaterialUseFlags & MATCONFIG_FLAGS_SUPPORT_EDITOR )
+		return SNAPSHOT_COUNT_EDITOR;
+	return SNAPSHOT_COUNT_NORMAL;
 }
 
 
@@ -205,7 +209,7 @@ public:
 
 	// Draws the shader
 	virtual void DrawElements( IShader *pShader, IMaterialVar **params, ShaderRenderState_t* pShaderState, VertexCompressionType_t vertexCompression,
-							   uint32 nMaterialVarTimeStamp ) = 0;
+							   uint32 nMaterialVarTimeStamp, uint32 nModulationFlags, bool bRenderingPreTessPatchMesh ) = 0;
 
 	// Used to iterate over all shaders for editing purposes
 	virtual int	 ShaderCount() const = 0;

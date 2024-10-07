@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: This is a panel which is rendered image on top of an entity
 //
@@ -8,7 +8,7 @@
 #include "cbase.h"
 #pragma warning (disable: 4514)
 #include "vgui_bitmappanel.h"
-#include <KeyValues.h>
+#include <keyvalues.h>
 #include "panelmetaclassmgr.h"
 #include "vgui_bitmapimage.h"
 
@@ -19,13 +19,11 @@
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
-DECLARE_BUILD_FACTORY( CBitmapPanel );
-
 
 //-----------------------------------------------------------------------------
 // Constructor
 //-----------------------------------------------------------------------------
-CBitmapPanel::CBitmapPanel( ) :	BaseClass( NULL, "CBitmapPanel" ), m_pImage(0)
+CBitmapPanel::CBitmapPanel( ) :	BaseClass( NULL, "CBitmapPanel" ), m_pImage( NULL )
 {
 	SetPaintBackgroundEnabled( false );
 	m_szMouseOverText[ 0 ] = 0;
@@ -34,7 +32,7 @@ CBitmapPanel::CBitmapPanel( ) :	BaseClass( NULL, "CBitmapPanel" ), m_pImage(0)
 }
 
 CBitmapPanel::CBitmapPanel( vgui::Panel *pParent, const char *pName ) : 
-	BaseClass( pParent, pName ), m_pImage(0)
+	BaseClass( pParent, pName ), m_pImage( NULL )
 {
 	SetPaintBackgroundEnabled( false );
 	m_szMouseOverText[ 0 ] = 0;
@@ -108,7 +106,7 @@ void CBitmapPanel::ApplySettings(KeyValues *pInitData)
 	if ( pColorString && pColorString[ 0 ] )
 	{
 		// Try and scan them in
-		int r = 0, g = 0, b = 0, a = 0;
+		int r, g, b, a;
 		int scanned;
 		scanned = sscanf( pColorString, "%i %i %i %i", &r, &g, &b, &a );
 		if ( scanned == 4 )
@@ -191,6 +189,10 @@ const char *CBitmapPanel::GetMouseOverText( void )
 //-----------------------------------------------------------------------------
 void CBitmapPanel::SetImage( BitmapImage *pImage )
 {
+	if ( m_pImage && m_bOwnsImage )
+	{
+		delete m_pImage;
+	}
 	m_pImage = pImage;
 	m_bOwnsImage = (pImage == NULL);
 
@@ -199,22 +201,4 @@ void CBitmapPanel::SetImage( BitmapImage *pImage )
 	{
 		m_pImage->GetColor( m_r, m_g, m_b, m_a );
 	}
-}
-
-//-----------------------------------------------------------------------------
-// Purpose: Set image data directly
-//-----------------------------------------------------------------------------
-void CBitmapPanel::SetBitmap( const Bitmap_t &bitmap )
-{
-
-	// Make sure we have an image that we own
-	if ( m_pImage == NULL || !m_bOwnsImage )
-	{
-		delete m_pImage;
-		m_pImage = new BitmapImage( GetVPanel(), NULL );
-		m_bOwnsImage = true;
-	}
-
-	// Set the bitmap
-	m_pImage->SetBitmap( bitmap );
 }

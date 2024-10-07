@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright ©, Valve Corporation, All rights reserved. =======
 //
 // Purpose: CEconItem, a shared object for econ items
 //
@@ -14,10 +14,7 @@
 #include "game_item_schema.h"			// needed for GameItemDefinition_t
 
 class CAttribute_String;
-class CAttribute_DynamicRecipeComponent;
-class CAttribute_ItemSlotCriteria;
-class CAttribute_WorldItemPlacement;
-class IMaterial;
+
 //-----------------------------------------------------------------------------
 // Purpose: Template helper classes for dealing with types.
 //-----------------------------------------------------------------------------
@@ -45,13 +42,6 @@ struct AreTypesIdentical { enum { kValue = false }; };
 
 template < typename T > struct AreTypesIdentical<T, T> { enum { kValue = true }; };
 
-// IsPointerType<T> takes one input and "returns" via kValue whether the type is a pointer
-// type in any way, const, volatile, whatever.
-template < typename T >
-struct IsPointerType { enum { kValue = false }; };
-
-template < typename T > struct IsPointerType<T *> { enum { kValue = true }; };
-
 // IsValidAttributeValueTypeImpl<T> is a hand-made specialization for what types we want
 // to consider valid attribute data types. This is used as a sanity check to make sure we
 // don't pass in completely arbitrary types to things like FindAttribute(). (Doing so
@@ -63,11 +53,8 @@ struct IsValidAttributeValueTypeImpl { enum { kValue = false }; };
 
 template < > struct IsValidAttributeValueTypeImpl<attrib_value_t> { enum { kValue = true }; };
 template < > struct IsValidAttributeValueTypeImpl<float> { enum { kValue = true }; };
-template < > struct IsValidAttributeValueTypeImpl<uint64> { enum { kValue = true }; };
 template < > struct IsValidAttributeValueTypeImpl<CAttribute_String> { enum { kValue = true }; };
-template < > struct IsValidAttributeValueTypeImpl<CAttribute_DynamicRecipeComponent> { enum { kValue = true }; };
-template < > struct IsValidAttributeValueTypeImpl < CAttribute_ItemSlotCriteria > { enum { kValue = true }; };
-template < > struct IsValidAttributeValueTypeImpl < CAttribute_WorldItemPlacement > { enum { kValue = true }; };
+template < > struct IsValidAttributeValueTypeImpl<Vector> { enum { kValue = true }; };
 
 template < typename T >
 struct IsValidAttributeValueType : public IsValidAttributeValueTypeImpl< typename StripConstIfPresent<T>::ResultType > { };
@@ -84,13 +71,10 @@ public:
 	virtual ~IEconItemAttributeIterator ( ) { }
 
 	// Returns whether to continue iteration after this element.
-	virtual bool OnIterateAttributeValue( const CEconItemAttributeDefinition *pAttrDef, attrib_value_t value )											= 0;
-	virtual bool OnIterateAttributeValue( const CEconItemAttributeDefinition *pAttrDef, float value )													= 0;
-	virtual bool OnIterateAttributeValue( const CEconItemAttributeDefinition *pAttrDef, const uint64& value )											= 0;
-	virtual bool OnIterateAttributeValue( const CEconItemAttributeDefinition *pAttrDef, const CAttribute_String& value )								= 0;
-	virtual bool OnIterateAttributeValue( const CEconItemAttributeDefinition *pAttrDef, const CAttribute_DynamicRecipeComponent& value )				= 0;
-	virtual bool OnIterateAttributeValue( const CEconItemAttributeDefinition *pAttrDef, const CAttribute_ItemSlotCriteria& value )						= 0;
-	virtual bool OnIterateAttributeValue( const CEconItemAttributeDefinition *pAttrDef, const CAttribute_WorldItemPlacement& value )					= 0;
+	virtual bool OnIterateAttributeValue( const CEconItemAttributeDefinition *pAttrDef, attrib_value_t value ) = 0;
+	virtual bool OnIterateAttributeValue( const CEconItemAttributeDefinition *pAttrDef, float value ) = 0;
+	virtual bool OnIterateAttributeValue( const CEconItemAttributeDefinition *pAttrDef, const CAttribute_String& value ) = 0;
+	virtual bool OnIterateAttributeValue( const CEconItemAttributeDefinition *pAttrDef, const Vector& value ) = 0;
 };
 
 //-----------------------------------------------------------------------------
@@ -103,13 +87,10 @@ class CEconItemSpecificAttributeIterator : public IEconItemAttributeIterator
 {
 	// By default, always return true
 	virtual bool OnIterateAttributeValue( const CEconItemAttributeDefinition *pAttrDef, attrib_value_t value )											{ return true; }
-	virtual bool OnIterateAttributeValue( const CEconItemAttributeDefinition *pAttrDef, float value )													{ return true; }
-	virtual bool OnIterateAttributeValue( const CEconItemAttributeDefinition *pAttrDef, const uint64& value )											{ return true; }
 	virtual bool OnIterateAttributeValue( const CEconItemAttributeDefinition *pAttrDef, const CAttribute_String& value )								{ return true; }
-	virtual bool OnIterateAttributeValue( const CEconItemAttributeDefinition *pAttrDef, const CAttribute_DynamicRecipeComponent& value )				{ return true; }
-	virtual bool OnIterateAttributeValue( const CEconItemAttributeDefinition *pAttrDef, const CAttribute_ItemSlotCriteria& value )						{ return true; }
-	virtual bool OnIterateAttributeValue( const CEconItemAttributeDefinition *pAttrDef, const CAttribute_WorldItemPlacement& value )					{ return true; }
+	virtual bool OnIterateAttributeValue( const CEconItemAttributeDefinition *pAttrDef, const Vector& value )											{ return true; }
 };
+
 
 //-----------------------------------------------------------------------------
 // Purpose: Interface for a single callback function per-attribute, regardless of
@@ -133,31 +114,15 @@ public:
 		return OnIterateAttributeValueUntyped( pAttrDef );
 	}
 
-	virtual bool OnIterateAttributeValue( const CEconItemAttributeDefinition *pAttrDef, const uint64& ) OVERRIDE
-	{
-		return OnIterateAttributeValueUntyped( pAttrDef );
-	}
-
 	virtual bool OnIterateAttributeValue( const CEconItemAttributeDefinition *pAttrDef, const CAttribute_String& ) OVERRIDE
 	{
 		return OnIterateAttributeValueUntyped( pAttrDef );
 	}
 
-	virtual bool OnIterateAttributeValue( const CEconItemAttributeDefinition *pAttrDef, const CAttribute_DynamicRecipeComponent& ) OVERRIDE
+	virtual bool OnIterateAttributeValue( const CEconItemAttributeDefinition *pAttrDef, const Vector& ) OVERRIDE
 	{
 		return OnIterateAttributeValueUntyped( pAttrDef );
 	}
-
-	virtual bool OnIterateAttributeValue( const CEconItemAttributeDefinition *pAttrDef, const CAttribute_ItemSlotCriteria& ) OVERRIDE
-	{
-		return OnIterateAttributeValueUntyped( pAttrDef );
-	}
-
-	virtual bool OnIterateAttributeValue( const CEconItemAttributeDefinition *pAttrDef, const CAttribute_WorldItemPlacement& ) OVERRIDE
-	{
-		return OnIterateAttributeValueUntyped( pAttrDef );
-	}
-
 
 private:
 	virtual bool OnIterateAttributeValueUntyped( const CEconItemAttributeDefinition *pAttrDef ) = 0;
@@ -265,27 +230,12 @@ public:
 		return OnIterateAttributeValueTyped( pAttrDef, value );
 	}
 
-	virtual bool OnIterateAttributeValue( const CEconItemAttributeDefinition *pAttrDef, const uint64 & value ) OVERRIDE
+	virtual bool OnIterateAttributeValue( const CEconItemAttributeDefinition *pAttrDef, const CAttribute_String& value ) OVERRIDE
 	{
 		return OnIterateAttributeValueTyped( pAttrDef, value );
 	}
 
-	virtual bool OnIterateAttributeValue( const CEconItemAttributeDefinition *pAttrDef, const CAttribute_String & value ) OVERRIDE
-	{
-		return OnIterateAttributeValueTyped( pAttrDef, value );
-	}
-
-	virtual bool OnIterateAttributeValue( const CEconItemAttributeDefinition *pAttrDef, const CAttribute_DynamicRecipeComponent & value ) OVERRIDE
-	{
-		return OnIterateAttributeValueTyped( pAttrDef, value );
-	}
-
-	virtual bool OnIterateAttributeValue( const CEconItemAttributeDefinition *pAttrDef, const CAttribute_ItemSlotCriteria & value ) OVERRIDE
-	{
-		return OnIterateAttributeValueTyped( pAttrDef, value );
-	}
-
-	virtual bool OnIterateAttributeValue( const CEconItemAttributeDefinition *pAttrDef, const CAttribute_WorldItemPlacement & value ) OVERRIDE
+	virtual bool OnIterateAttributeValue( const CEconItemAttributeDefinition *pAttrDef, const Vector& value ) OVERRIDE
 	{
 		return OnIterateAttributeValueTyped( pAttrDef, value );
 	}
@@ -384,9 +334,6 @@ inline void CAttributeIterator_GetTypedAttributeValue<CAttribute_String, const c
 template < typename TAttributeContainerType >
 bool FindAttribute( const TAttributeContainerType *pSomethingThatHasAnIterateAttributesFunction, const CEconItemAttributeDefinition *pAttrDef )
 {
-#ifdef CLIENT_DLL
-	VPROF_BUDGET( "IEconItemInterface::FindAttribute", VPROF_BUDGETGROUP_FINDATTRIBUTE );
-#endif
 	if ( !pAttrDef )
 		return false;
 
@@ -401,9 +348,6 @@ bool FindAttribute( const TAttributeContainerType *pSomethingThatHasAnIterateAtt
 template < typename TActualTypeInMemory, typename TTreatAsThisType, typename TAttributeContainerType >
 bool FindAttribute_UnsafeBitwiseCast( const TAttributeContainerType *pSomethingThatHasAnIterateAttributesFunction, const CEconItemAttributeDefinition *pAttrDef, TTreatAsThisType *out_pValue )
 {
-#ifdef CLIENT_DLL
-	VPROF_BUDGET( "IEconItemInterface::FindAttribute_UnsafeBitwiseCast", VPROF_BUDGETGROUP_FINDATTRIBUTEUNSAFE );
-#endif
 	if ( !pAttrDef )
 		return false;
 
@@ -446,101 +390,53 @@ public:
 		return ::FindAttribute( this, pAttrDef, out_pValue );
 	}
 
-	// Helpers to look for specific attribute values
-	virtual CEconItemPaintKitDefinition *GetCustomPainkKitDefinition( void ) const { return GetItemDefinition() ? GetItemDefinition()->GetCustomPainkKitDefinition() : NULL; }
-	virtual bool GetCustomPaintKitWear( float &flWear ) const;
+	virtual int GetCustomPaintKitIndex( void ) const;
+	virtual int GetCustomPaintKitSeed( void ) const;
+	virtual float GetCustomPaintKitWear( float flWearDefault = 0.0f ) const;
+
+	virtual float GetStickerAttributeBySlotIndexFloat( int nSlotIndex, EStickerAttributeType type, float flDefault ) const;
+	virtual uint32 GetStickerAttributeBySlotIndexInt( int nSlotIndex, EStickerAttributeType type, uint32 uiDefault ) const;
 
 	// IEconItemInterface common implementation.
 	virtual bool IsTradable() const;
-	virtual int  GetUntradabilityFlags() const;
+	virtual bool IsMarketable() const;
 	virtual bool IsCommodity() const;
 	virtual bool IsUsableInCrafting() const;
-	virtual bool IsMarketable() const;				// can this item be listed on the Marketplace?
+	virtual bool IsHiddenFromDropList() const;
 
-	bool IsTemporaryItem() const;					// returns whether this item is a temporary instance of an item that is not by nature temporary (ie., a preview item, an item with an attribute expiration timer)
-	RTime32 GetExpirationDate() const;				// will return RTime32( 0 ) if this item will not expire, otherwise the time that it will auto-delete itself; this looks at both static and dynamic ways of expiring timers
+	virtual RTime32 GetExpirationDate() const;
 
 	// IEconItemInterface interface.
 	virtual const GameItemDefinition_t *GetItemDefinition() const = 0;
 
-	virtual itemid_t		GetID() const = 0;				// intentionally not called GetItemID to avoid stomping non-virtual GetItemID() on CEconItem
 	virtual uint32			GetAccountID() const = 0;
+	virtual uint64			GetItemID() const = 0;
 	virtual int32			GetQuality() const = 0;
-	virtual style_index_t	GetStyle() const = 0;
+	virtual int32			GetRarity() const = 0;
 	virtual uint8			GetFlags() const = 0;
 	virtual eEconItemOrigin GetOrigin() const = 0;
-	virtual int				GetQuantity() const = 0;
+	virtual uint16			GetQuantity() const = 0;
 	virtual uint32			GetItemLevel() const = 0;
 	virtual bool			GetInUse() const = 0;			// is this item in use somewhere in the backend? (ie., cross-game trading)
 
 	virtual const char	   *GetCustomName() const = 0;		// get a user-generated name, if present, otherwise NULL; return value is UTF8
 	virtual const char	   *GetCustomDesc() const = 0;		// get a user-generated flavor text, if present, otherwise NULL; return value is UTF8
 
+	virtual int				GetItemSetIndex() const = 0;
+
 	// IEconItemInterface attribute iteration interface. This is not meant to be used for
 	// attribute lookup! This is meant for anything that requires iterating over the full
 	// attribute list.
 	virtual void IterateAttributes( IEconItemAttributeIterator *pIterator ) const = 0;
 
-	// Fetch values from the definition
-	const char	*GetDefinitionString( const char *pszKeyName, const char *pszDefaultValue = "" ) const;
-	KeyValues *GetDefinitionKey( const char *pszKeyName ) const;
-
+	// We can check whether the item is potentially tradable in future if enough time
+	// passes, and if yes can get the exact date when it becomes tradable
+	bool IsPotentiallyTradable() const;
+	
+	RTime32 GetCacheRefreshDateTime() const;
+	
 	RTime32 GetTradableAfterDateTime() const;
-
-	virtual item_definition_index_t GetItemDefIndex() const { return GetItemDefinition() ? GetItemDefinition()->GetDefinitionIndex() : INVALID_ITEM_DEF_INDEX; }
-
-	virtual IMaterial* GetMaterialOverride( int iTeam ) = 0;
-
-protected:
-	bool IsPermanentlyUntradable() const;
-	bool IsTemporarilyUntradable() const;
-};
-
-//-----------------------------------------------------------------------------
-// Purpose: Classes that want default behavior for GetMaterialOverride, which 
-// currently derive from IEconItemInterface can instead derive from 
-// CMaterialOverrideContainer< IEconItemInterface > and have the details
-// of material overrides hidden from them. 
-//-----------------------------------------------------------------------------
-template <typename TBaseClass> 
-class CMaterialOverrideContainer : public TBaseClass
-{
-public:
-	virtual IMaterial* GetMaterialOverride( int iTeam ) OVERRIDE
-	{
-		#ifdef CLIENT_DLL
-			Assert( iTeam >= 0 && iTeam < ARRAYSIZE( m_materialOverrides ) );
-
-			if ( m_materialOverrides[ iTeam ].IsValid() )
-				return m_materialOverrides[ iTeam ];
-
-			if ( !this->GetItemDefinition() )
-				return NULL;
-
-			const char* pName = this->GetItemDefinition()->GetMaterialOverride( iTeam );
-			if ( pName == NULL )
-				return NULL;
-
-			m_materialOverrides[ iTeam ].Init( pName, TEXTURE_GROUP_CLIENT_EFFECTS );
-			return m_materialOverrides[ iTeam ];
-		#else
-			return NULL;
-		#endif
-	}
-
-protected:
-	void ResetMaterialOverrides()
-	{
-		#ifdef CLIENT_DLL
-			for ( int i = 0; i < TF_TEAM_COUNT; ++i ) 
-				m_materialOverrides[ i ].Shutdown();
-		#endif
-	}
-
-private:
-#ifdef CLIENT_DLL
-	CMaterialReference m_materialOverrides[ TF_TEAM_COUNT ];
-#endif
+	RTime32 GetUseAfterDateTime() const;
 };
 
 #endif // ECONITEMINTERFACE_H

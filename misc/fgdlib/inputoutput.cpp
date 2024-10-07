@@ -1,12 +1,10 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
-//
-// Purpose: 
+//========= Copyright © 1996-2008, Valve Corporation, All rights reserved. ====
 //
 //=============================================================================
 
 
 #include <tier0/dbg.h>
-#include "fgdlib/InputOutput.h"
+#include "fgdlib/inputoutput.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include <tier0/memdbgon.h>
@@ -36,6 +34,7 @@ static TypeMap_t TypeMap[] =
 	{ iotEHandle,	"target_destination" },
 	{ iotColor,		"color255" },
 	{ iotEHandle,	"ehandle" }, // for backwards compatibility
+	{ iotScript,	"script" },
 };
 
 

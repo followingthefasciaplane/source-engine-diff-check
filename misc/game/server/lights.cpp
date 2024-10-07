@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: spawn and think functions for editor-placed lights
 //
@@ -8,6 +8,7 @@
 #include "cbase.h"
 #include "lights.h"
 #include "world.h"
+#include "env_cascade_light.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -218,7 +219,7 @@ void CLight::FadeThink(void)
 	{
 		char sCurString[2];
 		sCurString[0] = m_iCurrentFade;
-		sCurString[1] = 0;
+		sCurString[1] = NULL;
 		engine->LightStyle(m_iStyle, sCurString);
 
 		// UNDONE: Consider making this settable war to control fade speed
@@ -231,7 +232,7 @@ void CLight::FadeThink(void)
 //
 LINK_ENTITY_TO_CLASS( light_spot, CLight );
 LINK_ENTITY_TO_CLASS( light_glspot, CLight );
-
+LINK_ENTITY_TO_CLASS( light_directional, CLight );
 
 class CEnvLight : public CLight
 {
@@ -246,20 +247,35 @@ LINK_ENTITY_TO_CLASS( light_environment, CEnvLight );
 
 bool CEnvLight::KeyValue( const char *szKeyName, const char *szValue )
 {
+	bool bSuccess = true;
 	if (FStrEq(szKeyName, "_light"))
+	{
+		int tmp[4];
+		V_StringToIntArray( tmp, 4, szValue );
+		CCascadeLight::SetLightColor( tmp[0], tmp[1], tmp[2], tmp[3] );
+	}
+	else if ( FStrEq( szKeyName, "_ambient" ) )
 	{
 		// nothing
 	}
 	else
 	{
-		return BaseClass::KeyValue( szKeyName, szValue );
+		bSuccess = BaseClass::KeyValue( szKeyName, szValue );
 	}
 
-	return true;
-}
+	if ( FStrEq( szKeyName, "pitch" ) )
+	{
+		CCascadeLight::SetEnvLightShadowPitch( atof( szValue ) );
+	}
 
+	CCascadeLight::SetEnvLightShadowAngles( GetAbsAngles() );
+		
+	return bSuccess;
+}
 
 void CEnvLight::Spawn( void )
 {
 	BaseClass::Spawn( );
+		
+	CCascadeLight::SetEnvLightShadowAngles( GetAbsAngles() );
 }

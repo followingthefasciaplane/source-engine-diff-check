@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -11,8 +11,9 @@
 #if !defined(_STATIC_LINKED) || defined(SOUNDEMITTERSYSTEM_DLL)
 
 #include "SoundEmitterSystem/isoundemittersystembase.h"
-#include "interval.h"
+#include "tier2/interval.h"
 #include "soundchars.h"
+#include "keyvalues.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -33,7 +34,6 @@ static SoundChannels g_pChannelNames[] =
 	{ CHAN_BODY, "CHAN_BODY" },
 	{ CHAN_STREAM, "CHAN_STREAM" },
 	{ CHAN_STATIC, "CHAN_STATIC" },
-	{ CHAN_VOICE2, "CHAN_VOICE2" },
 };
 
 struct VolumeLevel
@@ -197,9 +197,9 @@ soundlevel_t TextToSoundLevel( const char *key )
 			return entry->level;
 	}
 
-	if ( !Q_strnicmp( key, SNDLVL_PREFIX, Q_strlen( SNDLVL_PREFIX ) ) )
+	if ( StringHasPrefix( key, SNDLVL_PREFIX ) )
 	{
-		char const *val = key + Q_strlen( SNDLVL_PREFIX );
+		char const *val = key + V_strlen( SNDLVL_PREFIX );
 		int sndlvl = atoi( val );
 		if ( sndlvl > 0 && sndlvl <= 180 )
 		{
@@ -339,15 +339,27 @@ CSoundParametersInternal::CSoundParametersInternal()
 	play_to_owner_only = false;
 	had_missing_wave_files = false;
 	uses_gender_token = false;
+	m_bHasCached = false;
+	m_bHRTFBilinear = false;
+	m_bHRTFFollowEntity = false;
+	
+	m_nSoundEntryVersion = 1;
 
+	m_pOperatorsKV = NULL;
+
+	// TERROR:
+	m_pGameData = NULL;
 }
 
 CSoundParametersInternal::CSoundParametersInternal( const CSoundParametersInternal& src )
 {
 	m_pSoundNames = NULL;
 	m_pConvertedNames = NULL;
-	m_nSoundNames = 0;
-	m_nConvertedNames = 0;
+
+	m_pOperatorsKV = NULL;
+	// TERROR:
+	m_pGameData = NULL;
+	
 	CopyFrom( src );
 }
 
@@ -358,10 +370,28 @@ CSoundParametersInternal::~CSoundParametersInternal()
 	if ( m_nConvertedNames > 1 )
 		free( m_pConvertedNames);
 
+	if ( m_pOperatorsKV )
+	{
+		m_pOperatorsKV->deleteThis();
+		m_pOperatorsKV = NULL;
+	}
+
 	m_pConvertedNames = NULL;
 	m_pSoundNames = NULL;
 	m_nSoundNames = 0;
 	m_nConvertedNames = 0;
+}
+
+void CSoundParametersInternal::SetOperatorsKV( KeyValues *src )
+{
+	if ( m_pOperatorsKV )
+	{
+		m_pOperatorsKV->deleteThis();
+	}
+	m_pOperatorsKV = NULL;
+
+	m_pOperatorsKV = new KeyValues( "Operators" );
+	src->CopySubkeys( m_pOperatorsKV );
 }
 
 void CSoundParametersInternal::CopyFrom( const CSoundParametersInternal& src )
@@ -377,6 +407,8 @@ void CSoundParametersInternal::CopyFrom( const CSoundParametersInternal& src )
 	soundlevel = src.soundlevel;
 	delay_msec = src.delay_msec;
 	play_to_owner_only = src.play_to_owner_only;
+	m_bHRTFBilinear = src.m_bHRTFBilinear;
+	m_bHRTFFollowEntity = src.m_bHRTFFollowEntity;
 
 	m_nSoundNames = src.m_nSoundNames;
 	if ( m_nSoundNames )
@@ -414,6 +446,11 @@ void CSoundParametersInternal::CopyFrom( const CSoundParametersInternal& src )
 		m_pConvertedNames = NULL;
 	}
 
+	if ( src.m_pOperatorsKV )
+	{
+		SetOperatorsKV( src.m_pOperatorsKV );
+	}
+
 	had_missing_wave_files = src.had_missing_wave_files;
 	uses_gender_token = src.uses_gender_token;
 }
@@ -436,6 +473,10 @@ bool CSoundParametersInternal::operator == ( const CSoundParametersInternal& oth
 	if ( delay_msec != other.delay_msec )
 		return false;
 	if ( play_to_owner_only != other.play_to_owner_only )
+		return false;
+	if (m_bHRTFBilinear != other.m_bHRTFBilinear)
+		return false;
+	if ( m_bHRTFFollowEntity != other.m_bHRTFFollowEntity )
 		return false;
 
 	if ( m_nSoundNames != other.m_nSoundNames )

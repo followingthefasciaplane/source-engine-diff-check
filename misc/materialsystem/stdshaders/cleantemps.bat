@@ -9,4 +9,8 @@ if exist fxctmp9_360_tmp rd /s /q fxctmp9_360_tmp
 if exist vshtmp9_360_tmp rd /s /q vshtmp9_360_tmp
 if exist pshtmp9_360_tmp rd /s /q pshtmp9_360_tmp
 
+if exist fxctmp9_ps3_tmp rd /s /q fxctmp9_ps3_tmp
+if exist vshtmp9_ps3_tmp rd /s /q vshtmp9_ps3_tmp
+if exist pshtmp9_ps3_tmp rd /s /q pshtmp9_ps3_tmp
+
 if exist shaders rd /s /q shaders

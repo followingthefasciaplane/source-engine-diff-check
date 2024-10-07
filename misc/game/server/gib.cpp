@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose:		A gib is a chunk of a body, or a piece of wood/metal/rocks/etc.
 //
@@ -20,6 +20,8 @@
 #include "tier0/memdbgon.h"
 
 extern Vector			g_vecAttackDir;		// In globals.cpp
+
+CUtlVector<EHANDLE> CGib::s_ExtantGibs;
 
 BEGIN_DATADESC( CGib )
 
@@ -342,7 +344,7 @@ void CGib::WaitTillLand ( void )
 
 	if ( GetAbsVelocity() == vec3_origin )
 	{
-		SetRenderColorA( 255 );
+		SetRenderAlpha( 255 );
 		m_nRenderMode = kRenderTransTexture;
 		if ( GetMoveType() != MOVETYPE_VPHYSICS )
 		{
@@ -404,6 +406,14 @@ bool CGib::SUB_AllowedToFade( void )
 
 	if ( pPlayer && pPlayer->FInViewCone( this ) && m_bForceRemove == false )
 	{
+		// We don't want Gibs to fade out while onscreen... but we also can't allow an infinite
+		// number of gibs accumulate, so let the oldest ones fade out if we're over the limit.
+		int nGibsToKill = s_ExtantGibs.Count() - MAX_CONCURRENT_GIBS;
+		for ( int i = 0; i < nGibsToKill; i++ )
+		{
+			if ( this == s_ExtantGibs[ i ] )
+				return true;
+		}
 		return false;
 	}
 
@@ -577,17 +587,30 @@ void CGib::StickyGibTouch ( CBaseEntity *pOther )
 	SetMoveType( MOVETYPE_NONE );
 }
 
-//
-// Throw a chunk
-//
-void CGib::Spawn( const char *szGibModel )
+//-----------------------------------------------------------------------------
+// CGib destructor
+//-----------------------------------------------------------------------------
+CGib::~CGib( void )
+{
+	// NOTE: this should not be slow, because MAX_CONCURRENT_GIBS should not be large
+	int nIndex = s_ExtantGibs.Find( this );
+	if ( nIndex >= 0 )
+		s_ExtantGibs.Remove( nIndex );
+	else
+		ExecuteNTimes( 20, Warning( "CGibs are being created which circumvent Spawn() - this can result in a leak.\n" ) );
+}
+
+//-----------------------------------------------------------------------------
+// Spawn a gib with a finite lifetime, after which it will fade out.
+//-----------------------------------------------------------------------------
+void CGib::Spawn( const char *szGibModel, float flLifetime )
 {
 	SetMoveType( MOVETYPE_FLYGRAVITY, MOVECOLLIDE_FLY_BOUNCE );
 	SetFriction(0.55); // deading the bounce a bit
 	
 	// sometimes an entity inherits the edict from a former piece of glass,
 	// and will spawn using the same render FX or m_nRenderMode! bad!
-	SetRenderColorA( 255 );
+	SetRenderAlpha( 255 );
 	m_nRenderMode = kRenderNormal;
 	m_nRenderFX = kRenderFxNone;
 	
@@ -599,13 +622,8 @@ void CGib::Spawn( const char *szGibModel )
 
 	SetModel( szGibModel );
 
-#ifdef HL1_DLL
-	SetElasticity( 1.0 );
-	UTIL_SetSize( this, vec3_origin, vec3_origin );
-#endif//HL1_DLL
-
 	SetNextThink( gpGlobals->curtime + 4 );
-	m_lifeTime = 25;
+	m_lifeTime = flLifetime;
 	SetTouch ( &CGib::BounceGibTouch );
 
     m_bForceRemove = false;
@@ -613,16 +631,8 @@ void CGib::Spawn( const char *szGibModel )
 	m_material = matNone;
 	m_cBloodDecals = 5;// how many blood decals this gib can place (1 per bounce until none remain). 
 
-}
-
-
-//-----------------------------------------------------------------------------
-// Spawn a gib with a finite lifetime, after which it will fade out.
-//-----------------------------------------------------------------------------
-void CGib::Spawn( const char *szGibModel, float flLifetime )
-{
-	Spawn( szGibModel );
-	m_lifeTime = flLifetime;
+	// Make sure the gib dies within its alotted lifetime
+	s_ExtantGibs.AddToTail( this );
 	SetThink ( &CGib::SUB_FadeOut );
 	SetNextThink( gpGlobals->curtime + m_lifeTime );
 }

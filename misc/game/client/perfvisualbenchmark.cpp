@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -7,7 +7,7 @@
 
 #include "cbase.h"
 #include "perfvisualbenchmark.h"
-#include "KeyValues.h"
+#include "keyvalues.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -21,9 +21,7 @@ static CPerfVisualBenchmark s_PerfVisualBenchmark; // singleton
 
 IGameSystem* PerfVisualBenchmark() { return &s_PerfVisualBenchmark; }
 
-#ifndef _XBOX
 extern ConVar cl_mouseenable;
-#endif
 
 void usrCmd_Start()
 {
@@ -211,10 +209,9 @@ bool CPerfVisualBenchmark::Init()
 
 void CPerfVisualBenchmark::Start()
 {
-#ifndef _XBOX
 	m_bSaveMouseEnable = cl_mouseenable.GetBool();
 	cl_mouseenable.SetValue( 0 );
-#endif
+
 	m_iCurVar = 0;
 	m_flTimer = gpGlobals->realtime + FPS_STABILIZE_TIME;
 	m_bWaiting = true;
@@ -228,9 +225,8 @@ void CPerfVisualBenchmark::Start()
 
 void CPerfVisualBenchmark::Stop()
 {
-#ifndef _XBOX
 	cl_mouseenable.SetValue( m_bSaveMouseEnable );
-#endif
+
 	m_bIsOn = false;
 	Print();
 	engine->ClientCmd_Unrestricted("host_timescale 0");					// pause the mofo

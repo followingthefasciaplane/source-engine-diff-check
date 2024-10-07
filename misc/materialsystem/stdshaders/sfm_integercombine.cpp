@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -10,17 +10,16 @@
 #include "sfm_integercombine_ps20.inc"
 #include "sfm_integercombine_ps20b.inc"
 
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
+
 BEGIN_VS_SHADER_FLAGS( sfm_integercombine_shader, "Help for SFM integer HDR combine pass", SHADER_NOT_EDITABLE )
 	BEGIN_SHADER_PARAMS
-		// Original full resolution texture
-		SHADER_PARAM( ORIGINALTEXTURE, SHADER_PARAM_TYPE_TEXTURE, "", "" )
-
-		// Blurred quarter-resolution texture
-		SHADER_PARAM( BLURREDTEXTURE, SHADER_PARAM_TYPE_TEXTURE, "", "" )
-
-		// How much bloom gets added in
-		SHADER_PARAM( BLOOMAMOUNT, SHADER_PARAM_TYPE_VEC4, "", "" )
-
+		SHADER_PARAM( ORIGINALTEXTURE, SHADER_PARAM_TYPE_TEXTURE, "", "" )	// Original full resolution texture
+		SHADER_PARAM( BLURREDTEXTURE, SHADER_PARAM_TYPE_TEXTURE, "", "" )	// Blurred quarter-resolution texture
+		SHADER_PARAM( BLOOMAMOUNT, SHADER_PARAM_TYPE_VEC4, "", "" )			// How much bloom gets added in
+		SHADER_PARAM( ISFLOAT, SHADER_PARAM_TYPE_INTEGER, "", "" )			// Float or integer?
 	END_SHADER_PARAMS
 
 	SHADER_INIT
@@ -31,12 +30,6 @@ BEGIN_VS_SHADER_FLAGS( sfm_integercombine_shader, "Help for SFM integer HDR comb
 	
 	SHADER_FALLBACK
 	{
-		// Requires DX9 + above
-		if ( g_pHardwareConfig->GetDXSupportLevel() < 90 )
-		{
-			Assert( 0 );
-			return "Wireframe";
-		}
 		return 0;
 	}
 
@@ -46,7 +39,7 @@ BEGIN_VS_SHADER_FLAGS( sfm_integercombine_shader, "Help for SFM integer HDR comb
 		{
 			pShaderShadow->EnableDepthWrites( false );
 			pShaderShadow->EnableDepthTest( false );
-			pShaderShadow->EnableAlphaWrites( false );
+			pShaderShadow->EnableAlphaWrites( true );
 			pShaderShadow->EnableBlending( false );
 			pShaderShadow->EnableCulling( false );
 
@@ -54,7 +47,7 @@ BEGIN_VS_SHADER_FLAGS( sfm_integercombine_shader, "Help for SFM integer HDR comb
 			pShaderShadow->EnableTexture( SHADER_SAMPLER1, true );
 
 			int fmt = VERTEX_POSITION;
-			pShaderShadow->VertexShaderVertexFormat( fmt, 2, 0, 0 ); // Two texture coordinates (first for high res, second for low res)
+			pShaderShadow->VertexShaderVertexFormat( fmt, 1, 0, 0 );
 
 			DECLARE_STATIC_VERTEX_SHADER( sfm_combine_vs20 );
 			SET_STATIC_VERTEX_SHADER( sfm_combine_vs20 );
@@ -73,10 +66,13 @@ BEGIN_VS_SHADER_FLAGS( sfm_integercombine_shader, "Help for SFM integer HDR comb
 
 		DYNAMIC_STATE
 		{
-			BindTexture( SHADER_SAMPLER0, ORIGINALTEXTURE, -1 );
-			BindTexture( SHADER_SAMPLER1, BLURREDTEXTURE, -1 );
+			BindTexture( SHADER_SAMPLER0, TEXTURE_BINDFLAGS_NONE, ORIGINALTEXTURE, -1 );
+			BindTexture( SHADER_SAMPLER1, TEXTURE_BINDFLAGS_NONE,  BLURREDTEXTURE, -1 );
 
 			SetPixelShaderConstant( 0, BLOOMAMOUNT );
+
+
+			bool bIsFloat = params[ISFLOAT]->GetIntValue() != 0;
 
 			DECLARE_DYNAMIC_VERTEX_SHADER( sfm_combine_vs20 );
 			SET_DYNAMIC_VERTEX_SHADER( sfm_combine_vs20 );
@@ -84,11 +80,13 @@ BEGIN_VS_SHADER_FLAGS( sfm_integercombine_shader, "Help for SFM integer HDR comb
 			if( g_pHardwareConfig->SupportsPixelShaders_2_b() )
 			{
 				DECLARE_DYNAMIC_PIXEL_SHADER( sfm_integercombine_ps20b );
+				SET_DYNAMIC_PIXEL_SHADER_COMBO( ISFLOAT, bIsFloat );
 				SET_DYNAMIC_PIXEL_SHADER( sfm_integercombine_ps20b );
 			}
 			else
 			{
 				DECLARE_DYNAMIC_PIXEL_SHADER( sfm_integercombine_ps20 );
+				SET_DYNAMIC_PIXEL_SHADER_COMBO( ISFLOAT, bIsFloat );
 				SET_DYNAMIC_PIXEL_SHADER( sfm_integercombine_ps20 );
 			}
 		}

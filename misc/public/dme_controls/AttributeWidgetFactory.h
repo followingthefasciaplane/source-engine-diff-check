@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -39,6 +39,7 @@ struct AttributeWidgetInfo_t
 	AttributeWidgetInfo_t()
 	{
 		m_nArrayIndex = -1;
+		m_bShowUniqueID = true;
 	}
 
 	CDmElement *m_pElement;
@@ -50,6 +51,8 @@ struct AttributeWidgetInfo_t
 	IDmNotify *m_pNotify;
 	bool m_bAutoApply;
 	bool m_bShowMemoryUsage;
+
+	bool m_bShowUniqueID;
 };
 
 

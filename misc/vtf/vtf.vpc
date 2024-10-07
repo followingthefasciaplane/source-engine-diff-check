@@ -5,6 +5,7 @@
 //-----------------------------------------------------------------------------
 
 $macro SRCDIR		".."
+
 $include "$SRCDIR\vpc_scripts\source_lib_base.vpc"
 
 $Configuration
@@ -24,6 +25,7 @@ $Project "vtf"
 		$File	"s3tc_decode.cpp" 	[$WINDOWS]
 		$File	"vtf.cpp"
 		$File	"vtf_x360.cpp"		[$X360]
+		$File	"vtf_ps3.cpp"		[$PS3]
 	}
 
 	$Folder	"Public Header Files"
@@ -39,8 +41,8 @@ $Project "vtf"
 
 	$Folder "Link Libraries" [$X360]
 	{
-		$Lib bitmap
-		$Lib mathlib
-		$Lib tier2
+		$File	"$SRCDIR\lib\public\bitmap_360.lib"
+		$File	"$SRCDIR\lib\public\mathlib_360.lib"
+		$File	"$SRCDIR\lib\public\tier2_360.lib"
 	}
 }

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -12,7 +12,7 @@
 #pragma once
 #endif
 
-#include <vgui/VGUI.h>
+#include <vgui/vgui.h>
 #include <vgui_controls/Panel.h>
 #include <vgui_controls/ProgressBar.h>
 
@@ -51,8 +51,6 @@ public:
 	};
 	int GetProgressDirection() const { return m_iProgressDirection; }
 	void SetProgressDirection( int val ) { m_iProgressDirection = val; }
-	void SetStartSegment( int val ) { m_iStartSegment = val; }
-	void SetReverseProgress( bool bReverse ) { m_bReverseProgress = bReverse; }
 
 protected:
 	virtual void Paint();
@@ -63,8 +61,6 @@ protected:
 
 private:
 	int m_iProgressDirection;
-	int m_iStartSegment;
-	bool m_bReverseProgress;
 
 	int m_nTextureId[NUM_PROGRESS_TEXTURES];
 	char *m_pszImageName[NUM_PROGRESS_TEXTURES];

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -44,6 +44,7 @@ extern bool g_LostVideoMemory;
 void MaterialSystem_DestroySortinfo( void );
 void MaterialSystem_CreateSortinfo( void );
 
+void MaterialSystem_RegisterPaintSurfaces( void );
 void InitMaterialSystem( void );
 void ShutdownMaterialSystem( void );
 void InitStartupScreen();
@@ -64,11 +65,9 @@ bool SurfNeedsLightmap( SurfaceHandle_t surfID );
 void InitWellKnownRenderTargets( void );
 void ShutdownWellKnownRenderTargets( void );
 
-void HandleServerAllowColorCorrection();
-
 void InitMaterialSystemConfig( bool bInEditMode );
 
-#ifndef SWDS
+#ifndef DEDICATED
 #	ifdef NEWMESH
 extern CUtlVector<IVertexBuffer *> g_WorldStaticMeshes;
 #	else
@@ -76,23 +75,25 @@ extern CUtlVector<IMesh *> g_WorldStaticMeshes;
 #	endif
 #endif
 
+extern CUtlVector<IMesh *> g_DepthMeshForSortID;
+
 struct materiallist_t
 {
-	short			nextBlock;
-	short			count;
-	msurface2_t		*pSurfaces[15];
+	int				nextBlock;
+	int				count;
+	msurface2_t		*pSurfaces[14];
 };
 
 struct surfacesortgroup_t
 {
-	short			listHead;
-	short			listTail;
-	unsigned short	vertexCount;
-	short			groupListIndex;
-	unsigned short	vertexCountNoDetail;
-	unsigned short	indexCountNoDetail;
-	unsigned short	triangleCount;
-	unsigned short  surfaceCount;
+	int32			listHead;
+	int32			listTail;
+	int32			groupListIndex;
+	uint32			vertexCount;
+	uint32			vertexCountNoDetail;
+	uint32			indexCountNoDetail;
+	uint32			triangleCount;
+	uint32			surfaceCount;
 };
 
 
@@ -111,12 +112,24 @@ public:
 		return groupOffset[nSortGroup] + sortID;
 	}
 
+#ifdef _PS3
+	void EnsureCapacityForSPU( int maxSortIDs, int minMaterialLists );
+
+	inline const surfacesortgroup_t &GetGroupByIndex( int groupIndex ) const
+	{
+		if (!IsGroupUsed(groupIndex))
+			return m_emptyGroup;
+		return m_groupsShared[m_groupIndices[groupIndex]];
+	}
+#else
 	inline const surfacesortgroup_t &GetGroupByIndex( int groupIndex ) const
 	{
 		if (!IsGroupUsed(groupIndex))
 			return m_emptyGroup;
 		return m_groups[groupIndex];
 	}
+#endif
+
 	inline const CUtlVector<surfacesortgroup_t *> &GetSortList( int nSortGroup ) const
 	{
 		return m_sortGroupLists[nSortGroup];
@@ -127,22 +140,86 @@ public:
 		return m_list[index];
 	}
 
+#if defined(_PS3)
+	inline const materiallist_t *GetMaterialList( void ) const
+	{
+		return &m_list[0];
+	}
+
+	inline const surfacesortgroup_t *GetGroupsShared( void ) const
+	{
+		return &m_groupsShared[0];
+	}
+
+	inline const uint16 *GetGroupIndices( void ) const
+	{
+		return &m_groupIndices[0];
+	}
+
+	inline surfacesortgroup_t **GetSortGroupLists( int nSortGroup )
+	{
+		return (m_sortGroupLists[ nSortGroup ].Base());
+	}
+
+	// base addresses of CUtlVecs for SPU
+	inline void *GetMaterialListUtlPtr( void )
+	{
+		return &m_list;
+	}
+
+	inline void *GetGroupsSharedUtlPtr( void )
+	{
+		return &m_groupsShared;
+	}
+
+	inline void *GetGroupIndicesUtlPtr( void )
+	{
+		return &m_groupIndices;
+	}
+
+	inline void *GetSortGroupListsUtlPtr( int nSortGroup )
+	{
+		return &m_sortGroupLists[ nSortGroup ];
+	}
+
+#endif
+
+
 	inline const surfacesortgroup_t &GetGroupForSortID( int sortGroup, int sortID ) const
 	{
 		return GetGroupByIndex(GetIndexForSortID(sortGroup,sortID));
 	}
 
+#if !defined(_PS3)
 	void EnsureMaxSortIDs( int newMaxSortIDs );
+#endif
+
 private:
+
 	void InitGroup( surfacesortgroup_t *pGrup );
+#ifdef _PS3
+	bool IsGroupUsed( int groupIndex ) const { return (m_groupIndices[groupIndex] != 0xFFFF); }
+	inline void MarkGroupUsed( int groupIndex ) { m_groupIndices[groupIndex] = m_groupsShared.Count(); m_groupsShared.AddToTail(); }
+	inline void MarkGroupNotUsed( int groupIndex ) { m_groupIndices[groupIndex] = 0xFFFF; }
+#else
 	bool IsGroupUsed( int groupIndex ) const { return (m_groupUsed[ (groupIndex>>3) ] & (1<<(groupIndex&7))) != 0; }
 	inline void MarkGroupUsed( int groupIndex ) { m_groupUsed[groupIndex>>3] |= (1<<(groupIndex&7)); }
 	inline void MarkGroupNotUsed( int groupIndex ) { m_groupUsed[groupIndex>>3] &= ~(1<<(groupIndex&7)); }
+#endif
 
 	CUtlVector<materiallist_t>			m_list;
+
+	// On PS3, the sparse array is smaller so that we fit on SPU
+	// and the Used flags, just become the indirection to remove the sparseness
+
+#ifdef _PS3
+	CUtlVector<surfacesortgroup_t>		m_groupsShared;			// Not sparse
+	CUtlVector<uint16>					m_groupIndices;			// Sparse
+#else
 	CUtlVector<surfacesortgroup_t>		m_groups;		// one per sortID per MAT_SORT_GROUP, sparse
 	CUtlVector<byte>					m_groupUsed;
-	
+#endif
+
 	// list of indices into m_groups in order per MAT_SORT_GROUP, compact
 	CUtlVector<surfacesortgroup_t *>	m_sortGroupLists[MAX_MAT_SORT_GROUPS];
 	surfacesortgroup_t					m_emptyGroup;
@@ -216,8 +293,7 @@ struct SurfaceCtx_t
 void SurfSetupSurfaceContext( SurfaceCtx_t& ctx, SurfaceHandle_t surfID );
 
 // Compute texture and lightmap coordinates
-void SurfComputeTextureCoordinate( SurfaceCtx_t const& ctx, SurfaceHandle_t surfID, 
-									    Vector const& vec, Vector2D& uv );
+void SurfComputeTextureCoordinate( SurfaceHandle_t surfID, Vector const& vec, float * RESTRICT uv );
 void SurfComputeLightmapCoordinate( SurfaceCtx_t const& ctx, SurfaceHandle_t surfID, 
 										 Vector const& vec, Vector2D& uv );
 

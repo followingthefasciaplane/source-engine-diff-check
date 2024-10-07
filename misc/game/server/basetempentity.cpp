@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -117,8 +117,9 @@ void CBaseTempEntity::PrecacheTempEnts( void )
 
 void CBaseTempEntity::Create( IRecipientFilter& filter, float delay )
 {
-	// temp entities can't be reliable or part of the signon message, use real entities instead
-	Assert( !filter.IsReliable() && !filter.IsInitMessage() );
+	// temp entities can't be part of the signon message, use real entities instead
+	// temp entities *can* be reliable, necessarily, due to particles.
+	Assert( !filter.IsInitMessage() );
 	Assert( delay >= -1 && delay <= 1); // 1 second max delay
 
 	engine->PlaybackTempEntity( filter, delay, 

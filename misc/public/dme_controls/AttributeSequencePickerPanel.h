@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======//
 //
 // Purpose: 
 //
@@ -14,7 +14,7 @@
 #endif
 
 #include "dme_controls/AttributeBasePickerPanel.h"
-#include "vgui_controls/PHandle.h"
+#include "vgui_controls/phandle.h"
 
 
 //-----------------------------------------------------------------------------

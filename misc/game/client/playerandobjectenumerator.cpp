@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -26,7 +26,7 @@ CPlayerAndObjectEnumerator::CPlayerAndObjectEnumerator( float radius )
 
 int	CPlayerAndObjectEnumerator::GetObjectCount()
 {
-	return m_Objects.Size();
+	return m_Objects.Count();
 }
 
 C_BaseEntity *CPlayerAndObjectEnumerator::GetObject( int index )

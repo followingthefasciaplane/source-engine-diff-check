@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright (c) 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -12,14 +12,13 @@
 #include "env_wind_shared.h"
 #include "engine/IEngineTrace.h"
 #include "tier0/vprof.h"
-#include "clienteffectprecachesystem.h"
 #include "particles_ez.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
 IMPLEMENT_CLIENTCLASS_DT_NOBASE( C_Func_Dust, DT_Func_Dust, CFunc_Dust )
-	RecvPropInt( RECVINFO(m_Color) ),
+	RecvPropInt( RECVINFO(m_Color), 0, RecvProxy_Int32ToColor32 ),
 	RecvPropInt( RECVINFO(m_SpawnRate) ),
 	RecvPropFloat( RECVINFO(m_flSizeMin) ),
 	RecvPropFloat( RECVINFO(m_flSizeMax) ),
@@ -30,6 +29,7 @@ IMPLEMENT_CLIENTCLASS_DT_NOBASE( C_Func_Dust, DT_Func_Dust, CFunc_Dust )
 	RecvPropInt( RECVINFO(m_DistMax) ),
 	RecvPropInt( RECVINFO( m_nModelIndex ) ),
 	RecvPropFloat( RECVINFO( m_FallSpeed ) ),
+	RecvPropBool( RECVINFO( m_bAffectedByWind ) ),
 	RecvPropDataTable( RECVINFO_DT( m_Collision ), 0, &REFERENCE_RECV_TABLE(DT_CollisionProperty) ),
 END_RECV_TABLE()
 
@@ -88,8 +88,10 @@ void CDustEffect::RenderParticles( CParticleRenderIterator *pIterator )
 void CDustEffect::SimulateParticles( CParticleSimulateIterator *pIterator )
 {
 	Vector vecWind;
-	GetWindspeedAtTime( gpGlobals->curtime, vecWind );
-
+	if ( m_pDust->m_bAffectedByWind )
+		GetWindspeedAtTime( gpGlobals->curtime, vecWind );
+	else
+		vecWind = Vector( 0, 0, 0 );
 
 	CFuncDustParticle *pParticle = (CFuncDustParticle*)pIterator->GetFirst();
 	while ( pParticle )
@@ -228,12 +230,12 @@ void C_Func_Dust::AttemptSpawnNewParticle()
 				pParticle->m_vVelocity.z -= m_FallSpeed;
 
 				pParticle->m_flLifetime = 0;
-				pParticle->m_flDieTime = RemapVal( rand(), 0, VALVE_RAND_MAX, m_LifetimeMin, m_LifetimeMax );
+				pParticle->m_flDieTime = RandomFloat( m_LifetimeMin, m_LifetimeMax );
 
 				if( m_DustFlags & DUSTFLAGS_SCALEMOTES )
-					pParticle->m_flSize = RemapVal( rand(), 0, VALVE_RAND_MAX, m_flSizeMin/10000.0f, m_flSizeMax/10000.0f );
+					pParticle->m_flSize = RandomFloat( m_flSizeMin/10000.0f, m_flSizeMax/10000.0f );
 				else
-					pParticle->m_flSize = RemapVal( rand(), 0, VALVE_RAND_MAX, m_flSizeMin, m_flSizeMax );
+					pParticle->m_flSize = RandomFloat( m_flSizeMin, m_flSizeMax );
 			
 				pParticle->m_Color = m_Color;
 			}

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: Used to calculate the player's view in the vehicle
 //
@@ -213,15 +213,42 @@ void SharedVehicleViewSmoothing(CBasePlayer *pPlayer,
 								bool bEnterAnimOn, bool bExitAnimOn, 
 								const Vector &vecEyeExitEndpoint, 
 								ViewSmoothingData_t *pData, 
-								float *pFOV )
+								float *pFOV, bool bForceViewToAttachment /*= false*/ )
 {
 	int eyeAttachmentIndex = pData->pVehicle->LookupAttachment( "vehicle_driver_eyes" );
 	matrix3x4_t vehicleEyePosToWorld;
 	Vector vehicleEyeOrigin;
 	QAngle vehicleEyeAngles;
+
+	// 79061: When this gets called from CreateMove the attachment point can be invalid.
+	// Forcing it to recalculate on 360 (the only platform the bug shows) for this entity and
+	// it's hierarchy.
+#if defined ( CLIENT_DLL )
+	if ( IsX360() )
+	{
+		C_BaseAnimating* pParent = (C_BaseAnimating*)pData->pVehicle->GetMoveParent();
+		while ( pParent )
+		{
+			pParent->InvalidateBoneCache();
+			pParent = (C_BaseAnimating*)pParent->GetMoveParent();
+		}
+		pData->pVehicle->InvalidateBoneCache();
+	}
+#endif
+
 	pData->pVehicle->GetAttachment( eyeAttachmentIndex, vehicleEyeOrigin, vehicleEyeAngles );
 	AngleMatrix( vehicleEyeAngles, vehicleEyePosToWorld );
 
+	if ( bForceViewToAttachment )
+	{
+		*pAbsOrigin = vehicleEyeOrigin;
+		*pAbsAngles = vehicleEyeAngles;
+		if ( pFOV != NULL )
+		{
+			*pFOV = pData->flFOV;
+		}
+		return;
+	}
 	// Dampen the eye positional change as we drive around.
 	*pAbsAngles = pPlayer->EyeAngles();
 	if ( r_VehicleViewDampen.GetInt() && pData->bDampenEyePosition )
@@ -239,8 +266,8 @@ void SharedVehicleViewSmoothing(CBasePlayer *pPlayer,
 		pData->flEnterExitDuration = pData->pVehicle->SequenceDuration( pData->pVehicle->GetSequence() );
 
 #ifdef CLIENT_DLL
-		pData->vecOriginSaved = PrevMainViewOrigin();
-		pData->vecAnglesSaved = PrevMainViewAngles();
+		pData->vecOriginSaved = PrevMainViewOrigin( pPlayer->GetSplitScreenPlayerSlot() );
+		pData->vecAnglesSaved = PrevMainViewAngles( pPlayer->GetSplitScreenPlayerSlot() );
 #endif
 
 		// Save our initial angular error, which we will blend out over the length of the animation.
@@ -273,8 +300,8 @@ void SharedVehicleViewSmoothing(CBasePlayer *pPlayer,
 		if ( frac < 1.0 )
 		{
 			// Blend to the desired vehicle eye origin
-			//Vector vecToView = (vehicleEyeOrigin - PrevMainViewOrigin());
-			//vehicleEyeOrigin = PrevMainViewOrigin() + (vecToView * SimpleSpline(frac));
+			//Vector vecToView = (vehicleEyeOrigin - PrevMainViewOrigin(pPlayer->GetSplitScreenPlayerSlot() ));
+			//vehicleEyeOrigin = PrevMainViewOrigin(pPlayer->GetSplitScreenPlayerSlot() ) + (vecToView * SimpleSpline(frac));
 			//debugoverlay->AddBoxOverlay( vehicleEyeOrigin, -Vector(1,1,1), Vector(1,1,1), vec3_angle, 0,255,255, 64, 10 );
 		}
 		else 
@@ -334,7 +361,7 @@ void SharedVehicleViewSmoothing(CBasePlayer *pPlayer,
 	// If we're playing an entry or exit animation...
 	if ( bRunningAnim || pData->bRunningEnterExit )
 	{
-		float flSplineFrac = clamp( SimpleSpline( frac ), 0.f, 1.f );
+		float flSplineFrac = clamp( SimpleSpline( frac ), 0, 1 );
 
 		// Blend out the error between the player's initial eye angles and the animation's initial
 		// eye angles over the duration of the animation. 
@@ -398,19 +425,27 @@ void SharedVehicleViewSmoothing(CBasePlayer *pPlayer,
 			
 			if ( pFOV != NULL )
 			{
+#if defined ( PORTAL2 )
+				*pFOV = Lerp( flFracFOV, flDefaultFOV, pData->flFOV );
+#else
 				if ( pData->flFOV > flDefaultFOV )
 				{
 					*pFOV = Lerp( flFracFOV, flDefaultFOV, pData->flFOV );
 				}
+#endif
 			}
 		}
 	}
 	else if ( pFOV != NULL )
 	{
+#if defined ( PORTAL2 )
+		*pFOV = pData->flFOV;
+#else
 		if ( pData->flFOV > flDefaultFOV )
 		{
 			// Not running an entry/exit anim. Just use the vehicle's FOV.
 			*pFOV = pData->flFOV;
 		}
+#endif
 	}
 }

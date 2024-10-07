@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -6,13 +6,6 @@
 #if defined( USE_SDL )
 #undef PROTECTED_THINGS_ENABLE
 #include "SDL.h"
-#include "SDL_syswm.h"
-
-#if defined( OSX )
-#define DONT_DEFINE_BOOL
-#include <objc/message.h>
-#endif
-
 #endif
 
 #if defined( WIN32 ) && !defined( _X360 ) && !defined( DX_TO_GL_ABSTRACTION )
@@ -21,16 +14,23 @@
 #endif
 
 #if defined( IS_WINDOWS_PC ) && !defined( USE_SDL )
-	#include <winsock.h>
+#include <winsock.h>
 #elif defined(_X360)
-	// nothing to include for 360
+// nothing to include for 360
 #elif defined(OSX)
+#include <Carbon/Carbon.h>
 #elif defined(LINUX)
 	#include "tier0/dynfunction.h"
 #elif defined(_WIN32)
 	#include "tier0/dynfunction.h"
+#elif defined( _PS3 )
+#include "basetypes.h"
+#include "ps3/ps3_core.h"
+#include "ps3/ps3_win32stubs.h"
+#include <cell/audio.h>
+#include <sysutil/sysutil_sysparam.h>
 #else
-	#error
+#error
 #endif
 #include "appframework/ilaunchermgr.h"
 
@@ -38,13 +38,13 @@
 #include "cl_main.h"
 #include "host.h"
 #include "quakedef.h"
-#include "tier0/vcrmode.h"
 #include "tier0/icommandline.h"
 #include "ivideomode.h"
 #include "gl_matsysiface.h"
 #include "cdll_engine_int.h"
 #include "vgui_baseui_interface.h"
 #include "iengine.h"
+#include "avi/iavi.h"
 #include "keys.h"
 #include "VGuiMatSurface/IMatSystemSurface.h"
 #include "tier3/tier3.h"
@@ -54,65 +54,72 @@
 #include "sys_dll.h"
 #include "inputsystem/iinputsystem.h"
 #include "inputsystem/ButtonCode.h"
-#ifdef WIN32
-#undef WIN32_LEAN_AND_MEAN
-  #include "unicode/unicode.h"
-#endif
 #include "GameUI/IGameUI.h"
-#include "matchmaking.h"
 #include "sv_main.h"
-#include "video/ivideoservices.h"
-#include "sys.h"
+#if defined( BINK_VIDEO )
+#include "bink/bink.h"
+#endif
+#include "vgui/IVGui.h"
+#include "IHammer.h"
+#include "inputsystem/iinputstacksystem.h"
+#include "avi/ibik.h"
 #include "materialsystem/imaterial.h"
+#include "characterset.h"
+#include "server.h"
 
+#if defined( INCLUDE_SCALEFORM )
+#include "scaleformui/scaleformui.h"
+#endif
+
+#include <vgui/ILocalize.h>
+#include <vgui/ISystem.h>
 
 #if defined( _X360 )
-  #include "xbox/xbox_win32stubs.h"
-  #include "hl2orange.spa.h"
+#include "xbox/xbox_win32stubs.h"
+#include "snd_dev_xaudio.h"
+#include "xmp.h"
+#include "xbox/xbox_launch.h"
+#include "ixboxsystem.h"
+extern IXboxSystem *g_pXboxSystem;
 #endif
 
 #if defined( LINUX )
-  #include "snd_dev_sdl.h"
+#include "snd_dev_sdl.h"
 #endif
 
+#include "matchmaking/imatchframework.h"
+#include "tier2/tier2.h"
 
-#ifdef DBGFLAG_ASSERT
+#include "tier1/fmtstr.h"
 
-  #define AssertExit( _exp )		Assert( _exp )
-  #define AssertExitF( _exp )		Assert( _exp )
-
-#else
-
-  #define AssertExit( _exp )		if ( !( _exp ) ) return;
-  #define AssertExitF( _exp )		if ( !( _exp ) ) return false;
-
+#if !defined( PLATFORM_X360 )
+#include "cl_steamauth.h"
 #endif
 
-
-
+#if defined( PLATFORM_WINDOWS )
+#include "vaudio/ivaudio.h"
+extern void VAudioInit();
+extern IVAudio * vaudio;
+#endif
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
+extern ConVar cv_vguipanel_active;
+
 void S_BlockSound (void);
 void S_UnblockSound (void);
 void ClearIOStates( void );
+
 
 //-----------------------------------------------------------------------------
 // Game input events
 //-----------------------------------------------------------------------------
 enum GameInputEventType_t
 {
-	IE_Close = IE_FirstAppEvent,
-	IE_WindowMove,
+	IE_WindowMove = IE_FirstAppEvent,
 	IE_AppActivated,
 };
-
-
-
-#ifdef WIN32
-static 	IUnicodeWindows *unicode = NULL;
-#endif
 
 //-----------------------------------------------------------------------------
 // Purpose: Main game interface, including message pump and window creation
@@ -135,13 +142,8 @@ public:
 	void			InputDetachFromGameWindow();
 
 	void			PlayStartupVideos( void );
-	
-	// This is the SDL_Window* under SDL, HWND otherwise.
+
 	void*			GetMainWindow( void );
-	// This will be the HWND under D3D + Windows (both with and without SDL), SDL_Window* everywhere else.
-	void*			GetMainDeviceWindow( void );
-	// This will be the HWND under Windows, the WindowRef under Mac, and (for now) NULL on Linux
-	void*			GetMainWindowPlatformSpecificHandle( void );
 	void**			GetMainWindowAddress( void );
 
 	void			GetDesktopInfo( int &width, int &height, int &refreshrate );
@@ -156,19 +158,17 @@ public:
 	void			SetCanPostActivateEvents( bool bEnable );
 	bool			CanPostActivateEvents();
 
+	virtual void    OnScreenSizeChanged( int nOldWidth, int nOldHeight );
+
 public:
-#ifdef USE_SDL
-	void			SetMainWindow( SDL_Window* window );
-#else
-#ifdef WIN32
+	void			SetMainWindow( HWND window );
+	void			SetActiveApp( bool active );
+#if defined( WIN32 ) || defined( _GAMECONSOLE )
 	int				WindowProc( HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam );
 #endif
-	void			SetMainWindow( HWND window );
-#endif
-	void			SetActiveApp( bool active );
-
-	bool			LoadUnicode();
-	void			UnloadUnicode();
+	// plays a video file and waits until completed. Can be interrupted by user input.
+	virtual void	PlayVideoListAndWait( const char *szVideoFileList, bool bNeedHealthWarning = false );
+	virtual void	PlayVideoAndWait(const char *filename, bool bNeedHealthWarning = false);
 
 // Message handlers.
 public:
@@ -181,10 +181,12 @@ public:
 
 	// Dispatch all the queued up messages.
 	virtual void	DispatchAllStoredGameMessages();
+
+	InputContextHandle_t GetInputContext() { return m_hInputContext; }
+
 private:
 	void			AppActivate( bool fActive );
-	void			PlayVideoAndWait( const char *filename, bool bNeedHealthWarning = false); // plays a video file and waits till it's done to return. Can be interrupted by user.
-	
+
 private:
 	void AttachToWindow();
 	void DetachFromWindow();
@@ -197,20 +199,20 @@ private:
 
 	bool			m_bExternallySuppliedWindow;
 
-#if defined( WIN32 )
+#if USE_SDL
+	SDL_Window		*m_hWindow;
+#elif defined( WIN32 ) 
 	HWND			m_hWindow;
-	#if !defined( USE_SDL )
-		HINSTANCE		m_hInstance;
+	HINSTANCE		m_hInstance;
 
-		// Stores a wndproc to chain message calls to
-		WNDPROC			m_ChainedWindowProc;
+	// Stores a wndproc to chain message calls to
+	WNDPROC			m_ChainedWindowProc;
 
-		RECT			m_rcLastRestoredClientRect;
-	#endif
-#endif
-
-#if defined( USE_SDL )
-	SDL_Window		*m_pSDLWindow;
+	RECT			m_rcLastRestoredClientRect;
+#elif OSX
+	WindowRef		m_hWindow;
+#else
+#error
 #endif
 
 	int				m_x;
@@ -218,18 +220,57 @@ private:
 	int				m_width;
 	int				m_height;
 	bool			m_bActiveApp;
-	CSysModule		*m_hUnicodeModule;
-
 	bool			m_bCanPostActivateEvents;
+
 	int				m_iDesktopWidth, m_iDesktopHeight, m_iDesktopRefreshRate;
-	void			UpdateDesktopInformation();
+	void			UpdateDesktopInformation( HWND hWnd );
 #ifdef WIN32
 	void			UpdateDesktopInformation( WPARAM wParam, LPARAM lParam );
 #endif
+	InputContextHandle_t m_hInputContext;
 };
 
 static CGame g_Game;
 IGame *game = ( IGame * )&g_Game;
+
+#if defined( _PS3 )
+extern void AbortLoadingUpdatesDueToShutdown();
+extern bool SaveUtilV2_CanShutdown();
+void PS3_sysutil_callback_forwarder( uint64 uiStatus, uint64 uiParam )
+{
+	if ( Steam3Client().SteamUtils() )
+		Steam3Client().SteamUtils()->PostPS3SysutilCallback( uiStatus, uiParam, NULL );
+	
+	if ( uiStatus == CELL_SYSUTIL_REQUEST_EXITGAME )
+	{
+		SaveUtilV2_CanShutdown();
+		AbortLoadingUpdatesDueToShutdown();
+	}
+	
+}
+int PS3_WindowProc_Proxy( xevent_t const &ev )
+{
+	// HWND = NULL
+	// message = WM_*** (arg1)
+	// LPARAM = parameter (arg2)
+	// WPARAM = 0 (arg3)
+	// Note the order of parameters to WindowProc:
+	//		WindowProc( HWND, MSG, WPARAM=arg3=0, LPARAM )
+	if ( ev.arg3 )
+	{
+		// Event has sysutil payload
+		PS3_sysutil_callback_forwarder( ev.sysutil_status, ev.sysutil_param );
+		if ( 0 && g_pMatchFramework )
+		{
+			KeyValues *kv = new KeyValues( "Ps3SysutilCallback" );
+			kv->SetUint64( "status", ev.sysutil_status );
+			kv->SetUint64( "param", ev.sysutil_param );
+			g_pMatchFramework->GetEventsSubscription()->BroadcastEvent( kv );
+		}
+	}
+	return g_Game.WindowProc( NULL, ev.arg1, ev.arg3, ev.arg2 );
+}
+#endif
 
 #if !defined( _X360 )
 const wchar_t CGame::CLASSNAME[] = L"Valve001";
@@ -246,6 +287,11 @@ bool g_bVCRSingleStep = false;
 bool g_bWaitingForStepKeyUp = false;	// Used to prevent it from running frames while you hold the S key down.
 
 bool g_bShowVCRPlaybackDisplay = true;
+
+InputContextHandle_t GetGameInputContext()
+{
+	return g_Game.GetInputContext();
+}
 
 // These are all the windows messages that can change game state.
 // See CGame::WindowProc for a description of how they work.
@@ -279,7 +325,7 @@ void CGame::AppActivate( bool fActive )
 	// Don't let video modes changes queue up another activate event
 	SetCanPostActivateEvents( false );
 
-#ifndef SWDS
+#ifndef DEDICATED
 	if ( videomode )
 	{
 		if ( fActive )
@@ -291,6 +337,13 @@ void CGame::AppActivate( bool fActive )
 			videomode->ReleaseVideo();
 		}
 	}
+#ifdef OSX
+	// make sure the mouse cursor is in a sane location, force it to screen middle
+	if ( fActive )
+	{
+		g_pLauncherMgr->SetCursorPosition( m_width/2, m_height/2 );
+	}
+#endif
 
 	if ( host_initialized )
 	{
@@ -313,20 +366,8 @@ void CGame::AppActivate( bool fActive )
 			}
 		}
 	}
-#endif // SWDS
+#endif // DEDICATED
 	SetActiveApp( fActive );
-
-#ifdef _XBOX
-	if ( host_initialized )
-	{
-		ClearIOStates();
-		if ( fActive )
-		{
-			UpdateMaterialSystemConfig();
-		}
-	}
-	SetActiveApp( fActive );
-#endif
 
 	// Allow queueing of activation events
 	SetCanPostActivateEvents( true );
@@ -335,7 +376,7 @@ void CGame::AppActivate( bool fActive )
 void CGame::HandleMsg_WindowMove( const InputEvent_t &event )
 {
 	game->SetWindowXY( event.m_nData, event.m_nData2 );
-#ifndef SWDS
+#ifndef DEDICATED
 	videomode->UpdateWindowPosition();
 #endif
 }
@@ -362,13 +403,81 @@ void CGame::DispatchInputEvent( const InputEvent_t &event )
 	case IE_ButtonPressed:
 	case IE_ButtonDoubleClicked:
 	case IE_ButtonReleased:
+	case IE_KeyTyped:
+	case IE_KeyCodeTyped:
 		Key_Event( event );
 		break;
 
+	// Broadcast analog values both to VGui & to GameUI
+	case IE_AnalogValueChanged:
+		{
+			// mouse events should go to vgui first, but joystick events should go to scaleform first
+
+			if ( event.m_nData >= JOYSTICK_FIRST_AXIS )
+			{
+				if ( g_pScaleformUI && g_pScaleformUI->HandleInputEvent( event ) )
+					break;
+
+				if ( g_pMatSystemSurface && g_pMatSystemSurface->HandleInputEvent( event ) )
+					break;
+			}
+			else
+			{
+				if ( g_pMatSystemSurface && g_pMatSystemSurface->HandleInputEvent( event ) )
+					break;
+
+#if defined( INCLUDE_SCALEFORM )
+				bool vguiActive = IsPC() && cv_vguipanel_active.GetBool();			
+			
+				// we filter input while the console is visible, to prevent scaleform from
+				//		handling anything underneath the console
+				if ( !vguiActive && g_pScaleformUI && g_pScaleformUI->HandleInputEvent( event ) )
+					break;
+#endif // INCLUDE_SCALEFORM
+			}
+
+			// Let GameUI have the next whack at events
+			if ( g_ClientDLL && g_ClientDLL->HandleGameUIEvent( event ) )
+				break;
+		}
+		break;
+
+	case IE_OverlayEvent:
+		if ( event.m_nData == 1 )
+		{
+			// Overlay has activated
+			if ( !EngineVGui()->IsGameUIVisible() && sv.IsActive() && sv.IsSinglePlayerGame() )
+			{
+				Cbuf_AddText( Cbuf_GetCurrentPlayer(), "gameui_activate" );
+			}
+		}
+		break;
+
+#ifdef _PS3
+	case IE_ControllerUnplugged:
+		WindowProc( 0, WM_SYS_INPUTDEVICESCHANGED, 0, ( 1 << event.m_nData ) );
+		break;
+	case IE_PS_CameraUnplugged:
+		g_pMatchFramework->GetEventsSubscription()->BroadcastEvent( new KeyValues( "OnPSEyeChangedStatus", "CamStatus", event.m_nData ) );
+		break;
+	case IE_PS_Move_OutOfView:
+		g_pMatchFramework->GetEventsSubscription()->BroadcastEvent( new KeyValues( "OnPSMoveOutOfViewChanged", "OutOfViewBool", event.m_nData ) );
+		break;
+#endif
 	default:
+		
 		// Let vgui have the first whack at events
 		if ( g_pMatSystemSurface && g_pMatSystemSurface->HandleInputEvent( event ) )
 			break;
+
+#if defined( INCLUDE_SCALEFORM )
+		bool vguiActive = IsPC() && cv_vguipanel_active.GetBool();			
+
+		// we filter all input while the console is visible, to prevent scaleform from
+		//		handling anything underneath the console
+		if ( !vguiActive && g_pScaleformUI && g_pScaleformUI->HandleInputEvent( event ) )
+			break;
+#endif // INCLUDE_SCALEFORM
 
 		for ( int i=0; i < ARRAYSIZE( g_GameMessageHandlers ); i++ )
 		{
@@ -385,35 +494,12 @@ void CGame::DispatchInputEvent( const InputEvent_t &event )
 
 void CGame::DispatchAllStoredGameMessages()
 {
-#if !defined( NO_VCR )
-	if ( VCRGetMode() == VCR_Playback )
-	{
-		InputEvent_t event;
-		while ( VCRHook_PlaybackGameMsg( &event ) )
-		{
-			event.m_nTick = g_pInputSystem->GetPollTick();
-			DispatchInputEvent( event );
-		}
-	}
-	else
-	{
-		int nEventCount = g_pInputSystem->GetEventCount();
-		const InputEvent_t* pEvents = g_pInputSystem->GetEventData( );
-		for ( int i = 0; i < nEventCount; ++i )
-		{
-			VCRHook_RecordGameMsg( pEvents[i] );
-			DispatchInputEvent( pEvents[i] );
-		}
-		VCRHook_RecordEndGameMsg();
-	}
-#else
 	int nEventCount = g_pInputSystem->GetEventCount();
 	const InputEvent_t* pEvents = g_pInputSystem->GetEventData( );
 	for ( int i = 0; i < nEventCount; ++i )
 	{
 		DispatchInputEvent( pEvents[i] );
 	}
-#endif
 }
 
 void VCR_EnterPausedState()
@@ -512,58 +598,22 @@ void VCR_HandlePlaybackMessages(
 //-----------------------------------------------------------------------------
 static LONG WINAPI CallDefaultWindowProc( HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam )
 {
-	if ( unicode )
-		return unicode->DefWindowProcW( hWnd, uMsg, wParam, lParam );
-	return DefWindowProc( hWnd, uMsg, wParam, lParam );
+#if defined( _GAMECONSOLE )
+	return 0;
+#else
+	return DefWindowProcW( hWnd, uMsg, wParam, lParam );
+#endif
 }
 #endif
 
 //-----------------------------------------------------------------------------
 // Purpose: The user has accepted an invitation to a game, we need to detect if 
-//			it's TF2 and restart properly if it is
+//			it's our game and restart properly if it is
 //-----------------------------------------------------------------------------
 void XBX_HandleInvite( DWORD nUserId )
 {
 #ifdef _X360
-	// Grab our invite info
-	XINVITE_INFO inviteInfo;
-	DWORD dwError = XInviteGetAcceptedInfo( nUserId, &inviteInfo );
-	if ( dwError != ERROR_SUCCESS )
-		return;
-
-	// We only care if we're asked to join an Orange Box session
-	if ( inviteInfo.dwTitleID != TITLEID_THE_ORANGE_BOX )
-	{
-		// Do the normal "we've been invited to a game" behavior
-		return;
-	}
-
-	// Otherwise, launch depending on our current MOD
-	if ( !Q_stricmp( GetCurrentMod(), "tf" ) )
-	{
-		// We're already running TF2, so just join the session
-		if ( nUserId != XBX_GetPrimaryUserId() )
-		{
-			// Switch users, the other had the invite
-			XBX_SetPrimaryUserId( nUserId );
-		}
-
-		// Kick off our join
-		g_pMatchmaking->JoinInviteSession( &(inviteInfo.hostInfo) );
-	}
-	else
-	{
-		// Save off our session ID for later retrieval
-		// NOTE: We may need to actually save off the inviter's XID and search for them later on if we took too long or the
-		//		 session they were a part of went away
-		
-		XBX_SetInviteSessionId( inviteInfo.hostInfo.sessionID );
-		XBX_SetInvitedUserId( nUserId );
-
-		// Quit via the menu path "QuitNoConfirm"
-		EngineVGui()->SystemNotification( SYSTEMNOTIFY_INVITE_SHUTDOWN );
-
-	}
+	g_pMatchFramework->AcceptInvite( nUserId );
 #endif //_X360
 }
 
@@ -575,6 +625,8 @@ int CGame::WindowProc( HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 
 {
 	LONG			lRet = 0;
+	BOOL			bCallDefault = 0;
+#if defined( WIN32 )
 	HDC				hdc;
 	PAINTSTRUCT		ps;
 
@@ -591,12 +643,7 @@ int CGame::WindowProc( HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 
 	if ( eng->GetQuitting() != IEngine::QUIT_NOTQUITTING )
 		return CallWindowProc( m_ChainedWindowProc, hWnd, uMsg, wParam, lParam );
-
-	// If we're playing back, listen to a couple input things used to drive VCR mode
-	if ( VCRGetMode() == VCR_Playback )
-	{
-		VCR_HandlePlaybackMessages( hWnd, uMsg, wParam, lParam );
-	}
+#endif // WIN32
 
 	//
 	// Note: NO engine state should be changed in here while in VCR record or playback. 
@@ -623,6 +670,15 @@ int CGame::WindowProc( HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 				event.m_nData = bActivated;
 				g_pInputSystem->PostUserEvent( event );
 			}
+			// handle focus changes including fullscreen 
+			if ( wParam == 0 )
+			{
+				S_UpdateWindowFocus( false );
+			}
+			else
+			{
+				S_UpdateWindowFocus( true );
+			}
 		}
 		break;
 
@@ -635,48 +691,43 @@ int CGame::WindowProc( HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 			return BROADCAST_QUERY_DENY;
 		}
 
-		lRet = CallWindowProc( m_ChainedWindowProc, hWnd, uMsg, wParam, lParam );
+		bCallDefault = true;
 		break;
 
+#if defined( WIN32 )
 	case WM_SYSCOMMAND:
 		if ( ( wParam == SC_MONITORPOWER ) || ( wParam == SC_KEYMENU ) || ( wParam == SC_SCREENSAVE ) )
             return lRet;
     
 		if ( wParam == SC_CLOSE ) 
 		{
-#if !defined( NO_VCR )
 			// handle the close message, but make sure 
 			// it's not because we accidently hit ALT-F4
-			if ( HIBYTE(VCRHook_GetKeyState(VK_LMENU)) || HIBYTE(VCRHook_GetKeyState(VK_RMENU) ) )
+			if ( HIBYTE(GetKeyState(VK_LMENU)) || HIBYTE(GetKeyState(VK_RMENU) ) )
 				return lRet;
-#endif
-			Cbuf_Clear();
-			Cbuf_AddText( "quit\n" );
+
+			Cbuf_Clear( Cbuf_GetCurrentPlayer() );
+			Cbuf_AddText( Cbuf_GetCurrentPlayer(), "quit\n" );
 		}
 
-#ifndef SWDS
-		if ( VCRGetMode() == VCR_Disabled )
-		{
-			S_BlockSound();
-			S_ClearBuffer();
-		}
+#ifndef DEDICATED
+		S_BlockSound();
+		S_ClearBuffer();
 #endif
 
 		lRet = CallWindowProc( m_ChainedWindowProc, hWnd, uMsg, wParam, lParam );
 
-#ifndef SWDS
-		if ( VCRGetMode() == VCR_Disabled )
-		{
-			S_UnblockSound();
-		}
+#ifndef DEDICATED
+		S_UnblockSound();
 #endif
 		break;
+#endif
 
-	case WM_CLOSE:
-		// Handle close messages
-		event.m_nType = IE_Close;
-		g_pInputSystem->PostUserEvent( event );
-		return 0;
+	case WM_SYS_SHUTDOWNREQUEST:
+		Assert( IsGameConsole() );
+		Cbuf_Clear( Cbuf_GetCurrentPlayer() );
+		Cbuf_AddText( Cbuf_GetCurrentPlayer(), "quit_gameconsole\n" );
+		break;
 
 	case WM_MOVE:
 		event.m_nType = IE_WindowMove;
@@ -685,6 +736,7 @@ int CGame::WindowProc( HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 		g_pInputSystem->PostUserEvent( event );
 		break;
 
+#if defined( WIN32 )
 	case WM_SIZE:
 		if ( wParam != SIZE_MINIMIZED )
 		{
@@ -693,7 +745,7 @@ int CGame::WindowProc( HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 		}
 		else
 		{
-#ifndef _X360
+#ifndef _GAMECONSOLE
 			// Fix the window rect to have same client area as it used to have
 			// before it got minimized
 			RECT rcWindow;
@@ -708,31 +760,95 @@ int CGame::WindowProc( HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 #endif
 		}
 		break;
+#endif
 
+	case WM_SETFOCUS:
+		if ( g_pHammer )
+			g_pHammer->NoteEngineGotFocus();
+		break;
+	
 	case WM_SYSCHAR:
 		// keep Alt-Space from happening
 		break;
 
 	case WM_COPYDATA:
-		// Hammer -> engine remote console command.
-		// Return true to indicate that the message was handled.
-		Cbuf_AddText( (const char *)(((COPYDATASTRUCT *)lParam)->lpData) );
-		Cbuf_AddText( "\n" );
-		lRet = 1;
+		//
+		// Researching all codebase legacy yields the following use cases.
+		// COPYDATASTRUCT.dwParam = 0 in most cases:
+		// + another engine instance passing over commandline when executed with -hijack param
+		// + worldcraft editor sending a command
+		// + mdlviewer sending a reload model command
+		// + Hammer -> engine remote console command.
+		// COPYDATASTRUCT.cbData = 0 in another case:
+		// + materialsystem enumerating and sending message to other materialsystem windows
+		// Our WNDPROC should return true to indicate that the message was handled.
+		//
+		{
+			COPYDATASTRUCT &cpData = *( ( COPYDATASTRUCT * ) lParam );
+			if ( cpData.cbData )
+			{	// There is payload supplied to the message
+				if ( cpData.dwData == 0 )
+				{	// Legacy protocol to put console command into command buffer
+					const char *pcBuffer = ( const char * ) ( cpData.lpData );
+					Cbuf_AddText( Cbuf_GetCurrentPlayer(), pcBuffer );
+					lRet = 1;
+				}
+				else if ( cpData.dwData == 0x43525950 ) // CRYP
+				{	// Encryption key supplied for connection
+					// Format:
+					// dot.ted.ip.adr:port>4bytes16bytesupto256bytes
+					const char *pcBuffer = ( const char * ) ( cpData.lpData );
+					const char *pcTerm = V_strnchr( pcBuffer, '>', 24 );
+					if ( pcTerm && pcTerm > pcBuffer )
+					{
+						DWORD numBytesForAddress = pcTerm - pcBuffer + 1;
+						if ( ( numBytesForAddress < cpData.cbData ) &&
+							( cpData.cbData - numBytesForAddress > sizeof( int32 ) + NET_CRYPT_KEY_LENGTH ) &&
+							( cpData.cbData - numBytesForAddress - sizeof( int32 ) - NET_CRYPT_KEY_LENGTH <= 256 ) &&
+							!!( *reinterpret_cast< const int32 * >( pcTerm + 1 ) & 0xFFFF0000 ) ) // client key must use high bits and be not zero
+						{
+							CFmtStr fmtAddr( "%.*s", pcTerm - pcBuffer, pcBuffer );
+							extern void RegisterServerCertificate( char const *szServerAddress, int numBytesPayload, void const *pvPayload );
+							RegisterServerCertificate( fmtAddr.Access(), cpData.cbData - numBytesForAddress, pcTerm + 1 );
+							lRet = 1;
+						}
+					}
+				}
+			}
+		}
 		break;
 
-#if defined( _X360 )
+#if defined( _GAMECONSOLE )
 	case WM_XREMOTECOMMAND:
-		Cbuf_AddText( (const char*)lParam );
-		Cbuf_AddText( "\n" );
+		Cbuf_AddText( Cbuf_GetCurrentPlayer(), (const char*)lParam );
 		break;
 
 	case WM_SYS_STORAGEDEVICESCHANGED:
-		if ( !EngineVGui()->IsGameUIVisible() )
+		g_pMatchFramework->GetEventsSubscription()->BroadcastEvent( new KeyValues( "OnSysStorageDevicesChanged" ) );
+		break;
+
+	case WM_LIVE_CONTENT_INSTALLED:
 		{
-			EngineVGui()->ActivateGameUI();
+#if defined ( _X360 )
+			bool isArcadeTitleUnlocked = g_pXboxSystem->IsArcadeTitleUnlocked();
+			g_pXboxSystem->UpdateArcadeTitleUnlockStatus();
+			if ( !isArcadeTitleUnlocked && g_pXboxSystem->IsArcadeTitleUnlocked() )
+			{
+				g_pMatchFramework->GetEventsSubscription()->BroadcastEvent( new KeyValues( "OnUnlockArcadeTitle" ) );
+			}
+#endif
+			g_pMatchFramework->GetEventsSubscription()->BroadcastEvent( new KeyValues( "OnDowloadableContentInstalled" ) );
+			break;
 		}
-		EngineVGui()->SystemNotification( SYSTEMNOTIFY_STORAGEDEVICES_CHANGED );	
+	case WM_LIVE_MEMBERSHIP_PURCHASED:
+		g_pMatchFramework->GetEventsSubscription()->BroadcastEvent( new KeyValues( "OnLiveMembershipPurchased" ) );
+		break;
+
+	case WM_LIVE_VOICECHAT_AWAY:
+#if defined( _X360 )
+		// If we're triggered with lParam = true, we are now using LIVE Party Chat or Private Chat, not the Game Chat Channel.
+		g_pMatchFramework->GetEventsSubscription()->BroadcastEvent( new KeyValues( "OnLiveVoicechatAway", "NotTitleChat", ( lParam == 1 ) ? "1" : "0" ) );
+#endif
 		break;
 
 	case WM_XMP_PLAYBACKCONTROLLERCHANGED:
@@ -744,60 +860,277 @@ int CGame::WindowProc( HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 		break;
 
 	case WM_SYS_SIGNINCHANGED:
-		if ( XUserGetSigninState( XBX_GetPrimaryUserId() ) == eXUserSigninState_NotSignedIn )
 		{
-			// X360TBD: User signed out - pause the game?
+
+		xevent_SYS_SIGNINCHANGED_t *pSysEvent = reinterpret_cast< xevent_SYS_SIGNINCHANGED_t * >( lParam );
+		Assert( pSysEvent );
+		if ( !pSysEvent )
+			break;
+#if defined( _X360 ) && !defined( _CERT_NODEFINE )
+		DevMsg( "WM_SYS_SIGNINCHANGED( ptr=0x%p, 0x%08X )\n", pSysEvent, pSysEvent->dwParam );
+		for ( int k = 0; k < XUSER_MAX_COUNT; ++ k )
+		{
+			XUSER_SIGNIN_STATE eState = XUserGetSigninState( k );
+			XUID xid;
+			if ( ERROR_SUCCESS != XUserGetXUID( k, &xid ) )
+				xid = 0ull;
+			DevMsg( "                    User%d [ %llx %d ] XUID=%llx state = %d\n", k, pSysEvent->xuid[k], pSysEvent->state[k], xid, eState );
 		}
-		EngineVGui()->SystemNotification( lParam ? SYSTEMNOTIFY_USER_SIGNEDIN : SYSTEMNOTIFY_USER_SIGNEDOUT );	
+#endif
+		if ( pSysEvent->dwParam )
+		{
+			//
+			//	This is a special handler for crazy Xbox LIVE notifications
+			//	when console lost connection to Secure Gateway and tries to
+			//	re-establish its security tickets and other secure crap.
+			//	See: https://bugbait.valvesoftware.com/show_bug.cgi?id=27583
+			//	TCR 001 BAS Game Stability
+			//	Repro Steps:
+			//		1) Launch [Game] with two controllers and an extra profile that is Gold, and has no Ethernet connected.
+			//		2) From the main menu select "Start Game"
+			//		3) During gameplay have the inactive controller sign into the gold profile.
+			//	It will generate the following sign-in notification:
+			//		[DBG]: [XNET:2] AuthWarn: SG connection failed!  Retrying with fresh ticket (update 0).
+			//		[DBG]: [XNET:2] AuthWarn: XNetDnsLookup timed out for XEAS.PART.XBOXLIVE.COM
+			//		[DBG]: [XNET:2] Warning: Unexpected TGT error 0x80151904!
+			//		WM_SYS_SIGNINCHANGED( 0x00000000, 0x00000001 )
+			//			User0 XUID=0 state = 0		<--- all the users state is reported as signed out with NULL XUID
+			//		WM_LIVE_CONNECTIONCHANGED( 0x00000000, 0x80151904 )
+			//			User0 XUID=0 state = 0
+			//		Followed by:
+			//		WM_SYS_SIGNINCHANGED( 0x00000000, 0x00000002 )
+			//			User0 XUID=e0000a2e5a849e42 state = 1
+			//			User1 XUID=e0000b49fab8416e state = 1
+			//	To handle this we will ignore notifications when controller mask doesn't specify signed-in controllers.
+			//
+			bool bSomeUsersStillSignedIn = false;
+			for ( int k = 0; k < XUSER_MAX_COUNT; ++ k )
+			{
+				if ( (pSysEvent->dwParam & ( 1 << k )) == 0 )
+					continue;
+
+				if ( pSysEvent->state[k] != eXUserSigninState_NotSignedIn )
+				{
+					bSomeUsersStillSignedIn = true;
+					break;
+				}
+			}
+			if ( !bSomeUsersStillSignedIn )
+			{
+				// This is the crazy notification mentioned above, discard
+				DevMsg( "WM_SYS_SIGNINCHANGED is discarded due to invalid parameters!\n" );
+				break;
+			}
+		}
+		{
+			//
+			//	This is a handler for TCR exploit of X360 blade
+			//	TCR 015 BAS Sign-In Changes
+			//	Using inactive controller to initiate sign-in, but actually
+			//	pressing last "A" button on an active controller will not
+			//	generate a sign-out message, but will generate a new sign-in
+			//	message.
+			//	We need to keep XUIDs around and if a new sign-in message is
+			//	coming from a new XUID we fake a sign-out message first and
+			//	then the new sign-in message.
+			//
+
+			MEM_ALLOC_CREDIT();
+			static XUID s_arrSignedInXUIDs[ XUSER_MAX_COUNT ] = { 0 };
+			KeyValues *pEvent = NULL;
+			for ( int k = 0; k < XUSER_MAX_COUNT; ++ k )
+			{
+				XUID xidOld = s_arrSignedInXUIDs[k];
+				XUID xidNew = pSysEvent->xuid[k];
+
+				if ( xidOld )
+				{
+					// We had a ctrl signed in this slot
+					bool bSignedOut = false;
+					
+					if ( pSysEvent->state[k] == eXUserSigninState_NotSignedIn )
+					{
+						bSignedOut = true;
+					}
+					else if ( !IsEqualXUID( xidNew, xidOld ) )
+					{
+						bSignedOut = true;
+					}
+
+					// If user signed out, add to notification
+					if ( bSignedOut )
+					{
+						if ( !pEvent )
+						{
+							pEvent = new KeyValues( "OnSysSigninChange" );
+							pEvent->SetString( "action", "signout" );
+						}
+						int idx = pEvent->GetInt( "numUsers", 0 );
+						pEvent->SetInt( "numUsers", idx + 1 );
+
+						int nMask = pEvent->GetInt( "mask", 0 );
+						pEvent->SetInt( "mask", nMask | ( 1 << k ) );
+
+						char bufUserIdx[32];
+						sprintf( bufUserIdx, "user%d", idx );
+						pEvent->SetInt( bufUserIdx, k );
+					}
+				}
+
+				s_arrSignedInXUIDs[k] = xidNew;
+			}
+			if ( pEvent )
+			{
+				g_pMatchFramework->GetEventsSubscription()->BroadcastEvent( pEvent );
+			}
+		}
+		if ( pSysEvent->dwParam )
+		{
+			MEM_ALLOC_CREDIT();
+			KeyValues *pEvent = new KeyValues( "OnSysSigninChange" );
+			pEvent->SetString( "action", "signin" );
+			for ( int k = 0; k < XUSER_MAX_COUNT; ++ k )
+			{
+				if ( (pSysEvent->dwParam & ( 1 << k )) == 0 )
+					continue;
+
+				int idx = pEvent->GetInt( "numUsers", 0 );
+				pEvent->SetInt( "numUsers", idx + 1 );
+
+				int nMask = pEvent->GetInt( "mask", 0 );
+				pEvent->SetInt( "mask", nMask | ( 1 << k ) );
+
+				char bufUserIdx[32];
+				sprintf( bufUserIdx, "user%d", idx );
+				pEvent->SetInt( bufUserIdx, k );
+			}
+			g_pMatchFramework->GetEventsSubscription()->BroadcastEvent( pEvent );
+		}
+
+		}
 		break;
+
+	case WM_LIVE_CONNECTIONCHANGED:
+#if defined( _X360 ) && !defined( _CERT )
+		DevMsg( "WM_LIVE_CONNECTIONCHANGED( 0x%08X, 0x%08X )\n", wParam, lParam );
+		for ( int k = 0; k < XUSER_MAX_COUNT; ++ k )
+		{
+			XUSER_SIGNIN_STATE eState = XUserGetSigninState( k );
+			XUID xid;
+			if ( ERROR_SUCCESS != XUserGetXUID( k, &xid ) )
+				xid = 0ull;
+			DevMsg( "                    User%d XUID=%llx state = %d\n", k, xid, eState );
+		}
+#endif
+
+		// Vitaliy [8/5/2008]
+		// Triggering any callbacks from inside WM_LIVE_CONNECTIONCHANGED is
+		// unreliable because access to accounts sign-in information is blocked.
+		// Repro case: user1 is signed into Live, user2 signs in with local account
+		// then WM_LIVE_CONNECTIONCHANGED will be triggered and XUserGetSigninState
+		// will be returning 0 for all user ids.
+		break;   // end case WM_LIVE_CONNECTIONCHANGED
 
 	case WM_SYS_UI:
 		if ( lParam )
 		{
+			// When the blade opens, release all buttons
+			g_pInputSystem->ResetInputState();
+
 			// Don't activate it if it's already active (a sub window may be active)
 			// Multiplayer doesn't want the UI to appear, since it can't pause anyway
-			if ( !EngineVGui()->IsGameUIVisible() && g_ServerGlobalVariables.maxClients == 1 )
+			if ( !EngineVGui()->IsGameUIVisible() && sv.IsActive() && sv.IsSinglePlayerGame() )
 			{
-				Cbuf_AddText( "gameui_activate" );
+				Cbuf_AddText( Cbuf_GetCurrentPlayer(), "gameui_activate" );
 			}
 		}
-		EngineVGui()->SystemNotification( lParam ? SYSTEMNOTIFY_XUIOPENING : SYSTEMNOTIFY_XUICLOSED );
+		{
+		MEM_ALLOC_CREDIT();
+		g_pMatchFramework->GetEventsSubscription()->BroadcastEvent( new KeyValues(
+			"OnSysXUIEvent", "action", lParam ? "opening" : "closed" ) );
+
+		}
 		break;
 
+	case WM_FRIENDS_FRIEND_ADDED:		// Need to update mutelist for friends changes in case of Friends-Only privileges
+	case WM_FRIENDS_FRIEND_REMOVED:
 	case WM_SYS_MUTELISTCHANGED:
-		g_pMatchmaking->UpdateMuteList();
+		{
+			MEM_ALLOC_CREDIT();
+			g_pMatchFramework->GetEventsSubscription()->BroadcastEvent( new KeyValues( "OnSysMuteListChanged" ) );
+		}
+		break;
+
+	case WM_SYS_PROFILESETTINGCHANGED:
+		{
+			MEM_ALLOC_CREDIT();
+			if ( KeyValues *kvNotify = new KeyValues( "OnSysProfileSettingsChanged" ) )
+			{
+				kvNotify->SetInt( "mask", lParam );
+				for ( int k = 0; k < XUSER_MAX_COUNT; ++ k )
+				{
+					if ( lParam & ( 1 << k ) )
+					{
+						kvNotify->SetInt( CFmtStr( "user%d", k ), 1 );
+					}
+				}
+				g_pMatchFramework->GetEventsSubscription()->BroadcastEvent( kvNotify );
+			}
+		}
 		break;
 
 	case WM_SYS_INPUTDEVICESCHANGED:
 		{
-			XINPUT_CAPABILITIES caps;
-			if ( XInputGetCapabilities( XBX_GetPrimaryUserId(), XINPUT_FLAG_GAMEPAD, &caps ) == ERROR_DEVICE_NOT_CONNECTED )
+			MEM_ALLOC_CREDIT();
+			int nDisconnectedDeviceMask = 0;
+			for ( DWORD k = 0; k < XBX_GetNumGameUsers(); ++ k )
 			{
-				if ( EngineVGui()->IsGameUIVisible() == false )
+#ifdef _X360
+				XINPUT_CAPABILITIES caps;
+				if ( XInputGetCapabilities( XBX_GetUserId(k), XINPUT_FLAG_GAMEPAD, &caps ) == ERROR_DEVICE_NOT_CONNECTED )
+#elif defined( _PS3 )
+				if ( lParam & ( 1 << XBX_GetUserId(k) ) )	// PS3 passes disconnected controllers mask in lParam
+#else
+				Assert(0);
+				if ( 0 )
+#endif
 				{
-					EngineVGui()->ActivateGameUI();
-				}
+					nDisconnectedDeviceMask |= ( 1 << k );
+				}				
+			}
+
+			if ( nDisconnectedDeviceMask )
+			{
+				// This message is only sent when one of our active users has lost their controller connection
+				// FIXME: Only do this when the guest is at fault?  A "toast" is already presented to the user by the API otherwise.
+				g_pMatchFramework->GetEventsSubscription()->BroadcastEvent( new KeyValues(
+					"OnSysInputDevicesChanged", "mask", nDisconnectedDeviceMask ) );
 			}
 		}
 		break;
 
+#if defined( _DEMO )
+	case WM_XCONTROLLER_KEY:
+		if ( lParam )
+		{
+			// any keydown activity resets the timeout or changes into interactivbe demo mode
+			Host_RestartDemoTimeout( true );
+		}
+		bCallDefault = true;
+		break;
+#endif
 #endif
 
+#if defined( WIN32 )
 	case WM_PAINT:
 		hdc = BeginPaint(hWnd, &ps);
 		RECT rcClient;
 		GetClientRect( hWnd, &rcClient );
-#ifndef SWDS		
-		// Only renders stuff if running -noshaderapi
-		if ( videomode )
-		{
-			videomode->DrawNullBackground( hdc, rcClient.right, rcClient.bottom );
-		}
-#endif
 		EndPaint(hWnd, &ps);
 		break;
+#endif
 
-#ifndef _X360
+#if defined( WIN32 ) && !defined( _X360 )
 	case WM_DISPLAYCHANGE:
 		if ( !m_iDesktopHeight || !m_iDesktopWidth )
 		{
@@ -812,26 +1145,36 @@ int CGame::WindowProc( HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 		default:
 			break;
 
-#ifndef SWDS
+#ifndef DEDICATED
 		case 14:
             if ( !videomode->IsWindowedMode() )
 				return 0;
 			break;
 #endif
 		}
-		return CallWindowProc( m_ChainedWindowProc, hWnd, uMsg, wParam, lParam);
+		bCallDefault = true;
+		break;
 
 	default:
-		lRet = CallWindowProc( m_ChainedWindowProc, hWnd, uMsg, wParam, lParam );
+		bCallDefault = true;
 	    break;
     }
+
+	if ( bCallDefault )
+	{
+#ifdef _PS3
+		lRet = 0;
+#else
+		lRet = CallWindowProc( m_ChainedWindowProc, hWnd, uMsg, wParam, lParam );
+#endif
+	}
 
     // return 0 if handled message, 1 if not
     return lRet;
 }
 #elif defined(OSX)
 
-#elif defined(LINUX)
+#elif defined( LINUX )
 
 #elif defined(_WIN32)
 
@@ -844,7 +1187,7 @@ int CGame::WindowProc( HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 //-----------------------------------------------------------------------------
 // Creates the game window 
 //-----------------------------------------------------------------------------
-static LONG WINAPI HLEngineWindowProc( HWND hWnd, UINT uMsg, WPARAM  wParam, LPARAM  lParam )
+static LRESULT WINAPI HLEngineWindowProc( HWND hWnd, UINT uMsg, WPARAM  wParam, LPARAM  lParam )
 {
 	return g_Game.WindowProc( hWnd, uMsg, wParam, lParam );
 }
@@ -925,16 +1268,30 @@ bool CGame::CreateGameWindow( void )
 		V_strcat( windowName, " - ", sizeof( windowName ) );
 		V_strcat( windowName, p, sizeof( windowName ) );
 	}
+		
+#if defined( USE_SDL )
+	modinfo->deleteThis();
+	modinfo = NULL;
 
-#if defined( WIN32 ) && !defined( USE_SDL )
-#ifndef SWDS
-	if ( IsPC() )
+	if ( !g_pLauncherMgr->CreateGameWindow( windowName, true, 0, 0, true ) )
 	{
-		if ( !LoadUnicode() )
-		{
-			return false;
-		}
+		Error( "Fatal Error:  Unable to create game window!" );
+		return false;
 	}
+	
+	char localPath[ MAX_PATH ];
+	if ( g_pFileSystem->GetLocalPath( "resource/game-icon.bmp", localPath, sizeof(localPath) ) )
+	{
+		g_pFileSystem->GetLocalCopy( localPath );
+		g_pLauncherMgr->SetApplicationIcon( localPath );
+	}
+	
+	SetMainWindow( ( HWND )g_pLauncherMgr->GetWindowRef() );
+
+	AttachToWindow( );
+	return true;
+#elif defined( WIN32 ) && !defined( USE_SDL )
+#ifndef DEDICATED
 
 #if !defined( _X360 )
 	WNDCLASSW wc;
@@ -944,7 +1301,12 @@ bool CGame::CreateGameWindow( void )
 	memset( &wc, 0, sizeof( wc ) );
 
     wc.style         = CS_OWNDC | CS_DBLCLKS;
-    wc.lpfnWndProc   = CallDefaultWindowProc;
+
+#if !defined( _GAMECONSOLE )
+    wc.lpfnWndProc   = DefWindowProcW;
+#else
+	wc.lpfnWndProc   = CallDefaultWindowProc;
+#endif
     wc.hInstance     = m_hInstance;
     wc.lpszClassName = CLASSNAME;
 
@@ -964,7 +1326,7 @@ bool CGame::CreateGameWindow( void )
 	}
 	
 
-#ifndef SWDS
+#ifndef DEDICATED
 	char const *pszGameType = modinfo->GetString( "type" );
 	if ( pszGameType && Q_stristr( pszGameType, "multiplayer" ) )
 		DoSomeSocketStuffInOrderToGetZoneAlarmToNoticeUs();
@@ -981,9 +1343,9 @@ bool CGame::CreateGameWindow( void )
 	// Oops, we didn't clean up the class registration from last cycle which
 	// might mean that the wndproc pointer is bogus
 #ifndef _X360
-	unicode->UnregisterClassW( CLASSNAME, m_hInstance );
+	UnregisterClassW( CLASSNAME, m_hInstance );
 	// Register it again
-    unicode->RegisterClassW( &wc );
+    RegisterClassW( &wc );
 #else
 	RegisterClass( &wc );
 #endif
@@ -994,7 +1356,7 @@ bool CGame::CreateGameWindow( void )
 	// Give it a frame if we want a border
 	if ( videomode->IsWindowedMode() )
 	{
-		if( !CommandLine()->FindParm( "-noborder" ) )
+		if( !CommandLine()->FindParm( "-noborder" )&& !videomode->NoWindowBorder() )
 		{
 			style |= WS_OVERLAPPEDWINDOW;
 			style &= ~WS_THICKFRAME;
@@ -1019,7 +1381,7 @@ bool CGame::CreateGameWindow( void )
 	}
 
 #if !defined( _X360 )
-	HWND hwnd = unicode->CreateWindowExW( exFlags, CLASSNAME, uc, style, 
+	HWND hwnd = CreateWindowExW( exFlags, CLASSNAME, uc, style, 
 		0, 0, w, h, NULL, NULL, m_hInstance, NULL );
 	// NOTE: On some cards, CreateWindowExW slams the FPU control word
 	SetupFPUControlWord();
@@ -1041,26 +1403,24 @@ bool CGame::CreateGameWindow( void )
 #else
 	return true;
 #endif
-#elif defined( USE_SDL )
-	bool windowed = videomode->IsWindowedMode();
-
+#elif defined(OSX)
 	modinfo->deleteThis();
 	modinfo = NULL;
 
-	if ( !g_pLauncherMgr->CreateGameWindow( windowName, windowed, 0, 0 ) )
+	if ( !g_pLauncherMgr->CreateGameWindow( windowName, true, 640, 480 ) )
 	{
 		Error( "Fatal Error:  Unable to create game window!" );
 		return false;
 	}
 	
 	char localPath[ MAX_PATH ];
-	if ( g_pFileSystem->GetLocalPath( "resource/game-icon.bmp", localPath, sizeof(localPath) ) )
+	if ( g_pFileSystem->GetLocalPath( "resource/game.icns", localPath, sizeof(localPath) ) )
 	{
 		g_pFileSystem->GetLocalCopy( localPath );
 		g_pLauncherMgr->SetApplicationIcon( localPath );
 	}
-
-	SetMainWindow( (SDL_Window*)g_pLauncherMgr->GetWindowRef() );
+	
+	SetMainWindow( g_pLauncherMgr->GetWindowRef() );
 
 	AttachToWindow( );
 	return true;
@@ -1077,7 +1437,7 @@ void CGame::DestroyGameWindow()
 {
 #if defined( USE_SDL )
 	g_pLauncherMgr->DestroyGameWindow();
-#else
+#elif defined( WIN32 )
 #ifndef DEDICATED
 	// Destroy all things created when the window was created
 	if ( !m_bExternallySuppliedWindow )
@@ -1091,8 +1451,7 @@ void CGame::DestroyGameWindow()
 		}
 
 #if !defined( _X360 )
-		unicode->UnregisterClassW( CLASSNAME, m_hInstance );
-		UnloadUnicode();
+		UnregisterClassW( CLASSNAME, m_hInstance );
 #else
 		UnregisterClass( CLASSNAME, m_hInstance );
 #endif
@@ -1102,7 +1461,13 @@ void CGame::DestroyGameWindow()
 		m_hWindow = (HWND)0;
 		m_bExternallySuppliedWindow = false;
 	}
-#endif // !defined( SWDS )
+
+#endif // !DEDICATED 
+#elif defined( OSX )
+	g_pLauncherMgr->DestroyGameWindow();
+#elif defined (_PS3)
+#else
+#error
 #endif
 }
 
@@ -1115,8 +1480,14 @@ void CGame::SetGameWindow( void *hWnd )
 	m_bExternallySuppliedWindow = true;
 #if defined( USE_SDL )
 	SDL_RaiseWindow( (SDL_Window *)hWnd );
+#elif defined( WIN32 ) 
+	SetMainWindow( (HWND)hWnd );
+#elif defined( OSX ) && defined( PLATFORM_64BITS )
+	Assert( !"unimpl OSX-64" );
+#elif defined( OSX )
+	SetUserFocusWindow( (WindowRef)hWnd );
 #else
-    SetMainWindow( (HWND)hWnd );
+#error
 #endif
 }
 
@@ -1126,23 +1497,17 @@ void CGame::SetGameWindow( void *hWnd )
 //-----------------------------------------------------------------------------
 void CGame::AttachToWindow()
 {
-#if defined( WIN32 )
 	if ( !m_hWindow )
 		return;
-#if !defined( USE_SDL )
+
+#if defined( WIN32 ) && !defined( USE_SDL )
 	m_ChainedWindowProc = (WNDPROC)GetWindowLongPtrW( m_hWindow, GWLP_WNDPROC );
 	SetWindowLongPtrW( m_hWindow, GWLP_WNDPROC, (LONG_PTR)HLEngineWindowProc );
 #endif
-#endif // WIN32
-    
 	if ( g_pInputSystem )
 	{
 		// Attach the input system window proc
-#if defined( WIN32 )
 		g_pInputSystem->AttachToWindow( (void *)m_hWindow );
-#else
-		g_pInputSystem->AttachToWindow( (void *)m_pSDLWindow );
-#endif
 		g_pInputSystem->EnableInput( true );
 		g_pInputSystem->EnableMessagePump( false );
 	}
@@ -1150,12 +1515,8 @@ void CGame::AttachToWindow()
 	if ( g_pMatSystemSurface )
 	{
 		// Attach the vgui matsurface window proc
-#if defined( WIN32 )
-		g_pMatSystemSurface->AttachToWindow( (void *)m_hWindow, true );
-#else
-		g_pMatSystemSurface->AttachToWindow( (void *)m_pSDLWindow, true );
-#endif
-		g_pMatSystemSurface->EnableWindowsMessages( true );
+        g_pMatSystemSurface->SetAppDrivesInput( true );
+        g_pMatSystemSurface->EnableWindowsMessages( true );
 	}
 }
 
@@ -1171,9 +1532,9 @@ void CGame::DetachFromWindow()
 
 	if ( g_pMatSystemSurface )
 	{
-		// Detach the vgui matsurface window proc
-		g_pMatSystemSurface->AttachToWindow( NULL );
-	}
+		// Detach the vgui matsurface
+        g_pMatSystemSurface->EnableWindowsMessages( false );
+    }
 
 	if ( g_pInputSystem )
 	{
@@ -1202,7 +1563,7 @@ bool CGame::InputAttachToGameWindow()
 	AttachToWindow();
 
 #ifndef DEDICATED
-	vgui::surface()->OnScreenSizeChanged( videomode->GetModeStereoWidth(), videomode->GetModeStereoHeight() );
+	vgui::surface()->OnScreenSizeChanged( videomode->GetModeWidth(), videomode->GetModeHeight() );
 #endif
 
 	// We don't get WM_ACTIVATEAPP messages in this case; simulate one.
@@ -1210,10 +1571,17 @@ bool CGame::InputAttachToGameWindow()
 
 #if defined( WIN32 ) && !defined( USE_SDL )
 	// Capture + hide the mouse
-	SetCapture( m_hWindow );
-#elif defined( USE_SDL )
+    g_pInputStackSystem->SetMouseCapture( m_hInputContext, true );
+#elif defined(OSX)
 	Assert( !"Impl me" );
 	return false;
+#elif defined( LINUX )
+	Assert( !"Impl me" );
+	return false;
+#elif defined(_WIN32)
+	Assert( !"Impl me" );
+	return false;
+#elif defined(_PS3)
 #else
 #error
 #endif
@@ -1232,10 +1600,15 @@ void CGame::InputDetachFromGameWindow()
 
 	// Release + show the mouse
 	ReleaseCapture();
-#elif defined( USE_SDL )
+#elif defined(OSX)
 	Assert( !"Impl me" );
+#elif defined( LINUX )
+	Assert( !"Impl me" );
+#elif defined(_WIN32)
+	Assert( !"Impl me" );
+#elif defined(_PS3)
 #else
-    #error "have no idea what OS we are building for"
+#error
 #endif
 
 	// We don't get WM_ACTIVATEAPP messages in this case; simulate one.
@@ -1246,40 +1619,32 @@ void CGame::InputDetachFromGameWindow()
 
 void CGame::PlayStartupVideos( void )
 {
-	if ( IsX360() || Plat_IsInBenchmarkMode() )
+	if ( Plat_IsInBenchmarkMode() )
 		return;
 
-#ifndef SWDS
-	
+#ifndef DEDICATED
 	// Wait for the mode to change and stabilized
 	// FIXME: There's really no way to know when this is completed, so we have to guess a time that will mostly be correct
-	if ( videomode->IsWindowedMode() == false )
+	if ( IsPC() && videomode->IsWindowedMode() == false )
 	{
-		Sys_Sleep( 1000 );
+		ThreadSleep( 1000 );
 	}
 
-	bool bEndGame = CommandLine()->CheckParm( "-endgamevid" );
-	bool bRecap = CommandLine()->CheckParm( "-recapvid" );	// FIXME: This is a temp addition until the movie playback is centralized -- jdw
-	
-	bool bNeedHealthWarning = false;
+	bool bEndGame = CommandLine()->CheckParm("-endgamevid") ? true : false;
+	bool bRecap = CommandLine()->CheckParm("-recapvid") ? true : false;	// FIXME: This is a temp addition until the movie playback is centralized -- jdw
+	bool bNeedHealthWarning = IsPC() && g_pFullFileSystem->FileExists( "media/HealthWarning.txt" );
 
-	const char *HealthFile = "media/HealthWarning.txt";
-
-	FileHandle_t	hFile;
-
-	COM_OpenFile( HealthFile, &hFile );	
-		
-	//There is no access to steam at this point so we are checking for the presence of an empty file that will only exist in the chinese depot
-	if ( hFile != FILESYSTEM_INVALID_HANDLE )
-	{
-		bNeedHealthWarning = true;
-		COM_CloseFile( hFile );
-	}
-
-	if (!bNeedHealthWarning && !bEndGame && !bRecap && (CommandLine()->CheckParm("-dev") || CommandLine()->CheckParm("-novid") || CommandLine()->CheckParm("-allowdebug")))
+	if ( !bNeedHealthWarning && 
+		!bEndGame && 
+		!bRecap && 
+		( CommandLine()->CheckParm( "-dev" ) || 
+			CommandLine()->CheckParm( "-novid" ) || 
+			CommandLine()->CheckParm( "-allowdebug" ) ||
+			CommandLine()->CheckParm( "-console" ) ||
+			CommandLine()->CheckParm( "-toconsole" ) ) )
 		return;
 
-	const char *pszFile = "media/StartupVids.txt";
+	char *pszFile = "media/startupvids" PLATFORM_EXT ".txt";
 	if ( bEndGame )
 	{
 		// Don't go back into the map that triggered this.
@@ -1292,124 +1657,785 @@ void CGame::PlayStartupVideos( void )
 	{
 		pszFile = "media/RecapVids.txt";
 	}
-	
-	int vidFileLength;
 
-	// have to use the malloc memory allocation option in COM_LoadFile since the memory system isn't set up at this point.
-	const char *buffer = (char *) COM_LoadFile( pszFile, 5, &vidFileLength );
+#if defined( PLATFORM_WINDOWS ) && defined( BINK_VIDEO )
+	VAudioInit();
+	void *pMilesEngine = NULL;
+	if ( g_pBIK) 
+	{
+		ConVarRef windows_speaker_config("windows_speaker_config");
+		
+		if ( windows_speaker_config.IsValid() && windows_speaker_config.GetInt() >= 5 )
+		{
+			pMilesEngine = vaudio ? vaudio->CreateMilesAudioEngine() : NULL;
+#if !defined( _GAMECONSOLE )
+			g_pBIK->SetMilesSoundDevice( pMilesEngine );
+#endif	//!defined( _GAMECONSOLE )
+		}
+		else
+		{
+#if !defined( _GAMECONSOLE )
+			g_pBIK->SetMilesSoundDevice( NULL );
+#endif //!defined( _GAMECONSOLE )
+		}
+	}
+#endif // defined( PLATFORM_WINDOWS ) && defined( BINK_VIDEO )
+
+	PlayVideoListAndWait( pszFile );
+
+#if defined( PLATFORM_WINDOWS ) && defined( BINK_VIDEO )
+	if ( pMilesEngine )
+	{
+#if !defined( _GAMECONSOLE )
+		g_pBIK->SetMilesSoundDevice( NULL );
+#endif //!defined( _GAMECONSOLE )
+		vaudio->DestroyMilesAudioEngine( pMilesEngine );
+	}
+#endif
+
+#endif // DEDICATED
+}
 	
-	if ((buffer == NULL) || (vidFileLength == 0))
+#define MAX_CAPTION_LENGTH	256
+
+class CCaptionSequencer
+{
+public:
+	CCaptionSequencer( void ) : m_bCaptions( false )
+	{
+		Reset();
+	}
+
+	void Reset( void )
+	{
+		// captioning start when rendering stable, not simply at movie start
+		m_CaptionStartTime = 0;
+
+		// initial priming state to fetch a caption
+		m_bShowingCaption = false;
+		m_bCaptionStale = true;
+
+		m_CurCaptionString[0] = '\0';
+		m_CurCaptionStartTime = 0.0f;
+		m_CurCaptionEndTime = 0.0f;
+		m_CurCaptionColor = 0xFFFFFFFF;
+		if ( m_CaptionBuf.TellPut() )
+		{
+			// reset to start
+			m_CaptionBuf.SeekGet( CUtlBuffer::SEEK_HEAD, 0 );
+		}
+	}
+
+	void Init( const char *pFilename )
+	{
+		m_bCaptions = false;	
+
+		if ( g_pFullFileSystem->ReadFile( pFilename, "GAME", m_CaptionBuf ) )
+		{
+			// FIXME: This needs the MOD dir to construct the filename properly!
+			//		  See me when this is being merged into Main -- jweier
+			
+			g_pVGuiLocalize->AddFile( "resource/l4d360ui_%language%.txt", "GAME", true );
+			
+			m_bCaptions = true;	
+		}
+	}
+
+	void SetStartTime( float flStarTtime )
+	{
+		// Start our captions now
+		m_CaptionStartTime = Plat_FloatTime();
+	}
+
+	bool GetCaptionToken( char *token, int tokenLen )
+	{
+		if ( !token || !tokenLen )
+			return false;
+
+		if ( !m_CaptionBuf.IsValid() )
+		{
+			// end of data
+			return false;
+		}
+
+		m_CaptionBuf.GetLine( token, tokenLen );
+#ifdef _WIN32
+		char *pCRLF = V_stristr( token, "\r" );
+		if ( pCRLF )
+		{
+			*pCRLF = '\0';
+		}
+		m_CaptionBuf.SeekGet( CUtlBuffer::SEEK_CURRENT, 1 );
+#else
+		char *pCRLF = V_stristr( token, "\n" );
+		if ( pCRLF )
+		{
+			*pCRLF = '\0';
+		}
+#endif
+		return true;
+	}
+
+	bool GetNextCaption( void )
+	{
+		char buff[MAX_CAPTION_LENGTH];
+
+		if ( !GetCaptionToken( m_CurCaptionString, sizeof( m_CurCaptionString ) ) )
+		{
+			// end of captions
+			m_CurCaptionString[0] = '\0';
+			return false;
+		}
+
+		// hex color		
+		GetCaptionToken( buff, sizeof( buff ) );
+		sscanf( buff, "%x", &m_CurCaptionColor );
+
+		// float start time
+		GetCaptionToken( buff, sizeof( buff ) );
+		m_CurCaptionStartTime = atof( buff );
+
+		// float end time
+		GetCaptionToken( buff, sizeof( buff ) );
+		m_CurCaptionEndTime = atof( buff );
+
+		// have valid caption
+		m_bCaptionStale = false;
+		return true;
+	}
+
+	const char *GetCurrentCaption( int *pColorOut )
+	{
+		if ( m_bCaptions == false )
+			return NULL;
+
+		if ( m_CaptionStartTime )
+		{
+			// get a timeline
+			float elapsed = Plat_FloatTime() - m_CaptionStartTime;
+
+			// Get a new caption because we've just finished one
+			if ( !m_bShowingCaption && m_bCaptionStale )
+			{
+				GetNextCaption();
+			}
+
+			if ( m_bShowingCaption )
+			{
+				if ( elapsed > m_CurCaptionEndTime )	// Caption just turned off
+				{
+					m_bShowingCaption = false;			// Don't draw caption
+					m_bCaptionStale = true;				// Trigger getting a new one on the next frame
+				}
+			}
+			else
+			{
+				if ( elapsed > m_CurCaptionStartTime )	// Turn Caption on
+				{
+					m_bShowingCaption = true;
+				}
+			}
+
+			if ( m_bShowingCaption && m_CurCaptionString[0] )
+			{
+				if ( pColorOut )
+				{
+					*pColorOut = m_CurCaptionColor;
+				}
+				return m_CurCaptionString;
+			}
+		}
+
+		return NULL;
+	}
+
+private:
+	// Captions / Subtitles
+	bool				m_bCaptions;
+	bool				m_bShowingCaption;
+	bool				m_bCaptionStale;
+	vgui::HScheme		m_hCaptionFont;
+	float				m_CaptionStartTime;
+	CUtlBuffer			m_CaptionBuf;
+
+	char				m_CurCaptionString[MAX_CAPTION_LENGTH];
+	float				m_CurCaptionStartTime;
+	float				m_CurCaptionEndTime;
+	unsigned int		m_CurCaptionColor;
+};
+
+// Panel for drawing subtitles on a movie panel
+
+// Panel for drawing subtitles on a movie panel
+class CSubtitlePanel : public vgui::Panel
+{
+public:
+	CSubtitlePanel( vgui::Panel *parent, const char *pMovieName, int nPlaybackHeight ) : vgui::Panel( parent, "SubtitlePanel" ) 
+	{
+		// FIXME: Need a better method for this
+		vgui::HScheme hScheme = vgui::scheme()->LoadSchemeFromFile("Resource/SourceScheme.res", "Tracker" );
+		vgui::IScheme *pNewScheme = vgui::scheme()->GetIScheme( hScheme );
+		if ( pNewScheme )
+		{	
+			m_hFont = pNewScheme->GetFont( "CloseCaption_IntroMovie", true );
+		}
+
+		m_pSubtitleLabel = new vgui::Label( this, "SubtitleLabel", L"" );
+		m_pSubtitleLabel->SetFont( m_hFont );
+		int fontTall = vgui::surface()->GetFontTall( m_hFont );
+
+		int width, height;
+		vgui::surface()->GetScreenSize( width, height );
+
+		// clamp width to title safe area
+		int xPos = width * 0.05f;
+		width *= 0.9f;
+
+		// assume video is centered
+		// must be scaled according to playback height, due to letterboxing
+		// don't want to cut into or overlap border, need to be within video, and title safe
+		// so pushes up according to font height
+		int yOffset = ( nPlaybackHeight - height )/2;
+		int yPos = ( 0.85f * nPlaybackHeight - fontTall ) - yOffset;
+
+		// captions are anchored to a baseline and grow upward
+		// any resolution changes then are title safe
+		m_pSubtitleLabel->SetPos( xPos, yPos );
+		m_pSubtitleLabel->SetTall( fontTall*2 );
+		m_pSubtitleLabel->SetWide( width );
+		m_pSubtitleLabel->SetContentAlignment( vgui::Label::a_center );
+		m_pSubtitleLabel->SetCenterWrap( true );
+
+		// Strip our extension
+		char captionFilename[MAX_QPATH];
+		Q_StripExtension( pMovieName, captionFilename, MAX_QPATH );
+
+		// Now add on the '_captions.txt' ending
+		Q_strncat( captionFilename, "_captions.txt", MAX_QPATH );
+
+		// Setup our captions
+		m_Captions.Init( captionFilename );
+	}
+
+	void StartCaptions( void )
+	{
+		m_Captions.SetStartTime( Plat_FloatTime() );
+	}
+
+	virtual void Paint( void )
+	{
+		int nColor = 0xFFFFFFFF;
+		const char *pCaptionText = m_Captions.GetCurrentCaption( &nColor );
+
+		m_pSubtitleLabel->SetText( pCaptionText );
+
+		// Pull the color out of this hex value
+		int r = ( nColor >> 24 ) & 0xFF;
+		int g = ( nColor >> 16 ) & 0xFF;
+		int b = ( nColor >> 8 ) & 0xFF;
+		int a = ( nColor >> 0 ) & 0xFF;
+		m_pSubtitleLabel->SetFgColor( Color(r,g,b,a) );
+
+		vgui::Panel::Paint();
+	}
+
+private:
+	CCaptionSequencer	m_Captions;
+
+	vgui::HFont			m_hFont;
+	vgui::Label			*m_pSubtitleLabel;
+};
+
+
+const char *lpszDubbedLanguages[] =
+{ 
+	"english",
+	"french",
+	"german",
+	"spanish",
+	"russian"
+};
+
+//-----------------------------------------------------------------------------
+// Purpose: Determines if we should be playing with captions
+//-----------------------------------------------------------------------------
+inline bool ShouldUseCaptioning( void )
+{
+	char language[64];
+
+	// Fallback to English
+	V_strncpy( language, "english", sizeof( language ) );
+
+#if !defined( NO_STEAM ) && !defined( DEDICATED )
+	// When Steam isn't running we can't get the language info... 
+	if ( Steam3Client().SteamApps() )
+	{
+		V_strncpy( language, Steam3Client().SteamApps()->GetCurrentGameLanguage(), sizeof(language) );
+	}
+#endif
+
+	// Iterate through the language we have dubbed and don't subtitle in that case
+	for ( int i = 0; i < ARRAYSIZE( lpszDubbedLanguages ); i++ )
+	{
+		if ( Q_stricmp( language, lpszDubbedLanguages[i] ) == 0 )
+			return false;
+	}
+
+	return true;
+}
+
+
+//-----------------------------------------------------------------------------
+// Purpose: Tests for players attempting to skip a movie via keypress
+//-----------------------------------------------------------------------------
+bool UserRequestingMovieSkip( void )
+{
+	if ( IsGameConsole() )
+	{
+		// Any joystick can cause the skip, so we must check all four
+		for ( int i = 0; i < XUSER_MAX_COUNT; i++ )
+		{
+			// If any of these buttons are down, we skip
+			if ( g_pInputSystem->IsButtonDown( ButtonCodeToJoystickButtonCode( KEY_XBUTTON_A, i ) ) || 
+			 	 g_pInputSystem->IsButtonDown( ButtonCodeToJoystickButtonCode( KEY_XBUTTON_B, i ) ) || 
+				 g_pInputSystem->IsButtonDown( ButtonCodeToJoystickButtonCode( KEY_XBUTTON_X, i ) ) || 
+				 g_pInputSystem->IsButtonDown( ButtonCodeToJoystickButtonCode( KEY_XBUTTON_Y, i ) ) || 
+				 g_pInputSystem->IsButtonDown( ButtonCodeToJoystickButtonCode( KEY_XBUTTON_START, i ) ) || 
+				 g_pInputSystem->IsButtonDown( ButtonCodeToJoystickButtonCode( KEY_XBUTTON_BACK, i ) ) )
+			{
+				return true;
+			}
+		}
+		
+		// Nothing pressed
+		return false;
+	}
+
+	return ( g_pInputSystem->IsButtonDown( KEY_ESCAPE ) || 
+			g_pInputSystem->IsButtonDown( KEY_SPACE ) || 
+			g_pInputSystem->IsButtonDown( KEY_ENTER ) );
+}
+
+#if defined( _X360 )
+static char const * GetConsoleLocaleRatingsBoard()
+{
+	switch ( XGetLocale() )
+	{
+	case XC_LOCALE_AUSTRALIA: return "OFLC";
+	case XC_LOCALE_AUSTRIA: return "PEGI";
+	case XC_LOCALE_BELGIUM: return "PEGI";
+	case XC_LOCALE_BRAZIL: return "";
+	case XC_LOCALE_CANADA: return "ESRB";
+	case XC_LOCALE_CHILE: return "";
+	case XC_LOCALE_CHINA: return "";
+	case XC_LOCALE_COLOMBIA: return "";
+	case XC_LOCALE_CZECH_REPUBLIC: return "PEGI";
+	case XC_LOCALE_DENMARK: return "PEGI";
+	case XC_LOCALE_FINLAND: return "PEGI";
+	case XC_LOCALE_FRANCE: return "PEGI";
+	case XC_LOCALE_GERMANY: return "USK";
+	case XC_LOCALE_GREECE: return "PEGI";
+	case XC_LOCALE_HONG_KONG: return "";
+	case XC_LOCALE_HUNGARY: return "";
+	case XC_LOCALE_INDIA: return "";
+	case XC_LOCALE_IRELAND: return "BBFCPEGI";
+	case XC_LOCALE_ITALY: return "PEGI";
+	case XC_LOCALE_JAPAN: return "CERO";
+	case XC_LOCALE_KOREA: return "GRB";
+	case XC_LOCALE_MEXICO: return "";
+	case XC_LOCALE_NETHERLANDS: return "PEGI";
+	case XC_LOCALE_NEW_ZEALAND: return "OFLC";
+	case XC_LOCALE_NORWAY: return "PEGI";
+	case XC_LOCALE_POLAND: return "PEGI";
+	case XC_LOCALE_PORTUGAL: return "PEGI";
+	case XC_LOCALE_SINGAPORE: return "";
+	case XC_LOCALE_SLOVAK_REPUBLIC: return "PEGI";
+	case XC_LOCALE_SOUTH_AFRICA: return "";
+	case XC_LOCALE_SPAIN: return "PEGI";
+	case XC_LOCALE_SWEDEN: return "PEGI";
+	case XC_LOCALE_SWITZERLAND: return "PEGI";
+	case XC_LOCALE_TAIWAN: return "";
+	case XC_LOCALE_GREAT_BRITAIN: return "BBFCPEGI";
+	case XC_LOCALE_UNITED_STATES: return "ESRB";
+	default: return NULL;
+	}
+}
+#endif
+
+void CGame::PlayVideoListAndWait( const char *szVideoFileList, bool bNeedHealthWarning /* = false */ )
+{
+#ifndef DEDICATED
+
+	CUtlBuffer vidBuffer( 0, 0, CUtlBuffer::TEXT_BUFFER );
+	if ( !g_pFullFileSystem->ReadFile( szVideoFileList, "GAME", vidBuffer ) )
 	{
 		return;
 	}
 
+#if defined( USE_SDL )
+	int CursorStateBak = SDL_ShowCursor( -1 );
+	SDL_ShowCursor( 0 );
+#elif defined( WIN32 )
 	// hide cursor while playing videos
-  #if defined( USE_SDL )
-	g_pLauncherMgr->SetMouseVisible( false );
-  #elif defined( WIN32 )
-	::ShowCursor( FALSE );
-  #endif
-
-#if defined( LINUX )
-	extern void VAudioInit();
-	VAudioInit();
-	Audio_CreateSDLAudioDevice();
+	::ShowCursor(FALSE);
+#endif
+#if defined( OSX ) && !defined( USE_SDL )
+    CGDisplayHideCursor( kCGDirectMainDisplay );
+#endif
+	
+#ifdef _X360
+	// TCR024
+	XMPOverrideBackgroundMusic();
 #endif
 
-	const char *start = buffer;
-
-	while( true )
+#ifdef _GAMECONSOLE
+	// Install movie player match framework
+	extern IMatchFramework *g_pMoviePlayer_MatchFramework;
+	bool bInstalledMoviePlayerMatchFramework = false;
+	if ( !g_pMatchFramework && IsGameConsole() )
 	{
-		start = COM_Parse(start);
-		if ( Q_strlen( com_token ) <= 0 )
+#ifdef _X360
+		XOnlineStartup();
+#endif
+		g_pMatchFramework = g_pMoviePlayer_MatchFramework;
+		bInstalledMoviePlayerMatchFramework = true;
+	}
+#ifdef _PS3
+	int iLibAudioInitCode = cellAudioInit();
+	CellAudioOutState caosDevice = {0};
+	if ( iLibAudioInitCode >= 0 )
+	{
+		int numDevices = cellAudioOutGetNumberOfDevice( CELL_AUDIO_OUT_PRIMARY );
+		if ( numDevices > 0 )
+		{
+			int iAudioState = cellAudioOutGetState( CELL_AUDIO_OUT_PRIMARY, 0, &caosDevice );
+			if ( g_pBIK && ( iAudioState >= 0 ) )
+			{
+				g_pBIK->SetPS3SoundDevice( caosDevice.soundMode.channel );
+			}
+		}
+	}
+#endif
+#endif
+
+	characterset_t breakSet;
+	CharacterSetBuild( &breakSet, "" );
+	char moviePath[MAX_PATH];
+	while ( !IsPS3QuitRequested() )
+	{
+		int nTokenSize = vidBuffer.ParseToken( &breakSet, moviePath, sizeof( moviePath ) );
+		if ( nTokenSize <= 0 )
 		{
 			break;
 		}
 
-		// get the path to the media file and play it.
-		char localPath[MAX_PATH];
-
- 		    g_pFileSystem->GetLocalPath( com_token, localPath, sizeof(localPath) );
- 		
-		PlayVideoAndWait( localPath, bNeedHealthWarning );
-		localPath[0] = 0; // just to make sure we don't play the same avi file twice in the case that one movie is there but another isn't.
+		// get the path to the file and play it.
+		PlayVideoAndWait( moviePath, bNeedHealthWarning );
 	}
 
+#ifdef _GAMECONSOLE
+#ifdef _PS3
+	if ( iLibAudioInitCode >= 0 )
+	{
+		cellAudioQuit();
+	}
+#endif
+	if ( ( g_pMatchFramework == g_pMoviePlayer_MatchFramework ) && bInstalledMoviePlayerMatchFramework )
+	{
+#ifdef _X360
+		XOnlineCleanup();
+#endif
+		g_pMatchFramework = NULL;
+	}
+#endif
+
+#ifdef _X360
+	// TCR024
+	XMPRestoreBackgroundMusic();
+#endif
+
+#if defined( USE_SDL )
+	SDL_ShowCursor( CursorStateBak );
+#elif defined( WIN32 )
 	// show cursor again
-  #if defined( USE_SDL )
-	g_pLauncherMgr->SetMouseVisible( true );
-  #elif defined( WIN32 )
-	::ShowCursor( TRUE );
-  #endif
-
-	// call free on the buffer since the buffer was malloc'd in COM_LoadFile
-	free( (void *)buffer );
-
-#endif // SWDS
+	::ShowCursor(TRUE);
+#endif
+#ifdef OSX
+    CGDisplayShowCursor( kCGDirectMainDisplay );
+#endif
+#endif // DEDICATED
 }
 
 //-----------------------------------------------------------------------------
-// Purpose: Plays a video until the video completes or ESC is pressed
-// Input  : *filename - Name of the file (relative to the filesystem)
+// Plays a Bink video until the video completes or user input cancels
 //-----------------------------------------------------------------------------
 void CGame::PlayVideoAndWait( const char *filename, bool bNeedHealthWarning )
 {
-	// do we have a filename and a video system, and not on a console?
-	if ( !filename || !filename[0] || g_pVideo == NULL )
+#if defined( BINK_VIDEO )
+
+#if defined( IS_WINDOWS_PC ) || defined( OSX ) || defined( _GAMECONSOLE )
+	if ( !filename || !filename[0] )
 		return;
 
-	// is it the valve logo file?		
-	bool bIsValveLogo = ( Q_strstr( filename, "valve.") != NULL );
+	if ( !g_pBIK )
+		return;
 
-	//Chinese health messages appears for 11 seconds, so we force a minimum delay time for those
-	float forcedMinTime = ( bIsValveLogo && bNeedHealthWarning ) ? 11.0f : -1.0f;
-
-#if defined( WIN32 ) && !defined ( _X360 )	&& !defined( USE_SDL )
-	// Black out the back of the screen once at the beginning of each video (since we're not scaling to fit)
-	HDC dc = ::GetDC( m_hWindow );
-
-	RECT rect;
-	rect.top = 0;
-	rect.bottom = m_height;
-	rect.left = 0;
-	rect.right = m_width;
-
-	HBRUSH hBlackBrush = (HBRUSH) ::GetStockObject( BLACK_BRUSH );
-	::SetViewportOrgEx( dc, 0, 0, NULL );
-	::FillRect( dc, &rect, hBlackBrush );
-	::ReleaseDC( (HWND) GetMainWindow(), dc );
-    
+#if defined( _X360 ) && defined( _DEMO )
+	// Xbox 360 is required to show ratings from the locale specific ratings board
+	if ( char const *pszRating = Q_stristr( filename, "RATINGBOARD" ) )
+	{
+		// Determine the rating of the current locale
+		char const *szRatingBoard = GetConsoleLocaleRatingsBoard();
+		if ( !szRatingBoard || !*szRatingBoard )
+			return;
+		
+		// Format it into the buffer
+		int nRatingPrefixLen = ( pszRating - filename );
+		int numBufferBytes = nRatingPrefixLen + Q_strlen( szRatingBoard ) + 32;
+		char *pchRatingBuffer = ( char * ) stackalloc( numBufferBytes );
+		Q_snprintf( pchRatingBuffer, numBufferBytes, "%.*s%s.bik", nRatingPrefixLen, filename, szRatingBoard );
+		filename = pchRatingBuffer;	// stackalloc ensures that the buffer is valid until the function returns
+	}
 #else
-	// need OS specific way to clear screen
-    
+	if ( Q_stristr( filename, "RATINGBOARD" ) )
+		return;
 #endif
 
-	VideoResult_t status = 	g_pVideo->PlayVideoFileFullScreen( filename, "GAME", GetMainWindowPlatformSpecificHandle (),
-	                                                           m_width, m_height, m_iDesktopWidth, m_iDesktopHeight, videomode->IsWindowedMode(),
-	                                                           forcedMinTime, VideoPlaybackFlags::DEFAULT_FULLSCREEN_OPTIONS | VideoPlaybackFlags::FILL_WINDOW );
+	// Supplying a NULL context will cause Bink to allocate its own
+	// FIXME: At this point we're playing at the full volume of the computer, NOT the user's set volume in the game!
+#if defined( _X360 ) 
+	if ( Audio_CreateXAudioDevice( false ) )
+	{
+    #if defined ( BINK_VIDEO )
+		if ( !g_pBIK->HookXAudio() )
+			return;
+	#endif
+	}
+#elif defined( LINUX )
+	Audio_CreateSDLAudioDevice();
+#elif defined( _PS3 )
+	// S_Init(); // fully initialize sound system here
+#elif defined( PLATFORM_WINDOWS )
+	//BinkSoundUseDirectSound( NULL );	// Bink sound is initialized by the caller now
+#endif
 
-	// Everything ok?
-	if ( status == VideoResult::SUCCESS )
+ 	CMatRenderContextPtr pRenderContext( g_pMaterialSystem );
+
+#if defined ( QUICKTIME_VIDEO )
+	IQuickTime *pVideoPlayer = g_pQuickTime;
+	QUICKTIMEMaterial_t VideoHandle;
+	QUICKTIMEMaterial_t InvalidVideoHandle = QUICKTIMEMATERIAL_INVALID;
+#elif defined( BINK_VIDEO )
+	IBik *pVideoPlayer = g_pBIK;
+	BIKHandle_t	VideoHandle;
+	BIKHandle_t InvalidVideoHandle = BIKHANDLE_INVALID;
+#else
+  #error "Need to have support for video playback enabled via source_video_base.vpc"
+#endif
+	
+	if ( !pVideoPlayer )
+		return;
+
+	// get the path to the media file and play it.
+	char localPath[MAX_PATH];
+	
+	// Are we wanting to use a quicktime ".mov" version of the media instead of what's specified?
+#if defined( FORCE_QUICKTIME ) && defined( QUICKTIME_VIDEO )
+	// is it not a .mov file extension?
+	if ( V_stristr( com_token, ".mov") == NULL )
+	{
+		// Compose Quicktime version
+		char QTPath[MAX_PATH];
+		V_strncpy( QTPath, filename, MAX_PATH );
+		V_SetExtension( QTPath, ".mov", MAX_PATH );
+		
+		g_pFileSystem->GetLocalPath( QTPath, localPath, sizeof(localPath) );
+	}
+	else
+#endif 
+	{
+		V_strncpy( localPath, filename, sizeof(localPath) );
+	}
+	
+	// Load and create our BINK or QuickTime video
+	VideoHandle = pVideoPlayer->CreateMaterial( "VideoMaterial", localPath, "GAME" );
+	if ( VideoHandle == InvalidVideoHandle )
 	{
 		return;
 	}
 
-	// We don't worry if it could not find something to could play
-	if ( status == VideoResult::VIDEO_FILE_NOT_FOUND )	
+	float flU0 = 0.0f;
+	float flV0 = 0.0f;
+	float flU1, flV1;
+	pVideoPlayer->GetTexCoordRange( VideoHandle, &flU1, &flV1 );
+
+	IMaterial *pMaterial = pVideoPlayer->GetMaterial( VideoHandle );
+
+	int nTexHeight = pMaterial->GetMappingHeight();
+	int nTexWidth = pMaterial->GetMappingWidth();
+
+	int nWidth, nHeight;
+	pVideoPlayer->GetFrameSize( VideoHandle, &nWidth, &nHeight );
+
+	const AspectRatioInfo_t &aspectRatioInfo = materials->GetAspectRatioInfo();
+
+	// Determine how the video's aspect ratio relates to the screen's
+	float flPhysicalFrameRatio = aspectRatioInfo.m_flFrameBuffertoPhysicalScalar * ( ( float )m_width / ( float )m_height );
+	float flVideoRatio = ( ( float ) nWidth / ( float ) nHeight );
+
+	int nPlaybackWidth;
+	int nPlaybackHeight;
+	
+	if ( flVideoRatio > flPhysicalFrameRatio )
 	{
-		return;
+		// Height must be adjusted
+		nPlaybackWidth = m_width;
+		// Have to account for the difference between physical and pixel aspect ratios.
+		nPlaybackHeight = ( ( float )m_width / aspectRatioInfo.m_flPhysicalToFrameBufferScalar ) / flVideoRatio;
+	}
+	else if ( flVideoRatio < flPhysicalFrameRatio )
+	{
+		// Width must be adjusted
+		// Have to account for the difference between physical and pixel aspect ratios.
+		nPlaybackWidth = ( float )m_height * flVideoRatio * aspectRatioInfo.m_flPhysicalToFrameBufferScalar;
+		nPlaybackHeight = m_height;
+	}
+	else
+	{
+		// Ratio matches
+		nPlaybackWidth = m_width;
+		nPlaybackHeight = m_height;
 	}
 
-	// Debug Builds, we want an error looked at by a developer, Release builds just send a message to the spew
-#ifdef _DEBUG
-	Error( "Error %d occurred attempting to play video file %s\n", (int) status, filename );
-#else
-	Msg( "Error %d occurred attempting to play video file %s\n", (int) status, filename );
+	// Turn off our vertex alpha for these draw calls as they don't write alpha per-vertex
+	pMaterial->SetMaterialVarFlag( MATERIAL_VAR_VERTEXALPHA, false );
+
+	// Prep the screen
+	pRenderContext->Viewport( 0, 0, m_width, m_height );
+	pRenderContext->DepthRange( 0, 1 );
+	pRenderContext->ClearColor3ub( 0, 0, 0 );
+	pRenderContext->SetToneMappingScaleLinear( Vector(1,1,1) );
+	
+	// Find our letterboxing offset
+	int xpos = ( (float) ( m_width - nPlaybackWidth ) / 2 );
+	int ypos = ( (float) ( m_height - nPlaybackHeight ) / 2 );
+
+	// Enable the input system's message pump
+	g_pInputSystem->EnableMessagePump( true );
+
+	// Panel which allows for subtitling of startup movies
+	CSubtitlePanel *pSubtitlePanel = NULL;
+
+	bool bUseCaptioning = ShouldUseCaptioning();
+	if ( bUseCaptioning )
+	{
+		// Create a panel whose purpose is to 
+		pSubtitlePanel = new CSubtitlePanel( NULL, filename, nPlaybackHeight );
+		pSubtitlePanel->SetParent( g_pMatSystemSurface->GetEmbeddedPanel() );
+		pSubtitlePanel->SetPaintBackgroundEnabled( false );
+		pSubtitlePanel->SetPaintEnabled( true );
+		pSubtitlePanel->SetBounds( 0, 0, m_width, m_height );
+		
+		// VGUI needs a chance to move this panel into its global space
+		vgui::ivgui()->RunFrame();
+
+		// Start the caption sequence
+		pSubtitlePanel->StartCaptions();
+	}
+
+	// We need to make sure that these keys have been released since last pressed, otherwise you can skip
+	// movies inadvertently 
+	bool bKeyDebounced = ( UserRequestingMovieSkip() == false );
+	bool bExitingProcess = false;
+#if defined( _DEMO ) && defined( _X360 )
+	bExitingProcess = Host_IsDemoExiting();
 #endif
 
+	while ( 1 )
+	{
+#ifdef _GAMECONSOLE
+		if ( !bExitingProcess )
+		{
+			XBX_ProcessEvents();		// Force events to be processed that will deliver us ingame invites
+			XBX_DispatchEventsQueue();	// Dispatch the events too
+		}
+#endif
+
+		// Pump messages to avoid lockups on focus change
+		g_pInputSystem->PollInputState( GetBaseLocalClient().IsActive() );
+		game->DispatchAllStoredGameMessages();
+
+		// xbox cannot skip legals
+		if ( bKeyDebounced && ( IsPC() || ( IsGameConsole() && !Q_stristr( filename, "valve" ) ) ) )
+		{
+			if ( !bExitingProcess && UserRequestingMovieSkip() )
+				break;
+		}
+		else
+		{
+			bKeyDebounced = ( UserRequestingMovieSkip() == false );
+		}
+
+		// Update our frame
+		if ( pVideoPlayer->Update( VideoHandle ) == false )
+			break;
+		
+		if( IsPS3QuitRequested() )
+			break;
+
+		pRenderContext->AntiAliasingHint( AA_HINT_MOVIE );
+
+		// Clear the draw buffer and blt the material to it
+		pRenderContext->ClearBuffers( true, true, true );
+		pRenderContext->DrawScreenSpaceRectangle( pMaterial, xpos, ypos, nPlaybackWidth, nPlaybackHeight, flU0*nTexWidth, flV0*nTexHeight, flU1*nTexWidth-1, flV1*nTexHeight-1, nTexWidth, nTexHeight );
+
+		// Draw our VGUI panel
+		if ( bUseCaptioning )
+		{
+			vgui::surface()->PaintTraverse( pSubtitlePanel->GetVPanel() );
+		}
+				
+		// Busy wait until we are ready to swap.
+#ifdef QUICKTIME_VIDEO
+		while ( !pVideoPlayer->ReadyForSwap( BIKHandle ) )
+#else
+		// TODO - is this valid with threaded bink changes?: while ( !pVideoPlayer->ReadyForSwap( BIKHandle ) )
+#endif
+		{
+			NULL;
+		}
+
+		g_pMaterialSystem->SwapBuffers();
+		
+		if ( ENABLE_BIK_PERF_SPEW )
+		{
+			// timing debug code for bink playback
+			static double flPreviousTime = -1.0;
+			double flTime = Plat_FloatTime();
+			double flDeltaTime = flTime - flPreviousTime;
+			if ( flDeltaTime > 0.0 )
+			{
+				Warning( "%0.2lf sec*60 %0.2lf fps\n", flDeltaTime * 60.0, 1.0 / flDeltaTime );
+			}
+			flPreviousTime = flTime;
+		}
+	}
+
+	// Disable the input system's message pump
+	g_pInputSystem->EnableMessagePump( false );
+
+	// Clean up the Bink video
+	if ( VideoHandle != InvalidVideoHandle )
+	{
+		pVideoPlayer->DestroyMaterial( VideoHandle );
+	}
+
+	// Clean up VGUI work
+	delete pSubtitlePanel;
+#endif
+
+#endif // BINK_VIDEO
 }
-
-
 
 
 //-----------------------------------------------------------------------------
@@ -1417,21 +2443,9 @@ void CGame::PlayVideoAndWait( const char *filename, bool bNeedHealthWarning )
 //-----------------------------------------------------------------------------
 CGame::CGame()
 {
-#if defined( USE_SDL )
-	m_pSDLWindow = 0;
-#endif
-
-#if defined( WIN32 )
-#if !defined( USE_SDL )
-	unicode = NULL;
-	m_hUnicodeModule = NULL;
-	m_hInstance = 0;
-	m_ChainedWindowProc = NULL;
-#endif
-
+#ifndef LINUX
 	m_hWindow = 0;
 #endif
-
 	m_x = m_y = 0;
 	m_width = m_height = 0;
 	m_bActiveApp = false;
@@ -1439,6 +2453,12 @@ CGame::CGame()
 	m_iDesktopWidth = 0;
 	m_iDesktopHeight = 0;
 	m_iDesktopRefreshRate = 0;
+	m_hInputContext = INPUT_CONTEXT_HANDLE_INVALID;
+#if defined( WIN32 ) && !defined( USE_SDL )
+	m_hInstance = 0;
+	m_ChainedWindowProc = NULL;
+#endif
+
 }
 
 //-----------------------------------------------------------------------------
@@ -1471,116 +2491,68 @@ bool CGame::Init( void *pvInstance )
 
 	m_hInstance = (HINSTANCE)pvInstance;
 #endif
+
+	m_hInputContext = g_pInputStackSystem->PushInputContext();
+
+	// Capture + hide the mouse
+	g_pInputStackSystem->SetMouseCapture( m_hInputContext, true );
+
 	return true;
 }
 
 
 bool CGame::Shutdown( void )
 {
+	if ( m_hInputContext != INPUT_CONTEXT_HANDLE_INVALID )
+	{
+		g_pInputStackSystem->PopInputContext();
+		m_hInputContext = INPUT_CONTEXT_HANDLE_INVALID;
+	}
+
 #if defined( WIN32 ) && !defined( USE_SDL )
 	m_hInstance = 0;
 #endif
-	return true;
-}
 
-bool CGame::LoadUnicode( void )
-{
-#ifdef WIN32
-	m_hUnicodeModule = Sys_LoadModule( "unicode" );
-	if ( !m_hUnicodeModule )
-	{
-		Error( "Unable to load unicode.dll" );
-		return false;
-	}
-
-	CreateInterfaceFn factory = Sys_GetFactory( m_hUnicodeModule );
-	if ( !factory )
-	{
-		Error( "Unable to get factory from unicode.dll" );
-		return false;
-	}
-
-	unicode = ( IUnicodeWindows * )factory( VENGINE_UNICODEINTERFACE_VERSION, NULL );
-	if ( !unicode )
-	{
-		Error( "Unable to load interface '%s' from unicode.dll", VENGINE_UNICODEINTERFACE_VERSION );
-		return false;
-	}
+#ifdef _PS3
+	AbortLoadingUpdatesDueToShutdown();
 #endif
 
 	return true;
-}
-
-void CGame::UnloadUnicode()
-{
-#ifdef WIN32
-	unicode = NULL;
-
-	if ( m_hUnicodeModule )
-	{
-		Sys_UnloadModule( m_hUnicodeModule );
-		m_hUnicodeModule = NULL;
-	}
-#endif
 }
 
 void *CGame::GetMainWindow( void )
 {
-#ifdef USE_SDL
-	return (void*)m_pSDLWindow;
-#else
-	return GetMainWindowPlatformSpecificHandle();
-#endif
-}
-
-void *CGame::GetMainDeviceWindow( void )
-{
-#if defined( DX_TO_GL_ABSTRACTION ) && defined( USE_SDL )
-	return (void*)m_pSDLWindow;
+#if defined( LINUX )
+	return 0;
 #else
 	return (void*)m_hWindow;
 #endif
 }
 
-void *CGame::GetMainWindowPlatformSpecificHandle( void )
-{
-#ifdef WIN32
-	return (void*)m_hWindow;
-#else
-	SDL_SysWMinfo pInfo;
-	SDL_VERSION( &pInfo.version );
-	if ( !SDL_GetWindowWMInfo( (SDL_Window*)m_pSDLWindow, &pInfo ) )
-	{
-		Error( "Fatal Error: Unable to get window info from SDL." );
-		return NULL;
-	}
-
-#ifdef OSX
-	id nsWindow = (id)pInfo.info.cocoa.window;
-	SEL selector = sel_registerName("windowRef");
-	id windowRef = objc_msgSend( nsWindow, selector );
-	return windowRef;
-#else
-	// Not used on Linux.
-	return NULL;
-#endif
-
-#endif // !WIN32
-}
-
-
+#if defined(USE_SDL)
 void** CGame::GetMainWindowAddress( void )
 {
-#ifdef WIN32
+	m_hWindow = (SDL_Window *)g_pLauncherMgr->GetWindowRef();
 	return (void**)&m_hWindow;
-#else
-	return NULL;
-#endif
 }
+#elif defined( WIN32 ) 
+void** CGame::GetMainWindowAddress( void )
+{
+	return (void**)&m_hWindow;
+}
+#elif defined(OSX)
+void** CGame::GetMainWindowAddress( void )
+{
+	m_hWindow = (WindowRef)g_pLauncherMgr->GetWindowRef();
+	return (void**)&m_hWindow;
+}
+#else
+#error
+#endif
 
 void CGame::GetDesktopInfo( int &width, int &height, int &refreshrate )
 {
-#if defined( USE_SDL )
+#if defined(USE_SDL)
 
 	width = 640;
 	height = 480;
@@ -1600,7 +2572,8 @@ void CGame::GetDesktopInfo( int &width, int &height, int &refreshrate )
 			}
 		}
 	}
-#else
+
+#elif defined( WIN32 )
 	// order of initialization means that this might get called early.  In that case go ahead and grab the current
 	// screen window and setup based on that.
 	// we need to do this when initializing the base list of video modes, for example
@@ -1616,12 +2589,26 @@ void CGame::GetDesktopInfo( int &width, int &height, int &refreshrate )
 	width = m_iDesktopWidth;
 	height = m_iDesktopHeight;
 	refreshrate = m_iDesktopRefreshRate;
+#elif defined(OSX)
+	if ( m_iDesktopWidth == 0 )
+			{
+		CGDirectDisplayID mainDisplay = CGMainDisplayID();
+		CGDisplayModeRef displayMode = CGDisplayCopyDisplayMode(mainDisplay);
+		width = (int)CGDisplayModeGetWidth(displayMode);
+		height = (int)CGDisplayModeGetHeight(displayMode);
+		refreshrate = (int)CGDisplayModeGetRefreshRate(displayMode);
+	}
+	width = m_iDesktopWidth;
+	height = m_iDesktopHeight;
+	refreshrate = m_iDesktopRefreshRate;
+#else
+#error
 #endif
 }
 
-void CGame::UpdateDesktopInformation( )
+void CGame::UpdateDesktopInformation( HWND hWnd )
 {
-#if defined( USE_SDL )
+#if defined(USE_SDL)
 	// Get the size of the display we will be displayed fullscreen on.
 	static ConVarRef sdl_displayindex( "sdl_displayindex" );
 	int displayIndex = sdl_displayindex.IsValid() ? sdl_displayindex.GetInt() : 0;
@@ -1632,12 +2619,20 @@ void CGame::UpdateDesktopInformation( )
 	m_iDesktopWidth = mode.w;
 	m_iDesktopHeight = mode.h;
 	m_iDesktopRefreshRate = mode.refresh_rate;
-#else
-	HDC dc = ::GetDC( m_hWindow );
+#elif defined( WIN32 ) 
+	HDC dc = ::GetDC( hWnd );
 	m_iDesktopWidth = ::GetDeviceCaps(dc, HORZRES);
 	m_iDesktopHeight = ::GetDeviceCaps(dc, VERTRES);
 	m_iDesktopRefreshRate = ::GetDeviceCaps(dc, VREFRESH);
-	::ReleaseDC( m_hWindow, dc );
+	::ReleaseDC( hWnd, dc );
+#elif defined(OSX)
+	CGDirectDisplayID mainDisplay = CGMainDisplayID();
+	CGDisplayModeRef displayMode = CGDisplayCopyDisplayMode(mainDisplay);
+	m_iDesktopWidth = (int)CGDisplayModeGetWidth(displayMode);
+	m_iDesktopHeight = (int)CGDisplayModeGetHeight(displayMode);;
+	m_iDesktopRefreshRate = (int)CGDisplayModeGetRefreshRate(displayMode);
+#else
+#error
 #endif
 }
 
@@ -1649,44 +2644,29 @@ void CGame::UpdateDesktopInformation( WPARAM wParam, LPARAM lParam )
 }
 #endif
 
-#ifndef USE_SDL
 void CGame::SetMainWindow( HWND window )
 {
+#if defined( USE_SDL )
+	m_hWindow = (SDL_Window*)window;
+#elif defined( WIN32 ) && !defined( USE_SDL )
 	m_hWindow = window;
-	
-	// update our desktop info (since the results will change if we are going to fullscreen mode)
-	if ( !m_iDesktopWidth || !m_iDesktopHeight )
-	{
-		UpdateDesktopInformation();
-	}
-}
+#elif OSX
+	m_hWindow = (WindowRef)window;
 #else
-void CGame::SetMainWindow( SDL_Window* window )
-{
-#if defined( WIN32 )
-	// For D3D, we need to access the underlying HWND of the SDL_Window.
-	// We also can't do this in GetMainDeviceWindow and just use that, because for some reason
-	// people use GetMainWindowAddress and store that pointer to our member.
-	SDL_SysWMinfo pInfo;
-	SDL_VERSION( &pInfo.version );
-	if ( !SDL_GetWindowWMInfo( (SDL_Window*)g_pLauncherMgr->GetWindowRef(), &pInfo ) )
-	{
-		Error( "Fatal Error: Unable to get window info from SDL." );
-		return;
-	}
-
-	m_hWindow = pInfo.info.win.window;
+#error
 #endif
 
-	m_pSDLWindow = window;
+	if ( IsPC() && !IsPosix() )
+	{
+		avi->SetMainWindow( (void*)window );
+	}
 
 	// update our desktop info (since the results will change if we are going to fullscreen mode)
 	if ( !m_iDesktopWidth || !m_iDesktopHeight )
 	{
-		UpdateDesktopInformation();
+		UpdateDesktopInformation( window );
 	}
 }
-#endif
 
 void CGame::SetWindowXY( int x, int y )
 {
@@ -1738,5 +2718,13 @@ bool CGame::CanPostActivateEvents()
 void CGame::SetActiveApp( bool active )
 {
 	m_bActiveApp = active;
+}
+
+void CGame::OnScreenSizeChanged( int nOldWidth, int nOldHeight )
+{
+	if ( g_ClientDLL )
+	{
+		g_ClientDLL->OnScreenSizeChanged( nOldWidth, nOldHeight );
+	}
 }
 

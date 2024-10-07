@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose:
 //
@@ -15,6 +15,7 @@
 #pragma once
 #endif
 
+#include "tier0/platform.h"
 #include "tier1/utlhash.h"
 
 #include <string_t.h> // NULL_STRING define
@@ -63,6 +64,9 @@ public:
 	const char *StringFromSymbol( int token );
 
 private:
+#ifndef _WIN32
+	unsigned _rotr ( unsigned val, int shift);
+#endif
 	unsigned int HashString( const char *pszToken );
 	
 	//---------------------------------
@@ -90,7 +94,7 @@ struct levellist_t
 {
 	DECLARE_SIMPLE_DATADESC();
 
-	char	mapName[ MAX_MAP_NAME_SAVE ];
+	char	mapName[ MAX_MAP_NAME ];
 	char	landmarkName[ 32 ];
 	edict_t	*pentLandmark;
 	Vector	vecLandmarkOrigin;
@@ -102,7 +106,7 @@ struct levellist_t
 
 struct EHandlePlaceholder_t // Engine does some of the game writing (alas, probably shouldn't), but can't see ehandle.h
 {
-	unsigned long i;
+	uint32 i;
 };
 
 //-------------------------------------
@@ -122,6 +126,11 @@ struct entitytable_t
 		globalname = NULL_STRING;
 		landmarkModelSpace.Init();
 		modelname = NULL_STRING;
+#ifdef SR_ENTS_VISIBLE
+		hEnt = NULL;
+#else
+		hEnt.i = 0;
+#endif
 	}
 
 	int			id;				// Ordinal ID of this entity (used for entity <--> pointer conversions)
@@ -168,7 +177,7 @@ struct saverestorelevelinfo_t
 	char		szLandmarkName[20];	// landmark we'll spawn near in next level
 	Vector		vecLandmarkOffset;	// for landmark transitions
 	float		time;
-	char		szCurrentMapName[MAX_MAP_NAME_SAVE];	// To check global entities
+	char		szCurrentMapName[MAX_MAP_NAME];	// To check global entities
 	int			mapVersion;
 };
 
@@ -178,7 +187,7 @@ class CGameSaveRestoreInfo
 {
 public:
 	CGameSaveRestoreInfo()
-		: tableCount( 0 ), pTable( 0 ), m_pCurrentEntity( 0 ), m_EntityToIndex( 1024 )
+		: tableCount( 0 ), pTable( 0 ), m_pCurrentEntity( 0 ), m_nEntityDataSize( 0 )
 	{
 		memset( &levelInfo, 0, sizeof( levelInfo ) );
 		modelSpaceOffset.Init( 0, 0, 0 );
@@ -214,6 +223,8 @@ public:
 	void BuildEntityHash()
 	{
 #ifdef GAME_DLL
+		MEM_ALLOC_CREDIT();
+		new (&m_EntityToIndex) CEntityToIndexHash( 1024 );
 		int i;
 		entitytable_t *pTable;
 		int nEntities = NumEntities();
@@ -229,6 +240,7 @@ public:
 	void PurgeEntityHash()
 	{
 		m_EntityToIndex.Purge();
+		Destruct( &m_EntityToIndex );
 	}
 
 	int	GetEntityIndex( const CBaseEntity *pEntity )
@@ -247,14 +259,14 @@ public:
 			else
 			{
 				int i;
-				entitytable_t *pEntTable;
+				entitytable_t *pTable;
 
 				int nEntities = NumEntities();
 				for ( i = 0; i < nEntities; i++ )
 				{
-					pEntTable = GetEntityInfo( i );
-					if ( pEntTable->hEnt == pEntity )
-						return pEntTable->id;
+					pTable = GetEntityInfo( i );
+					if ( pTable->hEnt == pEntity )
+						return pTable->id;
 				}
 			}
 		}
@@ -264,6 +276,7 @@ public:
 
 	saverestorelevelinfo_t levelInfo;
 	Vector		modelSpaceOffset;			// used only for globaly entity brushes modelled in different coordinate systems.
+	int			m_nEntityDataSize;			// total size of entity savegame data
 	
 private:
 	int			tableCount;		// Number of elements in the entity table
@@ -508,26 +521,29 @@ inline const char *CSaveRestoreSegment::StringFromSymbol( int token )
 	return "<<illegal>>";
 }
 
-/// XXX(JohnS): I'm not sure using an intrinsic has any value here, just doing the shift should be recognized by most
-///             compilers. Either way, there's no portable intrinsic.
+#ifndef _WIN32
+inline unsigned CSaveRestoreSegment::_rotr ( unsigned val, int shift)
+{
+		register unsigned lobit;        /* non-zero means lo bit set */
+		register unsigned num = val;    /* number to rotate */
 
-// Newer GCC versions provide this in this header, older did by default.
-#if !defined( _rotr ) && defined( COMPILER_GCC )
-#include <x86intrin.h>
-#endif
+		shift &= 0x1f;                  /* modulo 32 -- this will also make
+										   negative shifts work */
 
-#ifdef COMPILER_CLANG
-static __inline__ unsigned int __attribute__((__always_inline__, __nodebug__))
-_rotr(unsigned int _Value, int _Shift) {
-	_Shift &= 0x1f;
-	return _Shift ? (_Value >> _Shift) | (_Value << (32 - _Shift)) : _Value;
+		while (shift--) 
+		{
+				lobit = num & 1;        /* get high bit */
+				num >>= 1;              /* shift right one bit */
+				if (lobit)
+						num |= 0x80000000;  /* set hi bit if lo bit was set */
+		}
+
+		return num;
 }
 #endif
 
-
 inline unsigned int CSaveRestoreSegment::HashString( const char *pszToken )
 {
-	COMPILE_TIME_ASSERT( sizeof( unsigned int ) == 4 );
 	unsigned int	hash = 0;
 
 	while ( *pszToken )

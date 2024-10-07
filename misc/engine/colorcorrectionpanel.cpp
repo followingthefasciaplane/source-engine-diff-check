@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2003, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -9,12 +9,13 @@
 #include <vgui/ISurface.h>
 #include <vgui/IVGui.h>
 #include <vgui_controls/BuildGroup.h>
-#include "KeyValues.h"
+#include "keyvalues.h"
 #include <vgui_controls/Label.h>
 #include <vgui_controls/Slider.h>
 #include <vgui_controls/ComboBox.h>
 #include <vgui_controls/Controls.h>
 #include <vgui_controls/Button.h>
+#include <vgui_controls/FileOpenStateMachine.h>
 #include <vgui_controls/FileOpenDialog.h>
 #include <vgui_controls/RadioButton.h>
 #include <vgui_controls/CheckButton.h>
@@ -31,11 +32,16 @@
 #include "materialsystem/itexture.h"
 #include "vtf/vtf.h"
 #include "pixelwriter.h"
-#include "UtlSortVector.h"
+#include "utlsortvector.h"
 #include "filesystem_engine.h"
+#include "tier2/fileutils.h"
 #include "gl_matsysiface.h"
 #include "materialsystem/IColorCorrection.h"
 #include "tier2/tier2.h"
+#include "dmxloader/dmxloader.h"
+#include "dmxloader/dmxelement.h"
+#include "dmxloader/dmxattribute.h"
+#include "tier2/p4helpers.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -45,8 +51,9 @@ using namespace vgui;
 const int g_nPreviewImageWidth  = 128;
 const int g_nPreviewImageHeight =  96;
 
-ConVar mat_colorcorrection( "mat_colorcorrection", "0", FCVAR_ARCHIVE );
+ConVar mat_colorcorrection( "mat_colorcorrection", "1", FCVAR_CHEAT );
 ConVar mat_colcorrection_disableentities( "mat_colcorrection_disableentities", "0" );
+ConVar mat_colcorrection_editor( "mat_colcorrection_editor", "0" );
 
 //-----------------------------------------------------------------------------
 // CPrecisionSlider
@@ -226,6 +233,16 @@ static const char *s_pColorCorrectionToolNames[CC_TOOL_COUNT] =
 	"Color Balance Tool",
 };
 
+static const char *s_pColorCorrectionDmxElementNames[CC_TOOL_COUNT] = 
+{
+	"<none>",
+	"CDmeColorCorrectionCurvesOp",
+	"CDmeColorCorrectionLevelsOp",
+	"CDmeColorCorrectionSelectedHSVOp",
+	"CDmeColorCorrectionLookupOp",
+	"CDmeColorCorrectionColorBalanceOp",
+};
+
 
 //-----------------------------------------------------------------------------
 // Converts RGB to normalized
@@ -336,6 +353,9 @@ public:
 
 	virtual void SetBlendFactor( float flBlendFactor ) = 0;
 	virtual float GetBlendFactor( ) = 0;
+
+	virtual bool Serialize( CDmxElement *pDmxElement ) = 0;
+	virtual bool Unserialize( CDmxElement *pDmxElement ) = 0;
 };
 
 
@@ -556,7 +576,7 @@ public:
 	virtual void Release() { delete this; }
 
 	virtual const char *GetName()			  { return m_pName; }
-	virtual void SetName( const char *pName ) { V_strcpy_safe( m_pName, pName ); }
+	virtual void SetName( const char *pName ) { Q_strcpy( m_pName, pName ); }
 
 	virtual IColorOperation *Clone();
 
@@ -567,6 +587,7 @@ public:
 
 	// Controls which channels to modify (see Channel_t)
 	void SetChannelMask( int nMask );
+	int GetChannelMask() const { return m_nChannelMask; }
 
 	// Controls how much this op should take effect (1 = use 100% converted color, 0 = use 100% input color)
 	virtual void SetBlendFactor( float flBlend );
@@ -590,6 +611,10 @@ public:
 	// Iterates the control points
 	int ControlPointCount() const;
 	void GetControlPoint( int nPoint, float *pInValue, float *pOutValue );
+
+	// Serialization
+	virtual bool Serialize( CDmxElement *pElement );
+	virtual bool Unserialize( CDmxElement *pElement );
 
 private:
 	// Computes actual corrected color (expensive!!)
@@ -644,7 +669,7 @@ CCurvesColorOperation::CCurvesColorOperation() : m_ControlPoints()
 	m_bEnable = true;
 	UpdateOutColorArray();
 
-	V_strcpy_safe( m_pName, "Curves" );
+	Q_strcpy( m_pName, "Curves" );
 }
 
 
@@ -849,6 +874,44 @@ void CCurvesColorOperation::Apply( const Vector &inRGB, Vector &outRGB )
 }
 
 
+//-----------------------------------------------------------------------------
+// Serialization
+//-----------------------------------------------------------------------------
+bool CCurvesColorOperation::Serialize( CDmxElement *pElement )
+{
+	pElement->SetName( m_pName );
+	pElement->SetValue( "channelMask", m_nChannelMask );
+	pElement->SetValue( "blendFactor", m_flBlendFactor );
+	pElement->SetValue( "enabled", m_bEnable );
+	CDmxAttribute *pControlPointAttribute = pElement->AddAttribute( "controlPoints" );
+	CUtlVector< Vector >& controlPoints = pControlPointAttribute->GetArrayForEdit< Vector >();
+	int nCount = m_ControlPoints.Count();
+	for ( int i = 0; i < nCount; ++i )
+	{
+		controlPoints.AddToTail( m_ControlPoints[i] );
+	}
+	return true;
+}
+
+bool CCurvesColorOperation::Unserialize( CDmxElement *pElement )
+{
+	Q_strncpy( m_pName, pElement->GetName( ), sizeof( m_pName ) );
+	m_nChannelMask = pElement->GetValue< int >( "channelMask" );
+	m_flBlendFactor = pElement->GetValue< float >( "blendFactor" );
+	m_bEnable = pElement->GetValue< bool >( "enabled" );
+	const CUtlVector< Vector >& controlPoints = pElement->GetArray< Vector >( "controlPoints" );
+	int nCount = controlPoints.Count();
+	for ( int i = 0; i < nCount; ++i )
+	{
+		m_ControlPoints.Insert( controlPoints[i] );
+	}
+
+	UpdateOutColorArray();
+	return true;
+}
+
+
+
 IColorOperation *CCurvesColorOperation::Clone( )
 {
 	CCurvesColorOperation *pClone = new CCurvesColorOperation();
@@ -1035,11 +1098,9 @@ CColorCurvesUIPanel::CColorCurvesUIPanel( vgui::Panel *pParent, CCurvesColorOper
 		m_pColorMask->AddItem( s_pColorMaskLabel[i], NULL );
 	}
 	m_pColorMask->AddActionSignalTarget( this );
-	m_pColorMask->ActivateItem( 0 );
 
 	m_pBlendFactorSlider = new CPrecisionSlider( this, "BlendFactorSlider" );
 	m_pBlendFactorSlider->SetRange( 0, 255 );
-	m_pBlendFactorSlider->SetValue( 255 );
 	m_pBlendFactorSlider->AddActionSignalTarget( this );
 
 	m_pColorOp = pOp;
@@ -1047,6 +1108,23 @@ CColorCurvesUIPanel::CColorCurvesUIPanel( vgui::Panel *pParent, CCurvesColorOper
 	m_pCurveEditor->SetCurvesOp( m_pColorOp );
 
 	LoadControlSettings("Resource\\ColorCurvesUIPanel.res");
+
+	switch( pOp->GetChannelMask() )
+	{
+	case CCurvesColorOperation::RED_CHANNEL:
+		m_pColorMask->ActivateItem( 1 );
+		break;
+	case CCurvesColorOperation::GREEN_CHANNEL:
+		m_pColorMask->ActivateItem( 2 );
+		break;
+	case CCurvesColorOperation::BLUE_CHANNEL:
+		m_pColorMask->ActivateItem( 3 );
+		break;
+	default:
+		m_pColorMask->ActivateItem( 0 );
+		break;
+	}
+	m_pBlendFactorSlider->SetValue( 255 * pOp->GetBlendFactor() );
 }
 
 CColorCurvesUIPanel::~CColorCurvesUIPanel()
@@ -1155,14 +1233,14 @@ public:
 		ALL_CHANNELS = RED_CHANNEL | GREEN_CHANNEL | BLUE_CHANNEL,
 	};
 
-	CLevelsColorOperation();
+	CLevelsColorOperation( CColorOperationList *pList );
 
 	// Methods of IColorOperation
 	virtual void Apply( const Vector &inRGB, Vector &outRGB );
 	virtual void Release() { delete this; }
 
 	virtual const char *GetName()			  { return m_pName; }
-	virtual void SetName( const char *pName ) { V_strcpy_safe( m_pName, pName ); }
+	virtual void SetName( const char *pName ) { Q_strcpy( m_pName, pName ); }
 
 	virtual ColorCorrectionTool_t ToolID() { return CC_TOOL_LEVELS; }
 
@@ -1173,6 +1251,7 @@ public:
 
 	// Controls which channels to modify (see Channel_t)
 	void SetChannelMask( int nMask );
+	int GetChannelMask() const { return m_nChannelMask; }
 
 	// Controls how much this op should take effect (1 = use 100% converted color, 0 = use 100% input color)
 	virtual void SetBlendFactor( float flBlend );
@@ -1180,13 +1259,18 @@ public:
 
 	// Sets input levels
 	void SetInputLevels( float flMinValue, float flMidValue, float flMaxValue );
+	void GetInputLevels( float *pMinValue, float *pMidValue, float *pMaxValue );
 
 	// Sets output levels
  	void SetOutputLevels( float flMinValue, float flMaxValue );
+	void GetOutputLevels( float *pMinValue, float *pMaxValue );
 
 	// Used to set/get the list
 	CColorOperationList *GetColorOpList()				{ return m_pOpList; }
 	void SetColorOpList( CColorOperationList *pList )	{ m_pOpList = pList; }
+
+	virtual bool Serialize( CDmxElement *pElement );
+	virtual bool Unserialize( CDmxElement *pElement );
 
 private:
 	// Computes normalized input level (expensive!!)
@@ -1222,7 +1306,7 @@ private:
 //-----------------------------------------------------------------------------
 // Constructor
 //-----------------------------------------------------------------------------
-CLevelsColorOperation::CLevelsColorOperation()
+CLevelsColorOperation::CLevelsColorOperation( CColorOperationList *pList ) : m_pOpList( pList )
 {
 	m_flMinInputLevel = 0.0f;
 	m_flMidInputLevel = 0.5f;
@@ -1237,7 +1321,7 @@ CLevelsColorOperation::CLevelsColorOperation()
 	m_bEnable = true;
 	UpdateOutputLevelArray();
 
-	V_strcpy_safe( m_pName, "Levels" );
+	Q_strcpy( m_pName, "Levels" );
 }
 
 
@@ -1273,6 +1357,13 @@ void CLevelsColorOperation::SetInputLevels( float flMinValue, float flMidValue, 
 	colorcorrectiontools->UpdateColorCorrection();
 }
 
+void CLevelsColorOperation::GetInputLevels( float *pMinValue, float *pMidValue, float *pMaxValue )
+{
+	*pMinValue = m_flMinInputLevel;
+	*pMidValue = m_flMidInputLevel;
+	*pMaxValue = m_flMaxInputLevel;
+}
+
 
 //-----------------------------------------------------------------------------
 // Sets output levels
@@ -1283,6 +1374,12 @@ void CLevelsColorOperation::SetOutputLevels( float flMinValue, float flMaxValue 
 	m_flMaxOutputLevel = clamp( flMaxValue, 0.0f, 1.0f );
 	UpdateOutputLevelArray();
 	colorcorrectiontools->UpdateColorCorrection();
+}
+
+void CLevelsColorOperation::GetOutputLevels( float *pMinValue, float *pMaxValue )
+{
+	*pMinValue = m_flMinOutputLevel;
+	*pMaxValue = m_flMaxOutputLevel;
 }
 
 
@@ -1398,9 +1495,48 @@ void CLevelsColorOperation::Apply( const Vector &inRGB, Vector &outRGB )
 }
 
 
+//-----------------------------------------------------------------------------
+// Serialization
+//-----------------------------------------------------------------------------
+bool CLevelsColorOperation::Serialize( CDmxElement *pElement )
+{
+	pElement->SetName( m_pName );
+	pElement->SetValue( "channelMask", m_nChannelMask );
+	pElement->SetValue( "blendFactor", m_flBlendFactor );
+	pElement->SetValue( "enabled", m_bEnable );
+
+	pElement->SetValue( "minInputLevel", m_flMinInputLevel );
+	pElement->SetValue( "midInputLevel", m_flMidInputLevel );
+	pElement->SetValue( "maxInputLevel", m_flMaxInputLevel );
+
+	pElement->SetValue( "minOutputLevel", m_flMinOutputLevel );
+	pElement->SetValue( "maxOutputLevel", m_flMaxOutputLevel );
+
+	return true;
+}
+
+bool CLevelsColorOperation::Unserialize( CDmxElement *pElement )
+{
+	Q_strncpy( m_pName, pElement->GetName( ), sizeof( m_pName ) );
+	m_nChannelMask = pElement->GetValue< int >( "channelMask" );
+	m_flBlendFactor = pElement->GetValue< float >( "blendFactor" );
+	m_bEnable = pElement->GetValue< bool >( "enabled" );
+
+	m_flMinInputLevel = pElement->GetValue<float>( "minInputLevel" );
+	m_flMidInputLevel = pElement->GetValue<float>( "midInputLevel" );
+	m_flMaxInputLevel = pElement->GetValue<float>( "maxInputLevel" );
+
+	m_flMinOutputLevel = pElement->GetValue<float>( "minOutputLevel" );
+	m_flMaxOutputLevel = pElement->GetValue<float>( "maxOutputLevel" );
+
+	UpdateOutputLevelArray();
+	return true;
+}
+
+
 IColorOperation *CLevelsColorOperation::Clone( )
 {
-	CLevelsColorOperation *pClone = new CLevelsColorOperation;
+	CLevelsColorOperation *pClone = new CLevelsColorOperation( m_pOpList );
 
 	Q_memcpy( pClone->m_pOutValue, m_pOutValue, sizeof(float)*256.0f );
 
@@ -1415,8 +1551,6 @@ IColorOperation *CLevelsColorOperation::Clone( )
 	pClone->m_flMaxOutputLevel = m_flMaxOutputLevel;
 
 	pClone->m_bEnable = m_bEnable;
-
-	pClone->m_pOpList = m_pOpList;
 
 	Q_memcpy( pClone->m_pName, m_pName, sizeof(char)*256 );
 
@@ -1537,7 +1671,7 @@ void CColorHistogramPanel::ComputeHistogram( Rect_t &srcRect, unsigned char *pBi
 			case RGB:
 				{
 					float flGreyScale = 0.299f * col.r + 0.587f * col.g + 0.114f * col.b;
-					g = (int)(flGreyScale + 0.5f);
+					int g = (int)(flGreyScale + 0.5f);
 					g = clamp( g, 0, 255 );
 					++m_pHistogram[g];
 				}
@@ -1691,11 +1825,6 @@ CColorSlider::CColorSlider( vgui::Panel *pParent, const char *pName, int nKnobCo
 
 CColorSlider::~CColorSlider()
 {
-	if ( vgui::surface() && m_nWhiteMaterial != -1 )
-	{
-		vgui::surface()->DestroyTextureID( m_nWhiteMaterial );
-		m_nWhiteMaterial = -1;
-	}
 }
 
 
@@ -1992,11 +2121,9 @@ CColorLevelsUIPanel::CColorLevelsUIPanel( vgui::Panel *pParent, CLevelsColorOper
 		m_pColorMask->AddItem( s_pColorMaskLabel[i], NULL );
 	}
 	m_pColorMask->AddActionSignalTarget( this );
-	m_pColorMask->ActivateItem( 0 );
 
 	m_pBlendFactorSlider = new CPrecisionSlider( this, "BlendFactorSlider" );
 	m_pBlendFactorSlider->SetRange( 0, 255 );
-	m_pBlendFactorSlider->SetValue( 255 );
 	m_pBlendFactorSlider->AddActionSignalTarget( this );
 
 	m_pInputLevelSlider = new CColorSlider( this, "InputLevelSlider", 3 );
@@ -2007,12 +2134,38 @@ CColorLevelsUIPanel::CColorLevelsUIPanel( vgui::Panel *pParent, CLevelsColorOper
 	m_pOutputLevelSlider->SetRange( 0, 255 );
 	m_pOutputLevelSlider->AddActionSignalTarget( this );
 
-	m_pLevelsOp = new CLevelsColorOperation;
+	m_pLevelsOp = pOp;
 	m_pHistogramPanel = new CColorHistogramPanel( this, "Histogram", pOp );
 
-	m_pLevelsOp = pOp;
-
 	LoadControlSettings("Resource\\ColorLevelsUIPanel.res");
+
+	m_pBlendFactorSlider->SetValue( 255 * pOp->GetBlendFactor() );
+
+	float flMinValue, flMidValue, flMaxValue;
+	pOp->GetInputLevels( &flMinValue, &flMidValue, &flMaxValue );
+	m_pInputLevelSlider->SetNormalizedValue( 0, flMinValue ); 
+	m_pInputLevelSlider->SetNormalizedValue( 2, flMidValue ); 
+	m_pInputLevelSlider->SetNormalizedValue( 1, flMaxValue ); 
+
+	pOp->GetOutputLevels( &flMinValue, &flMaxValue );
+	m_pOutputLevelSlider->SetNormalizedValue( 0, flMinValue ); 
+	m_pOutputLevelSlider->SetNormalizedValue( 1, flMaxValue ); 
+
+	switch( pOp->GetChannelMask() )
+	{
+	case CCurvesColorOperation::RED_CHANNEL:
+		m_pColorMask->ActivateItem( 1 );
+		break;
+	case CCurvesColorOperation::GREEN_CHANNEL:
+		m_pColorMask->ActivateItem( 2 );
+		break;
+	case CCurvesColorOperation::BLUE_CHANNEL:
+		m_pColorMask->ActivateItem( 3 );
+		break;
+	default:
+		m_pColorMask->ActivateItem( 0 );
+		break;
+	}
 
 	ResetBlendFactorSlider();
 }
@@ -2150,7 +2303,7 @@ void CColorLevelsUIPanel::OnTextChanged( KeyValues *data )
 class CSelectedHSVOperation : public IColorOperation
 {
 public:
-	CSelectedHSVOperation();
+	CSelectedHSVOperation( CColorOperationList *pList );
 
 	// Selection methods
 	enum SelectionMethod_t
@@ -2182,7 +2335,7 @@ public:
 	virtual void Release() { delete this; }
 
 	virtual const char *GetName()			  { return m_pName; }
-	virtual void SetName( const char *pName ) { V_strcpy_safe( m_pName, pName ); }
+	virtual void SetName( const char *pName ) { Q_strcpy( m_pName, pName ); }
 
 	virtual ColorCorrectionTool_t ToolID() { return CC_TOOL_SELECTED_HSV; }
 
@@ -2192,6 +2345,7 @@ public:
 	virtual void SetEnabled( bool bEnable ) { m_bEnable = bEnable; }
 
 	void AddSelectedColor( unsigned char r, unsigned char g, unsigned char b );
+	void AddSelectedColorHSV( unsigned char h, unsigned char s, unsigned char v );
 	void ClearSelectedColors( );
 
 	float GetSelectionAmount( unsigned char r, unsigned char g, unsigned char b ) const;
@@ -2222,6 +2376,9 @@ public:
 	CColorOperationList *GetColorOpList()				{ return m_pOpList; }
 	void SetColorOpList( CColorOperationList *pList )	{ m_pOpList = pList; }
 
+	virtual bool Serialize( CDmxElement *pDmxElement );
+	virtual bool Unserialize( CDmxElement *pDmxElement );
+
 private:
 	CColorOperationList *m_pOpList;
 
@@ -2248,7 +2405,7 @@ private:
 //-----------------------------------------------------------------------------
 // Constructor
 //-----------------------------------------------------------------------------
-CSelectedHSVOperation::CSelectedHSVOperation()
+CSelectedHSVOperation::CSelectedHSVOperation( CColorOperationList *pList ) : m_pOpList( pList )
 {
 	m_SelectionMethod = SELECT_NEARBY_RGB;
 	m_DeltaHSV.Init( 0, 0, 0 );
@@ -2263,7 +2420,7 @@ CSelectedHSVOperation::CSelectedHSVOperation()
 
 	m_bEnable = true;
 
-	V_strcpy_safe( m_pName, "HSV" );
+	Q_strcpy( m_pName, "HSV" );
 }
 
 
@@ -2433,6 +2590,19 @@ void CSelectedHSVOperation::AddSelectedColor( unsigned char r, unsigned char g, 
 	colorcorrectiontools->UpdateColorCorrection();
 }
 
+void CSelectedHSVOperation::AddSelectedColorHSV( unsigned char h, unsigned char s, unsigned char v )
+{
+	Vector color, hsv;
+	hsv.x = h / 255.0f;
+	hsv.y = s / 255.0f;
+	hsv.z = v / 255.0f;
+	HSVtoRGB( hsv, color );
+	m_SelectedRGBs.AddToTail( color );
+	m_SelectedHSVs.AddToTail( hsv );
+
+	colorcorrectiontools->UpdateColorCorrection();
+}
+
 void CSelectedHSVOperation::ClearSelectedColors( )
 {
 	m_SelectedRGBs.RemoveAll();
@@ -2528,9 +2698,81 @@ void CSelectedHSVOperation::Apply( const Vector &inRGB, Vector &outRGB )
 	VectorLerp( inRGB, outRGB, flSelectionAmount * m_flBlendFactor, outRGB ); 
 }
 
+
+//-----------------------------------------------------------------------------
+// Serialization
+//-----------------------------------------------------------------------------
+bool CSelectedHSVOperation::Serialize( CDmxElement *pElement )
+{
+	pElement->SetName( m_pName );
+	pElement->SetValue( "blendFactor", m_flBlendFactor );
+	pElement->SetValue( "enabled", m_bEnable );
+
+	CDmxAttribute *pSelectedRGBAttribute = pElement->AddAttribute( "selectedRGBs" );
+	CUtlVector< Vector >& selectedRGBs = pSelectedRGBAttribute->GetArrayForEdit< Vector >();
+	int nCount = m_SelectedRGBs.Count();
+	for ( int i = 0; i < nCount; ++i )
+	{
+		selectedRGBs.AddToTail( m_SelectedRGBs[i] );
+	}
+
+	CDmxAttribute *pSelectedHSVAttribute = pElement->AddAttribute( "selectedHSVs" );
+	CUtlVector< Vector >& selectedHSVs = pSelectedHSVAttribute->GetArrayForEdit< Vector >();
+	nCount = m_SelectedHSVs.Count();
+	for ( int i = 0; i < nCount; ++i )
+	{
+		selectedHSVs.AddToTail( m_SelectedHSVs[i] );
+	}
+
+	pElement->SetValue<int>( "selectionMethod", m_SelectionMethod );
+
+	pElement->SetValue( "deltaHSV", m_DeltaHSV );
+
+	pElement->SetValue( "tolerance", m_Tolerance );
+	pElement->SetValue( "fuzziness", m_Fuzziness );
+
+	pElement->SetValue( "colorize", m_bColorize );
+	pElement->SetValue( "invertSelection", m_bInvertSelection );
+
+	return true;
+}
+
+bool CSelectedHSVOperation::Unserialize( CDmxElement *pElement )
+{
+	Q_strncpy( m_pName, pElement->GetName( ), sizeof( m_pName ) );
+	m_flBlendFactor = pElement->GetValue< float >( "blendFactor" );
+	m_bEnable = pElement->GetValue< bool >( "enabled" );
+
+	const CUtlVector< Vector >& selectedRGBs = pElement->GetArray< Vector >( "selectedRGBs" );
+	int nCount = selectedRGBs.Count();
+	for ( int i = 0; i < nCount; ++i )
+	{
+		m_SelectedRGBs.AddToTail( selectedRGBs[i] );
+	}
+
+	const CUtlVector< Vector >& selectedHSVs = pElement->GetArray< Vector >( "selectedHSVs" );
+	nCount = selectedHSVs.Count();
+	for ( int i = 0; i < nCount; ++i )
+	{
+		m_SelectedHSVs.AddToTail( selectedHSVs[i] );
+	}
+
+	m_SelectionMethod = (SelectionMethod_t)pElement->GetValue<int>( "selectionMethod" );
+
+	m_DeltaHSV = pElement->GetValue<Vector>( "deltaHSV" );
+
+	m_Tolerance = pElement->GetValue<float>( "tolerance" );
+	m_Fuzziness = pElement->GetValue<float>( "fuzziness" );
+
+	m_bColorize = pElement->GetValue<bool>( "colorize" );
+	m_bInvertSelection = pElement->GetValue<bool>( "invertSelection" );
+
+	return true;
+}
+
 IColorOperation *CSelectedHSVOperation::Clone()
 {
-	CSelectedHSVOperation *pClone = new CSelectedHSVOperation;
+	CSelectedHSVOperation *pClone = new CSelectedHSVOperation( m_pOpList );
 
 	pClone->m_SelectedRGBs = m_SelectedRGBs;
 	pClone->m_SelectedHSVs = m_SelectedHSVs;
@@ -2773,10 +3015,10 @@ void CUncorrectedImagePanel::OnCursorMoved( int x, int y )
 	x = m_TextureSubRect.x + (float)x * m_TextureSubRect.width / sx;
 	y = m_TextureSubRect.y + (float)y * m_TextureSubRect.height / sy;
 
-	int nSelectedX = min( x, m_nWidth );
-	nSelectedX = max( 0, nSelectedX );
-	int nSelectedY = min( y, m_nHeight );
-	nSelectedY = max( 0, nSelectedY );
+	int nSelectedX = MIN( x, m_nWidth );
+	nSelectedX = MAX( 0, nSelectedX );
+	int nSelectedY = MIN( y, m_nHeight );
+	nSelectedY = MAX( 0, nSelectedY );
 	BGRA8888_t *pTexel = &m_pImageBuffer[(nSelectedY * m_nWidth) + nSelectedX];
 
 	if( !bCTRLDown )
@@ -2861,6 +3103,8 @@ private:
 	// Update delta HSV in the color operation
 	void	UpdateDeltaHSV( );
 
+	void PickColorFromTextEntry( bool bRGB );
+
 	vgui::ComboBox		*m_pSelectionMethod;
 	CPrecisionSlider	*m_pHueSlider;
 	CPrecisionSlider	*m_pSaturationSlider;
@@ -2875,6 +3119,12 @@ private:
 	vgui::CheckButton	*m_pInvertSelectionButton;
 
 	vgui::Button		*m_pSelectionButton;
+
+	vgui::Button		*m_pPickRGBButton;
+	vgui::Button		*m_pPickHSVButton;
+	vgui::TextEntry		*m_pColorEntry1;
+	vgui::TextEntry		*m_pColorEntry2;
+	vgui::TextEntry		*m_pColorEntry3;
 
 	CFullScreenSelectionPanel *m_pFullScreenSelection;
 
@@ -2932,6 +3182,16 @@ CSelectedHSVUIPanel::CSelectedHSVUIPanel( vgui::Panel *parent, CSelectedHSVOpera
 
 	m_pSelectionButton = new vgui::Button( this, "SelectionButton", "Select" );
 	m_pSelectionButton->AddActionSignalTarget( this );
+
+	m_pPickRGBButton= new vgui::Button( this, "RGBPickButton", "RGB" );
+	m_pPickRGBButton->AddActionSignalTarget( this );
+
+	m_pPickHSVButton= new vgui::Button( this, "HSVPickButton", "HSV" );
+	m_pPickHSVButton->AddActionSignalTarget( this );
+
+	m_pColorEntry1 = new vgui::TextEntry( this, "ColorEntry1" );
+	m_pColorEntry2 = new vgui::TextEntry( this, "ColorEntry2" );
+	m_pColorEntry3 = new vgui::TextEntry( this, "ColorEntry3" );
 
 	m_pUncorrectedImage = new CUncorrectedImagePanel( this, "UncorrectedImage" );
 	m_pUncorrectedImage->SetHSVOperation( m_pHSVOperation );
@@ -3009,6 +3269,10 @@ void CSelectedHSVUIPanel::PopulateControls()
 	}
 	m_pSelectionMethod->AddActionSignalTarget( this );
 	m_pSelectionMethod->ActivateItem( m_pHSVOperation->GetSelectionMethod() );
+
+	m_pColorEntry1->SetText( "0" );
+	m_pColorEntry2->SetText( "0" );
+	m_pColorEntry3->SetText( "0" );
 }
 
 
@@ -3169,8 +3433,32 @@ void CSelectedHSVUIPanel::OnCommand( const char *command )
 	{
 		EnableSelectionMode( !m_bSelectionEnable );
 	}
+	else if( !Q_stricmp( "PickRGB", command ) )
+	{
+		PickColorFromTextEntry( true );
+	}
+	else if( !Q_stricmp( "PickHSV", command ) )
+	{
+		PickColorFromTextEntry( false );
+	}
 }
 
+void CSelectedHSVUIPanel::PickColorFromTextEntry( bool bRGB )
+{
+	int r = m_pColorEntry1->GetValueAsInt();
+	int g = m_pColorEntry2->GetValueAsInt();
+	int b = m_pColorEntry3->GetValueAsInt();
+
+	m_pHSVOperation->ClearSelectedColors();
+	if ( bRGB )
+	{
+		m_pHSVOperation->AddSelectedColor( r, g, b );
+	}
+	else
+	{
+		m_pHSVOperation->AddSelectedColorHSV( r, g, b );
+	}
+}
 
 void CSelectedHSVUIPanel::EnableSelectionMode( bool bEnable )
 {
@@ -3201,7 +3489,7 @@ public:
 	virtual void Release() { delete this; }
 
 	virtual const char *GetName()			  { return m_pName; }
-	virtual void SetName( const char *pName ) { V_strcpy_safe( m_pName, pName ); }
+	virtual void SetName( const char *pName ) { Q_strcpy( m_pName, pName ); }
 
 	virtual ColorCorrectionTool_t ToolID() { return CC_TOOL_LOOKUP; }
 
@@ -3220,8 +3508,11 @@ public:
 	virtual void SetBlendFactor( float flBlend );
 	virtual float GetBlendFactor( ) { return m_flBlendFactor; }
 
-	bool IsFileLoaded( )		{ return m_LookupTable != 0; }
+	bool IsFileLoaded( )		{ return m_LookupTable ? true : false; }
 	const char *GetFilename( )	{ return m_pFilename; }
+
+	virtual bool Unserialize( CDmxElement *pElement );
+	virtual bool Serialize( CDmxElement *pElement );
 
 private:
 
@@ -3253,8 +3544,8 @@ CColorLookupOperation::CColorLookupOperation( )
 	m_LookupTable = 0;
 	m_flBlendFactor = 1.0f;
 
-	V_strcpy_safe( m_pName, "Lookup" );
-	V_strcpy_safe( m_pFilename, "" );
+	Q_strcpy( m_pName, "Lookup" );
+	Q_strcpy( m_pFilename, "" );
 }
 
 
@@ -3370,12 +3661,15 @@ void CColorLookupOperation::LoadLookupTable( const char *pFilename )
 	{
 		color24 color;
 		g_pFileSystem->Read( &color, sizeof(color24), file_handle );
+		byte s = color.r;
+		color.r = color.b;
+		color.b = s;
 		m_LookupTable[i] = color;
 	}
 
 	g_pFileSystem->Close( file_handle );
 
-	V_strcpy_safe( m_pFilename, pFilename );
+	Q_strcpy( m_pFilename, pFilename );
 
 	colorcorrectiontools->UpdateColorCorrection();
 }
@@ -3401,9 +3695,36 @@ void CColorLookupOperation::DeleteLookupTableData( )
 	if( m_LookupTable )
 	{
 		m_Resolution = 0;
-		delete m_LookupTable;
+		delete[] m_LookupTable;
 	}
 }
+
+
+//-----------------------------------------------------------------------------
+// Serialization
+//-----------------------------------------------------------------------------
+bool CColorLookupOperation::Serialize( CDmxElement *pElement )
+{
+	pElement->SetName( m_pName );
+	pElement->SetValue( "blendFactor", m_flBlendFactor );
+	pElement->SetValue( "enabled", m_bEnable );
+
+	pElement->SetValue( "fileName", m_pFilename );
+
+	return true;
+}
+
+bool CColorLookupOperation::Unserialize( CDmxElement *pElement )
+{
+	Q_strncpy( m_pName, pElement->GetName( ), sizeof( m_pName ) );
+	m_flBlendFactor = pElement->GetValue< float >( "blendFactor" );
+	m_bEnable = pElement->GetValue< bool >( "enabled" );
+
+	LoadLookupTable( pElement->GetValueString( "fileName" ) );
+
+	return true;
+}
+
 
 
 IColorOperation *CColorLookupOperation::Clone()
@@ -3474,11 +3795,11 @@ CColorLookupUIPanel::CColorLookupUIPanel( vgui::Panel *pParent, CColorLookupOper
 
 	m_pBlendFactorSlider = new CPrecisionSlider( this, "BlendFactorSlider" );
 	m_pBlendFactorSlider->SetRange( 0, 255 );
-	m_pBlendFactorSlider->SetValue( 255 );
 	m_pBlendFactorSlider->AddActionSignalTarget( this );
 
 	LoadControlSettings("Resource\\ColorLookupUIPanel.res");
 
+	m_pBlendFactorSlider->SetValue( 255 * pOp->GetBlendFactor() );
 	SetButtonText( );
 }
 
@@ -3583,7 +3904,7 @@ public:
 	virtual void Release() { delete this; }
 
 	virtual const char *GetName()			  { return m_pName; }
-	virtual void SetName( const char *pName ) { V_strcpy_safe( m_pName, pName ); }
+	virtual void SetName( const char *pName ) { Q_strcpy( m_pName, pName ); }
 
 	virtual ColorCorrectionTool_t ToolID() { return CC_TOOL_BALANCE; }
 
@@ -3596,7 +3917,11 @@ public:
 	virtual void SetBlendFactor( float flBlend );
 	virtual float GetBlendFactor( ) { return m_flBlendFactor; }
 
+	virtual bool Serialize( CDmxElement *pElement );
+	virtual bool Unserialize( CDmxElement *pElement );
+
 	void SetPreserveLuminosity( bool bPreserveLum ) { m_PreserveLuminosity = bPreserveLum; Update(); }
+	bool IsPreservingLuminosity() const { return m_PreserveLuminosity; }
 
 	void SetCyanRedBalance     ( ColorBalanceMode_t mode, float value ) { m_CyanRedBalance[ (int)mode ]      = value; Update(); }
 	void SetMagentaGreenBalance( ColorBalanceMode_t mode, float value ) { m_MagentaGreenBalance[ (int)mode ] = value; Update(); }
@@ -3666,7 +3991,7 @@ CColorBalanceOperation::CColorBalanceOperation( )
 
 	CreateLookupTables( );
 
-	V_strcpy_safe( m_pName, "Balance" );
+	Q_strcpy( m_pName, "Balance" );
 }
 
 
@@ -3686,13 +4011,13 @@ int RGBToL( int r, int g, int b )
 
 	if( r>g )
 	{
-		imax = max( r, b );
-		imin = min( g, b );
+		imax = MAX( r, b );
+		imin = MIN( g, b );
 	}
 	else
 	{
-		imax = max( g, b );
-		imin = min( r, b );
+		imax = MAX( g, b );
+		imin = MIN( r, b );
 	}
 
 	return (int)((float)(imax+imin)/2.0f);
@@ -3774,13 +4099,13 @@ void RGBToHSL( int *red, int *green, int *blue )
 
 	if (r > g)
 	{
-		imax = max (r, b);
-		imin = min (g, b);
+		imax = MAX(r, b);
+		imin = MIN(g, b);
 	}
 	else
 	{
-		imax = max (g, b);
-		imin = min (r, b);
+		imax = MAX(g, b);
+		imin = MIN(r, b);
 	}
 
 	l = (imax + imin) / 2.0;
@@ -3917,6 +4242,66 @@ void CColorBalanceOperation::CreateLookupTables( )
 	}
 }
 
+
+//-----------------------------------------------------------------------------
+// Serialization
+//-----------------------------------------------------------------------------
+bool CColorBalanceOperation::Serialize( CDmxElement *pElement )
+{
+	pElement->SetName( m_pName );
+	pElement->SetValue( "blendFactor", m_flBlendFactor );
+	pElement->SetValue( "enabled", m_bEnable );
+
+	pElement->SetValue( "preserveLuminosity", m_PreserveLuminosity );
+
+	CDmxAttribute *pCyanRedAttribute = pElement->AddAttribute( "cyanRedBalance" );
+	CDmxAttribute *pMagentaGreenAttribute = pElement->AddAttribute( "magentaGreenBalance" );
+	CDmxAttribute *pYellowBlueAttribute = pElement->AddAttribute( "yellowBlueBalance" );
+
+	CUtlVector< float >& cyanRedBalance = pCyanRedAttribute->GetArrayForEdit< float >();
+	CUtlVector< float >& magentaGreenBalance = pMagentaGreenAttribute->GetArrayForEdit< float >();
+	CUtlVector< float >& yellowBlueBalance = pYellowBlueAttribute->GetArrayForEdit< float >();
+
+	for ( int i = 0; i < CC_BALANCE_MODE_COUNT; ++i )
+	{
+		cyanRedBalance.AddToTail( m_CyanRedBalance[i] );
+		magentaGreenBalance.AddToTail( m_MagentaGreenBalance[i] );
+		yellowBlueBalance.AddToTail( m_YellowBlueBalance[i] );
+	}
+
+	return true;
+}
+
+bool CColorBalanceOperation::Unserialize( CDmxElement *pElement )
+{
+	Q_strncpy( m_pName, pElement->GetName( ), sizeof( m_pName ) );
+	m_flBlendFactor = pElement->GetValue< float >( "blendFactor" );
+	m_bEnable = pElement->GetValue< bool >( "enabled" );
+	m_PreserveLuminosity = pElement->GetValue< bool >( "preserveLuminosity" );
+
+	const CUtlVector< float >& cyanRedBalance = pElement->GetArray< float >( "cyanRedBalance" );
+	const CUtlVector< float >& magentaGreenBalance = pElement->GetArray< float >( "magentaGreenBalance" );
+	const CUtlVector< float >& yellowBlueBalance = pElement->GetArray< float >( "yellowBlueBalance" );
+
+	int nCount = cyanRedBalance.Count();
+	if ( magentaGreenBalance.Count() != nCount || yellowBlueBalance.Count() != nCount )
+		return false;
+
+	if ( nCount != CC_BALANCE_MODE_COUNT )
+		return false;
+
+	for ( int i = 0; i < CC_BALANCE_MODE_COUNT; ++i )
+	{
+		m_CyanRedBalance[i] = cyanRedBalance[i];
+		m_MagentaGreenBalance[i] = magentaGreenBalance[i];
+		m_YellowBlueBalance[i] = yellowBlueBalance[i];
+	}
+
+	CreateLookupTables();
+	return true;
+}
+
+
 IColorOperation *CColorBalanceOperation::Clone()
 {
 	CColorBalanceOperation *pClone = new CColorBalanceOperation;
@@ -3930,8 +4315,8 @@ IColorOperation *CColorBalanceOperation::Clone()
 	Q_memcpy( pClone->m_YellowBlueBalance,   m_YellowBlueBalance,   sizeof(float)*CC_BALANCE_MODE_COUNT );
 
 	Q_memcpy( pClone->m_ShadowsSubTransfer,    m_ShadowsSubTransfer,    sizeof(float)*256 );
-	Q_memcpy( pClone->m_MidtonesSubTransfer,   m_ShadowsSubTransfer,    sizeof(float)*256 );
-	Q_memcpy( pClone->m_HighlightsSubTransfer, m_ShadowsSubTransfer,    sizeof(float)*256 );
+	Q_memcpy( pClone->m_MidtonesSubTransfer,   m_MidtonesSubTransfer,    sizeof(float)*256 );
+	Q_memcpy( pClone->m_HighlightsSubTransfer, m_HighlightsSubTransfer,    sizeof(float)*256 );
 	Q_memcpy( pClone->m_ShadowsAddTransfer,    m_ShadowsAddTransfer,    sizeof(float)*256 );
 	Q_memcpy( pClone->m_MidtonesAddTransfer,   m_MidtonesAddTransfer,   sizeof(float)*256 );
 	Q_memcpy( pClone->m_HighlightsAddTransfer, m_HighlightsAddTransfer, sizeof(float)*256 );
@@ -3944,6 +4329,21 @@ IColorOperation *CColorBalanceOperation::Clone()
 
 	return pClone;
 }
+
+
+static IColorOperation *CreateColorOp( ColorCorrectionTool_t nToolId, CColorOperationList *pOpList )
+{
+	switch( nToolId )
+	{
+	case CC_TOOL_BALANCE:		return new CColorBalanceOperation(); 
+	case CC_TOOL_CURVES:		return new CCurvesColorOperation();
+	case CC_TOOL_LOOKUP:		return new CColorLookupOperation(); 
+	case CC_TOOL_LEVELS:		return new CLevelsColorOperation( pOpList );
+	case CC_TOOL_SELECTED_HSV:	return new CSelectedHSVOperation( pOpList );
+	default: return NULL;
+	}
+}
+
 
 //-----------------------------------------------------------------------------
 // Root panel for color balance operations
@@ -3999,6 +4399,7 @@ private:
 //-----------------------------------------------------------------------------
 CColorBalanceUIPanel::CColorBalanceUIPanel( vgui::Panel *pParent, CColorBalanceOperation *pOp ) : BaseClass( pParent, "BalanceUIPanel" )
 {
+	bool bIsPreservingLuminosity = pOp->IsPreservingLuminosity();
 	m_pPreserveLuminosityButton = new vgui::CheckButton( this, "PreserveLuminosity", "Preserve Luminosity" );
 
 	m_pShadowModeButton    = new vgui::RadioButton( this, "ShadowMode", "Shadows" );
@@ -4022,14 +4423,17 @@ CColorBalanceUIPanel::CColorBalanceUIPanel( vgui::Panel *pParent, CColorBalanceO
 
 	m_pBlendFactorSlider = new CPrecisionSlider( this, "BlendFactorSlider" );
 	m_pBlendFactorSlider->SetRange( 0, 255 );
-	m_pBlendFactorSlider->SetValue( 255 );
 	m_pBlendFactorSlider->AddActionSignalTarget( this );
 
 	LoadControlSettings("Resource\\ColorBalanceUIPanel.res");
 
+	m_pPreserveLuminosityButton->SetSelected( bIsPreservingLuminosity );
+	m_pBlendFactorSlider->SetValue( 255 * pOp->GetBlendFactor() );
+
 	m_pBalanceOp = pOp;
 
 	ResetBlendFactorSlider();
+	ResetSliders();
 }
 
 
@@ -4077,7 +4481,8 @@ void CColorBalanceUIPanel::OnMessage(const KeyValues *params,  vgui::VPANEL from
 		vgui::Panel *pPanel = reinterpret_cast<vgui::Panel *>( const_cast<KeyValues*>(params)->GetPtr("panel") );
 		if( pPanel == m_pPreserveLuminosityButton )
 		{
-			m_pBalanceOp->SetPreserveLuminosity( m_pPreserveLuminosityButton->IsSelected() );
+			bool bPreserveLuminosity = ((KeyValues*)params)->GetBool( "state" );
+			m_pBalanceOp->SetPreserveLuminosity( bPreserveLuminosity );
 			return;
 		}
 	}
@@ -4311,16 +4716,7 @@ void CNewOperationDialog::OnCommand( const char *command )
 	{
 		int nSelectedItem = m_pOperationType->GetActiveItem();
 
-		IColorOperation *newOp = 0;
-		switch( (ColorCorrectionTool_t)nSelectedItem+1 )
-		{
-			case CC_TOOL_BALANCE: newOp = new CColorBalanceOperation(); break;
-			case CC_TOOL_CURVES:  newOp = new CCurvesColorOperation();  break;
-			case CC_TOOL_LOOKUP:  newOp = new CColorLookupOperation();  break;
-			case CC_TOOL_LEVELS:       newOp = new CLevelsColorOperation(); ((CLevelsColorOperation *)newOp)->SetColorOpList( m_pOpList ); break;
-			case CC_TOOL_SELECTED_HSV: newOp = new CSelectedHSVOperation(); ((CSelectedHSVOperation *)newOp)->SetColorOpList( m_pOpList ); break;
-		}
-
+		IColorOperation *newOp = CreateColorOp( (ColorCorrectionTool_t)(nSelectedItem+1), m_pOpList );
 		if( m_pName->GetTextLength()>0 )
 		{
 			char buf[256];
@@ -4374,7 +4770,6 @@ public:
 	virtual void SetSortColumn( int column );
 
 private:
-
 	vgui::TextEntry	*m_pNameEditPanel;
 	int				 m_nEditItem;
         
@@ -4421,9 +4816,10 @@ void COperationListPanel::SetSortColumn( int column )
 	if( column==0 )
 	{
 		bool bAllEnabled = true;
-		for( int i=0;i<GetItemCount();i++ )
+		for ( int itemID = FirstItem(); itemID != InvalidItemID(); itemID = NextItem( itemID ) )
 		{
-			IColorOperation *pOp = (IColorOperation *)GetItemUserData( i );
+			IColorOperation *pOp = (IColorOperation *)GetItemUserData( itemID );
+			Assert( pOp );
 
 			if( !pOp->IsEnabled() )
 			{
@@ -4432,12 +4828,14 @@ void COperationListPanel::SetSortColumn( int column )
 			}
 		}
 
-		for( int i=0;i<GetItemCount();i++ )
+		for ( int itemID = FirstItem(); itemID != InvalidItemID(); itemID = NextItem( itemID ) )
 		{
-			KeyValues *kv = GetItem( i );
+			KeyValues *kv = GetItem( itemID );
+			Assert( kv );
 			kv->SetInt( "image", (!bAllEnabled)?1:0 );
 
-			IColorOperation *pOp = (IColorOperation *)GetItemUserData( i );
+			IColorOperation *pOp = (IColorOperation *)GetItemUserData( itemID );
+			Assert( pOp );
 			pOp->SetEnabled( !bAllEnabled );
 		}
 
@@ -4457,11 +4855,14 @@ void COperationListPanel::OnMousePressed( MouseCode code )
 
 		if( column==0 && row!=-1 )
 		{
-			IColorOperation *pOp = (IColorOperation *)GetItemUserData( row );
+			int itemID = GetItemIDFromRow( row );
+			IColorOperation *pOp = (IColorOperation *)GetItemUserData( itemID );
+			Assert( pOp );
 
 			bool bNewEnable = !pOp->IsEnabled();
 
-			KeyValues *kv = GetItem( row );
+			KeyValues *kv = GetItem( itemID );
+			Assert( kv );
 			kv->SetInt( "image", (bNewEnable)?1:0 );
 
 			pOp->SetEnabled( bNewEnable );
@@ -4477,44 +4878,55 @@ void COperationListPanel::OnMousePressed( MouseCode code )
 
 void COperationListPanel::OnMouseDoublePressed( MouseCode code )
 {
-	if( code==MOUSE_LEFT )
+	if ( code !=MOUSE_LEFT )
 	{
-		int x, y;
-		input()->GetCursorPos( x, y );
-
-		int row, column;
-		GetCellAtPos( x, y, row, column );
-
-		if( column!=0 && row==-1 )
-		{
-			PostActionSignal( new KeyValues( "Command", "Command", "NewOperation" ) );
-		}
-		else
-		{
-			if( input()->IsKeyDown( KEY_LCONTROL )||input()->IsKeyDown( KEY_RCONTROL ) )
-			{
-				if( !m_pNameEditPanel )
-				{
-					m_nEditItem = row;
-					m_pNameEditPanel = new vgui::TextEntry( this, "Name" );
-					m_pNameEditPanel->SendNewLine( true );
-					m_pNameEditPanel->SetCatchEnterKey( true );
-					m_pNameEditPanel->AddActionSignalTarget( this );
-					m_pNameEditPanel->SetSize( 226, 24 );
-					m_pNameEditPanel->SetBgColor( Color(255,255,255,255) );
-					EnterEditMode( row, column, m_pNameEditPanel );
-				}
-			}
-			else if( input()->IsKeyDown( KEY_LALT ) || input()->IsKeyDown( KEY_RALT ) )
-			{
-				PostActionSignal( new KeyValues( "Command", "Command", "CloneOperation" ) );
-			}
-			else
-			{
-				BaseClass::OnMouseDoublePressed( code );
-			}
-		}
+		BaseClass::OnMouseDoublePressed( code );
+		return;
 	}
+
+	int x, y;
+	input()->GetCursorPos( x, y );
+
+	int row, column;
+	GetCellAtPos( x, y, row, column );
+
+	if( column!=0 && row==-1 )
+	{
+		PostActionSignal( new KeyValues( "Command", "Command", "NewOperation" ) );
+		return;
+	}
+
+	if( input()->IsKeyDown( KEY_LCONTROL )||input()->IsKeyDown( KEY_RCONTROL ) )
+	{
+		if( !m_pNameEditPanel )
+		{
+			int itemID = GetItemIDFromRow( row );
+			m_nEditItem = itemID;
+			m_pNameEditPanel = new vgui::TextEntry( this, "Name" );
+			m_pNameEditPanel->SendNewLine( true );
+			m_pNameEditPanel->SetCatchEnterKey( true );
+			m_pNameEditPanel->AddActionSignalTarget( this );
+			m_pNameEditPanel->SetSize( 226, 24 );
+			m_pNameEditPanel->SetBgColor( Color(255,255,255,255) );
+			EnterEditMode( row, column, m_pNameEditPanel );
+		}
+		return;
+	}
+
+	if( input()->IsKeyDown( KEY_LALT ) || input()->IsKeyDown( KEY_RALT ) )
+	{
+		PostActionSignal( new KeyValues( "Command", "Command", "CloneOperation" ) );
+		return;
+	}
+
+	int nSelectedItem = GetSelectedItem( 0 );
+	if ( nSelectedItem >= 0 )
+	{
+		PostActionSignal( new KeyValues( "LaunchOperation", "item", nSelectedItem ) );
+		return;
+	}
+
+	BaseClass::OnMouseDoublePressed( code );
 }
 
 
@@ -4526,6 +4938,7 @@ void COperationListPanel::OnTextNewLine( KeyValues *data )
 	if( m_nEditItem!=-1 )
 	{
 		IColorOperation *pOp = (IColorOperation *)GetItemUserData( m_nEditItem );
+		Assert( pOp );
 
 		pOp->SetName( newName );
 
@@ -4542,13 +4955,19 @@ void COperationListPanel::OnTextNewLine( KeyValues *data )
 //-----------------------------------------------------------------------------
 // CColorOperationListPanel - View window for operations in a CColorOperationList
 //-----------------------------------------------------------------------------
-class CColorOperationListPanel : public vgui::EditablePanel
+class CColorOperationListPanel : public vgui::EditablePanel, public vgui::IFileOpenStateMachineClient
 {
 	DECLARE_CLASS_SIMPLE( CColorOperationListPanel, vgui::EditablePanel );
 
+// members of IFileOpenStateMachineClient
+public:
+	virtual void SetupFileOpenDialog( vgui::FileOpenDialog *pDialog, bool bOpenFile, const char *pFileFormat, KeyValues *pContextKeyValues );
+	virtual bool OnReadFileFromDisk( const char *pFileName, const char *pFileFormat, KeyValues *pContextKeyValues );
+	virtual bool OnWriteFileToDisk( const char *pFileName, const char *pFileFormat, KeyValues *pContextKeyValues );
+
 public:
 	CColorOperationListPanel( vgui::Panel *parent, ColorCorrectionHandle_t CCHandle );
-   ~CColorOperationListPanel( );
+	~CColorOperationListPanel( );
 
 	void Init( );
 	void Shutdown( );
@@ -4570,7 +4989,7 @@ private:
 	MESSAGE_FUNC_PARAMS( OnOpPanelClose, "OpPanelClose", data );
 	MESSAGE_FUNC_PARAMS( OnSliderMoved, "SliderMoved", data );
 	MESSAGE_FUNC_PARAMS( OnCheckButtonChecked, "CheckButtonChecked", data );
-	MESSAGE_FUNC_CHARPTR( OnFileSelected, "FileSelected", fullpath );
+	MESSAGE_FUNC_INT( OnLaunchOperation, "LaunchOperation", item );
 
 	virtual void OnMouseDoublePressed( MouseCode code );
 	virtual void OnKeyCodeTyped( KeyCode code );
@@ -4579,11 +4998,17 @@ private:
 
 	void LaunchOperationPanel( IColorOperation *pOp );
 
+	bool LoadVCCFile( const char *pFullPath );
+	bool SaveVCCFile( const char *pFullPath );
+	bool SaveRawFile( const char *pFullPath );
+
 	vgui::Button			*m_pNewOperationButton;
 	vgui::Button			*m_pDeleteOperationButton;
 	vgui::Button			*m_pBringForwardButton;
 	vgui::Button			*m_pPushBackButton;
+	vgui::Button			*m_pLoadButton;
 	vgui::Button			*m_pSaveButton;
+	vgui::Button			*m_pSaveAsButton;
 	vgui::CheckButton		*m_pEnableButton;
 	vgui::CheckButton		*m_pEnableEntitiesButton;
 	COperationListPanel		*m_pOperationListPanel;
@@ -4597,8 +5022,11 @@ private:
 
 	ColorCorrectionHandle_t  m_CCHandle;
 
+	FileOpenStateMachine	*m_pFileOpenStateMachine;
+
 	CUtlVector< CColorCorrectionUIChildPanel * > m_OpPanelList;
 
+	CUtlString	m_FileName;
 	bool m_bEnable;
 	bool m_bEnableEntities;
 };
@@ -4610,6 +5038,8 @@ CColorOperationListPanel::CColorOperationListPanel( vgui::Panel *parent, ColorCo
 	m_pBringForwardButton    = new vgui::Button( this, "BringForward",    "Up",			   this, "BringForward" );
 	m_pPushBackButton        = new vgui::Button( this, "PushBack",        "Down",		   this, "PushBack" );
 	m_pSaveButton			 = new vgui::Button( this, "Save",			  "Save",		   this, "Save" );
+	m_pSaveAsButton			 = new vgui::Button( this, "SaveAs",		  "Save As",	   this, "SaveAs" );
+	m_pLoadButton			 = new vgui::Button( this, "Load",			  "Load",		   this, "Load" );
 
 	m_pEnableButton          = new vgui::CheckButton( this, "Enable", "Enable" );
 	m_pEnableButton->SetSelected( false );
@@ -4647,6 +5077,9 @@ CColorOperationListPanel::CColorOperationListPanel( vgui::Panel *parent, ColorCo
 	m_pLookupViewWindow->AddActionSignalTarget( this );
 	m_pLookupViewWindow->Activate();
 
+	m_pFileOpenStateMachine = new vgui::FileOpenStateMachine( this, this );
+	m_pFileOpenStateMachine->AddActionSignalTarget( this );
+
 	m_pNewDialog = 0;
 	m_bEnable = true;
 	m_bEnableEntities = true;
@@ -4680,9 +5113,10 @@ void CColorOperationListPanel::OnSliderMoved( KeyValues *data )
 	if ( pPanel == m_pBlendFactorSlider )
 	{
 		int nSelectedItem = m_pOperationListPanel->GetSelectedItem( 0 );
-		if( nSelectedItem>=0 && nSelectedItem<m_pOperationListPanel->GetItemCount() )
+		if( nSelectedItem>=0 && m_pOperationListPanel->IsValidItemID( nSelectedItem ) )
 		{
 			IColorOperation *pOp = (IColorOperation *)m_pOperationListPanel->GetItemUserData( nSelectedItem );
+			Assert( pOp );
             pOp->SetBlendFactor( m_pBlendFactorSlider->GetValue() / 255.0f );
 
 			for( int i=0;i<m_OpPanelList.Count();i++ )
@@ -4708,11 +5142,13 @@ void CColorOperationListPanel::OnCheckButtonChecked( KeyValues *data )
 		{
 			PostActionSignal( new KeyValues( "Command", "Command", "EnableColorCorrection" ) );
 			m_bEnable = true;
+			mat_colcorrection_editor.SetValue( 1 );
 		}
 		else
 		{
 			PostActionSignal( new KeyValues( "Command", "Command", "DisableColorCorrection" ) );
 			m_bEnable = false;
+			mat_colcorrection_editor.SetValue( 0 );
 		}
 	}
 	else if ( pPanel == m_pEnableEntitiesButton )
@@ -4728,6 +5164,53 @@ void CColorOperationListPanel::OnCheckButtonChecked( KeyValues *data )
 			mat_colcorrection_disableentities.SetValue( 1 );
 		}
 	}
+}
+
+void CColorOperationListPanel::SetupFileOpenDialog( vgui::FileOpenDialog *pDialog, bool bOpenFile, const char *pFileFormat, KeyValues *pContextKeyValues )
+{
+	char pStartingDir[ MAX_PATH ];
+
+	GetModContentSubdirectory( "materialsrc/correction", pStartingDir, sizeof(pStartingDir) );
+	g_pFullFileSystem->CreateDirHierarchy( pStartingDir );
+
+	// Open a bsp file to create a new commentary file
+	pDialog->SetTitle( "Choose VCC File", true );
+	pDialog->SetStartDirectoryContext( "vcc_session", pStartingDir );
+	pDialog->AddFilter( "*.vcc", "Valve Color Correction File (*.vcc)", true );
+}
+
+bool CColorOperationListPanel::OnReadFileFromDisk( const char *pFileName, const char *pFileFormat, KeyValues *pContextKeyValues )
+{
+	bool bOk = LoadVCCFile( pFileName );
+	if ( bOk )
+	{
+		m_FileName = pFileName;
+		PopulateList( );
+		colorcorrectiontools->UpdateColorCorrection();
+	}
+	return bOk;
+}
+
+bool CColorOperationListPanel::OnWriteFileToDisk( const char *pFileName, const char *pFileFormat, KeyValues *pContextKeyValues )
+{
+	if ( !SaveVCCFile( pFileName ) )
+		return false;
+
+	m_FileName = pFileName;
+
+	char pRawPath[MAX_PATH];
+	ComputeModFilename( pFileName, pRawPath, sizeof(pRawPath) );
+
+	// FIXME: Move into ComputeModFilename?
+	char *pMaterialSrc = Q_stristr( pRawPath, "\\materialsrc\\" );
+	if ( pMaterialSrc )
+	{
+		pMaterialSrc += 12; 
+		int nLen = Q_strlen( pMaterialSrc );
+		memmove( pMaterialSrc - 2, pMaterialSrc, nLen+1 );
+	}
+	Q_SetExtension( pRawPath, ".raw", sizeof(pRawPath) );
+	return SaveRawFile( pRawPath );
 }
 
 void CColorOperationListPanel::OnCommand( const char *command )
@@ -4746,8 +5229,10 @@ void CColorOperationListPanel::OnCommand( const char *command )
 		if( m_pOperationListPanel->GetSelectedItemsCount()!=0 )
 		{
 			int nSelectedItem = m_pOperationListPanel->GetSelectedItem( 0 );
+			Assert( m_pOperationListPanel->IsValidItemID( nSelectedItem ) );
 
 			IColorOperation *pOp = m_OperationList.GetOperation( nSelectedItem );
+			Assert( pOp );
 			m_OperationList.DeleteOperation( nSelectedItem );
 
 			for( int i=0;i<m_OpPanelList.Count();i++ )
@@ -4770,37 +5255,78 @@ void CColorOperationListPanel::OnCommand( const char *command )
 	else if( !Q_stricmp( command, "BringForward" ) )
 	{
 		int nSelectedItem = m_pOperationListPanel->GetSelectedItem( 0 );
-		if( nSelectedItem!=0 )
+		int nSelectedRow = m_pOperationListPanel->GetItemCurrentRow( nSelectedItem );
+		if( m_pOperationListPanel->IsValidItemID( nSelectedItem ) && nSelectedRow != 0 )
 		{
-			m_OperationList.BringForward( nSelectedItem );
+			m_OperationList.BringForward( nSelectedRow );
 
 			PopulateList( );
 
 			colorcorrectiontools->UpdateColorCorrection( );
 
-			m_pOperationListPanel->SetSingleSelectedItem( nSelectedItem-1 );
+			for ( nSelectedItem=m_pOperationListPanel->FirstItem(); nSelectedItem != m_pOperationListPanel->InvalidItemID(); nSelectedItem=m_pOperationListPanel->NextItem(nSelectedItem) )
+			{
+				if ( m_pOperationListPanel->GetItemCurrentRow(nSelectedItem) == nSelectedRow - 1 )
+				{
+					m_pOperationListPanel->SetSingleSelectedItem( nSelectedItem );
+				}
+			}
 		}
 	}
 	else if( !Q_stricmp( command, "PushBack" ) )
 	{
 		int nSelectedItem = m_pOperationListPanel->GetSelectedItem( 0 );
-		if( nSelectedItem<m_OperationList.GetNumOperations()-1 )
+		int nSelectedRow = m_pOperationListPanel->GetItemCurrentRow( nSelectedItem );
+		if( m_pOperationListPanel->IsValidItemID( nSelectedItem ) && nSelectedRow < m_OperationList.GetNumOperations()-1 )
 		{
-			m_OperationList.PushBack( nSelectedItem );
+			m_OperationList.PushBack( nSelectedRow );
 
 			PopulateList( );
 
 			colorcorrectiontools->UpdateColorCorrection( );
 
-			m_pOperationListPanel->SetSingleSelectedItem( nSelectedItem+1 );
+			for ( nSelectedItem=m_pOperationListPanel->FirstItem(); nSelectedItem != m_pOperationListPanel->InvalidItemID(); nSelectedItem=m_pOperationListPanel->NextItem(nSelectedItem) )
+			{
+				if ( m_pOperationListPanel->GetItemCurrentRow(nSelectedItem) == nSelectedRow + 1 )
+				{
+					m_pOperationListPanel->SetSingleSelectedItem( nSelectedItem );
+				}
+			}
 		}
 	}
 	else if( !Q_stricmp( command, "Save" ) )
 	{
- 		FileOpenDialog *save_dialog = new FileOpenDialog( this, "File Save", false );
-		save_dialog->AddActionSignalTarget( this );
-		save_dialog->AddFilter( "*.raw", ".RAW files", true );
-		save_dialog->DoModal( true );
+		g_p4factory->SetDummyMode( p4 == NULL );
+		g_p4factory->SetOpenFileChangeList( "Color Correction Auto Checkout" );
+		int nFlags = 0;
+		if ( p4 )
+		{
+			nFlags |= FOSM_SHOW_PERFORCE_DIALOGS;
+		}
+		m_pFileOpenStateMachine->SaveFile( NULL, m_FileName.Get(), "vcc", nFlags );
+	}
+	else if( !Q_stricmp( command, "SaveAs" ) )
+	{
+		g_p4factory->SetDummyMode( p4 == NULL );
+		g_p4factory->SetOpenFileChangeList( "Color Correction Auto Checkout" );
+		int nFlags = 0;
+		if ( p4 )
+		{
+			nFlags |= FOSM_SHOW_PERFORCE_DIALOGS;
+		}
+		m_pFileOpenStateMachine->SaveFile( NULL, NULL, "vcc", nFlags );
+	}
+	else if( !Q_stricmp( command, "Load" ) )
+	{
+		g_p4factory->SetDummyMode( p4 == NULL );
+		g_p4factory->SetOpenFileChangeList( "Color Correction Auto Checkout" );
+
+		int nFlags = FOSM_SHOW_SAVE_QUERY;
+		if ( p4 )
+		{
+			nFlags |= FOSM_SHOW_PERFORCE_DIALOGS;
+		}
+		m_pFileOpenStateMachine->OpenFile( NULL, "vcc", NULL, m_FileName.Get(), "vcc", nFlags );
 	}
 	else if( !Q_stricmp( command, "NewComplete" ) )
 	{
@@ -4895,7 +5421,7 @@ void CColorOperationListPanel::PopulateList( )
 			KeyValues *kv = new KeyValues( "operation", "layer", op->GetName() );
 			kv->SetInt( "image", (op->IsEnabled())?1:0 );
 			
-			m_pOperationListPanel->AddItem( kv, (unsigned int)op, false, false );
+			m_pOperationListPanel->AddItem( kv, (uintp)op, false, false );
 		}
 	}
 }
@@ -4920,12 +5446,22 @@ CColorOperationList *CColorOperationListPanel::GetOperationList( )
 	return &m_OperationList;
 }
 
+void CColorOperationListPanel::OnLaunchOperation( int item )
+{
+	IColorOperation *pSelectedOp = m_OperationList.GetOperation( item );
+	LaunchOperationPanel( pSelectedOp );
+}
+
 void CColorOperationListPanel::OnMouseDoublePressed( MouseCode code )
 {
 	BaseClass::OnMouseDoublePressed( code );
 
 	if( code==MOUSE_LEFT )
 	{
+		int nSelectedItem = m_pOperationListPanel->GetSelectedItem( 0 );
+		IColorOperation *pSelectedOp = m_OperationList.GetOperation( nSelectedItem );
+
+		LaunchOperationPanel( pSelectedOp );
 	}
 }
 
@@ -4945,36 +5481,6 @@ void CColorOperationListPanel::OnKeyCodeTyped( KeyCode code )
 	}
 
 	BaseClass::OnKeyCodeTyped( code );
-}
-
-void CColorOperationListPanel::OnFileSelected( const char *pFilename )
-{
-	FileHandle_t file_handle = g_pFileSystem->Open( pFilename, "wb" );
-
-	colorcorrection->LockLookup( m_CCHandle );
-    
-	RGBX5551_t inColor;
-
-	inColor.b = 0;
-	for ( int b = 0; b < 32; ++b, ++inColor.b )
-	{
-		inColor.g = 0;
-		for ( int g = 0; g < 32; ++g, ++inColor.g )
-		{
-			inColor.r = 0;
-			for ( int r = 0; r < 32; ++r, ++inColor.r )
-			{
-				color24 outColor;
-
-				outColor = colorcorrection->GetLookup( m_CCHandle, inColor );
-				g_pFileSystem->Write( &outColor, sizeof(color24), file_handle );
-			}
-		}
-	}
-
-	colorcorrection->UnlockLookup( m_CCHandle );
-
-	g_pFileSystem->Close( file_handle );
 }
 
 void CColorOperationListPanel::LaunchOperationPanel( IColorOperation *pOp )
@@ -5009,8 +5515,16 @@ void CColorOperationListPanel::LaunchOperationPanel( IColorOperation *pOp )
 
 		int xPos = parentX - 250*panelOffset;
 
-		pOpPanel->SetPos(  xPos, parentY );
-		pOpPanel->SetSize( 250, 480 );
+		if ( pOp->ToolID() == CC_TOOL_SELECTED_HSV )
+		{
+			pOpPanel->SetPos(  xPos, parentY-40 );
+			pOpPanel->SetSize( 250, 520 );
+		}
+		else
+		{
+			pOpPanel->SetPos(  xPos, parentY );
+			pOpPanel->SetSize( 250, 480 );
+		}
 		pOpPanel->SetTitle( pOp->GetName(), true );
 		pOpPanel->AddActionSignalTarget( this );
 		pOpPanel->SetSizeable( false );
@@ -5067,6 +5581,9 @@ public:
 
 	void			SetFinalOperation( IColorOperation *pOp );
 
+	const color24 * GetLookupCache();
+	const color24 * GetLookupCache360();
+
 protected:
 
 	CColorOperationListPanel *m_pOperationListPanel;
@@ -5080,12 +5597,24 @@ protected:
 	int				m_nRowStep;
 	int				m_nCurrentRow;
 	color24			m_pLookupCache[ 32*32*32 ];
+	color24			m_pLookupCache360[ 32*32*32 ];
 
 	bool			m_bForceReset;
     
 private:
 };
 
+//-----------------------------------------------------------------------------
+const color24 * CColorCorrectionUIPanel::GetLookupCache()
+{
+	return ( const color24 * )m_pLookupCache;
+}
+
+//-----------------------------------------------------------------------------
+const color24 * CColorCorrectionUIPanel::GetLookupCache360()
+{
+	return ( const color24 * )m_pLookupCache360;
+}
 
 //-----------------------------------------------------------------------------
 // Purpose: Basic help dialog
@@ -5120,16 +5649,17 @@ CColorCorrectionUIPanel::CColorCorrectionUIPanel( vgui::Panel *parent ) : BaseCl
 	SetSizeable( false );
 	SetMoveable( true );
 
-	int w = 250;
+	int w = 350;
 	int h = 480;
 
-	int x = videomode->GetModeStereoWidth() - w - 10;
-	int y = videomode->GetModeStereoHeight() - h - 10;
+	int x = videomode->GetModeWidth() - w - 10;
+	int y = videomode->GetModeHeight() - h - 10;
 	SetBounds( x, y, w, h );
 
 	m_pOperationListPanel->PopulateList( );
 
 	Q_memset( m_pLookupCache, 0x00, sizeof(color24)*32*32*32 );
+	Q_memset( m_pLookupCache360, 0x00, sizeof(color24)*32*32*32 );
 	m_nCurrentRow = -1;
 	m_nRowStep = 4;
 
@@ -5202,20 +5732,21 @@ void CColorCorrectionUIPanel::OnThink( )
 {
 	BaseClass::OnThink();
 
-	if( m_bForceReset )
+	if ( m_bForceReset )
 	{
 		colorcorrection->LockLookup( m_CCHandle );
 		colorcorrection->ResetLookup( m_CCHandle );
 		colorcorrection->UnlockLookup( m_CCHandle );
+
 		m_bForceReset = false;
 	}
 
-	if( m_nCurrentRow!=-1 )
+	if ( m_nCurrentRow!=-1 )
 	{
 		RGBX5551_t inColor;
 
 		inColor.r = m_nCurrentRow;
-		for ( int r = m_nCurrentRow; r < 32 && r < (m_nCurrentRow+32/m_nRowStep); ++r, ++inColor.r )
+		for ( int r = m_nCurrentRow; r < 32 && r < ( m_nCurrentRow + 32 / m_nRowStep ); ++r, ++inColor.r )
 		{
 			inColor.g = 0;
 			for ( int g = 0; g < 32; ++g, ++inColor.g )
@@ -5223,24 +5754,68 @@ void CColorCorrectionUIPanel::OnThink( )
 				inColor.b = 0;
 				for ( int b = 0; b < 32; ++b, ++inColor.b )
 				{
-					color24 outColor;
-					color24 directColor = colorcorrection->ConvertToColor24( inColor );
-					if( m_bEnable )
+					//================================================//
+					// Color correction for the real sRGB color space //
+					//================================================//
+
+					// For the PC, color correction works in srgb gamma space
+					color24 vSrgbOutColor;
+					color24 vSrgbInputColor = colorcorrection->ConvertToColor24( inColor );
+					if ( m_bEnable )
 					{
-						m_pOperationListPanel->GetOperationList()->Apply( directColor, outColor, m_pFinalOperation );
+						m_pOperationListPanel->GetOperationList()->Apply( vSrgbInputColor, vSrgbOutColor, m_pFinalOperation );
 					}
 					else
 					{
-						outColor = directColor;
+						vSrgbOutColor = vSrgbInputColor;
 					}
 
-					m_pLookupCache[ inColor.r + inColor.g*32 + inColor.b*32*32 ] = outColor;
+					m_pLookupCache[ inColor.r + inColor.g*32 + inColor.b*32*32 ] = vSrgbOutColor;
+
+					//==============================================================//
+					// Color correction for XBox 360's piecewise linear color space //
+					//==============================================================//
+
+					// Since the 360 has a different gamma space (piecewise linear / pwl) than the PC, the input and
+					// output needs to be converted at the right time. Since our Apply() function works in srgb space,
+					// we need to find the srgb color that our input pwl color maps to. Feeding that converted color that is now
+					// in srgb space into the Apply() function will then give us the output srgb color that then needs to be
+					// converted back into 360 pwl space and written to the raw file.
+
+					// 360's pwl input color
+					color24 vPwlInputColor = colorcorrection->ConvertToColor24( inColor );
+
+					// Input color mapped to the equivalent srgb color
+					color24 vPwlInputColorAsSrgb;
+					vPwlInputColorAsSrgb.r = ( uint8 )( SrgbLinearToGamma( X360GammaToLinear( float( vPwlInputColor.r ) / 255.0f ) ) * 255.0f );
+					vPwlInputColorAsSrgb.g = ( uint8 )( SrgbLinearToGamma( X360GammaToLinear( float( vPwlInputColor.g ) / 255.0f ) ) * 255.0f );
+					vPwlInputColorAsSrgb.b = ( uint8 )( SrgbLinearToGamma( X360GammaToLinear( float( vPwlInputColor.b ) / 255.0f ) ) * 255.0f );
+
+					// Color correction applied in srgb color space
+					color24 vPwlOutColorAsSrgb;
+					if ( m_bEnable )
+					{
+						m_pOperationListPanel->GetOperationList()->Apply( vPwlInputColorAsSrgb, vPwlOutColorAsSrgb, m_pFinalOperation );
+					}
+					else
+					{
+						vPwlOutColorAsSrgb = vPwlInputColorAsSrgb;
+					}
+
+					// Output color converted from srgb to pwl color space
+					color24 vPwlOutColor;
+					vPwlOutColor.r = ( uint8 )( X360LinearToGamma( SrgbGammaToLinear( float( vPwlOutColorAsSrgb.r ) / 255.0f ) ) * 255.0f );
+					vPwlOutColor.g = ( uint8 )( X360LinearToGamma( SrgbGammaToLinear( float( vPwlOutColorAsSrgb.g ) / 255.0f ) ) * 255.0f );
+					vPwlOutColor.b = ( uint8 )( X360LinearToGamma( SrgbGammaToLinear( float( vPwlOutColorAsSrgb.b ) / 255.0f ) ) * 255.0f );
+
+					// Output pwl color stored in table
+					m_pLookupCache360[ inColor.r + inColor.g*32 + inColor.b*32*32 ] = vPwlOutColor;
 				}
 			}
 		}
 
-		m_nCurrentRow+=32/m_nRowStep;
-		if( m_nCurrentRow==32 )
+		m_nCurrentRow += 32 / m_nRowStep;
+		if ( m_nCurrentRow == 32 )
 		{
 			colorcorrection->LockLookup( m_CCHandle );
 			colorcorrection->CopyLookup( m_CCHandle, m_pLookupCache );
@@ -5279,6 +5854,7 @@ void CColorCorrectionUIPanel::OnKeyCodeTyped(KeyCode code)
 }
 
 
+//-----------------------------------------------------------------------------
 void CColorCorrectionUIPanel::SetFinalOperation( IColorOperation *pOp ) 
 { 
 	m_pFinalOperation = pOp; 
@@ -5287,9 +5863,189 @@ void CColorCorrectionUIPanel::SetFinalOperation( IColorOperation *pOp )
 
 
 //-----------------------------------------------------------------------------
+static CColorCorrectionUIPanel *g_pColorCorrectionUI = NULL;
+
+
+bool CColorOperationListPanel::LoadVCCFile( const char *pFullPath )
+{
+	BeginDMXContext();
+
+	CDmxElement *pColorOperaterList;
+	if ( !UnserializeDMX( pFullPath, "GAME", true, &pColorOperaterList ) )
+	{
+		Warning( "Error loading file %s!\n", pFullPath );
+		EndDMXContext( true );
+		return false;
+	}
+
+	CDmxAttribute *pOperatorAttribute = pColorOperaterList->GetAttribute( "operators" );
+	if ( !pOperatorAttribute )
+	{
+		Warning( "File %s !\n", pFullPath );
+		EndDMXContext( true );
+		return false;
+	}
+	
+	const CUtlVector< CDmxElement* >& operators = pOperatorAttribute->GetArray< CDmxElement* >();
+
+	bool bOk = true;
+	CUtlVector< IColorOperation * > loadedOps;
+	int nCount = operators.Count();
+	for ( int i = 0; i < nCount; ++i )
+	{
+		CDmxElement *pDmxOp = operators[i];
+		int nOpType;
+		for ( nOpType = 0; nOpType < CC_TOOL_COUNT; ++nOpType )
+		{
+			if ( !Q_stricmp( s_pColorCorrectionDmxElementNames[nOpType], pDmxOp->GetTypeString() ) )
+				break;
+		}
+
+		if ( nOpType == CC_TOOL_COUNT )
+		{
+			Warning( "Unknown color correction operator %s\n", pDmxOp->GetTypeString() );
+			bOk = false;
+			break;
+		}
+
+		IColorOperation *pOp = CreateColorOp( (ColorCorrectionTool_t)nOpType, &m_OperationList );
+		if ( !pOp->Unserialize( pDmxOp ) )
+		{
+			Warning( "Error unserializing color correction operator %s\n", pDmxOp->GetName() );
+			bOk = false;
+			break;
+		}
+
+		loadedOps.AddToTail( pOp );
+	}
+
+	EndDMXContext( true );
+	if ( !bOk )
+		return false;
+
+	m_OperationList.Clear();
+	int nOldCount = m_OpPanelList.Count();
+	for ( int i = 0; i < nOldCount; ++i )
+	{
+		m_OpPanelList[i]->Shutdown();
+		delete m_OpPanelList[i];
+	}
+	m_OpPanelList.RemoveAll();
+
+	// Copy the loaded operations in
+	for ( int i = 0; i < nCount; ++i )
+	{
+		m_OperationList.AddOperation( loadedOps[i] );
+	}
+
+	return true;
+}
+
+bool CColorOperationListPanel::SaveVCCFile( const char *pFullPath )
+{
+	BeginDMXContext();
+
+	// Create Dmx elements representing the operation list
+	CDmxElement *pColorOperaterList = CreateDmxElement( "DmeColorCorrectionOperatorList" );
+	CDmxElementModifyScope modify( pColorOperaterList ); 
+
+	CDmxAttribute *pOperatorAttribute = pColorOperaterList->AddAttribute( "operators" );
+	CUtlVector< CDmxElement* >& operators = pOperatorAttribute->GetArrayForEdit< CDmxElement* >();
+
+	bool bOk = true;
+	int nCount = m_OperationList.GetNumOperations();
+	for ( int i = 0; i < nCount; ++i )
+	{
+		IColorOperation *pOp = m_OperationList.GetOperation( i );
+
+		CDmxElement *pDmxOp = CreateDmxElement( s_pColorCorrectionDmxElementNames[ pOp->ToolID() ] );
+		CDmxElementModifyScope modifyOp( pDmxOp ); 
+		if ( !pOp->Serialize( pDmxOp ) )
+		{
+			bOk = false;
+			Warning( "Error serializing color operator %s\n", pOp->GetName() );
+			break;
+		}
+		operators.AddToTail( pDmxOp );
+	}
+
+	modify.Release();
+
+	if ( bOk )
+	{
+		SerializeDMX( pFullPath, "MOD", true, pColorOperaterList );
+	}
+	EndDMXContext( true );
+
+	return bOk;
+}
+
+bool CColorOperationListPanel::SaveRawFile( const char *pFullPath )
+{
+	//=============//
+	// PC raw file //
+	//=============//
+	CP4AutoEditAddFile co( pFullPath );
+
+	FileHandle_t file_handle = g_pFileSystem->Open( pFullPath, "wb" );
+	if ( file_handle == NULL )
+		return false;
+
+	RGBX5551_t inColor;
+	inColor.b = 0;
+	for ( int b = 0; b < 32; ++b, ++inColor.b )
+	{
+		inColor.g = 0;
+		for ( int g = 0; g < 32; ++g, ++inColor.g )
+		{
+			inColor.r = 0;
+			for ( int r = 0; r < 32; ++r, ++inColor.r )
+			{
+				color24 outColor = g_pColorCorrectionUI->GetLookupCache()[ inColor.r + inColor.g*32 + inColor.b*32*32 ];
+				g_pFileSystem->Write( &outColor, sizeof(color24), file_handle );
+			}
+		}
+	}
+
+	g_pFileSystem->Close( file_handle );
+
+	//=======================//
+	// XBox 360 PWL raw file //
+	//=======================//
+	char pFilename360[256+4] = "";
+	V_StripExtension( pFullPath, pFilename360, 256+4 );
+	V_DefaultExtension( pFilename360, ".pwl.raw", 256+4 );
+
+	CP4AutoEditAddFile co2( pFilename360 );
+
+	FileHandle_t file_handle360 = g_pFileSystem->Open( pFilename360, "wb" );
+	if ( file_handle360 == NULL )
+		return false;
+
+	inColor.b = 0;
+	for ( int b = 0; b < 32; ++b, ++inColor.b )
+	{
+		inColor.g = 0;
+		for ( int g = 0; g < 32; ++g, ++inColor.g )
+		{
+			inColor.r = 0;
+			for ( int r = 0; r < 32; ++r, ++inColor.r )
+			{
+				color24 outColor = g_pColorCorrectionUI->GetLookupCache360()[ inColor.r + inColor.g*32 + inColor.b*32*32 ];
+				g_pFileSystem->Write( &outColor, sizeof(color24), file_handle360 );
+			}
+		}
+	}
+
+	g_pFileSystem->Close( file_handle360 );
+
+	return true;
+}
+
+
+//-----------------------------------------------------------------------------
 // Main interface to the performance tools 
 //-----------------------------------------------------------------------------
-static CColorCorrectionUIPanel *g_pColorCorrectionUI = NULL;
 
 class CColorCorrectionTools : public IColorCorrectionTools
 {
@@ -5335,8 +6091,13 @@ void CColorCorrectionTools::Shutdown( void )
 
 void CColorCorrectionTools::InstallColorCorrectionUI( vgui::Panel *parent )
 {
-	if ( g_pColorCorrectionUI )
+	if ( g_pColorCorrectionUI || IsX360() )
 		return;
+
+#ifndef NO_TOOLFRAMEWORK
+	if ( CommandLine()->CheckParm( "-tools" ) == NULL )
+		return;
+#endif
 
 	g_pColorCorrectionUI = new CColorCorrectionUIPanel( parent );
 	Assert( g_pColorCorrectionUI );
@@ -5349,7 +6110,7 @@ bool CColorCorrectionTools::ShouldPause() const
 
 void CColorCorrectionTools::GrabPreColorCorrectedFrame( int x, int y, int width, int height )
 {
-	if ( !g_pColorCorrectionUI->IsVisible() )
+	if ( !g_pColorCorrectionUI || !g_pColorCorrectionUI->IsVisible() )
 		return;
 
 	CMatRenderContextPtr pRenderContext( g_pMaterialSystem );
@@ -5382,7 +6143,15 @@ void CColorCorrectionTools::SetFinalOperation( IColorOperation *pOp )
 void ShowHideColorCorrectionUI()
 {
 	if ( !g_pColorCorrectionUI )
+	{
+#ifndef NO_TOOLFRAMEWORK
+		if ( CommandLine()->CheckParm( "-tools" ) == NULL )
+		{
+			Warning( "colorcorrectionui is only available when running with -tools!\n" );
+		}
+#endif
 		return;
+	}
 
 	bool bWasVisible = g_pColorCorrectionUI->IsVisible();
 

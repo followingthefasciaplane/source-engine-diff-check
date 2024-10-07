@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -171,6 +171,16 @@ inline void RecordFloat( float f )
 		RECORD_INT( _state );									\
 		RECORD_INT( _val )
 
+#	define RECORD_SAMPLER_STATES( _sampler, _addressU, _addressV, _addressW, _minFilter, _magFilter, _mipFilter )	\
+	RECORD_COMMAND( DX8_SET_SAMPLER_STATE, 7 );					\
+	RECORD_INT( _sampler );										\
+	RECORD_INT( _addressU );									\
+	RECORD_INT( _addressV );									\
+	RECORD_INT( _addressW );									\
+	RECORD_INT( _minFilter );									\
+	RECORD_INT( _magFilter );									\
+	RECORD_INT( _mipFilter )
+
 #	ifdef RECORD_DEBUG_STRINGS
 #		define RECORD_DEBUG_STRING( _str )			\
 			RECORD_COMMAND( DX8_DEBUG_STRING, 1 );	\
@@ -191,6 +201,7 @@ inline void RecordFloat( float f )
 #	define RECORD_RENDER_STATE( _state, _val )	0
 #	define RECORD_TEXTURE_STAGE_STATE( _stage, _state, _val )	0
 #	define RECORD_SAMPLER_STATE( _stage, _state, _val )	0
+#	define RECORD_SAMPLER_STATES( _sampler, _addressU, _addressV, _addressW, _minFilter, _magFilter, _mipFilter )	0
 #	define RECORD_DEBUG_STRING( _str )			0
 
 #endif // RECORDING

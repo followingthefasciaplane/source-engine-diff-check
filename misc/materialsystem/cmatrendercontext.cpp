@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========== Copyright Valve Corporation, All rights reserved. ========
 //
 // Purpose:
 //
@@ -6,7 +6,9 @@
 
 #include "pch_materialsystem.h"
 
+#ifndef _PS3
 #define MATSYS_INTERNAL
+#endif
 
 #include <math.h>
 #include "cmatrendercontext.h"
@@ -18,7 +20,7 @@
 #include "ctype.h"
 
 #include "tier1/fmtstr.h"
-#include "togl/rendermechanism.h"
+//#include "glmgr/glmdebug.h"
 
 // NOTE: This must be the last file included!!!
 #include "tier0/memdbgon.h"
@@ -52,12 +54,12 @@ static bool s_bDirtyDisk = false;
 
 void ValidateMatrices( const VMatrix &m1, const VMatrix &m2, float eps = .001 )
 {
-	if ( !ShouldValidateMatrices() )
-		return;
-
-	for ( int i = 0; i < 16; i++ )
+	if ( ShouldValidateMatrices() )
 	{
-		AssertFloatEquals( m1.Base()[i], m1.Base()[i], eps );
+		for ( int i = 0; i < 16; i++ )
+		{
+			AssertFloatEquals( m1.Base()[i], m1.Base()[i], eps );
+		}
 	}
 }
 
@@ -115,6 +117,7 @@ void SetupDirtyDiskReportFunc()
 CMemoryStack CMatRenderContextBase::sm_RenderData[2];
 int	CMatRenderContextBase::sm_nRenderLockCount = 0;
 int	CMatRenderContextBase::sm_nRenderStack = 0;
+MemoryStackMark_t CMatRenderContextBase::sm_nRenderCurrentAllocPoint = 0;
 int	CMatRenderContextBase::sm_nInitializeCount = 0;
 
 
@@ -122,7 +125,7 @@ int	CMatRenderContextBase::sm_nInitializeCount = 0;
 // Constructor
 //-----------------------------------------------------------------------------
 CMatRenderContextBase::CMatRenderContextBase() :
-	m_pMaterialSystem( NULL ), m_RenderTargetStack( 16, 32 ), m_MatrixMode( NUM_MATRIX_MODES )
+	m_pMaterialSystem( NULL ), m_RenderTargetStack( 16, 32 ), m_ScissorRectStack( 16, 32 ), m_MatrixMode( NUM_MATRIX_MODES )
 {
 	int i;
 
@@ -130,12 +133,11 @@ CMatRenderContextBase::CMatRenderContextBase() :
 
 	// Put a special element at the top of the RT stack (indicating back buffer is current top of stack)
 	// NULL indicates back buffer, -1 indicates full-size viewport
-#if !defined( _X360 )
-                RenderTargetStackElement_t initialElement = { {NULL, NULL, NULL, NULL}, NULL, 0, 0, -1, -1 };
+#if !defined( _X360 ) && !defined( _PS3 )
+	RenderTargetStackElement_t initialElement = { {NULL, NULL, NULL, NULL}, NULL, 0, 0, -1, -1 };
 #else
-                RenderTargetStackElement_t initialElement = { {NULL}, NULL, 0, 0, -1, -1 };
+	RenderTargetStackElement_t initialElement = { {NULL}, NULL, 0, 0, -1, -1 };
 #endif
-
 
 	m_RenderTargetStack.Push( initialElement );
 
@@ -151,7 +153,10 @@ CMatRenderContextBase::CMatRenderContextBase() :
 	m_HeightClipZ = 0.0f;
 	m_bEnableClipping = true;
 	m_bFlashlightEnable = false;
+	m_bCascadedShadowMappingEnabled = false;
+	m_bRenderingPaint = false;
 	m_bFullFrameDepthIsValid = false;
+	m_bCullingEnabledForSinglePassFlashlight = false;
 
 	for ( i = 0; i < NUM_MATRIX_MODES; i++ )
 	{
@@ -163,37 +168,63 @@ CMatRenderContextBase::CMatRenderContextBase() :
 
 	m_Viewport.Init( 0, 0, 0, 0 );
 
-	m_LastSetToneMapScale=Vector(1,1,1);
-	m_CurToneMapScale=1.0;
-	m_GoalToneMapScale = 1.0f;
+	m_LastSetToneMapScale = Vector(1,1,1);
 }
 
+
+const char *COM_GetModDirectory()
+{
+	static char modDir[MAX_PATH];
+	if ( Q_strlen( modDir ) == 0 )
+	{
+		const char *gamedir = CommandLine()->ParmValue("-game", CommandLine()->ParmValue( "-defaultgamedir", "hl2" ) );
+		Q_strncpy( modDir, gamedir, sizeof(modDir) );
+		if ( strchr( modDir, '/' ) || strchr( modDir, '\\' ) )
+		{
+			Q_StripLastDir( modDir, sizeof(modDir) );
+			int dirlen = Q_strlen( modDir );
+			Q_strncpy( modDir, gamedir + dirlen, sizeof(modDir) - dirlen );
+		}
+	}
+
+	return modDir;
+}
 
 //-----------------------------------------------------------------------------
 // Init, shutdown
 //-----------------------------------------------------------------------------
 InitReturnVal_t CMatRenderContextBase::Init( )
 {
-	MEM_ALLOC_CREDIT();
 	if ( !sm_nInitializeCount )
 	{
 		int nSize = 2200 * 1024;
 		int nCommitSize = 32 * 1024;
-
-#ifdef SWDS
-		nSize = nCommitSize = 1024;
-#endif
-
-		const char *gamedir = CommandLine()->ParmValue("-game", CommandLine()->ParmValue( "-defaultgamedir", "hl2" ) );
-		if ( gamedir && !Q_stricmp( "garrysmod", gamedir ) )
+		
+		if ( !Q_stricmp( "infested", COM_GetModDirectory() ) )
 		{
 			nSize = 4400 * 1024;
 		}
-
-		sm_RenderData[0].Init( nSize, nCommitSize, 0, 32 );
-		sm_RenderData[1].Init( nSize, nCommitSize, 0, 32 );
+		else if ( !Q_stricmp( "swarm", COM_GetModDirectory() ) )
+		{
+			nSize = 4400 * 1024;
+		}
+		else if ( !Q_stricmp( "portal2", COM_GetModDirectory() ) )
+		{
+			nSize = 6600 * 1024;
+		}
+		else if ( !Q_stricmp( "csgo", COM_GetModDirectory() ) )
+		{
+			nSize = 6600 * 1024;
+		}
+		
+#ifdef DEDICATED
+		nSize = nCommitSize = 1024;
+#endif
+		sm_RenderData[0].Init( "CMatRenderContextBase::sm_RenderData[0]", nSize, nCommitSize, 0, 32 );
+		sm_RenderData[1].Init( "CMatRenderContextBase::sm_RenderData[1]", nSize, nCommitSize, 0, 32 );
 		sm_nRenderStack = 0;
 		sm_nRenderLockCount = 0;
+		sm_nRenderCurrentAllocPoint = 0;
 	}
 	++sm_nInitializeCount;
 	return INIT_OK;
@@ -228,36 +259,28 @@ void CMatRenderContextBase::MarkRenderDataUnused( bool bFrameBegin )
 		sm_nRenderLockCount = 0;
 	}
 
-
-	// JAY: DO NOT MERGE FROM TF2 - L4D HAS CHANGED THE UNDERLYING INTERFACE IN A WAY THAT DOESN'T REQUIRE THIS
-#if 0
-	// Switch stacks
 	if ( bFrameBegin )
 	{
+		// Switch stacks
 		sm_nRenderStack = 1 - sm_nRenderStack;
-	}
 
-	// Clear the new stack
-#ifdef _DEBUG
-	memset( sm_RenderData[sm_nRenderStack].GetBase(), 0xFF, RenderDataSizeUsed() );
-#endif
-	sm_RenderData[ sm_nRenderStack ].FreeAll( false );
-#else
-	// Just for TF2, don't free the stack until the end of frame.  TF2 Allocates render data and holds it over the lock
-	// period because we haven't revised the studiorender interface yet to change patterns.
-	// Switch stacks
-	if ( bFrameBegin )
-	{
-		sm_nRenderStack = 1 - sm_nRenderStack;
 		// Clear the new stack
 #ifdef _DEBUG
 		memset( sm_RenderData[sm_nRenderStack].GetBase(), 0xFF, RenderDataSizeUsed() );
 #endif
 		sm_RenderData[ sm_nRenderStack ].FreeAll( false );
+		sm_nRenderCurrentAllocPoint = 0;
 	}
+	else
+	{
+		// Clear to the previous alloc point
+#ifdef _DEBUG
+		char *pClearFrom = (char*)sm_RenderData[sm_nRenderStack].GetBase() + sm_nRenderCurrentAllocPoint;
+		int nSizeToClear = RenderDataSizeUsed() - sm_nRenderCurrentAllocPoint;
+		memset( pClearFrom, 0xFF, nSizeToClear );
 #endif
-
-
+		sm_RenderData[sm_nRenderStack].FreeToAllocPoint( sm_nRenderCurrentAllocPoint, false );
+	}
 }
 
 int CMatRenderContextBase::RenderDataSizeUsed() const
@@ -282,7 +305,7 @@ void	CMatRenderContextBase::PrintfVA( char *fmt, va_list vargs )
 {
 }
 
-void	CMatRenderContextBase::Printf( const char *fmt, ... )
+void	CMatRenderContextBase::Printf( char *fmt, ... )
 {
 }
 
@@ -325,6 +348,16 @@ void CMatRenderContextBase::InitializeFrom( CMatRenderContextBase *pInitialState
 		m_RenderTargetStack.Push( pInitialState->m_RenderTargetStack[i] );
 	}
 
+
+	m_ScissorRectStack.Clear();
+	m_ScissorRectStack.EnsureCapacity( pInitialState->m_ScissorRectStack.Count() );
+
+	for ( i = 0; i < pInitialState->m_ScissorRectStack.Count(); i++ )
+	{
+		m_ScissorRectStack.Push( pInitialState->m_ScissorRectStack[i] );
+	}
+
+
 	m_MatrixMode = pInitialState->m_MatrixMode;
 	for ( i = 0; i < NUM_MATRIX_MODES; i++ )
 	{
@@ -332,36 +365,40 @@ void CMatRenderContextBase::InitializeFrom( CMatRenderContextBase *pInitialState
 	}
 
 	m_bFlashlightEnable = pInitialState->m_bFlashlightEnable;
-
-	m_FrameTime = pInitialState->m_FrameTime;
-	m_GoalToneMapScale = pInitialState->m_GoalToneMapScale;
-	m_CurToneMapScale = pInitialState->m_CurToneMapScale;
+	m_bCascadedShadowMappingEnabled = pInitialState->m_bCascadedShadowMappingEnabled;
+	m_bRenderingPaint = pInitialState->m_bRenderingPaint;
 	m_LastSetToneMapScale = pInitialState->m_LastSetToneMapScale;
 }
 
-void CMatRenderContextBase::Bind( IMaterial *iMaterial, void *proxyData )
+void CMatRenderContextBase::Bind( IMaterial *pMaterial, void *proxyData )
 {
-	IMaterialInternal *material = static_cast<IMaterialInternal *>( iMaterial );
+	IMaterialInternal *material = static_cast<IMaterialInternal *>( pMaterial );
 
 	if ( !material )
 	{
-		Warning( "Programming error: CMatRenderContext::Bind: NULL material\n" );
+		Warning( "Programming error: CMatRenderContextBase::Bind: NULL material\n" );
 		material = static_cast<IMaterialInternal *>( g_pErrorMaterial );
 	}
+	
 	material = material->GetRealTimeVersion(); //always work with the real time versions of materials internally
 
-	if ( GetCurrentMaterialInternal() != material )
+	if ( m_pCurrentMaterial != material )
 	{
 		if( !material->IsPrecached() )
 		{
-			DevWarning( "Binding uncached material \"%s\", artificially incrementing refcount\n", material->GetName() );
+			// This model is supposed to come in like this, skip the warning message
+			if( V_strcmp(material->GetName(), "engine/preloadtexture" ) != 0 )
+			{
+				DevWarning( "Binding uncached material \"%s\", artificially incrementing refcount\n", material->GetName() );
+			}
+
 			material->ArtificialAddRef();
 			material->Precache();
 		}
-		SetCurrentMaterialInternal(material);
+		m_pCurrentMaterial = material;
 	}
 
-	SetCurrentProxy( proxyData );
+	m_pCurrentProxyData = proxyData;
 }
 
 void CMatRenderContextBase::BindLightmapPage( int lightmapPageID )
@@ -486,7 +523,7 @@ void CMatRenderContextBase::LoadMatrix( const VMatrix& matrix )
 
 void CMatRenderContextBase::LoadMatrix( const matrix3x4_t& matrix )
 {
-	m_pCurMatrixItem->matrix = matrix;
+	m_pCurMatrixItem->matrix.Init( matrix );
 	m_pCurMatrixItem->flags = MSF_DIRTY; // clearing identity implicitly
 	CurrentMatrixChanged();
 }
@@ -636,11 +673,9 @@ void CMatRenderContextBase::RecomputeViewState()
 		viewMatrix[1][3] * viewMatrix[1][2] + 
 		viewMatrix[2][3] * viewMatrix[2][2] );
 
-	// FIXME Implement computation of m_vecViewForward, etc
-	m_vecViewForward.Init();
-	m_vecViewRight.Init();
-
-	// FIXME: Is this correct?
+	m_vecViewForward.Init( viewMatrix[2][0], viewMatrix[2][1], viewMatrix[2][2]);
+	m_vecViewForward *= -1.0f;
+	m_vecViewRight.Init( viewMatrix[0][0], viewMatrix[0][1], viewMatrix[0][2] );
 	m_vecViewUp.Init( viewMatrix[1][0], viewMatrix[1][1], viewMatrix[1][2] );
 }
 
@@ -653,9 +688,6 @@ void CMatRenderContextBase::GetWorldSpaceCameraPosition( Vector *pCameraPos )
 void CMatRenderContextBase::GetWorldSpaceCameraVectors( Vector *pVecForward, Vector *pVecRight, Vector *pVecUp )
 {
 	RecomputeViewState();
-
-	// FIXME Implement computation of m_vecViewForward
-	Assert( 0 );
 
 	if ( pVecForward )
 	{
@@ -673,11 +705,11 @@ void CMatRenderContextBase::GetWorldSpaceCameraVectors( Vector *pVecForward, Vec
 
 void *CMatRenderContextBase::LockRenderData( int nSizeInBytes )
 {
-	MEM_ALLOC_CREDIT();
 	void *pDest = sm_RenderData[ sm_nRenderStack ].Alloc( nSizeInBytes, false );
 	if ( !pDest )
 	{
-		ExecuteNTimes( 10, Warning("MaterialSystem: Out of memory in render data!\n") );
+		ExecuteNTimes( 10, Warning( "MaterialSystem: Out of memory in render data! (Attempted size = %d)\n", nSizeInBytes ) );
+		MemOutOfMemory(nSizeInBytes);
 	}
 	AddRefRenderData();
 	return pDest;
@@ -700,6 +732,16 @@ void CMatRenderContextBase::ReleaseRenderData()
 	if ( sm_nRenderLockCount == 0 )
 	{
 		OnRenderDataUnreferenced();
+		// Keep track of the current allocation point for the current render data stack
+		// in case the render context switches from CMatRenderContext to CMatQueuedRenderContext
+		// Note that both render context mode write to the same render data stack
+		// and OnRenderDataUnreferenced will have different implementation:
+		//     * CMatQueuedRenderContext - render data stack keeps growing until the next BeginFrame
+		//               where we switch to the next render data stack and clear the new one
+		//     * CMatRenderContext - free render data previously allocated. Therefore ensure that
+		//				 render data added by CMatQueuedRenderContext are not overwritten by only freeing
+		//               up to the current allocation point
+		sm_nRenderCurrentAllocPoint = sm_RenderData [sm_nRenderStack ].GetCurrentAllocPoint();
 	}
 }
 
@@ -709,6 +751,20 @@ void CMatRenderContextBase::SyncMatrices()
 
 void CMatRenderContextBase::SyncMatrix( MaterialMatrixMode_t mode )
 {
+}
+
+ShaderAPITextureHandle_t CMatRenderContextBase::GetLightmapTexture( int nLightmapPage )
+{
+	// Should never be called
+	Assert( 0 );
+	return INVALID_SHADERAPI_TEXTURE_HANDLE;
+}
+
+ShaderAPITextureHandle_t CMatRenderContextBase::GetPaintmapTexture( int nLightmapPage )
+{
+	// Should never be called
+	Assert( 0 );
+	return INVALID_SHADERAPI_TEXTURE_HANDLE;
 }
 
 void CMatRenderContextBase::SetHeightClipMode( enum MaterialHeightClipMode_t heightClipMode )
@@ -804,10 +860,10 @@ void CMatRenderContextBase::PushRenderTargetAndViewport( )
 void CMatRenderContextBase::PushRenderTargetAndViewport( ITexture *pTexture )
 {
 	// Just blindly push the data on the stack with flags indicating full bounds
-#if !defined( _X360 )
-	RenderTargetStackElement_t element = { {pTexture, NULL, NULL, NULL}, 0, 0, -1, -1 };
+#if !defined( _X360 ) && !defined( _PS3 )
+	RenderTargetStackElement_t element = { {pTexture, NULL, NULL, NULL}, NULL, 0, 0, -1, -1 };
 #else
-	RenderTargetStackElement_t element = { {pTexture}, 0, 0, -1, -1 };
+	RenderTargetStackElement_t element = { {pTexture}, NULL, 0, 0, -1, -1 };
 #endif
 	m_RenderTargetStack.Push( element );
 	CommitRenderTargetAndViewport();
@@ -834,7 +890,7 @@ void CMatRenderContextBase::PushRenderTargetAndViewport( ITexture *pTexture, int
 void CMatRenderContextBase::PushRenderTargetAndViewport( ITexture *pTexture, ITexture *pDepthTexture, int nViewX, int nViewY, int nViewW, int nViewH )
 {
 	// Just blindly push the data on the stack
-#if !defined( _X360 )
+#if !defined( _X360 ) && !defined( _PS3 )
 	RenderTargetStackElement_t element = { {pTexture, NULL, NULL, NULL}, pDepthTexture, nViewX, nViewY, nViewW, nViewH };
 #else
 	RenderTargetStackElement_t element = { {pTexture}, pDepthTexture, nViewX, nViewY, nViewW, nViewH };
@@ -857,7 +913,6 @@ void CMatRenderContextBase::PopRenderTargetAndViewport( void )
 		return;
 	}
 
-	// Changelist #266217 added this to main/src/materialsystem.
 	Flush();
 
 	// Remove the top of stack
@@ -922,82 +977,6 @@ float CMatRenderContextBase::ComputePixelDiameterOfSphere( const Vector& vecAbsO
 	return vheight * fabs( clipPos2.y - clipPos1.y ) / 2.0f;
 }
 
-ConVar mat_accelerate_adjust_exposure_down( "mat_accelerate_adjust_exposure_down", "3.0", FCVAR_CHEAT );
-ConVar mat_hdr_manual_tonemap_rate( "mat_hdr_manual_tonemap_rate", "1.0" );
-ConVar mat_hdr_tonemapscale( "mat_hdr_tonemapscale", "1.0", FCVAR_CHEAT );
-ConVar mat_tonemap_algorithm( "mat_tonemap_algorithm", "1", FCVAR_CHEAT, "0 = Original Algorithm 1 = New Algorithm" );
-
-void CMatRenderContextBase::TurnOnToneMapping(void)
-{
-	if ( ( HardwareConfig()->GetHDRType() != HDR_TYPE_NONE ) && ( m_FrameTime > 0.0f ) )
-	{
-		float elapsed_time = m_FrameTime;
-		float goalScale = m_GoalToneMapScale;
-		float rate = mat_hdr_manual_tonemap_rate.GetFloat();
-		
-		if ( mat_tonemap_algorithm.GetInt() == 1 )
-		{
-			rate *= 2.0f; // Default 2x for the new tone mapping algorithm so it feels the same as the original
-		}
-
-		if ( rate == 0.0f ) // Zero indicates instantaneous tonemap scaling
-		{
-			m_CurToneMapScale = goalScale;
-		}
-		else
-		{
-			if ( goalScale < m_CurToneMapScale )
-			{
-				float acc_exposure_adjust = mat_accelerate_adjust_exposure_down.GetFloat();
-
-				// Adjust at up to 4x rate when over-exposed.
-				rate = min( ( acc_exposure_adjust * rate ), FLerp( rate, ( acc_exposure_adjust * rate ), 0.0f, 1.5f, ( m_CurToneMapScale - goalScale ) ) );
-			}
-
-			float flRateTimesTime = rate * elapsed_time;
-			if ( mat_tonemap_algorithm.GetInt() == 1 )
-			{
-				// For the new tone mapping algorithm, limit the rate based on the number of bins to 
-				// help reduce the tone map scalar "riding the wave" of the histogram re-building
-
-				//Warning( "flRateTimesTime = %.4f", flRateTimesTime );
-				flRateTimesTime = min( flRateTimesTime, ( 1.0f / 16.0f ) * 0.25f ); // 16 is number of HDR sample bins defined in viewpostprocess.cpp
-				//Warning( " --> %.4f\n", flRateTimesTime );
-			}
-
-			float alpha = max( 0.0f, min( 1.0f, flRateTimesTime ) );
-			m_CurToneMapScale = ( goalScale * alpha ) + ( m_CurToneMapScale * ( 1.0f - alpha ) );
-
-			if ( !IsFinite( m_CurToneMapScale ) )
-			{
-				Assert( 0 );
-				m_CurToneMapScale = goalScale;
-			}
-		}
-
-		SetToneMappingScaleLinear( Vector( m_CurToneMapScale, m_CurToneMapScale, m_CurToneMapScale ) );
-		m_LastSetToneMapScale = Vector( m_CurToneMapScale, m_CurToneMapScale, m_CurToneMapScale );
-	}
-}
-
-void CMatRenderContextBase::ResetToneMappingScale(float sc)
-{
-	m_CurToneMapScale = sc;
-	SetToneMappingScaleLinear( Vector( m_CurToneMapScale, m_CurToneMapScale, m_CurToneMapScale ) );
-	m_LastSetToneMapScale = Vector( m_CurToneMapScale, m_CurToneMapScale, m_CurToneMapScale );
-	// mat_hdr_tonemapscale.SetValue(1.0f);
-	m_GoalToneMapScale = 1;
-}
-
-void CMatRenderContextBase::SetGoalToneMappingScale( float monoscale)
-{
-	Assert( IsFinite( monoscale ) );
-	if( IsFinite( monoscale ) )
-	{
-		m_GoalToneMapScale = monoscale;
-	}
-}
-
 Vector CMatRenderContextBase::GetToneMappingScaleLinear( void )
 {
 	if ( HardwareConfig()->GetHDRType() == HDR_TYPE_NONE )
@@ -1006,51 +985,10 @@ Vector CMatRenderContextBase::GetToneMappingScaleLinear( void )
 		return m_LastSetToneMapScale;
 }
 
-void CMatRenderContextBase::OnAsyncCreateTextureFromRenderTarget( ITexture* pSrcRt, const char** ppDstName, IAsyncTextureOperationReceiver* pRecipient )
-{
-	Assert( pSrcRt != NULL );
-	Assert( pRecipient != NULL );
-	Assert( ppDstName != NULL && *ppDstName != NULL);
-	
-	// Bump the ref count on the recipient before handing it off. This ensures the receiver won't go away before we have completed our work. 
-	pSrcRt->AddRef();
-	pRecipient->AddRef();
-
-	// Also, need to allocate a copy of the string and use that one s.t. the caller doesn't have to worry about it.
-	char* pDstNameCopy = new char[ V_strlen( *ppDstName ) + 1 ];
-	V_strcpy( pDstNameCopy, *ppDstName );
-	( *ppDstName ) = pDstNameCopy;
-}
-
-// Map and unmap a texture. The pRecipient->OnAsyncMapComplete is called when complete. 
-void CMatRenderContextBase::OnAsyncMap( ITextureInternal* pTexToMap, IAsyncTextureOperationReceiver* pRecipient, void* pExtraArgs )
-{
-	Assert( pTexToMap != NULL );
-	Assert( pRecipient != NULL );
-
-	pTexToMap->AddRef();
-	pRecipient->AddRef();
-}
-
-void CMatRenderContextBase::OnAsyncUnmap( ITextureInternal* pTexToUnmap ) 
-{
-	Assert( pTexToUnmap != NULL );
-
-	pTexToUnmap->AddRef();
-}
-
-void CMatRenderContextBase::OnAsyncCopyRenderTargetToStagingTexture( ITexture* pDst, ITexture* pSrc, IAsyncTextureOperationReceiver* pRecipient )
-{
-	Assert( pDst != NULL );
-	Assert( pSrc != NULL );
-	Assert( pRecipient != NULL );
-
-	pDst->AddRef();
-	pSrc->AddRef();
-	pRecipient->AddRef();
-}
-
-#undef g_pShaderAPI 
+#undef g_pShaderAPI
+#if defined( _PS3 ) || defined( _OSX )
+#define g_pShaderAPI ShaderAPI()
+#endif
 
 //-----------------------------------------------------------------------------
 //
@@ -1105,17 +1043,12 @@ void CMatRenderContext::OnReleaseShaderObjects()
 	m_pBoundMorph = NULL;
 }
 
-#ifdef DX_TO_GL_ABSTRACTION
+#if defined( DX_TO_GL_ABSTRACTION ) && !defined( _GAMECONSOLE )
 void CMatRenderContext::DoStartupShaderPreloading( void )
 {
 	g_pShaderDevice->DoStartupShaderPreloading();
 }
 #endif
-
-void CMatRenderContext::TextureManagerUpdate()
-{
-	TextureManager()->Update();
-}
 
 
 inline IMaterialInternal *CMatRenderContext::GetMaterialInternal( MaterialHandle_t h ) const
@@ -1130,7 +1063,12 @@ inline IMaterialInternal *CMatRenderContext::GetDrawFlatMaterial()
 
 inline IMaterialInternal *CMatRenderContext::GetBufferClearObeyStencil( int i )
 {
-	return GetMaterialSystem()->GetBufferClearObeyStencil(i );
+	return GetMaterialSystem()->GetBufferClearObeyStencil( i );
+}
+
+inline IMaterialInternal *CMatRenderContext::GetReloadZcullMaterial()
+{
+	return GetMaterialSystem()->GetReloadZcullMaterial();
 }
 
 inline ShaderAPITextureHandle_t CMatRenderContext::GetFullbrightLightmapTextureHandle() const
@@ -1148,9 +1086,19 @@ inline ShaderAPITextureHandle_t CMatRenderContext::GetBlackTextureHandle() const
 	return GetMaterialSystem()->GetBlackTextureHandle();
 }
 
+inline ShaderAPITextureHandle_t CMatRenderContext::GetBlackAlphaZeroTextureHandle() const
+{
+	return GetMaterialSystem()->GetBlackAlphaZeroTextureHandle();
+}
+
 inline ShaderAPITextureHandle_t CMatRenderContext::GetFlatNormalTextureHandle() const
 {
 	return GetMaterialSystem()->GetFlatNormalTextureHandle();
+}
+
+inline ShaderAPITextureHandle_t CMatRenderContext::GetFlatSSBumpTextureHandle() const
+{
+	return GetMaterialSystem()->GetFlatSSBumpTextureHandle();
 }
 
 inline ShaderAPITextureHandle_t CMatRenderContext::GetGreyTextureHandle() const
@@ -1178,6 +1126,18 @@ inline CMatLightmaps *CMatRenderContext::GetLightmaps()
 	return GetMaterialSystem()->GetLightmaps();
 }
 
+
+inline const CMatPaintmaps *CMatRenderContext::GetPaintmaps() const
+{
+	return GetMaterialSystem()->GetPaintmaps();
+}
+
+inline CMatPaintmaps *CMatRenderContext::GetPaintmaps()
+{
+	return GetMaterialSystem()->GetPaintmaps();
+}
+
+
 inline ShaderAPITextureHandle_t CMatRenderContext::GetMaxDepthTextureHandle() const
 {
 	return GetMaterialSystem()->GetMaxDepthTextureHandle();
@@ -1185,41 +1145,30 @@ inline ShaderAPITextureHandle_t CMatRenderContext::GetMaxDepthTextureHandle() co
 
 void CMatRenderContext::BeginRender()
 {
-#if 1 // Rick's optimization: not sure this is needed anymore
 	if ( GetMaterialSystem()->GetThreadMode() != MATERIAL_SINGLE_THREADED )
 	{
-		VPROF_INCREMENT_GROUP_COUNTER( "render/CMatBeginRender", COUNTER_GROUP_TELEMETRY, 1 );
+//		VPROF_INCREMENT_GROUP_COUNTER( "render/CMatBeginRender", COUNTER_GROUP_TELEMETRY, 1 );
 
-		TelemetrySetLockName( TELEMETRY_LEVEL1, (char const *)&g_MatSysMutex, "MatSysMutex" );
+		TelemetrySetLockName( TELEMETRY_LEVEL0, (char const *)&g_MatSysMutex, "MatSysMutex" );
 
-		tmTryLock( TELEMETRY_LEVEL1, (char const *)&g_MatSysMutex, "BeginRender" );
+		tmTryLock( TELEMETRY_LEVEL0, (char const *)&g_MatSysMutex, "BeginRender" );
 		g_MatSysMutex.Lock();
-		tmEndTryLock( TELEMETRY_LEVEL1, (char const *)&g_MatSysMutex, TMLR_SUCCESS );
-		tmSetLockState( TELEMETRY_LEVEL1, (char const *)&g_MatSysMutex, TMLS_LOCKED, "BeginRender" );
+		tmEndTryLock( TELEMETRY_LEVEL0, (char const *)&g_MatSysMutex, TMLR_SUCCESS );
+		tmSetLockState( TELEMETRY_LEVEL0, (char const *)&g_MatSysMutex, TMLS_LOCKED, "BeginRender" );
 	}
-#endif
 }
 
 void CMatRenderContext::EndRender()
 {
-#if 1 // Rick's optimization: not sure this is needed anymore
 	if ( GetMaterialSystem()->GetThreadMode() != MATERIAL_SINGLE_THREADED )
 	{
 		g_MatSysMutex.Unlock();
-		tmSetLockState( TELEMETRY_LEVEL1, (char const *)&g_MatSysMutex, TMLS_RELEASED, "EndRender" );
+		tmSetLockState( TELEMETRY_LEVEL0, (char const *)&g_MatSysMutex, TMLS_RELEASED, "EndRender" );
 	}
-#endif
 }
 
 void CMatRenderContext::Flush( bool flushHardware )
 {
-	VPROF( "CMatRenderContextBase::Flush" );
-
-	g_pShaderAPI->FlushBufferedPrimitives();
-	if ( IsPC() && flushHardware )
-	{
-		g_pShaderAPI->FlushBufferedPrimitives();
-	}
 }
 
 bool CMatRenderContext::TestMatrixSync( MaterialMatrixMode_t mode )
@@ -1542,15 +1491,62 @@ void CMatRenderContext::SyncMatrix( MaterialMatrixMode_t mode )
 	}
 }
 
+ShaderAPITextureHandle_t CMatRenderContext::GetLightmapTexture( int nLightmapPage )
+{
+	switch ( nLightmapPage )
+	{
+	default:
+		Assert( ( nLightmapPage == 0 && GetLightmaps()->GetNumLightmapPages() == 0 ) || ( nLightmapPage >= 0 && nLightmapPage < GetLightmaps()->GetNumLightmapPages() ) );
+		if( nLightmapPage >= 0 && nLightmapPage < GetLightmaps()->GetNumLightmapPages() )
+			return GetLightmaps()->GetLightmapPageTextureHandle( nLightmapPage );
+		return INVALID_SHADERAPI_TEXTURE_HANDLE;
+
+	case MATERIAL_SYSTEM_LIGHTMAP_PAGE_USER_DEFINED:
+		AssertOnce( m_pUserDefinedLightmap );
+		return m_pUserDefinedLightmap->GetTextureHandle( 0 );
+
+	case MATERIAL_SYSTEM_LIGHTMAP_PAGE_WHITE:
+		return GetFullbrightLightmapTextureHandle();
+
+	case MATERIAL_SYSTEM_LIGHTMAP_PAGE_WHITE_BUMP:
+		return GetFullbrightBumpedLightmapTextureHandle();
+
+	case MATERIAL_SYSTEM_LIGHTMAP_PAGE_INVALID:
+		return INVALID_SHADERAPI_TEXTURE_HANDLE;
+	}
+}
+
 
 //-----------------------------------------------------------------------------
 // Swap buffers
 //-----------------------------------------------------------------------------
+
+extern void OnFrameTimestampAvailableMST(float);
+extern void OnGpuStartFrame(uint32 context);
+extern void OnGpuEndFrame(uint32 context);
+
 void CMatRenderContext::SwapBuffers()
 {
 	g_pMorphMgr->AdvanceFrame();
 	g_pOcclusionQueryMgr->AdvanceFrame();
+
+#if X360_ALLOW_TIMESTAMPS
+	OnFrameTimestampAvailableMST(1.0f);
+
+	IDirect3DDevice9* pDevice = ( IDirect3DDevice9* ) g_pMaterialSystem->GetD3DDevice();
+
+	pDevice->InsertCallback(D3DCALLBACK_IMMEDIATE, (D3DCALLBACK)OnGpuEndFrame, 0 );
+#endif
+
+#ifdef GCM_ALLOW_TIMESTAMPS
+	OnFrameTimestampAvailableMST(1.0f);
+#endif
+
 	g_pShaderDevice->Present();
+
+#if X360_ALLOW_TIMESTAMPS
+	pDevice->InsertCallback(D3DCALLBACK_IMMEDIATE, (D3DCALLBACK)OnGpuStartFrame, 0 );
+#endif
 
 #ifdef _X360
 	if ( s_bDirtyDisk )
@@ -1686,8 +1682,6 @@ void CMatRenderContext::BindMorph( IMorph *pMorph )
 
 	if ( m_pBoundMorph != pMorphInternal )
 	{
-		g_pShaderAPI->FlushBufferedPrimitives();
-
 		m_pBoundMorph = pMorphInternal;
 
 		bool bEnableHWMorph = false;
@@ -1697,8 +1691,7 @@ void CMatRenderContext::BindMorph( IMorph *pMorph )
 		}
 		else if ( pMorphInternal )
 		{
-			bEnableHWMorph = true;
-			pMorphInternal->Bind( m_pMorphRenderContext );
+			bEnableHWMorph = pMorphInternal->Bind( m_pMorphRenderContext );
 		}
 		g_pShaderAPI->EnableHWMorphing( bEnableHWMorph );
 	}
@@ -1793,15 +1786,15 @@ void CMatRenderContext::CommitRenderTargetAndViewport( void )
 		if ( element.m_pRenderTargets[rt] == NULL )
 		{
 			g_pShaderAPI->SetRenderTargetEx(rt); // No texture parameter here indicates back buffer
-			
-			if ( IsPC() )
-			{
-				Assert( ImageLoader::SizeInBytes( g_pShaderDevice->GetBackBufferFormat() ) <= 4 );
-				g_pShaderAPI->EnableLinearColorSpaceFrameBuffer( false );
-			}
-			
+						
 			if (rt == 0)										// the first rt sets the viewport
 			{
+				if (IsPC() || IsPS3())
+				{
+					Assert(ImageLoader::SizeInBytes(g_pShaderDevice->GetBackBufferFormat()) <= 4);
+					g_pShaderAPI->EnableLinearColorSpaceFrameBuffer(false);
+				}
+
 				// If either dimension is negative, set to full bounds of back buffer
 				if ( (element.m_nViewW < 0) || (element.m_nViewH < 0) )
 				{
@@ -1827,9 +1820,11 @@ void CMatRenderContext::CommitRenderTargetAndViewport( void )
 
 			if (rt == 0)
 			{
-				if ( IsPC() )
+				if ( IsPC() || IsPS3() )
 				{
-					if( element.m_pRenderTargets[rt]->GetImageFormat() == IMAGE_FORMAT_RGBA16161616F )
+					if( ( element.m_pRenderTargets[rt]->GetImageFormat() == IMAGE_FORMAT_RGBA16161616F ) ||
+						( element.m_pRenderTargets[rt]->GetImageFormat() == IMAGE_FORMAT_RGBA32323232F )  ||
+						( element.m_pRenderTargets[rt]->GetImageFormat() == IMAGE_FORMAT_R32F ) )
 					{
 						g_pShaderAPI->EnableLinearColorSpaceFrameBuffer( true );
 					}
@@ -1869,24 +1864,35 @@ void CMatRenderContext::SetFrameBufferCopyTexture( ITexture *pTexture, int textu
 		Assert( 0 );
 		return;
 	}
-	if( m_pCurrentFrameBufferCopyTexture[textureIndex] != pTexture )
-	{
-		g_pShaderAPI->FlushBufferedPrimitives();
-	}
 	// FIXME: Do I need to increment/decrement ref counts here, or assume that the app is going to do it?
 	m_pCurrentFrameBufferCopyTexture[textureIndex] = pTexture;
 }
 
 void CMatRenderContext::BindLocalCubemap( ITexture *pTexture )
 {
-	ITexture *pPreviousTexture = m_pLocalCubemapTexture;
-
 	CMatRenderContextBase::BindLocalCubemap( pTexture );
 
-	if( m_pLocalCubemapTexture != pPreviousTexture )
+	if ( g_pShaderDevice->IsUsingGraphics() )
 	{
-		g_pShaderAPI->FlushBufferedPrimitives();
+		if( pTexture )
+		{
+			ITextureInternal *pTextureInternal = static_cast<ITextureInternal*>( pTexture );
+			g_pShaderAPI->SetStandardTextureHandle( TEXTURE_LOCAL_ENV_CUBEMAP, pTextureInternal->GetTextureHandle( 0 ) ); 
+		}
+		else
+		{
+			g_pShaderAPI->SetStandardTextureHandle( TEXTURE_LOCAL_ENV_CUBEMAP, INVALID_SHADERAPI_TEXTURE_HANDLE ); 
+		}
 	}
+}
+
+void CMatRenderContext::SetNonInteractiveLogoTexture( ITexture *pTexture, float flNormalizedX, float flNormalizedY, float flNormalizedW, float flNormalizedH )
+{
+	m_pNonInteractiveLogo.Init( pTexture );
+	m_flLogoNormalizedX = flNormalizedX;
+	m_flLogoNormalizedY = flNormalizedY;
+	m_flLogoNormalizedW = flNormalizedW;
+	m_flLogoNormalizedH = flNormalizedH;
 }
 
 void CMatRenderContext::SetNonInteractivePacifierTexture( ITexture *pTexture, float flNormalizedX, float flNormalizedY, float flNormalizedSize )
@@ -1936,19 +1942,32 @@ void CMatRenderContext::EnableNonInteractiveMode( MaterialNonInteractiveMode_t m
 	else
 	{
 		ShaderNonInteractiveInfo_t info;
+
+		// background
+		ITextureInternal *pTexInternal = static_cast<ITextureInternal*>( (ITexture*)m_pNonInteractiveTempFullscreenBuffer[mode] );
+		info.m_hTempFullscreenTexture = pTexInternal ? pTexInternal->GetTextureHandle(0) : INVALID_SHADERAPI_TEXTURE_HANDLE;
+
+		// logo
+		info.m_flLogoNormalizedX = m_flLogoNormalizedX;
+		info.m_flLogoNormalizedY = m_flLogoNormalizedY;
+		info.m_flLogoNormalizedW = m_flLogoNormalizedW;
+		info.m_flLogoNormalizedH = m_flLogoNormalizedH;
+
+		ITextureInternal *pTexLogoInternal = static_cast<ITextureInternal*>( (ITexture*)m_pNonInteractiveLogo );
+		info.m_hLogoTexture = pTexLogoInternal ? pTexLogoInternal->GetTextureHandle(0) : INVALID_SHADERAPI_TEXTURE_HANDLE;
+
+		// pacifier
 		info.m_flNormalizedX = m_flNormalizedX;
 		info.m_flNormalizedY = m_flNormalizedY;
 		info.m_flNormalizedSize = m_flNormalizedSize;
 
-		ITextureInternal *pTexInternal = static_cast<ITextureInternal*>( (ITexture*)m_pNonInteractiveTempFullscreenBuffer[mode] );
-		info.m_hTempFullscreenTexture = pTexInternal ? 
-			pTexInternal->GetTextureHandle(0) : INVALID_SHADERAPI_TEXTURE_HANDLE;
 		ITextureInternal *pTexPacifierInternal = static_cast<ITextureInternal*>( (ITexture*)m_pNonInteractivePacifier );
 		info.m_nPacifierCount = pTexPacifierInternal ? pTexPacifierInternal->GetNumAnimationFrames() : 0;
 		for ( int i = 0; i < info.m_nPacifierCount; ++i )
 		{
 			info.m_pPacifierTextures[i] = pTexPacifierInternal->GetTextureHandle( i ); 
 		}
+
 		g_pShaderDevice->EnableNonInteractiveMode( mode, &info );
 	}
 }
@@ -1983,7 +2002,7 @@ void CMatRenderContext::SetRenderTargetEx( int nRenderTargetID, ITexture *pNewTa
 			// If we're going to render to a texture
 			// Make sure the texture is a render target...
 			bool reset = true;
-			if (nRenderTargetID==0)
+			if ( nRenderTargetID == 0 )
 			{
 				// reset vp on change of rt#0
 				m_Viewport.m_nTopLeftX = 0;
@@ -1992,6 +2011,7 @@ void CMatRenderContext::SetRenderTargetEx( int nRenderTargetID, ITexture *pNewTa
 				m_Viewport.m_nHeight = pNewTarget->GetActualHeight();
 				g_pShaderAPI->SetViewports( 1, &m_Viewport ); 
 			}
+
 			ITextureInternal *pTexInt = static_cast<ITextureInternal*>(pNewTarget);
 			if ( pTexInt )
 			{
@@ -2002,7 +2022,9 @@ void CMatRenderContext::SetRenderTargetEx( int nRenderTargetID, ITexture *pNewTa
 				}
 			}
 
-			if( pNewTarget && pNewTarget->GetImageFormat() == IMAGE_FORMAT_RGBA16161616F )
+			if ( pNewTarget && ( ( pNewTarget->GetImageFormat() == IMAGE_FORMAT_RGBA16161616F ) || 
+				                 ( pNewTarget->GetImageFormat() == IMAGE_FORMAT_RGBA32323232F ) ) ||
+								 ( pNewTarget->GetImageFormat() == IMAGE_FORMAT_R32F ) )
 			{
 				g_pShaderAPI->EnableLinearColorSpaceFrameBuffer( true );
 			}
@@ -2043,43 +2065,51 @@ void CMatRenderContext::GetLightmapDimensions( int *w, int *h )
 	*h = GetMaterialSystem()->GetLightmapHeight( GetLightmapPage() );
 }
 
+
+//-----------------------------------------------------------------------------
+// FIXME: This is a hack required for NVidia/XBox, can they fix in drivers?
+//-----------------------------------------------------------------------------
 void CMatRenderContext::DrawScreenSpaceQuad( IMaterial* pMaterial )
 {
-	// Despite saying we render a full screen quad, this actually renders a single triangle
-	// that covers the whole screen.
+	// This is required because the texture coordinates for NVidia reading
+	// out of non-power-of-two textures is borked
 	int w, h;
 
 	GetRenderTargetDimensions( w, h );
 	if ( ( w == 0 ) || ( h == 0 ) )
 		return;
 
-	// DX9 disagrees about (0, 0) in a render target and (0, 0) in the texture. 
-	// Fix that here by doing a half-pixel offset for the pixel. 
-	// Because we are working in clip space which is 2 units across, the adjustment factor is 1.
-	float flOffsetW = 1.0f / w;
-	float flOffsetH = 1.0f / h;
+	// This is the size of the back-buffer we're reading from.
+	int bw, bh;
+	bw = w; bh = h;
 
+	/* FIXME: Get this to work in hammer/engine integration
+	if ( m_pRenderTargetTexture )
+	{
+	}
+	else
+	{
+		MaterialVideoMode_t mode;
+		GetDisplayMode( mode );
+		if ( ( mode.m_Width == 0 ) || ( mode.m_Height == 0 ) )
+			return;
+		bw = mode.m_Width;
+		bh = mode.m_Height;
+	}
+	*/
+
+	float s0, t0;
+	float s1, t1;
+		 	  
+	float flOffsetS = (bw != 0.0f) ? 1.0f / bw : 0.0f;
+	float flOffsetT = (bh != 0.0f) ? 1.0f / bh : 0.0f;
+	s0 = 0.5f * flOffsetS;
+	t0 = 0.5f * flOffsetT;
+	s1 = (w-0.5f) * flOffsetS;
+	t1 = (h-0.5f) * flOffsetT;
+	
 	Bind( pMaterial );
 	IMesh* pMesh = GetDynamicMesh( true );
-
-	CMeshBuilder meshBuilder;;
-	meshBuilder.Begin( pMesh, MATERIAL_TRIANGLES, 1 );
-
-	enum { TL, BL, TR, COORDS_COUNT };
-
-	struct CoordSSQ_t
-	{
-		float x, y;
-		float u, v;
-	};
-
-	CoordSSQ_t coords[] = { 
-		{ -1.0f - 1.0f * flOffsetW,  1.0f + 1.0f * flOffsetH,  0.0f,  0.0f }, // TL
-		{ -1.0f - 1.0f * flOffsetW, -3.0f + 1.0f * flOffsetH,  0.0f,  2.0f }, // BL
-		{  3.0f - 1.0f * flOffsetW,  1.0f + 1.0f * flOffsetH,  2.0f,  0.0f }, // TR
-	};
-
-	static_assert( ARRAYSIZE( coords ) == COORDS_COUNT, "Unexpected number of coords in triangle, should match enum." );
 
 	MatrixMode( MATERIAL_VIEW );
 	PushMatrix();
@@ -2089,17 +2119,37 @@ void CMatRenderContext::DrawScreenSpaceQuad( IMaterial* pMaterial )
 	PushMatrix();
 	LoadIdentity();
 
-	for ( int i = 0; i < COORDS_COUNT; ++i )
-	{
-		meshBuilder.Position3f(    coords[ i ].x, coords[ i ].y,          0.0f );
-		meshBuilder.Normal3f(               0.0f,          0.0f,          1.0f );
-		meshBuilder.TangentS3f(             0.0f,          1.0f,          0.0f );
-		meshBuilder.TangentT3f(             1.0f,          0.0f,          0.0f );
-		meshBuilder.TexCoord2f( 0, coords[ i ].u, coords[ i ].v                );
+	CMeshBuilder meshBuilder;
+	meshBuilder.Begin( pMesh, MATERIAL_QUADS, 1 );
 
-		meshBuilder.AdvanceVertex();
-	}
-									   
+	meshBuilder.Position3f( -1.0f, -1.0f, 0.0f );
+	meshBuilder.TangentS3f( 0.0f, 1.0f, 0.0f );
+	meshBuilder.TangentT3f( 1.0f, 0.0f, 0.0f );
+	meshBuilder.Normal3f( 0.0f, 0.0f, 1.0f );
+	meshBuilder.TexCoord2f( 0, s0, t1 );
+	meshBuilder.AdvanceVertex();
+
+	meshBuilder.Position3f( -1.0f, 1, 0.0f );
+	meshBuilder.TangentS3f( 0.0f, 1.0f, 0.0f );
+	meshBuilder.TangentT3f( 1.0f, 0.0f, 0.0f );
+	meshBuilder.Normal3f( 0.0f, 0.0f, 1.0f );
+	meshBuilder.TexCoord2f( 0, s0, t0 );
+	meshBuilder.AdvanceVertex();
+
+	meshBuilder.Position3f( 1, 1, 0.0f );
+	meshBuilder.TangentS3f( 0.0f, 1.0f, 0.0f );
+	meshBuilder.TangentT3f( 1.0f, 0.0f, 0.0f );
+	meshBuilder.Normal3f( 0.0f, 0.0f, 1.0f );
+	meshBuilder.TexCoord2f( 0, s1, t0 );
+	meshBuilder.AdvanceVertex();
+
+	meshBuilder.Position3f( 1, -1.0f, 0.0f );
+	meshBuilder.TangentS3f( 0.0f, 1.0f, 0.0f );
+	meshBuilder.TangentT3f( 1.0f, 0.0f, 0.0f );
+	meshBuilder.Normal3f( 0.0f, 0.0f, 1.0f );
+	meshBuilder.TexCoord2f( 0, s1, t1 );
+	meshBuilder.AdvanceVertex();
+
 	meshBuilder.End();
 	pMesh->Draw();
 
@@ -2181,15 +2231,13 @@ int CMatRenderContext::CompareMaterialCombos( IMaterial *pMaterial1, IMaterial *
 
 	IMaterialVar **pParams1 = pMat1->GetShaderParams();
 	IMaterialVar **pParams2 = pMat2->GetShaderParams();
-	int nParams1 = pMat1->ShaderParamCount();
-	int nParams2 = pMat2->ShaderParamCount();
-	int nBaseTexParamType1 = pParams1 && nParams1 > BASETEXTURE ? pParams1[BASETEXTURE]->GetType() : -1;
-	int nBaseTexParamType2 = pParams2 && nParams2 > BASETEXTURE ? pParams2[BASETEXTURE]->GetType() : -1;
-	if( nBaseTexParamType1 == MATERIAL_VAR_TYPE_TEXTURE || nBaseTexParamType2 == MATERIAL_VAR_TYPE_TEXTURE )
+
+	if( pParams1[BASETEXTURE]->GetType() == MATERIAL_VAR_TYPE_TEXTURE ||
+		pParams2[BASETEXTURE]->GetType() == MATERIAL_VAR_TYPE_TEXTURE )
 	{
-		if( nBaseTexParamType1 != nBaseTexParamType2 )
+		if( pParams1[BASETEXTURE]->GetType() != pParams2[BASETEXTURE]->GetType() )
 		{
-			return nBaseTexParamType2 - nBaseTexParamType1;
+			return pParams2[BASETEXTURE]->GetType() - pParams1[BASETEXTURE]->GetType();
 		}
 		int dBaseTexture = Q_stricmp( pParams1[BASETEXTURE]->GetTextureValue()->GetName(), pParams2[BASETEXTURE]->GetTextureValue()->GetName() );
 		if ( dBaseTexture )
@@ -2200,53 +2248,44 @@ int CMatRenderContext::CompareMaterialCombos( IMaterial *pMaterial1, IMaterial *
 	if ( dLightmap )
 		return dLightmap;
 
-	return (int)pMat1 - (int)pMat2;
+	if ( pMat1 > pMat2 ) 
+		return 1;
+	if ( pMat1 < pMat2 )
+		return -1;
+	return 0;
 }
 
 
-void CMatRenderContext::Bind( IMaterial *iMaterial, void *proxyData )
+void CMatRenderContext::Bind( IMaterial *pMaterial, void *proxyData )
 {
-	if ( !iMaterial )
+	IMaterialInternal *material = static_cast<IMaterialInternal *>( pMaterial );
+
+	if ( !material )
 	{
 		if ( !g_pErrorMaterial )
 			return;
+		
 		Warning( "Programming error: CMatRenderContext::Bind: NULL material\n" );
-		iMaterial = g_pErrorMaterial;
+		material = static_cast<IMaterialInternal *>( g_pErrorMaterial );
 	}
-	else
-	{
-		iMaterial = iMaterial->CheckProxyReplacement( proxyData );
-	}
-
-	IMaterialInternal *material = static_cast<IMaterialInternal *>( iMaterial );
+	
 	material = material->GetRealTimeVersion(); //always work with the real time versions of materials internally
-	if ( material->GetReferenceCount() <= 0 )
-	{
-		static ConVarRef matTextureListConVar( "mat_texture_list" );
-		static ConVarRef matShowWaterTextureConVar( "mat_showwatertextures" );
-
-		if ( ( !matTextureListConVar.IsValid() || !matTextureListConVar.GetBool() ) &&
-		     ( !matShowWaterTextureConVar.IsValid() || !matShowWaterTextureConVar.GetBool() ))
-		{
-			Warning( "Material %s has bad reference count %d when being bound\n", material->GetName(), material->GetReferenceCount() );
-			// The usual solution for this for global materials that really don't need refcounting is to do material->AddRef();
-			Assert( 0 );
-			iMaterial = g_pErrorMaterial;
-		}
-	}
 
 	if (g_config.bDrawFlat && !material->NoDebugOverride())
 	{
 		material = static_cast<IMaterialInternal *>( GetDrawFlatMaterial() );
 	}
 
-	CMatRenderContextBase::Bind( iMaterial, proxyData );
+	CMatRenderContextBase::Bind( pMaterial, proxyData );
+
+	IMaterialInternal* pMatInternal = GetCurrentMaterialInternal();
+	Assert( pMatInternal );
 
 	// We've always gotta call the bind proxy
 	SyncMatrices();
-	if ( GetMaterialSystem()->GetThreadMode() == MATERIAL_SINGLE_THREADED )
+	if ( GetMaterialSystem()->GetThreadMode() == MATERIAL_SINGLE_THREADED || pMatInternal->HasQueueFriendlyProxies() )
 	{
-		GetCurrentMaterialInternal()->CallBindProxy( proxyData );
+		pMatInternal->CallBindProxy( proxyData, NULL );
 	}
 	g_pShaderAPI->Bind( GetCurrentMaterialInternal() );
 }
@@ -2431,6 +2470,61 @@ void CMatRenderContext::DrawClearBufferQuad( unsigned char r, unsigned char g, u
 	PopMatrix();
 }
 
+#ifdef _PS3
+
+void CMatRenderContext::DrawReloadZcullQuad()
+{
+	IMaterialInternal *pMaterial = GetReloadZcullMaterial();
+	Bind( pMaterial );
+
+	IMesh* pMesh = GetDynamicMesh( true );
+
+	MatrixMode( MATERIAL_MODEL );
+	PushMatrix();
+	LoadIdentity();
+
+	MatrixMode( MATERIAL_VIEW );
+	PushMatrix();
+	LoadIdentity();
+
+	MatrixMode( MATERIAL_PROJECTION );
+	PushMatrix();
+	LoadIdentity();
+
+	CMeshBuilder meshBuilder;
+	meshBuilder.Begin( pMesh, MATERIAL_QUADS, 1 );
+
+	meshBuilder.Position3f( -1.0f, -1.0f, 0.0f );
+	meshBuilder.Color4ub( 0, 0, 0, 0 );
+	meshBuilder.AdvanceVertex();
+
+	meshBuilder.Position3f( -1.0f, 1.0f, 0.0f );
+	meshBuilder.Color4ub( 0, 0, 0, 0 );
+	meshBuilder.AdvanceVertex();
+
+	meshBuilder.Position3f( 1.0f, 1.0f, 0.0f );
+	meshBuilder.Color4ub( 0, 0, 0, 0 );
+	meshBuilder.AdvanceVertex();
+
+	meshBuilder.Position3f( 1.0f, -1.0f, 0.0f );
+	meshBuilder.Color4ub( 0, 0, 0, 0 );
+	meshBuilder.AdvanceVertex();
+
+	meshBuilder.End();
+	pMesh->Draw();
+
+	MatrixMode( MATERIAL_MODEL );
+	PopMatrix();
+
+	MatrixMode( MATERIAL_VIEW );
+	PopMatrix();
+
+	MatrixMode( MATERIAL_PROJECTION );
+	PopMatrix();
+}
+
+#endif // _PS3
+
 //-----------------------------------------------------------------------------
 // Should really be called SetViewport
 //-----------------------------------------------------------------------------
@@ -2592,9 +2686,11 @@ void CMatRenderContext::BindLightmapPage( int lightmapPageID )
 	if ( m_lightmapPageID == lightmapPageID )
 		return;
 
-	// We gotta make sure there's no buffered primitives 'cause this'll
-	// change the render state.
-	g_pShaderAPI->FlushBufferedPrimitives();
+	if ( g_pShaderDevice->IsUsingGraphics() )
+	{
+		g_pShaderAPI->SetStandardTextureHandle( TEXTURE_LIGHTMAP, GetLightmapTexture( lightmapPageID ) ); 
+		g_pShaderAPI->SetStandardTextureHandle( TEXTURE_PAINT, GetPaintmapTexture( lightmapPageID ) ); 
+	}
 
 	CMatRenderContextBase::BindLightmapPage( lightmapPageID );
 }
@@ -2604,11 +2700,6 @@ void CMatRenderContext::BindLightmapTexture( ITexture *pLightmapTexture )
 	if ( ( m_lightmapPageID == MATERIAL_SYSTEM_LIGHTMAP_PAGE_USER_DEFINED ) && ( m_pUserDefinedLightmap == pLightmapTexture ) )
 		return;
 
-	// We gotta make sure there's no buffered primitives 'cause this'll
-	// change the render state.
-	g_pShaderAPI->FlushBufferedPrimitives();
-
-	m_lightmapPageID = MATERIAL_SYSTEM_LIGHTMAP_PAGE_USER_DEFINED;
 	if ( pLightmapTexture )
 	{
 		pLightmapTexture->IncrementReferenceCount();
@@ -2618,128 +2709,246 @@ void CMatRenderContext::BindLightmapTexture( ITexture *pLightmapTexture )
 		m_pUserDefinedLightmap->DecrementReferenceCount();
 	}
 	m_pUserDefinedLightmap = static_cast<ITextureInternal*>( pLightmapTexture );
-}
 
-
-void CMatRenderContext::BindLightmap( Sampler_t sampler )
-{
-	switch ( m_lightmapPageID )
+	m_lightmapPageID = MATERIAL_SYSTEM_LIGHTMAP_PAGE_USER_DEFINED;
+	if ( g_pShaderDevice->IsUsingGraphics() )
 	{
-	default:
-		Assert( ( m_lightmapPageID == 0 && GetLightmaps()->GetNumLightmapPages() == 0 ) || ( m_lightmapPageID >= 0 && m_lightmapPageID < GetLightmaps()->GetNumLightmapPages() ) );
-		if( m_lightmapPageID >= 0 && m_lightmapPageID < GetLightmaps()->GetNumLightmapPages() )
-		{
-			g_pShaderAPI->BindTexture( sampler, GetLightmaps()->GetLightmapPageTextureHandle( m_lightmapPageID ) );
-		}
-		break;
-
-	case MATERIAL_SYSTEM_LIGHTMAP_PAGE_USER_DEFINED:
-		AssertOnce( m_pUserDefinedLightmap );
-		g_pShaderAPI->BindTexture( sampler, m_pUserDefinedLightmap->GetTextureHandle( 0 ) );
-		break;
-
-	case MATERIAL_SYSTEM_LIGHTMAP_PAGE_WHITE:
-		BindFullbrightLightmap( sampler );
-		break;
-
-	case MATERIAL_SYSTEM_LIGHTMAP_PAGE_WHITE_BUMP:
-		BindBumpedFullbrightLightmap( sampler );
-		break;
+		g_pShaderAPI->SetStandardTextureHandle( TEXTURE_LIGHTMAP, GetLightmapTexture( m_lightmapPageID ) ); 
+		g_pShaderAPI->SetStandardTextureHandle( TEXTURE_PAINT, GetPaintmapTexture( m_lightmapPageID ) ); 
 	}
 }
 
-void CMatRenderContext::BindBumpLightmap( Sampler_t sampler )
+
+void CMatRenderContext::BindLightmap( Sampler_t sampler, TextureBindFlags_t nBindFlags )
 {
-	switch ( m_lightmapPageID )
+	g_pShaderAPI->BindTexture( sampler, nBindFlags, GetLightmapTexture( m_lightmapPageID ) );
+}
+
+ShaderAPITextureHandle_t CMatRenderContext::GetPaintmapTexture( int nLightmapPage )
+{
+	if( !GetPaintmaps()->IsEnabled() )
 	{
+		return GetBlackAlphaZeroTextureHandle();
+	}
+
+	switch ( nLightmapPage ) //paint map pages match lightmap pages
+	{
+	case MATERIAL_SYSTEM_LIGHTMAP_PAGE_USER_DEFINED:
+	case MATERIAL_SYSTEM_LIGHTMAP_PAGE_WHITE:
+	case MATERIAL_SYSTEM_LIGHTMAP_PAGE_WHITE_BUMP:
+		break;
+
 	default:
-		Assert( m_lightmapPageID >= 0 && m_lightmapPageID < GetLightmaps()->GetNumLightmapPages() );
-		if( m_lightmapPageID >= 0 && m_lightmapPageID < GetLightmaps()->GetNumLightmapPages() )
 		{
-			g_pShaderAPI->BindTexture( sampler, GetLightmaps()->GetLightmapPageTextureHandle( m_lightmapPageID ) );
-			g_pShaderAPI->BindTexture( (Sampler_t)(sampler+1), GetLightmaps()->GetLightmapPageTextureHandle( m_lightmapPageID ) );
-			g_pShaderAPI->BindTexture( (Sampler_t)(sampler+2), GetLightmaps()->GetLightmapPageTextureHandle( m_lightmapPageID ) );
+			int nNumLightmapPages = GetLightmaps()->GetNumLightmapPages();
+			Assert( ( nLightmapPage == 0 && nNumLightmapPages == 0 ) || ( nLightmapPage >= 0 && nLightmapPage < nNumLightmapPages ) );
+			if( nLightmapPage >= 0 && nLightmapPage < nNumLightmapPages )
+				return GetPaintmaps()->GetPaintmapPageTextureHandle( nLightmapPage );
 		}
 		break;
-	case MATERIAL_SYSTEM_LIGHTMAP_PAGE_USER_DEFINED:
-		AssertOnce( m_pUserDefinedLightmap );
-		g_pShaderAPI->BindTexture( sampler, m_pUserDefinedLightmap->GetTextureHandle( 0 ) );
-		g_pShaderAPI->BindTexture( (Sampler_t)(sampler+1), m_pUserDefinedLightmap->GetTextureHandle( 0 ) );
-		g_pShaderAPI->BindTexture( (Sampler_t)(sampler+2), m_pUserDefinedLightmap->GetTextureHandle( 0 ) );
-		break;
-	case MATERIAL_SYSTEM_LIGHTMAP_PAGE_WHITE_BUMP:
-		BindBumpedFullbrightLightmap( sampler );
-		BindBumpedFullbrightLightmap( (Sampler_t)(sampler+1) );
-		BindBumpedFullbrightLightmap( (Sampler_t)(sampler+2) );
-		break;
-	case MATERIAL_SYSTEM_LIGHTMAP_PAGE_WHITE:
-		BindBumpedFullbrightLightmap( sampler );
-		BindBumpedFullbrightLightmap( (Sampler_t)(sampler+1) );
-		BindBumpedFullbrightLightmap( (Sampler_t)(sampler+2) );
-		break;
 	}
+
+	return GetBlackAlphaZeroTextureHandle();
 }
 
-void CMatRenderContext::BindFullbrightLightmap( Sampler_t sampler )
+void CMatRenderContext::BindPaintTexture( Sampler_t sampler, TextureBindFlags_t nBindFlags )
 {
-	g_pShaderAPI->BindTexture( sampler, GetFullbrightLightmapTextureHandle() );
+	ShaderAPITextureHandle_t hPaintmap = GetPaintmapTexture( m_lightmapPageID );
+	g_pShaderAPI->BindTexture( sampler, nBindFlags, hPaintmap );
 }
 
-void CMatRenderContext::BindBumpedFullbrightLightmap( Sampler_t sampler )
+void CMatRenderContext::BindBumpLightmap( Sampler_t sampler, TextureBindFlags_t nBindFlags )
 {
-	g_pShaderAPI->BindTexture( sampler, GetFullbrightBumpedLightmapTextureHandle() );
+	ShaderAPITextureHandle_t hLightmap = GetLightmapTexture( m_lightmapPageID );
+	g_pShaderAPI->BindTexture( sampler, nBindFlags, hLightmap );
+	g_pShaderAPI->BindTexture( (Sampler_t)(sampler+1), nBindFlags, hLightmap );
+	g_pShaderAPI->BindTexture( (Sampler_t)(sampler+2), nBindFlags, hLightmap );
 }
 
+void CMatRenderContext::BindFullbrightLightmap( Sampler_t sampler, TextureBindFlags_t nBindFlags )
+{
+	g_pShaderAPI->BindTexture( sampler, nBindFlags, GetFullbrightLightmapTextureHandle() );
+}
+
+void CMatRenderContext::BindBumpedFullbrightLightmap( Sampler_t sampler, TextureBindFlags_t nBindFlags )
+{
+	g_pShaderAPI->BindTexture( sampler, nBindFlags, GetFullbrightBumpedLightmapTextureHandle() );
+}
+
+
+static void SafeTextureBind( ITextureInternal *tex, Sampler_t sampler, TextureBindFlags_t nBindFlags ) 
+{
+	AssertMsg( tex, "Tried to bind NULL texture.\n" );
+	if ( tex )
+		tex->Bind( sampler, nBindFlags );
+}
 
 //-----------------------------------------------------------------------------
 // Bind standard textures
 //-----------------------------------------------------------------------------
-void CMatRenderContext::BindStandardTexture( Sampler_t sampler, StandardTextureId_t id )
+
+ShaderAPITextureHandle_t CMatRenderContext::GetStandardTexture( StandardTextureId_t id )
 {
 	switch ( id )
 	{
+	case TEXTURE_PAINT:
+		return GetPaintmapTexture( m_lightmapPageID );
+
 	case TEXTURE_LIGHTMAP:
-		BindLightmap( sampler );
+		return GetLightmapTexture( m_lightmapPageID );
+
+	case TEXTURE_LIGHTMAP_BUMPED:
+		return GetLightmapTexture( m_lightmapPageID );
+
+	case TEXTURE_LIGHTMAP_FULLBRIGHT:
+		return GetFullbrightLightmapTextureHandle();
+
+	case TEXTURE_LIGHTMAP_BUMPED_FULLBRIGHT:
+		return GetFullbrightBumpedLightmapTextureHandle();
+
+	case TEXTURE_WHITE:
+		return GetWhiteTextureHandle();
+
+	case TEXTURE_BLACK:
+		return GetBlackTextureHandle();
+
+	case TEXTURE_BLACK_ALPHA_ZERO:
+		return GetBlackAlphaZeroTextureHandle();
+
+	case TEXTURE_GREY:
+		return GetGreyTextureHandle();
+
+	case TEXTURE_GREY_ALPHA_ZERO:
+		return GetGreyAlphaZeroTextureHandle();
+
+	case TEXTURE_NORMALMAP_FLAT:
+		return GetFlatNormalTextureHandle();
+
+	case TEXTURE_SSBUMP_FLAT:
+		return GetFlatSSBumpTextureHandle();
+
+	case TEXTURE_NORMALIZATION_CUBEMAP:
+		return TextureManager()->NormalizationCubemap()->GetTextureHandle(0);
+
+	case TEXTURE_NORMALIZATION_CUBEMAP_SIGNED:
+		return TextureManager()->SignedNormalizationCubemap()->GetTextureHandle(0);
+
+	case TEXTURE_FRAME_BUFFER_FULL_TEXTURE_0:
+	case TEXTURE_FRAME_BUFFER_FULL_TEXTURE_1:
+		{
+			int nTextureIndex = id - TEXTURE_FRAME_BUFFER_FULL_TEXTURE_0; 
+			if( m_pCurrentFrameBufferCopyTexture[ nTextureIndex ] )
+			{
+				return ( ( ITextureInternal * )m_pCurrentFrameBufferCopyTexture[ nTextureIndex ] )->GetTextureHandle(0);
+			}
+		}
+		return INVALID_SHADERAPI_TEXTURE_HANDLE;
+
+	case TEXTURE_COLOR_CORRECTION_VOLUME_0:
+	case TEXTURE_COLOR_CORRECTION_VOLUME_1:
+	case TEXTURE_COLOR_CORRECTION_VOLUME_2:
+	case TEXTURE_COLOR_CORRECTION_VOLUME_3:
+		{
+			return TextureManager()->ColorCorrectionTexture( id - TEXTURE_COLOR_CORRECTION_VOLUME_0 )->GetTextureHandle(0);
+		}
+
+	case TEXTURE_SHADOW_NOISE_2D:
+		return TextureManager()->ShadowNoise2D()->GetTextureHandle(0);
+
+	case TEXTURE_SSAO_NOISE_2D:
+		return TextureManager()->SSAONoise2D()->GetTextureHandle(0);
+
+	case TEXTURE_IDENTITY_LIGHTWARP:
+		return TextureManager()->IdentityLightWarp()->GetTextureHandle(0);
+
+	case TEXTURE_MORPH_ACCUMULATOR:
+		return g_pMorphMgr->MorphAccumulator()->GetTextureHandle(0);
+
+	case TEXTURE_MORPH_WEIGHTS:
+		return g_pMorphMgr->MorphWeights()->GetTextureHandle(0);
+
+	case TEXTURE_FRAME_BUFFER_FULL_DEPTH:
+		if( m_bFullFrameDepthIsValid && TextureManager()->FullFrameDepthTexture() )
+			return TextureManager()->FullFrameDepthTexture()->GetTextureHandle(0);
+		else
+			return GetMaxDepthTextureHandle();
+
+	case TEXTURE_LOCAL_ENV_CUBEMAP:
+		{
+			ITextureInternal *pTextureInternal = static_cast<ITextureInternal*>( m_pLocalCubemapTexture );
+			return pTextureInternal->GetTextureHandle( 0 );
+		}
+
+	case TEXTURE_STEREO_PARAM_MAP:
+		{
+			return TextureManager()->StereoParamTexture()->GetTextureHandle( 0 );
+		}
+
+	default:
+		Assert(0);
+	}
+
+	return INVALID_SHADERAPI_TEXTURE_HANDLE;
+}
+
+void CMatRenderContext::BindStandardTexture( Sampler_t sampler, TextureBindFlags_t nBindFlags, StandardTextureId_t id )
+{
+	switch ( id )
+	{
+	case TEXTURE_PAINT:
+		BindPaintTexture( sampler, nBindFlags );
+		break;
+
+	case TEXTURE_LIGHTMAP:
+		BindLightmap( sampler, nBindFlags );
 		return;
 
 	case TEXTURE_LIGHTMAP_BUMPED:
-		BindBumpLightmap( sampler );
+		BindBumpLightmap( sampler, nBindFlags );
 		return;
 
 	case TEXTURE_LIGHTMAP_FULLBRIGHT:
-		BindFullbrightLightmap( sampler );
+		BindFullbrightLightmap( sampler, nBindFlags );
 		return;
 
 	case TEXTURE_LIGHTMAP_BUMPED_FULLBRIGHT:
-		BindBumpedFullbrightLightmap( sampler );
+		BindBumpedFullbrightLightmap( sampler, nBindFlags );
 		return;
 
 	case TEXTURE_WHITE:
-		g_pShaderAPI->BindTexture( sampler, GetWhiteTextureHandle() );
+		g_pShaderAPI->BindTexture( sampler, nBindFlags, GetWhiteTextureHandle() );
 		return;
 
 	case TEXTURE_BLACK:
-		g_pShaderAPI->BindTexture( sampler, GetBlackTextureHandle() );
+		g_pShaderAPI->BindTexture( sampler, nBindFlags, GetBlackTextureHandle() );
+		return;
+
+	case TEXTURE_BLACK_ALPHA_ZERO:
+		g_pShaderAPI->BindTexture( sampler, nBindFlags, GetBlackAlphaZeroTextureHandle() );
 		return;
 
 	case TEXTURE_GREY:
-		g_pShaderAPI->BindTexture( sampler, GetGreyTextureHandle() );
+		g_pShaderAPI->BindTexture( sampler, nBindFlags, GetGreyTextureHandle() );
 		return;
 
 	case TEXTURE_GREY_ALPHA_ZERO:
-		g_pShaderAPI->BindTexture( sampler, GetGreyAlphaZeroTextureHandle() );
+		g_pShaderAPI->BindTexture( sampler, nBindFlags, GetGreyAlphaZeroTextureHandle() );
 		return;
 
 	case TEXTURE_NORMALMAP_FLAT:
-		g_pShaderAPI->BindTexture( sampler, GetFlatNormalTextureHandle() );
+		g_pShaderAPI->BindTexture( sampler, nBindFlags, GetFlatNormalTextureHandle() );
+		return;
+
+	case TEXTURE_SSBUMP_FLAT:
+		g_pShaderAPI->BindTexture( sampler, nBindFlags, GetFlatSSBumpTextureHandle() );
 		return;
 
 	case TEXTURE_NORMALIZATION_CUBEMAP:
-		TextureManager()->NormalizationCubemap()->Bind( sampler );
+		SafeTextureBind( TextureManager()->NormalizationCubemap(), sampler, nBindFlags );
 		return;
 
 	case TEXTURE_NORMALIZATION_CUBEMAP_SIGNED:
-		TextureManager()->SignedNormalizationCubemap()->Bind( sampler );
+		SafeTextureBind( TextureManager()->SignedNormalizationCubemap(), sampler, nBindFlags );
 		return;
 
 	case TEXTURE_FRAME_BUFFER_FULL_TEXTURE_0:
@@ -2748,7 +2957,7 @@ void CMatRenderContext::BindStandardTexture( Sampler_t sampler, StandardTextureI
 			int nTextureIndex = id - TEXTURE_FRAME_BUFFER_FULL_TEXTURE_0; 
 			if( m_pCurrentFrameBufferCopyTexture[ nTextureIndex ] )
 			{
-				( ( ITextureInternal * )m_pCurrentFrameBufferCopyTexture[ nTextureIndex ] )->Bind( sampler );
+				( ( ITextureInternal * )m_pCurrentFrameBufferCopyTexture[ nTextureIndex ] )->Bind( sampler, nBindFlags );
 			}
 		}
 		return;
@@ -2758,39 +2967,48 @@ void CMatRenderContext::BindStandardTexture( Sampler_t sampler, StandardTextureI
 	case TEXTURE_COLOR_CORRECTION_VOLUME_2:
 	case TEXTURE_COLOR_CORRECTION_VOLUME_3:
 		{
-			ITextureInternal *pTexture = TextureManager()->ColorCorrectionTexture( id - TEXTURE_COLOR_CORRECTION_VOLUME_0 );
-			if( pTexture )
-			{
-				pTexture->Bind( sampler );
-			}
+			SafeTextureBind( TextureManager()->ColorCorrectionTexture( id - TEXTURE_COLOR_CORRECTION_VOLUME_0 ), sampler, nBindFlags );
 		}
 		return;
 
 	case TEXTURE_SHADOW_NOISE_2D:
-		TextureManager()->ShadowNoise2D()->Bind( sampler );
+		SafeTextureBind( TextureManager()->ShadowNoise2D(), sampler, nBindFlags );
+		return;
+
+	case TEXTURE_SSAO_NOISE_2D:
+		SafeTextureBind( TextureManager()->SSAONoise2D(), sampler, nBindFlags );
 		return;
 
 	case TEXTURE_IDENTITY_LIGHTWARP:
-		TextureManager()->IdentityLightWarp()->Bind( sampler );
+		SafeTextureBind( TextureManager()->IdentityLightWarp(), sampler, nBindFlags );
 		return;
 
 	case TEXTURE_MORPH_ACCUMULATOR:
-		g_pMorphMgr->MorphAccumulator()->Bind( sampler );
+		SafeTextureBind( g_pMorphMgr->MorphAccumulator(), sampler, nBindFlags );
 		return;
 
 	case TEXTURE_MORPH_WEIGHTS:
-		g_pMorphMgr->MorphWeights()->Bind( sampler );
+		SafeTextureBind( g_pMorphMgr->MorphWeights(), sampler, nBindFlags );
 		return;
 
 	case TEXTURE_FRAME_BUFFER_FULL_DEPTH:
-		if( m_bFullFrameDepthIsValid )
-			TextureManager()->FullFrameDepthTexture()->Bind( sampler );
+		if( m_bFullFrameDepthIsValid && TextureManager()->FullFrameDepthTexture() )
+			TextureManager()->FullFrameDepthTexture()->Bind( sampler, nBindFlags );
 		else
-			g_pShaderAPI->BindTexture( sampler, GetMaxDepthTextureHandle() );
+			g_pShaderAPI->BindTexture( sampler, nBindFlags, GetMaxDepthTextureHandle() );
 		return;
 
-	case TEXTURE_DEBUG_LUXELS:
-		TextureManager()->DebugLuxels2D()->Bind( sampler );
+	case TEXTURE_LOCAL_ENV_CUBEMAP:
+		{
+			ITextureInternal *pTextureInternal = static_cast<ITextureInternal*>( m_pLocalCubemapTexture );
+			g_pShaderAPI->BindTexture( sampler, nBindFlags, pTextureInternal->GetTextureHandle( 0 ) );
+		}
+		return;
+
+	case TEXTURE_STEREO_PARAM_MAP:
+		{
+			SafeTextureBind( TextureManager()->StereoParamTexture(), sampler, nBindFlags );
+		}
 		return;
 
 	default:
@@ -2798,21 +3016,45 @@ void CMatRenderContext::BindStandardTexture( Sampler_t sampler, StandardTextureI
 	}
 }
 
-void CMatRenderContext::BindStandardVertexTexture( VertexTextureSampler_t sampler, StandardTextureId_t id )
+void CMatRenderContext::BindStandardVertexTexture( VertexTextureSampler_t vtSampler, StandardTextureId_t id )
 {
 	switch ( id )
 	{
 	case TEXTURE_MORPH_ACCUMULATOR:
-		g_pMorphMgr->MorphAccumulator()->BindVertexTexture( sampler );
+		g_pMorphMgr->MorphAccumulator()->BindVertexTexture( vtSampler );
 		return;
 
 	case TEXTURE_MORPH_WEIGHTS:
-		g_pMorphMgr->MorphWeights()->BindVertexTexture( sampler );
+		g_pMorphMgr->MorphWeights()->BindVertexTexture( vtSampler );
+		return;
+
+	case TEXTURE_SUBDIVISION_PATCHES:
+#if defined( FEATURE_SUBD_SUPPORT )
+		g_pShaderAPI->BindVertexTexture( vtSampler, g_pSubDMgr->SubDTexture() );
+#else
+		// not supported
+		Assert( 0 );
+#endif
+		return;
+
+	case TEXTURE_BLACK:
+		g_pShaderAPI->BindVertexTexture( vtSampler, GetBlackTextureHandle() );
 		return;
 
 	default:
 		Assert(0);
 	}
+}
+
+float CMatRenderContext::GetSubDHeight()
+{
+#if defined( FEATURE_SUBD_SUPPORT )
+	return (float)g_pSubDMgr->GetHeight();
+#else
+	// not supported
+	Assert( 0 );
+	return 0;
+#endif
 }
 
 void CMatRenderContext::GetStandardTextureDimensions( int *pWidth, int *pHeight, StandardTextureId_t id )
@@ -2830,9 +3072,11 @@ void CMatRenderContext::GetStandardTextureDimensions( int *pWidth, int *pHeight,
 
 	case TEXTURE_WHITE:
 	case TEXTURE_BLACK:
+	case TEXTURE_BLACK_ALPHA_ZERO:
 	case TEXTURE_GREY:
 	case TEXTURE_GREY_ALPHA_ZERO:
 	case TEXTURE_NORMALMAP_FLAT:
+	case TEXTURE_SSBUMP_FLAT:
 	default:
 		Assert( 0 );
 		Warning( "GetStandardTextureDimensions: still unimplemented for this type!\n" );
@@ -2866,6 +3110,10 @@ void CMatRenderContext::GetStandardTextureDimensions( int *pWidth, int *pHeight,
 		pTexture = TextureManager()->ShadowNoise2D();
 		break;
 
+	case TEXTURE_SSAO_NOISE_2D:
+		pTexture = TextureManager()->SSAONoise2D();
+		break;
+
 	case TEXTURE_IDENTITY_LIGHTWARP:
 		pTexture = TextureManager()->IdentityLightWarp();
 		return;
@@ -2878,8 +3126,8 @@ void CMatRenderContext::GetStandardTextureDimensions( int *pWidth, int *pHeight,
 		pTexture = g_pMorphMgr->MorphWeights();
 		break;
 
-	case TEXTURE_DEBUG_LUXELS:
-		pTexture = TextureManager()->DebugLuxels2D();
+	case TEXTURE_STEREO_PARAM_MAP:
+		pTexture = TextureManager()->StereoParamTexture();
 		break;
 	}
 
@@ -2917,11 +3165,12 @@ void CMatRenderContext::FogColor3fv( const float* rgb )
 
 void CMatRenderContext::SetFlashlightMode( bool bEnable )
 {
-	if( bEnable != m_bFlashlightEnable )
-	{
-		g_pShaderAPI->FlushBufferedPrimitives();
-		m_bFlashlightEnable = bEnable;
-	}
+	m_bFlashlightEnable = bEnable;
+}
+
+void CMatRenderContext::SetRenderingPaint( bool bEnable )
+{
+	m_bRenderingPaint = bEnable;
 }
 
 bool CMatRenderContext::GetFlashlightMode( ) const
@@ -2929,59 +3178,123 @@ bool CMatRenderContext::GetFlashlightMode( ) const
 	return m_bFlashlightEnable;
 }
 
+bool CMatRenderContext::IsCullingEnabledForSinglePassFlashlight() const
+{
+	return m_bCullingEnabledForSinglePassFlashlight;
+}
+
+void CMatRenderContext::EnableCullingForSinglePassFlashlight( bool bEnable )
+{
+	m_bCullingEnabledForSinglePassFlashlight = bEnable;
+}
+
+void CMatRenderContext::EnableSinglePassFlashlightMode( bool bEnable )
+{
+	m_bSinglePassFlashlightMode = bEnable;
+	g_pShaderAPI->EnableSinglePassFlashlightMode( bEnable );
+}
+
+bool CMatRenderContext::SinglePassFlashlightModeEnabled() const
+{
+	return m_bSinglePassFlashlightMode;
+}
+
 void CMatRenderContext::SetFlashlightStateEx( const FlashlightState_t &state, const VMatrix &worldToTexture, ITexture *pFlashlightDepthTexture )
 {
 	g_pShaderAPI->SetFlashlightStateEx( state, worldToTexture, pFlashlightDepthTexture );
-	if ( IsPC() && g_config.dxSupportLevel <= 70 )
+}
+
+void CMatRenderContext::SetCascadedShadowMappingState( const CascadedShadowMappingState_t &state, ITexture *pDepthTextureAtlas )
+{
+	g_pShaderAPI->SetCascadedShadowMappingState( state, pDepthTextureAtlas );
+}
+
+// This routine pushes a new scissor rect onto the top of the stack by intersecting with
+// the current top before pushing.  This means the top is always the intersection of all
+// rects on the stack and it makes popping the stack trivial
+void CMatRenderContext::PushScissorRect( const int nLeft, const int nTop, const int nRight, const int nBottom )
+{
+	// Really deep stack, overflow?
+	if ( m_ScissorRectStack.Count() > 32 )
 	{
-		// Going to go ahead and set a single hardware light here to do all lighting except for
-		// the spotlight falloff function, which is done with a texture.
-		SetAmbientLight( 0.0f, 0.0f, 0.0f );
-		static Vector4D blackCube[6];
-		int i;
-		for( i = 0; i < 6; i++ )
-		{
-			blackCube[i].Init( 0.0f, 0.0f, 0.0f, 0.0f );
-		}
-		SetAmbientLightCube( blackCube );		
+		DevMsg( "Scissor Rect Stack overflow.  Too many Pushes?\n" );
+	}
 
-		// Disable all the lights except for the first one.
-		for( i = 1; i < HardwareConfig()->MaxNumLights(); ++i )
-		{
-			LightDesc_t desc;
-			desc.m_Type = MATERIAL_LIGHT_DISABLE;
-			SetLight( i, desc );
-		}
+	// Necessary to push the stack top onto itself; realloc could happen otherwise
+	m_ScissorRectStack.EnsureCapacity( m_ScissorRectStack.Count() + 1 );
 
-		LightDesc_t desc;
-		desc.m_Type = MATERIAL_LIGHT_POINT;
-		desc.m_Attenuation0 = state.m_fConstantAtten;
-		desc.m_Attenuation1 = state.m_fLinearAtten;
-		desc.m_Attenuation2 = state.m_fQuadraticAtten;
-		// flashlightfixme: I don't know why this scale has to be here to get fixed function lighting to work.
-		desc.m_Color.x = state.m_Color[0] * 17000.0f;
-		desc.m_Color.y = state.m_Color[1] * 17000.0f;
-		desc.m_Color.z = state.m_Color[2] * 17000.0f;
-		desc.m_Position = state.m_vecLightOrigin;
+	int nNewLeft = nLeft;
+	int nNewTop = nTop;
+	int nNewRight = nRight;
+	int nNewBottom = nBottom;
 
-		QAngle angles;
-		QuaternionAngles( state.m_quatOrientation, angles );
-		AngleVectors( angles, &desc.m_Direction );
+	// If there are already elements in the stack, intersect with them
+	if ( m_ScissorRectStack.Count() > 0 )
+	{
+		nNewLeft   = MAX( m_ScissorRectStack.Top().nLeft, nLeft );
+		nNewTop    = MAX( m_ScissorRectStack.Top().nTop, nTop );
+		nNewRight  = MIN( m_ScissorRectStack.Top().nRight, nRight );
+		nNewBottom = MIN( m_ScissorRectStack.Top().nBottom, nBottom );
+	}
 
-		desc.m_Range = state.m_FarZ;
-		desc.m_Falloff = 0.0f;
-		SetLight( 0, desc );
+	// If we have a negative width, just slam to a rect of zero width
+	if ( nNewLeft > nNewRight )
+	{
+		nNewLeft = nNewRight;
+	}
+
+	// If we have a negative height, just slam to a rect of zero height
+	if ( nNewTop > nNewBottom )
+	{
+		nNewTop = nNewBottom;
+	}
+
+	// Make sure we don't have a negative rect
+	Assert( nNewRight >= nNewLeft );
+	Assert( nNewBottom >= nNewTop );
+
+	// Make an element and push it
+	ScissorRectStackElement_t element = { nNewLeft, nNewTop, nNewRight, nNewBottom };
+	m_ScissorRectStack.Push( element );
+
+	g_pShaderAPI->SetScissorRect( element.nLeft, element.nTop, element.nRight, element.nBottom, true );
+}
+
+void CMatRenderContext::PopScissorRect( )
+{
+	// Nothing on the stack.  Just disable scissoring and bail
+	if ( m_ScissorRectStack.Count() <= 0 )
+	{
+		DevMsg( "Scissor Rect Stack underflow.  Too many Pops?\n" );
+	
+		g_pShaderAPI->SetScissorRect( -1, -1, -1, -1, false );
+		return;
+	}
+
+	m_ScissorRectStack.Pop();
+
+	// If there is anything left on the stack, set the ShaderAPI rect to the top
+	if ( m_ScissorRectStack.Count() > 0 )
+	{
+		g_pShaderAPI->SetScissorRect( m_ScissorRectStack.Top().nLeft, 
+									  m_ScissorRectStack.Top().nTop,
+									  m_ScissorRectStack.Top().nRight,
+									  m_ScissorRectStack.Top().nBottom, true );
+	}
+	else
+	{
+		// We popped the last element, turn off scissoring
+		g_pShaderAPI->SetScissorRect( -1, -1, -1, -1, false );
 	}
 }
 
-void CMatRenderContext::SetScissorRect( const int nLeft, const int nTop, const int nRight, const int nBottom, const bool bEnableScissor )
+void CMatRenderContext::SetToneMappingScaleLinear( const Vector &vScale )
 {
-	g_pShaderAPI->SetScissorRect( nLeft, nTop, nRight, nBottom, bEnableScissor );
-}
+	// Keep a copy in CMatRenderContext since CMatRenderContextBase::GetToneMappingScaleLinear() doesn't have access to ShaderAPI
+	m_LastSetToneMapScale = vScale;
 
-void CMatRenderContext::SetToneMappingScaleLinear( const Vector &scale )
-{
-	g_pShaderAPI->SetToneMappingScaleLinear( scale );
+	// Call into ShaderAPI
+	g_pShaderAPI->SetToneMappingScaleLinear( vScale );
 }
 
 void CMatRenderContext::BeginBatch( IMesh* pIndices )
@@ -2995,9 +3308,10 @@ void CMatRenderContext::BindBatch( IMesh* pVertices, IMaterial *pAutoBind )
 	m_pBatchMesh = GetDynamicMesh( false, pVertices, m_pBatchIndices, pAutoBind );
 }
 
-void CMatRenderContext::DrawBatch(int firstIndex, int numIndices )
+void CMatRenderContext::DrawBatch(MaterialPrimitiveType_t primType, int firstIndex, int numIndices )
 {
 	Assert( m_pBatchMesh );
+	m_pBatchMesh->SetPrimitiveType( primType );
 	m_pBatchMesh->Draw( firstIndex, numIndices );
 }
 
@@ -3019,59 +3333,10 @@ bool CMatRenderContext::OnDrawMesh( IMesh *pMesh, CPrimList *pLists, int nLists 
 	return true;
 }
 
-void CMatRenderContext::AsyncCreateTextureFromRenderTarget( ITexture* pSrcRt, const char* pDstName, ImageFormat dstFmt, bool bGenMips, int nAdditionalCreationFlags, IAsyncTextureOperationReceiver* pRecipient, void* pExtraArgs )
+bool CMatRenderContext::OnDrawMeshModulated( IMesh *pMesh, const Vector4D& vecDiffuseModulation, int firstIndex, int numIndices )
 {
-	if ( g_pMaterialSystem->GetThreadMode() == MATERIAL_SINGLE_THREADED ) 
-	{
-		OnAsyncCreateTextureFromRenderTarget( pSrcRt, &pDstName, pRecipient );
-	}
-
-	TextureManager()->AsyncCreateTextureFromRenderTarget( pSrcRt, pDstName, dstFmt, bGenMips, nAdditionalCreationFlags, pRecipient, pExtraArgs );
-}
-
-void CMatRenderContext::AsyncMap( ITextureInternal* pTexToMap, IAsyncTextureOperationReceiver* pRecipient, void* pExtraArgs )
-{
-	if ( g_pMaterialSystem->GetThreadMode() == MATERIAL_SINGLE_THREADED )
-	{
-		OnAsyncMap( pTexToMap, pRecipient, pExtraArgs );
-	}
-
-	void* pMemory = NULL;
-	int nPitch = NULL;
-
-	pTexToMap->Map( &pMemory, &nPitch );
-
-	pRecipient->OnAsyncMapComplete( pTexToMap, pExtraArgs, pMemory, nPitch );
-
-	// Release references held earlier in OnAsyncMap
-	SafeRelease( &pRecipient );
-	SafeRelease( &pTexToMap );
-}
-
-void CMatRenderContext::AsyncUnmap( ITextureInternal* pTexToUnmap )
-{
-	if ( g_pMaterialSystem->GetThreadMode() == MATERIAL_SINGLE_THREADED )
-	{
-		OnAsyncUnmap( pTexToUnmap );
-	}
-
-	pTexToUnmap->Unmap();
-	SafeRelease( &pTexToUnmap ); // Matches AddRef from OnAsyncUnmap
-}
-
-void CMatRenderContext::AsyncCopyRenderTargetToStagingTexture( ITexture* pDst, ITexture* pSrc, IAsyncTextureOperationReceiver* pRecipient, void* pExtraArgs )
-{
-	if ( g_pMaterialSystem->GetThreadMode() == MATERIAL_SINGLE_THREADED )
-	{
-		OnAsyncCopyRenderTargetToStagingTexture( pDst, pSrc, pRecipient );
-	}
-
-	pSrc->CopyToStagingTexture( pDst );
-	pRecipient->OnAsyncReadbackBegin( pDst, pSrc, pExtraArgs );
-
-	SafeRelease( &pDst );
-	SafeRelease( &pSrc );
-	SafeRelease( &pRecipient );
+	SyncMatrices();
+	return true;
 }
 
 
@@ -3096,6 +3361,38 @@ void CMatRenderContext::AccumulateMorph( IMorph* pMorph, int nMorphCount, const 
 bool CMatRenderContext::GetMorphAccumulatorTexCoord( Vector2D *pTexCoord, IMorph *pMorph, int nVertex )
 {
 	return g_pMorphMgr->GetMorphAccumulatorTexCoord( m_pMorphRenderContext, pTexCoord, pMorph, nVertex );
+}
+
+int CMatRenderContext::GetSubDBufferWidth()
+{
+#if defined( FEATURE_SUBD_SUPPORT )
+	return g_pSubDMgr->GetWidth();
+#else
+	// not supported
+	Assert( 0 );
+	return 0;
+#endif
+}
+
+float *CMatRenderContext::LockSubDBuffer( int nNumRows )
+{
+#if defined( FEATURE_SUBD_SUPPORT )
+	return g_pSubDMgr->Lock( nNumRows );
+#else
+	// not supported
+	Assert( 0 );
+	return NULL;
+#endif
+}
+
+void CMatRenderContext::UnlockSubDBuffer()
+{
+#if defined( FEATURE_SUBD_SUPPORT )
+	return g_pSubDMgr->Unlock();
+#else
+	// not supported
+	Assert( 0 );
+#endif
 }
 
 
@@ -3133,14 +3430,14 @@ void	CMatRenderContext::PrintfVA( char *fmt, va_list vargs )
 	#endif
 }
 
-void	CMatRenderContext::Printf( const char *fmt, ... )
+void	CMatRenderContext::Printf( char *fmt, ... )
 {
 	#if GLMDEBUG
 		va_list	vargs;
 
 		va_start(vargs, fmt);
 
-		g_pShaderAPI->PrintfVA( (char *)fmt, vargs );
+		g_pShaderAPI->PrintfVA( fmt, vargs );
 
 		va_end( vargs );
 	#endif
@@ -3154,4 +3451,5 @@ float	CMatRenderContext::Knob( char *knobname, float *setvalue )
 		return 0.0f;
 	#endif
 }
+
 

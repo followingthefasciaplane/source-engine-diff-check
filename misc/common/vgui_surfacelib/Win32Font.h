@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright � 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -11,7 +11,7 @@
 #pragma once
 #endif
 
-#if !defined( _X360 )
+#if !defined( _X360 ) && !defined( _PS3 )
 #define WIN32_LEAN_AND_MEAN
 #define OEMRESOURCE
 #include <windows.h>
@@ -23,7 +23,9 @@
 #include "utlrbtree.h"
 #include "tier1/utlsymbol.h"
 
-struct newChar_t;
+#if defined(_PS3)
+class IFont;
+#endif
 
 //-----------------------------------------------------------------------------
 // Purpose: encapsulates a windows font
@@ -50,14 +52,13 @@ public:
 	// gets the abc widths for a character
 	virtual void GetCharABCWidths(int ch, int &a, int &b, int &c);
 
+#if !defined (_PS3)
 	// set the font to be the one to currently draw with in the gdi
 	virtual void SetAsActiveFont(HDC hdc);
+#endif
 
 	// returns the height of the font, in pixels
 	virtual int GetHeight();
-
-	// returns requested height of font.
-	virtual int GetHeightRequested();
 
 	// returns the ascent of the font, in pixels (ascent=units above the base line)
 	virtual int GetAscent();
@@ -73,10 +74,9 @@ public:
 
 	// gets the name of this font
 	const char *GetName() { return m_szName.String(); }
-	const char *GetFamilyName() { return NULL; }
 
 	// gets the width of ch given its position around before and after chars
-	void GetKernedCharWidth( wchar_t ch, wchar_t chBefore, wchar_t chAfter, float &wide, float &abcA );
+	virtual void GetKernedCharWidth( wchar_t ch, wchar_t chBefore, wchar_t chAfter, float &wide, float &abcA, float &abcC );
 
 #if defined( _X360 )
 	// generates texture data for a set of chars
@@ -87,11 +87,13 @@ public:
 
 private:
 
-#if !defined( _X360 )
+#if !defined( _GAMECONSOLE )
 	HFONT			m_hFont;
 	HDC				m_hDC;
 	HBITMAP			m_hDIB;
-#else
+#elif defined ( _PS3 )
+	IFont           *m_pFont;
+#elif defined( _X360 )
 	HXUIFONT		m_hFont;
 	HDC				m_hDC;
 #endif
@@ -103,12 +105,17 @@ protected:
 	CUtlSymbol		m_szName;
 
 	short			m_iTall;
+
+#ifdef _PS3
+	int				m_iWeight;
+#else
 	unsigned short	m_iWeight;
+#endif
+
 	unsigned short	m_iFlags;
 	unsigned short	m_iScanLines;
 	unsigned short	m_iBlur;
 	unsigned short	m_rgiBitmapSize[2];
-	bool			m_bUnderlined;
 
 	unsigned int	m_iHeight : 8;
 	unsigned int	m_iMaxCharWidth : 8;
@@ -117,7 +124,8 @@ protected:
 	unsigned int	m_iOutlineSize : 1;
 	unsigned int	m_bAntiAliased : 1;
 	unsigned int	m_bRotary : 1;
-	unsigned int	m_bAdditive : 1; //29
+	unsigned int	m_bAdditive : 1;
+	unsigned int	m_bUnderlined : 1; //30
 
 private:
 	// abc widths
@@ -128,9 +136,7 @@ private:
 		char c;
 	};
 
-#if !defined( _X360 )
-	// On PC we cache char widths on demand when actually requested to minimize our use of the kernels 
-	// paged pool (GDI may cache information about glyphs we have requested and take up lots of paged pool)
+	// cache for additional or asian characters (since it's too big too just store them all)
 	struct abc_cache_t
 	{
 		wchar_t wch;
@@ -138,7 +144,12 @@ private:
 	};
 	CUtlRBTree<abc_cache_t, unsigned short> m_ExtendedABCWidthsCache;
 	static bool ExtendedABCWidthsCacheLessFunc(const abc_cache_t &lhs, const abc_cache_t &rhs);
-#else
+
+	// First range of characters are automatically cached
+#if defined( _PS3 )
+	enum { ABCWIDTHS_CACHE_SIZE = 128 };
+	abc_t m_ABCWidthsCache[ABCWIDTHS_CACHE_SIZE];
+#elif defined( _X360 )
 	// 360 requires all possible characters during font init
 	enum { ABCWIDTHS_CACHE_SIZE = 256 };
 	abc_t m_ABCWidthsCache[ABCWIDTHS_CACHE_SIZE];

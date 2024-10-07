@@ -1,27 +1,17 @@
+// ALL SKIP STATEMENTS THAT AFFECT THIS SHADER!!!
+// defined $PIXELFOGTYPE && defined $WRITEWATERFOGTODESTALPHA && ( $PIXELFOGTYPE != 1 ) && $WRITEWATERFOGTODESTALPHA
+// defined $LIGHTING_PREVIEW && defined $FASTPATHENVMAPTINT && $LIGHTING_PREVIEW && $FASTPATHENVMAPTINT
+// defined $LIGHTING_PREVIEW && defined $FASTPATHENVMAPCONTRAST && $LIGHTING_PREVIEW && $FASTPATHENVMAPCONTRAST
+// defined $LIGHTING_PREVIEW && defined $FASTPATH && $LIGHTING_PREVIEW && $FASTPATH
+// ($FLASHLIGHT || $FLASHLIGHTSHADOWS) && $LIGHTING_PREVIEW
+// defined $PIXELFOGTYPE && defined $WRITEWATERFOGTODESTALPHA && ( $PIXELFOGTYPE != 1 ) && $WRITEWATERFOGTODESTALPHA
+// defined $LIGHTING_PREVIEW && defined $FASTPATHENVMAPTINT && $LIGHTING_PREVIEW && $FASTPATHENVMAPTINT
+// defined $LIGHTING_PREVIEW && defined $FASTPATHENVMAPCONTRAST && $LIGHTING_PREVIEW && $FASTPATHENVMAPCONTRAST
+// defined $LIGHTING_PREVIEW && defined $FASTPATH && $LIGHTING_PREVIEW && $FASTPATH
+// ($FLASHLIGHT || $FLASHLIGHTSHADOWS) && $LIGHTING_PREVIEW
 #include "shaderlib/cshader.h"
 class sprite_ps20b_Static_Index
 {
-private:
-	int m_nCONVERT_TO_SRGB;
-#ifdef _DEBUG
-	bool m_bCONVERT_TO_SRGB;
-#endif
-public:
-	void SetCONVERT_TO_SRGB( int i )
-	{
-		Assert( i >= 0 && i <= 0 );
-		m_nCONVERT_TO_SRGB = i;
-#ifdef _DEBUG
-		m_bCONVERT_TO_SRGB = true;
-#endif
-	}
-	void SetCONVERT_TO_SRGB( bool i )
-	{
-		m_nCONVERT_TO_SRGB = i ? 1 : 0;
-#ifdef _DEBUG
-		m_bCONVERT_TO_SRGB = true;
-#endif
-	}
 private:
 	int m_nVERTEXCOLOR;
 #ifdef _DEBUG
@@ -38,6 +28,7 @@ public:
 	}
 	void SetVERTEXCOLOR( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nVERTEXCOLOR = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bVERTEXCOLOR = true;
@@ -59,6 +50,7 @@ public:
 	}
 	void SetCONSTANTCOLOR( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nCONSTANTCOLOR = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bCONSTANTCOLOR = true;
@@ -80,6 +72,7 @@ public:
 	}
 	void SetHDRTYPE( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 2 );
 		m_nHDRTYPE = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bHDRTYPE = true;
@@ -101,6 +94,7 @@ public:
 	}
 	void SetSRGB( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nSRGB = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bSRGB = true;
@@ -122,18 +116,16 @@ public:
 	}
 	void SetSRGB_OUTPUT_ADAPTER( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nSRGB_OUTPUT_ADAPTER = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bSRGB_OUTPUT_ADAPTER = true;
 #endif
 	}
 public:
-	sprite_ps20b_Static_Index( )
+	// CONSTRUCTOR
+	sprite_ps20b_Static_Index( IShaderShadow *pShaderShadow, IMaterialVar **params )
 	{
-#ifdef _DEBUG
-		m_bCONVERT_TO_SRGB = true;
-#endif // _DEBUG
-		m_nCONVERT_TO_SRGB =  0;
 #ifdef _DEBUG
 		m_bVERTEXCOLOR = false;
 #endif // _DEBUG
@@ -160,10 +152,10 @@ public:
 		// Asserts to make sure that we aren't using any skipped combinations.
 		// Asserts to make sure that we are setting all of the combination vars.
 #ifdef _DEBUG
-		bool bAllStaticVarsDefined = m_bCONVERT_TO_SRGB && m_bVERTEXCOLOR && m_bCONSTANTCOLOR && m_bHDRTYPE && m_bSRGB && m_bSRGB_OUTPUT_ADAPTER;
+		bool bAllStaticVarsDefined = m_bVERTEXCOLOR && m_bCONSTANTCOLOR && m_bHDRTYPE && m_bSRGB && m_bSRGB_OUTPUT_ADAPTER;
 		Assert( bAllStaticVarsDefined );
 #endif // _DEBUG
-		return ( 4 * m_nCONVERT_TO_SRGB ) + ( 4 * m_nVERTEXCOLOR ) + ( 8 * m_nCONSTANTCOLOR ) + ( 16 * m_nHDRTYPE ) + ( 48 * m_nSRGB ) + ( 96 * m_nSRGB_OUTPUT_ADAPTER ) + 0;
+		return ( 4 * m_nVERTEXCOLOR ) + ( 8 * m_nCONSTANTCOLOR ) + ( 16 * m_nHDRTYPE ) + ( 48 * m_nSRGB ) + ( 96 * m_nSRGB_OUTPUT_ADAPTER ) + 0;
 	}
 };
 #define shaderStaticTest_sprite_ps20b psh_forgot_to_set_static_VERTEXCOLOR + psh_forgot_to_set_static_CONSTANTCOLOR + psh_forgot_to_set_static_HDRTYPE + psh_forgot_to_set_static_SRGB + psh_forgot_to_set_static_SRGB_OUTPUT_ADAPTER + 0
@@ -185,6 +177,7 @@ public:
 	}
 	void SetHDRENABLED( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nHDRENABLED = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bHDRENABLED = true;
@@ -206,22 +199,24 @@ public:
 	}
 	void SetPIXELFOGTYPE( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nPIXELFOGTYPE = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bPIXELFOGTYPE = true;
 #endif
 	}
 public:
-	sprite_ps20b_Dynamic_Index()
+	// CONSTRUCTOR
+	sprite_ps20b_Dynamic_Index( IShaderDynamicAPI *pShaderAPI )
 	{
 #ifdef _DEBUG
 		m_bHDRENABLED = false;
 #endif // _DEBUG
 		m_nHDRENABLED = 0;
 #ifdef _DEBUG
-		m_bPIXELFOGTYPE = false;
+		m_bPIXELFOGTYPE = true;
 #endif // _DEBUG
-		m_nPIXELFOGTYPE = 0;
+		m_nPIXELFOGTYPE = ( pShaderAPI->GetSceneFogMode() == MATERIAL_FOG_LINEAR_BELOW_FOG_Z ) ;
 	}
 	int GetIndex()
 	{
@@ -234,4 +229,34 @@ public:
 		return ( 1 * m_nHDRENABLED ) + ( 2 * m_nPIXELFOGTYPE ) + 0;
 	}
 };
-#define shaderDynamicTest_sprite_ps20b psh_forgot_to_set_dynamic_HDRENABLED + psh_forgot_to_set_dynamic_PIXELFOGTYPE + 0
+#define shaderDynamicTest_sprite_ps20b psh_forgot_to_set_dynamic_HDRENABLED + 0
+
+static const ShaderComboInformation_t s_DynamicComboArray_sprite_ps20b[2] = 
+{
+	{ "HDRENABLED", 0, 1 },
+	{ "PIXELFOGTYPE", 0, 1 },
+};
+
+static const ShaderComboInformation_t s_StaticComboArray_sprite_ps20b[5] = 
+{
+	{ "VERTEXCOLOR", 0, 1 },
+	{ "CONSTANTCOLOR", 0, 1 },
+	{ "HDRTYPE", 0, 2 },
+	{ "SRGB", 0, 1 },
+	{ "SRGB_OUTPUT_ADAPTER", 0, 1 },
+};
+static const ShaderComboSemantics_t sprite_ps20b_combos =
+{
+	"sprite_ps20b", s_DynamicComboArray_sprite_ps20b, 2, s_StaticComboArray_sprite_ps20b, 5 
+};
+
+class ConstructMe_sprite_ps20b
+{
+public:
+	ConstructMe_sprite_ps20b()
+	{
+		GetShaderDLL()->AddShaderComboInformation( &sprite_ps20b_combos );
+	}
+};
+
+static ConstructMe_sprite_ps20b s_ConstructMe_sprite_ps20b;

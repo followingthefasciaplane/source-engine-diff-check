@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -36,6 +36,8 @@ struct DispCollPlaneIndex_t
 class CPlaneIndexHashFuncs
 {
 public:
+
+	// cppcheck-suppress noExplicitConstructor
 	CPlaneIndexHashFuncs( int ) {}
 
 	// Compare
@@ -183,7 +185,7 @@ FORCEINLINE int IntersectRayWithFourBoxes( const FourVectors &rayStart, const Fo
 	boxExitT = MinSIMD(boxExitT,Four_Ones);
 
 	// if entry<=exit for the box, we've got a hit
-	fltx4 active = CmpLeSIMD(boxEntryT,boxExitT);			// mask of which boxes are active
+	bi32x4 active = CmpLeSIMD(boxEntryT,boxExitT);			// mask of which boxes are active
 
 	// hit at least one box?
 	return TestSignSIMD(active);
@@ -198,13 +200,13 @@ FORCEINLINE int IntersectFourBoxPairs( const FourVectors &mins0, const FourVecto
 	FourVectors intersectMaxs = minimum(maxs0,maxs1);
 
 	// if intersectMins <= intersectMaxs then the boxes overlap in this dimension
-	fltx4 overlapX = CmpLeSIMD(intersectMins.x,intersectMaxs.x);
-	fltx4 overlapY = CmpLeSIMD(intersectMins.y,intersectMaxs.y);
-	fltx4 overlapZ = CmpLeSIMD(intersectMins.z,intersectMaxs.z);
+	bi32x4 overlapX = CmpLeSIMD(intersectMins.x,intersectMaxs.x);
+	bi32x4 overlapY = CmpLeSIMD(intersectMins.y,intersectMaxs.y);
+	bi32x4 overlapZ = CmpLeSIMD(intersectMins.z,intersectMaxs.z);
 	
 	// if the boxes overlap in all three dimensions, they intersect
-	fltx4 tmp = AndSIMD( overlapX, overlapY );
-	fltx4 active = AndSIMD( tmp, overlapZ );
+	bi32x4 tmp = AndSIMD( overlapX, overlapY );
+	bi32x4 active = AndSIMD( tmp, overlapZ );
 
 	// hit at least one box?
 	return TestSignSIMD(active);
@@ -237,7 +239,7 @@ FORCEINLINE int IntersectFourBoxSpherePairs( const FourVectors &center, const fl
 
 	// if squared distance between each sphere center & box is less than the radiusSquared for that sphere
 	// we have an intersection
-	fltx4 active = CmpLeSIMD(distSq,radiusSq);
+	bi32x4 active = CmpLeSIMD(distSq,radiusSq);
 
 	// at least one intersection?
 	return TestSignSIMD(active);
@@ -328,25 +330,14 @@ void CDispCollTree::AABBTree_CopyDispData( CCoreDispInfo *pDisp )
 	}
 
 	// Allocate collision tree data.
-	{
-	MEM_ALLOC_CREDIT();
+	HUNK_ALLOC_CREDIT_( "AABBTree_CopyDispData" );
 	m_aVerts.SetSize( GetSize() );
-	}
-
-	{
-	MEM_ALLOC_CREDIT();
 	m_aTris.SetSize( GetTriSize() );
-	}
-
-	{
-	MEM_ALLOC_CREDIT();
 	int numLeaves = (GetWidth()-1) * (GetHeight()-1);
 	m_leaves.SetCount(numLeaves);
 	int numNodes = Nodes_CalcCount( m_nPower );
 	numNodes -= numLeaves;
 	m_nodes.SetCount(numNodes);
-	}
-
 
 	// Setup size.
 	m_nSize = sizeof( this );
@@ -376,19 +367,51 @@ void CDispCollTree::AABBTree_CopyDispData( CCoreDispInfo *pDisp )
 		m_aTris[iTri].m_uiFlags = pDisp->GetTriTagValue( iTri );
 
 		// Calculate the surface props and set flags.
-		float flTotalAlpha = 0.0f;
-		for ( int iVert = 0; iVert < 3; ++iVert )
+		if ( ( pDisp->GetFlags() & DISP_INFO_FLAG_HAS_MULTIBLEND ) != 0 )
 		{
-			flTotalAlpha += pDisp->GetAlpha( m_aTris[iTri].GetVert( iVert ) );
-		}
+			float flTotalAlpha[3] = { 0,0,0 };
+			for ( int iVert = 0; iVert < 3; ++iVert )
+			{
+				Vector4D vBlend;
+				pDisp->GetMultiBlend( m_aTris[iTri].GetVert( iVert ), vBlend );
+				flTotalAlpha[0] += vBlend.y;
+				flTotalAlpha[1] += vBlend.z;
+				flTotalAlpha[2] += vBlend.w;
+			}
 
-		if ( flTotalAlpha > DISP_ALPHA_PROP_DELTA )
-		{
-			m_aTris[iTri].m_uiFlags |= DISPSURF_FLAG_SURFPROP2;
+			if ( ( flTotalAlpha[2] > DISP_MULTIBLEND_PROP_THRESHOLD ) && ( flTotalAlpha[2] >= flTotalAlpha[1] ) && ( flTotalAlpha[2] >= flTotalAlpha[0] ) )
+			{
+				m_aTris[iTri].m_uiFlags |= DISPSURF_FLAG_SURFPROP4;
+			}
+			else if ( ( flTotalAlpha[1] > DISP_MULTIBLEND_PROP_THRESHOLD ) && ( flTotalAlpha[1] >= flTotalAlpha[0] ) )
+			{
+				m_aTris[iTri].m_uiFlags |= DISPSURF_FLAG_SURFPROP3;
+			}
+			else if ( flTotalAlpha[0] > DISP_MULTIBLEND_PROP_THRESHOLD )
+			{
+				m_aTris[iTri].m_uiFlags |= DISPSURF_FLAG_SURFPROP2;
+			}
+			else
+			{
+				m_aTris[iTri].m_uiFlags |= DISPSURF_FLAG_SURFPROP1;
+			}
 		}
 		else
 		{
-			m_aTris[iTri].m_uiFlags |= DISPSURF_FLAG_SURFPROP1;
+			float flTotalAlpha = 0.0f;
+			for ( int iVert = 0; iVert < 3; ++iVert )
+			{
+				flTotalAlpha += pDisp->GetAlpha( m_aTris[iTri].GetVert( iVert ) );
+			}
+
+			if ( flTotalAlpha > DISP_ALPHA_PROP_DELTA )
+			{
+				m_aTris[iTri].m_uiFlags |= DISPSURF_FLAG_SURFPROP2;
+			}
+			else
+			{
+				m_aTris[iTri].m_uiFlags |= DISPSURF_FLAG_SURFPROP1;
+			}
 		}
 
 		// Add the displacement surface flag.
@@ -499,7 +522,7 @@ inline void CDispCollTree::LockCache()
 #ifdef ENGINE_DLL
 	if ( !g_DispCollTriCache.LockResource( m_hCache ) )
 	{
-		AUTO_LOCK( s_CacheMutex );
+		AUTO_LOCK_FM( s_CacheMutex );
 
 		// Cache may have just been created, so check once more
 		if ( !g_DispCollTriCache.LockResource( m_hCache ) )
@@ -891,7 +914,7 @@ static const Vector g_Vec3DispCollEpsilons(DISPCOLL_DIST_EPSILON,DISPCOLL_DIST_E
 //-----------------------------------------------------------------------------
 bool CDispCollTree::AABBTree_SweepAABB( const Ray_t &ray, const Vector &vecInvDelta, CBaseTrace *pTrace )
 {
-	VPROF( "DispHullTest" );
+	VPROF( "Disp_AABBTree_SweepAABB" );
 	//	VPROF_BUDGET( "DispHullTraces", VPROF_BUDGETGROUP_DISP_HULLTRACES );
 	// Check for hull test.
 	if ( CheckFlags( CCoreDispInfo::SURF_NOHULL_COLL ) )
@@ -914,6 +937,7 @@ bool CDispCollTree::AABBTree_SweepAABB( const Ray_t &ray, const Vector &vecInvDe
 
 	if ( listIndex <= list.maxIndex )
 	{
+		VPROF( "DispHullTest_Tris" );
 		LockCache();
 		for ( ; listIndex <= list.maxIndex; listIndex++ )
 		{
@@ -1409,6 +1433,8 @@ CDispCollTree::CDispCollTree()
 	m_nContents = -1;
 	m_nSurfaceProps[0] = 0;
 	m_nSurfaceProps[1] = 0;
+	m_nSurfaceProps[2] = 0;
+	m_nSurfaceProps[3] = 0;
 
 	m_vecStabDir.Init();
 	m_mins.Init( FLT_MAX, FLT_MAX, FLT_MAX );
@@ -1500,7 +1526,7 @@ CDispCollTree *DispCollTrees_Alloc( int count )
 {
 	CDispCollTree *pTrees = NULL;
 #ifdef ENGINE_DLL
-	pTrees = (CDispCollTree *)Hunk_Alloc( count * sizeof(CDispCollTree), false );
+	pTrees = (CDispCollTree *)Hunk_AllocName( count * sizeof(CDispCollTree), "DispCollTrees_Alloc", false );
 	g_nTrees = count;
 	for ( int i = 0; i < g_nTrees; i++ )
 	{

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright (c) 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -41,7 +41,6 @@ struct Eyes_DX8_DX9_Vars_t
 	int m_nGlintU;
 	int m_nGlintV;
 	int m_nDilation;
-	int m_nIntro;
 	int m_nEntityOrigin;
 	int m_nWarpParam;
 };

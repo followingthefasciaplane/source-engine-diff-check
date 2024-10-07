@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: This is an entity that represents a vgui screen
 //
@@ -66,6 +66,7 @@ private:
 	void InputSetInactive( inputdata_t &inputdata );
 
 	string_t m_strOverlayMaterial;
+	bool	m_bIsTransparent;
 
 	CNetworkVar( float, m_flWidth ); 
 	CNetworkVar( float, m_flHeight );

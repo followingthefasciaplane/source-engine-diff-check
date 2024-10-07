@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -51,7 +51,7 @@ public:
 	virtual void Activate( const CUtlVector< DmePickerInfo_t >& vec );
 
 	// Forward arrow keys to the list
-	virtual void OnKeyCodePressed( vgui::KeyCode code );
+	virtual void OnKeyCodeTyped( vgui::KeyCode code );
 
 	// Returns the selceted DmElement
 	CDmElement *GetSelectedDme( );

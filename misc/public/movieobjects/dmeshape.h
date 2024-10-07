@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =======
 //
 // A class representing an abstract shape (ie drawable object)
 //
@@ -35,6 +35,7 @@ public:
 	virtual void Draw( const matrix3x4_t &shapeToWorld, CDmeDrawSettings *pDmeDrawSettings = NULL );
 
 	virtual void GetBoundingSphere( Vector &c, float &r ) const;
+	virtual void GetBoundingBox( Vector &min, Vector &max ) const { min.Zero(); max.Zero(); }
 
 	// Find out how many DmeDag's have this DmeShape as their shape, could be 0
 	int GetParentCount() const;

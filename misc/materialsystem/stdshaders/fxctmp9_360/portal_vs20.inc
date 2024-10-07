@@ -1,3 +1,5 @@
+// ALL SKIP STATEMENTS THAT AFFECT THIS SHADER!!!
+// defined $LIGHTING_PREVIEW && defined $FASTPATH && $LIGHTING_PREVIEW && $FASTPATH
 #include "shaderlib/cshader.h"
 class portal_vs20_Static_Index
 {
@@ -17,6 +19,7 @@ public:
 	}
 	void SetHASALPHAMASK( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nHASALPHAMASK = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bHASALPHAMASK = true;
@@ -38,6 +41,7 @@ public:
 	}
 	void SetHASSTATICTEXTURE( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nHASSTATICTEXTURE = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bHASSTATICTEXTURE = true;
@@ -59,13 +63,15 @@ public:
 	}
 	void SetUSEALTERNATEVIEW( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nUSEALTERNATEVIEW = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bUSEALTERNATEVIEW = true;
 #endif
 	}
 public:
-	portal_vs20_Static_Index( )
+	// CONSTRUCTOR
+	portal_vs20_Static_Index( IShaderShadow *pShaderShadow, IMaterialVar **params )
 	{
 #ifdef _DEBUG
 		m_bHASALPHAMASK = false;
@@ -110,6 +116,7 @@ public:
 	}
 	void SetSKINNING( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nSKINNING = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bSKINNING = true;
@@ -131,13 +138,15 @@ public:
 	}
 	void SetADDSTATIC( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nADDSTATIC = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bADDSTATIC = true;
 #endif
 	}
 public:
-	portal_vs20_Dynamic_Index()
+	// CONSTRUCTOR
+	portal_vs20_Dynamic_Index( IShaderDynamicAPI *pShaderAPI )
 	{
 #ifdef _DEBUG
 		m_bSKINNING = false;
@@ -160,3 +169,31 @@ public:
 	}
 };
 #define shaderDynamicTest_portal_vs20 vsh_forgot_to_set_dynamic_SKINNING + vsh_forgot_to_set_dynamic_ADDSTATIC + 0
+
+static const ShaderComboInformation_t s_DynamicComboArray_portal_vs20[2] = 
+{
+	{ "SKINNING", 0, 1 },
+	{ "ADDSTATIC", 0, 1 },
+};
+
+static const ShaderComboInformation_t s_StaticComboArray_portal_vs20[3] = 
+{
+	{ "HASALPHAMASK", 0, 1 },
+	{ "HASSTATICTEXTURE", 0, 1 },
+	{ "USEALTERNATEVIEW", 0, 1 },
+};
+static const ShaderComboSemantics_t portal_vs20_combos =
+{
+	"portal_vs20", s_DynamicComboArray_portal_vs20, 2, s_StaticComboArray_portal_vs20, 3 
+};
+
+class ConstructMe_portal_vs20
+{
+public:
+	ConstructMe_portal_vs20()
+	{
+		GetShaderDLL()->AddShaderComboInformation( &portal_vs20_combos );
+	}
+};
+
+static ConstructMe_portal_vs20 s_ConstructMe_portal_vs20;

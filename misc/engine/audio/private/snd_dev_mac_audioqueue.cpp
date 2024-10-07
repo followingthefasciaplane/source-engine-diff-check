@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright (c) 1996-2010, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -14,7 +14,6 @@
 
 extern bool snd_firsttime;
 extern bool MIX_ScaleChannelVolume( paintbuffer_t *ppaint, channel_t *pChannel, int volume[CCHANVOLUMES], int mixchans );
-extern void S_SpatializeChannel( int volume[6], int master_vol, const Vector *psourceDir, float gain, float mono );
 
 #define NUM_BUFFERS_SOURCES		128
 #define	BUFF_MASK				(NUM_BUFFERS_SOURCES - 1 )
@@ -29,37 +28,29 @@ extern void S_SpatializeChannel( int volume[6], int master_vol, const Vector *ps
 class CAudioDeviceAudioQueue : public CAudioDeviceBase
 {
 public:
+	CAudioDeviceAudioQueue()
+	{
+		m_pName = "AudioQueue";
+		m_nChannels = 2;
+		m_nSampleBits = 16;
+		m_nSampleRate = 44100;
+		m_bIsActive = true;
+	}
+
 	bool		IsActive( void );
 	bool		Init( void );
 	void		Shutdown( void );
-	void		PaintEnd( void );
 	int			GetOutputPosition( void );
-	void		ChannelReset( int entnum, int channelIndex, float distanceMod );
 	void		Pause( void );
 	void		UnPause( void );
-	float		MixDryVolume( void );
-	bool		Should3DMix( void );
-	void		StopAllSounds( void );
 
-	int			PaintBegin( float mixAheadTime, int soundtime, int paintedtime );
+	int64		PaintBegin( float mixAheadTime, int64 soundtime, int64 paintedtime );
+	void		PaintEnd( void );
 	void		ClearBuffer( void );
 	void		UpdateListener( const Vector& position, const Vector& forward, const Vector& right, const Vector& up );
-	void		MixBegin( int sampleCount );
-	void		MixUpsample( int sampleCount, int filtertype );
-	void		Mix8Mono( channel_t *pChannel, char *pData, int outputOffset, int inputOffset, fixedint rateScaleFix, int outCount, int timecompress );
-	void		Mix8Stereo( channel_t *pChannel, char *pData, int outputOffset, int inputOffset, fixedint rateScaleFix, int outCount, int timecompress );
-	void		Mix16Mono( channel_t *pChannel, short *pData, int outputOffset, int inputOffset, fixedint rateScaleFix, int outCount, int timecompress );
-	void		Mix16Stereo( channel_t *pChannel, short *pData, int outputOffset, int inputOffset, fixedint rateScaleFix, int outCount, int timecompress );
 
 	void		TransferSamples( int end );
-	void		SpatializeChannel( int volume[CCHANVOLUMES/2], int master_vol, const Vector& sourceDir, float gain, float mono);
-	void		ApplyDSPEffects( int idsp, portable_samplepair_t *pbuffront, portable_samplepair_t *pbufrear, portable_samplepair_t *pbufcenter, int samplecount );
 
-	const char *DeviceName( void )			{ return "AudioQueue"; }
-	int			DeviceChannels( void )		{ return 2; }
-	int			DeviceSampleBits( void )	{ return 16; }
-	int			DeviceSampleBytes( void )	{ return 2; }
-	int			DeviceDmaSpeed( void )		{ return SOUND_DMA_SPEED; }
 	int			DeviceSampleCount( void )	{ return m_deviceSampleCount; }
 
 	void BufferCompleted() { m_buffersCompleted++; }
@@ -89,7 +80,9 @@ private:
 	bool m_bFailed;
 	bool m_bRunning;
 	
-	
+	bool m_bSurround;
+	bool m_bSurroundCenter;
+	bool m_bHeadphone;
 };
 
 CAudioDeviceAudioQueue *wave = NULL;
@@ -127,9 +120,7 @@ bool CAudioDeviceAudioQueue::Init( void )
 	m_sndBuffers = NULL;
 	m_pauseCount = 0;
 
-	m_bSurround = false;
-	m_bSurroundCenter = false;
-	m_bHeadphone = false;
+	m_bIsHeadphone = false;
 	m_buffersSent = 0;
 	m_buffersCompleted = 0;
 	m_pauseCount = 0;
@@ -200,7 +191,7 @@ void CAudioDeviceAudioQueue::OpenWaveOut( void )
 	m_buffersSent = 0;
 	m_buffersCompleted = 0;
 		
-    m_DataFormat.mSampleRate       = 44100;
+    m_DataFormat.mSampleRate       = SOUND_DMA_SPEED;
     m_DataFormat.mFormatID         = kAudioFormatLinearPCM;
     m_DataFormat.mFormatFlags      = kAudioFormatFlagIsSignedInteger|kAudioFormatFlagIsPacked;
     m_DataFormat.mBytesPerPacket   = 4; // 16-bit samples * 2 channels
@@ -215,7 +206,7 @@ void CAudioDeviceAudioQueue::OpenWaveOut( void )
     OSStatus err = AudioQueueNewOutput(&m_DataFormat, AudioCallback, this, NULL, NULL, 0, &m_Queue);	
 	if ( err != noErr) 
 	{
-		DevMsg( "Failed to create AudioQueue output %d\n", (int)err );
+		DevMsg( "Failed to create AudioQueue output %d\n", err );
 		m_bFailed = true;
 		return;
 	}
@@ -225,7 +216,7 @@ void CAudioDeviceAudioQueue::OpenWaveOut( void )
         err = AudioQueueAllocateBuffer( m_Queue, BUFFER_SIZE,&(m_Buffers[i]));
 		if ( err != noErr) 
 		{
-			DevMsg( "Failed to AudioQueueAllocateBuffer output %d (%i)\n",(int)err,i );
+			DevMsg( "Failed to AudioQueueAllocateBuffer output %d (%i)\n", err,i );
 			m_bFailed = true;
 		}
 		
@@ -236,7 +227,7 @@ void CAudioDeviceAudioQueue::OpenWaveOut( void )
     err = AudioQueuePrime( m_Queue, 0, NULL);
 	if ( err != noErr) 
 	{
-		DevMsg( "Failed to create AudioQueue output %d\n", (int)err );
+		DevMsg( "Failed to create AudioQueue output %d\n", err );
 		m_bFailed = true;
 		return;
 	}
@@ -246,7 +237,7 @@ void CAudioDeviceAudioQueue::OpenWaveOut( void )
 	err = AudioQueueAddPropertyListener( m_Queue, kAudioQueueProperty_IsRunning, AudioQueueIsRunningCallback, this );
 	if ( err != noErr) 
 	{
-		DevMsg( "Failed to create AudioQueue output %d\n", (int)err );
+		DevMsg( "Failed to create AudioQueue output %d\n", err );
 		m_bFailed = true;
 		return;
 	}
@@ -273,7 +264,7 @@ void CAudioDeviceAudioQueue::CloseWaveOut( void )
 		m_bRunning = false;
 		
 		AudioQueueRemovePropertyListener( m_Queue, kAudioQueueProperty_IsRunning, AudioQueueIsRunningCallback, this );
-		
+
 		for ( int i = 0; i < NUM_BUFFERS_SOURCES; i++ )
 			AudioQueueFreeBuffer( m_Queue, m_Buffers[i]);
 
@@ -294,15 +285,15 @@ void CAudioDeviceAudioQueue::CloseWaveOut( void )
 //-----------------------------------------------------------------------------
 // Mixing setup
 //-----------------------------------------------------------------------------
-int CAudioDeviceAudioQueue::PaintBegin( float mixAheadTime, int soundtime, int paintedtime )
+int64 CAudioDeviceAudioQueue::PaintBegin( float mixAheadTime, int64 soundtime, int64 paintedtime )
 {
 	//  soundtime - total samples that have been played out to hardware at dmaspeed
 	//  paintedtime - total samples that have been mixed at speed
 	//  endtime - target for samples in mixahead buffer at speed
 
-	unsigned int endtime = soundtime + mixAheadTime * DeviceDmaSpeed();
+	int64 endtime = soundtime + mixAheadTime * SampleRate();
 	
-	int samps = DeviceSampleCount() >> (DeviceChannels()-1);
+	int samps = DeviceSampleCount() >> (ChannelCount()-1);
 
 	if ((int)(endtime - soundtime) > samps)
 		endtime = soundtime + samps;
@@ -323,15 +314,7 @@ int CAudioDeviceAudioQueue::PaintBegin( float mixAheadTime, int soundtime, int p
 //-----------------------------------------------------------------------------
 void CAudioDeviceAudioQueue::PaintEnd( void )
 {
-	int	cblocks = 4 << 1; 
-
-	if ( m_bRunning && m_buffersSent == m_buffersCompleted )
-	{
-		// We are running the audio queue but have become starved of buffers.
-		// Stop the audio queue so we force a restart of it.
-		AudioQueueStop( m_Queue, true );
-	}
-
+	int	cblocks = 8 << 1; 
 	//
 	// submit a few new sound blocks
 	//
@@ -347,7 +330,7 @@ void CAudioDeviceAudioQueue::PaintEnd( void )
 		OSStatus err = AudioQueueEnqueueBuffer( m_Queue, m_Buffers[iBuf], 0, NULL);
 		if ( err != noErr) 
 		{
-			DevMsg( "Failed to AudioQueueEnqueueBuffer output %d\n", (int)err );
+			DevMsg( "Failed to AudioQueueEnqueueBuffer output %d\n", err );
 		}
 		
 		m_buffersSent++;
@@ -371,7 +354,7 @@ int CAudioDeviceAudioQueue::GetOutputPosition( void )
 
 	s &= (DeviceSampleCount()-1);
 
-	return s / DeviceChannels();
+	return s / ChannelCount();
 }
 
 
@@ -408,17 +391,6 @@ bool CAudioDeviceAudioQueue::IsActive( void )
 	return ( m_pauseCount == 0 );
 }
 
-float CAudioDeviceAudioQueue::MixDryVolume( void )
-{
-	return 0;
-}
-
-
-bool CAudioDeviceAudioQueue::Should3DMix( void )
-{
-	return false;
-}
-
 
 void CAudioDeviceAudioQueue::ClearBuffer( void )
 {
@@ -443,81 +415,12 @@ bool CAudioDeviceAudioQueue::BIsPlaying()
 }
 
 
-void CAudioDeviceAudioQueue::MixBegin( int sampleCount )
-{
-	MIX_ClearAllPaintBuffers( sampleCount, false );
-}
-
-
-void CAudioDeviceAudioQueue::MixUpsample( int sampleCount, int filtertype )
-{
-	paintbuffer_t *ppaint = MIX_GetCurrentPaintbufferPtr();
-	int ifilter = ppaint->ifilter;
-	
-	Assert (ifilter < CPAINTFILTERS);
-
-	S_MixBufferUpsample2x( sampleCount, ppaint->pbuf, &(ppaint->fltmem[ifilter][0]), CPAINTFILTERMEM, filtertype );
-
-	ppaint->ifilter++;
-}
-
-void CAudioDeviceAudioQueue::Mix8Mono( channel_t *pChannel, char *pData, int outputOffset, int inputOffset, fixedint rateScaleFix, int outCount, int timecompress )
-{
-	int volume[CCHANVOLUMES];
-	paintbuffer_t *ppaint = MIX_GetCurrentPaintbufferPtr();
-
-	if (!MIX_ScaleChannelVolume( ppaint, pChannel, volume, 1))
-		return;
-
-	Mix8MonoWavtype( pChannel, ppaint->pbuf + outputOffset, volume, (byte *)pData, inputOffset, rateScaleFix, outCount );
-}
-
-
-void CAudioDeviceAudioQueue::Mix8Stereo( channel_t *pChannel, char *pData, int outputOffset, int inputOffset, fixedint rateScaleFix, int outCount, int timecompress )
-{
-	int volume[CCHANVOLUMES];
-	paintbuffer_t *ppaint = MIX_GetCurrentPaintbufferPtr();
-
-	if (!MIX_ScaleChannelVolume( ppaint, pChannel, volume, 2 ))
-		return;
-
-	Mix8StereoWavtype( pChannel, ppaint->pbuf + outputOffset, volume, (byte *)pData, inputOffset, rateScaleFix, outCount );
-}
-
-
-void CAudioDeviceAudioQueue::Mix16Mono( channel_t *pChannel, short *pData, int outputOffset, int inputOffset, fixedint rateScaleFix, int outCount, int timecompress )
-{
-	int volume[CCHANVOLUMES];
-	paintbuffer_t *ppaint = MIX_GetCurrentPaintbufferPtr();
-
-	if (!MIX_ScaleChannelVolume( ppaint, pChannel, volume, 1 ))
-		return;
-
-	Mix16MonoWavtype( pChannel, ppaint->pbuf + outputOffset, volume, pData, inputOffset, rateScaleFix, outCount );
-}
-
-
-void CAudioDeviceAudioQueue::Mix16Stereo( channel_t *pChannel, short *pData, int outputOffset, int inputOffset, fixedint rateScaleFix, int outCount, int timecompress )
-{
-	int volume[CCHANVOLUMES];
-	paintbuffer_t *ppaint = MIX_GetCurrentPaintbufferPtr();
-
-	if (!MIX_ScaleChannelVolume( ppaint, pChannel, volume, 2 ))
-		return;
-
-	Mix16StereoWavtype( pChannel, ppaint->pbuf + outputOffset, volume, pData, inputOffset, rateScaleFix, outCount );
-}
-
-
-void CAudioDeviceAudioQueue::ChannelReset( int entnum, int channelIndex, float distanceMod )
-{
-}
 
 
 void CAudioDeviceAudioQueue::TransferSamples( int end )
 {
-	int		lpaintedtime = g_paintedtime;
-	int		endtime = end;
+	int64	lpaintedtime = g_paintedtime;
+	int64	endtime = end;
 	
 	// resumes playback...
 
@@ -525,27 +428,6 @@ void CAudioDeviceAudioQueue::TransferSamples( int end )
 	{
 		S_TransferStereo16( m_sndBuffers, PAINTBUFFER, lpaintedtime, endtime );
 	}
-}
-
-void CAudioDeviceAudioQueue::SpatializeChannel( int volume[CCHANVOLUMES/2], int master_vol, const Vector& sourceDir, float gain, float mono )
-{
-	VPROF("CAudioDeviceAudioQueue::SpatializeChannel");
-	S_SpatializeChannel( volume, master_vol, &sourceDir, gain, mono );
-}
-
-void CAudioDeviceAudioQueue::StopAllSounds( void )
-{
-	m_bSoundsShutdown = true;
-	m_bRunning = false;
-	AudioQueueStop(m_Queue, true);
-}
-
-
-
-void CAudioDeviceAudioQueue::ApplyDSPEffects( int idsp, portable_samplepair_t *pbuffront, portable_samplepair_t *pbufrear, portable_samplepair_t *pbufcenter, int samplecount )
-{
-	//SX_RoomFX( endtime, filter, timefx );
-	DSP_Process( idsp, pbuffront, pbufrear, pbufcenter, samplecount );
 }
 
 

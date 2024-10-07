@@ -1,13 +1,13 @@
-//====== Copyright © 1996-2006, Valve Corporation, All rights reserved. =======
+//========== Copyright (c) Valve Corporation, All rights reserved. ==========//
 //
 // Purpose: 
 //
-//=============================================================================
+//===========================================================================//
 
 // DYNAMIC: "WRITE_DEPTH_TO_DESTALPHA"	"0..1"	[ps20b] [PC]
-// DYNAMIC: "WRITE_DEPTH_TO_DESTALPHA"	"0..0"	[ps20b] [XBOX]
+// DYNAMIC: "WRITE_DEPTH_TO_DESTALPHA"	"0..0"	[ps20b] [CONSOLE]
 // DYNAMIC: "WRITE_DEPTH_TO_DESTALPHA"  "0..1"	[ps30]
-// DYNAMIC: "PIXELFOGTYPE"				"0..1"
+#include "common_fog_ps_fxc.h"
 
 #include "common_ps_fxc.h"
 #include "shader_constant_register_map.h"
@@ -15,7 +15,8 @@
 sampler BaseTextureSampler			: register( s0 );
 sampler IrisSampler					: register( s1 );
 sampler GlintSampler				: register( s2 );
-const float4 cEyeScalars			: register( c0 );	// { Dilation, ambient, x, x }
+const float4 cEyeScalars			: register( c0 );	// { Dilation, x, x, x }
+const float4 cEyeScalars2			: register( c1 );	// { ambient, ambient, ambient, ambient }
 
 const float4 g_FogParams				: register( PSREG_FOG_PARAMS );
 const float4 g_EyePos_SpecExponent		: register( PSREG_EYEPOS_SPEC_EXPONENT );
@@ -31,9 +32,9 @@ struct PS_INPUT
 };
 
 #define fDilationFactor	cEyeScalars.x
-#define fGlintDamping	cEyeScalars.y
+#define fGlintDamping	cEyeScalars2.x
 
-float4 main( PS_INPUT i ) : COLOR
+float4_color_return_type main( PS_INPUT i ) : COLOR
 {
 	float4 baseSample  = tex2D( BaseTextureSampler, i.baseTexCoord  );
 	float4 glintSample = tex2D( GlintSampler,       i.glintTexCoord );
@@ -63,6 +64,6 @@ float4 main( PS_INPUT i ) : COLOR
 	bWriteDepthToAlpha = WRITE_DEPTH_TO_DESTALPHA != 0;
 #endif
 
-	float fogFactor = CalcPixelFogFactor( PIXELFOGTYPE, g_FogParams, g_EyePos_SpecExponent.z, i.worldPos_projPosZ.z, i.worldPos_projPosZ.w );
+	float fogFactor = CalcPixelFogFactor( PIXELFOGTYPE, g_FogParams, g_EyePos_SpecExponent.xyz, i.worldPos_projPosZ.xyz, i.worldPos_projPosZ.w );
 	return FinalOutput( result, fogFactor, PIXELFOGTYPE, TONEMAP_SCALE_LINEAR, bWriteDepthToAlpha, i.worldPos_projPosZ.w  );
 }

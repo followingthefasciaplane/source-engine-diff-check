@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Xbox Launch Routines.
 //
@@ -24,8 +24,9 @@
 #define LF_EXITFROMINSTALLER	0x00000002	// set if exit was from an installer
 #define LF_EXITFROMGAME			0x00000004	// set if exit was from a game
 #define LF_EXITFROMCHOOSER		0x00000008	// set if exit was from the chooser
-#define LF_GAMERESTART			0x00000010	// set if game wants to restart self (skips appchooser)
-#define LF_INVITERESTART		0x00000020	// set if game was invited from another app (launches TF and fires off session connect)
+#define LF_WARMRESTART			0x00000010	// set if game wants to restart self (skips intro movies)
+#define LF_INSTALLEDTOCACHE		0x00000040	// set if installer populated or validated cache partition
+#define LF_UNKNOWNDATA			0x00000080
 
 #pragma pack(1)
 struct launchHeader_t
@@ -34,10 +35,16 @@ struct launchHeader_t
 	unsigned int	version;
 	unsigned int	flags;
 
-	int				nStorageID;
 	int				nUserID;
+	int				nCtrlr2Storage[4];
+	char			nSlot2Ctrlr[4];
+	char			nSlot2Guest[4];
+	int				numGameUsers;
+
 	int				bForceEnglish;
-	XNKID			nInviteSessionID;
+
+	// increments at each engine re-launch
+	DWORD			nAttractID;
 	
 	// for caller defined data, occurs after this header
 	// limited to slightly less than MAX_LAUNCH_DATA_SIZE
@@ -77,11 +84,27 @@ public:
 		m_Launch.header.version = 0;
 		m_Launch.header.flags = 0;
 
-		m_Launch.header.nStorageID = XBX_INVALID_STORAGE_ID;
 		m_Launch.header.nUserID = XBX_INVALID_USER_ID;
 		m_Launch.header.bForceEnglish = false;
 
-		memset( &m_Launch.header.nInviteSessionID, 0, sizeof( m_Launch.header.nInviteSessionID ) );
+		m_Launch.header.nCtrlr2Storage[0] = XBX_INVALID_STORAGE_ID;
+		m_Launch.header.nCtrlr2Storage[1] = XBX_INVALID_STORAGE_ID;
+		m_Launch.header.nCtrlr2Storage[2] = XBX_INVALID_STORAGE_ID;
+		m_Launch.header.nCtrlr2Storage[3] = XBX_INVALID_STORAGE_ID;
+
+		m_Launch.header.nSlot2Ctrlr[0] = 0;
+		m_Launch.header.nSlot2Ctrlr[1] = 1;
+		m_Launch.header.nSlot2Ctrlr[2] = 2;
+		m_Launch.header.nSlot2Ctrlr[3] = 3;
+
+		m_Launch.header.nSlot2Guest[0] = 0;
+		m_Launch.header.nSlot2Guest[1] = 0;
+		m_Launch.header.nSlot2Guest[2] = 0;
+		m_Launch.header.nSlot2Guest[3] = 0;
+
+		m_Launch.header.numGameUsers = 0;
+
+		m_Launch.header.nAttractID = 0;
 
 		m_Launch.header.nDataSize = 0;
 	}
@@ -94,6 +117,15 @@ public:
 
 	bool SetLaunchData( void *pData, int dataSize, int flags = 0 )
 	{
+#if defined( _DEMO )
+		if ( pData && ( flags & LF_UNKNOWNDATA ) )
+		{
+			// not ours, put the demo structure back as-is
+			XSetLaunchData( pData, dataSize );
+			m_LaunchDataSize = dataSize;
+			return true;
+		}
+#endif
 		if ( pData && dataSize && dataSize > MaxPayloadSize() )
 		{
 			// not enough room
@@ -191,9 +223,25 @@ public:
 				*pDataSize = m_LaunchDataSize;
 			}
 		}
+		else if ( !m_LaunchDataSize )
+		{
+			// mark for caller as all invalid
+			if ( pID )
+			{
+				*pID = 0;
+			}
+			if ( pData )
+			{
+				*pData = NULL;
+			}
+			if ( pDataSize )
+			{
+				*pDataSize = 0;
+			}
+		}
 
-		// valid when data is available (not necessarily valve's tag)
-		return m_LaunchDataSize != 0;
+		// valid when any data is available (not necessarily valve's tag)
+		return ( m_LaunchDataSize != 0 );
 	}
 
 	//--------------------------------------------------------------------------------------
@@ -211,11 +259,13 @@ public:
 	void RestoreOrResetLaunchData()
 	{
 		RestoreLaunchData();
+#if !defined( _DEMO )
 		if ( m_Launch.header.id != VALVE_LAUNCH_ID || m_Launch.header.version != VALVE_LAUNCH_VERSION )
 		{
 			// not interested in somebody else's data
 			ResetLaunchData();
 		}
+#endif
 	}
 
 	//--------------------------------------------------------------------------------------
@@ -225,58 +275,164 @@ public:
 	{
 		// establish the data
 		RestoreOrResetLaunchData();
+#if defined( _DEMO )
+		if ( m_Launch.header.id && m_Launch.header.id != VALVE_LAUNCH_ID )
+		{
+			return 0;
+		}
+#endif
 		return m_Launch.header.flags;
 	}
 
-	int GetStorageID( void )
+	void SetLaunchFlags( unsigned int ufNewFlags )
 	{
-		RestoreOrResetLaunchData();
-		return m_Launch.header.nStorageID;
+#if defined( _DEMO )
+		if ( m_Launch.header.id && m_Launch.header.id != VALVE_LAUNCH_ID )
+		{
+			return;
+		}
+#endif
+		m_Launch.header.flags = ufNewFlags;
 	}
-	void SetStorageID( int storageID )
+
+	void GetStorageID( int storageID[4] )
 	{
 		RestoreOrResetLaunchData();
-		m_Launch.header.nStorageID = storageID;
+#if defined( _DEMO )
+		if ( m_Launch.header.id && m_Launch.header.id != VALVE_LAUNCH_ID )
+		{
+			storageID[0] = XBX_INVALID_STORAGE_ID;
+			storageID[1] = XBX_INVALID_STORAGE_ID;
+			storageID[2] = XBX_INVALID_STORAGE_ID;
+			storageID[3] = XBX_INVALID_STORAGE_ID;
+			return;
+		}
+#endif
+		memcpy( storageID, m_Launch.header.nCtrlr2Storage, sizeof( m_Launch.header.nCtrlr2Storage ) );
+	}
+	void SetStorageID( int const storageID[4] )
+	{
+#if defined( _DEMO )
+		if ( m_Launch.header.id && m_Launch.header.id != VALVE_LAUNCH_ID )
+		{
+			return;
+		}
+#endif
+		memcpy( m_Launch.header.nCtrlr2Storage, storageID, sizeof( m_Launch.header.nCtrlr2Storage ) );
+	}
+
+	void GetSlotUsers( int &numGameUsers, char nSlot2Ctrlr[4], char nSlot2Guest[4] )
+	{
+		RestoreOrResetLaunchData();
+#if defined( _DEMO )
+		if ( m_Launch.header.id && m_Launch.header.id != VALVE_LAUNCH_ID )
+		{
+			numGameUsers = 0;
+
+			nSlot2Ctrlr[0] = 0;
+			nSlot2Ctrlr[1] = 1;
+			nSlot2Ctrlr[2] = 2;
+			nSlot2Ctrlr[3] = 3;
+
+			nSlot2Guest[0] = 0;
+			nSlot2Guest[1] = 0;
+			nSlot2Guest[2] = 0;
+			nSlot2Guest[3] = 0;
+			return;
+		}
+#endif
+		numGameUsers = m_Launch.header.numGameUsers;
+		memcpy( nSlot2Ctrlr, m_Launch.header.nSlot2Ctrlr, sizeof( m_Launch.header.nSlot2Ctrlr ) );
+		memcpy( nSlot2Guest, m_Launch.header.nSlot2Guest, sizeof( m_Launch.header.nSlot2Guest ) );
+	}
+	void SetSlotUsers( int numGameUsers, char const nSlot2Ctrlr[4], char const nSlot2Guest[4] )
+	{
+#if defined( _DEMO )
+		if ( m_Launch.header.id && m_Launch.header.id != VALVE_LAUNCH_ID )
+		{
+			return;
+		}
+#endif
+		m_Launch.header.numGameUsers = numGameUsers;
+		memcpy( m_Launch.header.nSlot2Ctrlr, nSlot2Ctrlr, sizeof( m_Launch.header.nSlot2Ctrlr ) );
+		memcpy( m_Launch.header.nSlot2Guest, nSlot2Guest, sizeof( m_Launch.header.nSlot2Guest ) );
 	}
 
 	int GetUserID( void )
 	{
 		RestoreOrResetLaunchData();
+#if defined( _DEMO )
+		if ( m_Launch.header.id && m_Launch.header.id != VALVE_LAUNCH_ID )
+		{
+			return XBX_INVALID_USER_ID;
+		}
+#endif
 		return m_Launch.header.nUserID;
 	}
 	void SetUserID( int userID )
 	{
-		RestoreOrResetLaunchData();
+#if defined( _DEMO )
+		if ( m_Launch.header.id && m_Launch.header.id != VALVE_LAUNCH_ID )
+		{
+			return;
+		}
+#endif
 		m_Launch.header.nUserID = userID;
 	}
 
 	bool GetForceEnglish( void )
 	{
 		RestoreOrResetLaunchData();
+#if defined( _DEMO )
+		if ( m_Launch.header.id && m_Launch.header.id != VALVE_LAUNCH_ID )
+		{
+			return false;
+		}
+#endif
 		return m_Launch.header.bForceEnglish ? true : false;
 	}
 	void SetForceEnglish( bool bForceEnglish )
 	{
-		RestoreOrResetLaunchData();
+#if defined( _DEMO )
+		if ( m_Launch.header.id && m_Launch.header.id != VALVE_LAUNCH_ID )
+		{
+			return;
+		}
+#endif
 		m_Launch.header.bForceEnglish = bForceEnglish;
 	}
 
-	void GetInviteSessionID( XNKID *pSessionID )
+	DWORD GetAttractID( void )
 	{
 		RestoreOrResetLaunchData();
-		*pSessionID = m_Launch.header.nInviteSessionID;
+#if defined( _DEMO )
+		if ( m_Launch.header.id && m_Launch.header.id != VALVE_LAUNCH_ID )
+		{
+			return 0;
+		}
+#endif
+		return m_Launch.header.nAttractID;
 	}
-	void SetInviteSessionID( XNKID *pSessionID )
+	void SetAttractID( DWORD nAttractID )
 	{
-		RestoreOrResetLaunchData();
-		m_Launch.header.nInviteSessionID = *pSessionID;
+#if defined( _DEMO )
+		if ( m_Launch.header.id && m_Launch.header.id != VALVE_LAUNCH_ID )
+		{
+			return;
+		}
+#endif
+		m_Launch.header.nAttractID = nAttractID;
 	}
 
 	void Launch( const char *pNewImageName = NULL )
 	{
 		if ( !pNewImageName )
 		{
+#if defined( _DEMO )
+			pNewImageName = XLAUNCH_KEYWORD_DEFAULT_APP;
+#else
 			pNewImageName = "default.xex";
+#endif
 		}
 
 		XLaunchNewImage( pNewImageName, 0 );

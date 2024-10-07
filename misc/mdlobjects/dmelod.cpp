@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =====//
 //
 // Dme version of a hitbox
 //
@@ -25,6 +25,7 @@ IMPLEMENT_ELEMENT_FACTORY( DmeLOD, CDmeLOD );
 //-----------------------------------------------------------------------------
 void CDmeLOD::OnConstruction()
 {
+	m_Path.Init( this, "path" );
 	m_Model.Init( this, "model" );
 	m_Skeleton.Init( this, "skeleton" );
 	m_CombinationOperator.Init( this, "combinationOperator" );

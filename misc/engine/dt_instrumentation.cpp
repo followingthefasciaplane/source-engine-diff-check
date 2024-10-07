@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -9,7 +9,6 @@
 #include <windows.h>
 #endif
 #include "tier0/platform.h"
-#include "tier0/icommandline.h"
 #include "dt_instrumentation.h"
 #include "utlvector.h"
 #include "utllinkedlist.h"
@@ -20,9 +19,11 @@
 #include "dt_recv_decoder.h"
 #include "filesystem.h"
 #include "filesystem_engine.h"
+#include "tier0/icommandline.h"
 #include "cdll_int.h"
 #include "client.h"
 #include "common.h"
+#include <time.h>
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -43,6 +44,7 @@ public:
 	int m_nDecodes;
 	int m_nDataBits;
 	int m_nIndexBits;
+	int m_nPropIndex;	// Index into its CSendTablePrecalc::m_Props.
 };
 
 
@@ -65,22 +67,21 @@ CUtlLinkedList<CDTIRecvTable*, int> g_DTIRecvTables;
 
 void DTI_Init()
 {
-#if ( defined( IS_WINDOWS_PC ) && (! defined( SWDS ) ) )
+
+#if ( defined( IS_WINDOWS_PC ) && (! defined( DEDICATED ) ) )
 	extern IVEngineClient *engineClient;
 	if ( CommandLine()->FindParm( "-dti" ) && !g_bDTIEnabled )
 	{
 		g_bDTIEnabled = true;
 
-		SYSTEMTIME systemTime;
-		GetLocalTime( &systemTime );
+		struct tm systemTime;
+		Plat_GetLocalTime( &systemTime );
 
 		char dtiFileName[MAX_PATH];
-		char dtiLevelName[MAX_PATH];
-		V_FileBase( engineClient->GetLevelName(), dtiLevelName, ARRAYSIZE( dtiLevelName ) );
 		V_snprintf( dtiFileName, ARRAYSIZE( dtiFileName ), "dti_client_%s_%02d%02d%02d-%02d%02d%02d.csv", 
-					dtiLevelName,
-					systemTime.wYear % 100, systemTime.wMonth, systemTime.wDay,
-					systemTime.wHour, systemTime.wMinute, systemTime.wSecond );
+					engineClient->GetLevelNameShort(),
+					(systemTime.tm_year + 1900) % 100, systemTime.tm_mon, systemTime.tm_wday,
+					systemTime.tm_hour, systemTime.tm_min, systemTime.tm_sec );
 		g_pDTIFilename = COM_StringCopy( dtiFileName );
 	}
 #endif
@@ -117,6 +118,7 @@ void DTI_Flush()
 			",Avg Bits"
 			",Total Index Bits"
 			",Avg Index Bits"
+			",Flat prop index"
 			",=SUM(D:D)"
 			"\n" );
 	
@@ -151,7 +153,8 @@ void DTI_Flush()
 					// Total/Avg index bits
 					",%d"
 					",%.3f"
-					",=D%d/H$1"
+					",%d"
+					",=D%d/I$1"
 
 					"\n",
 					
@@ -169,6 +172,9 @@ void DTI_Flush()
 					// Total/Avg index bits
 					pProp->m_nIndexBits,
 					(float)pProp->m_nIndexBits / pProp->m_nDecodes,
+					
+					pProp->m_nPropIndex,
+
 					row++
 					);
 			}
@@ -231,6 +237,7 @@ void _DTI_HookDeltaBits( CRecvDecoder *pDecoder, int iProp, int nDataBits, int n
 	pProp->m_nDecodes++;
 	pProp->m_nDataBits += nDataBits;
 	pProp->m_nIndexBits += nIndexBits;
+	pProp->m_nPropIndex = iProp;
 
 	pTable->m_bSawAction = true;
 }

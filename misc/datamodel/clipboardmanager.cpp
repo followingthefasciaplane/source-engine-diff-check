@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -8,7 +8,7 @@
 #include "datamodel.h"
 #include "tier1/KeyValues.h"
 
-#ifndef _LINUX
+#ifndef POSIX
 #define USE_WINDOWS_CLIPBOARD
 #endif
 
@@ -60,7 +60,7 @@ void CClipboardManager::SetClipboardData( CUtlVector< KeyValues * >& data, IClip
 	m_pfnCleanup = pfnOptionalCleanuFunction;
 
 #if defined( USE_WINDOWS_CLIPBOARD )
-	if ( m_Data.Count() >= 0 )
+	if ( m_Data.Count() > 0 )
 	{
 		// Only stick the first item's data into the clipboard
 		char const *text = m_Data[ 0 ]->GetString( "text", "" );

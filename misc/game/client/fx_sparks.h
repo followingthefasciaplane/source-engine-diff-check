@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -74,7 +74,7 @@ class CTrailParticles : public CSimpleEmitter
 {
 	DECLARE_CLASS( CTrailParticles, CSimpleEmitter );
 public:
-	CTrailParticles( const char *pDebugName );
+	explicit CTrailParticles( const char *pDebugName );
 	
 	static CTrailParticles	*Create( const char *pDebugName )	{	return new CTrailParticles( pDebugName );	}
 

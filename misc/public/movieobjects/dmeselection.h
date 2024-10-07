@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2006, Valve Corporation, All rights reserved. =======
 //
 // A class representing a subselection of something like a mesh
 //
@@ -13,6 +13,7 @@
 
 
 #include "datamodel/dmelement.h"
+#include "datamodel/dmattributevar.h"
 
 
 //-----------------------------------------------------------------------------

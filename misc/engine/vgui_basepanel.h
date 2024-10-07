@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -38,9 +38,9 @@ protected:
 
 
 // Global version of the DrawColoredText function.
-int DrawColoredText( vgui::HFont font, int x, int y, int r, int g, int b, int a, const wchar_t *text );
-int DrawColoredText( vgui::HFont font, int x, int y, Color clr, const wchar_t *text );
-int DrawCenteredColoredText( vgui::HFont font, int left, int top, int right, int bottom, Color clr, const wchar_t *text );
+void DrawColoredText( vgui::HFont font, int x, int y, int r, int g, int b, int a, const wchar_t *text );
+void DrawColoredText( vgui::HFont font, int x, int y, Color clr, const wchar_t *text );
+void DrawCenteredColoredText( vgui::HFont font, int left, int top, int right, int bottom, Color clr, const wchar_t *text );
 int DrawTextLen( vgui::HFont font, const wchar_t *text );
 
 

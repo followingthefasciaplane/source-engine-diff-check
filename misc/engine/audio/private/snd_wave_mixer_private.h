@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -28,11 +28,11 @@ public:
 							CAudioMixerWave( IWaveData *data );
 	virtual					~CAudioMixerWave( void );
 
-	int						MixDataToDevice( IAudioDevice *pDevice, channel_t *pChannel, int sampleCount, int outputRate, int outputOffset );
+	int						MixDataToDevice( channel_t *pChannel, int sampleCount, int outputRate, int outputOffset );
 	int						SkipSamples( channel_t *pChannel, int sampleCount, int outputRate, int outputOffset );
 	bool					ShouldContinueMixing( void );
 
-	virtual void			Mix( IAudioDevice *pDevice, channel_t *pChannel, void *pData, int outputOffset, int inputOffset, fixedint fracRate, int outCount, int timecompress ) = 0;
+	virtual void			Mix( channel_t *pChannel, void *pData, int outputOffset, int inputOffset, fixedint fracRate, int outCount, int timecompress ) = 0;
 	virtual int				GetOutputData( void **pData, int sampleCount, char copyBuf[AUDIOSOURCE_COPYBUF_SIZE] );
 
 	virtual CAudioSource*	GetSource( void );
@@ -41,6 +41,7 @@ public:
 	virtual float			GetVolumeScale( void );
 	
 	// Move the current position to newPosition
+	virtual bool			IsSetSampleStartSupported() const;
 	virtual void			SetSampleStart( int newPosition );
 	
 	// End playback at newEndPosition
@@ -51,7 +52,7 @@ public:
 	// private helper routines
 
 	char *					LoadMixBuffer( channel_t *pChannel, int sample_load_request, int *psamples_loaded, char copyBuf[AUDIOSOURCE_COPYBUF_SIZE] );
-	int						MixDataToDevice_( IAudioDevice *pDevice, channel_t *pChannel, int sampleCount, int outputRate, int outputOffset, bool bSkipAllSamples );
+	int						MixDataToDevice_( channel_t *pChannel, int sampleCount, int outputRate, int outputOffset, bool bSkipAllSamples );
 	int						GetSampleLoadRequest( double rate, int sampleCount, bool bInterpolated_pitch );
 
 	virtual bool			IsReadyToMix();
@@ -60,9 +61,9 @@ public:
 
 protected:
 	double				m_fsample_index;			// index of next sample to output
-	int					m_sample_max_loaded;		// count of total samples loaded - ie: the index of 
+	int64				m_sample_max_loaded;		// count of total samples loaded - ie: the index of 
 													// the next sample to be loaded.
-	int					m_sample_loaded_index;		// index of last sample loaded
+	int64				m_sample_loaded_index;		// index of last sample loaded
 
 	IWaveData			*m_pData;
 	double 				m_forcedEndSample;

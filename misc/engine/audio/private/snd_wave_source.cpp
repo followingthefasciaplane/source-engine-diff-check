@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright � 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -14,16 +14,23 @@
 #include "xwvfile.h"
 #include "filesystem/IQueuedLoader.h"
 #include "tier1/lzmaDecoder.h"
-#include "tier2/fileutils.h"
+#include "tier1/fmtstr.h"
+#include "characterset.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
 // This determines how much data to pre-cache (will invalidate per-map caches if changed).
-#define SND_ASYNC_LOOKAHEAD_SECONDS		( 0.125f )
+#define SOUND_DIRECTORY_LENGTH			6		// i.e., Q_strlen( "sound/" )
+#define MASTER_CACHE_NAME				"_master"
+#define SOUND_PREFETCH_FILE	"scripts/sound_prefetch.txt"
 
 extern ConVar snd_async_spew_blocking;
+extern double realtime;
 ConVar snd_async_minsize("snd_async_minsize", "262144");
+static ConVar snd_prefetch_common( "snd_prefetch_common", "1", FCVAR_RELEASE, "Prefetch common sounds from directories specified in " SOUND_PREFETCH_FILE );
+
+ConVar force_audio_english( "force_audio_english", "0", FCVAR_ARCHIVE | FCVAR_ARCHIVE_GAMECONSOLE, "Keeps track of whether we're forcing english in a localized language." );
 
 // #define DEBUG_CHUNKS
 
@@ -102,7 +109,10 @@ CAudioSourceWave::CAudioSourceWave( CSfxTable *pSfx )
 	m_pSfx = pSfx;
 #ifdef _DEBUG
 	if ( m_pSfx )
-		m_pDebugName = strdup( m_pSfx->getname() );
+	{
+		char buf[MAX_PATH];
+		m_pDebugName = strdup( m_pSfx->getname(buf, sizeof(buf)) );
+	}
 #endif
 
 	m_bNoSentence = false;
@@ -112,6 +122,9 @@ CAudioSourceWave::CAudioSourceWave( CSfxTable *pSfx )
 	m_bIsSentenceWord = false;
 
 	m_numDecodedSamples = 0;
+
+	// TERROR: limit data read while rebuilding cache
+	m_bIsRebuildingCache = false;
 }
 
 CAudioSourceWave::CAudioSourceWave( CSfxTable *pSfx, CAudioSourceCachedInfo *info )
@@ -119,7 +132,10 @@ CAudioSourceWave::CAudioSourceWave( CSfxTable *pSfx, CAudioSourceCachedInfo *inf
 	m_pSfx = pSfx;
 #ifdef _DEBUG
 	if ( m_pSfx )
-		m_pDebugName = strdup( m_pSfx->getname() );
+	{
+		char buf[MAX_PATH];
+		m_pDebugName = strdup( m_pSfx->getname(buf, sizeof(buf)) );
+	}
 #endif
 
 	m_refCount = 0;
@@ -156,6 +172,9 @@ CAudioSourceWave::CAudioSourceWave( CSfxTable *pSfx, CAudioSourceCachedInfo *inf
 	m_nCachedDataSize = 0;
 	m_bIsPlayOnce = false;
 	m_bIsSentenceWord = false;
+
+	// TERROR: limit data read while rebuilding cache
+	m_bIsRebuildingCache = false;
 }
 
 
@@ -180,17 +199,25 @@ void CAudioSourceWave::GetCacheData( CAudioSourceCachedInfo *info )
 {
 	Assert( info->Type() == CAudioSource::AUDIO_SOURCE_WAV );
 
-	byte tempbuf[ 32768 ];
-	int datalen = 0;
-	// NOTE GetStartupData has side-effects (...) hence the unconditional call
-	if ( GetStartupData( tempbuf, sizeof( tempbuf ), datalen ) &&
-	     info->s_bIsPrecacheSound &&
-	     datalen > 0 )
+	int nFileSize;
+	if (GetStartupData( nFileSize ) == false)
 	{
-		byte *data = new byte[ datalen ];
-		Q_memcpy( data, tempbuf, datalen );
-		info->SetCachedDataSize(  datalen );
-		info->SetCachedData( data );
+		m_dataStart = 0;
+		m_dataSize = nFileSize;
+
+		// START OF HACK - HACK - HACK! Necessary for Portal 2 so it fits in one single DVD
+		// If that's not a WAV file, assume that's an MP3
+		// Unfortunately shortcomings of the sound cache force us to do this here
+		info->SetBits( 8 );
+		info->SetChannels( 1 );			// Make this more accurate at some point 
+		info->SetSampleRate( 44100 );	// Make this more accurate at some point
+		info->SetLoopStart( -1 );		// No loop
+		info->SetSampleCount( m_dataSize );
+		info->SetDataSize( m_dataSize );
+		info->SetDataStart( 0 );
+		info->SetType( CAudioSource::AUDIO_SOURCE_MP3 );
+		// END OF HACK - HACK - HACK!
+		return;
 	}
 
 	info->SetBits( m_bits );
@@ -228,9 +255,9 @@ void CAudioSourceWave::GetCacheData( CAudioSourceCachedInfo *info )
 // Purpose: 
 // Output : char const
 //-----------------------------------------------------------------------------
-char const *CAudioSourceWave::GetFileName()
+char const *CAudioSourceWave::GetFileName( char *pOutBuf, size_t bufLen )
 {
-	return m_pSfx ? m_pSfx->GetFileName() : "NULL m_pSfx";
+	return m_pSfx ? m_pSfx->GetFileName( pOutBuf, bufLen ) : "NULL m_pSfx";
 }
 
 //-----------------------------------------------------------------------------
@@ -241,7 +268,7 @@ bool CAudioSourceWave::IsAsyncLoad()
 {
 	VPROF("CAudioSourceWave::IsAsyncLoad");
 
-	if ( ( IsPC() || !IsX360() ) && !m_AudioCacheHandle.IsValid() )
+	if ( ( IsPC() || !IsGameConsole() ) && !m_AudioCacheHandle.IsValid() )
 	{
 		m_AudioCacheHandle.Get( GetType(), m_pSfx->IsPrecachedSound(), m_pSfx, &m_nCachedDataSize );
 	}
@@ -258,7 +285,7 @@ bool CAudioSourceWave::IsAsyncLoad()
 //-----------------------------------------------------------------------------
 void CAudioSourceWave::CheckAudioSourceCache()
 {
-	if ( IsX360() )
+	if ( IsGameConsole() )
 	{
 		// 360 does not use audio cache files
 		return;
@@ -266,7 +293,7 @@ void CAudioSourceWave::CheckAudioSourceCache()
 
 	Assert( m_pSfx );
 
-	if ( !m_pSfx || !m_pSfx->IsPrecachedSound() )
+	if ( !m_pSfx->IsPrecachedSound() )
 	{
 		return;
 	}
@@ -473,7 +500,7 @@ void CAudioSourceWave::ParseSentence( IterateRIFF &walk )
 //-----------------------------------------------------------------------------
 CSentence *CAudioSourceWave::GetSentence( void )
 {
-	if ( IsX360() )
+	if ( IsGameConsole() )
 	{
 		return m_pTempSentence;
 	}
@@ -514,9 +541,26 @@ CSentence *CAudioSourceWave::GetSentence( void )
 	return NULL;
 }
 
-const char *CAudioSourceWave::GetName()
+const char *CAudioSourceWave::GetName( char *pBuf, size_t bufLen )
 { 
-	return m_pSfx ? m_pSfx->getname() : NULL; 
+	return m_pSfx ? m_pSfx->getname(pBuf, bufLen) : NULL; 
+}
+
+int CAudioSourceWave::GetQuality()
+{
+	return ( m_format == WAVE_FORMAT_XMA ? m_quality : 0 );
+}
+
+PathTypeFilter_t GetAudioPathFilter()
+{
+	if ( XBX_IsAudioLocalized() && force_audio_english.GetBool() )
+	{
+		// skip the localized search paths and fall through to the primary zips
+		return FILTER_CULLLOCALIZED;
+	}
+
+	// No audio exists outside of zips, all the audio is inside the zips
+	return FILTER_CULLNONPACK;
 }
 
 //-----------------------------------------------------------------------------
@@ -531,9 +575,19 @@ bool CAudioSourceWave::GetXboxAudioStartupData()
 	MEM_ALLOC_CREDIT();
 
 	// try native optimal xma wav file first
-	Q_StripExtension( m_pSfx->GetFileName(), tempFileName, sizeof( tempFileName ) );
-	Q_snprintf( fileName, sizeof( fileName ), "sound\\%s.360.wav", tempFileName );
-	if ( !g_pFullFileSystem->ReadFile( fileName, "GAME", buf, sizeof( xwvHeader_t ) ) )
+	Q_StripExtension( m_pSfx->GetFileName(fileName, sizeof(fileName)), tempFileName, sizeof( tempFileName ) );
+	Q_snprintf( fileName, sizeof( fileName ), "sound\\%s" PLATFORM_EXT ".wav", tempFileName );
+
+	V_FixDoubleSlashes( fileName );
+	PathTypeQuery_t pathType;
+	char szFullName[MAX_PATH];
+	if ( !g_pFullFileSystem->RelativePathToFullPath( fileName, "GAME", szFullName, sizeof( szFullName ), GetAudioPathFilter(), &pathType ) )
+	{
+		// not found, not supported
+		return false;
+	}
+
+	if ( !g_pFullFileSystem->ReadFile( szFullName, "GAME", buf, sizeof( xwvHeader_t ) ) )
 	{
 		// not found, not supported
 		return false;
@@ -546,16 +600,21 @@ bool CAudioSourceWave::GetXboxAudioStartupData()
 			return false;
 		}
 
-		if ( pHeader->format == XWV_FORMAT_XMA )
+		switch ( pHeader->format )
 		{
+		case XWV_FORMAT_XMA:
 			m_format = WAVE_FORMAT_XMA;
-		}
-		else if ( pHeader->format == XWV_FORMAT_PCM )
-		{
+			break;
+		case XWV_FORMAT_PCM:
 			m_format = WAVE_FORMAT_PCM;
-		}
-		else
-		{
+			break;
+		case XWV_FORMAT_MP3:
+			m_format = WAVE_FORMAT_MP3;
+			break;
+		case XWV_FORMAT_TEMP:
+			m_format = WAVE_FORMAT_TEMP;
+			break;
+		default:
 			// unknown
 			return false;
 		}
@@ -564,25 +623,37 @@ bool CAudioSourceWave::GetXboxAudioStartupData()
 		m_channels = pHeader->channels;
 		m_dataStart = pHeader->dataOffset;
 		m_dataSize = pHeader->dataSize;
+		m_quality = pHeader->quality;
 
 		m_loopStart = pHeader->loopStart;
 		m_loopBlock = pHeader->loopBlock;
 		m_numLeadingSamples	= pHeader->numLeadingSamples;
 		m_numTrailingSamples = pHeader->numTrailingSamples;
 
-		if ( m_format == WAVE_FORMAT_XMA )
+		switch (m_format)
 		{
-			// xma is compressed blocks, trick to fool system to treat data as bytes, not samples
+		case WAVE_FORMAT_MP3:
+		case WAVE_FORMAT_TEMP:
+			// MP3 and temp format do not store numDecodedSamples correctly (in bytes instead of samples).
+			// We would need to change makegamedata accordingly (corresponding code is commented).
+			// However I [oliviern] did not want to change the data that late in Portal 2. So patch in the code instead.
+			pHeader->numDecodedSamples /= m_channels * sizeof( short );
+
+			// Pass through...
+
+		case WAVE_FORMAT_XMA:
+			// xma and MP3 are compressed blocks, trick to fool system to treat data as bytes, not samples
 			// unfortunate, but callers must know xma context and provide offsets in samples or bytes
 			m_bits = 16;
 			m_sampleSize = 1;
 			m_sampleCount = m_dataSize;
-		}
-		else
-		{
+			break;
+
+		default:
 			m_bits = 16;
 			m_sampleSize = sizeof( short ) * m_channels;
 			m_sampleCount = m_dataSize / m_sampleSize;
+			break;
 		}
 
 		// keep true decoded samples because cannot be easily determined
@@ -594,7 +665,7 @@ bool CAudioSourceWave::GetXboxAudioStartupData()
 		if ( pHeader->staticDataSize )
 		{
 			// get optional data
-			if ( !g_pFullFileSystem->ReadFile( fileName, "GAME", fileBuffer, pHeader->staticDataSize, sizeof( xwvHeader_t ) ) )
+			if ( !g_pFullFileSystem->ReadFile( szFullName, "GAME", fileBuffer, pHeader->staticDataSize, sizeof( xwvHeader_t ) ) )
 			{
 				return false;
 			}
@@ -618,13 +689,15 @@ bool CAudioSourceWave::GetXboxAudioStartupData()
 				m_bNoSentence = false;
 
 				// vdat is precompiled into minimal binary format and possibly compressed
-				if ( CLZMA::IsCompressed( pData ) )
+				CLZMA lzma;
+				
+				if ( lzma.IsCompressed( pData ) )
 				{
 					// uncompress binary vdat and restore
 					CUtlBuffer targetBuffer;
-					int originalSize = CLZMA::GetActualSize( pData );
+					int originalSize = lzma.GetActualSize( pData );
 					targetBuffer.EnsureCapacity( originalSize );
-					CLZMA::Uncompress( pData, (unsigned char *)targetBuffer.Base() );
+					lzma.Uncompress( pData, (unsigned char *)targetBuffer.Base() );
 					targetBuffer.SeekPut( CUtlBuffer::SEEK_HEAD, originalSize );
 					m_pTempSentence->CacheRestoreFromBuffer( targetBuffer );
 				}
@@ -658,13 +731,13 @@ void CAudioSourceWave::Setup( const char *pFormatBuffer, int formatSize, Iterate
 }
 
 
-bool CAudioSourceWave::GetStartupData( void *dest, int destsize, int& bytesCopied )
+bool CAudioSourceWave::GetStartupData( int &nfileSize )
 {
-	bytesCopied = 0;
-
 	char formatBuffer[1024];
-	const char *pName = m_pSfx->GetFileName();
+	char nameBuf[MAX_PATH];
+	const char *pName = m_pSfx->GetFileName(nameBuf, sizeof(nameBuf));
 	InFileRIFF riff( pName, *g_pSndIO );
+	nfileSize = riff.GetFileSize();
 
 	if ( riff.RIFFName() != RIFF_WAVE )
 	{
@@ -718,31 +791,6 @@ bool CAudioSourceWave::GetStartupData( void *dest, int destsize, int& bytesCopie
 	{
 		// failed during setup
 		return false;
-	}
-
-	// requesting precache snippet as leader for streaming startup latency
-	if ( destsize )
-	{
-		int file = g_pSndIO->open( m_pSfx->GetFileName() );
-		if ( !file )
-		{
-			return false;
-		}
-
-		int bytesNeeded = m_channels * ( m_bits >> 3 ) * m_rate * SND_ASYNC_LOOKAHEAD_SECONDS;
-
-		// Round to multiple of 4
-		bytesNeeded = ( bytesNeeded + 3 ) & ~3;
-
-		bytesCopied = min( destsize, m_dataSize );
-		bytesCopied = min( bytesNeeded, bytesCopied );
-
-		g_pSndIO->seek( file, m_dataStart );
-		g_pSndIO->read( dest, bytesCopied, file );
-		g_pSndIO->close( file );
-
-		// some samples need to be converted
-		ConvertSamples( (char *)dest, ( bytesCopied / m_sampleSize ) );
 	}
 
 	return true;
@@ -826,7 +874,8 @@ void CAudioSourceWave::ParseSamplerChunk( IterateRIFF &walk )
 #ifdef _DEBUG
 		else
 		{
-			Msg("Unknown sampler chunk type %d on %s\n", LittleLong( samplerChunk.Loops[0].dwType ), m_pSfx->GetFileName() );
+			char nameBuf[MAX_PATH];
+			Msg("Unknown sampler chunk type %d on %s\n", LittleLong( samplerChunk.Loops[0].dwType ), m_pSfx->GetFileName(nameBuf,sizeof(nameBuf)) );
 		}
 #endif
 	}
@@ -874,14 +923,17 @@ int CAudioSourceWave::GetLoopingInfo( int *pLoopBlock, int *pNumLeadingSamples, 
 // Input  : samplePosition - absolute position
 // Output : int - looped position
 //-----------------------------------------------------------------------------
-int CAudioSourceWave::ConvertLoopedPosition( int samplePosition )
+int64 CAudioSourceWave::ConvertLoopedPosition( int64 samplePosition )
 {
-	if ( m_format == WAVE_FORMAT_XMA )
+	switch ( m_format )
 	{
-		// xma mixer interprets loops and *always* sends a corrected position
+	case WAVE_FORMAT_XMA:
+	case WAVE_FORMAT_MP3:
+	case WAVE_FORMAT_TEMP:
+		// xma and mp3 mixer interprets loops and *always* sends a corrected position
 		return samplePosition;
 	}
-	
+
 	// if the wave is looping and we're past the end of the sample
 	// convert to a position within the loop
 	// At the end of the loop, we return a short buffer, and subsequent call
@@ -912,7 +964,7 @@ void CAudioSourceWave::ReferenceRemove( CAudioMixer *pMixer )
 {
 	m_refCount--;
 
-	if ( m_refCount == 0 && ( ( IsPC() && IsPlayOnce() ) || ( IsX360() && IsStreaming() ) ) )
+	if ( m_refCount == 0 && ( ( IsPC() && IsPlayOnce() ) || ( IsGameConsole() && IsStreaming() ) ) )
 	{
 		SetPlayOnce( false ); // in case it gets used again
 		CacheUnload();
@@ -957,8 +1009,8 @@ public:
 	virtual					~CAudioSourceMemWave();
 
 	// These are all implemented by CAudioSourceMemWave.
-	virtual CAudioMixer*	CreateMixer( int initialStreamPosition = 0 );
-	virtual int				GetOutputData( void **pData, int samplePosition, int sampleCount, char copyBuf[AUDIOSOURCE_COPYBUF_SIZE] );
+	virtual CAudioMixer*	CreateMixer( int initialStreamPosition, int skipInitialSamples, bool bUpdateDelayForChoreo, SoundError &soundError, hrtf_info_t* pHRTFVec );
+	virtual int				GetOutputData( void **pData, int64 samplePosition, int sampleCount, char copyBuf[AUDIOSOURCE_COPYBUF_SIZE] );
 	virtual int				ZeroCrossingBefore( int sample );
 	virtual int				ZeroCrossingAfter( int sample );
 
@@ -977,7 +1029,7 @@ protected:
 	// Whoeover derives must implement this.
 	virtual char			*GetDataPointer( void );
 
-	memhandle_t				m_hCache;
+	WaveCacheHandle_t		m_hCache;
 	StreamHandle_t			m_hStream;
 
 private:
@@ -998,7 +1050,7 @@ CAudioSourceMemWave::CAudioSourceMemWave( CSfxTable *pSfx ) :
 	m_hCache = 0;
 	m_hStream = INVALID_STREAM_HANDLE;
 
-	if ( IsX360() )
+	if ( IsGameConsole() )
 	{
 		bool bValid = GetXboxAudioStartupData();
 		if ( !bValid )
@@ -1008,7 +1060,9 @@ CAudioSourceMemWave::CAudioSourceMemWave( CSfxTable *pSfx ) :
 			bValid = GetXboxAudioStartupData();
 			if ( bValid )
 			{
-				DevWarning( "Failed to load sound \"%s\", substituting \"%s\"\n", pSfx->getname(), pSfx->GetFileName() );
+				char nameBuf1[MAX_PATH];
+				char nameBuf2[MAX_PATH];
+				DevWarning( "Failed to load sound \"%s\", substituting \"%s\"\n", pSfx->getname(nameBuf1,sizeof(nameBuf1)), pSfx->GetFileName(nameBuf2,sizeof(nameBuf2)) );
 			}
 		}
 	
@@ -1034,13 +1088,28 @@ CAudioSourceMemWave::~CAudioSourceMemWave()
 //-----------------------------------------------------------------------------
 // Purpose: Creates a mixer and initializes it with an appropriate mixer
 //-----------------------------------------------------------------------------
-CAudioMixer *CAudioSourceMemWave::CreateMixer( int initialStreamPosition )
+CAudioMixer *CAudioSourceMemWave::CreateMixer( int initialStreamPosition, int skipInitialSamples, bool bUpdateDelayForChoreo, SoundError &soundError, hrtf_info_t* pHRTFVector )
 {
-	CAudioMixer *pMixer = CreateWaveMixer( CreateWaveDataMemory(*this), m_format, m_channels, m_bits, initialStreamPosition );
+	if (pHRTFVector && m_bits != 16)
+	{
+		char filename[256];
+		this->m_pSfx->GetFileName(filename, sizeof(filename));
+		DevMsg("Sound %s configured to use HRTF but is not a 16-bit sound\n", filename);
+		pHRTFVector = nullptr;
+	}
 
+	CAudioMixer *pMixer = CreateWaveMixer( CreateWaveDataHRTF(CreateWaveDataMemory(*this), pHRTFVector), m_format, pHRTFVector ? 2 : m_channels, m_bits, initialStreamPosition, skipInitialSamples, bUpdateDelayForChoreo );
+	if ( pMixer )
+	{
+		ReferenceAdd( pMixer );
+		soundError = SE_OK;
+	}
+	else
+	{
+		soundError = SE_CANT_CREATE_MIXER;
+	}
 	return pMixer;
 }
-
 
 //-----------------------------------------------------------------------------
 // Purpose: 
@@ -1049,7 +1118,7 @@ CAudioMixer *CAudioSourceMemWave::CreateMixer( int initialStreamPosition )
 //			sampleCount - number of samples (not bytes)
 // Output : int - number of samples available
 //-----------------------------------------------------------------------------
-int CAudioSourceMemWave::GetOutputData( void **pData, int samplePosition, int sampleCount, char copyBuf[AUDIOSOURCE_COPYBUF_SIZE] )
+int CAudioSourceMemWave::GetOutputData( void **pData, int64 samplePosition, int sampleCount, char copyBuf[AUDIOSOURCE_COPYBUF_SIZE] )
 { 
 	// handle position looping
 	samplePosition = ConvertLoopedPosition( samplePosition );
@@ -1082,7 +1151,7 @@ int CAudioSourceMemWave::GetOutputData( void **pData, int samplePosition, int sa
 		}
 		else
 		{
-			if ( IsPC() || !IsX360() )
+			if ( IsPC() || !IsGameConsole() )
 			{
 				// Start async loader if we haven't already done so
 				CacheLoad();
@@ -1119,8 +1188,8 @@ int CAudioSourceMemWave::GetOutputData( void **pData, int samplePosition, int sa
 
 
 // Hardcoded macros to test for zero crossing
-#define ZERO_X_8(b)		((b)<2 && (b)>-2)
-#define ZERO_X_16(b)	((b)<512 && (b)>-512)
+#define ZERO_X_8(b)		((b)<8 && (b)>-8)
+#define ZERO_X_16(b)	((b)<2048 && (b)>-2048)
 
 //-----------------------------------------------------------------------------
 // Purpose: Search backward for a zero crossing starting at sample
@@ -1210,6 +1279,9 @@ int	CAudioSourceMemWave::ZeroCrossingBefore( int sample )
 int	CAudioSourceMemWave::ZeroCrossingAfter( int sample )
 {
 	char *pWaveData = GetDataPointer();
+	Assert( pWaveData );
+	if ( !pWaveData )
+		return sample;
 
 	if ( m_format == WAVE_FORMAT_PCM )
 	{
@@ -1310,12 +1382,13 @@ void CAudioSourceMemWave::ParseDataChunk( IterateRIFF &walk )
 
 	// 360 streaming model loads data later, but still needs critical member setup
 	char *pData = NULL;
-	if ( IsPC() || !IsX360() )
+	if ( IsPC() || !IsGameConsole() )
 	{
 		pData = GetDataPointer();
 		if ( !pData )
 		{
-			Error( "CAudioSourceMemWave (%s): GetDataPointer() failed.", m_pSfx ? m_pSfx->GetFileName() : "m_pSfx = NULL" );
+			char nameBuf[MAX_PATH];
+			Error( "CAudioSourceMemWave (%s): GetDataPointer() failed.", m_pSfx ? m_pSfx->GetFileName(nameBuf, sizeof(nameBuf)) : "m_pSfx = NULL" );
 		}
 
 		// load them into memory (bad!!, this is a duplicate read of the data chunk)
@@ -1356,17 +1429,20 @@ int CAudioSourceMemWave::GetCacheStatus( void )
 {
 	VPROF("CAudioSourceMemWave::GetCacheStatus");
 
-	if ( IsPC() || !IsX360() )
+	if ( IsPC() || !IsGameConsole() )
 	{
 		// NOTE: This will start the load if it isn't started
-		bool bCacheValid;
-		bool bCompleted = wavedatacache->IsDataLoadCompleted( m_hCache, &bCacheValid );
+		bool bCacheValid, bIsMissing;
+		bool bCompleted = wavedatacache->IsDataLoadCompleted( m_hCache, &bCacheValid, &bIsMissing );
 		if ( !bCacheValid )
 		{
-			wavedatacache->RestartDataLoad( &m_hCache, m_pSfx->GetFileName(), m_dataSize, m_dataStart );
+			char nameBuf[MAX_PATH];
+			wavedatacache->RestartDataLoad( &m_hCache, m_pSfx->GetFileName(nameBuf, sizeof(nameBuf)), m_dataSize, m_dataStart );
 		}
 		if ( bCompleted )
 			return AUDIO_IS_LOADED;
+		if ( bIsMissing )
+			return AUDIO_ERROR_LOADING;
 		if ( wavedatacache->IsDataLoadInProgress( m_hCache ) )
 			return AUDIO_LOADING;
 	}
@@ -1383,7 +1459,8 @@ int CAudioSourceMemWave::GetCacheStatus( void )
 //-----------------------------------------------------------------------------
 void CAudioSourceMemWave::CacheLoad( void )
 {
-	if ( IsPC() || !IsX360() )
+	char nameBuf[MAX_PATH];
+	if ( IsPC() )
 	{
 		// Commence lazy load?
 		if ( m_hCache != 0 )
@@ -1392,25 +1469,31 @@ void CAudioSourceMemWave::CacheLoad( void )
 			wavedatacache->IsDataLoadCompleted( m_hCache, &bCacheValid );
 			if ( !bCacheValid )
 			{
-				wavedatacache->RestartDataLoad( &m_hCache, m_pSfx->GetFileName(), m_dataSize, m_dataStart );
+				wavedatacache->RestartDataLoad( &m_hCache, m_pSfx->GetFileName(nameBuf, sizeof(nameBuf)), m_dataSize, m_dataStart );
 			}
 			return;
 		}
 
-		m_hCache = wavedatacache->AsyncLoadCache( m_pSfx->GetFileName(), m_dataSize, m_dataStart );
+		m_hCache = wavedatacache->AsyncLoadCache( m_pSfx->GetFileName(nameBuf,sizeof(nameBuf)), m_dataSize, m_dataStart );
 	}
-	else
+	
+	if ( IsGameConsole() )
 	{
 		if ( m_hStream == INVALID_STREAM_HANDLE )
 		{
 			// memory wave is resident
-			const char *pFilename = m_pSfx->GetFileName();
+			const char *pFilename = m_pSfx->GetFileName(nameBuf, sizeof(nameBuf));
 			streamFlags_t streamFlags = STREAMED_FROMDVD;
 			char szFilename[MAX_PATH];
-			if ( m_format == WAVE_FORMAT_XMA || m_format == WAVE_FORMAT_PCM )
+
+			switch ( m_format )
 			{
-				V_strcpy_safe( szFilename, pFilename );
-				V_SetExtension( szFilename, ".360.wav", sizeof( szFilename ) );
+			case WAVE_FORMAT_XMA:
+			case WAVE_FORMAT_PCM:
+			case WAVE_FORMAT_MP3:
+			case WAVE_FORMAT_TEMP:
+				strcpy( szFilename, pFilename );
+				V_SetExtension( szFilename, PLATFORM_EXT ".wav", sizeof( szFilename ) );
 				pFilename = szFilename;
 
 				// memory resident xma waves use the queued loader
@@ -1418,15 +1501,23 @@ void CAudioSourceMemWave::CacheLoad( void )
 				if ( g_pQueuedLoader->IsMapLoading() )
 				{
 					// hint the wave data cache
+					// these are map based static sounds pooled accordingly
 					streamFlags |= STREAMED_QUEUEDLOAD;
 				}
+				break;
+
+			default:
+				// Normal mode for the other files...
+				break;
 			}
 
 			// open stream to load as a single monolithic buffer
-			m_hStream = wavedatacache->OpenStreamedLoad( pFilename, m_dataSize, m_dataStart, 0, -1, m_dataSize, 1, streamFlags );
+			SoundError error;
+			m_hStream = wavedatacache->OpenStreamedLoad( pFilename, m_dataSize, m_dataStart, 0, -1, m_dataSize, 1, streamFlags, error );
 			if ( m_hStream != INVALID_STREAM_HANDLE && !( streamFlags & STREAMED_QUEUEDLOAD ) )
 			{
-				// block and finish load, convert data once right now
+				// causes a synchronous block to finish the load
+				// convert data once right now
 				char *pWaveData = (char *)wavedatacache->GetStreamedDataPointer( m_hStream, true );
 				if ( pWaveData )
 				{
@@ -1442,7 +1533,7 @@ void CAudioSourceMemWave::CacheLoad( void )
 //-----------------------------------------------------------------------------
 void CAudioSourceMemWave::CacheUnload( void )
 {
-	if ( IsPC() || !IsX360() )
+	if ( IsPC() || !IsGameConsole() )
 	{
 		if ( m_hCache != 0 )
 		{
@@ -1468,7 +1559,8 @@ char *CAudioSourceMemWave::GetDataPointer( void )
 {
 	char *pWaveData = NULL;
 
-	if ( IsPC() || !IsX360() )
+	char nameBuf[MAX_PATH];
+	if ( IsPC() || !IsGameConsole() )
 	{
 		bool bSamplesConverted = false;
 
@@ -1479,10 +1571,20 @@ char *CAudioSourceMemWave::GetDataPointer( void )
 		}
 
 		// mount the requested data, blocks if necessary
+		// TERROR: limit data read while rebuilding cache
+		int dataSize = m_dataSize;
+		if ( m_bIsRebuildingCache )
+		{
+			const char *filename = m_pSfx->GetFileName(nameBuf, sizeof(nameBuf));
+			if ( V_stristr( filename, "music" ) != NULL )
+			{
+				dataSize = MIN( dataSize, 32768 );
+			}
+		}
 		wavedatacache->GetDataPointer( 
 			m_hCache, 
-			m_pSfx->GetFileName(), 
-			m_dataSize, 
+			m_pSfx->GetFileName(nameBuf, sizeof(nameBuf)), 
+			dataSize, 
 			m_dataStart, 
 			(void **)&pWaveData, 
 			0, 
@@ -1517,17 +1619,17 @@ class CAudioSourceStreamWave : public CAudioSourceWave, public IWaveStreamSource
 public:
 	CAudioSourceStreamWave( CSfxTable *pSfx );
 	CAudioSourceStreamWave( CSfxTable *pSfx, CAudioSourceCachedInfo *info );
-	~CAudioSourceStreamWave();
+	virtual ~CAudioSourceStreamWave();
 
-	CAudioMixer		*CreateMixer( int initialStreamPosition = 0 );
-	int				GetOutputData( void **pData, int samplePosition, int sampleCount, char copyBuf[AUDIOSOURCE_COPYBUF_SIZE] );
+	CAudioMixer		*CreateMixer( int initialStreamPosition, int skipInitialSamples, bool bUpdateDelayForChoreo, SoundError &soundError, hrtf_info_t *pHRTFVec );
+	int				GetOutputData( void **pData, int64 samplePosition, int sampleCount, char copyBuf[AUDIOSOURCE_COPYBUF_SIZE] );
 	void			ParseChunk( IterateRIFF &walk, int chunkName );
 	bool			IsStreaming( void ) { return true; }
 
 	virtual int		GetCacheStatus( void );
 
 	// IWaveStreamSource
-	virtual int UpdateLoopingSamplePosition( int samplePosition )
+	virtual int64 UpdateLoopingSamplePosition( int64 samplePosition )
 	{
 		return ConvertLoopedPosition( samplePosition );
 	}
@@ -1547,6 +1649,11 @@ public:
 
 private:
 	CAudioSourceStreamWave( const CAudioSourceStreamWave & ); // not implemented, not accessible
+
+#if !defined( _GAMECONSOLE )
+	// We need this for -tools mode to get access to the raw samples
+	FileHandle_t		m_hWaveFileAccess;
+#endif
 };
 
 //-----------------------------------------------------------------------------
@@ -1560,7 +1667,7 @@ CAudioSourceStreamWave::CAudioSourceStreamWave( CSfxTable *pSfx ) : CAudioSource
 	m_dataSize = 0;
 	m_sampleCount = 0;
 
-	if ( IsX360() )
+	if ( IsGameConsole() )
 	{
 		bool bValid = GetXboxAudioStartupData();
 		if ( !bValid )
@@ -1570,14 +1677,19 @@ CAudioSourceStreamWave::CAudioSourceStreamWave( CSfxTable *pSfx ) : CAudioSource
 			bValid = GetXboxAudioStartupData();
 			if ( bValid )
 			{
-				DevWarning( "Failed to load sound \"%s\", substituting \"%s\"\n", pSfx->getname(), pSfx->GetFileName() );
+				char nameBuf1[MAX_PATH];
+				char nameBuf2[MAX_PATH];
+				DevWarning( "Failed to load sound \"%s\", substituting \"%s\"\n", pSfx->getname(nameBuf1,sizeof(nameBuf1)), pSfx->GetFileName(nameBuf2,sizeof(nameBuf2)) );
 			}
 		}
 	}
 }
 
 CAudioSourceStreamWave::CAudioSourceStreamWave( CSfxTable *pSfx, CAudioSourceCachedInfo *info ) : 
-	CAudioSourceWave( pSfx, info )
+	CAudioSourceWave( pSfx, info ) 
+#if !defined( _GAMECONSOLE )
+	,m_hWaveFileAccess( FILESYSTEM_INVALID_HANDLE )
+#endif
 {
 	m_pSfx = pSfx;
 	m_dataStart = info->DataStart();
@@ -1591,6 +1703,13 @@ CAudioSourceStreamWave::CAudioSourceStreamWave( CSfxTable *pSfx, CAudioSourceCac
 //-----------------------------------------------------------------------------
 CAudioSourceStreamWave::~CAudioSourceStreamWave( void )
 {
+#if !defined( _GAMECONSOLE )
+	if ( m_hWaveFileAccess != FILESYSTEM_INVALID_HANDLE )
+	{
+		g_pFullFileSystem->Close( m_hWaveFileAccess );
+		m_hWaveFileAccess = FILESYSTEM_INVALID_HANDLE;
+	}
+#endif
 }
 
 
@@ -1598,36 +1717,54 @@ CAudioSourceStreamWave::~CAudioSourceStreamWave( void )
 // Purpose: Create an instance (mixer & wavedata) of this sound
 // Output : CAudioMixer * - pointer to the mixer
 //-----------------------------------------------------------------------------
-CAudioMixer *CAudioSourceStreamWave::CreateMixer( int initialStreamPosition )
+CAudioMixer *CAudioSourceStreamWave::CreateMixer( int initialStreamPosition, int skipInitialSamples, bool bUpdateDelayForChoreo, SoundError &soundError, hrtf_info_t* pHRTFVec )
 {
 	char fileName[MAX_PATH];
-	const char *pFileName = m_pSfx->GetFileName();
-	if ( IsX360() && ( m_format == WAVE_FORMAT_XMA || m_format == WAVE_FORMAT_PCM ) )
+	const char *pFileName = m_pSfx->GetFileName(fileName, sizeof(fileName));
+	if ( IsGameConsole() )
 	{
-		V_strcpy_safe( fileName, pFileName );
-		V_SetExtension( fileName, ".360.wav", sizeof( fileName ) );
-		pFileName = fileName;
-
-		// for safety, validate the initial stream position
-		// not trusting save/load
-		if ( m_format == WAVE_FORMAT_XMA )
+		switch ( m_format )
 		{
+		case WAVE_FORMAT_XMA:
+#if IsX360()
+			// for safety, validate the initial stream position
+			// not trusting save/load
 			if ( ( initialStreamPosition % XBOX_DVD_SECTORSIZE ) || 
 				( initialStreamPosition % XMA_BLOCK_SIZE ) ||
 				( initialStreamPosition >= m_dataSize ) )
 			{
 				initialStreamPosition = 0;
 			}
+#endif
+			// Pass through...
+		case WAVE_FORMAT_PCM:
+		case WAVE_FORMAT_MP3:
+		case WAVE_FORMAT_TEMP:
+			V_SetExtension( fileName, PLATFORM_EXT ".wav", sizeof( fileName ) );
+			break;
+
+		default:
+			// Do nothing otherwise
+			break;
 		}
 	}
 
+	if (pHRTFVec && m_bits != 16)
+	{
+		char filename[256];
+		this->m_pSfx->GetFileName(filename, sizeof(filename));
+		DevMsg("Sound %s configured to use HRTF but is not a 16-bit sound\n", filename);
+		pHRTFVec = nullptr;
+	}
+
 	// BUGBUG: Source constructs the IWaveData, mixer frees it, fix this?
-	IWaveData *pWaveData = CreateWaveDataStream( *this, static_cast<IWaveStreamSource *>(this), pFileName, m_dataStart, m_dataSize, m_pSfx, initialStreamPosition );
+	IWaveData *pWaveData = CreateWaveDataHRTF(CreateWaveDataStream( *this, static_cast<IWaveStreamSource *>(this), pFileName, m_dataStart, m_dataSize, m_pSfx, initialStreamPosition, skipInitialSamples, soundError ), pHRTFVec);
 	if ( pWaveData )
 	{
-		CAudioMixer *pMixer = CreateWaveMixer( pWaveData, m_format, m_channels, m_bits, initialStreamPosition );
+		CAudioMixer *pMixer = CreateWaveMixer( pWaveData, m_format, pHRTFVec ? 2 : m_channels, m_bits, initialStreamPosition, skipInitialSamples, bUpdateDelayForChoreo );
 		if ( pMixer )
 		{
+			ReferenceAdd( pMixer );
 			return pMixer;
 		}
 
@@ -1640,73 +1777,90 @@ CAudioMixer *CAudioSourceStreamWave::CreateMixer( int initialStreamPosition )
 
 void CAudioSourceStreamWave::Prefetch()
 {
-	PrefetchDataStream( m_pSfx->GetFileName(), m_dataStart, m_dataSize );
+	char nameBuf[MAX_PATH];
+	PrefetchDataStream( m_pSfx->GetFileName(nameBuf, sizeof(nameBuf)), m_dataStart, m_dataSize );
 }
 
 //-----------------------------------------------------------------------------
 //-----------------------------------------------------------------------------
 int CAudioSourceStreamWave::SampleToStreamPosition( int samplePosition )
 {
-	if ( IsPC() )
+	switch ( m_format )
 	{
-		// not for PC
-		Assert( 0 );
-		return 0;
-	}
-
-	if ( m_format != WAVE_FORMAT_XMA || !m_nHeaderSize )
-	{
-		// not in the expected format or lacking the seek table
-		return 0;
-	}
-
-	// Run through the seek table to find the block closest to the desired sample. 
-	// Each seek table entry is the index (counting from the beginning of the file) 
-	// of the first sample in the corresponding block, but there's no entry for the 
-	// first block (since the index would always be zero).
-	int *pSeekTable = (int*)m_pHeader;
-	int packet = 0;
-	for ( int i = 0; i < m_nHeaderSize/(int)sizeof( int ); ++i )
-	{
-		if ( samplePosition < pSeekTable[i] )
+	case WAVE_FORMAT_XMA:
+		if ( m_nHeaderSize != 0 )
 		{
-			packet = i;
-			break;
+			// Run through the seek table to find the block closest to the desired sample. 
+			// Each seek table entry is the index (counting from the beginning of the file) 
+			// of the first sample in the corresponding block, but there's no entry for the 
+			// first block (since the index would always be zero).
+			int *pSeekTable = (int*)m_pHeader;
+			int packet = 0;
+			for ( int i = 0; i < m_nHeaderSize/(int)sizeof( int ); ++i )
+			{
+				if ( samplePosition < pSeekTable[i] )
+				{
+					packet = i;
+					break;
+				}
+			}
+
+			int streamPosition = ( packet == 0 ) ? 0 : ( packet - 1 ) * 2048;
+			return streamPosition;
 		}
+		break;
+
+	case WAVE_FORMAT_PCM:
+		return samplePosition * m_sampleSize;
 	}
 
-	int streamPosition = ( packet == 0 ) ? 0 : ( packet - 1 ) * 2048;
-	return streamPosition;
+	// Function is not supported
+	if ( !IsCert() )
+	{
+		char fileName[MAX_PATH];
+		const char *pFileName = GetFileName( fileName, sizeof( fileName ) );
+		Warning( "SampleToStreamPosition( %d ) is not supported for sound '%s'.\n", samplePosition, pFileName );
+	}
+	// not in the expected format or lacking the seek table
+	return -1;
 }
 
 //-----------------------------------------------------------------------------
 //-----------------------------------------------------------------------------
 int CAudioSourceStreamWave::StreamToSamplePosition( int streamPosition )
 {
-	if ( IsPC() )
+	switch ( m_format )
 	{
-		// not for PC
-		Assert( 0 );
-		return 0;
+	case WAVE_FORMAT_XMA:
+		if ( m_nHeaderSize != 0 )
+		{
+			int packet = streamPosition/2048;
+			if ( packet <= 0 )
+			{
+				return 0;
+			}
+			if ( packet > m_nHeaderSize/(int)sizeof( int ) )
+			{
+				return m_numDecodedSamples;
+			}
+
+			return ((int*)m_pHeader)[packet - 1];
+		}
+		break;
+
+	case WAVE_FORMAT_PCM:
+		return streamPosition / m_sampleSize;
 	}
 
-	if ( m_format != WAVE_FORMAT_XMA || !m_nHeaderSize )
+	// Function is not supported
+	if ( !IsCert() )
 	{
-		// not in the expected format or lacking the seek table
-		return 0;
+		char fileName[MAX_PATH];
+		const char *pFileName = GetFileName( fileName, sizeof( fileName ) );
+		Warning( "StreamToSamplePosition( %d ) is not supported for sound '%s'.\n", streamPosition, pFileName );
 	}
-
-	int packet = streamPosition/2048;
-	if ( packet <= 0 )
-	{
-		return 0;
-	}
-	if ( packet > m_nHeaderSize/(int)sizeof( int ) )
-	{
-		return m_numDecodedSamples;
-	}
-
-	return ((int*)m_pHeader)[packet - 1];
+	// not in the expected format or lacking the seek table
+	return -1;
 }
 
 //-----------------------------------------------------------------------------
@@ -1738,8 +1892,31 @@ void CAudioSourceStreamWave::ParseChunk( IterateRIFF &walk, int chunkName )
 // Purpose: This is not implemented here.  This source has no data.  It is the
 //			WaveData's responsibility to load/serve the data
 //-----------------------------------------------------------------------------
-int CAudioSourceStreamWave::GetOutputData( void **pData, int samplePosition, int sampleCount, char copyBuf[AUDIOSOURCE_COPYBUF_SIZE] )
+int CAudioSourceStreamWave::GetOutputData( void **pData, int64 samplePosition, int sampleCount, char copyBuf[AUDIOSOURCE_COPYBUF_SIZE] )
 {
+#if !defined( _GAMECONSOLE )
+	// Only -tools mode uses this to build a "preview" of the wave form for PCM data only
+	if ( GetType() == WAVE_FORMAT_PCM ) 
+	{
+		if ( m_hWaveFileAccess == FILESYSTEM_INVALID_HANDLE )
+		{
+			char buf[ MAX_PATH ];
+			const char *pFilename = GetFileName( buf, sizeof( buf ) );
+			m_hWaveFileAccess = g_pFullFileSystem->Open( CFmtStr( "sound\\%s", pFilename ), "rb", "GAME" );
+		}
+
+		if ( m_hWaveFileAccess != FILESYSTEM_INVALID_HANDLE )
+		{
+			g_pFullFileSystem->Seek( m_hWaveFileAccess, m_dataStart + samplePosition * SampleSize(), FILESYSTEM_SEEK_HEAD );
+			if ( copyBuf != NULL )
+			{
+				g_pFullFileSystem->Read( copyBuf, sampleCount * SampleSize(), m_hWaveFileAccess ); 
+			}
+			*pData = copyBuf;
+			return sampleCount;
+		}
+	}
+#endif
 	return 0;
 }
 
@@ -1768,13 +1945,14 @@ CAudioSource *CreateWave( CSfxTable *pSfx, bool bStreaming )
 #if defined( _DEBUG )
 	// For some reason you can't usually do pSfx->getname() in the dev studio debugger, so for convenience we'll grab the name
 	// here in debug builds at least...
-	char const *pName = pSfx->getname();
+	char nameBuf[MAX_PATH];
+	char const *pName = pSfx->getname( nameBuf, sizeof(nameBuf) );
 	NOTE_UNUSED( pName );
 #endif
 
 	CAudioSourceWave *pWave = NULL;
 
-	if ( IsPC() || !IsX360() )
+	if ( IsPC() || !IsGameConsole() )
 	{
 		// Caching should always work, so if we failed to cache, it's a problem reading the file data, etc.
 		bool bIsMapSound = pSfx->IsPrecachedSound();
@@ -1824,7 +2002,8 @@ CAudioSource *CreateWave( CSfxTable *pSfx, bool bStreaming )
 CAudioSource *Audio_CreateStreamedWave( CSfxTable *pSfx )
 {
 #if defined( MP3_SUPPORT )
-	if ( Audio_IsMP3( pSfx->GetFileName() ) )
+	char nameBuf[MAX_PATH];
+	if ( Audio_IsMP3( pSfx->GetFileName( nameBuf, sizeof(nameBuf) ) ) )
 	{
 		return Audio_CreateStreamedMP3( pSfx );
 	}
@@ -1840,7 +2019,17 @@ CAudioSource *Audio_CreateStreamedWave( CSfxTable *pSfx )
 CAudioSource *Audio_CreateMemoryWave( CSfxTable *pSfx )
 {
 #if defined( MP3_SUPPORT )
-	if ( Audio_IsMP3( pSfx->GetFileName() ) )
+	char nameBuf[MAX_PATH];
+	if ( Audio_IsMP3( pSfx->GetFileName( nameBuf, sizeof(nameBuf) ) ) )
+	{
+		return Audio_CreateMemoryMP3( pSfx );
+	}
+
+	// In case the WAV file is actually an MP3 file.
+	bool bIsMapSound = pSfx->IsPrecachedSound();
+	// We pass AUDIO_SOURCE_WAV to not break the sound cache hack :(
+	CAudioSourceCachedInfo *pInfo = audiosourcecache->GetInfo( CAudioSource::AUDIO_SOURCE_WAV, bIsMapSound, pSfx );
+	if ( pInfo->Type() == CAudioSource::AUDIO_SOURCE_MP3 )
 	{
 		return Audio_CreateMemoryMP3( pSfx );
 	}
@@ -1878,14 +2067,8 @@ void MaybeReportMissingWav( char const *wav )
 	}
 }
 
-static float Audio_GetWaveDuration( char const *pName )
+static float Audio_GetADPCMWaveDuration( char const *pName )
 {
-	if ( IsX360() )
-	{
-		// should have precached
-		return 0;
-	}
-
 	char formatBuffer[1024];
 	WAVEFORMATEX *pfmt = (WAVEFORMATEX *)formatBuffer;
 
@@ -1940,19 +2123,46 @@ static float Audio_GetWaveDuration( char const *pName )
 		walk.ChunkNext();
 	}
 
-	// Not really a WAVE file or no format chunk, bail
-	if ( !format || !sampleCount )
-		return 0.0f;
-
 	float sampleRate = LittleDWord( pfmt->nSamplesPerSec );
 
-	if ( format == WAVE_FORMAT_ADPCM )
+	// Determine actual duration
+	sampleCount = ADPCMSampleCount( (ADPCMWAVEFORMAT *)formatBuffer, sampleCount );
+	
+	return (float)sampleCount / sampleRate;
+}
+
+
+static float Audio_GetWaveDuration( char const *pName )
+{
+	if ( IsGameConsole() )
 	{
-		// Determine actual duration
-		sampleCount = ADPCMSampleCount( (ADPCMWAVEFORMAT *)formatBuffer, sampleCount );
+		// should have precached
+		return 0;
 	}
 
-	return (float)sampleCount / sampleRate;
+	CAudioSourceCachedInfo *pInfo = audiosourcecache->GetInfoByName( CFmtStr( "sound/%s", PSkipSoundChars( pName ) ) );
+
+	if ( !pInfo )
+	{
+		return 0.0f;
+	}
+
+	int nFormat = pInfo->Format();
+	int nSampleCount = pInfo->SampleCount();
+	int nSampleRate = pInfo->SampleRate();
+
+	// Not really a WAVE file or no format chunk, bail
+	if ( !nFormat || !nSampleCount )
+		return 0.0f;
+
+	if ( nFormat == WAVE_FORMAT_ADPCM )
+	{
+		return Audio_GetADPCMWaveDuration( pName );
+	}
+	else
+	{
+		return (float)nSampleCount / nSampleRate;
+	}
 }
 
 //-----------------------------------------------------------------------------
@@ -1969,10 +2179,13 @@ float AudioSource_GetSoundDuration( char const *pName )
 	}
 #endif
 
-	CSfxTable *pSound = S_PrecacheSound( pName );
-	if ( pSound )
+	if ( IsGameConsole() )
 	{
-		return AudioSource_GetSoundDuration( pSound );
+		CSfxTable *pSound = S_PrecacheSound( pName );
+		if ( pSound )
+		{
+			return AudioSource_GetSoundDuration( pSound );
+		}
 	}
 
 	return Audio_GetWaveDuration( pName );
@@ -2225,9 +2438,10 @@ void CAudioSourceCachedInfo::Restore( CUtlBuffer& buf )
 int CAudioSourceCachedInfo::s_CurrentType = CAudioSource::AUDIO_SOURCE_MAXTYPE;
 CSfxTable *CAudioSourceCachedInfo::s_pSfx = NULL;
 bool CAudioSourceCachedInfo::s_bIsPrecacheSound = false;
-
+static bool g_bSoundRebuilt = false;
 void CAudioSourceCachedInfo::Rebuild( char const *filename )
 {
+	g_bSoundRebuilt = true;
 	// Wipe any old data
 	Clear();
 
@@ -2254,7 +2468,12 @@ void CAudioSourceCachedInfo::Rebuild( char const *filename )
 	case CAudioSource::AUDIO_SOURCE_VOICE:
 		break;
 	case CAudioSource::AUDIO_SOURCE_WAV:
-		as = new CAudioSourceMemWave( s_pSfx );
+		// TERROR: limit data read while rebuilding cache
+		{
+			CAudioSourceMemWave *memAs = new CAudioSourceMemWave( s_pSfx );
+			memAs->SetRebuildingCache();
+			as = memAs;
+		}
 		break;
 	case CAudioSource::AUDIO_SOURCE_MP3:
 #if defined( MP3_SUPPORT )
@@ -2270,75 +2489,88 @@ void CAudioSourceCachedInfo::Rebuild( char const *filename )
 	}
 }
 
-// Versions
-//   3: The before time
-//   4: Changed MP3 caching to ensure we store proper sample rate, removed hack to not cache vo/
-//   5: Fixed bug that could result in incorrect mp3 datasizes in the sound cache
-#define AUDIOSOURCE_CACHE_VERSION	 5
+#define AUDIOSOURCE_CACHE_VERSION	 3
 class CAudioSourceCache : public IAudioSourceCache
 {
 public:
-
-	struct SearchPathCache : CUtlCachedFileData< CAudioSourceCachedInfo >
-	{
-		SearchPathCache( const char *pszRepositoryFilename, const char *pszSearchPath, UtlCachedFileDataType_t eOutOfDateMethod )
-		: CUtlCachedFileData( pszRepositoryFilename, AUDIOSOURCE_CACHE_VERSION, AsyncLookaheadMetaChecksum, eOutOfDateMethod )
-		{
-			V_strcpy_safe( m_szSearchPath, pszSearchPath );
-
-			// Delete any existing cache if it's out of date
-			IsUpToDate();
-
-			// Load up existing cache file
-			Init();
-		}
-
-		char m_szSearchPath[ MAX_PATH ];
-
-		virtual ~SearchPathCache()
-		{
-			Shutdown();
-		}
-	};
-
+	typedef CUtlCachedFileData< CAudioSourceCachedInfo > CacheType_t;
 
 	CAudioSourceCache()
 	{
+		m_pMasterSoundCache = NULL;
+		m_pBuildingCache = NULL;
 		m_nServerCount = -1;
-		m_bSndCacheDebug = false;
 	}
 
 	bool Init( unsigned int memSize );
 	void Shutdown();
 
-	void CheckSaveDirtyCaches();
-	void CheckCacheBuild();
-	void BuildCache( char const *pszSearchPath );
-
-	static unsigned int AsyncLookaheadMetaChecksum( void );
-
 	void LevelInit( char const *mapname );
 	void LevelShutdown();
 
 	virtual CAudioSourceCachedInfo *GetInfo( int audiosourcetype, bool soundisprecached, CSfxTable *sfx );
+	virtual CAudioSourceCachedInfo *GetInfoByName( const char *soundName );
 	virtual void RebuildCacheEntry( int audiosourcetype, bool soundisprecached, CSfxTable *sfx );
-	virtual void ForceRecheckDiskInfo();
 
+	bool BuildMasterPrecachedSoundsCache();
+	bool UpdateMasterPrecachedSoundsCache();
+	void WriteManifest();
+
+	void ValidateSoundCache( char const *pchWavFile );
 private:
-	SearchPathCache *LookUpCacheEntry( const char *szCleanedFilename, int audiosourcetype, bool soundisprecached, CSfxTable *sfx );
+	// Purpose: 
+	CacheType_t *LookUpCacheEntry( const char *fn, int audiosourcetype, bool soundisprecached, CSfxTable *sfx );
 
-	SearchPathCache *FindCacheForSearchPath( const char *pszSearchPath );
-	SearchPathCache *CreateCacheForSearchPath( const char *pszSearchPath );
+	struct AudioSourceUsage_t
+	{
+		AudioSourceUsage_t() :
+			handle( 0 ),
+			count( 0u )
+		{
+		}
+		FileNameHandle_t	handle;
+		unsigned int		count;
+	};
 
-	static void GetSoundFilename( char *szResult, int nResultSize, const char *pszInputFilename );
+	static bool AudioSourceUsageLessFunc( const AudioSourceUsage_t& lhs, const AudioSourceUsage_t& rhs )
+	{
+		return lhs.handle < rhs.handle;
+	}
 
+	CacheType_t *AllocAudioCache( char const *cachename, bool bNeverCheckDisk );
+	bool LoadMasterCache( char const *pchLanguage, bool bAllowEmpty );
+
+	void RecursiveBuildSoundList( CUtlRBTree< FileNameHandle_t, int >& other, const char *pCurrentLanguage, const char *pCurrentDir, const char *pPathID );
+	CacheType_t *BuildCacheFromList( char const *cachename, CUtlRBTree< FileNameHandle_t, int >& list, bool showprogress = false, float flProgressStart = 0.0f, float flProgressEnd = 1.0f );
+	bool IsValidCache( char const *cachename );
 	void RemoveCache( char const *cachename );
 
-	// List of all loaded caches
-	CUtlVector<SearchPathCache*>	m_vecCaches;
+	void GetAudioCacheLanguageSuffix( CUtlString &sLanguage );
+	void PrefetchCommandSounds();
+
+	enum
+	{
+		MAX_LIST_SIZE = 1024
+	};
+
+	CUtlString				m_szMODPath;
+	CUtlString				m_szMapCacheBase;
+	CUtlString				m_szMasterCache;
+	CUtlString				m_szCurrentLanguage;
+
+	typedef enum
+	{
+		CACHE_MASTER,
+		CACHE_BUILDING
+	} SoundCacheType_t;
+
+	void					SetCachePointer( SoundCacheType_t ptrType, CacheType_t *ptr );
+
+	// All sounds (no startup data) referenced anywhere in game
+	CacheType_t				*m_pMasterSoundCache;
+	CacheType_t				*m_pBuildingCache;
 
 	int						m_nServerCount;
-	bool					m_bSndCacheDebug;
 };
 
 static CAudioSourceCache	g_ASCache;
@@ -2354,6 +2586,37 @@ void CAudioSourceCachedInfoHandle_t::InvalidateCache()
 	++s_nCurrentFlushCount;
 }
 
+bool CAudioSourceCache::LoadMasterCache( char const *pchLanguage, bool bAllowEmpty )
+{
+	m_szMasterCache = CFmtStr( "%s/_master%s.cache", AUDIOSOURCE_CACHE_ROOTDIR, pchLanguage );
+
+	char fullpath[ MAX_PATH ];
+	Q_snprintf( fullpath, sizeof( fullpath ), "%s%s", m_szMODPath.String(), m_szMasterCache.String() );
+	// Just for display
+	Q_FixSlashes( fullpath, INCORRECT_PATH_SEPARATOR );
+	Q_strlower( fullpath );
+	DevMsg(	1, "Trying cache :  '%s'\n", fullpath );
+
+	CacheType_t *cache = AllocAudioCache( m_szMasterCache.String(), true );
+
+	Assert( cache );
+	if ( !cache->Init() || 
+		( !bAllowEmpty && cache->Count() == 0 ) )
+	{
+		Warning( "Failed to init '%s'\n", m_szMasterCache.String() );
+		m_szMasterCache = "";
+		delete cache;
+		return false;
+	}
+	else
+	{
+		DevMsg(	1, "Successfully loaded audio cache file\n" );
+		SetCachePointer( CACHE_MASTER, cache );
+	}
+
+	return true;
+}
+
 //-----------------------------------------------------------------------------
 // Purpose: 
 // Output : Returns true on success, false on failure.
@@ -2364,99 +2627,108 @@ bool CAudioSourceCache::Init( unsigned int memSize )
 	Msg( "CAudioSourceCache: Init\n" );
 #endif
 
-	m_bSndCacheDebug = CommandLine()->FindParm( "-sndcachedebug" ) ? true : false;
-
 	if ( !wavedatacache->Init( memSize ) )
 	{
 		Error( "Unable to init wavedatacache system\n" );
 		return false;
 	}
 
-	if ( IsX360() )
+	if ( IsGameConsole() )
 	{
 		// 360 doesn't use audio source caches
 		return true;
 	}
 
-	// Gather up list of search paths
-	CUtlVector< CUtlString > vecSearchPaths;
-	GetSearchPath( vecSearchPaths, "game" );
+	GetAudioCacheLanguageSuffix( m_szCurrentLanguage );
 
-	// Create corresponding caches
-	FOR_EACH_VEC( vecSearchPaths, idxSearchPath )
+	if ( m_szCurrentLanguage.Length() > 0 )
 	{
+		DevMsg(	1, "Audio Caches using '%s' as suffix\n", m_szCurrentLanguage.String() );
+	}
 
-		// Standardize the name
-		char szSearchPath[ MAX_PATH ];
-		V_strcpy_safe( szSearchPath, vecSearchPaths[idxSearchPath] );
-		V_FixSlashes( szSearchPath );
-		V_AppendSlash( szSearchPath, sizeof(szSearchPath ) );
+	char sz[ MAX_PATH ];
+	Q_strncpy( sz, g_pSoundServices->GetGameDir(), sizeof( sz ) );
+	Q_StripTrailingSlash( sz );
 
-		// See if we already have a cache for this search path.
-		bool bFound = false;
-		FOR_EACH_VEC( m_vecCaches, idxCache )
+	// Special handling for -tempcontent so that audio caches are loaded out of the tempentent "GAME" dir rather than the main "MOD" dir.
+	// To do this we pass in a full path so that the CUtlCachedFileData doesn't get to specify that it only wants "MOD" search path
+	if ( CommandLine()->FindParm( "-tempcontent" ) )
+	{
+		Q_strncat( sz, "_tempcontent", sizeof( sz ), COPY_ALL_CHARACTERS );	
+	}
+
+	V_StripTrailingSlash( sz );
+
+	char szDLCPath[ MAX_PATH ];
+
+	int nHighestDLC = 1;
+	for ( ;nHighestDLC <= 99; nHighestDLC++ )
+	{
+		V_snprintf( szDLCPath, sizeof( szDLCPath ), "%s_dlc%d", sz, nHighestDLC );
+		if ( !g_pFullFileSystem->IsDirectory( szDLCPath ) )
 		{
-			if ( V_stricmp( szSearchPath, m_vecCaches[idxCache]->m_szSearchPath ) == 0 )
-			{
-				Assert( V_strcmp( szSearchPath, m_vecCaches[idxCache]->m_szSearchPath ) == 0 ); // case *should* match exactly
-				bFound = true;
-				break;
-			}
+			// does not exist, highest dlc available is previous
+			nHighestDLC--;
+			break;
 		}
-		if ( bFound )
-			continue;
 
-		// Add a ceche
-		SearchPathCache *pCache = CreateCacheForSearchPath( szSearchPath );
-		m_vecCaches.AddToTail( pCache );
+		V_snprintf( szDLCPath, sizeof( szDLCPath ), "%s_dlc%d/dlc_disabled.txt", sz, nHighestDLC );
+		if ( g_pFullFileSystem->FileExists( szDLCPath ) )
+		{
+			// disabled, highest dlc available is previous
+			nHighestDLC--;
+			break;
+		}
+	}
+
+	if ( nHighestDLC > 0 )
+	{
+		V_snprintf( szDLCPath, sizeof( szDLCPath ), "%s_dlc%d", sz, nHighestDLC );
+	}
+	else
+	{
+		V_strncpy( szDLCPath, sz, sizeof( szDLCPath ) );
+	}
+
+	Q_FixSlashes( szDLCPath );
+	Q_strlower( szDLCPath );
+
+	m_szMODPath = szDLCPath;
+	// Add trailing slash
+	m_szMODPath	+= CFmtStr( "%c", CORRECT_PATH_SEPARATOR );
+
+	g_pFullFileSystem->CreateDirHierarchy( CFmtStr( "%s%s", m_szMODPath.String(), AUDIOSOURCE_CACHE_ROOTDIR ), "GAME" );
+
+	// Assume failure
+	SetCachePointer( CACHE_MASTER, NULL );
+	bool bSuccess = LoadMasterCache( m_szCurrentLanguage, false );
+	if ( !bSuccess && Q_stricmp( m_szCurrentLanguage, "" ) )
+	{
+		bSuccess = LoadMasterCache( "", true );
+	}
+
+	if ( !bSuccess )
+	{
+		Warning( "  .cache load failed, forcing rebuild [lang:%s]!\n", m_szCurrentLanguage.String() );
+		BuildMasterPrecachedSoundsCache();
+	}
+	// Tools mode always tries to update sound cache for now
+	else if ( CommandLine()->FindParm( "-tools" ) && 
+		!CommandLine()->FindParm( "-norebuildaudiocache" ) )
+	{
+		UpdateMasterPrecachedSoundsCache();
+	}
+
+	if ( snd_prefetch_common.GetBool() )
+	{
+		PrefetchCommandSounds();
 	}
 
 	return true;
 }
 
-CAudioSourceCache::SearchPathCache *CAudioSourceCache::FindCacheForSearchPath( const char *pszSearchPath )
-{
-	FOR_EACH_VEC( m_vecCaches, idx )
-	{
-		SearchPathCache *pCache = m_vecCaches[idx];
-		if ( V_stricmp( pCache->m_szSearchPath, pszSearchPath ) == 0 )
-		{
-			return pCache;
-		}
-	}
-
-	return NULL;
-}
-
-CAudioSourceCache::SearchPathCache *CAudioSourceCache::CreateCacheForSearchPath( const char *pszSearchPath )
-{
-
-	// Make sure search path ends in a slash
-	char szSearchPath[ MAX_PATH ];
-	V_strcpy_safe( szSearchPath, pszSearchPath );
-	V_AppendSlash( szSearchPath, sizeof(szSearchPath) );
-
-	// Set the filename for the cache.
-	UtlCachedFileDataType_t eOutOfDateMethod = UTL_CACHED_FILE_USE_FILESIZE;
-	char szCacheName[ MAX_PATH + 32 ];
-	V_strcpy_safe( szCacheName, szSearchPath );
-	char *dotVpkSlash = V_stristr( szCacheName, ".vpk" CORRECT_PATH_SEPARATOR_S );
-	if ( dotVpkSlash )
-	{
-		Assert( dotVpkSlash[5] == '\0' );
-		char *d = dotVpkSlash+4; // backup to where the slash is
-		Assert( *d == CORRECT_PATH_SEPARATOR );
-		V_strcpy( d, ".sound.cache" );
-	}
-	else
-	{
-		V_strcat_safe( szCacheName, "sound" CORRECT_PATH_SEPARATOR_S "sound.cache" );
-		eOutOfDateMethod = UTL_CACHED_FILE_USE_TIMESTAMP;
-	}
-
-	return new SearchPathCache( szCacheName, szSearchPath, eOutOfDateMethod );
-}
-
+//-----------------------------------------------------------------------------
+// Purpose: 
 //-----------------------------------------------------------------------------
 void CAudioSourceCache::Shutdown()
 {
@@ -2464,62 +2736,34 @@ void CAudioSourceCache::Shutdown()
 	Msg( "CAudioSourceCache: Shutdown\n" );
 #endif
 
-	CheckSaveDirtyCaches();
-	m_vecCaches.PurgeAndDeleteElements();
+	if ( !IsGameConsole() || IsPC() )
+	{
+		if ( m_pMasterSoundCache )
+		{
+			m_pMasterSoundCache->Shutdown();
+			delete m_pMasterSoundCache;
+		}
+
+		SetCachePointer( CACHE_MASTER, NULL );
+	}
 
 	wavedatacache->Shutdown();
 }
 
 //-----------------------------------------------------------------------------
-// Purpose: Called by Host_Init on engine startup to rebuild everything if needed
+// Purpose: 
+// Input  : *cachename - 
+// Output : CacheType_t
 //-----------------------------------------------------------------------------
-void CAudioSourceCache::CheckCacheBuild()
+CAudioSourceCache::CacheType_t *CAudioSourceCache::AllocAudioCache( char const *cachename, bool bNeverCheckDisk )
 {
-	if ( IsX360() )
+	if ( IsGameConsole() )
 	{
-		return;
+		return NULL;
 	}
 
-	// !FIXME! We'll just do everything lazily for now!
-	FOR_EACH_VEC( m_vecCaches, idx )
-	{
-	}
-}
-
-//-----------------------------------------------------------------------------
-void CAudioSourceCache::CheckSaveDirtyCaches()
-{
-	FOR_EACH_VEC( m_vecCaches, idx )
-	{
-		SearchPathCache *pCache = m_vecCaches[idx];
-		if ( pCache->IsDirty() && pCache->GetNumElements() > 0 )
-		{
-			Msg( "Saving %s\n", pCache->GetRepositoryFileName() );
-			pCache->Save();
-		}
-	}
-}
-
-//-----------------------------------------------------------------------------
-// Purpose: Static method
-// Output : unsigned int
-//-----------------------------------------------------------------------------
-unsigned int CAudioSourceCache::AsyncLookaheadMetaChecksum( void )
-{
-	if ( IsX360() )
-	{
-		return 0;
-	}
-
-	CRC32_t crc;
-	CRC32_Init( &crc );
-
-	float f = SND_ASYNC_LOOKAHEAD_SECONDS;
-	CRC32_ProcessBuffer( &crc, &f, sizeof( f ) );
-	// Finish
-	CRC32_Final( &crc );
-
-	return (unsigned int)crc;
+	CacheType_t *cache = new CacheType_t( CFmtStr( "%s%s", m_szMODPath.String(), cachename ), AUDIOSOURCE_CACHE_VERSION, NULL, UTL_CACHED_FILE_USE_FILESIZE, bNeverCheckDisk );
+	return cache;
 }
 
 //-----------------------------------------------------------------------------
@@ -2528,7 +2772,7 @@ unsigned int CAudioSourceCache::AsyncLookaheadMetaChecksum( void )
 //-----------------------------------------------------------------------------
 void CAudioSourceCache::LevelInit( char const *mapname )
 {
-	CheckSaveDirtyCaches();
+	m_szMapCacheBase = CFmtStr( "%s/%s", AUDIOSOURCE_CACHE_ROOTDIR, mapname );
 }
 
 //-----------------------------------------------------------------------------
@@ -2536,22 +2780,107 @@ void CAudioSourceCache::LevelInit( char const *mapname )
 //-----------------------------------------------------------------------------
 void CAudioSourceCache::LevelShutdown()
 {
-	CheckSaveDirtyCaches();
+	if ( IsGameConsole() )
+	{
+		// 360 not using
+		return;
+	}
+
+	// Get precached sound count and store manifest if running with -makereslists
+	if ( !CommandLine()->FindParm( "-makereslists" ) )
+	{
+		return;
+	}
+
+	int count = g_pSoundServices->GetPrecachedSoundCount();
+
+	if ( !count )
+	{
+		return;
+	}
+
+	// So that we only save this out once per level
+	if ( g_pSoundServices->GetServerCount() == m_nServerCount )
+	{
+		return;
+	}
+
+	m_nServerCount = g_pSoundServices->GetServerCount();
+
+	WriteManifest();
 }
 
 //-----------------------------------------------------------------------------
-void CAudioSourceCache::GetSoundFilename( char *szResult, int nResultSize, const char *pszInputFilename )
+// Purpose: 
+//-----------------------------------------------------------------------------
+void CAudioSourceCache::WriteManifest()
 {
-	V_snprintf( szResult, nResultSize, "sound/%s", pszInputFilename );
-	V_FixSlashes( szResult );
-	V_RemoveDotSlashes( szResult );
-	V_strlower( szResult );
+	if ( IsGameConsole() )
+	{
+		// 360 not using
+		return;
+	}
+
+	int count = g_pSoundServices->GetPrecachedSoundCount();
+
+	if ( !count )
+	{
+		DevMsg( "Skipping WriteManifest, no entries in sound precache string table\n" );
+		return;
+	}
+
+	// Save manifest out to disk...
+	CUtlBuffer buf( 0, 0, CUtlBuffer::TEXT_BUFFER );
+
+	for ( int i = 0; i < count; ++i )
+	{
+		char const *fn = g_pSoundServices->GetPrecachedSound( i );
+		if ( fn && fn[ 0 ] )
+		{
+			char full[ 512 ];
+			Q_snprintf( full, sizeof( full ), "sound\\%s", PSkipSoundChars( fn ) );
+			Q_strlower( full );
+			Q_FixSlashes( full );
+
+			// Write to file
+			buf.Printf( "\"%s\"\r\n", full );
+		}
+	}
+
+	g_pFullFileSystem->CreateDirHierarchy( AUDIOSOURCE_CACHE_ROOTDIR, "MOD" );
+
+	char manifest_name[ 512 ];
+	Q_snprintf( manifest_name, sizeof( manifest_name ), "%s.manifest", m_szMapCacheBase.String() );
+
+	if ( g_pFullFileSystem->FileExists( manifest_name, "MOD" ) && 
+		!g_pFullFileSystem->IsFileWritable( manifest_name, "MOD" ) )
+	{
+		g_pFullFileSystem->SetFileWritable( manifest_name, true, "MOD" );
+	}
+
+	// Now write to file
+	FileHandle_t fh;
+	fh = g_pFullFileSystem->Open( manifest_name, "wb" );
+	if ( FILESYSTEM_INVALID_HANDLE != fh )
+	{
+		g_pFullFileSystem->Write( buf.Base(), buf.TellPut(), fh );
+		g_pFullFileSystem->Close( fh );
+
+		DevMsg( "WriteManifest:  Persisting cache manifest '%s' (%d entries)\n", manifest_name, count );
+	}
+	else
+	{
+		Warning( "WriteManifest:  Unable to persist cache manifest '%s', check file permissions\n", manifest_name );
+	}
 }
 
+
 //-----------------------------------------------------------------------------
-CAudioSourceCache::SearchPathCache *CAudioSourceCache::LookUpCacheEntry( const char *fn, int audiosourcetype, bool soundisprecached, CSfxTable *sfx )
+// Purpose: 
+//-----------------------------------------------------------------------------
+CAudioSourceCache::CacheType_t *CAudioSourceCache::LookUpCacheEntry( const char *fn, int audiosourcetype, bool soundisprecached, CSfxTable *sfx )
 {
-	if ( IsX360() )
+	if ( IsGameConsole() )
 	{
 		return NULL;
 	}
@@ -2559,36 +2888,43 @@ CAudioSourceCache::SearchPathCache *CAudioSourceCache::LookUpCacheEntry( const c
 	// Hack to remember the type of audiosource to create if we need to recreate it
 	CAudioSourceCachedInfo::s_CurrentType = audiosourcetype;
 	CAudioSourceCachedInfo::s_pSfx = sfx;
-	CAudioSourceCachedInfo::s_bIsPrecacheSound = soundisprecached;
+	CAudioSourceCachedInfo::s_bIsPrecacheSound = false;
 
-	// Get cleaned up filename
-	char szRelFilename[ 256 ];
-	GetSoundFilename( szRelFilename, sizeof( szRelFilename ), sfx->GetFileName() );
+	CacheType_t *pCache = NULL;
 
-	// Get absolute filename.  This thing had better exist in the filesystem somewhere
-	char szAbsFilename[ 1024 ];
-	if ( !g_pFullFileSystem->RelativePathToFullPath( szRelFilename, "game", szAbsFilename, sizeof(szAbsFilename) ) )
+	// If building a cache, just shortcut through to target cache
+	if ( m_pBuildingCache )
 	{
-		return NULL;
+		pCache = m_pBuildingCache;
 	}
-
-	// now try to figure out which search path this corresponds to
-	FOR_EACH_VEC( m_vecCaches, idx )
+	else 
 	{
-		SearchPathCache *pCache = m_vecCaches[idx];
-		if ( V_strncmp( pCache->m_szSearchPath, szAbsFilename, V_strlen( pCache->m_szSearchPath ) ) == 0 )
-		{
-			return pCache;
-		}
+		// Grab from the full master list
+		pCache = m_pMasterSoundCache;
 	}
-	Warning( "Cannot figure out which search path %s came from.  Absolute path is %s\n", szRelFilename, szAbsFilename );
-
-	SearchPathCache *pCache = NULL;
 
 	return pCache;
 }
 
 
+CAudioSourceCachedInfo *CAudioSourceCache::GetInfoByName( const char *soundName )
+{
+
+	VPROF("CAudioSourceCache::GetInfoByName");
+
+	if ( IsGameConsole() )
+	{
+		// 360 not using
+		return NULL;
+	}
+
+	if ( !m_pMasterSoundCache )
+	{
+		return NULL;		
+	}
+
+	return m_pMasterSoundCache->Get( soundName );
+}
 //-----------------------------------------------------------------------------
 // Purpose: 
 //-----------------------------------------------------------------------------
@@ -2596,7 +2932,7 @@ CAudioSourceCachedInfo *CAudioSourceCache::GetInfo( int audiosourcetype, bool so
 {
 	VPROF("CAudioSourceCache::GetInfo");
 
-	if ( IsX360() )
+	if ( IsGameConsole() )
 	{
 		// 360 not using
 		return NULL;
@@ -2605,25 +2941,25 @@ CAudioSourceCachedInfo *CAudioSourceCache::GetInfo( int audiosourcetype, bool so
 	Assert( sfx );
 
 	char fn[ 512 ];
-	GetSoundFilename( fn, sizeof( fn ), sfx->GetFileName() );
+	char nameBuf[MAX_PATH];
+	Q_snprintf( fn, sizeof( fn ), "sound/%s", sfx->GetFileName( nameBuf, sizeof(nameBuf) ) );
 
 	CAudioSourceCachedInfo *info = NULL;
-	SearchPathCache *pCache = LookUpCacheEntry( fn, audiosourcetype, soundisprecached, sfx );
+	CacheType_t *pCache = LookUpCacheEntry( fn, audiosourcetype, soundisprecached, sfx );
 	if ( !pCache )
 		return NULL;
 
 	info = pCache->Get( fn );
 
-// Is this applicable anymore now that we have a cache per search path?
-//	if ( info && info->Format() == 0 )
-//	{
-//		if ( g_pFullFileSystem->FileExists( fn, "BSP" ) )
-//		{
-//			DevMsg( 1, "Forced rebuild of bsp cache sound '%s'\n", fn );
-//			info = pCache->RebuildItem( fn );
-//			Assert( info->Format() != 0 );
-//		}
-//	}
+	if ( info && info->Format() == 0 )
+	{
+		if ( g_pFullFileSystem->FileExists( fn, "BSP" ) )
+		{
+			DevMsg( 1, "Forced rebuild of bsp cache sound '%s'\n", fn );
+			info = pCache->RebuildItem( fn );
+			Assert( info->Format() != 0 );
+		}
+	}
 
 	return info;
 }
@@ -2631,9 +2967,9 @@ CAudioSourceCachedInfo *CAudioSourceCache::GetInfo( int audiosourcetype, bool so
 
 void CAudioSourceCache::RebuildCacheEntry( int audiosourcetype, bool soundisprecached, CSfxTable *sfx )
 {
-	VPROF("CAudioSourceCache::RebuildCacheEntry");
+	VPROF("CAudioSourceCache::GetInfo");
 
-	if ( IsX360() )
+	if ( IsGameConsole() )
 	{
 		// 360 not using
 		return;
@@ -2642,28 +2978,44 @@ void CAudioSourceCache::RebuildCacheEntry( int audiosourcetype, bool soundisprec
 	Assert( sfx );
 
 	char fn[ 512 ];
-	GetSoundFilename( fn, sizeof( fn ), sfx->GetFileName() );
-	SearchPathCache *pCache = LookUpCacheEntry( fn, audiosourcetype, soundisprecached, sfx );
+	char nameBuf[MAX_PATH];
+	Q_snprintf( fn, sizeof( fn ), "sound/%s", sfx->GetFileName( nameBuf, sizeof(nameBuf) ) );
+	CacheType_t *pCache = LookUpCacheEntry( fn, audiosourcetype, soundisprecached, sfx );
 	if ( !pCache )
 		return;
 
 	pCache->RebuildItem( fn );
 }
 
-
 //-----------------------------------------------------------------------------
-void CAudioSourceCache::ForceRecheckDiskInfo()
+// Purpose: 
+// Input  : *cachename - 
+// Output : Returns true on success, false on failure.
+//-----------------------------------------------------------------------------
+bool CAudioSourceCache::IsValidCache( char const *cachename )
 {
-	FOR_EACH_VEC( m_vecCaches, idx )
+	if ( IsGameConsole() )
 	{
-		m_vecCaches[ idx ]->ForceRecheckDiskInfo();
+		return false;
 	}
+
+	CacheType_t *cache = AllocAudioCache( cachename, true );
+
+	// This will delete any outdated .cache files
+	bool valid = cache->IsUpToDate();
+
+	delete cache;
+
+	return valid;
 }
 
 //-----------------------------------------------------------------------------
+// Purpose: 
+// Input  : *cachename - 
+//-----------------------------------------------------------------------------
 void CAudioSourceCache::RemoveCache( char const *cachename )
 {
-	if ( IsX360() )
+	if ( IsGameConsole() )
 	{
 		return;
 	}
@@ -2678,139 +3030,458 @@ void CAudioSourceCache::RemoveCache( char const *cachename )
 	}
 }
 
-//-----------------------------------------------------------------------------
-void CAudioSourceCache::BuildCache( char const *pszSearchPath )
+void CAudioSourceCache::SetCachePointer( SoundCacheType_t ptrType, CacheType_t *ptr )
 {
-
-	// Get absolute path
-	char szAbsPath[ MAX_PATH ];
-	V_MakeAbsolutePath( szAbsPath, sizeof(szAbsPath), pszSearchPath );
-	V_FixSlashes( szAbsPath );
-
-	// Add a search path to the filesystem.  We'll add one search path as a kludge so we
-	// can use the existing file finder system easily
-	g_pFullFileSystem->AddSearchPath( szAbsPath, "soundcache_kludge", PATH_ADD_TO_HEAD );
-
-	Msg( "Finding .wav files...\n");
-	CUtlVector< CUtlString > vecFilenames;
-	AddFilesToList( vecFilenames, "sound", "soundcache_kludge", "wav" );
-
-	Msg( "Finding .mp3 files...\n");
-	AddFilesToList( vecFilenames, "sound", "soundcache_kludge", "mp3" );
-
-	Msg( "Found %d audio files.\n", vecFilenames.Count() );
-
-	g_pFullFileSystem->RemoveSearchPaths( "soundcache_kludge" );
-
-	if ( vecFilenames.Count() < 1 )
+	if ( IsGameConsole() )
 	{
-		Warning(" No audio files found.  Not building cache\n" );
 		return;
 	}
 
-	// FindCacheForSearchPath expects an absolute search path, but if we're working with a VPK we'll have the path to
-	// the file, wherein the proper path to the file is /foo/bar.vpk, but the *search path* should be /foo/bar.vpk/
-	char szAsSearchPath[MAX_PATH] = { 0 };
-	V_strncpy( szAsSearchPath, szAbsPath, sizeof( szAsSearchPath ) );
-	V_AppendSlash( szAsSearchPath, sizeof( szAsSearchPath ) );
+	bool dirty = false;
 
-	SearchPathCache *pCache = FindCacheForSearchPath( szAsSearchPath );
-	if ( !pCache )
+	switch ( ptrType )
 	{
-		// This cache might not have existed on startup
-		pCache = CreateCacheForSearchPath( szAbsPath );
-		m_vecCaches.AddToTail( pCache );
+	default:
+		Error( "SetCachePointer with bogus type %i\n", (int)ptrType );
+		break;
+	case CACHE_MASTER:
+		if ( m_pMasterSoundCache != ptr )
+		{
+			dirty = true;
+			m_pMasterSoundCache = ptr;
+		}
+		break;
+	case CACHE_BUILDING:
+		if ( m_pBuildingCache != ptr )
+		{
+			dirty = true;
+			m_pBuildingCache = ptr;
+		}
+		break;
 	}
 
-	g_pFullFileSystem->AddSearchPath( szAbsPath, "game", PATH_ADD_TO_HEAD );
-	int nLenAbsPath = V_strlen( szAbsPath );
-	int iLastShownPct = -1;
-	FOR_EACH_VEC( vecFilenames, idxFilename )
+	if ( dirty )
 	{
-		const char *pszFilename = vecFilenames[ idxFilename ];
-		if ( V_strnicmp( pszFilename, szAbsPath, nLenAbsPath ) != 0 )
-		{
-			Warning( "Sound %s doesn't begin with search path %s\n", pszFilename, szAbsPath );
-			Assert( false );
-			continue;
-		}
-		const char *pszRelName = pszFilename + nLenAbsPath;
-		if ( *pszRelName == '/' || *pszRelName == '\\' )
-			++pszRelName;
-		if ( V_strnicmp( pszRelName, "sound" CORRECT_PATH_SEPARATOR_S, 6 ) != 0 )
-		{
-			Warning( "Relative name %s doesn't begin with leading 'sound' directory?\n", pszRelName );
-			Assert( false );
-			continue;
-		}
-		const char *pszName = pszRelName + 6;
+		CAudioSourceCachedInfoHandle_t::InvalidateCache();
+	}
+}
 
-		// Show progress
-		int iPct = idxFilename * 100 / vecFilenames.Count();
-		if ( iPct != iLastShownPct )
-		{
-			Msg( "  %3d%% %s\n", iPct, pszName );
-			iLastShownPct = iPct;
-		}
+void CAudioSourceCache::ValidateSoundCache( char const *pchWavFile )
+{
+	Assert( m_pMasterSoundCache );
+	if ( !m_pMasterSoundCache )
+		return;
 
-		CAudioSourceCachedInfo::s_bIsPrecacheSound = true;
-		CAudioSourceCachedInfo::s_CurrentType = CAudioSource::AUDIO_SOURCE_WAV;
-		char szExt[ 10 ] = { 0 };
-		V_ExtractFileExtension( pszFilename, szExt, sizeof( szExt ) );
-		if ( V_stricmp( szExt, "mp3" ) == 0 )
-		{
-			CAudioSourceCachedInfo::s_CurrentType = CAudioSource::AUDIO_SOURCE_MP3;
-		}
-		CAudioSourceCachedInfo::s_pSfx = S_DummySfx( pszName );
+	m_pMasterSoundCache->SetNeverCheckDisk( false );
 
-		const CAudioSourceCachedInfo *pInfo = pCache->Get( pszRelName );
-		if ( !pInfo )
+	// Touch the cache
+	CSfxTable *pTable = S_PrecacheSound( &pchWavFile[ SOUND_DIRECTORY_LENGTH ] );
+	if ( pTable && pTable->pSource )
+	{
+		CAudioSourceCachedInfo::s_CurrentType = pTable->pSource->GetType();
+		CAudioSourceCachedInfo::s_pSfx = pTable;
+		CAudioSourceCachedInfo::s_bIsPrecacheSound = false;
+
+		g_bSoundRebuilt = false;
+
+		m_pMasterSoundCache->RecheckItem( pchWavFile );
+
+		if ( g_bSoundRebuilt )
 		{
-			Warning( "Failed to cache info for %s\n", pszFilename );
+			Msg( " updated '%s'\n", (char *)&pchWavFile[ SOUND_DIRECTORY_LENGTH ] );
 		}
 	}
-	g_pFullFileSystem->RemoveSearchPath( szAbsPath, "game" );
 
-	if ( pCache->IsDirty() )
+	m_pMasterSoundCache->SetNeverCheckDisk( true );
+
+	// Persist data to HD if dirty
+	if ( m_pMasterSoundCache->IsDirty() )
 	{
-		Msg( "Saving %s\n", pCache->GetRepositoryFileName() );
-		pCache->Save();
+		m_pMasterSoundCache->Save();
+	}
+}
+
+bool CAudioSourceCache::UpdateMasterPrecachedSoundsCache()
+{
+	Assert( m_pMasterSoundCache );
+	if ( !m_pMasterSoundCache )
+		return true;
+
+	float flStart = Plat_FloatTime();
+
+	Msg( "Updating sound cache [%d entries]\n", m_pMasterSoundCache->Count() );
+
+	CUtlRBTree< FileNameHandle_t, int > soundsOnDisk( 0, 0, DefLessFunc( FileNameHandle_t ) );
+	// Build recursive list of all wav files for all languages
+	RecursiveBuildSoundList( soundsOnDisk, m_szCurrentLanguage, "sound", "GAME" );
+
+	Msg( "Found %d sound files on disk\n", soundsOnDisk.Count() );
+
+	char soundname[ 512 ];
+
+	m_pMasterSoundCache->SetNeverCheckDisk( false );
+	m_pMasterSoundCache->ForceRecheckDiskInfo();
+
+	int nUpdated = 0;
+
+	for ( int i = soundsOnDisk.FirstInorder(); 
+		i != soundsOnDisk.InvalidIndex(); 
+		i = soundsOnDisk.NextInorder( i ) )
+	{
+		FileNameHandle_t& handle = soundsOnDisk[ i ];
+		soundname[ 0 ] = 0;
+		g_pFullFileSystem->String( handle, soundname, sizeof( soundname ) );
+
+		g_bSoundRebuilt = false;
+
+		// Touch the cache
+		CSfxTable *pTable = S_PrecacheSound( &soundname[ SOUND_DIRECTORY_LENGTH ] );
+		if ( pTable && pTable->pSource )
+		{
+			CAudioSourceCachedInfo::s_CurrentType = pTable->pSource->GetType();
+			CAudioSourceCachedInfo::s_pSfx = pTable;
+			CAudioSourceCachedInfo::s_bIsPrecacheSound = false;
+
+			m_pMasterSoundCache->Get( soundname );
+		}
+
+		if ( g_bSoundRebuilt )
+		{
+			++nUpdated;
+			Msg( " updated '%s'\n", (char *)&soundname[ SOUND_DIRECTORY_LENGTH ] );
+		}
+	}
+
+	m_pMasterSoundCache->SetNeverCheckDisk( true );
+
+	// Persist data to HD if dirty
+	m_pMasterSoundCache->Save();
+
+	float flEnd = Plat_FloatTime();
+
+	Msg( "Updated %i out of %i cached files [%.3f msec]\n", nUpdated, soundsOnDisk.Count(), 1000.0f * ( flEnd - flStart ) );
+
+	CAudioSourceCachedInfoHandle_t::InvalidateCache();
+
+	return true;
+}
+//-----------------------------------------------------------------------------
+// Purpose: 
+// Input  : showprogress - 
+// Output : Returns true on success, false on failure.
+//-----------------------------------------------------------------------------
+bool CAudioSourceCache::BuildMasterPrecachedSoundsCache()
+{
+	if ( IsGameConsole() )
+	{
+		// 360 not using
+		return false;
+	}
+
+	char fn[ 512 ];
+	Q_snprintf( fn, sizeof( fn ), "%s/%s%s.cache", AUDIOSOURCE_CACHE_ROOTDIR, MASTER_CACHE_NAME, m_szCurrentLanguage.String() );
+
+	DevMsg(	1, "Fast Build Temp Cache:  '%s'\n", fn );
+
+	// Blow away the cache if rebuilding, which will force a full cache build
+	RemoveCache( fn );
+
+	g_pSoundServices->CacheBuildingStart();	
+
+	CacheType_t *pOtherNoData = NULL;
+	CUtlRBTree< FileNameHandle_t, int > other( 0, 0, DefLessFunc( FileNameHandle_t ) );
+	
+	// Build recursive list of all wav files for all languages
+	RecursiveBuildSoundList( other, m_szCurrentLanguage, "sound", "GAME" );
+
+	pOtherNoData = BuildCacheFromList( fn, other, true, 0.0f, 1.0f );
+	if ( pOtherNoData )
+	{
+		if ( m_pMasterSoundCache )
+		{
+			// Don't shutdown/save, since we have a new one already
+			delete m_pMasterSoundCache;
+		}
+
+		// Take over ptr
+		SetCachePointer( CACHE_MASTER, pOtherNoData );
+	}
+
+	g_pSoundServices->CacheBuildingFinish();	
+
+	return true;
+}
+
+//-----------------------------------------------------------------------------
+void CAudioSourceCache::RecursiveBuildSoundList( CUtlRBTree< FileNameHandle_t, int >& root, const char *pLanguage, const char *pCurrentDir, const char *pathID )
+{
+	FileFindHandle_t fh;
+	FileNameHandle_t handle;
+
+	char path[ 512 ];
+    Q_snprintf( path, sizeof( path ), "%s/*.*", pCurrentDir );
+
+	Q_FixSlashes( path );
+
+	char const *fn = g_pFullFileSystem->FindFirstEx( path, pathID, &fh );
+	if ( fn )
+	{
+		do
+		{
+			if ( *fn != '.' )
+			{
+				if ( g_pFullFileSystem->FindIsDirectory( fh ) )
+				{
+					char nextdir[ 512 ];
+					Q_snprintf( nextdir, sizeof( nextdir ), "%s/%s", pCurrentDir, fn );
+
+					RecursiveBuildSoundList( root, pLanguage, nextdir, pathID );
+				}
+				else
+				{
+					char ext[ 10 ];
+					Q_ExtractFileExtension( fn, ext, sizeof( ext ) );
+
+					if ( ( !Q_stricmp( ext, "wav" ) || !Q_stricmp( ext, "mp3" ) ) && !Q_stristr( fn, ".360." ) && !Q_stristr( fn, ".ps3." ) )
+					{
+						char relative[ 512 ];
+						Q_snprintf( relative, sizeof( relative ), "%s/%s", pCurrentDir, fn );
+
+						Q_FixSlashes( relative );
+						handle = g_pFullFileSystem->FindOrAddFileName( relative );
+
+						if ( root.Find( handle ) == root.InvalidIndex() )
+						{
+							root.Insert( handle );
+						}
+					}
+				}
+			}
+
+			fn = g_pFullFileSystem->FindNext( fh );
+
+		} while ( fn );
+
+		g_pFullFileSystem->FindClose( fh );
+	}
+}
+
+//-----------------------------------------------------------------------------
+// Purpose: 
+// Input  : *cachename - 
+//			FileNameHandle_t - 
+//			soundlist - 
+//			fulldata - 
+//			showprogress - 
+// Output : CAudioSourceCache::CacheType_t
+//-----------------------------------------------------------------------------
+CAudioSourceCache::CacheType_t *CAudioSourceCache::BuildCacheFromList( char const *cachename, CUtlRBTree< FileNameHandle_t, int >& soundlist, bool showprogress /*= false*/, float flProgressStart /*= 0.0f*/, float flProgressEnd /*= 1.0f*/ )
+{
+	if ( IsGameConsole() )
+	{
+		// 360 not using
+		return NULL;
+	}
+
+	float flStart = Plat_FloatTime();
+
+
+	CacheType_t *newCache = NULL;
+
+	newCache = AllocAudioCache( cachename, false );
+	Assert( newCache );
+	if ( newCache->Init() )
+	{
+		SetCachePointer( CACHE_BUILDING, newCache );
+
+		int visited = 0;
+
+		for ( int i = soundlist.FirstInorder(); i != soundlist.InvalidIndex(); i = soundlist.NextInorder( i ) )
+		{
+			FileNameHandle_t& handle = soundlist[ i ];
+			char soundname[ 512 ];
+			soundname[ 0 ] = 0;
+			if ( g_pFullFileSystem->String( handle, soundname, sizeof( soundname ) ) )
+			{
+				// Touch the cache
+				// Force it to go into the "other" cache but to also appear as "full data" precache
+				CSfxTable *pTable = S_PrecacheSound( &soundname[ SOUND_DIRECTORY_LENGTH ] );
+				// This will "re-cache" this if it's not in this level's cache already
+				if ( pTable && pTable->pSource )
+				{
+					GetInfo( pTable->pSource->GetType(), false, pTable );
+				}
+			}
+			else
+			{
+				Assert( !"Unable to find FileNameHandle_t in fileystem list." );
+			}
+
+			++visited;
+
+			if ( !( visited % 100 ) )
+			{
+				Msg( "  progress %i/%i (%i %%)\n",
+					visited, soundlist.Count(), (int)( 100.0f * ( float) visited / (float) soundlist.Count() ) );
+			}
+
+			if ( showprogress )
+			{
+				float frac = ( float )( visited - 1 )/( float )soundlist.Count();
+
+				frac = flProgressStart + frac * ( flProgressEnd - flProgressStart );
+
+				char base[ 256 ];
+				Q_FileBase( soundname, base, sizeof( base ) );
+				Q_strlower( base );
+				g_pSoundServices->CacheBuildingUpdateProgress( frac, base );
+			}
+		}
+
+		Msg( "Touched %i cached files\n", soundlist.Count() );
+
+		SetCachePointer( CACHE_BUILDING, NULL );
+
+		// Persist data to HD if dirty
+		newCache->Save();
 	}
 	else
 	{
-		Msg( "No changes detected; not saving %s\n", pCache->GetRepositoryFileName() );
+		delete newCache;
+		newCache = NULL;
 	}
+
+	float flEnd = Plat_FloatTime();
+	Msg( "Elapsed time:  %.2f seconds\n",
+		flEnd - flStart );
+
+	return newCache;
 }
 
-void CheckCacheBuild()
+//-----------------------------------------------------------------------------
+void CAudioSourceCache::GetAudioCacheLanguageSuffix( CUtlString &sLanguage )
 {
-	g_ASCache.CheckCacheBuild();
-}
+	char const *pchLanguage = g_pSoundServices->GetUILanguage();
 
-CON_COMMAND( snd_buildcache, "<directory or VPK filename>  Rebulds sound cache for a given search path.\n" )
-{
-	if ( args.ArgC() < 2 )
+	if ( !pchLanguage || !*pchLanguage || !Q_stricmp( pchLanguage, "english" ) )
 	{
-		ConMsg( "Usage:  snd_buildcache <directory or VPK filename>\n" );
+		sLanguage = "";
 		return;
 	}
-
-	// Allow them to eitehr specify multiple args, or comma-seperated list.
-	// You cannot easily pas multiple args on the (OS) command line.
-	for ( int idxArg = 1 ; idxArg < args.ArgC() ; ++idxArg )
+	
+	//Check language right here to see if we need the caches for it.
+	char szLanguageList[ MAX_PATH ];
+	Q_snprintf( szLanguageList, sizeof( szLanguageList ), "%s/localization_cache_list.txt", AUDIOSOURCE_CACHE_ROOTDIR );	
+	FileHandle_t fh = g_pFullFileSystem->Open( szLanguageList, "r" );
+	char szCacheLanguage[ MAX_LIST_SIZE ];
+	if ( fh )
 	{
-		CUtlStringList vecPaths;
-		V_SplitString( args[idxArg], ",", vecPaths );
-		FOR_EACH_VEC( vecPaths, idxPath )
+		g_pFullFileSystem->Read( szCacheLanguage, MAX_LIST_SIZE, fh);
+		g_pFullFileSystem->Close( fh );
+
+		if ( Q_stristr( szCacheLanguage, pchLanguage ) )
 		{
-			g_ASCache.BuildCache( vecPaths[idxPath] );
+			sLanguage = CFmtStr( "_%s", pchLanguage );
+			return;
+		}
+		else
+		{
+			sLanguage = "";
+			return;
+		}
+	}	
+
+	sLanguage = CFmtStr( "_%s", pchLanguage );
+	return;
+}
+
+void CAudioSourceCache::PrefetchCommandSounds()
+{
+	if ( IsGameConsole() )
+		return;
+
+	if ( !m_pMasterSoundCache )
+		return;
+
+	CUtlVector< CUtlString > vecSearch;
+	CUtlBuffer buf( 0, 0, CUtlBuffer::TEXT_BUFFER );
+	if ( g_pFullFileSystem->ReadFile( SOUND_PREFETCH_FILE, "GAME", buf ) )
+	{
+		characterset_t breakSet;
+		CharacterSetBuild( &breakSet, "" );
+
+		// parse reslist
+		char substr[MAX_PATH];
+		for ( ;; )
+		{
+			int nTokenSize = buf.ParseToken( &breakSet, substr, sizeof( substr ), true );
+			if ( nTokenSize <= 0 )
+			{
+				break;
+			}
+
+			Q_FixSlashes( substr );
+			Q_strlower( substr );
+			vecSearch.AddToTail( CUtlString( substr ) );
+
+			Msg( "Prefetching data for subdir:  %s\n", substr );
 		}
 	}
 
-	// And now quit the game, because we mucked with search paths and the game is almost certainly not
-	// going to work anymore
-	Msg( "Quitting the game because we probably screwed up the search paths...\n" );
-	extern void HostState_Shutdown();
-	HostState_Shutdown();
+	// Nothing to do
+	if ( !vecSearch.Count() )
+		return;
+
+	COM_TimestampedLog( "PrefetchSounds Start" );
+	float flStart = Plat_FloatTime();
+	uint64 uBytesPrefeteched = 0ull;
+	uint32 uSoundsPrefetched = 0u;
+	// Now walk the cache and prefetch shiz
+	for ( int i = 0 ; i < m_pMasterSoundCache->Count(); ++i )
+	{
+		char szFile[ MAX_PATH ];
+		m_pMasterSoundCache->GetElementName( i, szFile, sizeof( szFile ) );
+		Q_FixSlashes( szFile );
+		Q_strlower( szFile );
+
+		for ( int j = 0; j < vecSearch.Count(); ++j )
+		{
+			const CUtlString &str = vecSearch[ j ];
+			if ( Q_stristr( szFile, str ) )
+			{
+				++uSoundsPrefetched;
+				const CAudioSourceCachedInfo *info = (*m_pMasterSoundCache)[ i ];
+				uBytesPrefeteched += info->DataSize();
+
+				S_PrefetchSound( szFile, false );
+				break;
+			}
+		}
+	}
+
+	float flEnd = Plat_FloatTime();
+
+	COM_TimestampedLog( "PrefetchSounds Finish" );
+	Msg( "Prefetched %u sounds, %s [%.3f msec]\n",
+		uSoundsPrefetched, Q_pretifymem( uBytesPrefeteched ), 1000.0f * ( flEnd - flStart ) );
 }
 
+CON_COMMAND( snd_rebuildaudiocache, "rebuild audio cache for current language\n" )
+{
+	g_ASCache.BuildMasterPrecachedSoundsCache();
+}
+
+CON_COMMAND( snd_writemanifest, "If running a game, outputs the precache manifest for the current level\n" )
+{
+	g_ASCache.WriteManifest();
+}
+
+CON_COMMAND( snd_updateaudiocache, "checks _master.cache based on file sizes and rebuilds any change/new entries\n" )
+{
+	g_ASCache.UpdateMasterPrecachedSoundsCache();
+}
+
+void S_ValidateSoundCache( char const *pchWavFile )
+{
+	g_ASCache.ValidateSoundCache( pchWavFile );
+}

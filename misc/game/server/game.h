@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -28,7 +28,6 @@ extern ConVar	forcerespawn;
 extern ConVar	footsteps;
 extern ConVar	flashlight;
 extern ConVar	aimcrosshair;
-extern ConVar	decalfrequency;
 extern ConVar	teamlist;
 extern ConVar	teamoverride;
 extern ConVar	defaultteam;

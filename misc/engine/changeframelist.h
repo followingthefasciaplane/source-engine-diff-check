@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -11,9 +11,8 @@
 #pragma once
 #endif
 
-
-#include "bitbuf.h"
-
+#include "mempool.h"
+#include "dt_common.h"
 
 // This class holds the last tick (from host_tickcount) that each property in 
 // a datatable changed at.
@@ -23,34 +22,47 @@
 // These are created once per entity per frame. Since usually a very small percentage of an
 // entity's properties actually change each frame, this allows you to get a small set of 
 // properties to delta for each client.
-abstract_class IChangeFrameList
+class CChangeFrameList
 {
 public:
-	
+
+	//properties are bucketed into batches to keep the iteration through change frames fast. This
+	//allows for a time stamp to be checked on a bucket, and thereby skip the entire bucket
+	static const uint32 knBucketSize = 32;
+
+	CChangeFrameList( int nProperties, int iCurTick );
+	~CChangeFrameList();
+
+	CChangeFrameList( const CChangeFrameList &rhs );
+
 	// Call this to delete the object.
-	virtual void	Release() = 0;
+	void Release();
 
 	// This just returns the value you passed into AllocChangeFrameList().
-	virtual int		GetNumProps() = 0;
+	int GetNumProps() const											{ return m_nNumProps; }
+	int GetPropTick( int nProp ) const								{ return m_ChangeTicks[ nProp ]; }
 
 	// Sets the change frames for the specified properties to iFrame.
-	virtual void	SetChangeTick( const int *pPropIndices, int nPropIndices, const int iTick ) = 0;
+	void SetChangeTick( const int* RESTRICT pProps, int nNumProps, const int iTick );
+	void SetChangeTick( const int nProp, const int iTick )			{ m_ChangeTicks[ nProp ] = iTick; m_ChangeTicks[ m_nNumProps + nProp / knBucketSize ] = iTick; }
+	
+	//given a bucket index, this will determine the lastest tick on that bucket
+	const int	GetNumBuckets() const								{ return m_ChangeTicks.Count() - m_nNumProps; }
+	const int*	GetBucketChangeTicks() const						{ return m_ChangeTicks.Base() + m_nNumProps; }
+	const int*	GetChangeTicks() const								{ return m_ChangeTicks.Base(); }
 
-	// Get a list of all properties with a change frame > iFrame.
-	virtual int		GetPropsChangedAfterTick( int iTick, int *iOutProps, int nMaxOutProps ) = 0;
+	// Given a tick and a property index, this will determine if it was changed after that time
+	bool DidPropChangeAfterTick( int iTick, int nProp ) const		{ return m_ChangeTicks[ nProp ] > iTick; }
 
-	virtual IChangeFrameList* Copy() = 0; // return a copy of itself
+	CChangeFrameList* Copy(); // return a copy of itself
 
+private:
+	// Change frames for each property. The buckets for the property set are appended onto the end.
+	CUtlVector< int >	m_ChangeTicks;
+	int					m_nNumProps;
 
-protected:
-	// Use Release to delete these.
-	virtual			~IChangeFrameList() {}
+	CChangeFrameList &operator=( const CChangeFrameList &rhs );
+
+	DECLARE_FIXEDSIZE_ALLOCATOR_MT( CChangeFrameList );
 };				
-
-
-// Call to initialize. Pass in the number of properties this CChangeFrameList will hold.
-// All properties will be initialized to iCurFrame.
-IChangeFrameList* AllocChangeFrameList( int nProperties, int iCurFrame );
-
-
 #endif // CHANGEFRAMELIST_H

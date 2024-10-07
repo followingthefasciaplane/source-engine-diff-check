@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: CS's custom C_VoteController
 //
@@ -10,7 +10,6 @@
 #include "hud.h"
 #include "cdll_client_int.h"
 #include "igameevents.h"
-#include "hud_vote.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -55,7 +54,7 @@ void C_VoteController::RecvProxy_VoteOption( const CRecvProxyData *pData, void *
 	
 	pMe->m_nVoteOptionCount[index] = pData->m_Value.m_Int;
 	pMe->m_bVotesDirty = true;
-	pMe->SetNextClientThink( gpGlobals->curtime + 0.001 );
+	pMe->SetNextClientThink( gpGlobals->curtime );
 }
 
 //-----------------------------------------------------------------------------
@@ -81,7 +80,7 @@ C_VoteController::~C_VoteController()
 void C_VoteController::ResetData()
 {
 	m_iActiveIssueIndex = INVALID_ISSUE;
-	m_iOnlyTeamToVote = TEAM_UNASSIGNED;
+	m_iOnlyTeamToVote = TEAM_INVALID;
 	for( int i = 0; i < MAX_VOTE_OPTIONS; i++ )
 	{
 		m_nVoteOptionCount[i] = 0;
@@ -108,41 +107,44 @@ void C_VoteController::ClientThink()
 {
 	BaseClass::ClientThink();
 
-	if( m_bTypeDirty )
+	C_BasePlayer *pLocalPlayer = C_BasePlayer::GetLocalPlayer();
+
+	if ( pLocalPlayer && ( (m_iOnlyTeamToVote == TEAM_INVALID) || (m_iOnlyTeamToVote == pLocalPlayer->GetTeamNumber()) ) )
 	{
-		m_bTypeDirty = false;
-		m_bVotesDirty = true;
-	}
-	
-	if( m_bVotesDirty )
-	{
-		if ( m_nPotentialVotes > 0 )
+		if ( m_bTypeDirty )
 		{
-#ifdef STAGING_ONLY
-			// Currently hard-coded to MAX_VOTE_COUNT options per issue
-			DevMsg( "Votes: Option1 - %d, Option2 - %d, Option3 - %d, Option4 - %d, Option5 - %d\n",
-				m_nVoteOptionCount[0], m_nVoteOptionCount[1], m_nVoteOptionCount[2], m_nVoteOptionCount[3], m_nVoteOptionCount[4] );
-#endif // STAGING_ONLY
-
-			IGameEvent *event = gameeventmanager->CreateEvent( "vote_changed" );
-			if ( event )
-			{
-				for ( int i = 0; i < MAX_VOTE_OPTIONS; i++ )
-				{	
-					char szOption[2];
-					Q_snprintf( szOption, sizeof( szOption ), "%i", i + 1 );
-
-					char szVoteOption[13] = "vote_option";
-					Q_strncat( szVoteOption, szOption, sizeof( szVoteOption ), COPY_ALL_CHARACTERS );
-
-					event->SetInt( szVoteOption, m_nVoteOptionCount[i] );
-				}
-				event->SetInt( "potentialVotes", m_nPotentialVotes );
-				gameeventmanager->FireEventClientSide( event );
-			}
+			m_bTypeDirty = false;
+			m_bVotesDirty = true;
 		}
 
-		m_bVotesDirty = false;
+		if ( m_bVotesDirty )
+		{
+			if ( m_nPotentialVotes > 0 )
+			{
+				// Currently hard-coded to MAX_VOTE_COUNT options per issue
+				DevMsg( "Votes: Option1 - %d, Option2 - %d, Option3 - %d, Option4 - %d, Option5 - %d\n",
+					m_nVoteOptionCount[ 0 ], m_nVoteOptionCount[ 1 ], m_nVoteOptionCount[ 2 ], m_nVoteOptionCount[ 3 ], m_nVoteOptionCount[ 4 ] );
+
+				IGameEvent *event = gameeventmanager->CreateEvent( "vote_changed" );
+				if ( event )
+				{
+					for ( int index = 0; index < MAX_VOTE_OPTIONS; index++ )
+					{
+						char szOption[ 2 ];
+						Q_snprintf( szOption, sizeof( szOption ), "%i", index + 1 );
+
+						char szVoteOption[ 13 ] = "vote_option";
+						Q_strncat( szVoteOption, szOption, sizeof( szVoteOption ), COPY_ALL_CHARACTERS );
+
+						event->SetInt( szVoteOption, m_nVoteOptionCount[ index ] );
+					}
+					event->SetInt( "potentialVotes", m_nPotentialVotes );
+					gameeventmanager->FireEventClientSide( event );
+				}
+			}
+
+			m_bVotesDirty = false;
+		}
 	}
 
 	SetNextClientThink( gpGlobals->curtime + 0.5f );
@@ -153,8 +155,8 @@ void C_VoteController::ClientThink()
 //-----------------------------------------------------------------------------
 void C_VoteController::FireGameEvent( IGameEvent *event )
 {
-	CHudVote *pHudVote = GET_HUDELEMENT( CHudVote );
-	if ( pHudVote && pHudVote->IsVisible() )
+	//CHudVote *pHudVote = GET_HUDELEMENT( CHudVote );
+	//if ( pHudVote && pHudVote->IsVisible() )
 	{
 		const char *eventName = event->GetName();
 		if ( !eventName )

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -17,7 +17,7 @@
 #include <ihltv.h>
 #include <utlrbtree.h>
 
-#define	HLTV_MIN_DIRECTOR_DELAY		10	// minimum delay if director is enabled
+#define	HLTV_MIN_DIRECTOR_DELAY		3	// minimum delay if director is enabled
 #define	HLTV_MAX_DELAY				120	// maximum delay
 
 
@@ -45,8 +45,10 @@ public:
 	CHLTVDirector();
 	virtual ~CHLTVDirector();
 
-	virtual void SetHLTVServer( IHLTVServer *hltv ); // give the director an HLTV interface 
-	IHLTVServer* GetHLTVServer( void ); 
+	virtual void AddHLTVServer( IHLTVServer *hltv )OVERRIDE; // give the director an HLTV interface 
+	virtual void RemoveHLTVServer( IHLTVServer *hltv ) OVERRIDE;
+	virtual IHLTVServer* GetHLTVServer( int nIndex ) OVERRIDE { return m_HltvServers[ nIndex ].m_pHLTVServer; }
+	virtual int GetHLTVServerCount() OVERRIDE { return m_HltvServers.Count(); }
 	int		GetDirectorTick( void );	// get current broadcast tick from director
 	int		GetPVSEntity( void ); // get current view entity (PVS)
 	Vector	GetPVSOrigin( void ); // get current PVS origin, if PVS entity is 0
@@ -56,6 +58,9 @@ public:
 	virtual const char** GetModEvents(); // returns list of event names forwarded to HLTV clients
 
 	void	BuildCameraList( void );
+
+	// Starts automatic recording of the current session
+	void	StartAutoRecording( void );
 		
 
 public: // IGameEventListener Interface
@@ -96,13 +101,18 @@ protected:
 	void	CheckHistory();
 	void	RemoveEventsFromHistory(int tick); // removes all commands < tick, or all if tick -1
 	
-	IHLTVServer		*m_pHLTVServer;	// interface to servers HLTV object
+	struct HltvServerRecord_t
+	{
+		IHLTVServer		*m_pHLTVServer;	// interface to servers HLTV object
+		CBasePlayer		*m_pHLTVClient; // the HLTV fake client
+	};
+	CUtlVector< HltvServerRecord_t > m_HltvServers;
+
 	float			m_fDelay;	// hltv delay in seconds
 	int				m_nBroadcastTick; // world time that is currently "on the air"
 	int				m_iPVSEntity;	// entity for PVS center
 	Vector			m_vPVSOrigin;	// PVS origin if PVS entity is 0
 	int				m_iCameraMan;	//  >0 if current view entity is a cameraman
-	CBasePlayer		*m_pHLTVClient; // the HLTV fake client
 	int				m_nNextShotTick;	// time for the next scene cut
 	int				m_iLastPlayer;		// last player in random rotation
 

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -6,6 +6,7 @@
 
 #include "datamodel/idatamodel.h"
 #include "datamodel/dmattributevar.h"
+#include "datamodel/dmelementfactoryhelper.h"
 #include "datamodel.h"
 #include "dependencygraph.h"
 #include "dmattributeinternal.h"
@@ -20,8 +21,10 @@
 #include "tier1/utlvector.h"
 #include "tier1/utlqueue.h"
 #include "tier1/utlbuffer.h"
+#include "tier1/fmtstr.h"
 #include "tier2/utlstreambuffer.h"
 #include "tier2/fileutils.h"
+#include <time.h>
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -57,6 +60,9 @@ public:
 			delete static_cast<CDmElement*>( pElement );
 		}
 	}
+	virtual void AddOnElementCreatedCallback( IDmeElementCreated *callback ) {};
+	virtual void RemoveOnElementCreatedCallback( IDmeElementCreated *callback ) {};
+	virtual void OnElementCreated( CDmElement* pElement ) {};
 };
 
 static CDmElementFactoryDefault s_DefaultElementFactory;
@@ -150,7 +156,7 @@ InitReturnVal_t CDataModel::Init( )
 
 //#define _ELEMENT_HISTOGRAM_
 #ifdef _ELEMENT_HISTOGRAM_
-CUtlMap< UtlSymId_t, int > g_typeHistogram( 0, 100, DefLessFunc( UtlSymId_t ) );
+CUtlMap< CUtlSymbolLarge, int > g_typeHistogram( 0, 100, DefLessFunc( CUtlSymbolLarge ) );
 #endif _ELEMENT_HISTOGRAM_
 
 
@@ -234,7 +240,7 @@ DmElementHandle_t CDataModel::FirstAllocatedElement()
 	for ( int i = 0; i < nHandles; ++i )
 	{
 		DmElementHandle_t hElement = ( DmElementHandle_t )m_Handles.GetHandleFromIndex( i );
-		if ( hElement != DMELEMENT_HANDLE_INVALID )
+		if ( CDmElement *pElement = GetElement( hElement ) )
 			return hElement;
 	}
 	return DMELEMENT_HANDLE_INVALID;
@@ -245,9 +251,9 @@ DmElementHandle_t CDataModel::NextAllocatedElement( DmElementHandle_t hElement )
 	int nHandles = ( int )m_Handles.GetHandleCount();
 	for ( int i = m_Handles.GetIndexFromHandle( hElement ) + 1; i < nHandles; ++i )
 	{
-		DmElementHandle_t hElementCur = ( DmElementHandle_t )m_Handles.GetHandleFromIndex( i );
-		if ( hElementCur != DMELEMENT_HANDLE_INVALID )
-			return hElementCur;
+		DmElementHandle_t hElement = ( DmElementHandle_t )m_Handles.GetHandleFromIndex( i );
+		if ( CDmElement *pElement = GetElement( hElement ) )
+			return hElement;
 	}
 
 	return DMELEMENT_HANDLE_INVALID;
@@ -308,16 +314,50 @@ int DmMemorySortFunc( const void * lhs, const void * rhs )
 	return info1.m_nTotalSize - info2.m_nTotalSize;
 }
 
-void CDataModel::DisplayMemoryStats( )
+// this method assumes that all elements that should be traversed have a parity of !bParity
+static void GatherElements_R( CDmElement *pElement, CUtlVector< DmElementHandle_t > &list, CUtlHash< DmElementHandle_t > &visited )
 {
-	CUtlMap< UtlSymId_t, DmMemoryInfo_t > typeHistogram( 0, 100, DefLessFunc( UtlSymId_t ) );
+	DmElementHandle_t h = pElement->GetHandle();
+
+	if ( visited.Find( h ) != visited.InvalidHandle() )
+		return;
+	visited.Insert( h );
+
+	list.AddToTail( h );
+
+	for ( const CDmAttribute *pAttr = pElement->FirstAttribute(); pAttr != NULL; pAttr = pAttr->NextAttribute() )
+	{
+		if ( pAttr->GetType() == AT_ELEMENT )
+		{
+			CDmElement *pChild = pAttr->GetValueElement<CDmElement>();
+			if ( !pChild )
+				continue;
+			GatherElements_R( pChild, list, visited );
+		}
+		else if ( pAttr->GetType() == AT_ELEMENT_ARRAY )
+		{
+			const CDmrElementArrayConst<> elementArrayAttr( pAttr );
+			int nChildren = elementArrayAttr.Count();
+			for ( int i = 0; i < nChildren; ++i )
+			{
+				CDmElement *pChild = elementArrayAttr[ i ];
+				if ( !pChild )
+					continue;
+				GatherElements_R( pChild, list, visited );
+			}
+		}
+	}
+}
+
+void CDataModel::BuildHistogramForHandles( CUtlMap< CUtlSymbolLarge, DmMemoryInfo_t > &typeHistogram, CUtlVector< DmElementHandle_t > &handles )
+{
 	CUtlHash< DmElementHandle_t > visited( 1024, 0, 0, HandleCompare, HandleHash );
 
-	int c = (int)m_Handles.GetHandleCount();
+	int c = handles.Count();
 	for ( int i = 0; i < c; ++i )
 	{
-		DmElementHandle_t h = (DmElementHandle_t)m_Handles.GetHandleFromIndex( i );
-		if ( !m_Handles.IsHandleValid( h ) )
+		DmElementHandle_t h = handles[ i  ];
+		if ( h == DMELEMENT_HANDLE_INVALID )
 			continue;
 
 		CDmElement *pElement = m_Handles.GetHandle( h );
@@ -338,6 +378,43 @@ void CDataModel::DisplayMemoryStats( )
 		++typeHistogram[j].m_nCount;
 		typeHistogram[j].m_nSize += nMemory;
 	}
+}
+
+void CDataModel::DisplayMemoryStats( DmElementHandle_t hElement /*= DMELEMENT_HANDLE_INVALID*/ )
+{
+	CUtlMap< CUtlSymbolLarge, DmMemoryInfo_t > typeHistogram( 0, 100, DefLessFunc( CUtlSymbolLarge ) );
+	CUtlHash< DmElementHandle_t > visited( 1024, 0, 0, HandleCompare, HandleHash );
+
+	CUtlVector< DmElementHandle_t > handles;
+
+	if ( hElement == DMELEMENT_HANDLE_INVALID )
+	{
+		int c = (int)m_Handles.GetHandleCount();
+		for ( int i = 0; i < c; ++i )
+		{
+			DmElementHandle_t h = (DmElementHandle_t)m_Handles.GetHandleFromIndex( i );
+			if ( !m_Handles.IsHandleValid( h ) )
+				continue;
+			handles.AddToTail( h );
+		}
+	}
+	else
+	{
+		// Do a recursive build
+		if ( !m_Handles.IsHandleValid( hElement ) )
+		{
+			Msg( "CDataModel::DisplayMemoryStats with invalid handle %u\n", (int)hElement );
+			return;
+		}
+
+		CDmElement *pElement = m_Handles.GetHandle( hElement );
+		if( pElement )
+		{
+			GatherElements_R( pElement, handles, visited );
+		}
+	}
+
+	BuildHistogramForHandles( typeHistogram, handles );
 
 	// Sort
 	DmMemorySortInfo_t* pSortInfo = (DmMemorySortInfo_t*)_alloca( typeHistogram.Count() * sizeof(DmMemorySortInfo_t) );
@@ -350,11 +427,11 @@ void CDataModel::DisplayMemoryStats( )
 	}
 	qsort( pSortInfo, nCount, sizeof(DmMemorySortInfo_t), DmMemorySortFunc );
 	     
-	int pTotals[ MEMORY_CATEGORY_COUNT ];
+	int pTotals[ MEMORY_CATEGORY_COUNT ] = { 0 };
+	int nLastTwoSize = 0;
 	int nTotalSize = 0;
 	int nTotalCount = 0;
 	int nTotalData = 0;
-	memset( pTotals, 0, sizeof(pTotals) );
 	ConMsg( "Dm Memory usage: type\t\t\t\tcount\ttotalsize\twastage %%\touter\t\tinner\t\tdatamodel\trefs\t\ttree\t\tatts\t\tdata\t(att count)\n" );
 	for ( int i = 0; i < nCount; ++i )
 	{
@@ -362,7 +439,7 @@ void CDataModel::DisplayMemoryStats( )
 		float flPercentOverhead = 1.0f - ( ( info.m_nSize != 0 ) ? ( (float)info.m_pCategories[MEMORY_CATEGORY_ATTRIBUTE_DATA] / (float)info.m_nSize ) : 0.0f );
 		flPercentOverhead *= 100.0f;
 		 
-		ConMsg( "%-40s\t%6d\t%9d\t\t%5.2f", GetString( typeHistogram.Key( pSortInfo[i].m_nIndex ) ), 
+		ConMsg( "%-40s\t%6d\t%9d\t\t%5.2f", typeHistogram.Key( pSortInfo[i].m_nIndex ).String(), 
 			info.m_nCount, info.m_nSize, flPercentOverhead );
 		int nTotal = 0;
 		for ( int j = 0; j < MEMORY_CATEGORY_COUNT; ++j )
@@ -379,6 +456,11 @@ void CDataModel::DisplayMemoryStats( )
 		nTotalSize += info.m_nSize;
 		nTotalCount += info.m_nCount;
 		nTotalData += info.m_pCategories[MEMORY_CATEGORY_ATTRIBUTE_DATA];
+
+		if ( i >= nCount - 2 )
+		{
+			nLastTwoSize += info.m_nSize;
+		}
 	}
 	  
 	ConMsg( "\n" );
@@ -389,25 +471,124 @@ void CDataModel::DisplayMemoryStats( )
 	}
 
 	ConMsg( "\n" );
+
+	float flPercent = 0.0f;
+	if ( nTotalSize > 0 )
+	{
+		flPercent =  100.0 *((float)nLastTwoSize/(float)nTotalSize);
+	}
+
+	ConMsg( "Last two rows as percentage of total size %f %%:\n", flPercent );
+
+	uint64 symbolBytes = m_SymbolTable.GetMemoryUsage();
+	int symbolCount = m_SymbolTable.GetNumStrings();
+
+	// Estimate string table usage
+	ConMsg( "Symbol table:  %d entries %I64u bytes\n", symbolCount, symbolBytes );
 }
 
+
+
+
+void IncrementSymbolRefCount( CUtlSymbolLarge symbol, CUtlMap< CUtlSymbolLarge, int, int > &refCountMap )
+{
+	int nIndex = refCountMap.Find( symbol );
+	if ( nIndex == refCountMap.InvalidIndex() )
+	{
+		nIndex = refCountMap.Insert( symbol );
+		refCountMap[ nIndex ] = 1;
+	}
+	else
+	{
+		refCountMap[ nIndex ]++;
+	}
+}
+
+int CompareSymbolsAcending( const CUtlSymbolLarge *symA, const CUtlSymbolLarge *symB )
+{
+	return V_stricmp( symA->String(), symB->String() );
+}
+
+// Dump the symbol table to the console
+void CDataModel::DumpSymbolTable()
+{
+	uint64 symbolBytes = m_SymbolTable.GetMemoryUsage();
+	int symbolCount = m_SymbolTable.GetNumStrings();
+
+	// Estimate string table usage
+	ConMsg( "Datamodel symbol table: %d entries %I64u bytes\n", symbolCount, symbolBytes );
+
+	CUtlMap< CUtlSymbolLarge, int, int > symbolRefCountMap( 0, symbolCount, DefLessFunc( CUtlSymbolLarge ) );
+	
+	int nNumElements = (int)m_Handles.GetHandleCount();
+	for ( int iElement = 0; iElement < nNumElements; ++iElement )
+	{
+		CDmElement *pElement = m_Handles.GetHandle( iElement );
+		if ( pElement == NULL )
+			continue;
+			
+		IncrementSymbolRefCount( pElement->GetType(), symbolRefCountMap );
+	
+		for ( CDmAttribute *pAttr = pElement->FirstAttribute(); pAttr; pAttr = pAttr->NextAttribute() )
+		{
+			IncrementSymbolRefCount( pAttr->GetNameSymbol(), symbolRefCountMap );
+
+			if ( pAttr->GetType() == AT_STRING )
+			{
+				IncrementSymbolRefCount( pAttr->GetValue< CUtlSymbolLarge >(), symbolRefCountMap );
+			}
+		}
+	}
+	
+	CUtlBuffer buf( 0, symbolBytes + ( symbolCount * 32 ), CUtlBuffer::TEXT_BUFFER );
+
+	buf.Printf( "Datamodel symbol table: %d entries %I64u bytes\n", symbolCount, symbolBytes );
+	CUtlVector< CUtlSymbolLarge > elements;
+	elements.EnsureCount( symbolCount );
+	m_SymbolTable.GetElements( 0, symbolCount, elements.Base() );
+	elements.Sort( CompareSymbolsAcending );
+
+	
+	buf.Printf( "Index      Address       References   String\n" );
+	for ( int i = 0; i < symbolCount; ++i )
+	{
+		CUtlSymbolLarge symbol = elements[ i ];
+		int nIndex = symbolRefCountMap.Find( symbol );
+		int nRefCount = ( nIndex != symbolRefCountMap.InvalidIndex() ) ? symbolRefCountMap[ nIndex ] : 0;
+
+		const char *pString = symbol.String();
+		buf.Printf( "%05d,     0x%p,     %5d,      '%s'\n", i, pString, nRefCount, pString );
+	}
+	
+	int nFileIndex = 0;
+	int nMaxFileIndex = 1000;
+	const char baseFilename[] = "DatamodelSymbols";
+	CUtlString filename;
+
+	char directory[ 256 ];
+	g_pFullFileSystem->GetCurrentDirectory( directory, sizeof( directory ) );
+
+	while ( nFileIndex < nMaxFileIndex )
+	{
+		filename = CFmtStr( "%s\\%s%i.txt", directory, baseFilename, nFileIndex );
+		if ( !g_pFullFileSystem->FileExists( filename ) )
+			break;
+		++nFileIndex;
+	}	
+
+	if ( nFileIndex < nMaxFileIndex )
+	{
+		g_pFullFileSystem->WriteFile( filename, NULL, buf );
+		Msg( "Wrote symbol stats to file: %s", filename.Get() );
+	}
+}
 
 //-----------------------------------------------------------------------------
 // Global symbol table for the datamodel system
 //-----------------------------------------------------------------------------
-UtlSymId_t CDataModel::GetSymbol( const char *pString )
+CUtlSymbolLarge CDataModel::GetSymbol( const char *pString )
 {
 	return m_SymbolTable.AddString( pString );
-}
-
-const char * CDataModel::GetString( UtlSymId_t sym ) const
-{
-	return m_SymbolTable.String( sym );
-}
-
-unsigned short CDataModel::GetSymbolCount() const // this can't ever overflow a ushort, since UtlSymId_t is a ushort, and one of its entries is invalid (0xffff)
-{
-	return m_SymbolTable.GetNumStrings(); // this is only useful because symbols are never removed
 }
 
 
@@ -638,17 +819,51 @@ bool CDataModel::SaveToFile( char const *pFileName, char const *pPathID, const c
 		}
 	}
 
-	bool bIsBinary = IsEncodingBinary( pEncodingName );
-	CUtlStreamBuffer buf( pFullPath, pPathID, bIsBinary ? 0 : CUtlBuffer::TEXT_BUFFER, true );
-	if ( !buf.IsValid() )
+	if ( !pEncodingName )
 	{
-		Warning( "CDataModel: Unable to open file \"%s\"\n", pFullPath );
-		return false;
+		pEncodingName = GetDefaultEncoding( pFormatName );
 	}
-	return Serialize( buf, pEncodingName, pFormatName, pRoot->GetHandle() );
+
+	bool bIsBinary = IsEncodingBinary( pEncodingName );
+	if ( bIsBinary )
+	{
+		CUtlStreamBuffer buf( pFullPath, pPathID, 0, true );
+		if ( !buf.IsValid() )
+		{
+			Warning( "CDataModel: Unable to open file \"%s\"\n", pFullPath );
+			return false;
+		}
+
+		bool bOk = Serialize( buf, pEncodingName, pFormatName, pRoot->GetHandle() );
+		if ( !bOk )
+			return false;
+
+	}
+	else
+	{
+		CUtlBuffer buf( 0, 0, CUtlBuffer::TEXT_BUFFER );
+
+		bool bOk = Serialize( buf, pEncodingName, pFormatName, pRoot->GetHandle() );
+		if ( !bOk )
+			return false;
+
+		if ( !g_pFullFileSystem->WriteFile( pFullPath, pPathID, buf ) )
+		{
+			Warning( "CDataModel: Unable to open file \"%s\"\n", pFullPath );
+			return false;
+		}
+	}
+
+	DmFileId_t fileid = GetFileId( pFullPath );
+	if ( fileid != DMFILEID_INVALID )
+	{
+		SetFileModificationUTCTime( fileid, GetCurrentUTCTime() );
+	}
+
+	return true;	
 }
 
-DmFileId_t CDataModel::RestoreFromFile( char const *pFileName, char const *pPathID, const char *pFormatHint, CDmElement **ppRoot, DmConflictResolution_t idConflictResolution /*= CR_DELETE_NEW*/, DmxHeader_t *pHeaderOut /*= NULL*/ )
+DmFileId_t CDataModel::RestoreFromFile( char const *pFileName, char const *pPathID, const char *pEncodingHint, CDmElement **ppRoot, DmConflictResolution_t idConflictResolution /*= CR_DELETE_NEW*/, DmxHeader_t *pHeaderOut /*= NULL*/ )
 {
 	// NOTE: This guarantees full path names for pathids
 	char pFullPath[ MAX_PATH ];
@@ -671,47 +886,89 @@ DmFileId_t CDataModel::RestoreFromFile( char const *pFileName, char const *pPath
 	bool bSuccess = ReadDMXHeader( typeBuf, pHeader );
 	if ( !bSuccess )
 	{
-		if ( !pFormatHint )
+		if ( !pEncodingHint )
 		{
-			Warning( "CDataModel: Unable to determine DMX format for file %s\n", pFullPath );
+			Warning( "CDataModel: Unable to determine DMX encoding for file %s\n", pFullPath );
 			return DMFILEID_INVALID;
 		}
 
-		if ( !IsValidNonDMXFormat( pFormatHint ) )
+		if ( !IsValidNonDMXFormat( pEncodingHint ) )
 		{
-			Warning( "CDataModel: Invalid DMX format hint '%s' for file %s\n", pFormatHint, pFullPath );
+			Warning( "CDataModel: Invalid DMX encoding hint '%s' for file %s\n", pEncodingHint, pFullPath );
 			return DMFILEID_INVALID;
 		}
 
-		// non-dmx file importers don't have versions or encodings, just formats
-		V_strncpy( pHeader->encodingName, pFormatHint, sizeof( pHeader->encodingName ) );
-		V_strncpy( pHeader->formatName,   pFormatHint, sizeof( pHeader->formatName ) );
-	}
-
-	bool bIsBinary = IsEncodingBinary( pHeader->encodingName );
-	CUtlStreamBuffer buf( pFullPath, pPathID, bIsBinary ? CUtlBuffer::READ_ONLY : CUtlBuffer::READ_ONLY | CUtlBuffer::TEXT_BUFFER );
-	if ( !buf.IsValid() )
-	{
-		Warning( "CDataModel: Unable to open file '%s'\n", pFullPath );
-		return DMFILEID_INVALID;
+		// non-dmx file importers don't have versions or formats, just encodings
+		V_strncpy( pHeader->encodingName, pEncodingHint, sizeof( pHeader->encodingName ) );
+		pHeader->formatName[0] = 0;
 	}
 
 	DmElementHandle_t hRootElement;
-	if ( !Unserialize( buf, pHeader->encodingName, pHeader->formatName, pFormatHint, pFullPath, idConflictResolution, hRootElement ) )
-		return DMFILEID_INVALID;
+	bool bIsBinary = IsEncodingBinary( pHeader->encodingName );
+	if ( bIsBinary )
+	{
+		CUtlStreamBuffer buf( pFullPath, pPathID, CUtlBuffer::READ_ONLY );
+		if ( !buf.IsValid() )
+		{
+			Warning( "CDataModel: Unable to open file '%s'\n", pFullPath );
+			return DMFILEID_INVALID;
+		}
+
+		if ( !Unserialize( buf, pHeader->encodingName, pHeader->formatName, pEncodingHint, pFullPath, idConflictResolution, hRootElement ) )
+			return DMFILEID_INVALID;
+
+	}
+	else
+	{
+		CUtlBuffer buf( 0, 0, CUtlBuffer::READ_ONLY | CUtlBuffer::TEXT_BUFFER );
+
+		if ( !g_pFullFileSystem->ReadFile( pFullPath, pPathID, buf ) )
+		{
+			Warning( "CDataModel: Unable to open file '%s'\n", pFullPath );
+			return DMFILEID_INVALID;
+		}
+
+		if ( !Unserialize( buf, pHeader->encodingName, pHeader->formatName, pEncodingHint, pFullPath, idConflictResolution, hRootElement ) )
+			return DMFILEID_INVALID;
+	}
+
+	
 
 	*ppRoot = g_pDataModel->GetElement( hRootElement );
 
 	DmFileId_t fileid = g_pDataModel->GetFileId( pFullPath );
 	Assert( fileid != DMFILEID_INVALID );
+	if ( fileid != DMFILEID_INVALID )
+	{
+		SetFileModificationUTCTime( fileid, g_pFullFileSystem->GetFileTime( pFullPath ) );
+	}
+
 	return fileid;
 }
+
+
+//-----------------------------------------------------------------------------
+// Is this a DMX file format?
+//-----------------------------------------------------------------------------
+bool CDataModel::IsDMXFormat( CUtlBuffer &buf )	const
+{
+	DmxHeader_t header;
+	bool bSuccess = ReadDMXHeader( buf, &header );
+	buf.SeekGet( CUtlBuffer::SEEK_HEAD, 0 );
+	return bSuccess;
+}
+
 
 //-----------------------------------------------------------------------------
 // Serialization of a element tree into a utlbuffer
 //-----------------------------------------------------------------------------
 bool CDataModel::Serialize( CUtlBuffer &outBuf, const char *pEncodingName, const char *pFormatName, DmElementHandle_t hRoot )
 {
+	if ( !pEncodingName )
+	{
+		pEncodingName = outBuf.IsText() ? "keyvalues2" : "binary";
+	}
+
 	// Find a serializer appropriate for the file format.
 	IDmSerializer *pSerializer = FindSerializer( pEncodingName );
 	if ( !pSerializer )
@@ -852,9 +1109,9 @@ bool CDataModel::IsLegacyFormat( const char *pFormatName ) const
 	return GetEncodingFromLegacyFormat( pFormatName ) != NULL;
 }
 
-bool CDataModel::IsValidNonDMXFormat( const char *pFormatName ) const
+bool CDataModel::IsValidNonDMXFormat( const char *pEncodingName ) const
 {
-	IDmSerializer *pSerializer = FindSerializer( pFormatName );
+	IDmSerializer *pSerializer = FindSerializer( pEncodingName );
 	return pSerializer && !pSerializer->StoresVersionInFile();
 }
 
@@ -867,9 +1124,6 @@ bool CDataModel::IsUnserializing()
 
 int CDataModel::GetCurrentFormatVersion( const char *pFormatName )
 {
-	if ( IsValidNonDMXFormat( pFormatName ) )
-		return 0; // unversioned format
-
 	IDmFormatUpdater *pUpdater = FindFormatUpdater( pFormatName );
 	if ( !pUpdater )
 		return -1; // invalid version #
@@ -880,18 +1134,16 @@ int CDataModel::GetCurrentFormatVersion( const char *pFormatName )
 //-----------------------------------------------------------------------------
 // Unserializes, returns the root of the unserialized tree in ppRoot 
 //-----------------------------------------------------------------------------
-bool CDataModel::Unserialize( CUtlBuffer &inBuf, const char *pEncodingName, const char *pSourceFormatName, const char *pFormatHint,
+bool CDataModel::Unserialize( CUtlBuffer &inBuf, const char *pEncodingName, const char *pRequiredFormat, const char *pUnused,
 							  const char *pFileName, DmConflictResolution_t idConflictResolution, DmElementHandle_t &hRoot )
 {
 	ClearUndo();
 	CDisableUndoScopeGuard sg;
 
-	Assert( pEncodingName && *pEncodingName );
-	if ( !pEncodingName || !*pEncodingName )
-		return false;
-	Assert( pSourceFormatName && *pSourceFormatName );
-	if ( !pSourceFormatName || !*pSourceFormatName )
-		return false;
+	if ( !pEncodingName )
+	{
+		pEncodingName = inBuf.IsText() ? "keyvalues2" : "binary";
+	}
 
 	// Find a serializer appropriate for the file format.
 	IDmSerializer *pSerializer = FindSerializer( pEncodingName );
@@ -905,7 +1157,9 @@ bool CDataModel::Unserialize( CUtlBuffer &inBuf, const char *pEncodingName, cons
 
 	DmxHeader_t header;
 	bool bStoresVersionInFile = pSerializer->StoresVersionInFile();
-	bool bIsCurrentVersion = true; // for formats that don't store a format, files are currently always at the current version
+	bool bIsCurrentVersion = false; // for formats that don't store a format, files are currently always *not* 
+									// at the current version since they need to be converted to dmx
+	const char *pDestFormatName;
 	if ( bStoresVersionInFile )
 	{
 		bool bOk = ReadDMXHeader( inBuf, &header );
@@ -915,71 +1169,98 @@ bool CDataModel::Unserialize( CUtlBuffer &inBuf, const char *pEncodingName, cons
 			return false;
 		}
 
-		if ( IsLegacyFormat( header.formatName ) )
+		int nCurrentFormatVersion = GetCurrentFormatVersion( header.formatName );
+		if ( header.nFormatVersion > nCurrentFormatVersion )
 		{
-			if ( GetCurrentFormatVersion( GENERIC_DMX_FORMAT ) == 1 )
-			{
-				IDmLegacyUpdater *pLegacyUpdater = FindLegacyUpdater( header.formatName );
-				bIsCurrentVersion = !pLegacyUpdater || pLegacyUpdater->IsLatestVersion();
-			}
-			else
-			{
-				bIsCurrentVersion = false;
-			}
+			Warning( "Unserialize: file format newer than executable's!\n" );
+			return false;
 		}
-		else
-		{
-			bIsCurrentVersion = GetCurrentFormatVersion( header.formatName ) == header.nFormatVersion;
-		}
+
+		bIsCurrentVersion = !IsLegacyFormat( header.formatName ) && nCurrentFormatVersion == header.nFormatVersion;
+		pDestFormatName = IsLegacyFormat( header.formatName ) ? GENERIC_DMX_FORMAT : header.formatName;
+	}
+	else
+	{
+		pDestFormatName = pSerializer->GetImportedFormat();
+		Q_strncpy( header.formatName, pDestFormatName, sizeof(header.formatName) );
+		header.nFormatVersion = pSerializer->GetImportedVersion();
+		header.nEncodingVersion = pSerializer->GetCurrentVersion();
+		Q_strncpy( header.encodingName, pSerializer->GetName(), sizeof(header.encodingName) );
 	}
 
 	// if we're not in dmxconvert, and we're not at the latest version, call dmxconvert and unserialize from the converted file
 	if ( !m_bOnlyCreateUntypedElements && !bIsCurrentVersion )
 	{
-		char path[ 256 ];
+		char path[ MAX_PATH ];
 		V_ExtractFilePath( pFileName, path, sizeof( path ) );
 
-		char tempFileName[ 256 ];
 		if ( !V_IsAbsolutePath( path ) )
 		{
 			g_pFullFileSystem->GetCurrentDirectory( path, sizeof( path ) );
 		}
 
+		bool bFileFound = g_pFullFileSystem->FileExists( pFileName );
+		if ( !bFileFound )
+		{
+			char *pTempFileName = ( char* )stackalloc( MAX_PATH ); // NOTE - stackalloc frees on function return, not scope return
+			V_ComposeFileName( path, "_temp_input_file_.dmx", pTempFileName, MAX_PATH );
+			pFileName = pTempFileName;
+
+			g_pFullFileSystem->WriteFile( pFileName, NULL, inBuf );
+		}
+
+		char tempFileName[ MAX_PATH ];
 		V_ComposeFileName( path, "_temp_conversion_file_.dmx", tempFileName, sizeof( tempFileName ) );
 		V_RemoveDotSlashes( tempFileName );
 
 		const char *pDestEncodingName = "binary";
-		const char *pDestFormatName = IsLegacyFormat( header.formatName ) ? GENERIC_DMX_FORMAT : header.formatName;
-		char cmdline[ 256 ];
-		V_snprintf( cmdline, sizeof( cmdline ), "dmxconvert -allowdebug -i %s -o %s -oe %s -of %s", pFileName, tempFileName, pDestEncodingName, pDestFormatName );
+		char cmdline[ 2 * MAX_PATH + 256 ];
+		V_snprintf( cmdline, sizeof( cmdline ), "dmxconvert -allowdebug -i \"%s\" -ie %s -o \"%s\" -oe %s -of %s", pFileName, header.encodingName, tempFileName, pDestEncodingName, pDestFormatName );
 
-		ProcessHandle_t hProcess = PROCESS_HANDLE_INVALID;
-		if ( g_pProcessUtils )
+		IProcess *pProcess = g_pProcessUtils->StartProcess( cmdline, 0 );
+		if ( !pProcess )
 		{
-			hProcess = g_pProcessUtils->StartProcess( cmdline, false );
-		}
-		if ( hProcess == PROCESS_HANDLE_INVALID )
-		{
-			Warning( "Unserialize: Unable to run conversion process \"%s\"\n", cmdline );
+			Warning( "Unerialize: Unable to start dmxconvert process\n" );
 			return false;
 		}
 
-		g_pProcessUtils->WaitUntilProcessCompletes( hProcess );
-		g_pProcessUtils->CloseProcess( hProcess );
+		pProcess->WaitUntilComplete();
+		pProcess->Release();
 
 		bool bSuccess;
 		{
-			CUtlStreamBuffer strbuf( tempFileName, NULL, CUtlBuffer::READ_ONLY );
-			if ( !strbuf.IsValid() )
+			if ( !inBuf.IsText() )
 			{
-				Warning( "Unserialize: Unable to open temp file \"%s\"\n", tempFileName );
-				return false;
+				CUtlStreamBuffer buf( tempFileName, NULL, CUtlBuffer::READ_ONLY );
+				if ( !buf.IsValid() )
+				{
+					Warning( "Unerialize: Unable to open temp file \"%s\"\n", tempFileName );
+					return false;
+				}
+
+				// yes, this passes in pFileName, even though it read from tempFileName - pFileName is only used for marking debug messages and setting fileid
+				bSuccess = Unserialize( buf, pDestEncodingName, pDestFormatName, pDestFormatName, pFileName, idConflictResolution, hRoot );
+
+			}
+			else
+			{
+				CUtlBuffer buf( 0, 0, CUtlBuffer::READ_ONLY );
+				if ( !g_pFullFileSystem->ReadFile( tempFileName, NULL, buf ) )
+				{
+					Warning( "Unerialize: Unable to open temp file \"%s\"\n", tempFileName );
+					return false;
+				}
+
+				// yes, this passes in pFileName, even though it read from tempFileName - pFileName is only used for marking debug messages and setting fileid
+				bSuccess = Unserialize( buf, pDestEncodingName, pDestFormatName, pDestFormatName, pFileName, idConflictResolution, hRoot );
 			}
 
-			// yes, this passes in pFileName, even though it read from tempFileName - pFileName is only used for marking debug messages and setting fileid
-			bSuccess = Unserialize( strbuf, pDestEncodingName, pDestFormatName, pDestFormatName, pFileName, idConflictResolution, hRoot );
 		}
 
+		if ( !bFileFound )
+		{
+			g_pFullFileSystem->RemoveFile( pFileName );
+		}
 		g_pFullFileSystem->RemoveFile( tempFileName );
 		return bSuccess;
 	}
@@ -989,8 +1270,14 @@ bool CDataModel::Unserialize( CUtlBuffer &inBuf, const char *pEncodingName, cons
 	{
 		if ( V_strcmp( pEncodingName, header.encodingName ) != 0 )
 			return false;
-		if ( V_strcmp( pSourceFormatName, header.formatName ) != 0 )
-			return false;
+
+		if ( pRequiredFormat && pRequiredFormat[0] )
+		{
+			if ( V_strcmp( pRequiredFormat, header.formatName ) != 0 )
+			{
+				Warning( "Unexpected format '%s' reading file '%s' - expected format '%s'\n", pRequiredFormat, pFileName, header.formatName );
+			}
+		}
 
 		if ( pSerializer->IsBinaryFormat() )
 		{
@@ -1010,12 +1297,20 @@ bool CDataModel::Unserialize( CUtlBuffer &inBuf, const char *pEncodingName, cons
 
 	// Now read the file using the appropriate format
 	CDmElement *pRoot;
-	bool bOk = pSerializer->Unserialize( inBuf, pEncodingName, header.nEncodingVersion, pSourceFormatName, header.nFormatVersion,
+	bool bOk = pSerializer->Unserialize( inBuf, pEncodingName, header.nEncodingVersion, header.formatName, header.nFormatVersion,
 															fileid, idConflictResolution, &pRoot );
-	hRoot = pRoot ? pRoot->GetHandle() : DMELEMENT_HANDLE_INVALID;
+	if ( bOk )
+	{
+		hRoot = pRoot ? pRoot->GetHandle() : DMELEMENT_HANDLE_INVALID;
 
-	SetFileFormat( fileid, pSourceFormatName );
-	SetFileRoot( fileid, hRoot );
+		SetFileModificationUTCTime( fileid, 0 );
+		SetFileFormat( fileid, header.formatName );
+		SetFileRoot( fileid, hRoot );
+	}
+	else
+	{
+		RemoveFileId( fileid );
+	}
 
 	m_bIsUnserializing = false;
 	return bOk;
@@ -1039,7 +1334,7 @@ bool CDataModel::UpdateUnserializedElements( const char *pSourceFormatName, int 
 
 	IDmFormatUpdater *pFormatUpdater = FindFormatUpdater( pSourceFormatName );
 	if ( !pFormatUpdater )
-		return false;
+		return true;	// Used to return false, if no format updater exists, simply means a format updater hasn't been required yet
 
 	return pFormatUpdater->Update( ppRoot, nSourceFormatVersion );
 }
@@ -1062,13 +1357,33 @@ DmFileId_t CDataModel::GetFileId( int i )
 	return ( DmFileId_t )m_openFiles.GetHandleFromIndex( i );
 }
 
-DmFileId_t CDataModel::FindOrCreateFileId( const char *pFilename )
+void CleanupFileName( char *pOutFileName, size_t nOutLen, const char *pInFileName )
 {
-	Assert( pFilename && *pFilename );
-	if ( !pFilename || !*pFilename )
+	char fixedFileName[ MAX_PATH ];
+	V_FixupPathName( fixedFileName, sizeof( fixedFileName ), pInFileName );
+
+	if ( !V_IsAbsolutePath( fixedFileName ) )
+	{
+		char currentDir[ MAX_PATH ];
+		g_pFullFileSystem->GetCurrentDirectory( currentDir, sizeof( currentDir ) );
+		V_MakeAbsolutePath( pOutFileName, nOutLen, fixedFileName, currentDir );
+	}
+	else
+	{
+		V_strncpy( pOutFileName, fixedFileName, nOutLen );
+	}
+}
+
+DmFileId_t CDataModel::FindOrCreateFileId( const char *pFileName )
+{
+	Assert( pFileName && *pFileName );
+	if ( !pFileName || !*pFileName )
 		return DMFILEID_INVALID;
 
-	DmFileId_t fileid = GetFileId( pFilename );
+	char fixedFileName[ MAX_PATH ];
+	CleanupFileName( fixedFileName, sizeof( fixedFileName ), pFileName );
+
+	DmFileId_t fileid = GetFileId( fixedFileName );
 	if ( fileid != DMFILEID_INVALID )
 	{
 //		Assert( IsFileLoaded( fileid ) );
@@ -1077,7 +1392,7 @@ DmFileId_t CDataModel::FindOrCreateFileId( const char *pFilename )
 	}
 
 	fileid = ( DmFileId_t )m_openFiles.AddHandle();
-	m_openFiles.SetHandle( fileid, new FileElementSet_t( GetSymbol( pFilename ) ) );
+	m_openFiles.SetHandle( fileid, new FileElementSet_t( GetSymbol( fixedFileName ) ) );
 	return fileid;
 }
 
@@ -1097,9 +1412,14 @@ void CDataModel::RemoveFileId( DmFileId_t fileid )
 	m_openFiles.RemoveHandle( fileid );
 }
 
-DmFileId_t CDataModel::GetFileId( const char *pFilename )
+DmFileId_t CDataModel::GetFileId( const char *pFileName )
 {
-	UtlSymId_t filenameSym = GetSymbol( pFilename );
+	char fixedFileName[ MAX_PATH ];
+	CleanupFileName( fixedFileName, sizeof( fixedFileName ), pFileName );
+
+	CUtlSymbolLarge filenameSym = m_SymbolTable.Find( fixedFileName );
+	if ( filenameSym == UTL_INVAL_SYMBOL_LARGE )
+		return DMFILEID_INVALID;
 
 	int nFiles = m_openFiles.GetHandleCount();
 	for ( int i = 0; i < nFiles; ++i )
@@ -1118,7 +1438,7 @@ const char *CDataModel::GetFileName( DmFileId_t fileid )
 {
 	FileElementSet_t *fes = m_openFiles.GetHandle( fileid );
 	Assert( fes || fileid == DMFILEID_INVALID );
-	return fes ? GetString( fes->m_filename ) : NULL;
+	return fes ? fes->m_filename.String() : NULL;
 }
 
 void CDataModel::SetFileName( DmFileId_t fileid, const char *pFileName )
@@ -1128,14 +1448,17 @@ void CDataModel::SetFileName( DmFileId_t fileid, const char *pFileName )
 	if ( !fes )
 		return;
 
-	fes->m_filename = GetSymbol( pFileName );
+	char pFixedFileName[ MAX_PATH ];
+	CleanupFileName( pFixedFileName, sizeof( pFixedFileName ), pFileName );
+
+	fes->m_filename = GetSymbol( pFixedFileName );
 }
 
 const char *CDataModel::GetFileFormat( DmFileId_t fileid )
 {
 	FileElementSet_t *fes = m_openFiles.GetHandle( fileid );
 	Assert( fes || fileid == DMFILEID_INVALID );
-	return fes ? GetString( fes->m_format ) : NULL;
+	return fes ? fes->m_format.String() : NULL;
 }
 
 void CDataModel::SetFileFormat( DmFileId_t fileid, const char *pFormat )
@@ -1166,6 +1489,42 @@ void CDataModel::SetFileRoot( DmFileId_t fileid, DmElementHandle_t hRoot )
 		return;
 
 	fes->m_hRoot = hRoot;
+}
+
+long CDataModel::GetFileModificationUTCTime( DmFileId_t fileid )
+{
+	FileElementSet_t *fes = m_openFiles.GetHandle( fileid );
+	Assert( fes || fileid == DMFILEID_INVALID );
+	return fes ? fes->m_fileModificationTime : 0;
+}
+
+void CDataModel::SetFileModificationUTCTime( DmFileId_t fileid, long fileModificationTime )
+{
+	FileElementSet_t *fes = m_openFiles.GetHandle( fileid );
+	Assert( fes || fileid == DMFILEID_INVALID );
+	if ( !fes )
+		return;
+
+#ifdef _DEBUG
+	char oldFileTime[ 256 ];
+	char newFileTime[ 256 ];
+	UTCTimeToString( oldFileTime, sizeof( oldFileTime ), fes->m_fileModificationTime );
+	UTCTimeToString( newFileTime, sizeof( newFileTime ), fileModificationTime );
+	Msg( "Setting file modification time for '%s' from %d: %s to %d: %s\n",
+		fes->m_filename.String(), fes->m_fileModificationTime, oldFileTime, fileModificationTime, newFileTime );
+#endif // _DEBUG
+
+	fes->m_fileModificationTime = fileModificationTime;
+}
+
+long CDataModel::GetCurrentUTCTime()
+{
+	return _time32( NULL );
+}
+
+void CDataModel::UTCTimeToString( char *pString, int maxChars, long fileTime )
+{
+	return g_pFullFileSystem->FileTimeToString( pString, maxChars, fileTime );
 }
 
 bool CDataModel::IsFileLoaded( DmFileId_t fileid )
@@ -1359,7 +1718,7 @@ void CDataModel::DontAutoDelete( DmElementHandle_t hElement )
 {
 	// this artificially adds a strong reference to the element, so it won't ever get unref'ed to 0
 	// the only ways for this element to go away are explicit deletion, or file unload
-	OnElementReferenceAdded( hElement, true );
+	OnElementReferenceAdded( hElement, HT_STRONG );
 }
 
 void CDataModel::OnElementReferenceAdded( DmElementHandle_t hElement, CDmAttribute *pAttribute )
@@ -1371,39 +1730,63 @@ void CDataModel::OnElementReferenceAdded( DmElementHandle_t hElement, CDmAttribu
 	if ( hElement == DMELEMENT_HANDLE_INVALID )
 		return;
 
-	DmObjectId_t *pId;
-	DmElementReference_t *pRef = FindElementReference( hElement, &pId );
+	DmElementReference_t *pRef = FindElementReference( hElement );
 	if ( !pRef )
 		return;
 
-//	Msg( "OnElementReferenceAdded: %s 0x%x '%s' referenced by 0x%x '%s'\n",
-//		GetString( GetElementType( hElement ) ), hElement, GetElementName( hElement ),
-//		pAttribute->GetOwner()->GetHandle(), pAttribute->GetName() );
+// 	Msg( "OnElementReferenceAdded: %s 0x%x '%s' referenced by %s 0x%x '%s'\n",
+// 		GetElementType( hElement ).String(), hElement, GetElementName( hElement ),
+// 		pAttribute->GetOwner()->GetTypeString(), pAttribute->GetOwner()->GetHandle(), pAttribute->GetName() );
+
+	if ( pRef->m_bHasEverBeenReferenced && !pRef->IsStronglyReferenced() )
+	{
+		CDmElement *pElement = GetElement( hElement );
+		if ( !pElement || pElement->GetFileId() != DMFILEID_INVALID )
+		{
+			m_bDeleteOrphanedElements = true;
+		}
+	}
+	pRef->m_bHasEverBeenReferenced = true;
 
 	pRef->AddAttribute( pAttribute );
 }
 
-void CDataModel::OnElementReferenceAdded( DmElementHandle_t hElement, bool bRefCount )
+void CDataModel::OnElementReferenceAdded( DmElementHandle_t hElement, HandleType_t handleType )
 {
 	if ( hElement == DMELEMENT_HANDLE_INVALID )
 		return;
 
-	DmObjectId_t *pId;
-	DmElementReference_t *pRef = FindElementReference( hElement, &pId );
+	DmElementReference_t *pRef = FindElementReference( hElement );
 	if ( !pRef )
 		return;
 
-//	Msg( "OnElementReferenceAdded: %s 0x%x \"%s\" referenced by %s handle\n",
-//		GetString( GetElementType( hElement ) ), hElement, GetElementName( hElement ),
-//		bRefCount ? "refcounted" : "weak" );
+// 	if ( handleType != HT_WEAK )
+// 	{
+// 		int nCount = handleType == HT_STRONG ? pRef->m_nStrongHandleCount : pRef->m_nUndoHandleCount;
+// 		Msg( "OnElementReferenceAdded: %s 0x%x \"%s\" referenced by %s handle\n",
+// 			GetElementType( hElement ).String(), hElement, GetElementName( hElement ),
+// 			handleType == HT_STRONG ? "strong" : "undo" );
+// 	}
 
-	if ( bRefCount )
+	if ( handleType != HT_WEAK )
 	{
-		++pRef->m_nStrongHandleCount;
+		bool bUpdate = handleType == HT_STRONG ? pRef->m_bHasEverBeenReferenced && !pRef->IsStronglyReferenced() : !pRef->IsReferencedByUndo();
+		if ( bUpdate )
+		{
+			CDmElement *pElement = GetElement( hElement );
+			if ( !pElement || pElement->GetFileId() != DMFILEID_INVALID )
+			{
+				m_bDeleteOrphanedElements = true;
+			}
+		}
+		pRef->m_bHasEverBeenReferenced = true;
 	}
-	else
+
+	switch ( handleType )
 	{
-		++pRef->m_nWeakHandleCount;
+	case HT_WEAK:	++pRef->m_nWeakHandleCount;	break;
+	case HT_STRONG: ++pRef->m_nStrongHandleCount; break;
+	case HT_UNDO:	++pRef->m_nUndoHandleCount; break;
 	}
 }
 
@@ -1418,81 +1801,63 @@ void CDataModel::OnElementReferenceRemoved( DmElementHandle_t hElement, CDmAttri
 	if ( hElement == DMELEMENT_HANDLE_INVALID )
 		return;
 
-	DmObjectId_t *pId;
-	DmElementReference_t *pRef = FindElementReference( hElement, &pId );
+	DmElementReference_t *pRef = FindElementReference( hElement );
 	if ( !pRef )
 		return;
 
-//	Msg( "OnElementReferenceRemoved: %s 0x%x '%s' referenced by 0x%x '%s'\n",
-//		GetString( GetElementType( hElement ) ), hElement, GetElementName( hElement ),
-//		pAttribute->GetOwner()->GetHandle(), pAttribute->GetName() );
-
 	pRef->RemoveAttribute( pAttribute );
+
+// 	Msg( "OnElementReferenceRemoved: %s 0x%x '%s' referenced by %s 0x%x '%s'\n",
+// 		GetElementType( hElement ).String(), hElement, GetElementName( hElement ),
+// 		pAttribute->GetOwner()->GetTypeString(), pAttribute->GetOwner()->GetHandle(), pAttribute->GetName() );
 
 	if ( !pRef->IsStronglyReferenced() )
 	{
-		if ( pId )
+		CDmElement *pElement = GetElement( hElement );
+		if ( !pElement || pElement->GetFileId() != DMFILEID_INVALID )
 		{
-			if ( !pRef->IsWeaklyReferenced() )
-			{
-				int i = m_unreferencedElementIds.AddToTail();
-				CopyUniqueId( *pId, &m_unreferencedElementIds[ i ] );
-			}
+			m_bDeleteOrphanedElements = true;
 		}
-		else
-		{
-			Assert( GetElement( hElement ) );
-			m_unreferencedElementHandles.AddToTail( hElement );
-		}
-
-//		Msg( " - marked as unreferenced!\n");
 	}
 }
 
-void CDataModel::OnElementReferenceRemoved( DmElementHandle_t hElement, bool bRefCount )
+void CDataModel::OnElementReferenceRemoved( DmElementHandle_t hElement, HandleType_t handleType )
 {
 	MEM_ALLOC_CREDIT();
 
 	if ( hElement == DMELEMENT_HANDLE_INVALID )
 		return;
 
-	DmObjectId_t *pId;
-	DmElementReference_t *pRef = FindElementReference( hElement, &pId );
+	DmElementReference_t *pRef = FindElementReference( hElement );
 	if ( !pRef )
 		return;
 
-//	Msg( "OnElementReferenceRemoved: %s 0x%x \"%s\" referenced by %s handle\n",
-//		GetString( GetElementType( hElement ) ), hElement, GetElementName( hElement ),
-//		bRefCount ? "refcounted" : "weak" );
-
-	if ( bRefCount )
+	switch ( handleType )
 	{
-		--pRef->m_nStrongHandleCount;
-	}
-	else
-	{
-		--pRef->m_nWeakHandleCount;
+	case HT_WEAK:	--pRef->m_nWeakHandleCount;	break;
+	case HT_STRONG: --pRef->m_nStrongHandleCount; break;
+	case HT_UNDO:	--pRef->m_nUndoHandleCount; break;
 	}
 
-	if ( !pRef->IsStronglyReferenced() )
+// 	if ( handleType != HT_WEAK )
+// 	{
+// 		int nCount = handleType == HT_STRONG ? pRef->m_nStrongHandleCount : pRef->m_nUndoHandleCount;
+// 		Msg( "OnElementReferenceRemoved: %s 0x%x \"%s\" referenced by %s handle\n",
+// 			GetElementType( hElement ).String(), hElement, GetElementName( hElement ),
+// 			handleType == HT_STRONG ? "strong" : "undo" );
+// 	}
+
+	if ( handleType != HT_WEAK )
 	{
-		if ( pId )
+		bool bUpdate = handleType == HT_STRONG ? !pRef->IsStronglyReferenced() : !pRef->IsReferencedByUndo();
+		if ( bUpdate )
 		{
-			if ( !pRef->IsWeaklyReferenced() )
+			CDmElement *pElement = GetElement( hElement );
+			if ( !pElement || pElement->GetFileId() != DMFILEID_INVALID )
 			{
-				int i = m_unreferencedElementIds.AddToTail();
-				CopyUniqueId( *pId, &m_unreferencedElementIds[ i ] );
+				m_bDeleteOrphanedElements = true;
 			}
 		}
-		else if ( bRefCount )
-		{
-			// only unref elements if strong reference changing
-			// this prevents [creation, weak ref, weak unref] from deleting element
-			Assert( GetElement( hElement ) );
-			m_unreferencedElementHandles.AddToTail( hElement );
-		}
-
-//		Msg( " - marked as unreferenced!\n");
 	}
 }
 
@@ -1500,59 +1865,80 @@ void CDataModel::RemoveUnreferencedElements()
 {
 	CDisableUndoScopeGuard sg;
 
-	int nElementIds = m_unreferencedElementIds.Count();
-	for ( int i = 0; i < nElementIds; ++i )
-	{
-		UtlHashHandle_t h = m_unloadedIdElementMap.Find( ElementIdHandlePair_t( m_unreferencedElementIds[ i ] ) );
-		if ( h == m_unloadedIdElementMap.InvalidHandle() )
-			continue;
-
-		if ( m_unloadedIdElementMap[ h ].m_ref.IsWeaklyReferenced() )
-			continue; // don't remove if it's been referenced again - this allows an unref followed by a ref in the same edit phase
-
-//		Msg( "Removing reference: 0x%x\n", m_unloadedIdElementMap[ h ].m_ref.m_hElement );
-
-		m_unloadedIdElementMap.Remove( h );
-	}
-	m_unreferencedElementIds.RemoveAll();
-
-	// this is intentionally calling Count() every time through, since DestroyElement may cause more elements to be added to the list
-	for ( int i = 0; i < m_unreferencedElementHandles.Count(); ++i )
-	{
-		DmElementHandle_t hElement = m_unreferencedElementHandles[ i ];
-
-		CDmElement *pElement = GetElement( hElement );
-//		Assert( pElement );
-		if ( !pElement )
-			continue;
-
-//		Msg( "%s '%s' %08x unref'ed to 0\n", pElement->GetTypeString(), pElement->GetName(), pElement->GetHandle() );
-
-		if ( CDmeElementAccessor::GetReference( pElement )->IsStronglyReferenced() )
-			continue;
-
-//		Msg( " -deleted\n" );
-
-		DeleteElement( hElement );
-	}
-	m_unreferencedElementHandles.RemoveAll();
-
 	if ( m_bDeleteOrphanedElements )
 	{
-		m_bDeleteOrphanedElements = false;
 		FindAndDeleteOrphanedElements();
+		m_bDeleteOrphanedElements = false;
 	}
 }
 
+void UpdateReferenceToElementsNotInUndoWithParityBitSet( CDmAttribute *pAttr, CDmElement *pChild, int nParityBit, bool bDetach )
+{
+	if ( !pAttr || !pChild )
+		return;
+
+	if ( pChild->IsOnlyInUndo() || !pChild->GetParity( nParityBit ) )
+		return;
+
+	DmElementReference_t *pRef = CDmeElementAccessor::GetReference( pChild );
+
+	if ( bDetach )
+	{
+// 		Msg( "removing " );
+		pRef->RemoveAttribute( pAttr );
+	}
+	else
+	{
+		Assert( !CDmeElementAccessor::GetReference( pChild )->FindAttribute( pAttr ) );
+// 		Msg( "adding   " );
+		pRef->AddAttribute( pAttr );
+	}
+
+// 	CDmElement *pOwner = pAttr->GetOwner();
+// 	Msg( "reference to %s 0x%x '%s' from %s 0x%x '%s' %s\n",
+// 		pChild->GetTypeString(), pChild->GetHandle(), pChild->GetName(),
+// 		pOwner->GetTypeString(), pOwner->GetHandle(), pOwner->GetName(),
+// 		pAttr->GetName() );
+}
+
+void UpdateReferencesToElementsNotInUndoWithParityBitSet( CDmElement *pElement, int nParityBit, bool bDetach )
+{
+	for ( CDmAttribute *pAttr = pElement->FirstAttribute(); pAttr; pAttr = pAttr->NextAttribute() )
+	{
+		DmAttributeType_t type = pAttr->GetType();
+		if ( type == AT_ELEMENT )
+		{
+			UpdateReferenceToElementsNotInUndoWithParityBitSet( pAttr, pAttr->GetValueElement< CDmElement >(), nParityBit, bDetach );
+		}
+		else if ( type == AT_ELEMENT_ARRAY )
+		{
+			const CDmrElementArrayConst<> elementArray( pAttr );
+			int nChildren = elementArray.Count();
+			for ( int i = 0; i < nChildren; ++i )
+			{
+				UpdateReferenceToElementsNotInUndoWithParityBitSet( pAttr, elementArray[ i ], nParityBit, bDetach );
+			}
+		}
+	}
+}
+
+
 void CDataModel::FindAndDeleteOrphanedElements()
 {
-#if 1 // this appears to be faster, and is fully implemented
 	// mark & sweep algorithm for elements
 
-	// clear accessible flag from all elements
-	for ( DmElementHandle_t hElement = FirstAllocatedElement(); hElement != DMELEMENT_HANDLE_INVALID; hElement = NextAllocatedElement( hElement ) )
+	enum
 	{
-		CDmElement *pElement = GetElement( hElement );
+		BIT_STRONG = 0,
+		BIT_UNDO = 1,
+	};
+
+	// clear accessible flag from all elements
+	int nHandles = ( int )m_Handles.GetHandleCount();
+	for ( int i = 0; i < nHandles; ++i )
+	{
+		DmElementHandle_t hElement = ( DmElementHandle_t )m_Handles.GetHandleFromIndex( i );
+		CDmElement *pElement = m_Handles.GetHandle( hElement, false ); // walk through invalidated handles as well (such as deleted elements)
 		if ( !pElement )
 			continue;
 
@@ -1560,7 +1946,26 @@ void CDataModel::FindAndDeleteOrphanedElements()
 		if ( fileid == DMFILEID_INVALID )
 			continue;
 
-		pElement->MarkAccessible( false );
+		pElement->SetParity( false, BIT_STRONG );
+		pElement->SetParity( false, BIT_UNDO );
+	}
+
+	// mark elements accessible from undo system
+	for ( int i = 0; i < nHandles; ++i )
+	{
+		DmElementHandle_t hElement = ( DmElementHandle_t )m_Handles.GetHandleFromIndex( i );
+		CDmElement *pElement = m_Handles.GetHandle( hElement, false ); // walk through invalidated handles as well (such as deleted elements)
+		if ( !pElement )
+			continue;
+
+		DmFileId_t fileid = pElement->GetFileId();
+		if ( fileid == DMFILEID_INVALID )
+			continue;
+
+		if ( CDmeElementAccessor::GetReference( pElement )->m_nUndoHandleCount == 0 )
+			continue;
+
+		pElement->SetParity( true, TD_ALL, BIT_UNDO );
 	}
 
 	// mark elements accessible from file roots
@@ -1576,7 +1981,7 @@ void CDataModel::FindAndDeleteOrphanedElements()
 		if ( !pRoot )
 			continue;
 
-		pRoot->MarkAccessible( TD_ALL );
+		pRoot->SetParity( true, TD_ALL, BIT_STRONG );
 	}
 
 	// mark elements accessible from counted handles
@@ -1590,10 +1995,47 @@ void CDataModel::FindAndDeleteOrphanedElements()
 		if ( fileid == DMFILEID_INVALID )
 			continue;
 
-		if ( CDmeElementAccessor::GetReference( pElement )->m_nStrongHandleCount == 0 )
+		// an element is deleted when its strong handle count goes to zero, but if it never leaves zero, it shouldn't be deleted
+		DmElementReference_t *pRef = CDmeElementAccessor::GetReference( pElement );
+		if ( pRef->m_bHasEverBeenReferenced && pRef->m_nStrongHandleCount == 0 )
 			continue;
 
-		pElement->MarkAccessible( TD_ALL );
+		pElement->SetParity( true, TD_ALL, BIT_STRONG );
+	}
+
+
+	// BIT_STRONG,  IsOnlyInUndo() => being moved out of undo
+	// BIT_STRONG, !IsOnlyInUndo() => remaining out of undo
+	// BIT_UNDO,    IsOnlyInUndo() => remaining in undo
+	// BIT_UNDO,   !IsOnlyInUndo() => being moved into undo
+
+	// update element references
+	for ( DmElementHandle_t hElement = FirstAllocatedElement(); hElement != DMELEMENT_HANDLE_INVALID; hElement = NextAllocatedElement( hElement ) )
+	{
+		CDmElement *pElement = GetElement( hElement );
+		if ( !pElement )
+			continue;
+
+		DmFileId_t fileid = pElement->GetFileId();
+		if ( fileid == DMFILEID_INVALID )
+			continue;
+
+		if ( pElement->GetParity( BIT_STRONG ) )
+		{
+			if ( pElement->IsOnlyInUndo() )
+			{
+				// this element is leaving the undo system - add references to elements that aren't in undo (and weren't before)
+				UpdateReferencesToElementsNotInUndoWithParityBitSet( pElement, BIT_STRONG, false );
+			}
+		}
+		else if ( pElement->GetParity( BIT_UNDO ) )
+		{
+			if ( !pElement->IsOnlyInUndo() )
+			{
+				// this element is entering the undo system - remove references to elements that aren't in undo (and weren't before)
+				UpdateReferencesToElementsNotInUndoWithParityBitSet( pElement, BIT_STRONG, true );
+			}
+		}
 	}
 
 	// delete elements that aren't accessible
@@ -1607,36 +2049,36 @@ void CDataModel::FindAndDeleteOrphanedElements()
 		if ( fileid == DMFILEID_INVALID )
 			continue;
 
-		if ( pElement->IsAccessible() )
-			continue;
+// 		Msg( "%s 0x%08x '%s': %s %s - %s\n",
+// 			pElement->GetTypeString(), hElement, pElement->GetName(),
+// 			pElement->GetParity( BIT_STRONG ) ? "strong" : "!strong",
+// 			pElement->GetParity( BIT_UNDO ) ? "undo" : "!undo",
+// 			pElement->IsOnlyInUndo() ? "only in undo" : "not only in undo" );
 
-		DeleteElement( hElement );
+		if ( pElement->GetParity( BIT_STRONG ) )
+		{
+			if ( pElement->IsOnlyInUndo() )
+			{
+// 				Msg( "adopting  %s 0x%08x '%s'\n", pElement->GetTypeString(), hElement, pElement->GetName() );
+				pElement->SetOnlyInUndo( false );
+				CDmeElementAccessor::OnAdoptedFromUndo( pElement );
+			}
+		}
+		else if ( pElement->GetParity( BIT_UNDO ) )
+		{
+			if ( !pElement->IsOnlyInUndo() )
+			{
+// 				Msg( "orphaning %s 0x%08x '%s'\n", pElement->GetTypeString(), hElement, pElement->GetName() );
+				pElement->SetOnlyInUndo( true );
+				CDmeElementAccessor::OnOrphanedToUndo( pElement );
+			}
+		}
+		else
+		{
+//			Msg( "deleting %s 0x%08x '%s'\n", pElement->GetTypeString(), hElement, pElement->GetName() );
+			DeleteElement( hElement );
+		}
 	}
-#else
-	// root finding algorithm on elements
-
-	// JDTODO - this incorrectly deletes elements that are referenced by a counted handle, but aren't under the file root
-
-	CUtlVector< ElementPathItem_t > path;
-	for ( DmElementHandle_t hElement = FirstAllocatedElement(); hElement != DMELEMENT_HANDLE_INVALID; hElement = NextAllocatedElement( hElement ) )
-	{
-		CDmElement *pElement = GetElement( hElement );
-		if ( !pElement )
-			continue;
-
-		DmFileId_t fileid = pElement->GetFileId();
-		if ( fileid == DMFILEID_INVALID )
-			continue;
-
-		DmElementHandle_t hRoot = GetFileRoot( fileid );
-
-		path.RemoveAll();
-		if ( hRoot == hElement || pElement->FindReferer( hRoot, path, TD_ALL ) )
-			continue;
-
-		DeleteElement( hElement );
-	}
-#endif
 }
 
 
@@ -1649,6 +2091,12 @@ DmElementHandle_t CDataModel::FindElement( const DmObjectId_t &id )
 	return m_elementIds[ h ];
 }
 
+void CDataModel::GetExistingElements( CElementIdHash &hash ) const
+{
+	DMX_PROFILE_SCOPE( GetExistingElements_Copy );
+	hash = m_elementIds;
+}
+
 
 DmAttributeReferenceIterator_t CDataModel::FirstAttributeReferencingElement( DmElementHandle_t hElement )
 {
@@ -1656,7 +2104,7 @@ DmAttributeReferenceIterator_t CDataModel::FirstAttributeReferencingElement( DmE
 	if ( !pRef || pRef->m_attributes.m_hAttribute == DMATTRIBUTE_HANDLE_INVALID )
 		return DMATTRIBUTE_REFERENCE_ITERATOR_INVALID;
 
-	return ( DmAttributeReferenceIterator_t )( int )&pRef->m_attributes;
+	return ( DmAttributeReferenceIterator_t )( intp )&pRef->m_attributes;
 }
 
 DmAttributeReferenceIterator_t CDataModel::NextAttributeReferencingElement( DmAttributeReferenceIterator_t hAttrIter )
@@ -1665,7 +2113,7 @@ DmAttributeReferenceIterator_t CDataModel::NextAttributeReferencingElement( DmAt
 	if ( !pList )
 		return DMATTRIBUTE_REFERENCE_ITERATOR_INVALID;
 
-	return ( DmAttributeReferenceIterator_t )( int )pList->m_pNext;
+	return ( DmAttributeReferenceIterator_t )( intp )pList->m_pNext;
 }
 
 CDmAttribute *CDataModel::GetAttribute( DmAttributeReferenceIterator_t hAttrIter )
@@ -1718,20 +2166,30 @@ void CDataModel::SetDefaultElementFactory( IDmElementFactory *pFactory )
 // Input  : *elementName - 
 //			factory - 
 //-----------------------------------------------------------------------------
-void CDataModel::AddElementFactory( const char *pClassName, IDmElementFactory *pFactory )
+void CDataModel::AddElementFactory( CDmElementFactoryHelper *pFactoryHelper )
 {
-	Assert( pClassName && pFactory );
+	Assert( pFactoryHelper );
+	const char *pClassName = pFactoryHelper->GetClassname();
 	int idx = m_Factories.Find( pClassName );
 	if ( idx == m_Factories.InvalidIndex() )
 	{
-		m_Factories.Insert( pClassName, pFactory );
+		m_Factories.Insert( pClassName, pFactoryHelper );
 	}
 	else
 	{
 		// Override the factory?
-		m_Factories[idx] = pFactory;
+		m_Factories[idx] = pFactoryHelper;
 		Warning( "Factory for element type '%s' already exists\n", pClassName );
 	}
+}
+
+CDmElementFactoryHelper	*CDataModel::GetElementFactoryHelper( const char *pElementType )
+{
+	int idx = m_Factories.Find( pElementType );
+	if ( idx == m_Factories.InvalidIndex() )
+		return NULL;
+
+	return m_Factories[ idx ];
 }
 
 bool CDataModel::HasElementFactory( const char *pElementType ) const
@@ -1763,13 +2221,15 @@ char const *CDataModel::GetFactoryName( int index ) const
 //-----------------------------------------------------------------------------
 // Purpose: Creates a scene object 
 //-----------------------------------------------------------------------------
-DmElementHandle_t CDataModel::CreateElement( UtlSymId_t typeSymbol, const char *pElementName, DmFileId_t fileid, const DmObjectId_t *pObjectID )
+DmElementHandle_t CDataModel::CreateElement( CUtlSymbolLarge typeSymbol, const char *pElementName, DmFileId_t fileid, const DmObjectId_t *pObjectID )
 {
-	return CreateElement( GetString( typeSymbol ), pElementName, fileid, pObjectID );
+	return CreateElement( typeSymbol.String(), pElementName, fileid, pObjectID );
 }
 
 DmElementHandle_t CDataModel::CreateElement( const char *pElementType, const char *pElementName, DmFileId_t fileid, const DmObjectId_t *pObjectID )
 {
+	DMX_PROFILE_SCOPE( CDataModel_CreateElement1 );
+
 	Assert( !pObjectID || m_elementIds.Find( *pObjectID ) == m_elementIds.InvalidHandle() );
 
 	UtlHashHandle_t h = pObjectID ? m_unloadedIdElementMap.Find( ElementIdHandlePair_t( *pObjectID ) ) : m_unloadedIdElementMap.InvalidHandle();
@@ -1834,8 +2294,8 @@ public:
 	}
 
 private:
-	CDmeCountedHandle	m_hElement;
-	bool				m_bKill;
+	CDmeUndoHandle	m_hElement;
+	bool			m_bKill;
 };
 
 //-----------------------------------------------------------------------------
@@ -1844,6 +2304,8 @@ private:
 //-----------------------------------------------------------------------------
 CDmElement* CDataModel::CreateElement( const DmElementReference_t &ref, const char *pElementType, const char *pElementName, DmFileId_t fileid, const DmObjectId_t *pObjectID )
 {
+	DMX_PROFILE_SCOPE( CDataModel_CreateElement2 );
+
 //	Msg( "Creating %s 0x%x '%s' in file \"%s\" - %d elements loaded\n", pElementType, ref.m_hElement, pElementName ? pElementName : "", GetFileName( fileid ), m_elementIds.Count() );
 
 	MEM_ALLOC_CREDIT();
@@ -1879,40 +2341,60 @@ CDmElement* CDataModel::CreateElement( const DmElementReference_t &ref, const ch
 	}
 	else
 	{
+		DMX_PROFILE_SCOPE( CreateElement_FindFactory );
+
 		int idx = m_Factories.Find( pElementType );
 		if ( idx == m_Factories.InvalidIndex() )
 		{
-			Warning( "Unable to create unknown element %s!\n", pElementType );
-			return NULL;
+			if ( !m_pDefaultFactory )
+			{
+				Warning( "Unable to create unknown element %s!\n", pElementType );
+				return NULL;
+			}
+			m_bUnableToSetDefaultFactory = true;
+			pFactory = m_pDefaultFactory;
 		}
 		else
 		{
 			m_bUnableToCreateOnlyUntypedElements = true;
-			pFactory = m_Factories[ idx ];
+			pFactory = m_Factories[ idx ]->GetFactory();
 		}
 	}
 	Assert( pFactory );
 
 	// Create an undo element
 	CUndoCreateElement *pUndo = NULL;
-	if ( g_pDataModel->IsUndoEnabled() && fileid != DMFILEID_INVALID ) // elements not in any file don't participate in undo
 	{
-		pUndo = new CUndoCreateElement();
-		g_pDataModel->AddUndoElement( pUndo );
+		if ( fileid != DMFILEID_INVALID && g_pDataModel->IsUndoEnabled()  ) // elements not in any file don't participate in undo
+		{
+			DMX_PROFILE_SCOPE( CreateElement_Undo );
+			pUndo = new CUndoCreateElement();
+			g_pDataModel->AddUndoElement( pUndo );
+		}
 	}
 
 	CDisableUndoScopeGuard sg;
 
-	CDmElement *pElement = pFactory->Create( ref.m_hElement, pElementType, pElementName, fileid, *pObjectID );
+	CDmElement *pElement = NULL;
+	
+	{
+		DMX_PROFILE_SCOPE( CreateElement_pFactoryCreate );
+		pElement = pFactory->Create( ref.m_hElement, pElementType, pElementName, fileid, *pObjectID );
+	}
+
 	if ( pElement )
 	{
+		DMX_PROFILE_SCOPE( CreateElement_PerformConstruction );
+
 		++m_nElementsAllocatedSoFar;
-		m_nMaxNumberOfElements = max( m_nMaxNumberOfElements, GetAllocatedElementCount() );
+		m_nMaxNumberOfElements = MAX( m_nMaxNumberOfElements, GetAllocatedElementCount() );
 
 		CDmeElementAccessor::SetReference( pElement, ref );
 		m_Handles.SetHandle( ref.m_hElement, pElement );
 		m_elementIds.Insert( ref.m_hElement );
+
 		CDmeElementAccessor::PerformConstruction( pElement );
+		CDmeElementAccessor::EnableOnChangedCallbacks( pElement );
 
 		if ( pUndo )
 		{
@@ -1921,8 +2403,11 @@ CDmElement* CDataModel::CreateElement( const DmElementReference_t &ref, const ch
 
 		NotifyState( NOTIFY_CHANGE_TOPOLOGICAL );
 
+		// Notify any supplied callbacks of this element's creation
+		pFactory->OnElementCreated( pElement );
+
 #ifdef _ELEMENT_HISTOGRAM_
-		UtlSymId_t typeSym = GetSymbol( pElementType );
+		CUtlSymbolLarge typeSym = GetSymbol( pElementType );
 		short i = g_typeHistogram.Find( typeSym );
 		if ( g_typeHistogram.IsValidIndex( i ) )
 		{
@@ -1938,6 +2423,51 @@ CDmElement* CDataModel::CreateElement( const DmElementReference_t &ref, const ch
 	return pElement;
 }
 
+void CDataModel::UpdateReferenceToElements( CDmAttribute *pAttr, CDmElement *pChild, bool bDetach )
+{
+	if ( !pAttr || !pChild )
+		return;
+
+	if ( bDetach )
+	{
+// 		Msg( "removing " );
+		OnElementReferenceRemoved( pChild->GetHandle(), pAttr );
+	}
+	else
+	{
+		Assert( !CDmeElementAccessor::GetReference( pChild )->FindAttribute( pAttr ) );
+// 		Msg( "adding   " );
+		OnElementReferenceAdded( pChild->GetHandle(), pAttr );
+	}
+
+// 	CDmElement *pOwner = pAttr->GetOwner();
+// 	Msg( "reference to %s 0x%x '%s' from %s 0x%x '%s' %s\n",
+// 		pChild->GetTypeString(), pChild->GetHandle(), pChild->GetName(),
+// 		pOwner->GetTypeString(), pOwner->GetHandle(), pOwner->GetName(),
+// 		pAttr->GetName() );
+}
+
+void CDataModel::UpdateReferencesToElements( CDmElement *pElement, bool bDetach )
+{
+	for ( CDmAttribute *pAttr = pElement->FirstAttribute(); pAttr; pAttr = pAttr->NextAttribute() )
+	{
+		DmAttributeType_t type = pAttr->GetType();
+		if ( type == AT_ELEMENT )
+		{
+			UpdateReferenceToElements( pAttr, pAttr->GetValueElement< CDmElement >(), bDetach );
+		}
+		else if ( type == AT_ELEMENT_ARRAY )
+		{
+			const CDmrElementArrayConst<> elementArray( pAttr );
+			int nChildren = elementArray.Count();
+			for ( int i = 0; i < nChildren; ++i )
+			{
+				UpdateReferenceToElements( pAttr, elementArray[ i ], bDetach );
+			}
+		}
+	}
+}
+
 
 class CUndoDestroyElement : public CUndoElement
 {
@@ -1948,7 +2478,12 @@ public:
 		m_bKill( true ),
 		m_hElement( hElement )
 	{
-		Assert( GetElement<CDmElement>( hElement ) && GetElement<CDmElement>( hElement )->GetFileId() != DMFILEID_INVALID );
+		CDmElement *pElement = GetElement<CDmElement>( hElement );
+		Assert( pElement && pElement->GetFileId() != DMFILEID_INVALID );
+		g_pDataModelImp->UpdateReferencesToElements( pElement, true );
+		pElement->SetOnlyInUndo( true );
+		CDmeElementAccessor::OnOrphanedToUndo( pElement );
+
 		g_pDataModelImp->MarkHandleInvalid( m_hElement );
 	}
 
@@ -1965,16 +2500,27 @@ public:
 	{
 		m_bKill = false;
 		g_pDataModelImp->MarkHandleValid( m_hElement );
+
+		CDmElement *pElement = GetElement<CDmElement>( m_hElement );
+		pElement->SetOnlyInUndo( false );
+		CDmeElementAccessor::OnAdoptedFromUndo( pElement );
+		g_pDataModelImp->UpdateReferencesToElements( pElement, false );
 	}
 
 	virtual void Redo()
 	{
 		m_bKill = true;
+
+		CDmElement *pElement = GetElement<CDmElement>( m_hElement );
+		g_pDataModelImp->UpdateReferencesToElements( pElement, true );
+		pElement->SetOnlyInUndo( true );
+		CDmeElementAccessor::OnOrphanedToUndo( pElement );
+
 		g_pDataModelImp->MarkHandleInvalid( m_hElement );
 	}
 
 private:
-	CDmeCountedHandle	m_hElement;
+	CDmeUndoHandle	m_hElement;
 	bool				m_bKill;
 };
 
@@ -1998,8 +2544,10 @@ void CDataModel::DestroyElement( DmElementHandle_t hElement )
 		return;
 
 	// Create an undo element
-	if ( UndoEnabledForElement( GetElement( hElement ) ) )
+	if ( UndoEnabledForElement( pElement ) )
 	{
+		m_bDeleteOrphanedElements = true;
+
 		CUndoDestroyElement *pUndo = new CUndoDestroyElement( hElement );
 		g_pDataModel->AddUndoElement( pUndo );
 		NotifyState( NOTIFY_CHANGE_TOPOLOGICAL );
@@ -2031,7 +2579,7 @@ void CDataModel::DeleteElement( DmElementHandle_t hElement, DmHandleReleasePolic
 	const char *pElementType = pElement->GetTypeString();
 	Assert( pElementType );
 
-//	Msg( "Deleting %s element 0x%x \'%s\' in file \"%s\" - %d elements loaded\n", pElementType, hElement, pInternal->GetName(), GetFileName( pInternal->GetFileId() ), m_elementIds.Count() );
+// 	Msg( "Deleting %s element 0x%x \'%s\' in file \"%s\" - %d elements loaded\n", pElementType, hElement, pElement->GetName(), GetFileName( pElement->GetFileId() ), m_elementIds.Count() );
 
 	UtlHashHandle_t h = m_elementIds.Find( pElement->GetId() );
 	Assert( h != m_elementIds.InvalidHandle() );
@@ -2055,7 +2603,7 @@ void CDataModel::DeleteElement( DmElementHandle_t hElement, DmHandleReleasePolic
 	else
 	{
 		int idx = m_Factories.Find( pElementType );
-		pFactory = idx == m_Factories.InvalidIndex() ? m_pDefaultFactory : m_Factories[ idx ];
+		pFactory = idx == m_Factories.InvalidIndex() ? m_pDefaultFactory : m_Factories[ idx ]->GetFactory();
 	}
 
 	CDmeElementAccessor::PerformDestruction( pElement );
@@ -2141,11 +2689,11 @@ CDmElement *CDataModel::GetElement( DmElementHandle_t hElement ) const
 	return ( hElement != DMELEMENT_HANDLE_INVALID ) ? m_Handles.GetHandle( hElement ) : NULL;
 }
 
-UtlSymId_t CDataModel::GetElementType( DmElementHandle_t hElement ) const
+CUtlSymbolLarge CDataModel::GetElementType( DmElementHandle_t hElement ) const
 {
 	CDmElement *pElement = ( hElement != DMELEMENT_HANDLE_INVALID ) ? m_Handles.GetHandle( hElement ) : NULL;
 	if ( pElement == NULL )
-		return UTL_INVAL_SYMBOL;
+		return UTL_INVAL_SYMBOL_LARGE;
 	return pElement->GetType();
 }
 
@@ -2181,59 +2729,6 @@ const char *CDataModel::GetAttributeNameForType( DmAttributeType_t attType ) con
 DmAttributeType_t CDataModel::GetAttributeTypeForName( const char *name ) const
 {
 	return AttributeType( name );
-}
-
-
-//-----------------------------------------------------------------------------
-// Event "mailing list"	s
-//-----------------------------------------------------------------------------
-DmMailingList_t CDataModel::CreateMailingList()
-{
-	return m_MailingLists.AddToTail();
-}
-
-void CDataModel::DestroyMailingList( DmMailingList_t list )
-{
-	m_MailingLists.Remove( list );
-}
-
-void CDataModel::AddElementToMailingList( DmMailingList_t list, DmElementHandle_t h )
-{
-	// Make sure it's not already in the list
-	Assert( m_MailingLists[list].m_Elements.Find( h ) < 0 );
-	m_MailingLists[list].m_Elements.AddToTail( h );
-}
-
-bool CDataModel::RemoveElementFromMailingList( DmMailingList_t list, DmElementHandle_t h )
-{
-	// Make sure we find it!
-	MailingList_t &mailingList = m_MailingLists[list];
-	int i = mailingList.m_Elements.Find( h );
-	Assert( i >= 0 );
-	mailingList.m_Elements.FastRemove( i );
-	return ( mailingList.m_Elements.Count() != 0 );
-}
-
-bool CDataModel::PostAttributeChanged( DmMailingList_t list, CDmAttribute *pAttribute )
-{
-	MailingList_t &mailingList = m_MailingLists[list];
-	int nCount = mailingList.m_Elements.Count();
-	for ( int i = nCount; --i >= 0; )
-	{
-		DmElementHandle_t hElement = mailingList.m_Elements[i];
-		CDmElement *pElement = GetElement( hElement );
-		if ( pElement )
-		{
-			pElement->OnAttributeChanged( pAttribute );
-		}
-		else
-		{
-			// The element handle is stale; remove it.
-			mailingList.m_Elements.FastRemove( i );
-		}
-	}
-
-	return ( mailingList.m_Elements.Count() != 0 );
 }
 
 
@@ -2379,12 +2874,12 @@ void CDataModel::ClearUndo()
 	m_bDeleteOrphanedElements = true; // next time we delete unreferenced elements, delete orphaned subtrees as well
 }
 
-UtlSymId_t CDataModel::GetUndoDescInternal( const char *context )
+CUtlSymbolLarge CDataModel::GetUndoDescInternal( const char *context )
 {
 	return GetUndoMgr()->GetUndoDescInternal( context );
 }
 
-UtlSymId_t CDataModel::GetRedoDescInternal( const char *context )
+CUtlSymbolLarge CDataModel::GetRedoDescInternal( const char *context )
 {
 	return GetUndoMgr()->GetRedoDescInternal( context );
 }
@@ -2394,9 +2889,9 @@ void CDataModel::GetUndoInfo( CUtlVector< UndoInfo_t >& list )
 	GetUndoMgr()->GetUndoInfo( list );
 }
 
-const char *CDataModel::GetUndoString( UtlSymId_t sym )
+const char *CDataModel::GetUndoString( CUtlSymbolLarge sym )
 {
-	return CUndoManager::GetUndoString( sym );
+	return sym.String();
 }
 
 
@@ -2461,4 +2956,44 @@ bool CDataModel::HasClipboardData() const
 	return GetClipboardMgr()->HasClipboardData();
 }
 
+// Commits symbols in symbol table
+void CDataModel::CommitSymbols()
+{
+	m_SymbolTable.Commit();
+}
+
+
+
+
+void CDataModel::AddOnElementCreatedCallback( const char *pElementType, IDmeElementCreated *callback )
+{
+
+	IDmElementFactory *pFactory = NULL;
+
+	int idx = m_Factories.Find( pElementType );
+	if ( idx == m_Factories.InvalidIndex() ) return;
+	
+	pFactory = m_Factories[ idx ]->GetFactory();
+	
+	Assert( pFactory );
+
+	pFactory->AddOnElementCreatedCallback( callback );
+
+}
+
+void CDataModel::RemoveOnElementCreatedCallback( const char *pElementType, IDmeElementCreated *callback )
+{
+
+	IDmElementFactory *pFactory = NULL;
+
+	int idx = m_Factories.Find( pElementType );
+	if ( idx == m_Factories.InvalidIndex() ) return;
+	
+	pFactory = m_Factories[ idx ]->GetFactory();
+	
+	Assert( pFactory );
+
+	pFactory->RemoveOnElementCreatedCallback( callback );
+	
+}
 

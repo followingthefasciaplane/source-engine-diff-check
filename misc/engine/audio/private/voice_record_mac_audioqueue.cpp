@@ -19,6 +19,8 @@
 
 #define kNumSecAudioBuffer	1.0f
 
+int Voice_SamplesPerSec();
+
 // ------------------------------------------------------------------------------
 // VoiceRecord_AudioQueue
 // ------------------------------------------------------------------------------
@@ -38,8 +40,8 @@ public:
 	
 	// Initialize. The format of the data we expect from the provider is
 	// 8-bit signed mono at the specified sample rate.
-	virtual bool		Init( int nSampleRate );
-
+	virtual bool		Init();
+	
 	virtual void		Idle();
 	
 	// Get the most recent N samples.
@@ -91,8 +93,10 @@ private:
 VoiceRecord_AudioQueue::VoiceRecord_AudioQueue() :
 m_nSampleRate( 0 ), m_AudioUnit( NULL ), m_SampleBufferSize(0), m_SampleBuffer(NULL),
 m_SampleBufferReadPos(0), m_SampleBufferWritePos(0), m_bRecordingAudio(false), m_hThread( NULL ), m_bFirstInit( true )
-{
+{	
 	ClearInterfaces();
+	m_nSampleRate = Voice_SamplesPerSec();
+	Init();
 }
 
 
@@ -416,30 +420,22 @@ bool VoiceRecord_AudioQueue::InitalizeInterfaces()
 	return true;
 }
 
-bool VoiceRecord_AudioQueue::Init( int nSampleRate )
+bool VoiceRecord_AudioQueue::Init()
 {
-	if ( m_AudioUnit && m_nSampleRate != nSampleRate )
-	{
-		// Need to recreate interfaces with different sample rate
-		ReleaseInterfaces();
-		ClearInterfaces();
-	}
-	m_nSampleRate = nSampleRate;
-
-	// Re-initialize the capture buffer if neccesary
+	// Re-initialize the capture buffer if neccesary (shouldn't be)
 	if ( !m_AudioUnit )
 	{
 		InitalizeInterfaces();
 	}
 
 	m_SampleBufferReadPos = m_SampleBufferWritePos = 0;
-
+	
 	//printf( "VoiceRecord_AudioQueue::Init()\n" );
 	// Initialise
 	OSStatus status = AudioUnitInitialize( m_AudioUnit );
 	if ( status != noErr )
-		return false;
-
+		return false;	
+	
 	return true;
 }
 
@@ -514,9 +510,9 @@ int VoiceRecord_AudioQueue::GetRecordedData(short *pOut, int nSamples )
 
 
 VoiceRecord_AudioQueue g_AudioQueueVoiceRecord;
-IVoiceRecord* CreateVoiceRecord_AudioQueue( int sampleRate )
+IVoiceRecord* CreateVoiceRecord_AudioQueue(int sampleRate)
 {
-	if ( g_AudioQueueVoiceRecord.Init( sampleRate ) )
+	if( g_AudioQueueVoiceRecord.Init() )
 	{
 		return &g_AudioQueueVoiceRecord;
 	}

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Pulling CCollisionEvent's definition out of physics.cpp so it can be abstracted upon (for the portal mod)
 //			
@@ -116,6 +116,8 @@ public:
 
 	void GetListOfPenetratingEntities( CBaseEntity *pSearch, CUtlVector<CBaseEntity *> &list );
 	bool IsInCallback() { return m_inCallback > 0 ? true : false; }
+
+	void RemovePenetrationEvents( CBaseEntity *pEntity );
 
 private:
 #if _DEBUG

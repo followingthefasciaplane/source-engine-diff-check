@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose:  baseclientstate.cpp: implementation of the CBaseClientState class.
 //
@@ -9,6 +9,9 @@
 #include "convar_serverbounded.h"
 #include "sys.h"
 #include "net.h"
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
 
 
 // These are the server cvars that control our cvars.
@@ -28,25 +31,29 @@ extern ConVar  sv_client_predict;
 // rate
 // ------------------------------------------------------------------------------------------ //
 
+void CL_RateCvarChanged( IConVar *pConVar, const char *pOldValue, float flOldValue )
+{
+}
+
 class CBoundedCvar_Rate : public ConVar_ServerBounded
 {
 public:
 	CBoundedCvar_Rate() :
 	  ConVar_ServerBounded( 
-		  "rate",
-#if defined( _X360 )
-		  "6000",
-#else
-		  V_STRINGIFY(DEFAULT_RATE),
-#endif
-		  FCVAR_ARCHIVE | FCVAR_USERINFO, 
-		  "Max bytes/sec the host can receive data" )
+		  "rate", 
+		  STRINGIFY( DEFAULT_RATE ),
+		  FCVAR_ARCHIVE | FCVAR_USERINFO,
+		  "Max bytes/sec the host can receive data", 
+		  CL_RateCvarChanged )
 	  {
 	  }
 
 	virtual float GetFloat() const
 	{
-		if ( cl.m_nSignonState >= SIGNONSTATE_FULL )
+#ifdef DEDICATED
+		return GetBaseFloatValue();
+#else
+		if ( GetBaseLocalClient().m_nSignonState >= SIGNONSTATE_FULL )
 		{
 			int nRate = (int)GetBaseFloatValue();
 			return (float)ClampClientRate( nRate );
@@ -55,6 +62,7 @@ public:
 		{
 			return GetBaseFloatValue();
 		}
+#endif
 	}
 };
 
@@ -72,7 +80,7 @@ public:
 	CBoundedCvar_CmdRate() :
 	  ConVar_ServerBounded( 
 		  "cl_cmdrate", 
-		  "30", 
+		  "64", 
 		  FCVAR_ARCHIVE | FCVAR_USERINFO, 
 		  "Max number of command packets sent to server per second", true, MIN_CMD_RATE, true, MAX_CMD_RATE )
 	{
@@ -82,7 +90,13 @@ public:
 	{
 		float flCmdRate = GetBaseFloatValue();
 
-		if ( sv_mincmdrate.GetInt() != 0 && cl.m_nSignonState >= SIGNONSTATE_FULL )
+#ifndef DEDICATED
+		if ( GetBaseLocalClient().ishltv )
+		{
+			extern ConVar tv_snapshotrate;
+			return tv_snapshotrate.GetFloat();
+		}
+		else if ( sv_mincmdrate.GetInt() != 0 && GetBaseLocalClient().m_nSignonState >= SIGNONSTATE_FULL )
 		{
 			// First, we make it stay within range of cl_updaterate.
 			float diff = flCmdRate - cl_updaterate->GetFloat();
@@ -98,6 +112,7 @@ public:
 			return clamp( flCmdRate, sv_mincmdrate.GetFloat(), sv_maxcmdrate.GetFloat() );
 		}
 		else
+#endif
 		{
 			return flCmdRate;
 		}
@@ -119,7 +134,7 @@ public:
 	CBoundedCvar_UpdateRate() :
 	  ConVar_ServerBounded( 
 		  "cl_updaterate",
-		  "20", 
+		  "64", 
 		  FCVAR_ARCHIVE | FCVAR_USERINFO | FCVAR_NOT_CONNECTED, 
 		  "Number of packets per second of updates you are requesting from the server" )
 	{
@@ -131,8 +146,16 @@ public:
 		//
 		// This cvar only takes effect on the server anyway, and this is done there too,
 		// but we have this here so they'll get the **note thing telling them the value 
-		// isn't functioning the way they set it.		
-		return clamp( GetBaseFloatValue(), sv_minupdaterate.GetFloat(), sv_maxupdaterate.GetFloat() );
+		// isn't functioning the way they set it.
+		float flValue = GetBaseFloatValue();
+#ifndef DEDICATED
+		if ( GetBaseLocalClient().ishltv )
+		{
+			extern ConVar tv_snapshotrate;
+			return tv_snapshotrate.GetFloat();
+		}
+#endif
+		return clamp( flValue, sv_minupdaterate.GetFloat(), sv_maxupdaterate.GetFloat() );
 	}
 };
 

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose:
 //
@@ -17,7 +17,6 @@
 #include "tier0/tslist.h"
 #include "datacache_common.h"
 #include "tier3/tier3.h"
-
 
 //-----------------------------------------------------------------------------
 //
@@ -39,8 +38,9 @@ struct DataCacheItemData_t
 
 //-------------------------------------
 
-#define DC_NO_NEXT_LOCKED ((DataCacheItem_t *)0xffffffff)
-#define DC_MAX_THREADS_FRAMELOCKED 4
+#define DC_NO_NEXT_LOCKED ((DataCacheItem_t *)-1)
+#define DC_MAX_THREADS_FRAMELOCKED 6
+
 
 struct DataCacheItem_t : DataCacheItemData_t
 {
@@ -117,6 +117,7 @@ public:
 	virtual int Unlock( DataCacheHandle_t handle );
 	virtual void *Get( DataCacheHandle_t handle, bool bFrameLock = false );
 	virtual void *GetNoTouch( DataCacheHandle_t handle, bool bFrameLock = false );
+	virtual void GetAndLockMultiple( void **ppData, int nCount, DataCacheHandle_t *pHandles );
 	virtual void LockMutex();
 	virtual void UnlockMutex();
 
@@ -154,6 +155,8 @@ public:
 
 	virtual void UpdateSize( DataCacheHandle_t handle, unsigned int nNewSize );
 
+	virtual unsigned int GetOptions();
+
 private:
 	friend void DataCacheItem_t::DestroyResource();
 
@@ -173,18 +176,19 @@ private:
 	void NoteUnlock( int size );
 	void NoteSizeChanged( int oldSize, int newSize );
 
+	// for debugging only, under user cvar enabling, causes datacache stress flushing
+	void ForceFlushDebug( bool bFlush );
+
 	struct FrameLock_t
 	{
-		//$ WARNING: This needs a TSLNodeBase_t as the first item in here.
-		TSLNodeBase_t	base;
 		int				m_iLock;
 		DataCacheItem_t *m_pFirst;
 		int				m_iThread;
 	};
-	typedef CThreadLocal<FrameLock_t *> CThreadFrameLock;
+	//typedef CThreadLocal<FrameLock_t *> CThreadFrameLock;
 
 	CDataCacheLRU &		m_LRU;
-	CThreadFrameLock	m_ThreadFrameLock;
+	FrameLock_t *       m_FrameLocks[MAX_THREADS_SUPPORTED];
 	DataCacheStatus_t	m_status;
 	DataCacheLimits_t	m_limits;
 	IDataCacheClient *	m_pClient;
@@ -280,6 +284,9 @@ public:
 	inline unsigned GetNumBytesUnlocked()	{ return m_status.nBytes - m_status.nBytesLocked; }
 	inline unsigned GetNumItemsUnlocked()	{ return m_status.nItems - m_status.nItemsLocked; }
 
+	virtual int GetSectionCount( void );
+	virtual const char *GetSectionName( int iIndex );
+
 private:
 	//-----------------------------------------------------
 
@@ -293,7 +300,7 @@ private:
 	int FindSectionIndex( const char *pszSection );
 
 	// Utilities used by the data cache report
-	void OutputItemReport( memhandle_t hItem );
+	void OutputItemReport( memhandle_t hItem, void *pXboxData = NULL );
 	static bool SortMemhandlesBySizeLessFunc( const memhandle_t& lhs, const memhandle_t& rhs );
 
 	//-----------------------------------------------------

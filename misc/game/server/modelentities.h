@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -11,6 +11,8 @@
 #pragma once
 #endif
 
+#include "positionwatcher.h"
+
 //!! replace this with generic start enabled/disabled
 #define SF_WALL_START_OFF		0x0001
 #define SF_IGNORE_PLAYERUSE		0x0002
@@ -18,7 +20,7 @@
 //-----------------------------------------------------------------------------
 // Purpose: basic solid geometry
 // enabled state:	brush is visible
-// disabled state:	brush not visible
+// disabled staute:	brush not visible
 //-----------------------------------------------------------------------------
 class CFuncBrush : public CBaseEntity
 {
@@ -26,14 +28,15 @@ public:
 	DECLARE_CLASS( CFuncBrush, CBaseEntity );
 
 	virtual void Spawn( void );
+	virtual void Activate( void );
 	bool CreateVPhysics( void );
 
 	virtual int	ObjectCaps( void ) { return HasSpawnFlags(SF_IGNORE_PLAYERUSE) ? BaseClass::ObjectCaps() : BaseClass::ObjectCaps() | FCAP_IMPULSE_USE; }
 
 	virtual int DrawDebugTextOverlays( void );
 
-	virtual void TurnOff( void );
-	virtual void TurnOn( void );
+	void TurnOff( void );
+	void TurnOn( void );
 
 	// Input handlers
 	void InputTurnOff( inputdata_t &inputdata );
@@ -50,13 +53,14 @@ public:
 
 	BrushSolidities_e m_iSolidity;
 	int m_iDisabled;
-	bool m_bSolidBsp;
 	string_t m_iszExcludedClass;
+	bool m_bSolidBsp;
 	bool m_bInvertExclusion;
 
 	DECLARE_DATADESC();
+	DECLARE_SERVERCLASS();
 
-	virtual bool IsOn( void ) const;
+	virtual bool IsOn( void );
 };
 
 

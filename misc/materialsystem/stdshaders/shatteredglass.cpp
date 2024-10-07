@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Lightmap only shader
 //
@@ -11,6 +11,10 @@
 #include "ShatteredGlass_ps20.inc"
 #include "ShatteredGlass_ps20b.inc"
 #include "ShatteredGlass_vs20.inc"
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
 
 BEGIN_VS_SHADER( ShatteredGlass,
 			  "Help for ShatteredGlass" )
@@ -72,12 +76,6 @@ BEGIN_VS_SHADER( ShatteredGlass,
 
 	SHADER_FALLBACK
 	{
-        // MMW Shattered Glass runs as a DX9 effect for 8.2 hardware
-        bool isDX9 = (g_pHardwareConfig->GetDXSupportLevel() >= 82);
-		if( !isDX9 )
-		{
-			return "ShatteredGlass_DX8";
-		}
 		return 0;
 	}
 
@@ -127,6 +125,7 @@ BEGIN_VS_SHADER( ShatteredGlass,
 		}
 		bool bHasVertexColor = IS_FLAG_SET(MATERIAL_VAR_VERTEXCOLOR);
 		bool bHasBaseAlphaEnvmapMask = IS_FLAG_SET(MATERIAL_VAR_BASEALPHAENVMAPMASK);
+		TextureBindFlags_t nLightmapBindFlags = ( g_pHardwareConfig->GetHDRType() == HDR_TYPE_NONE ) ? TEXTURE_BINDFLAGS_SRGBREAD : TEXTURE_BINDFLAGS_NONE;
 	
 		// Base
 		SHADOW_STATE
@@ -157,14 +156,7 @@ BEGIN_VS_SHADER( ShatteredGlass,
 
 			// Lightmap
 			pShaderShadow->EnableTexture( SHADER_SAMPLER1, true );
-			if( g_pHardwareConfig->GetHDRType() == HDR_TYPE_NONE )
-			{
-				pShaderShadow->EnableSRGBRead( SHADER_SAMPLER1, true );
-			}
-			else
-			{
-				pShaderShadow->EnableSRGBRead( SHADER_SAMPLER1, false );
-			}
+			pShaderShadow->EnableSRGBRead( SHADER_SAMPLER1, ( nLightmapBindFlags & TEXTURE_BINDFLAGS_SRGBREAD ) != 0  );
 
 			// Detail texture
 			pShaderShadow->EnableTexture( SHADER_SAMPLER3, true );
@@ -175,10 +167,8 @@ BEGIN_VS_SHADER( ShatteredGlass,
 			{
 				flags |= VERTEX_NORMAL;
 				pShaderShadow->EnableTexture( SHADER_SAMPLER2, true );
-				if( g_pHardwareConfig->GetHDRType() == HDR_TYPE_NONE )
-				{
-					pShaderShadow->EnableSRGBRead( SHADER_SAMPLER2, true );
-				}
+				bool bSRGBReadEnvMap = g_pHardwareConfig->GetHDRType() == HDR_TYPE_NONE;
+				pShaderShadow->EnableSRGBRead( SHADER_SAMPLER2, bSRGBReadEnvMap );
 			
 				if( bHasEnvmapMask )
 				{
@@ -222,55 +212,47 @@ BEGIN_VS_SHADER( ShatteredGlass,
 			}
 
 			DefaultFog();
+
+			PI_BeginCommandBuffer();
+			PI_SetModulationPixelShaderDynamicState( 1 );
+			PI_EndCommandBuffer();
 		}
 		DYNAMIC_STATE
 		{
 			SetVertexShaderTextureTransform( VERTEX_SHADER_SHADER_SPECIFIC_CONST_0, BASETEXTURETRANSFORM );
 			SetVertexShaderTextureScale( VERTEX_SHADER_SHADER_SPECIFIC_CONST_2, DETAILSCALE );
 
-			BindTexture( SHADER_SAMPLER0, BASETEXTURE, FRAME );
-			pShaderAPI->BindStandardTexture( SHADER_SAMPLER1, TEXTURE_LIGHTMAP );
-			BindTexture( SHADER_SAMPLER3, DETAIL );
+			BindTexture( SHADER_SAMPLER0, TEXTURE_BINDFLAGS_SRGBREAD, BASETEXTURE, FRAME );
+			pShaderAPI->BindStandardTexture( SHADER_SAMPLER1, nLightmapBindFlags, TEXTURE_LIGHTMAP );
+			BindTexture( SHADER_SAMPLER3, TEXTURE_BINDFLAGS_SRGBREAD, DETAIL );
 
 			if( bHasEnvmap )
 			{
-				BindTexture( SHADER_SAMPLER2, ENVMAP, ENVMAPFRAME );
+				bool bSRGBReadEnvMap = g_pHardwareConfig->GetHDRType() == HDR_TYPE_NONE;
+				BindTexture( SHADER_SAMPLER2, SRGBReadMask( bSRGBReadEnvMap ), ENVMAP, ENVMAPFRAME );
 				if( bHasEnvmapMask )
 				{
-					BindTexture( SHADER_SAMPLER5, ENVMAPMASK, ENVMAPMASKFRAME );
+					BindTexture( SHADER_SAMPLER5, TEXTURE_BINDFLAGS_NONE, ENVMAPMASK, ENVMAPMASKFRAME );
 				}
 			}
 
-			pShaderAPI->BindStandardTexture( SHADER_SAMPLER6, TEXTURE_NORMALIZATION_CUBEMAP_SIGNED );
-
-			/*
-			"DOWATERFOG"				"0..1"
-			"ENVMAP_MASK"			"0..1"
-			*/
-			MaterialFogMode_t fogType = pShaderAPI->GetSceneFogMode();
-			int fogIndex = ( fogType == MATERIAL_FOG_LINEAR_BELOW_FOG_Z ) ? 1 : 0;
+			pShaderAPI->BindStandardTexture( SHADER_SAMPLER6, TEXTURE_BINDFLAGS_NONE, TEXTURE_NORMALIZATION_CUBEMAP_SIGNED );
 
 			DECLARE_DYNAMIC_VERTEX_SHADER( shatteredglass_vs20 );
-			SET_DYNAMIC_VERTEX_SHADER_COMBO( DOWATERFOG,  fogIndex );
 			SET_DYNAMIC_VERTEX_SHADER( shatteredglass_vs20 );
 
 			if( g_pHardwareConfig->SupportsPixelShaders_2_b() )
 			{
 				DECLARE_DYNAMIC_PIXEL_SHADER( shatteredglass_ps20b );
-				SET_DYNAMIC_PIXEL_SHADER_COMBO( HDRENABLED,  IsHDREnabled() );
-				SET_DYNAMIC_PIXEL_SHADER_COMBO( PIXELFOGTYPE, pShaderAPI->GetPixelFogCombo() );
 				SET_DYNAMIC_PIXEL_SHADER( shatteredglass_ps20b );
 			}
 			else
 			{
 				DECLARE_DYNAMIC_PIXEL_SHADER( shatteredglass_ps20 );
-				SET_DYNAMIC_PIXEL_SHADER_COMBO( HDRENABLED,  IsHDREnabled() );
-				SET_DYNAMIC_PIXEL_SHADER_COMBO( PIXELFOGTYPE, pShaderAPI->GetPixelFogCombo() );
 				SET_DYNAMIC_PIXEL_SHADER( shatteredglass_ps20 );
 			}
 
 			SetEnvMapTintPixelShaderDynamicState( 0, ENVMAPTINT, -1 );
-			SetModulationPixelShaderDynamicState( 1 );
 			SetPixelShaderConstant( 2, ENVMAPCONTRAST );
 			SetPixelShaderConstant( 3, ENVMAPSATURATION );
 

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -22,14 +22,15 @@ abstract_class IWaveData
 public:
 	virtual						~IWaveData( void ) {}
 	virtual CAudioSource		&Source( void ) = 0;
-	virtual int					ReadSourceData( void **pData, int sampleIndex, int sampleCount, char copyBuf[AUDIOSOURCE_COPYBUF_SIZE] ) = 0;
+	virtual int					ReadSourceData( void **pData, int64 sampleIndex, int sampleCount, char copyBuf[AUDIOSOURCE_COPYBUF_SIZE] ) = 0;
 	virtual bool				IsReadyToMix() = 0;
+	virtual void				UpdateLoopPosition( int nLoopPosition ) = 0;
 };
 
 abstract_class IWaveStreamSource
 {
 public:
-	virtual int		UpdateLoopingSamplePosition( int samplePosition ) = 0;
+	virtual int64	UpdateLoopingSamplePosition( int64 samplePosition ) = 0;
 	virtual void	UpdateSamples( char *pData, int sampleCount ) = 0;
 	virtual int		GetLoopingInfo( int *pLoopBlock, int *pNumLeadingSamples, int *pNumTrailingSamples ) = 0;
 };
@@ -37,8 +38,9 @@ public:
 class IFileReadBinary;
 class CSfxTable;
 
-extern IWaveData *CreateWaveDataStream( CAudioSource &source, IWaveStreamSource *pStreamSource, const char *pFileName, int dataStart, int dataSize, CSfxTable *pSfx, int startOffset );
+extern IWaveData *CreateWaveDataStream( CAudioSource &source, IWaveStreamSource *pStreamSource, const char *pFileName, int dataStart, int dataSize, CSfxTable *pSfx, int startOffset, int skipInitialSamples, SoundError &soundError );
 extern IWaveData *CreateWaveDataMemory( CAudioSource &source );
+extern IWaveData *CreateWaveDataHRTF(IWaveData* pData, hrtf_info_t* dir);
 
 void PrefetchDataStream( const char *pFileName, int dataOffset, int dataSize );
 

@@ -1,11 +1,11 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
 // $Workfile:     $
 // $Date:         $
 // $NoKeywords: $
-//=============================================================================//
+//===========================================================================//
 
 
 #include "render_pch.h"
@@ -18,12 +18,15 @@
 #include "cdll_engine_int.h"
 #include "cl_main.h"
 #include "debugoverlay.h"
+#include "tier2/renderutils.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
 static ConVar r_drawlights(  "r_drawlights", "0", FCVAR_CHEAT );
 static ConVar r_drawlightinfo(  "r_drawlightinfo", "0", FCVAR_CHEAT );
+
+extern ConVar r_lightcache_radiusfactor;
 
 static bool s_bActivateLightSprites = false;
 
@@ -78,7 +81,9 @@ float ComputeLightRadius( dworldlight_t *pLight, bool bIsHDR )
 			{
 				flLightRadius = (-b + sqrtf(discrim)) / (2.0f * a);
 				if (flLightRadius < 0)
+				{
 					flLightRadius = 0;
+				}
 			}
 		}
 	}
@@ -166,73 +171,7 @@ static void DrawLightSprite( dworldlight_t *pLight, float angleAttenFactor )
 
 static void DrawPointLight( const Vector &vecOrigin, float flLightRadius )
 {
-	int nVertCount = POINT_THETA_GRID * (POINT_PHI_GRID + 1);
-	int nIndexCount = 8 * POINT_THETA_GRID * POINT_PHI_GRID;
-
-	CMatRenderContextPtr pRenderContext( materials );
-
-	pRenderContext->Bind( g_materialWorldWireframeZBuffer );
-	IMesh *pMesh = pRenderContext->GetDynamicMesh( );
-	CMeshBuilder meshBuilder;
-	meshBuilder.Begin( pMesh, MATERIAL_LINES, nVertCount, nIndexCount );
-
-	float dTheta = 360.0f / POINT_THETA_GRID;
-	float dPhi = 180.0f / POINT_PHI_GRID;
-
-	Vector pt;
-	int i;
-	float flPhi = 0;
-	for ( i = 0; i <= POINT_PHI_GRID; ++i )
-	{
-		float flSinPhi = sin(DEG2RAD(flPhi));
-		float flCosPhi = cos(DEG2RAD(flPhi));
-		float flTheta = 0;
-		for ( int j = 0; j < POINT_THETA_GRID; ++j )
-		{
-			pt = vecOrigin;
-			pt.x += flLightRadius * cos(DEG2RAD(flTheta)) * flSinPhi;
-			pt.y += flLightRadius * sin(DEG2RAD(flTheta)) * flSinPhi;
-			pt.z += flLightRadius * flCosPhi;
-
-			meshBuilder.Position3fv( pt.Base() );
-			meshBuilder.AdvanceVertex();
-
-			flTheta += dTheta;
-		}
-
-		flPhi += dPhi;
-	}
-
-	for ( i = 0; i < POINT_THETA_GRID; ++i )
-	{
-		for ( int j = 0; j < POINT_PHI_GRID; ++j )
-		{
-			int nNextIndex = (j != POINT_PHI_GRID - 1) ? j + 1 : 0;
-
-			meshBuilder.Index( i * POINT_PHI_GRID + j );
-			meshBuilder.AdvanceIndex();
-			meshBuilder.Index( (i + 1) * POINT_PHI_GRID + j );
-			meshBuilder.AdvanceIndex();
-
-			meshBuilder.Index( (i + 1) * POINT_PHI_GRID + j );
-			meshBuilder.AdvanceIndex();
-			meshBuilder.Index( (i + 1) * POINT_PHI_GRID + nNextIndex );
-			meshBuilder.AdvanceIndex();
-
-			meshBuilder.Index( (i + 1) * POINT_PHI_GRID + nNextIndex );
-			meshBuilder.AdvanceIndex();
-			meshBuilder.Index( i * POINT_PHI_GRID + nNextIndex );
-			meshBuilder.AdvanceIndex();
-
-			meshBuilder.Index( i * POINT_PHI_GRID + nNextIndex );
-			meshBuilder.AdvanceIndex();
-			meshBuilder.Index( i * POINT_PHI_GRID + j );
-			meshBuilder.AdvanceIndex();
-		}
-	}
-
-	meshBuilder.End();
-	pMesh->Draw();
+	RenderWireframeSphere( vecOrigin, flLightRadius, 8, 8, Color( 0, 255, 255, 255 ), true );
 }
 
 //-----------------------------------------------------------------------------
@@ -246,7 +185,16 @@ void DrawSpotLight( dworldlight_t *pLight )
 {
 	float flLightRadius = ComputeLightRadius( pLight, false );
 
-	int nGridLines = (int)(flLightRadius / SPOT_GRID_LINE_DISTANCE) + 1;
+	RenderWireframeSphere( pLight->origin, flLightRadius, 20, 20, Color( 255, 0, 0, 255 ), true );
+
+	float flGridLineDist = SPOT_GRID_LINE_DISTANCE;
+	int nGridLines = (int)(flLightRadius / flGridLineDist) + 1;
+	if ( nGridLines > 256 )
+	{
+		nGridLines = 256;
+		flGridLineDist = flLightRadius / (float)( nGridLines - 1 );
+	}
+
 	int nVertCount = SPOT_RADIAL_GRID * (nGridLines + 1);
 	int nIndexCount = 8 * SPOT_RADIAL_GRID * nGridLines;
 
@@ -280,21 +228,21 @@ void DrawSpotLight( dworldlight_t *pLight )
 		
 		float flRadius = flDist * flTanAngle;
 
-		float flTempAngle = 0;
+		float flAngle = 0;
 		for ( int j = 0; j < SPOT_RADIAL_GRID; ++j )
 		{
-			float flSin = sin( DEG2RAD( flTempAngle ) );
-			float flCos = cos( DEG2RAD( flTempAngle ) );
+			float flSin = sin(DEG2RAD(flAngle));
+			float flCos = cos(DEG2RAD(flAngle));
 			VectorMA( vecCenter, flRadius * flCos, xaxis, pt );
 			VectorMA( pt, flRadius * flSin, yaxis, pt );
 
 			meshBuilder.Position3fv( pt.Base() );
 			meshBuilder.AdvanceVertex();
 
-			flTempAngle += dTheta;
+			flAngle += dTheta;
 		}
 
-		flDist += SPOT_GRID_LINE_DISTANCE;
+		flDist += flGridLineDist;
 	}
 
 	for ( i = 0; i < nGridLines; ++i )
@@ -420,10 +368,8 @@ void DrawLightDebuggingInfo( void )
 
 	for (i = 0; i < host_state.worldbrush->numworldlights; i++)
 	{
-		if ((nLight > 0) && (i != nLight-1))
-			continue;
-
 		dworldlight_t *pLight = &host_state.worldbrush->worldlights[i];
+
 		Vector lightToEye;
 		float angleAttenFactor = 0.0f;
 		switch( pLight->type )

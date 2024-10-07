@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2009, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: master header file for socketlib.lib
 //
@@ -116,7 +116,7 @@ enum SocketState_t				// State of a given socket.
 #if defined( PLATFORM_X360 )
 #include <xtl.h>
 #include <winsockx.h>
-#elif defined( PLATFORM_WINDOWS_PC )
+#elif defined( PLATFORM_WINDOWS_PC32 ) || defined( PLATFORM_WINDOWS_PC64 )
 #include <winsock2.h>
 #else 
 #error No build platform macro (PLATFORM_*) defined
@@ -132,7 +132,7 @@ inline SOCKET GetPlatformSocket( SocketHandle_t handle )
     return static_cast<SOCKET>( handle );
 }
 
-static const SocketHandle_t InvalidSocketHandle = static_cast<SocketHandle_t>( INVALID_SOCKET );
+static const SocketHandle_t InvalidSocketHandle = GetSocketHandle( INVALID_SOCKET );
 
 
 // ----------------------------------------------------------------------------
@@ -181,16 +181,10 @@ public:
 																										// Only valid immediately after a function returns an unsuccessful error code.
     const char*			GetLastErrorString() const;														// Gets a string containing the last underlying system error reported.
     
-	SocketHandle_t		GetListeningSocket() const;
-
-	SocketHandle_t		GetEndpointSocket( int nEndpointIndex ) const;
-
-    void				ResetEndpoint( int endpointIndex );
-
-	SocketErrorCode_t	SetSocketOpt(  int endpointIndex, int level, int optname, const void *optval, int optlen );
-
+    
 private:
     SocketHandle_t		CreateNewSocket();
+    void				ResetEndpoint( int endpointIndex );
 
     SocketHandle_t		m_ListeningSocket;
     SocketHandle_t		m_EndpointSockets[ MAX_SERVER_CONNECTIONS ];
@@ -204,31 +198,6 @@ private:
     SocketErrorCode_t	m_LastError;
     int					m_LastSystemError;
 };
-
-
-//-----------------------------------------------------------------------------
-// Inline functions from CSocketConnection
-//-----------------------------------------------------------------------------
-
-
-//-----------------------------------------------------------------------------
-//
-//-----------------------------------------------------------------------------
-inline SocketHandle_t CSocketConnection::GetListeningSocket() const
-{
-	return m_ListeningSocket;
-}
-
-
-//-----------------------------------------------------------------------------
-//
-//-----------------------------------------------------------------------------
-inline SocketHandle_t CSocketConnection::GetEndpointSocket( int nEndpointIndex ) const
-{
-    AssertMsg( nEndpointIndex >= 0 && nEndpointIndex < MAX_SERVER_CONNECTIONS, "Endpoint index out of range" );
-
-	return m_EndpointSockets[ nEndpointIndex ];
-}
 
 
 // ----------------------------------------------------------------------------
@@ -295,8 +264,6 @@ public:
 	bool GetCurrentMessageManual( void*& msgData, uint32& msgSize );
 	bool DiscardCurrentMessageManual();
 	
-	bool IsSendingPartialMessage()			{ return m_bSendingPartialMessage; }
-	int32 PartialMessageBytesRemaining()	{ return m_bSendingPartialMessage ? m_PartialMessageBytesTotal - m_PartialMessageBytesSent : 0; }
 
 private:
     MessageHeader_t		m_MessageHeader;

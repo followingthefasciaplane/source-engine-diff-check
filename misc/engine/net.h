@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -16,14 +16,25 @@
 #include "common.h"
 #include "bitbuf.h"
 #include "netadr.h"
-#include "proto_version.h"
+#include "inetchannel.h"
+#include "networksystem/inetworksystem.h"
 
-// Flow control bytes per second limits
-#define MAX_RATE		(1024*1024)				
-#define MIN_RATE		1000
-#define DEFAULT_RATE	80000
+class ISteamDatagramTransportClient;
 
+// Flow control bytes per second limits:
+// 16,000 bytes per second = 128kbps
+// default rate: 192kbytes per second = 1.5mbps
+// 0.75Mbytes per second = 6mbps
+#define MIN_RATE		  16000
+#define DEFAULT_RATE	 196608
+#define MAX_RATE		 786432
+
+#ifdef _GAMECONSOLE
+#define SIGNON_TIME_OUT				75.0f  // signon disconnect timeout
+#else
 #define SIGNON_TIME_OUT				300.0f  // signon disconnect timeout
+#endif
+#define SIGNON_TIME_OUT_360			75.0f
 
 #define FRAGMENT_BITS		8
 #define FRAGMENT_SIZE		(1<<FRAGMENT_BITS)
@@ -38,7 +49,10 @@
 
 #define TCP_CONNECT_TIMEOUT		4.0f
 #define	PORT_ANY				-1
-#define PORT_TRY_MAX			32
+#define PORT_TRY_MAX			10							// the number of different ports to try to find an unused one
+#define PORT_TRY_MAX_FORKED     150							// the number to try when we are running as a forked child process (for the server farm)
+
+
 #define TCP_MAX_ACCEPTS			8
 
 #define LOOPBACK_SOCKETS	2
@@ -51,80 +65,43 @@
 
 // NETWORKING INFO
 
-// This is the packet payload without any header bytes (which are attached for actual sending)
-#define	NET_MAX_PAYLOAD				288000	// largest message we can send in bytes
-#define	NET_MAX_PAYLOAD_V23			96000	// largest message we can send in bytes
-#define NET_MAX_PAYLOAD_BITS_V23	17		// 2^NET_MAX_PAYLOAD_BITS > NET_MAX_PAYLOAD
-// This is just the client_t->netchan.datagram buffer size (shouldn't ever need to be huge)
-#define NET_MAX_DATAGRAM_PAYLOAD	4000	// = maximum unreliable payload size
-
-// UDP has 28 byte headers
-#define UDP_HEADER_SIZE				(20+8)	// IP = 20, UDP = 8
-
-
-#define MAX_ROUTABLE_PAYLOAD		1260	// Matches x360 size
-
-#if (MAX_ROUTABLE_PAYLOAD & 3) != 0
-#error Bit buffers must be a multiple of 4 bytes
-#endif
-
-#define MIN_ROUTABLE_PAYLOAD		16		// minimum playload size
-
-#define NETMSG_TYPE_BITS	6	// must be 2^NETMSG_TYPE_BITS > SVC_LASTMSG
-
-#define NETMSG_LENGTH_BITS	11	// 256 bytes 
-
-// This is the payload plus any header info (excluding UDP header)
-
-#define HEADER_BYTES	9	// 2*4 bytes seqnr, 1 byte flags
-
-// Pad this to next higher 16 byte boundary
-// This is the largest packet that can come in/out over the wire, before processing the header
-//  bytes will be stripped by the networking channel layer
-#define	NET_MAX_MESSAGE	PAD_NUMBER( ( NET_MAX_PAYLOAD + HEADER_BYTES ), 16 )
-
-// Even connectionless packets require int32 value (-1) + 1 byte content
-#define NET_MIN_MESSAGE 5
-
-#define NET_HEADER_FLAG_SPLITPACKET				-2
-#define NET_HEADER_FLAG_COMPRESSEDPACKET		-3
-
 class INetChannel;
 
-enum
+enum ESocketIndex_t
 {
+	NS_INVALID = -1,
+
 	NS_CLIENT = 0,	// client socket
 	NS_SERVER,	// server socket
+#ifdef _X360
+	NS_X360_SYSTEMLINK,
+	NS_X360_LOBBY,
+	NS_X360_TEAMLINK,
+#endif
 	NS_HLTV,
-	NS_MATCHMAKING,
-	NS_SYSTEMLINK,
-#ifdef LINUX
-	NS_SVLAN,	// LAN udp port for Linux. See NET_OpenSockets for info.
+	NS_HLTV1, // Note: NS_HLTV1 must follow NS_HLTV, NS_HLTV2 must follow NS_HLTV1, etc.
+#if defined( REPLAY_ENABLED )
+	NS_REPLAY,
 #endif
 	MAX_SOCKETS
 };
-
-typedef struct netpacket_s
-{
-	netadr_t		from;		// sender IP
-	int				source;		// received source 
-	double			received;	// received time
-	unsigned char	*data;		// pointer to raw packet data
-	bf_read			message;	// easy bitbuf data access
-	int				size;		// size in bytes
-	int				wiresize;   // size in bytes before decompression
-	bool			stream;		// was send as stream
-	struct netpacket_s *pNext;	// for internal use, should be NULL in public
-} netpacket_t;
 
 extern	netadr_t	net_local_adr;
 extern	double		net_time;
 
 class INetChannelHandler;
 class IConnectionlessPacketHandler;
+class CMsgSteamDatagramGameServerAuthTicket;
+class ISteamDatagramTransportClient;
 
 // Start up networking
 void		NET_Init( bool bDedicated );
+
+
+// initialize queued packet sender. must do after fork(), not before
+void NET_InitPostFork( void );
+
+
 // Shut down networking
 void		NET_Shutdown (void);
 // Read any incoming packets, dispatch to known netchannels and call handler for connectionless packets
@@ -132,13 +109,14 @@ void		NET_ProcessSocket( int sock, IConnectionlessPacketHandler * handler );
 // Set a port to listen mode
 void		NET_ListenSocket( int sock, bool listen );
 // Send connectionsless string over the wire
-void		NET_OutOfBandPrintf(int sock, const netadr_t &adr, PRINTF_FORMAT_STRING const char *format, ...) FMTFUNCTION( 3, 4 );
+void		NET_OutOfBandPrintf(int sock, const ns_address &adr, PRINTF_FORMAT_STRING const char *format, ...) FMTFUNCTION( 3, 4 );
+void		NET_OutOfBandDelayedPrintf(int sock, const ns_address &adr, uint32 unMillisecondsDelay, PRINTF_FORMAT_STRING const char *format, ...) FMTFUNCTION( 4, 5 );
 // Send a raw packet, connectionless must be provided (chan can be NULL)
-int			NET_SendPacket ( INetChannel *chan, int sock,  const netadr_t &to, const  unsigned char *data, int length, bf_write *pVoicePayload = NULL, bool bUseCompression = false );
+int			NET_SendPacket ( INetChannel *chan, int sock,  const ns_address &to, const  unsigned char *data, int length, bf_write *pVoicePayload = NULL, bool bUseCompression = false, uint32 unMillisecondsDelay = 0u );
 // Called periodically to maybe send any queued packets (up to 4 per frame)
 void		NET_SendQueuedPackets();
 // Start set current network configuration
-void		NET_SetMutiplayer(bool multiplayer);
+void		NET_SetMultiplayer(bool multiplayer);
 // Set net_time
 void		NET_SetTime( double realtime );
 // RunFrame must be called each system frame before reading/sending on any socket
@@ -146,13 +124,21 @@ void		NET_RunFrame( double realtime );
 // Check configuration state
 bool		NET_IsMultiplayer( void );
 bool		NET_IsDedicated( void );
+#ifdef SERVER_XLSP
+bool		NET_IsDedicatedForXbox( void );
+#else
+FORCEINLINE bool NET_IsDedicatedForXbox( void )
+{
+	return false;
+}
+#endif
+
 // Writes a error file with bad packet content
 void		NET_LogBadPacket(netpacket_t * packet);
 
 // bForceNew (used for bots) tells it not to share INetChannels (bots will crash when disconnecting if they
 // share an INetChannel).
-INetChannel	*NET_CreateNetChannel(int socketnumber, netadr_t *adr, const char * name, INetChannelHandler * handler, bool bForceNew=false,
-								  int nProtocolVersion=PROTOCOL_VERSION );
+INetChannel	*NET_CreateNetChannel( int socketnumber, const ns_address *adr, const char * name, INetChannelHandler * handler, const byte *pbEncryptionKey, bool bForceNew );
 void		NET_RemoveNetChannel(INetChannel *netchan, bool bDeleteNetChan);
 void		NET_PrintChannelStatus( INetChannel * chan );
 
@@ -174,6 +160,54 @@ void NET_RemoveAllExtraSockets();
 
 const char *NET_ErrorString (int code); // translate a socket error into a friendly string
 
+// Returns true if compression succeeded, false otherwise
+bool NET_BufferToBufferCompress( char *dest, unsigned int *destLen, char *source, unsigned int sourceLen );
+bool NET_BufferToBufferDecompress( char *dest, unsigned int *destLen, char *source, unsigned int sourceLen );
+
+netadr_t NET_InitiateSteamConnection(int sock, uint64 uSteamID, PRINTF_FORMAT_STRING const char *format, ...) FMTFUNCTION( 3, 4 );
+void NET_TerminateConnection(int sock, const ns_address &peer );
+void NET_TerminateSteamConnection(int sock, uint64 uSteamID );
+
+void NET_SleepUntilMessages( int nMilliseconds );
+
+// If net_public_adr convar is set then returns that, otherwise, checks with steam if we are a dedicated server (eventually will work for the client) and returns that
+// Returns false if not able to deduce address
+bool NET_GetPublicAdr( netadr_t &adr );
+
+/// Start listening for Steam datagram, if the convar tells us to
+void NET_SteamDatagramServerListen();
+
+/// Called when we receive a ticket to play on a particular gameserver
+#ifndef DEDICATED
+
+/// Make sure we are setup to talk to this gameserver
+bool NET_InitSteamDatagramProxiedGameserverConnection( const ns_address &adr );
+#endif
+
+//============================================================================
+//
+// Encrypted network channel communication support
+//
+
+#define NET_CRYPT_KEY_LENGTH 16
+bool NET_CryptVerifyServerCertificateAndAllocateSessionKey( bool bOfficial, const ns_address &from,
+	const byte *pchKeyPub, int numKeyPub,
+	const byte *pchKeySgn, int numKeySgn,
+	byte **pbAllocatedKey, int *pnAllocatedCryptoBlockSize );
+bool NET_CryptVerifyClientSessionKey( bool bOfficial,
+	const byte *pchKeyPri, int numKeyPri,
+	const byte *pbEncryptedKey, int numEncryptedBytes,
+	byte *pbPlainKey, int numPlainKeyBytes );
+
+enum ENetworkCertificate_t
+{
+	k_ENetworkCertificate_PublicKey,
+	k_ENetworkCertificate_PrivateKey,
+	k_ENetworkCertificate_Signature,
+	k_ENetworkCertificate_Max
+};
+bool NET_CryptGetNetworkCertificate( ENetworkCertificate_t eType, const byte **pbData, int *pnumBytes );
+
 //============================================================================
 
 // Message data
@@ -185,8 +219,44 @@ typedef struct
 	float	time;
 } flowstats_t;
 
+struct sockaddr;
+
+class ISteamSocketMgr
+{
+public:
+	enum ESteamCnxType
+	{
+		ESCT_NEVER = 0,
+		ESCT_ASBACKUP,
+		ESCT_ALWAYS,
+
+		ESCT_MAXTYPE,
+	};
+
+	enum
+	{
+		STEAM_CNX_PORT = 1,
+	};
+
+	virtual void Init() = 0;
+	virtual void Shutdown() = 0;
+
+	virtual ESteamCnxType GetCnxType() = 0;
+
+	virtual void OpenSocket( int s, int nModule, int nSetPort, int nDefaultPort, const char *pName, int nProtocol, bool bTryAny ) = 0;
+	virtual void CloseSocket( int s, int nModule ) = 0;
+
+	virtual int sendto( int s, const char * buf, int len, int flags, const ns_address &to ) = 0;
+	virtual int recvfrom( int s, char * buf, int len, int flags, ns_address * from ) = 0;
+
+	virtual uint64 GetSteamIDForRemote( const ns_address &remote ) = 0;
+};
+
+extern ISteamSocketMgr *g_pSteamSocketMgr;
+
 // Some hackery to avoid using va() in constructor since we cache off the pointer to the string in the ConVar!!!
 #define NET_STRINGIZE( x ) #x
 #define NET_MAKESTRING( macro, val )	macro(val)
 #define NETSTRING( val ) NET_MAKESTRING( NET_STRINGIZE, val )
+
 #endif // !NET_H

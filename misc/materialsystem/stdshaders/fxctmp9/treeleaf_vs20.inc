@@ -1,3 +1,6 @@
+// ALL SKIP STATEMENTS THAT AFFECT THIS SHADER!!!
+// ( $FLATTEN_STATIC_CONTROL_FLOW == 0 ) && ( $NUM_LIGHTS > 0 )  [PC]
+// defined $LIGHTING_PREVIEW && defined $FASTPATH && $LIGHTING_PREVIEW && $FASTPATH
 #include "shaderlib/cshader.h"
 class treeleaf_vs20_Static_Index
 {
@@ -17,56 +20,59 @@ public:
 	}
 	void SetHALFLAMBERT( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nHALFLAMBERT = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bHALFLAMBERT = true;
 #endif
 	}
 private:
-	int m_nUSE_STATIC_CONTROL_FLOW;
+	int m_nFLATTEN_STATIC_CONTROL_FLOW;
 #ifdef _DEBUG
-	bool m_bUSE_STATIC_CONTROL_FLOW;
+	bool m_bFLATTEN_STATIC_CONTROL_FLOW;
 #endif
 public:
-	void SetUSE_STATIC_CONTROL_FLOW( int i )
+	void SetFLATTEN_STATIC_CONTROL_FLOW( int i )
 	{
 		Assert( i >= 0 && i <= 1 );
-		m_nUSE_STATIC_CONTROL_FLOW = i;
+		m_nFLATTEN_STATIC_CONTROL_FLOW = i;
 #ifdef _DEBUG
-		m_bUSE_STATIC_CONTROL_FLOW = true;
+		m_bFLATTEN_STATIC_CONTROL_FLOW = true;
 #endif
 	}
-	void SetUSE_STATIC_CONTROL_FLOW( bool i )
+	void SetFLATTEN_STATIC_CONTROL_FLOW( bool i )
 	{
-		m_nUSE_STATIC_CONTROL_FLOW = i ? 1 : 0;
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
+		m_nFLATTEN_STATIC_CONTROL_FLOW = i ? 1 : 0;
 #ifdef _DEBUG
-		m_bUSE_STATIC_CONTROL_FLOW = true;
+		m_bFLATTEN_STATIC_CONTROL_FLOW = true;
 #endif
 	}
 public:
-	treeleaf_vs20_Static_Index( )
+	// CONSTRUCTOR
+	treeleaf_vs20_Static_Index( IShaderShadow *pShaderShadow, IMaterialVar **params )
 	{
 #ifdef _DEBUG
 		m_bHALFLAMBERT = false;
 #endif // _DEBUG
 		m_nHALFLAMBERT = 0;
 #ifdef _DEBUG
-		m_bUSE_STATIC_CONTROL_FLOW = false;
+		m_bFLATTEN_STATIC_CONTROL_FLOW = false;
 #endif // _DEBUG
-		m_nUSE_STATIC_CONTROL_FLOW = 0;
+		m_nFLATTEN_STATIC_CONTROL_FLOW = 0;
 	}
 	int GetIndex()
 	{
 		// Asserts to make sure that we aren't using any skipped combinations.
 		// Asserts to make sure that we are setting all of the combination vars.
 #ifdef _DEBUG
-		bool bAllStaticVarsDefined = m_bHALFLAMBERT && m_bUSE_STATIC_CONTROL_FLOW;
+		bool bAllStaticVarsDefined = m_bHALFLAMBERT && m_bFLATTEN_STATIC_CONTROL_FLOW;
 		Assert( bAllStaticVarsDefined );
 #endif // _DEBUG
-		return ( 12 * m_nHALFLAMBERT ) + ( 24 * m_nUSE_STATIC_CONTROL_FLOW ) + 0;
+		return ( 12 * m_nHALFLAMBERT ) + ( 24 * m_nFLATTEN_STATIC_CONTROL_FLOW ) + 0;
 	}
 };
-#define shaderStaticTest_treeleaf_vs20 vsh_forgot_to_set_static_HALFLAMBERT + vsh_forgot_to_set_static_USE_STATIC_CONTROL_FLOW + 0
+#define shaderStaticTest_treeleaf_vs20 vsh_forgot_to_set_static_HALFLAMBERT + vsh_forgot_to_set_static_FLATTEN_STATIC_CONTROL_FLOW + 0
 class treeleaf_vs20_Dynamic_Index
 {
 private:
@@ -85,6 +91,7 @@ public:
 	}
 	void SetDYNAMIC_LIGHT( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nDYNAMIC_LIGHT = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bDYNAMIC_LIGHT = true;
@@ -106,6 +113,7 @@ public:
 	}
 	void SetSTATIC_LIGHT( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nSTATIC_LIGHT = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bSTATIC_LIGHT = true;
@@ -127,13 +135,15 @@ public:
 	}
 	void SetNUM_LIGHTS( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 2 );
 		m_nNUM_LIGHTS = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bNUM_LIGHTS = true;
 #endif
 	}
 public:
-	treeleaf_vs20_Dynamic_Index()
+	// CONSTRUCTOR
+	treeleaf_vs20_Dynamic_Index( IShaderDynamicAPI *pShaderAPI )
 	{
 #ifdef _DEBUG
 		m_bDYNAMIC_LIGHT = false;
@@ -160,3 +170,31 @@ public:
 	}
 };
 #define shaderDynamicTest_treeleaf_vs20 vsh_forgot_to_set_dynamic_DYNAMIC_LIGHT + vsh_forgot_to_set_dynamic_STATIC_LIGHT + vsh_forgot_to_set_dynamic_NUM_LIGHTS + 0
+
+static const ShaderComboInformation_t s_DynamicComboArray_TreeLeaf_vs20[3] = 
+{
+	{ "DYNAMIC_LIGHT", 0, 1 },
+	{ "STATIC_LIGHT", 0, 1 },
+	{ "NUM_LIGHTS", 0, 2 },
+};
+
+static const ShaderComboInformation_t s_StaticComboArray_TreeLeaf_vs20[2] = 
+{
+	{ "HALFLAMBERT", 0, 1 },
+	{ "FLATTEN_STATIC_CONTROL_FLOW", 0, 1 },
+};
+static const ShaderComboSemantics_t TreeLeaf_vs20_combos =
+{
+	"TreeLeaf_vs20", s_DynamicComboArray_TreeLeaf_vs20, 3, s_StaticComboArray_TreeLeaf_vs20, 2 
+};
+
+class ConstructMe_TreeLeaf_vs20
+{
+public:
+	ConstructMe_TreeLeaf_vs20()
+	{
+		GetShaderDLL()->AddShaderComboInformation( &TreeLeaf_vs20_combos );
+	}
+};
+
+static ConstructMe_TreeLeaf_vs20 s_ConstructMe_TreeLeaf_vs20;

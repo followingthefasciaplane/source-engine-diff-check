@@ -1,63 +1,9 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
 
 #include "cbase.h"
 #include "econ_item_interface.h"
-#include "econ_item_tools.h"				// needed for CEconTool_WrappedGift definition for IsMarketable()
-#include "rtime.h"
-
-#ifdef STAGING_ONLY
-ConVar tf_paint_kit_force_wear( "tf_paint_kit_force_wear", "0", FCVAR_REPLICATED, "Set to force the wear level of paink kit weapons and ignore the GC dynamic attribute value." );
-#endif
-
-// --------------------------------------------------------------------------
-bool IEconItemInterface::GetCustomPaintKitWear( float &flWear ) const
-{
-
-#ifdef STAGING_ONLY
-	// don't assert in staging if this ConVar is set
-	if ( tf_paint_kit_force_wear.GetInt() > 0 )
-	{
-		flWear = tf_paint_kit_force_wear.GetFloat();
-		return true;
-	}
-#endif // STAGING_ONLY
-
-	static CSchemaAttributeDefHandle pAttrDef_PaintKitWear( "set_item_texture_wear" );
-	float flPaintKitWear = 0;
-	if ( pAttrDef_PaintKitWear && FindAttribute_UnsafeBitwiseCast<attrib_value_t>( this, pAttrDef_PaintKitWear, &flPaintKitWear ) )
-	{
-		flWear = flPaintKitWear;
-		return true;
-	}
-
-	static CSchemaAttributeDefHandle pAttrDef_DefaultWear( "texture_wear_default" );
-	if ( pAttrDef_DefaultWear && FindAttribute_UnsafeBitwiseCast<attrib_value_t>( this, pAttrDef_DefaultWear, &flPaintKitWear ) )
-	{
-		flWear = flPaintKitWear;
-		return true;
-	}
-	// If you have no wear, you also should not have a paint kit
-	AssertMsg( !GetCustomPainkKitDefinition(), "No Wear Found on Item [%llu - %s] that has a Paintkit!", GetID(), GetItemDefinition()->GetDefinitionName() );
-
-	return false;
-}
 
 // --------------------------------------------------------------------------
 // Purpose:
-// --------------------------------------------------------------------------
-bool IEconItemInterface::IsTemporaryItem() const
-{
-	// store preview items are also temporary
-	if ( GetOrigin() == kEconItemOrigin_PreviewItem )
-		return true;
-
-	RTime32 rtTime = GetExpirationDate();
-	if ( rtTime > 0 )
-		return true;
-
-	return false;
-}
-
 // --------------------------------------------------------------------------
 RTime32 IEconItemInterface::GetExpirationDate() const
 {
@@ -74,8 +20,8 @@ RTime32 IEconItemInterface::GetExpirationDate() const
 
 	// do we have a static timer set in the schema for all instances to expire?
 	return GetItemDefinition()
-		 ? GetItemDefinition()->GetExpirationDate()
-		 : RTime32( 0 );
+		? GetItemDefinition()->GetExpirationDate()
+		: RTime32( 0 );
 }
 
 // --------------------------------------------------------------------------
@@ -83,52 +29,162 @@ RTime32 IEconItemInterface::GetExpirationDate() const
 // --------------------------------------------------------------------------
 RTime32 IEconItemInterface::GetTradableAfterDateTime() const
 {
-	static CSchemaAttributeDefHandle pAttrib_TradableAfter( "tradable after date" );
-	Assert( pAttrib_TradableAfter );
+	static CSchemaAttributeDefHandle pAttrib( "tradable after date" );
+	Assert( pAttrib );
 
-	if ( !pAttrib_TradableAfter )
+	if ( !pAttrib )
 		return 0;
 
 	RTime32 rtTimestamp;
-	if ( !FindAttribute( pAttrib_TradableAfter, &rtTimestamp ) )
+	if ( !FindAttribute( pAttrib, &rtTimestamp ) )
 		return 0;
 
 	return rtTimestamp;
 }
 
+RTime32 IEconItemInterface::GetUseAfterDateTime() const
+{
+	static CSchemaAttributeDefHandle pAttrib( "use after date" );
+	Assert( pAttrib );
+
+	if ( !pAttrib )
+		return 0;
+
+	RTime32 rtTimestamp;
+	if ( !FindAttribute( pAttrib, &rtTimestamp ) )
+		return 0;
+
+	return rtTimestamp;
+}
+
+RTime32 IEconItemInterface::GetCacheRefreshDateTime() const
+{
+	RTime32 rtExpiration = 0;
+	/** Removed for partner depot **/
+	return rtExpiration;
+}
+
+int IEconItemInterface::GetCustomPaintKitIndex( void ) const
+{
+	static CSchemaAttributeDefHandle pAttrDef_PaintKit( "set item texture prefab" );
+	float flPaintKit = 0;
+	FindAttribute_UnsafeBitwiseCast<attrib_value_t>( this, pAttrDef_PaintKit, &flPaintKit );
+
+	return flPaintKit;
+}
+
+int IEconItemInterface::GetCustomPaintKitSeed( void ) const
+{
+	static CSchemaAttributeDefHandle pAttrDef_PaintKitSeed( "set item texture seed" );
+	float flPaintSeed = 0;
+	FindAttribute_UnsafeBitwiseCast<attrib_value_t>( this, pAttrDef_PaintKitSeed, &flPaintSeed );
+
+	return flPaintSeed;
+}
+
+float IEconItemInterface::GetCustomPaintKitWear( float flWearDefault /*= 0.0f*/ ) const
+{
+	static CSchemaAttributeDefHandle pAttrDef_PaintKitWear( "set item texture wear" );
+	float flPaintKitWear = flWearDefault;
+	FindAttribute_UnsafeBitwiseCast<attrib_value_t>( this, pAttrDef_PaintKitWear, &flPaintKitWear );
+
+	return flPaintKitWear;
+}
+
+float IEconItemInterface::GetStickerAttributeBySlotIndexFloat( int nSlotIndex, EStickerAttributeType type, float flDefault ) const
+{
+	const CSchemaAttributeDefHandle &attrDef = GetStickerAttributeDefHandle( nSlotIndex, type );
+	if ( attrDef )
+	{
+		if ( attrDef->IsStoredAsFloat() )
+		{
+			float flOutput = 0.0f;
+			if ( FindAttribute_UnsafeBitwiseCast< attrib_value_t >( this, attrDef, &flOutput ) )
+			{
+				return flOutput;
+			}
+		}
+		else
+		{
+			Assert( false );
+		}
+	}
+
+	return flDefault;	
+}
+
+uint32 IEconItemInterface::GetStickerAttributeBySlotIndexInt( int nSlotIndex, EStickerAttributeType type, uint32 uiDefault ) const
+{
+	const CSchemaAttributeDefHandle &attrDef = GetStickerAttributeDefHandle( nSlotIndex, type );
+	if ( attrDef )
+	{
+		if ( attrDef->IsStoredAsFloat() )
+		{
+			Assert( false );
+		}
+		else
+		{
+			uint32 unOutput;
+			if ( FindAttribute( attrDef, &unOutput ) )
+			{
+				return unOutput;
+			}
+		}
+	}
+
+	return uiDefault;
+}
+
 // --------------------------------------------------------------------------
-// Purpose: Return true if this item can never be traded
+// Purpose:
 // --------------------------------------------------------------------------
-bool IEconItemInterface::IsPermanentlyUntradable() const
+bool IEconItemInterface::IsTradable() const
+{
+	/** Removed for partner depot **/
+	return false;
+}
+
+bool IEconItemInterface::IsPotentiallyTradable() const
 {
 	if ( GetItemDefinition() == NULL )
-		return true;
-
-	// tagged to not be a part of the economy?
-	if ( ( kEconItemFlag_NonEconomy & GetFlags() ) != 0 )
-		return true;
+		return false;
 
 	// check attributes
 	
-	static CSchemaAttributeDefHandle pAttrib_AlwaysTradable( "always tradable" );
+	static CSchemaAttributeDefHandle pAttrDef_AlwaysTradableAndUsableInCrafting( "always tradable" );
 	static CSchemaAttributeDefHandle pAttrib_CannotTrade( "cannot trade" );
-	static CSchemaAttributeDefHandle pAttrib_NonEconomy( "non economy" );
+
 	
-	Assert( pAttrib_AlwaysTradable != NULL );
+	Assert( pAttrDef_AlwaysTradableAndUsableInCrafting != NULL );
 	Assert( pAttrib_CannotTrade != NULL );
 
-	if ( pAttrib_AlwaysTradable == NULL || pAttrib_CannotTrade == NULL || pAttrib_NonEconomy == NULL )
-		return true;
-
-	// Order matters, check for nonecon first.  Always tradable overrides cannot trade.
-	if ( FindAttribute( pAttrib_NonEconomy ) )			
-		return true;
-
-	if ( FindAttribute( pAttrib_AlwaysTradable ) )		// *sigh*
+	if ( pAttrDef_AlwaysTradableAndUsableInCrafting == NULL || pAttrib_CannotTrade == NULL )
 		return false;
 
-	if ( FindAttribute( pAttrib_CannotTrade ) )
+// NOTE: we are not checking the time delay on trade restriction here - the item is considered potentially tradable in future = true
+// 	if ( GetTradableAfterDateTime() > CRTime::RTime32TimeCur() )
+// 		return false;
+
+	// Explicit rules by item quality to validate trading eligibility
+	switch ( GetQuality() )
+	{
+	case AE_UNIQUE:
+		break;
+	case AE_STRANGE:
+		return ( GetOrigin() == kEconItemOrigin_FoundInCrate || GetOrigin() == kEconItemOrigin_Crafted || GetOrigin() == kEconItemOrigin_Purchased );
+	case AE_UNUSUAL:
+	case AE_TOURNAMENT:
+		return ( GetOrigin() == kEconItemOrigin_FoundInCrate );
+	default:
+		// all other qualities are untradable
+		return false;
+	}
+
+	if ( FindAttribute( pAttrDef_AlwaysTradableAndUsableInCrafting ) )
 		return true;
+
+	if ( FindAttribute( pAttrib_CannotTrade ) )
+		return false;
 
 	// items gained in this way are not tradable
 	switch ( GetOrigin() )
@@ -138,142 +194,25 @@ bool IEconItemInterface::IsPermanentlyUntradable() const
 	case kEconItemOrigin_Foreign:
 	case kEconItemOrigin_PreviewItem:
 	case kEconItemOrigin_SteamWorkshopContribution:
-		return true;
+	case kEconItemOrigin_StockItem:
+		return false;
 	}
-
-	// temporary items (items that will expire for any reason) cannot be traded
-	if ( IsTemporaryItem() )
-		return true;
 
 	// certain quality levels are not tradable
 	if ( GetQuality() >= AE_COMMUNITY && GetQuality() <= AE_SELFMADE )
-		return true;
-
-	// explicitly marked cannot trade?
-	if ( ( kEconItemFlag_CannotTrade & GetFlags() ) != 0 )
-		return true;
-
-	return false;
-}
-
-// --------------------------------------------------------------------------
-// Purpose: Return true if this item is a commodity on the Market (can place buy orders)
-// --------------------------------------------------------------------------
-bool IEconItemInterface::IsCommodity() const
-{
-	if ( GetItemDefinition() == NULL )
 		return false;
 
-	static CSchemaAttributeDefHandle pAttrib_IsCommodity( "is commodity" );
-	if ( FindAttribute( pAttrib_IsCommodity ) )
-		return true;
-
-	return false;
-}
-
-// --------------------------------------------------------------------------
-// Purpose: Return true if temporarily untradable
-// --------------------------------------------------------------------------
-bool IEconItemInterface::IsTemporarilyUntradable() const
-{
-	// Temporary untradability does NOT take "always tradable" into account
-	if ( GetTradableAfterDateTime() >= CRTime::RTime32TimeCur() )
-		return true;
-
-	return false;
-}
-
-// --------------------------------------------------------------------------
-// Purpose: Return true if this item is untradable
-// --------------------------------------------------------------------------
-bool IEconItemInterface::IsTradable() const
-{
-	// Items that are expired are never listable, regardless of other rules.
-	//RTime32 timeExpirationDate = GetExpirationDate();
-	//if ( timeExpirationDate > 0 && timeExpirationDate < CRTime::RTime32TimeCur() )
-	//	return false;
-
-	return GetUntradabilityFlags() == 0;
-}
-
-// --------------------------------------------------------------------------
-// Purpose: Return untradability flags
-// --------------------------------------------------------------------------
-int IEconItemInterface::GetUntradabilityFlags() const
-{
-	int nFlags = 0;
-	if ( IsTemporarilyUntradable() )
-	{
-		nFlags |= k_Untradability_Temporary;
-	}
-	
-	if ( IsPermanentlyUntradable() )
-	{
-		nFlags |= k_Untradability_Permanent;
-	}
-
-	return nFlags;
-}
-
-// --------------------------------------------------------------------------
-// Purpose:
-// --------------------------------------------------------------------------
-bool IEconItemInterface::IsUsableInCrafting() const
-{
-	if ( GetItemDefinition() == NULL )
+	// explicitly marked cannot trade?
+	if ( ( kEconItemFlags_CheckFlags_CannotTrade & GetFlags() ) != 0 )
 		return false;
 
 	// tagged to not be a part of the economy?
 	if ( ( kEconItemFlag_NonEconomy & GetFlags() ) != 0 )
 		return false;
 
-	// always craftable?
-	static CSchemaAttributeDefHandle pAttrib_AlwaysUsableInCraft( "always tradable" );
-	Assert( pAttrib_AlwaysUsableInCraft );
-
-	if ( FindAttribute( pAttrib_AlwaysUsableInCraft ) )
-		return true;
-
-	// never craftable?
-	static CSchemaAttributeDefHandle pAttrib_NeverCraftable( "never craftable" );
-	Assert( pAttrib_NeverCraftable );
-
-	if ( FindAttribute( pAttrib_NeverCraftable ) )
-		return false;
-
-	// temporary items (items that will expire for any reason) cannot be turned into
-	// permanent items
-	if ( IsTemporaryItem() )
-		return false;
-
-	// explicitly marked not usable in crafting?
-	if ( ( kEconItemFlag_CannotBeUsedInCrafting & GetFlags() ) != 0 )
-		return false;
-
-	// items gained in this way are not craftable
-	switch ( GetOrigin() )
-	{
-	case kEconItemOrigin_Invalid:
-	case kEconItemOrigin_Foreign:
-	case kEconItemOrigin_StorePromotion:
-	case kEconItemOrigin_SteamWorkshopContribution:
-		return false;
-
-	// purchased items can be used in crafting if explicitly tagged, but not by default
-	case kEconItemOrigin_Purchased:
-		// deny items the GC didn't flag at purchase time
-		if ( (GetFlags() & kEconItemFlag_PurchasedAfterStoreCraftabilityChanges2012) == 0 )
-			return false;
-
-		// deny items that can never be used
-		if ( (GetItemDefinition()->GetCapabilities() & ITEM_CAP_CAN_BE_CRAFTED_IF_PURCHASED) == 0 )
-			return false;
-
-		break;
-	}
-
-	// certain quality levels are not craftable
-	if ( GetQuality() >= AE_COMMUNITY && GetQuality() <= AE_SELFMADE )
+	// This code catches stock items with name tags (rarity is stock) and prevents them from trading/marketing
+	// until we have a better solution for extracting value out of reselling these items and avoiding scams
+	if ( GetRarity() <= 0 )
 		return false;
 
 	return true;
@@ -284,129 +223,88 @@ bool IEconItemInterface::IsUsableInCrafting() const
 // --------------------------------------------------------------------------
 bool IEconItemInterface::IsMarketable() const
 {
-	const CEconItemDefinition *pItemDef = GetItemDefinition();
-	if ( pItemDef == NULL )
-		return false;
-
-	// Untradeable items can never be marketed, regardless of other rules.
-	// Temporarily untradable items can be marketed, only permanent untradable items cannot be marketed
-	if ( IsPermanentlyUntradable() )
-		return false;
-
-	// Items that are expired are never listable, regardless of other rules.
-	RTime32 timeExpirationDate = GetExpirationDate();
-	if ( timeExpirationDate > 0 && timeExpirationDate < CRTime::RTime32TimeCur() )
-		return false;
-
-	// Initially, only TF2 supports listing items in the Marketplace.
-#if defined( TF_DLL ) || defined( TF_CLIENT_DLL ) || defined( TF_GC_DLL )
-	{
-		// User-created wrapped gifts are untradeable for the moment. This would provide a backdoor
-		// for users to sell anything they wanted, which is interesting but not what we want in
-		// the initial launch.
-		if ( pItemDef->GetTypedEconTool<CEconTool_WrappedGift>() )
-			return false;
-
-		// All other tools are listable. This includes keys, paints, backpack expanders, strange
-		// parts, Halloween spells, wedding rings, etc. It does not includes gifts (see above),
-		// noisemakers, or crates (see below).
-		if ( pItemDef->IsTool() )
-			return true;
-
-		// All crates are listable. Anything with the "decodable" flag is considered a crate.
-		if ( (pItemDef->GetCapabilities() & ITEM_CAP_DECODABLE) != 0 )
-			return true;
-
-		// Genuine-quality items come from time-limited purchase promos and are listable. Vintage
-		// items are from one-time transitions and are all finite quality. Haunted quality items are
-		// TF-Halloween-event specific. Some of the older haunted items didn't generate revenue, but
-		// the content is all old and there seems to be little harm in letting it be listed. The
-		// haunted items from 2013 all come from crates, which means they all generated revenue.
-		// Collectors items are created from a finite set of recipes.
-		// Paintkit Weapons are from cases or operations
-		if ( GetQuality() == AE_RARITY1 || GetQuality() == AE_VINTAGE || GetQuality() == AE_HAUNTED
-			|| GetQuality() == AE_COLLECTORS || GetQuality() == AE_PAINTKITWEAPON )
-			return true;
-
-		// All festive items are from time-limited holiday crates and are listable. This code seems
-		// safe. (...) (This code is in fact so safe that if we just do a substring match we'll also
-		// allow "A Rather Festive Tree".)
-		if ( !V_strncmp( pItemDef->GetDefinitionName(), "Festive", 7 ) )
-			return true;
-
-		// All botkiller items come from MvM rewards and are listable. This does a substring search
-		// to find all varieties (gold, silver, rust, etc.), etc.
-		if ( V_strstr( pItemDef->GetDefinitionName(), " Botkiller " ) )
-			return true;
-
-		// Mvm V2 Robit Parts
-		if ( V_strstr( pItemDef->GetDefinitionName(), "Robits " ) )
-			return true;
-
-		// MvM Killstreak Weapons
-		static CSchemaAttributeDefHandle pAttr_killstreak( "killstreak tier" );
-		if ( FindAttribute( pAttr_killstreak ) )
-			return true;
-
-		// Australium Items
-		static CSchemaAttributeDefHandle pAttrDef_IsAustralium( "is australium item" );
-		if ( FindAttribute( pAttrDef_IsAustralium ) )
-			return true;
-
-		// Glitch GateHat Replacement Item
-		static CSchemaItemDefHandle pItemDef_GlitchedCircuit( "Glitched Circuit Board" );
-		if ( pItemDef == pItemDef_GlitchedCircuit )
-			return true;
-
-		// Anything that says it wants to be marketable.
-		static CSchemaAttributeDefHandle pAttrDef_IsMarketable( "is marketable" );
-		if ( FindAttribute( pAttrDef_IsMarketable ) )
-			return true;
-
-		// Anything that is of limited quantity (ie limited promos)
-		static CSchemaAttributeDefHandle pAttrDef_IsLimited( "limited quantity item" );
-		if ( FindAttribute( pAttrDef_IsLimited ) )
-			return true;
-
-		// Allow the Giving items (not a wrapped_gift but a gift, ie Secret Saxton, Pile O Gifts, Pallet of Keys)
-		const CEconTool_Gift *pEconToolGift = pItemDef->GetTypedEconTool<CEconTool_Gift>();
-		if ( pEconToolGift )
-			return true;
-
-		// Unusual Cosmetics and Taunts
-		if ( GetQuality() == AE_UNUSUAL && ( GetItemDefinition()->GetLoadoutSlot( 0 ) == LOADOUT_POSITION_MISC || GetItemDefinition()->GetLoadoutSlot( 0 ) == LOADOUT_POSITION_TAUNT ) )
-			return true;
-
-		// Strange items.  Dont just check for strange quality, actually check for a strange attribute.
-		// See if we've got any strange attributes.
-		for ( int i = 0; i < GetKillEaterAttrCount(); i++ )
-		{
-			if ( FindAttribute( GetKillEaterAttr_Score( i ) ) )
-			{
-				return true;
-			}
-		}
-	}
-#endif // defined( TF_DLL ) || defined( TF_CLIENT_DLL ) || defined( TF_GC_DLL )
-
-	// By default, items aren't listable.
+	/** Removed for partner depot **/
 	return false;
 }
 
 // --------------------------------------------------------------------------
-const char	*IEconItemInterface::GetDefinitionString( const char *pszKeyName, const char *pszDefaultValue ) const
+// Purpose:
+// --------------------------------------------------------------------------
+bool IEconItemInterface::IsCommodity() const
 {
-	const GameItemDefinition_t *pDef = GetItemDefinition();
-	if ( pDef )
-		return pDef->GetDefinitionString( pszKeyName, pszDefaultValue );
-	return pszDefaultValue;
+	const CEconItemDefinition *pItemDef = GetItemDefinition();
+	if ( pItemDef == NULL )
+		return false;
+
+	static CSchemaAttributeDefHandle pAttrib_IsCommodity( "is commodity" );
+	Assert( pAttrib_IsCommodity != NULL );
+	if ( pAttrib_IsCommodity == NULL )
+		return false;
+
+	attrib_value_t unAttribValue;
+	if ( FindAttribute( pAttrib_IsCommodity, &unAttribValue ) && unAttribValue )
+		return true;
+
+	return false;
 }
 
-// --------------------------------------------------------------------------
-KeyValues *IEconItemInterface::GetDefinitionKey( const char *pszKeyName ) const
+bool IEconItemInterface::IsHiddenFromDropList() const
 {
-	const GameItemDefinition_t *pDef = GetItemDefinition();
-	if ( pDef )
-		return pDef->GetDefinitionKey( pszKeyName );
-	return NULL;
+	const CEconItemDefinition *pItemDef = GetItemDefinition();
+	if ( pItemDef == NULL )
+		return false;
+
+	static CSchemaAttributeDefHandle pAttrib_HideFromDropList( "hide from drop list" );
+	Assert( pAttrib_HideFromDropList != NULL );
+	if ( pAttrib_HideFromDropList == NULL )
+		return false;
+
+	attrib_value_t unAttribValue;
+	if ( FindAttribute( pAttrib_HideFromDropList, &unAttribValue ) && unAttribValue )
+		return true;
+
+	return false;
+}
+
+
+// --------------------------------------------------------------------------
+// Purpose:
+// --------------------------------------------------------------------------
+bool IEconItemInterface::IsUsableInCrafting() const
+{
+	if ( GetItemDefinition() == NULL )
+		return false;
+
+	// check attribute
+	static CSchemaAttributeDefHandle pAttrDef_AlwaysTradableAndUsableInCrafting( "always tradable" );
+	Assert( pAttrDef_AlwaysTradableAndUsableInCrafting );
+
+	if ( FindAttribute( pAttrDef_AlwaysTradableAndUsableInCrafting ) )
+		return true;
+
+	// explicitly marked not usable in crafting?
+	if ( ( kEconItemFlags_CheckFlags_NotUsableInCrafting & GetFlags() ) != 0 )
+		return false;
+
+	// items gained in this way are not craftable
+	switch ( GetOrigin() )
+	{
+	case kEconItemOrigin_Invalid:
+	case kEconItemOrigin_Foreign:
+	case kEconItemOrigin_PreviewItem:
+	case kEconItemOrigin_Purchased:
+	case kEconItemOrigin_StorePromotion:
+	case kEconItemOrigin_SteamWorkshopContribution:
+		return false;
+	}
+
+	// certain quality levels are not craftable
+	if ( GetQuality() >= AE_COMMUNITY && GetQuality() <= AE_SELFMADE )
+		return false;
+
+	// tagged to not be a part of the economy?
+	if ( ( kEconItemFlag_NonEconomy & GetFlags() ) != 0 )
+		return false;
+
+	return true;
 }

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2006, Valve Corporation, All rights reserved. ======//
 //
 //	MUST BE THE FIRST MODULE IN THE LINK PROCESS TO ACHIEVE @1
 //
@@ -9,7 +9,10 @@
 //	functions can appear in any order, but the oridnals should be autogened sequential.
 //===========================================================================//
 
-#include "tier1/tier1.h"
+// explicit definition, including the headers prevents this from occurring @1
+#define DLL_EXPORT	extern "C" __declspec( dllexport )
+DLL_EXPORT void* CreateInterface(const char *pName, int *pReturnCode);
+DLL_EXPORT void *CreateInterfaceThunk( const char *pName, int *pReturnCode );
 
 // Should be the first function that the linker 'sees' as an export
 void* CreateInterfaceThunk( const char *pName, int *pReturnCode )

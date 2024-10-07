@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -10,7 +10,7 @@
 #pragma once
 #endif
 
-#include "KeyValues.h"
+#include "keyvalues.h"
 #include "utlvector.h"
 #include "filesystem_init.h"
 
@@ -22,11 +22,17 @@
 #define	TOKEN_GAME_DIRECTORY	"GameDir"
 #define	TOKEN_TOOLS				"Tools"
 
+// STEAM CLOUD FLAGS
+#define STEAMREMOTESTORAGE_CLOUD_CONFIG		(1<<0)
+
+#define STEAMREMOTESTORAGE_CLOUD_ALL		0x7fff // all bits set, so any new items added will be on by default
+
 struct defaultConfigInfo_t
 {
 	char	gameName[MAX_PATH];
 	char	gameDir[MAX_PATH];
 	char	FGD[MAX_PATH];
+	char	steamPath[MAX_PATH];
 	char	defaultPointEntity[MAX_PATH];
 	char	exeName[MAX_PATH];
 	int		steamAppID;
@@ -34,11 +40,11 @@ struct defaultConfigInfo_t
 
 enum eSDKEpochs
 {
-	HL2 = 1,
-	EP1 = 2,
-	EP2 = 3,
-	SP2009 = 4,
-	MP2009 = 5,
+	SDK_EPOCH_HL2 = 1,
+	SDK_EPOCH_EP1 = 2,
+	SDK_EPOCH_EP2 = 3,
+	SDK_EPOCH_PORTAL2 = 4,
+	SDK_EPOCH_CSS15 = 5,
 };
 
 extern defaultConfigInfo_t *gDefaultConfigs[];
@@ -79,10 +85,29 @@ public:
 
 	void	SetBaseDirectory( const char *pDirectory );
 
-	void	GetRootGameDirectory( char *out, size_t outLen, const char *rootDir );
+	void	GetRootGameDirectory( char *out, size_t outLen, const char *rootDir, const char *steamDir );
 
 	const char *GetRootDirectory( void );
 	void	SetSDKEpoch( eSDKEpochs epoch ) { m_eSDKEpoch = epoch; };
+
+	static bool IsSDKDeployment()
+	{
+		static bool bRetVal = false;
+		static bool bInitialized = false;
+
+		if ( g_pFullFileSystem && !bInitialized )
+		{
+			char szBaseDirectory[MAX_PATH];
+
+			// Check to see whether 'steamapps/common' is part of the path to this EXE
+			g_pFullFileSystem->GetCurrentDirectory( szBaseDirectory, sizeof( szBaseDirectory ) );
+			V_FixSlashes( szBaseDirectory, '/' );
+			bRetVal = ( V_stristr( szBaseDirectory, "steamapps/common" ) != NULL );
+			bInitialized = true;
+		}
+
+		return ( bRetVal );
+	};
 
 private:
 

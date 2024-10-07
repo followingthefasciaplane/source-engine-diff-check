@@ -1,10 +1,10 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
 //=============================================================================//
 
-#ifndef SWDS
+#ifndef DEDICATED
 #include "screen.h"
 #include "cl_main.h"
 #include "iprediction.h"
@@ -36,22 +36,18 @@
 #include "r_decal.h"
 #include "materialsystem/imaterial.h"
 #include "EngineSoundInternal.h"
+#include "master.h"
 #include "ivideomode.h"
 #include "download.h"
 #include "GameUI/IGameUI.h"
-#include "cl_demo.h"
-#include "cdll_engine_int.h"
-
 #if defined( REPLAY_ENABLED )
-#include "replay/ienginereplay.h"
-#include "replay_internal.h"
+#include "replayhistorymanager.h"
 #endif
+#include "cl_demo.h"
 
 #include "audio_pch.h"
 
-#if defined ( _X360 )
-#include "matchmaking.h"
-#endif
+#include "paint.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -63,9 +59,8 @@ extern CNetworkStringTableContainer *networkStringTableContainerServer;
 
 static ConVar cl_allowupload ( "cl_allowupload", "1", FCVAR_ARCHIVE, "Client uploads customization files" );
 static ConVar cl_voice_filter( "cl_voice_filter", "", 0, "Filter voice by name substring" ); // filter incoming voice data
-
-static ConVar *replay_voice_during_playback = NULL;
-
+ConVar cl_voice_hltv_buffer_time("cl_voice_hltv_buffer_time", "0.3", 0, "Amount of time between receiving voice data and playing the audio in hltv");
+ConVar cl_voice_buffer_time("cl_voice_buffer_time", "0.04", 0, "Amount of time between receiving voice data and playing the audio");
 extern ConCommand quit;
 
 void CClientState::ConnectionClosing( const char * reason )
@@ -74,12 +69,11 @@ void CClientState::ConnectionClosing( const char * reason )
 	if ( m_nSignonState > SIGNONSTATE_NONE )
 	{
 		ConMsg( "Disconnect: %s.\n", reason );
-		if ( !Q_stricmp( reason, INVALID_STEAM_TICKET )
-			|| !Q_stricmp( reason, INVALID_STEAM_LOGON_TICKET_CANCELED ) )
+		if ( !Q_stricmp( reason, INVALID_STEAM_TICKET ) )
 		{
 			g_eSteamLoginFailure = STEAMLOGINFAILURE_BADTICKET;
 		}
-		else if ( !Q_stricmp( reason, INVALID_STEAM_LOGON_NOT_CONNECTED ) )
+		else if ( !Q_stricmp( reason, INVALID_STEAM_LOGON ) )
 		{
 			g_eSteamLoginFailure = STEAMLOGINFAILURE_NOSTEAMLOGIN;
 		}
@@ -96,16 +90,20 @@ void CClientState::ConnectionClosing( const char * reason )
 			g_eSteamLoginFailure = STEAMLOGINFAILURE_NONE;
 		}
 
+		// If the reason is a localized string, pass it raw.
 		if ( reason && reason[0] == '#' )
-		{
-			COM_ExplainDisconnection( true, reason );
-		}
+			COM_ExplainDisconnection( true, "%s", reason );
 		else
-		{
 			COM_ExplainDisconnection( true, "Disconnect: %s.\n", reason );
-		}
+
 		SCR_EndLoadingPlaque();
-		Host_Disconnect( true, reason );
+		Host_Disconnect(true);
+
+		if ( (reason != NULL) && (Q_stricmp( reason, "Server shutting down" ) == 0) && //if disconnect reason is server shutdown
+			(CommandLine()->FindParm( "-quitonservershutdown" ) != 0) ) //and we want to quit the game whenever the server shuts down (assists quick iteration)
+		{
+			Host_Shutdown(); //quit the game
+		}
 	}
 }
 
@@ -115,54 +113,46 @@ void CClientState::ConnectionCrashed( const char * reason )
 	// if connected, shut down host
 	if ( m_nSignonState > SIGNONSTATE_NONE )
 	{
-		DebuggerBreakIfDebugging_StagingOnly();
 
-		COM_ExplainDisconnection( true, "Disconnect: %s.\n", reason );
+		// If the reason is a localized string, pass it raw.
+		if(reason && reason[0] == '#')
+			COM_ExplainDisconnection( true, "%s", reason );
+		else
+			COM_ExplainDisconnection( true, "Disconnect: %s.\n", reason );
+
 		SCR_EndLoadingPlaque();
-		Host_EndGame ( true, "%s", reason );
+		Host_Disconnect(true);
 	}
 }
 
 
-void CClientState::FileRequested(const char *fileName, unsigned int transferID)
+void CClientState::FileRequested(const char *fileName, unsigned int transferID, bool isReplayDemoFile )
 {
 	ConMsg( "File '%s' requested from server %s.\n", fileName, m_NetChannel->GetAddress() );
 
 	if ( !cl_allowupload.GetBool() )
 	{
 		ConMsg( "File uploading disabled.\n" );
-		m_NetChannel->DenyFile( fileName, transferID );
+		m_NetChannel->DenyFile( fileName, transferID, isReplayDemoFile );
 		return;
 	}
 
 	// TODO check if file valid for uploading
-	m_NetChannel->SendFile( fileName, transferID );
+	m_NetChannel->SendFile( fileName, transferID, isReplayDemoFile );
 }
 
-void CClientState::FileReceived( const char * fileName, unsigned int transferID )
+void CClientState::FileReceived( const char * fileName, unsigned int transferID, bool isReplayDemoFile )
 {
-#ifndef _XBOX
 	// check if the client donwload manager requested this file
-	CL_FileReceived( fileName, transferID );
-	// notify client dll
-	if ( g_ClientDLL )
-	{
-		g_ClientDLL->FileReceived( fileName, transferID );
-	}
-#endif
+	CL_FileReceived( fileName, transferID, isReplayDemoFile );
 }
 
-void CClientState::FileDenied(const char *fileName, unsigned int transferID )
+void CClientState::FileDenied(const char *fileName, unsigned int transferID, bool isReplayDemoFile )
 {
-#ifndef _XBOX
 	// check if the file download manager requested that file
-	CL_FileDenied( fileName, transferID );
-#endif
+	CL_FileDenied( fileName, transferID, isReplayDemoFile );
 }
 
-void CClientState::FileSent( const char *fileName, unsigned int transferID )
-{
-}
 
 void CClientState::PacketStart( int incoming_sequence, int outgoing_acknowledged	)
 {
@@ -189,52 +179,44 @@ void CClientState::PacketEnd()
 	// How many commands total did we run this frame
 	int commands_acknowledged = command_ack - last_command_ack;
 
-//	COM_Log( "cl.log", "Server ack'd %i commands this frame\n", commands_acknowledged );
+//	COM_Log( "GetBaseLocalClient().log", "Server ack'd %i commands this frame\n", commands_acknowledged );
 
 	//Msg( "%i/%i CL_PostReadMessages:  last ack %i most recent %i acked %i commands\n", 
-	//	host_framecount, cl.tickcount,
-	//	cl.last_command_ack, 
-	//	cl.netchan->outgoing_sequence - 1,
+	//	host_framecount, GetBaseLocalClient().tickcount,
+	//	GetBaseLocalClient().last_command_ack, 
+	//	GetBaseLocalClient().netchan->outgoing_sequence - 1,
 	//	commands_acknowledged );
 
 	// Highest command parsed from messages
 	last_command_ack = command_ack;
+	last_server_tick = GetServerTickCount();
 	
 	// Let prediction copy off pristine data and report any errors, etc.
 	g_pClientSidePrediction->PostNetworkDataReceived( commands_acknowledged );
 
-#ifndef _XBOX
 	demoaction->DispatchEvents();
-#endif
 }
 
-#undef CreateEvent
-void CClientState::Disconnect( const char *pszReason, bool bShowMainMenu )
+void CClientState::Disconnect( bool bShowMainMenu )
 {
-#if defined( REPLAY_ENABLED )
-	if ( g_pClientReplayContext && IsConnected() )
-	{
-		g_pClientReplayContext->OnClientSideDisconnect();
-	}
-#endif
+	CBaseClientState::Disconnect( bShowMainMenu );
 
-	CBaseClientState::Disconnect( pszReason, bShowMainMenu );
+	if ( m_bSplitScreenUser )
+		return;
 
-#ifndef _X360
-	IGameEvent *event = g_GameEventManager.CreateEvent( "client_disconnect" );
-	if ( event )
+	// clear any map hacks
 	{
-		if ( !pszReason )
-			pszReason = "";
-		event->SetString( "message", pszReason );
-		g_GameEventManager.FireEventClientSide( event );
+		static ConVarRef map_wants_save_disable( "map_wants_save_disable" );
+		map_wants_save_disable.SetValue( 0 );
 	}
-#endif
 
 	// stop any demo activities
-#ifndef _XBOX
 	demoplayer->StopPlayback();
 	demorecorder->StopRecording();
+
+#if defined( REPLAY_ENABLED )
+	extern IReplayHistoryManager *g_pClientReplayHistoryManager;
+	g_pClientReplayHistoryManager->StopDownloads();
 #endif
 
 	S_StopAllSounds( true );
@@ -252,13 +234,11 @@ void CClientState::Disconnect( const char *pszReason, bool bShowMainMenu )
 
 	CL_ClearState();
 
-#ifndef _XBOX
 	// End any in-progress downloads
 	CL_HTTPStop_f();
-#endif
 
 	// stop loading progress bar 
-	if (bShowMainMenu)
+	if ( bShowMainMenu )
 	{
 		SCR_EndLoadingPlaque();
 	}
@@ -266,30 +246,53 @@ void CClientState::Disconnect( const char *pszReason, bool bShowMainMenu )
 	// notify game ui dll of out-of-in-game status
 	EngineVGui()->NotifyOfServerDisconnect();
 
-	if (bShowMainMenu && !engineClient->IsDrawingLoadingImage() && (cl.demonum == -1))
-	{
-		// we're not in the middle of loading something, so show the UI
-		if ( EngineVGui() )
-		{
-			EngineVGui()->ActivateGameUI();
-		}
-	}
-
 	HostState_OnClientDisconnected();
 
 	// if we played a demo from the startdemos list, play next one
-	if (cl.demonum != -1)
+	if ( GetBaseLocalClient().demonum != -1 )
 	{
 		CL_NextDemo();
 	}
 }
 
 
-bool CClientState::ProcessTick( NET_Tick *msg )
-{
-	int tick = msg->m_nTick;
+static bool s_bClientWaitingForHltvReplayTick = false;
 
-	m_NetChannel->SetRemoteFramerate( msg->m_flHostFrameTime, msg->m_flHostFrameTimeStdDeviation );
+bool CClientState::NETMsg_Tick( const CNETMsg_Tick& msg )
+{
+	if ( g_ClientDLL )
+	{
+		// Notify the client that we are just about to tick over.
+		g_ClientDLL->OnTickPre( host_tickcount );
+	}
+
+	int tick = msg.tick();
+
+	{
+		if ( m_nHltvReplayDelay )
+		{
+			if ( !msg.hltv_replay_flags() )
+				DevMsg( "%d. Msg_Tick %d cl:delayed sv:real-time\n", GetClientTickCount(), tick );
+		}
+		else
+		{
+			if ( msg.hltv_replay_flags() )
+				DevMsg( "%d. Msg_Tick %d cl:real-time sv:replay\n", GetClientTickCount(), tick );
+		}
+	}
+
+	if ( m_nHltvReplayDelay && !msg.hltv_replay_flags() )
+	{
+		// client is in hltv replay state, but server doesn't remember it - maybe there was a connection issue or something. 
+		DevMsg( "Inconsistent Client Replay state: tick without replay during replay. Force Stop Replay.\n" );
+		s_bClientWaitingForHltvReplayTick = true;
+		StopHltvReplay();
+	}
+
+	m_NetChannel->SetRemoteFramerate(
+		CNETMsg_Tick_t::FrametimeToFloat( msg.host_computationtime() ),
+		CNETMsg_Tick_t::FrametimeToFloat( msg.host_computationtime_std_deviation() ),
+		CNETMsg_Tick_t::FrametimeToFloat( msg.host_framestarttime_std_deviation() ) );
 
 	m_ClockDriftMgr.SetServerTick( tick );
 
@@ -300,29 +303,41 @@ bool CClientState::ProcessTick( NET_Tick *msg )
 	g_ClientGlobalVariables.tickcount = tick;	
 	g_ClientGlobalVariables.curtime = tick * host_state.interval_per_tick;
 	g_ClientGlobalVariables.frametime = (tick - oldtickcount) * host_state.interval_per_tick;	// We used to call GetFrameTime() here, but 'insimulation' is always
-																								// true so we have this code right in here to keep it simple.
+	// true so we have this code right in here to keep it simple.
+
+	if ( s_bClientWaitingForHltvReplayTick && g_ClientDLL )
+	{
+		if ( m_nHltvReplayDelay )
+		{
+			// we're starting replay. Clean up decals from the future
+			R_DecalTermNew( host_state.worldmodel->brush.pShared, tick );
+		}
+		g_ClientDLL->OnHltvReplayTick();
+		s_bClientWaitingForHltvReplayTick = false;
+	}
 
 	return true;
 }
 
-
-bool CClientState::ProcessStringCmd( NET_StringCmd *msg )
+bool CClientState::NETMsg_StringCmd( const CNETMsg_StringCmd& msg )
 {
-	return CBaseClientState::ProcessStringCmd( msg );
+	// Even though this is just forwarding to the base class, do not remove this function.
+	// There are multiple implementations of CClientState and the one in cl_null.cpp
+	// stubs this function out as a simple 'return true;'.
+	return BaseClass::NETMsg_StringCmd( msg );
 }
 
-
-bool CClientState::ProcessServerInfo( SVC_ServerInfo *msg )
+bool CClientState::SVCMsg_ServerInfo( const CSVCMsg_ServerInfo& msg )
 {
 	// Reset client state
 	CL_ClearState();
 
-	if ( !CBaseClientState::ProcessServerInfo( msg ) )
+	if ( !CBaseClientState::SVCMsg_ServerInfo( msg ) )
 	{
-		Disconnect( "CBaseClientState::ProcessServerInfo failed", true );
+		Disconnect(true);
 		return false;
 	}
-#ifndef _XBOX
+
 	if ( demoplayer->IsPlayingBack() )
 	{
 		// Because a server doesn't run during
@@ -335,30 +350,23 @@ bool CClientState::ProcessServerInfo( SVC_ServerInfo *msg )
 		// it's signon data (will be written into extra demo header file)
 		demorecorder->SetSignonState( SIGNONSTATE_NEW );
 	}
-#endif
+
 	// is server a HLTV proxy ?
-	ishltv = msg->m_bIsHLTV;		
+	ishltv = msg.is_hltv();
 
 #if defined( REPLAY_ENABLED )
 	// is server a replay proxy ?
-	isreplay = msg->m_bIsReplay;
+	isreplay = msg.is_replay();
 #endif
 
-	// The MD5 of the server map must match the MD5 of the client map. or else
+	// The CRC of the server map must match the CRC of the client map. or else
 	//  the client is probably cheating.
-	V_memcpy( serverMD5.bits, msg->m_nMapMD5.bits, MD5_DIGEST_LENGTH );
-
-	// Multiplayer game?
-	if ( m_nMaxClients > 1 )	
-	{
-		if ( mp_decals.GetInt() < r_decals.GetInt() )
-		{
-			r_decals.SetValue( mp_decals.GetInt() );
-		}
-	}
+	serverCRC = msg.map_crc();
+	// The client side DLL CRC check.
+	serverClientSideDllCRC = msg.client_crc();
 
 	g_ClientGlobalVariables.maxClients = m_nMaxClients;
-	g_ClientGlobalVariables.network_protocol = msg->m_nProtocol;
+	g_ClientGlobalVariables.network_protocol = msg.protocol();
 
 #ifdef SHARED_NET_STRING_TABLES
 	// use same instance of StringTableContainer as the server does
@@ -370,19 +378,19 @@ bool CClientState::ProcessServerInfo( SVC_ServerInfo *msg )
 #endif
 
 	CL_ReallocateDynamicData( m_nMaxClients );
-	
+
 	if ( sv.IsPaused() )
 	{
-		if ( msg->m_fTickInterval != host_state.interval_per_tick )
+		if ( msg.tick_interval() != host_state.interval_per_tick )
 		{
 			Host_Error( "Expecting interval_per_tick %f, got %f\n", 
-				host_state.interval_per_tick, msg->m_fTickInterval );
+				host_state.interval_per_tick, msg.tick_interval() );
 			return false;
 		}
 	}
 	else
 	{
-		host_state.interval_per_tick = msg->m_fTickInterval;
+		host_state.interval_per_tick = msg.tick_interval();
 	}
 
 	// Re-init hud video, especially if we changed game directories
@@ -393,18 +401,16 @@ bool CClientState::ProcessServerInfo( SVC_ServerInfo *msg )
 
 
 	gHostSpawnCount = m_nServerCount;
-	
+
 	videomode->MarkClientViewRectDirty();	// leave intermission full screen
 	return true;
 }
 
-bool CClientState::ProcessClassInfo( SVC_ClassInfo *msg )
+bool CClientState::SVCMsg_ClassInfo( const CSVCMsg_ClassInfo& msg )
 {
-	if ( msg->m_bCreateOnClient )
+	if ( msg.create_on_client() )
 	{
-#ifndef _XBOX
 		if ( !demoplayer->IsPlayingBack() )
-#endif
 		{
 			// Create all of the send tables locally
 			DataTable_CreateClientTablesFromServerTables();
@@ -414,33 +420,24 @@ bool CClientState::ProcessClassInfo( SVC_ClassInfo *msg )
 
 			// store the current data tables in demo file to make sure
 			// they are the same during playback 
-#ifndef _XBOX
 			demorecorder->RecordServerClasses( serverGameDLL->GetAllServerClasses() );
-#endif
 		}
 
 		LinkClasses();	// link server and client classes
 	}
 	else
 	{
-		CBaseClientState::ProcessClassInfo( msg );
+		CBaseClientState::SVCMsg_ClassInfo( msg );
 	}
 	
-#ifdef DEDICATED
-	bool bAllowMismatches = false;
-#else
-	bool bAllowMismatches = ( demoplayer && demoplayer->IsPlayingBack() );
-#endif // DEDICATED
-
+	bool bAllowMismatches = ( g_pClientDemoPlayer && g_pClientDemoPlayer->IsPlayingBack() );
 	if ( !RecvTable_CreateDecoders( serverGameDLL->GetStandardSendProxies(), bAllowMismatches ) ) // create receive table decoders
 	{
 		Host_EndGame( true, "CL_ParseClassInfo_EndClasses: CreateDecoders failed.\n" );
 		return false;
 	}
 
-#ifndef _XBOX
 	if ( !demoplayer->IsPlayingBack() )
-#endif
 	{
 		CLocalNetworkBackdoor::InitFastCopy();
 	}
@@ -448,30 +445,24 @@ bool CClientState::ProcessClassInfo( SVC_ClassInfo *msg )
 	return true;
 }
 
-bool CClientState::ProcessSetPause( SVC_SetPause *msg )
+bool CClientState::SVCMsg_SetPause( const CSVCMsg_SetPause& msg )
 {
-	CBaseClientState::ProcessSetPause( msg );
+	CBaseClientState::SVCMsg_SetPause( msg );
 
 	return true;
 }
 
-bool CClientState::ProcessSetPauseTimed( SVC_SetPauseTimed *msg )
+bool CClientState::SVCMsg_VoiceInit( const CSVCMsg_VoiceInit& msg )
 {
-	CBaseClientState::ProcessSetPauseTimed( msg );
-
-	return true;
-}
-
-bool CClientState::ProcessVoiceInit( SVC_VoiceInit *msg )
-{
-#if !defined( NO_VOICE )//#ifndef _XBOX
-	if ( msg->m_szVoiceCodec[0] == 0 )
+#if !defined( NO_VOICE )
+	if( msg.codec().size() == 0 )
 	{
 		Voice_Deinit();
 	}
 	else
 	{
-		Voice_Init( msg->m_szVoiceCodec, msg->m_nSampleRate );
+#define SPEEX_QUALITY 4
+		Voice_Init( msg.codec().c_str(), msg.has_version() ? msg.version() : SPEEX_QUALITY );
 	}
 #endif
 	return true;
@@ -479,86 +470,101 @@ bool CClientState::ProcessVoiceInit( SVC_VoiceInit *msg )
 
 ConVar voice_debugfeedback( "voice_debugfeedback", "0" );
 
-bool CClientState::ProcessVoiceData( SVC_VoiceData *msg )
+bool CClientState::SVCMsg_VoiceData( const CSVCMsg_VoiceData &msg )
 {
-	char chReceived[4096];
-	int bitsRead = msg->m_DataIn.ReadBitsClamped( chReceived, msg->m_nLength );
+#if defined ( _GAMECONSOLE )
 
-#if defined ( _X360 )
-	DWORD dwLength = msg->m_nLength;
-	XUID xuid = msg->m_xuid;
-	Audio_GetXVoice()->PlayIncomingVoiceData( xuid, (byte*)chReceived, dwLength );
-
-	if ( voice_debugfeedback.GetBool() )
+	FOR_EACH_VALID_SPLITSCREEN_PLAYER( i )
 	{
-		Msg( "Received voice from: %d\n", msg->m_nFromClient + 1 );
+		if ( msg.client() == GetLocalClient( i ).m_nPlayerSlot )
+			return true;
 	}
 
+	ConVarRef voice_verbose( "voice_verbose" );
+	if ( voice_verbose.GetBool() )
+	{
+		Msg( "* CClientState::ProcessVoiceData: playing SVC_VoiceData from %s with %u bytes\n", msg.GetNetChannel()->GetAddress(), msg.voice_data_size() );
+	}
+
+	Audio_GetXVoice()->PlayIncomingVoiceData( msg.xuid(), (const byte*)&msg.voice_data[0], msg.voice_data_size(), bAudible );
+	if ( voice_debugfeedback.GetBool() )
+	{
+		Msg( "%f Received voice from: %d [%d bytes]\n", realtime, msg->m_nFromClient + 1, dwLength );
+	}
 	return true;
 #endif
 
-#if !defined( NO_VOICE )//#ifndef _XBOX
-	int iEntity = msg->m_nFromClient + 1;
+#if !defined( NO_VOICE )
+	if ( voice_debugfeedback.GetBool() )
+	{
+		Msg( "Received voice from: %d\n", msg.client() + 1 );
+	}
+
+	int iEntity = msg.client() + 1;
 	if ( iEntity == (m_nPlayerSlot + 1) )
 	{ 
-		Voice_LocalPlayerTalkingAck();
+		Voice_LocalPlayerTalkingAck( m_nSplitScreenSlot );
 	}
 
 	player_info_t playerinfo;
 	engineClient->GetPlayerInfo( iEntity, &playerinfo );
 
+	CSteamID voicePlayer( playerinfo.xuid );
+
 	if ( Q_strlen( cl_voice_filter.GetString() ) > 0 && Q_strstr( playerinfo.name, cl_voice_filter.GetString() ) == NULL )
 		return true;
 
-#if defined( REPLAY_ENABLED )
-	extern IEngineClientReplay *g_pEngineClientReplay;
-	bool bInReplay = engineClient->IsPlayingDemo() && g_pEngineClientReplay && g_pEngineClientReplay->IsPlayingReplayDemo();
-
-	if ( replay_voice_during_playback == NULL )
-	{
-		replay_voice_during_playback = g_pCVar->FindVar( "replay_voice_during_playback" );
-		Assert( replay_voice_during_playback != NULL );
-	}
-
-	// Don't play back voice data during replay unless the client specified it to.
-	if ( bInReplay && replay_voice_during_playback && !replay_voice_during_playback->GetBool() )
-		return true;
-#endif
-
 	// Data length can be zero when the server is just acking a client's voice data.
-	if ( bitsRead == 0 )
+	if ( msg.voice_data().size() == 0 )
 		return true;
 
-	if ( !Voice_Enabled() )
-	{
+	if ( !Voice_SystemEnabled() )
 		return true;
-	}
 
-	// Have we already initialized the channels for this guy?
-	int nChannel = Voice_GetChannel( iEntity );
-	if ( nChannel == VOICE_CHANNEL_ERROR )
+	bool bIsCaster = msg.has_caster() && msg.caster();
+
+	// if this voice data is for a caster that is not enabled, then bail
+	if ( bIsCaster && !Voice_CasterEnabled( voicePlayer.GetAccountID() ) )
+		return true;
+
+	// if voice is enabled or it's a caster and caster voice is enabled.
+	if ( Voice_Enabled() || ( Voice_CasterEnabled( voicePlayer.GetAccountID() ) && bIsCaster ) )
 	{
-		// Create a channel in the voice engine and a channel in the sound engine for this guy.
-		nChannel = Voice_AssignChannel( iEntity, msg->m_bProximity );
+		// Have we already initialized the channels for this guy?
+		int nChannel = Voice_GetChannel( iEntity );
 		if ( nChannel == VOICE_CHANNEL_ERROR )
 		{
-			// If they used -nosound, then it's not a problem.
-			if ( S_IsInitted() )
-				ConDMsg("ProcessVoiceData: Voice_AssignChannel failed for client %d!\n", iEntity-1);
-			
-			return true;
+			// Create a channel in the voice engine and a channel in the sound engine for this guy.
+			float flBufferTime = GetBaseLocalClient().ishltv ? cl_voice_hltv_buffer_time.GetFloat() : cl_voice_buffer_time.GetFloat();
+			nChannel = Voice_AssignChannel( iEntity, msg.proximity(), bIsCaster, flBufferTime );
+			if ( nChannel == VOICE_CHANNEL_ERROR )
+			{
+				// If they used -nosound, then it's not a problem.
+				if ( S_IsInitted() )
+				{
+					ConDMsg( "ProcessVoiceData: Voice_AssignChannel failed for client %d!\n", iEntity - 1 );
+				}
+				return true;
+			}
 		}
+
+		// Give the voice engine the data (it in turn gives it to the mixer for the sound engine).
+		Voice_AddIncomingData( nChannel, 
+							   &msg.voice_data()[0], 
+							   msg.voice_data().size(),
+							   msg.has_section_number() ? msg.section_number() : 0,
+							   msg.has_sequence_bytes() ? msg.sequence_bytes() : 0,
+							   msg.has_uncompressed_sample_offset() ? msg.uncompressed_sample_offset() : 0,
+							   ( msg.has_format() && ( msg.format() == VOICEDATA_FORMAT_STEAM ) ) ? VoiceFormat_Steam : VoiceFormat_Engine );
 	}
 
-	// Give the voice engine the data (it in turn gives it to the mixer for the sound engine).
-	Voice_AddIncomingData( nChannel, chReceived, Bits2Bytes( bitsRead ), m_nCurrentSequence );
 #endif
 	return true;
 };
 
-bool CClientState::ProcessPrefetch( SVC_Prefetch *msg )
+bool CClientState::SVCMsg_Prefetch( const CSVCMsg_Prefetch& msg )
 {
-	char const *soundname = cl.GetSoundName( msg->m_nSoundIndex );
+	char const *soundname = GetBaseLocalClient().GetSoundName( msg.sound_index() );
 	if ( soundname && soundname [ 0 ] )
 	{
 		EngineSoundClient()->PrefetchSound( soundname );
@@ -566,121 +572,57 @@ bool CClientState::ProcessPrefetch( SVC_Prefetch *msg )
 	return true;
 }
 
-void CClientState::ProcessSoundsWithProtoVersion( SVC_Sounds *msg, CUtlVector< SoundInfo_t > &sounds, int nProtoVersion )
+bool CClientState::SVCMsg_Sounds( const CSVCMsg_Sounds& msg )
 {
-	SoundInfo_t defaultSound; defaultSound.SetDefault();
+	SoundInfo_t defaultSound;
+
 	SoundInfo_t *pDeltaSound = &defaultSound;
+	SoundInfo_t sound;
 
-	// Max is 32 in multiplayer and 255 in singleplayer
-	// Reserve this memory up front so it doesn't realloc under pDeltaSound pointing at it
-	sounds.EnsureCapacity( 256 );
-	
-	for ( int i = 0; i < msg->m_nNumSounds; i++ )
+	int nNumSounds = msg.sounds_size();
+	for ( int i=0; i<nNumSounds; i++ )
 	{
-		int nSound = sounds.AddToTail();
-		SoundInfo_t *pSound = &(sounds[ nSound ]);
+		const CSVCMsg_Sounds::sounddata_t& SoundData = msg.sounds( i );
 
-		pSound->ReadDelta( pDeltaSound, msg->m_DataIn, nProtoVersion );
+		sound.ReadDelta( pDeltaSound, SoundData );
 
-		pDeltaSound = pSound;	// copy delta values
+		pDeltaSound = &sound;	// copy delta values
 
-		if ( msg->m_bReliableSound )
+		if ( msg.reliable_sound() )
 		{
 			// client is incrementing the reliable sequence numbers itself
 			m_nSoundSequence = ( m_nSoundSequence + 1 ) & SOUND_SEQNUMBER_MASK;
-			Assert ( pSound->nSequenceNumber == 0 );
-			pSound->nSequenceNumber = m_nSoundSequence;
+			Assert ( sound.nSequenceNumber == 0 );
+			sound.nSequenceNumber = m_nSoundSequence;
 		}
+
+		// Add all received sounds to sorted queue (sounds may arrive in multiple messages), 
+		//  will be processed after all packets have been completely parsed
+		CL_AddSound( sound );
 	}
+
+	// check given length against read bits
+	return true;
 }
 
-bool CClientState::ProcessSounds( SVC_Sounds *msg )	
+bool CClientState::SVCMsg_FixAngle( const CSVCMsg_FixAngle &msg )
 {
-	if ( msg->m_DataIn.IsOverflowed() )
-	{
-		// Overflowed before we even started! There's nothing we can do with this buffer.
-		return false;
-	}
+	const CMsgQAngle& angle = msg.angle();
+	QAngle qangle( angle.x(), angle.y(), angle.z() );
 
-	CUtlVector< SoundInfo_t > sounds;
-
-	int startbit = msg->m_DataIn.GetNumBitsRead();
-
-	// Process with the reported proto version
-	ProcessSoundsWithProtoVersion( msg, sounds, g_ClientGlobalVariables.network_protocol );
-
-	int nRelativeBitsRead = msg->m_DataIn.GetNumBitsRead() - startbit;
-
-	if ( msg->m_nLength != nRelativeBitsRead || msg->m_DataIn.IsOverflowed() )
-	{
-		// The number of bits read is not what we expect!
-		sounds.RemoveAll();
-		
-		int nFallbackProtocol = 0;
-
-		// If the demo file thinks it's version 18 or 19, it might actually be the other.
-		// This is a work around for when we broke compatibility Halloween 2011.
-		// -Jeep
-		if ( g_ClientGlobalVariables.network_protocol == PROTOCOL_VERSION_18 )
-		{
-			nFallbackProtocol = PROTOCOL_VERSION_19;
-		}
-		else if ( g_ClientGlobalVariables.network_protocol == PROTOCOL_VERSION_19 )
-		{
-			nFallbackProtocol = PROTOCOL_VERSION_18;
-		}
-
-		if ( nFallbackProtocol != 0 )
-		{
-			// Roll back our buffer to before we read those bits and wipe the overflow flag
-			msg->m_DataIn.Reset();
-			msg->m_DataIn.Seek( startbit );
-
-			// Try again with the fallback version
-			ProcessSoundsWithProtoVersion( msg, sounds, nFallbackProtocol );
-
-			nRelativeBitsRead = msg->m_DataIn.GetNumBitsRead() - startbit;
-		}
-	}
-
-	if ( msg->m_nLength == nRelativeBitsRead )
-	{
-		// Now that we know the bits were read correctly, add all the sounds
-		for ( int i = 0; i < sounds.Count(); ++i )
-		{
-			// Add all received sounds to sorted queue (sounds may arrive in multiple messages), 
-			//  will be processed after all packets have been completely parsed
-			CL_AddSound( sounds[ i ] );
-		}
-
-		// read the correct number of bits
-		return true;
-	}
-
-	// Wipe the overflow flag and set the buffer to how much we expected to read
-	msg->m_DataIn.Reset();
-	msg->m_DataIn.Seek( startbit + msg->m_nLength );
-
-	// didn't read the correct number of bits with either proto version attempt
-	return false;
-}
-
-
-bool CClientState::ProcessFixAngle( SVC_FixAngle *msg )
-{
 	for (int i=0 ; i<3 ; i++)
 	{
 		// Clamp between -180 and 180
-		if (msg->m_Angle[i]>180)
+		if (qangle[i]>180)
 		{
-			msg->m_Angle[i] -= 360;
+			qangle[i] -= 360;
 		}
 	}
 
-	if ( msg->m_bRelative )
+	if ( msg.relative() )
 	{
-			// Update running counter
-		addangletotal += msg->m_Angle[YAW];
+		// Update running counter
+		addangletotal += qangle[YAW];
 
 		AddAngle a;
 		a.total = addangletotal;
@@ -691,28 +633,29 @@ bool CClientState::ProcessFixAngle( SVC_FixAngle *msg )
 	else
 	{
 
-		viewangles = msg->m_Angle;
+		viewangles = qangle;
 	}
 
 	return true;
 }
 
-
-bool CClientState::ProcessCrosshairAngle( SVC_CrosshairAngle *msg )
+bool CClientState::SVCMsg_CrosshairAngle( const CSVCMsg_CrosshairAngle& msg )
 {
-	g_ClientDLL->SetCrosshairAngle( msg->m_Angle );
+	const CMsgQAngle& angle = msg.angle();
+	const QAngle qangle( angle.x(), angle.y(), angle.z() );
+
+	g_ClientDLL->SetCrosshairAngle( qangle );
 
 	return true;
 }
 
-
-bool CClientState::ProcessBSPDecal( SVC_BSPDecal *msg )
+bool CClientState::SVCMsg_BSPDecal( const CSVCMsg_BSPDecal& msg )
 {
 	model_t	* model;
 
-	if ( msg->m_nEntityIndex )
+	if ( msg.entity_index() )
 	{
-		model = GetModel( msg->m_nModelIndex );
+		model = GetModel( msg.model_index() );
 	}
 	else
 	{
@@ -725,7 +668,7 @@ bool CClientState::ProcessBSPDecal( SVC_BSPDecal *msg )
 
 	if ( model == NULL )
 	{
-		IMaterial *mat = Draw_DecalMaterial( msg->m_nDecalTextureIndex );
+		IMaterial *mat = Draw_DecalMaterial( msg.decal_texture_index() );
 		char const *matname = "???";
 		if ( mat )
 		{
@@ -734,43 +677,33 @@ bool CClientState::ProcessBSPDecal( SVC_BSPDecal *msg )
 
 		Warning( "Warning! Static BSP decal (%s), on NULL model index %i for entity index %i.\n", 
 			matname,
-			msg->m_nModelIndex, 
-			msg->m_nEntityIndex );
+			msg.model_index(), 
+			msg.entity_index() );
 		return true;
 	}
 
 	if (r_decals.GetInt())
 	{
-		g_pEfx->DecalShoot( 
-			msg->m_nDecalTextureIndex, 
-			msg->m_nEntityIndex, 
-			model, 
-			vec3_origin, 
+		const CMsgVector& pos = msg.pos();
+		const Vector vecPos( pos.x(), pos.y(), pos.z() );
+
+		g_pEfx->DecalShoot(
+			msg.decal_texture_index(),
+			msg.entity_index(),
+			model,
+			vec3_origin,
 			vec3_angle,
-			msg->m_Pos, 
-			NULL, 
-			msg->m_bLowPriority ? 0 : FDECAL_PERMANENT );
+			vecPos,
+			NULL,
+			msg.low_priority() ? 0 : FDECAL_PERMANENT );
 	}
 
 	return true;
 }
 
-
-bool CClientState::ProcessGameEvent(SVC_GameEvent *msg)
+bool CClientState::SVCMsg_GameEvent(const CSVCMsg_GameEvent& msg)
 {
-	tmZoneFiltered( TELEMETRY_LEVEL0, 50, TMZF_NONE, "%s", __FUNCTION__ );
-
-	int startbit = msg->m_DataIn.GetNumBitsRead();
-
-	IGameEvent *event = g_GameEventManager.UnserializeEvent( &msg->m_DataIn );
-
-	int length = msg->m_DataIn.GetNumBitsRead() - startbit;
-
-	if ( length != msg->m_nLength )
-	{
-		DevMsg("CClientState::ProcessGameEvent: KeyValue length mismatch.\n" );
-		return true;
-	}
+	IGameEvent *event = g_GameEventManager.UnserializeEvent( msg );
 
 	if ( !event )
 	{
@@ -778,24 +711,22 @@ bool CClientState::ProcessGameEvent(SVC_GameEvent *msg)
 		return true;
 	}
 
+	if ( msg.passthrough() == 1 )
+	{
+		// this should only come to clients while they have replay in progress
+		event->SetBool( "realtime_passthrough", true );
+	}
+
 	g_GameEventManager.FireEventClientSide( event );
 
 	return true;
 }
 
-
-bool CClientState::ProcessUserMessage(SVC_UserMessage *msg)
+bool CClientState::SVCMsg_UserMessage( const CSVCMsg_UserMessage &msg)
 {
-	// buffer for incoming user message
-	ALIGN4 byte userdata[ MAX_USER_MSG_DATA ] ALIGN4_POST = { 0 };
-	bf_read userMsg( "UserMessage(read)", userdata, sizeof( userdata ) );
-	int bitsRead = msg->m_DataIn.ReadBitsClamped( userdata, msg->m_nLength );
-	userMsg.StartReading( userdata, Bits2Bytes( bitsRead ) );
-
-	// dispatch message to client.dll
-	if ( !g_ClientDLL->DispatchUserMessage( msg->m_nMsgType, userMsg ) )
+	if ( !g_ClientDLL->DispatchUserMessage( msg.msg_type(), msg.passthrough(), msg.msg_data().size(), &msg.msg_data()[0] ) )
 	{
-		ConMsg( "Couldn't dispatch user message (%i)\n", msg->m_nMsgType );
+		ConMsg( "Couldn't dispatch user message (%i)\n", msg.msg_type() );
 		return false;
 	}
 
@@ -803,41 +734,41 @@ bool CClientState::ProcessUserMessage(SVC_UserMessage *msg)
 }
 
 
-bool CClientState::ProcessEntityMessage(SVC_EntityMessage *msg)
+bool CClientState::SVCMsg_EntityMsg( const CSVCMsg_EntityMsg& msg )
 {
 	// Look up entity
-	IClientNetworkable *entity = entitylist->GetClientNetworkable( msg->m_nEntityIndex );
+	IClientNetworkable *entity = entitylist->GetClientNetworkable( msg.ent_index() );
 
 	if ( !entity )
 	{
-		// message was send to use, even we don't have this entity TODO change that on server side
+		int idx = queuedmessage.AddToTail();
+
+		CQueuedEntityMessage *pMessage = &queuedmessage[idx];
+		pMessage->m_msg.CopyFrom( msg );	
 		return true;
 	}
 
 	// route to entity 
 	MDLCACHE_CRITICAL_SECTION_( g_pMDLCache );
 
-	// buffer for incoming user message
-	ALIGN4 byte entityData[ MAX_ENTITY_MSG_DATA ] ALIGN4_POST = { 0 };
-	bf_read entMsg( "EntityMessage(read)", entityData, sizeof( entityData ) );
-	int bitsRead = msg->m_DataIn.ReadBitsClamped( entityData, msg->m_nLength );
-	entMsg.StartReading( entityData, Bits2Bytes( bitsRead ) );
-
-	entity->ReceiveMessage( msg->m_nClassID, entMsg );
+	bf_read entMsg;
+	entMsg.StartReading( msg.ent_data().data(), msg.ent_data().size() );
+	entity->ReceiveMessage( msg.class_id(), entMsg );
 
 	return true;
 }
 
 
-bool CClientState::ProcessPacketEntities( SVC_PacketEntities *msg )
+bool CClientState::SVCMsg_PacketEntities( const CSVCMsg_PacketEntities &msg )
 {
-	if ( !msg->m_bIsDelta )
+	CL_PreprocessEntities(); // setup client prediction
+
+	if ( !msg.is_delta() )
 	{
 		// Delta too old or is initial message
-#ifndef _XBOX			
 		// we can start recording now that we've received an uncompressed packet
 		demorecorder->SetSignonState( SIGNONSTATE_FULL );
-#endif
+
 		// Tell prediction that we're recreating entities due to an uncompressed packet arriving
 		if ( g_pClientSidePrediction  )
 		{
@@ -851,66 +782,60 @@ bool CClientState::ProcessPacketEntities( SVC_PacketEntities *msg )
 			// we requested a full update but still got a delta compressed packet. ignore it.
 			return true;
 		}
-
-		// Preprocessing primarily does client prediction. So if we're processing deltas--do it
-		// otherwise, we're about to be told exactly what the state of everything is--so skip it.
-		CL_PreprocessEntities(); // setup client prediction
 	}
 	
-	TRACE_PACKET(( "CL Receive (%d <-%d)\n", m_nCurrentSequence, msg->m_nDeltaFrom ));
-	TRACE_PACKET(( "CL Num Ents (%d)\n", msg->m_nUpdatedEntries ));
+	TRACE_PACKET(( "CL Receive (%d <-%d)\n", m_nCurrentSequence, msg.delta_from() ));
+	TRACE_PACKET(( "CL Num Ents (%d)\n", msg.updated_entries() ));
 
 	if ( g_pLocalNetworkBackdoor )
 	{
 		if ( m_nSignonState == SIGNONSTATE_SPAWN  )
 		{	
 			// We are done with signon sequence.
-			SetSignonState( SIGNONSTATE_FULL, m_nServerCount );
+			SetSignonState( SIGNONSTATE_FULL, m_nServerCount, NULL );
 		}
 
 		// ignore message, all entities are transmitted using fast local memcopy routines
 		m_nDeltaTick = GetServerTickCount();
 		return true;
 	}
-	
-	if ( !CL_ProcessPacketEntities ( msg ) )
+
+	if ( !CL_ProcessPacketEntities( msg ) )
 		return false;
 
-	return CBaseClientState::ProcessPacketEntities( msg );
+	return CBaseClientState::SVCMsg_PacketEntities( msg );
 }
 
 
-bool CClientState::ProcessTempEntities( SVC_TempEntities *msg )
+bool CClientState::SVCMsg_TempEntities( const CSVCMsg_TempEntities &msg )
 {
-	bool bReliable = false;
+	bool bReliable = msg.reliable();
 
-	float fire_time = cl.GetTime();
+	float fire_time = GetBaseLocalClient().GetTime();
 
-#ifndef _XBOX
 	// delay firing temp ents by cl_interp in multiplayer or demoplayback
-	if ( cl.m_nMaxClients > 1 || demoplayer->IsPlayingBack() )
+	if ( GetBaseLocalClient().m_nMaxClients > 1 || demoplayer->IsPlayingBack() )
 	{
 		float flInterpAmount = GetClientInterpAmount();
 		fire_time += flInterpAmount;
 	}
-#endif
 
-	if ( msg->m_nNumEntries == 0 )
+	int numEntries = msg.num_entries();
+	if ( numEntries == 0 )
 	{
 		bReliable = true;
-		msg->m_nNumEntries = 1;
+		numEntries = 1;
 	}
 
 	int flags = bReliable ? FEV_RELIABLE : 0;
 
 	// Don't actually queue unreliable events if playing a demo and skipping ahead
-#ifndef _XBOX
 	if ( !bReliable && demoplayer->IsSkipping() )
 	{
 		return true;
 	}
-#endif
-	bf_read &buffer = msg->m_DataIn; // shortcut
+
+	bf_read buffer( &msg.entity_data()[0], msg.entity_data().size() );
 
 	int classID = -1;
 	void *from = NULL;
@@ -919,8 +844,27 @@ bool CClientState::ProcessTempEntities( SVC_TempEntities *msg )
 	ALIGN4 unsigned char data[CEventInfo::MAX_EVENT_DATA] ALIGN4_POST;
 	bf_write toBuf( data, sizeof(data) );
 	CEventInfo *ei = NULL;
-	
-	for (int i = 0; i < msg->m_nNumEntries; i++ )
+
+	CUtlFixedLinkedList< CEventInfo > &eventList = GetBaseLocalClient().events;
+
+	class CAutoCleanupHandle
+	{
+	public:
+		explicit CAutoCleanupHandle( SerializedEntityHandle_t handle ) : m_Handle( handle )
+		{
+		}
+		~CAutoCleanupHandle()
+		{
+			g_pSerializedEntities->ReleaseSerializedEntity( m_Handle );
+		}
+	private:
+		SerializedEntityHandle_t m_Handle;
+	};
+
+	SerializedEntityHandle_t incoming = g_pSerializedEntities->AllocateSerializedEntity(__FILE__, __LINE__);
+	CAutoCleanupHandle cleanup( incoming );
+
+	for (int i = 0; i < numEntries; i++ )
 	{
 		float delay = 0.0f;
 
@@ -931,14 +875,16 @@ bool CClientState::ProcessTempEntities( SVC_TempEntities *msg )
 
 		toBuf.Reset();
 
+		SerializedEntityHandle_t merged = g_pSerializedEntities->AllocateSerializedEntity(__FILE__, __LINE__);
+
 		if ( buffer.ReadOneBit() )
 		{
 			from = NULL; // full update
 
 			classID = buffer.ReadUBitLong( m_nServerClassBits ); // classID 
-		
+
 			// Look up the client class, etc.
-	
+
 			// Match the server classes to the client classes.
 			pServerClass = m_pServerClasses ? &m_pServerClasses[ classID - 1 ] : NULL;
 
@@ -950,44 +896,102 @@ bool CClientState::ProcessTempEntities( SVC_TempEntities *msg )
 
 			// See if the client .dll has a handler for this class
 			pClientClass = FindClientClass( pServerClass->m_ClassName );
-		
+
 			if ( !pClientClass || !pClientClass->m_pRecvTable )
 			{
 				DevMsg("CL_QueueEvent: missing client receive table for %s.\n", pServerClass->m_ClassName );
 				return false;
 			}
 
-			RecvTable_MergeDeltas( pClientClass->m_pRecvTable, NULL, &buffer, &toBuf );
+			// Incoming data
+			RecvTable_ReadFieldList( pClientClass->m_pRecvTable, buffer, incoming, -1, false );
+			RecvTable_MergeDeltas( pClientClass->m_pRecvTable, SERIALIZED_ENTITY_HANDLE_INVALID, incoming, merged );
 		}
 		else
 		{
-			Assert( ei );
+			Assert( eventList.Tail() != eventList.InvalidIndex() );
 
-			unsigned int buffer_size = PAD_NUMBER( Bits2Bytes( ei->bits ), 4 );
-			bf_read fromBuf( ei->pData, buffer_size );
-		
-			RecvTable_MergeDeltas( pClientClass->m_pRecvTable, &fromBuf, &buffer, &toBuf );
+			CEventInfo *previous = &eventList[ eventList.Tail() ];
+
+			RecvTable_ReadFieldList( pClientClass->m_pRecvTable, buffer, incoming, -1, false );
+			RecvTable_MergeDeltas( pClientClass->m_pRecvTable, previous->m_Packed, incoming, merged );
 		}
 
 		// Add a slot
-		ei = &cl.events[ cl.events.AddToTail() ];
+		ei = &GetBaseLocalClient().events[ GetBaseLocalClient().events.AddToTail() ];
 
 		Assert( ei );
 
-		int size = Bits2Bytes(toBuf.GetNumBitsWritten() );
-		
 		ei->classID			= classID;
 		ei->fire_delay		= fire_time + delay;
 		ei->flags			= flags;
 		ei->pClientClass	= pClientClass;
-		ei->bits			= toBuf.GetNumBitsWritten();
-
-		// deltaBitsReader.ReadNextPropIndex reads uint32s, so make sure we alloc in 4-byte chunks.
-		ei->pData			= new byte[ ALIGN_VALUE( size, 4 ) ]; // copy raw data
-		Q_memcpy( ei->pData, data, size );
+		ei->m_Packed		= merged;
 	}
 
 	return true;
 }
+
+bool CClientState::SVCMsg_PaintmapData( const CSVCMsg_PaintmapData& msg )
+{
+	int nDword = ( Bits2Bytes( msg.paintmap().size() ) + 3 ) / 4;
+	CUtlVector< uint32 > data;
+	data.SetCount( nDword );
+
+	bf_read dataIn;
+	dataIn.ReadBits( const_cast<char*>(msg.paintmap().data()), msg.paintmap().size() );
+	
+	//handle endian issue between platforms
+	CByteswap swap;
+	swap.ActivateByteSwapping( !CByteswap::IsMachineBigEndian() );
+	swap.SwapBufferToTargetEndian( data.Base(), data.Base(), nDword );
+
+	if ( data.Count() > 0 )
+	{
+		g_PaintManager.LoadPaintmapDataRLE( data );
+	}
+
+	return true;
+}
+
+
+bool CClientState::SVCMsg_HltvReplay( const CSVCMsg_HltvReplay &msg )
+{
+	VPROF( "HltvReplayStart" );
+	DevMsg( "%d. Msg_HltvReplay %s->%s\n", GetClientTickCount(), m_nHltvReplayDelay ? "replay" : "real-time", msg.delay() ? "replay" : "real-time" );
+	int nWasDelay = m_nHltvReplayDelay;
+	m_nHltvReplayDelay = msg.delay();
+	m_nHltvReplayStopAt = msg.replay_stop_at();
+	m_nHltvReplayStartAt = msg.replay_start_at();
+	float flRate = msg.replay_slowdown_rate();
+	if ( flRate > 0 )
+	{
+		m_nHltvReplaySlowdownBeginAt = msg.replay_slowdown_begin();
+		m_nHltvReplaySlowdownEndAt = msg.replay_slowdown_end();
+		m_flHltvReplaySlowdownRate = flRate;
+	}
+	else
+	{
+		m_nHltvReplaySlowdownBeginAt = 0;
+		m_nHltvReplaySlowdownEndAt = 0;
+		m_flHltvReplaySlowdownRate = 1.0f;
+	}
+	if ( g_ClientDLL )
+	{
+		g_ClientDLL->OnHltvReplay( msg );
+		s_bClientWaitingForHltvReplayTick = true; // waiting for a tick message after the hltv replay either starts or stops: it will carry the new tick to time replay fades etc.
+	}
+	if ( !m_nHltvReplayDelay != !nWasDelay )
+	{
+		// clean up frame history, because we're about to start new history.
+		// this is only useful when we're switching the timeline between HLTV and non-HLTV streams: 
+		// the same frame encodes different information in these two modes, and we can't decode delta frames in one timeline based on the full frames in another.
+		// It's tolerable from networking perspective because every time we switch the mode, the server forces a full frame update immediately after this message.
+		// It's NOT VALID to delete client frames when we don't switch the modes, because the server WILL NOT send a full frame update
+		DeleteClientFrames( -1 ); 
+	}
+	return true;
+}
+
 
 #endif // swds

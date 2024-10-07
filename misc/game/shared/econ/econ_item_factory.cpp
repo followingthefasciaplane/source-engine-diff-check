@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright ©, Valve Corporation, All rights reserved. =======
 //
 // Purpose: EconItemFactory: Manages rolling for items requested by the game server
 //
@@ -6,9 +6,11 @@
 
 #include "cbase.h"
 
+#include "econ_item_view_helpers.h"
+#include "playerdecals_signature.h"
+
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
-#include "econ/econ_assetapi_context.h"
 
 
 using namespace GCSDK;
@@ -22,6 +24,17 @@ CEconItemFactory::CEconItemFactory(  )
 {
 }
 
+//-----------------------------------------------------------------------------
+itemid_t CEconItemFactory::GetNextID()
+{ 
+	if( !m_bIsInitialized || !GGCBase()->IsGCRunningType( GC_TYPE_MASTER ) )
+	{
+		AssertMsg( m_bIsInitialized, "Critical Error: Attempting to get a new item ID without loading in the starting ID first!!!" ); 
+		AssertMsg( GGCBase()->IsGCRunningType( GC_TYPE_MASTER ), "Critical Error: Attempting to get an item ID on the non-master GC, this will get out of sync" );
+		return INVALID_ITEM_ID;
+	}
+	return m_ulNextObjID++; 
+}
 
 //-----------------------------------------------------------------------------
 // Purpose:	Initializes the item factory and schema. Return false if init failed
@@ -37,7 +50,7 @@ bool CEconItemFactory::BYieldingInit()
 	}
 
 	static const char *pchMaxIDQuery = "SELECT MAX( ID ) FROM "
-		"( select max(ID) AS ID FROM Item UNION SELECT MAX(ID) AS ID FROM ForeignItem ) as tbl";
+		"( select Max(ID) AS ID FROM Item UNION SELECT MAX(ID) AS ID FROM ForeignItem ) as tbl";
 
 	CSQLAccess sqlAccess;
 	if( !sqlAccess.BYieldingExecuteSingleResult<uint64, uint64>( NULL, pchMaxIDQuery, k_EGCSQLType_int64, &m_ulNextObjID, NULL ) )
@@ -82,6 +95,37 @@ static const CEconItemQualityDefinition *GetQualityDefinitionForItemCreation( co
 	return GetItemSchema()->GetQualityDefinition( unQuality );
 }
 
+static const CEconItemRarityDefinition *GetRarityDefinitionForItemCreation( const CItemSelectionCriteria *pOptionalCriteria, const CEconItemDefinition *pItemDef )
+{
+	Assert( pItemDef );
+
+	// Do we have a quality specified? If so, is it a valid quality? If not, we fall back to the
+	// quality specified by the item definition, the schema, etc.
+	uint8 unRarity = k_unItemRarity_Any;
+
+	// Quality specified in generation request via criteria?
+	if ( pOptionalCriteria && pOptionalCriteria->BRaritySet() )
+	{
+		unRarity = pOptionalCriteria->GetRarity();
+	}
+
+	// If not: quality specified in item definition?
+	if ( unRarity == k_unItemRarity_Any )
+	{
+		unRarity = pItemDef->GetRarity();
+	}
+
+	// Final fallback: default quality in schema.
+	if ( unRarity == k_unItemRarity_Any )
+	{
+		unRarity = 1;
+	}
+
+	AssertMsg( unRarity != k_unItemRarity_Any, "Unable to locate valid rarity!" );
+
+	return GetItemSchema()->GetRarityDefinition( unRarity );
+}
+
 //-----------------------------------------------------------------------------
 // Purpose:	Creates an item matching the incoming item selection criteria
 // Input:	pItem - Pointer to the item to fill in
@@ -104,6 +148,12 @@ CEconItem *CEconItemFactory::CreateRandomItem( const CEconGameAccount *pGameAcco
 		EmitWarning( SPEW_GC, 2, "CEconItemFactory::CreateRandomItem(): Item creation request with unknown quality\n" );
 		return NULL;
 	}
+	const CEconItemRarityDefinition *pRarityDef = GetRarityDefinitionForItemCreation( &criteria, pItemDef );
+	if ( NULL == pRarityDef )
+	{
+		EmitWarning( SPEW_GC, 2, "CEconItemFactory::CreateRandomItem(): Item creation request with unknown rarity\n" );
+		return NULL;
+	}
 
 	// At this point we have everything that can fail will already have failed, so we can safely
 	// create an item and just move properties over to it.
@@ -112,16 +162,26 @@ CEconItem *CEconItemFactory::CreateRandomItem( const CEconGameAccount *pGameAcco
 	pItem->SetDefinitionIndex( pItemDef->GetDefinitionIndex() );
 	pItem->SetItemLevel( criteria.BItemLevelSet() ? criteria.GetItemLevel() : pItemDef->RollItemLevel() );
 	pItem->SetQuality( pQualityDef->GetDBValue() );
+	pItem->SetRarity( pRarityDef->GetDBValue() );
 	pItem->SetInventoryToken( criteria.GetInitialInventory() );
-	pItem->SetQuantity( criteria.BInitialQuantitySet() ? criteria.GetInitialQuantity() : pItemDef->GetDefaultDropQuantity() );
+	pItem->SetQuantity( criteria.GetInitialQuantity() );
 	// don't set account ID
 	
 	// Add any custom attributes we need
-	if( !BAddGCGeneratedAttributesToItem( pGameAccount, pItem ) )
+	AddGCGeneratedAttributesToItem( pGameAccount, pItem );
+
+	// Set any painkit data specified
+	const char *pchPaintKit = criteria.GetValueForFirstConditionOfFieldName( "*paintkit" );
+	if ( pchPaintKit )
 	{
-		delete pItem;
-		EmitWarning( SPEW_GC, 2, "CEconItemFactory::CreateSpecificItem(): Failed to generate attributes\n" );
-		return NULL;
+		const char *pchWear = criteria.GetValueForFirstConditionOfFieldName( "*wear" );
+
+		item_list_entry_t itemInit;
+		itemInit.m_nItemDef = pItemDef->GetDefinitionIndex();
+		itemInit.m_nPaintKit = atoi( pchPaintKit );
+		itemInit.m_nPaintKitSeed = 0;
+		itemInit.m_flPaintKitWear = pchWear ? atof( pchWear ) : 0.001;
+		pItem->InitAttributesDroppedFromListEntry( &itemInit );
 	}
 
 	return pItem;
@@ -133,8 +193,11 @@ CEconItem *CEconItemFactory::CreateRandomItem( const CEconGameAccount *pGameAcco
 //			unDefinitionIndex - The definition index of the item to create
 // Output:	True if a matching item could be generated, false otherwise
 //-----------------------------------------------------------------------------
-CEconItem *CEconItemFactory::CreateSpecificItem( const CEconGameAccount *pGameAccount, item_definition_index_t unDefinitionIndex )
+CEconItem *CEconItemFactory::CreateSpecificItem( const CEconGameAccount *pGameAccount, item_definition_index_t unDefinitionIndex, ECreateItemPolicy_t eCreateItemPolicy )
 {
+	if ( !pGameAccount )
+		return NULL;
+
 	// Find the matching index
 	const CEconItemDefinition *pItemDef = m_schema.GetItemDefinition( unDefinitionIndex );
 	if ( NULL == pItemDef )
@@ -149,29 +212,29 @@ CEconItem *CEconItemFactory::CreateSpecificItem( const CEconGameAccount *pGameAc
 		EmitWarning( SPEW_GC, 2, "CEconItemFactory::CreateSpecificItem(): Item creation request with unknown quality\n" );
 		return NULL;
 	}
+	const CEconItemRarityDefinition *pRarityDef = GetRarityDefinitionForItemCreation( NULL, pItemDef );
+	if ( NULL == pRarityDef )
+	{
+		EmitWarning( SPEW_GC, 2, "CEconItemFactory::CreateSpecificItem(): Item creation request with unknown rarity\n" );
+		return NULL;
+	}
 
 	CEconItem *pItem = new CEconItem();
-	if ( pGameAccount != NULL )
+	if ( eCreateItemPolicy & k_ECreateItemPolicy_NoSqlItemID )
+		pItem->SetItemID( 0ull );
+	else
 		pItem->SetItemID( GetNextID() );
+
 	pItem->SetDefinitionIndex( unDefinitionIndex );
 	pItem->SetItemLevel( pItemDef->RollItemLevel() );
 	pItem->SetQuality( pQualityDef->GetDBValue() );
+	pItem->SetRarity( pRarityDef->GetDBValue() );
 	// don't set inventory token
 	pItem->SetQuantity( MAX( 1, pItemDef->GetDefaultDropQuantity() ) );
+	pItem->SetAccountID( pGameAccount->Obj().m_unAccountID );
 
-	// Startup test code calls this with a null pGameAccount. 
-	if ( pGameAccount != NULL )
-	{
-		pItem->SetAccountID( pGameAccount->Obj().m_unAccountID );
-
-		// Add any custom attributes we need
-		if( !BAddGCGeneratedAttributesToItem( pGameAccount, pItem ) )
-		{
-			delete pItem;
-			EmitWarning( SPEW_GC, 2, "CEconItemFactory::CreateSpecificItem(): Failed to generate attributes\n" );
-			return NULL;
-		}
-	}
+	// Add any custom attributes we need
+	AddGCGeneratedAttributesToItem( pGameAccount, pItem );
 
 	return pItem;
 }
@@ -185,12 +248,12 @@ CEconItem *CEconItemFactory::CreateSpecificItem( const CEconGameAccount *pGameAc
 const CEconItemDefinition *CEconItemFactory::RollItemDefinition( const CItemSelectionCriteria &criteria ) const
 {
 	// Determine which item templates match the criteria
-	CUtlVector<item_definition_index_t> vecMatches;
+	CUtlVector<int> vecMatches;
 	const CEconItemSchema::ItemDefinitionMap_t &mapDefs = m_schema.GetItemDefinitionMap();
 
 	FOR_EACH_MAP_FAST( mapDefs, i )
 	{
-		if ( criteria.BEvaluate( mapDefs[i] ) )
+		if ( criteria.BEvaluate( mapDefs[i], m_schema ) )
 		{
 			vecMatches.AddToTail( mapDefs.Key( i ) );
 		}
@@ -208,124 +271,107 @@ const CEconItemDefinition *CEconItemFactory::RollItemDefinition( const CItemSele
 // Purpose:	Generates attributes that the item definition insists it always has, but must be generated by the GC
 // Input:	
 //-----------------------------------------------------------------------------
-bool CEconItemFactory::BAddGCGeneratedAttributesToItem( const CEconGameAccount *pGameAccount, CEconItem *pItem ) const
+void CEconItemFactory::AddGCGeneratedAttributesToItem( const CEconGameAccount *pGameAccount, CEconItem *pItem ) const
 {
 	const CEconItemDefinition *pDef = m_schema.GetItemDefinition( pItem->GetDefinitionIndex() );
 	if ( !pDef )
-		return false;
+		return;
 
 	const CUtlVector<static_attrib_t> &vecStaticAttribs = pDef->GetStaticAttributes();
 
 	// Only generate attributes that force the GC to generate them (so they vary per item created)
 	FOR_EACH_VEC( vecStaticAttribs, i )
 	{
-		if ( vecStaticAttribs[i].bForceGCToGenerate )
+		if ( vecStaticAttribs[i].m_bForceGCToGenerate )
 		{
 			ApplyStaticAttributeToItem( pItem, vecStaticAttribs[i], pGameAccount );
 		}
 	}
-
-	const IEconTool* pTool = pDef->GetEconTool();
-	if( pTool )
-	{
-		if( !pTool->BGenerateDynamicAttributes( pItem, pGameAccount ) )
-			return false;
-	}
-
-	if ( !pDef->BApplyPropertyGenerators( pItem ) )
-		return false;
-
-	return true;
 }
 
 //-----------------------------------------------------------------------------
 // Purpose:
 //-----------------------------------------------------------------------------
-void CEconItemFactory::ApplyStaticAttributeToItem( CEconItem *pItem, const static_attrib_t& staticAttrib, const CEconGameAccount *pGameAccount ) const
+void CEconItemFactory::ApplyStaticAttributeToItem( CEconItem *pItem, const static_attrib_t& staticAttrib, const CEconGameAccount *pGameAccount, const CCopyableUtlVector< uint32 > *vecValues, float flRangeMin, float flRangeMax ) const
 {
 	static CSchemaAttributeDefHandle pAttr_ElevateQuality( "elevate quality" );
-	static CSchemaAttributeDefHandle pAttr_ElevateToUnusual( "elevate to unusual if applicable" );
-	
-	static CSchemaAttributeDefHandle pAttr_Particle( "attach particle effect" );
-	static CSchemaAttributeDefHandle pAttr_HatUnusual( "hat only unusual effect" );
-
-	static CSchemaAttributeDefHandle pAttrDef_TauntUnusual( "taunt only unusual effect" );
-	static CSchemaAttributeDefHandle pAttrDef_TauntUnusualAttr( "on taunt attach particle index" );
+	static CSchemaAttributeDefHandle pAttr_SetItemTextureWear( "set item texture wear" );
+	static CSchemaAttributeDefHandle pAttr_SprayTintID( "spray tint id" );
+	static CSchemaAttributeDefHandle pAttr_SpraysRemaining( "sprays remaining" );
 
 	const CEconItemAttributeDefinition *pAttrDef = GetItemSchema()->GetAttributeDefinition( staticAttrib.iDefIndex );
 	Assert( pAttrDef );
 
 	// Special-case the elevate-quality attribute.
-	if ( pAttrDef == pAttr_ElevateQuality )
+	if ( pAttrDef->GetDefinitionIndex() == pAttr_ElevateQuality->GetDefinitionIndex() )
 	{
 		//AssertMsg( CEconItem::GetTypedAttributeType<CSchemaAttributeType_Default>( pAttrDef ), "Elevate quality attribute doesn't have the right type!" );
-		int iQuality = (int)staticAttrib.m_value.asFloat;
 
-		// Do not change the quality of an item to Strange if it is not basic
-		if ( iQuality == AE_STRANGE )
+		pItem->SetQuality( staticAttrib.m_value.asFloat );
+		return;
+	}
+
+	static CSchemaItemDefHandle hItemSpray( "spray" );
+	static CSchemaItemDefHandle hItemSprayPaint( "spraypaint" );
+	// Special-case the sprays remaining to mean unsealing the spray into spray paint
+	if ( pAttr_SpraysRemaining && hItemSpray && hItemSprayPaint && pItem->GetDefinitionIndex() == hItemSpray->GetDefinitionIndex() &&
+		pAttrDef->GetDefinitionIndex() == pAttr_SpraysRemaining->GetDefinitionIndex() )
+	{
+		pItem->SetDefinitionIndex( hItemSprayPaint->GetDefinitionIndex() );
+		pItem->SetFlag( kEconItemFlag_NonEconomy );
+		pItem->SetDynamicAttributeValue( pAttr_SpraysRemaining, uint32( PLAYERDECALS_NUMCHARGES ) );
+		return;
+	}
+
+	attribute_data_union_t attrValue = staticAttrib.m_value;
+
+	// pick from 'values' if they exist. Otherwise use min/max ranges specified.
+	if ( vecValues && ( *vecValues ).Count() != 0 )
+	{
+		uint32 uiRandIndex = CEconItemSchema::GetRandomStream().RandomInt( 0, ( *vecValues ).Count() - 1 );
+
+		if ( pAttrDef->IsStoredAsFloat() )
 		{
-			if ( pItem->GetQuality() == AE_UNIQUE || pItem->GetQuality() == AE_PAINTKITWEAPON || pItem->GetQuality() == AE_NORMAL )
-			{
-				pItem->SetQuality( iQuality );
-			}
-			// If the quality is strange, strangify this item
-			StrangifyItemInPlace( pItem );
+			attrValue.asFloat = ( *vecValues ).Element( uiRandIndex );	
 		}
 		else
 		{
-			pItem->SetQuality( iQuality );
+			attrValue.asUint32 = ( *vecValues ).Element( uiRandIndex );	
 		}
-
-		return;
 	}
-	// Special-case to elevate-quality only if item has particles.  This 'attr' needs to be added LAST in a lootlist
-	// Or rather after particles may have been granted
-	else if ( pAttrDef == pAttr_ElevateToUnusual )
+	else if ( flRangeMin != 0.0f || flRangeMax != 0.0 )
 	{
-		// Scan all attributes.
-		if ( pItem->FindAttribute( pAttr_Particle ) || pItem->FindAttribute( pAttrDef_TauntUnusualAttr ) )
+		if ( pAttrDef->IsStoredAsFloat() )
 		{
-			pItem->SetQuality( AE_UNUSUAL );
+			attrValue.asFloat = CEconItemSchema::GetRandomStream().RandomFloat( flRangeMin, flRangeMax );
 		}
-		return;
-	}
-	else if ( pAttrDef == pAttr_HatUnusual )
-	{
-		// Ensure the target item is a hat, if it is not bail, if it is setup a particle effect attr (Whole head items are considered 'hats' for purposes of unusuals )
-
-		if ( !(pItem->GetItemDefinition()->GetEquipRegionMask() & GetItemSchema()->GetEquipRegionBitMaskByName( "hat" ) ) 
-		  && !(pItem->GetItemDefinition()->GetEquipRegionMask() & GetItemSchema()->GetEquipRegionBitMaskByName( "whole_head" ) ) 
-		) {
-			// does not match, bail
-			return;
-		}
-			
-		// create a new static attrib
-		static_attrib_t unusualAttr( staticAttrib );
-
-		// load the normal attach effect instead
-		pAttr_Particle->GetAttributeType()->LoadOrGenerateEconAttributeValue( pItem, pAttr_Particle, unusualAttr, pGameAccount );
-		return;
-	}
-	else if ( pAttrDef == pAttrDef_TauntUnusual )
-	{
-		// Ensure the target item is a taunt, if it is not bail
-		if ( pItem->GetItemDefinition()->GetLoadoutSlot( 0 ) != LOADOUT_POSITION_TAUNT )
+		else
 		{
-			// does not match, bail
-			CFmtStr fmtStr( "Attempted to put an unusual taunt effect onto item %s, but it's not a taunt!  Check which lootlists it appears in and remove it from any that are trying to unusualize it!", pItem->GetItemDefinition()->GetItemDefinitionName() );
-			EmitError( SPEW_GC, "%s\n", fmtStr.Get() );
-			return;
+			attrValue.asUint32 = CEconItemSchema::GetRandomStream().RandomInt( flRangeMin, flRangeMax );
 		}
-
-		// create a new static attrib
-		static_attrib_t unusualAttr( staticAttrib );
-
-		// load the normal attach effect instead
-		pAttrDef_TauntUnusualAttr->GetAttributeType()->LoadOrGenerateEconAttributeValue( pItem, pAttrDef_TauntUnusualAttr, unusualAttr, pGameAccount );
-		return;
 	}
+
+	if ( pAttr_SetItemTextureWear && staticAttrib.iDefIndex == pAttr_SetItemTextureWear->GetDefinitionIndex() )
+	{
+		const CPaintKit *pPaintKit = GetItemSchema()->GetPaintKitDefinition( pItem->GetCustomPaintKitIndex() );
+		if ( pPaintKit )
+		{
+			attrValue.asFloat = RemapValClamped( attrValue.asFloat, 0.0f, 1.0f, pPaintKit->flWearRemapMin, pPaintKit->flWearRemapMax );
+		}
+	}
+
+#if ECON_SPRAY_TINT_IDS_FLOAT_COLORSPACE
+ 	if ( pAttr_SprayTintID && staticAttrib.iDefIndex == pAttr_SprayTintID->GetDefinitionIndex()
+ 		&& pAttr_SprayTintID->IsStoredAsInteger()
+ 		&& ( attrValue.asUint32 & 0xFF ) )
+ 	{	// Generation of random HSV space tints
+ 		attrValue.asUint32 = CombinedTintIDMakeFromIDHSVu( attrValue.asUint32,
+ 			CEconItemSchema::GetRandomStream().RandomInt( 0x00, 0x7F ),
+ 			CEconItemSchema::GetRandomStream().RandomInt( 0x00, 0x7F ),
+ 			CEconItemSchema::GetRandomStream().RandomInt( 0x00, 0x7F ) );
+ 	}
+#endif
 
 	// Custom attribute initialization code?
-	pAttrDef->GetAttributeType()->LoadOrGenerateEconAttributeValue( pItem, pAttrDef, staticAttrib, pGameAccount );
+	pAttrDef->GetAttributeType()->LoadOrGenerateEconAttributeValue( pItem, pAttrDef, staticAttrib.m_pszCustomLogic, attrValue, pGameAccount );
 }

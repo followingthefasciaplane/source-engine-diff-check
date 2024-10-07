@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -20,17 +20,17 @@
 class COM_IOReadBinary : public IFileReadBinary
 {
 public:
-	int open( const char *pFileName );
-	int read( void *pOutput, int size, int file );
-	void seek( int file, int pos );
-	unsigned int tell( int file );
-	unsigned int size( int file );
-	void close( int file );
+	FileHandle_t open( const char *pFileName );
+	int read( void *pOutput, int size, FileHandle_t file );
+	void seek( FileHandle_t file, int pos );
+	unsigned int tell( FileHandle_t file );
+	unsigned int size( FileHandle_t file );
+	void close( FileHandle_t file );
 };
 
 
 // prepend sound/ to the filename -- all sounds are loaded from the sound/ directory
-int COM_IOReadBinary::open( const char *pFileName )
+FileHandle_t COM_IOReadBinary::open( const char *pFileName )
 {
 	char namebuffer[512];
 	FileHandle_t hFile;
@@ -46,47 +46,47 @@ int COM_IOReadBinary::open( const char *pFileName )
 
 	hFile = g_pFileSystem->Open( namebuffer, "rb", "GAME" );
 
-	return (int)hFile;
+	return hFile;
 }
 
-int COM_IOReadBinary::read( void *pOutput, int size, int file )
+int COM_IOReadBinary::read( void *pOutput, int size, FileHandle_t file )
 {
 	if ( !file )
 		return 0;
 
-	return g_pFileSystem->Read( pOutput, size, (FileHandle_t)file );
+	return g_pFileSystem->Read( pOutput, size, file );
 }
 
-void COM_IOReadBinary::seek( int file, int pos )
+void COM_IOReadBinary::seek( FileHandle_t file, int pos )
 {
 	if ( !file )
 		return;
 
-	g_pFileSystem->Seek( (FileHandle_t)file, pos, FILESYSTEM_SEEK_HEAD );
+	g_pFileSystem->Seek( file, pos, FILESYSTEM_SEEK_HEAD );
 }
 
-unsigned int COM_IOReadBinary::tell( int file )
+unsigned int COM_IOReadBinary::tell( FileHandle_t file )
 {
 	if ( !file )
 		return 0;
 
-	return g_pFileSystem->Tell( (FileHandle_t)file );
+	return g_pFileSystem->Tell( file );
 }
 
-unsigned int COM_IOReadBinary::size( int file )
+unsigned int COM_IOReadBinary::size( FileHandle_t file )
 {
 	if (!file)
 		return 0;
 
-	return g_pFileSystem->Size( (FileHandle_t)file );
+	return g_pFileSystem->Size( file );
 }
 
-void COM_IOReadBinary::close( int file )
+void COM_IOReadBinary::close( FileHandle_t file )
 {
 	if (!file)
 		return;
 
-	g_pFileSystem->Close( (FileHandle_t)file );
+	g_pFileSystem->Close( file );
 }
 
 static COM_IOReadBinary io;

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -15,10 +15,7 @@
 	#define CWeaponIFMBase C_WeaponIFMBase
 #endif
 
-#if defined ( DOD_DLL )
-	#include "weapon_dodbase.h"
-	#define CWeaponModBaseClass CWeaponDODBase
-#elif defined ( TF_CLIENT_DLL )	|| defined ( TF_DLL )
+#if defined ( TF_CLIENT_DLL )	|| defined ( TF_DLL )
 	#include "tf_weaponbase.h"
 	#define CWeaponModBaseClass CTFWeaponBase
 #endif

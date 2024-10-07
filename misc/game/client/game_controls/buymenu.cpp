@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -6,9 +6,9 @@
 //=============================================================================//
 
 #include "cbase.h"
-#include "buymenu.h"
+#include "BuyMenu.h"
 
-#include "buysubmenu.h"
+#include "BuySubMenu.h"
 using namespace vgui;
 
 #include "mouseoverpanelbutton.h"
@@ -41,6 +41,20 @@ CBuyMenu::CBuyMenu(IViewPort *pViewPort) : WizardPanel( NULL, PANEL_BUY )
 	m_pMainMenu = new CBuySubMenu( this, "mainmenu" );
 	m_pMainMenu->LoadControlSettings( "Resource/UI/MainBuyMenu.res" );
 	m_pMainMenu->SetVisible( false );
+
+	int w, h;
+
+	// Demo kludge to ensure widescreen buy menu does not get clipped
+	engine->GetScreenSize( w, h );
+	float aspectRatio = (float)w/(float)h;
+	bool bIsWidescreen = ( aspectRatio >= 1.7f ) || ( aspectRatio <= 1.6f );
+
+	if ( bIsWidescreen )
+	{
+		SetMinimumSize( w, 480 );
+		SetWide(w);
+	}
+
 }
 
 
@@ -69,10 +83,13 @@ void CBuyMenu::ShowPanel(bool bShow)
 
 		SetMouseInputEnabled( true );
 
+		// Prevent the system menu from appearing - we close the buy menu
+		// when Esc is pressed
 		engine->ClientCmd_Unrestricted( "gameui_preventescapetoshow\n" );
 	}
 	else
 	{
+		// Re-enable default system menu behavior
 		engine->ClientCmd_Unrestricted( "gameui_allowescapetoshow\n" );
 
 		SetVisible( false );
@@ -86,59 +103,21 @@ void CBuyMenu::ShowPanel(bool bShow)
 void CBuyMenu::Update()
 {
 	//Don't need to do anything, but do need to implement this function as base is pure virtual
+	NULL;
 }
 void CBuyMenu::OnClose()
 {
+	// This can get called bypassing ShowPanel(false), so make sure the
+	// system menu works properly
 	engine->ClientCmd_Unrestricted( "gameui_allowescapetoshow\n" );
 
 	BaseClass::OnClose();
 	ResetHistory();
 }
 
-void CBuyMenu::OnKeyCodePressed( vgui::KeyCode code )
-{
-	int nDir = 0;
-
-	switch ( code )
-	{
-	case KEY_XBUTTON_UP:
-	case KEY_XSTICK1_UP:
-	case KEY_XSTICK2_UP:
-	case KEY_UP:
-	case STEAMCONTROLLER_DPAD_UP:
-		nDir = -1;
-		break;
-
-	case KEY_XBUTTON_DOWN:
-	case KEY_XSTICK1_DOWN:
-	case KEY_XSTICK2_DOWN:
-	case KEY_DOWN:
-	case STEAMCONTROLLER_DPAD_DOWN:
-		nDir = 1;
-		break;
-	}
-
-	if ( nDir != 0 )
-	{
-		Panel *pSubPanel = ( GetCurrentSubPanel() ? GetCurrentSubPanel() : m_pMainMenu );
-
-		CUtlSortVector< SortedPanel_t, CSortedPanelYLess > vecSortedButtons;
-		VguiPanelGetSortedChildButtonList( pSubPanel, (void*)&vecSortedButtons, "&", 0 );
-
-		if ( VguiPanelNavigateSortedChildButtonList( (void*)&vecSortedButtons, nDir ) != -1 )
-		{
-			// Handled!
-			return;
-		}
-	}
-	else
-	{
-		BaseClass::OnKeyCodePressed( code );
-	}
-}
-
 void CBuyMenu::OnKeyCodeTyped( KeyCode code )
 {
+	// Close the buy menu when the Esc key is pressed.
 	if ( code == KEY_ESCAPE	)
 	{
 		OnClose();
@@ -148,4 +127,3 @@ void CBuyMenu::OnKeyCodeTyped( KeyCode code )
 		BaseClass::OnKeyCodeTyped( code );
 	}
 }
-

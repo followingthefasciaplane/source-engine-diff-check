@@ -1,15 +1,23 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright 1996-2005, Valve Corporation, All rights reserved. ============//
 //
+// Purpose: 
+//
+// $NoKeywords: $
+//
+//=============================================================================//
+//--------------------------------------------------------------------------------------------------------------
 // download_internal.h
 //
 // Header file for optional HTTP asset downloading
 // Author: Matthew D. Campbell (matt@turtlerockstudios.com), 2004
-//
-//=======================================================================================//
+//--------------------------------------------------------------------------------------------------------------
 
 #ifndef DOWNLOAD_INTERNAL_H
 #define DOWNLOAD_INTERNAL_H
 
+#include "tier0/platform.h"
+
+//--------------------------------------------------------------------------------------------------------------
 /**
  * -------------------
  * Download overview:
@@ -50,13 +58,13 @@
  *
  * -------------------
  * Thread interaction:
- *  All thread interaction is handled via a shared RequestContext_t.  Interaction is
+ *  All thread interaction is handled via a shared RequestContext.  Interaction is
  *  structured so that at all times, only one thread can be writing to any given
  *  variable.
  *
  *  This is an attempt to enumerate all cases of thread interaction:
  *   1. Before download thread creation
- *      a) main thread allocates the RequestContext_t, and zeroes it out.
+ *      a) main thread allocates the RequestContext, and zeroes it out.
  *      b) main thread fills in the baseURL and gamePath strings.
  *      c) main thread sets cachedTimestamp, nBytesCached, and allocates/fills
  *         cacheData if there is data from a previous aborted download.
@@ -86,9 +94,9 @@
  *      c) download thread will set threadDone.
  *      d) after the main thread set shouldStop, it will only look at threadDone.
  *   4. After threadDone is set by download thread:
- *      a) download thread can safely exit, and will not access the RequestContext_t.
+ *      a) download thread can safely exit, and will not access the RequestContext.
  *      b) main thread can delete the cacheData, if any exists, and delete the
- *         RequestContext_t itself.  Thus ends the download.
+ *         RequestContext itself.  Thus ends the download.
  *   5. SPECIAL CASE: if the user hits Cancel during a download, the main thread will
  *      look at nBytesTotal and nBytesCurrent to determine if there is any data
  *      present, and read from data if there is.  The download thread will most likely
@@ -102,17 +110,102 @@
  *
  */
 
-//--------------------------------------------------------------------------------------------------------------
-
-#include "engine/requestcontext.h"
-
-//--------------------------------------------------------------------------------------------------------------
+enum { BufferSize = 256 };	///< BufferSize is used extensively within the download system to size char buffers.
 
 #ifdef POSIX
-void DownloadThread( void *voidPtr );
-#else
-DWORD __stdcall DownloadThread( void *voidPtr );
+typedef void *LPVOID;
 #endif
-#endif // DOWNLOAD_INTERNAL_H
+#if defined( _X360 ) || defined( POSIX )
+typedef LPVOID HINTERNET;
+#endif
 
 //--------------------------------------------------------------------------------------------------------------
+/**
+ * Status of the download thread, as set in RequestContext::status.
+ */
+enum HTTPStatus
+{
+	HTTP_CONNECTING = 0,///< This is set in the main thread before the download thread starts.
+	HTTP_FETCH,			///< The download thread sets this when it starts reading data.
+	HTTP_DONE,			///< The download thread sets this if it has read all the data successfully.
+	HTTP_ABORTED,		///< The download thread sets this if it aborts because it's RequestContext::shouldStop has been set.
+	HTTP_ERROR			///< The download thread sets this if there is an error connecting or downloading.  Partial data may be present, so the main thread can check.
+};
+
+//--------------------------------------------------------------------------------------------------------------
+/**
+ * Error encountered in the download thread, as set in RequestContext::error.
+ */
+enum HTTPError
+{
+	HTTP_ERROR_NONE = 0,
+	HTTP_ERROR_ZERO_LENGTH_FILE,
+	HTTP_ERROR_CONNECTION_CLOSED,
+	HTTP_ERROR_INVALID_URL,			///< InternetCrackUrl failed
+	HTTP_ERROR_INVALID_PROTOCOL,	///< URL didn't start with http:// or https://
+	HTTP_ERROR_CANT_BIND_SOCKET,
+	HTTP_ERROR_CANT_CONNECT,
+	HTTP_ERROR_NO_HEADERS,			///< Cannot read HTTP headers
+	HTTP_ERROR_FILE_NONEXISTENT,
+	HTTP_ERROR_MAX
+};
+
+//--------------------------------------------------------------------------------------------------------------
+typedef struct {
+	/**
+	 * The main thread sets this when it wants to abort the download,
+	 * or it is done reading data from a finished download.
+	 */
+	bool			shouldStop;
+
+	/**
+	 * The download thread sets this when it is exiting, so the main thread
+	 * can delete the RequestContext.
+	 */
+	bool			threadDone;
+
+	bool			bIsBZ2;					///< true if the file is a .bz2 file that should be uncompressed at the end of the download.  Set and used by main thread.
+	bool			bAsHTTP;				///< true if downloaded via HTTP and not ingame protocol.  Set and used by main thread
+	unsigned int	nRequestID;				///< request ID for ingame download
+
+	HTTPStatus		status;					///< Download thread status
+	DWORD			fetchStatus;			///< Detailed status info for the download
+	HTTPError		error;					///< Detailed error info
+
+	char			baseURL[BufferSize];	///< Base URL (including http://).  Set by main thread.
+	char			basePath[BufferSize];	///< Base path for the mod in the filesystem.  Set by main thread.
+	char			gamePath[BufferSize];	///< Game path to be appended to base URL.  Set by main thread.
+	char			serverURL[BufferSize];	///< Server URL (IP:port, loopback, etc).  Set by main thread, and used for HTTP Referer header.
+
+	/**
+	 * The file's timestamp, as returned in the HTTP Last-Modified header.
+	 * Saved to ensure partial download resumes match the original cached data.
+	 */
+	char			cachedTimestamp[BufferSize];
+
+	DWORD			nBytesTotal;			///< Total bytes in the file
+	DWORD			nBytesCurrent;			///< Current bytes downloaded
+	DWORD			nBytesCached;			///< Amount of data present in cacheData.
+
+	/**
+	 * Buffer for the full file data.  Allocated/deleted by the download thread
+	 * (which idles until the data is not needed anymore)
+	 */
+	unsigned char	*data;
+
+	/**
+	 * Buffer for partial data from previous failed downloads.
+	 * Allocated/deleted by the main thread (deleted after download thread is done)
+	 */
+	unsigned char	*cacheData;
+
+	// Used purely by the download thread - internal data -------------------
+	HINTERNET		hOpenResource;			///< Handle created by InternetOpen
+	HINTERNET		hDataResource;			///< Handle created by InternetOpenUrl
+
+} RequestContext;
+
+//--------------------------------------------------------------------------------------------------------------
+uintp DownloadThread( void *voidPtr );
+
+#endif // DOWNLOAD_INTERNAL_H

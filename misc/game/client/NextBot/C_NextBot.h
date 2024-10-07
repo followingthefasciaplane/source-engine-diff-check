@@ -1,7 +1,7 @@
 // C_NextBot.h
 // Next generation bot system
 // Author: Michael Booth, April 2005
-//========= Copyright Valve Corporation, All rights reserved. ============//
+// Copyright (c) 2005 Turtle Rock Studios, Inc. - All Rights Reserved
 
 #ifndef _C_NEXT_BOT_H_
 #define _C_NEXT_BOT_H_

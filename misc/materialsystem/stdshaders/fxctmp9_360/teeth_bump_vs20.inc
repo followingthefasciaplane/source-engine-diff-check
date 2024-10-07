@@ -1,72 +1,105 @@
+// ALL SKIP STATEMENTS THAT AFFECT THIS SHADER!!!
+// ( $DOWATERFOG == 0 ) && ( $DOPIXELFOG && $HARDWAREFOGBLEND )
+// ( $DOWATERFOG == 0 ) && ( $HARDWAREFOGBLEND == 0 ) && ( $DOPIXELFOG == 0 )
+// defined $LIGHTING_PREVIEW && defined $FASTPATH && $LIGHTING_PREVIEW && $FASTPATH
 #include "shaderlib/cshader.h"
 class teeth_bump_vs20_Static_Index
 {
 private:
-	int m_nINTRO;
+	int m_nFLATTEN_STATIC_CONTROL_FLOW;
 #ifdef _DEBUG
-	bool m_bINTRO;
+	bool m_bFLATTEN_STATIC_CONTROL_FLOW;
 #endif
 public:
-	void SetINTRO( int i )
+	void SetFLATTEN_STATIC_CONTROL_FLOW( int i )
 	{
-		Assert( i >= 0 && i <= 1 );
-		m_nINTRO = i;
+		Assert( i >= 0 && i <= 0 );
+		m_nFLATTEN_STATIC_CONTROL_FLOW = i;
 #ifdef _DEBUG
-		m_bINTRO = true;
+		m_bFLATTEN_STATIC_CONTROL_FLOW = true;
 #endif
 	}
-	void SetINTRO( bool i )
+	void SetFLATTEN_STATIC_CONTROL_FLOW( bool i )
 	{
-		m_nINTRO = i ? 1 : 0;
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 0 );
+		m_nFLATTEN_STATIC_CONTROL_FLOW = i ? 1 : 0;
 #ifdef _DEBUG
-		m_bINTRO = true;
+		m_bFLATTEN_STATIC_CONTROL_FLOW = true;
 #endif
 	}
 private:
-	int m_nUSE_STATIC_CONTROL_FLOW;
+	int m_nDOPIXELFOG;
 #ifdef _DEBUG
-	bool m_bUSE_STATIC_CONTROL_FLOW;
+	bool m_bDOPIXELFOG;
 #endif
 public:
-	void SetUSE_STATIC_CONTROL_FLOW( int i )
+	void SetDOPIXELFOG( int i )
 	{
 		Assert( i >= 0 && i <= 1 );
-		m_nUSE_STATIC_CONTROL_FLOW = i;
+		m_nDOPIXELFOG = i;
 #ifdef _DEBUG
-		m_bUSE_STATIC_CONTROL_FLOW = true;
+		m_bDOPIXELFOG = true;
 #endif
 	}
-	void SetUSE_STATIC_CONTROL_FLOW( bool i )
+	void SetDOPIXELFOG( bool i )
 	{
-		m_nUSE_STATIC_CONTROL_FLOW = i ? 1 : 0;
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
+		m_nDOPIXELFOG = i ? 1 : 0;
 #ifdef _DEBUG
-		m_bUSE_STATIC_CONTROL_FLOW = true;
+		m_bDOPIXELFOG = true;
+#endif
+	}
+private:
+	int m_nHARDWAREFOGBLEND;
+#ifdef _DEBUG
+	bool m_bHARDWAREFOGBLEND;
+#endif
+public:
+	void SetHARDWAREFOGBLEND( int i )
+	{
+		Assert( i >= 0 && i <= 0 );
+		m_nHARDWAREFOGBLEND = i;
+#ifdef _DEBUG
+		m_bHARDWAREFOGBLEND = true;
+#endif
+	}
+	void SetHARDWAREFOGBLEND( bool i )
+	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 0 );
+		m_nHARDWAREFOGBLEND = i ? 1 : 0;
+#ifdef _DEBUG
+		m_bHARDWAREFOGBLEND = true;
 #endif
 	}
 public:
-	teeth_bump_vs20_Static_Index( )
+	// CONSTRUCTOR
+	teeth_bump_vs20_Static_Index( IShaderShadow *pShaderShadow, IMaterialVar **params )
 	{
 #ifdef _DEBUG
-		m_bINTRO = false;
+		m_bFLATTEN_STATIC_CONTROL_FLOW = false;
 #endif // _DEBUG
-		m_nINTRO = 0;
+		m_nFLATTEN_STATIC_CONTROL_FLOW = 0;
 #ifdef _DEBUG
-		m_bUSE_STATIC_CONTROL_FLOW = false;
+		m_bDOPIXELFOG = true;
 #endif // _DEBUG
-		m_nUSE_STATIC_CONTROL_FLOW = 0;
+		m_nDOPIXELFOG = g_pHardwareConfig->SupportsPixelShaders_2_b() ;
+#ifdef _DEBUG
+		m_bHARDWAREFOGBLEND = true;
+#endif // _DEBUG
+		m_nHARDWAREFOGBLEND = 0 ;
 	}
 	int GetIndex()
 	{
 		// Asserts to make sure that we aren't using any skipped combinations.
 		// Asserts to make sure that we are setting all of the combination vars.
 #ifdef _DEBUG
-		bool bAllStaticVarsDefined = m_bINTRO && m_bUSE_STATIC_CONTROL_FLOW;
+		bool bAllStaticVarsDefined = m_bFLATTEN_STATIC_CONTROL_FLOW && m_bDOPIXELFOG && m_bHARDWAREFOGBLEND;
 		Assert( bAllStaticVarsDefined );
 #endif // _DEBUG
-		return ( 48 * m_nINTRO ) + ( 96 * m_nUSE_STATIC_CONTROL_FLOW ) + 0;
+		return ( 16 * m_nFLATTEN_STATIC_CONTROL_FLOW ) + ( 16 * m_nDOPIXELFOG ) + ( 32 * m_nHARDWAREFOGBLEND ) + 0;
 	}
 };
-#define shaderStaticTest_teeth_bump_vs20 vsh_forgot_to_set_static_INTRO + vsh_forgot_to_set_static_USE_STATIC_CONTROL_FLOW + 0
+#define shaderStaticTest_teeth_bump_vs20 vsh_forgot_to_set_static_FLATTEN_STATIC_CONTROL_FLOW + 0
 class teeth_bump_vs20_Dynamic_Index
 {
 private:
@@ -85,6 +118,7 @@ public:
 	}
 	void SetCOMPRESSED_VERTS( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nCOMPRESSED_VERTS = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bCOMPRESSED_VERTS = true;
@@ -106,6 +140,7 @@ public:
 	}
 	void SetDOWATERFOG( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nDOWATERFOG = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bDOWATERFOG = true;
@@ -127,6 +162,7 @@ public:
 	}
 	void SetSKINNING( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nSKINNING = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bSKINNING = true;
@@ -148,9 +184,32 @@ public:
 	}
 	void SetSTATIC_LIGHT( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nSTATIC_LIGHT = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bSTATIC_LIGHT = true;
+#endif
+	}
+private:
+	int m_nMORPHING;
+#ifdef _DEBUG
+	bool m_bMORPHING;
+#endif
+public:
+	void SetMORPHING( int i )
+	{
+		Assert( i >= 0 && i <= 0 );
+		m_nMORPHING = i;
+#ifdef _DEBUG
+		m_bMORPHING = true;
+#endif
+	}
+	void SetMORPHING( bool i )
+	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 0 );
+		m_nMORPHING = i ? 1 : 0;
+#ifdef _DEBUG
+		m_bMORPHING = true;
 #endif
 	}
 private:
@@ -161,7 +220,7 @@ private:
 public:
 	void SetNUM_LIGHTS( int i )
 	{
-		Assert( i >= 0 && i <= 2 );
+		Assert( i >= 0 && i <= 0 );
 		m_nNUM_LIGHTS = i;
 #ifdef _DEBUG
 		m_bNUM_LIGHTS = true;
@@ -169,22 +228,24 @@ public:
 	}
 	void SetNUM_LIGHTS( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 0 );
 		m_nNUM_LIGHTS = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bNUM_LIGHTS = true;
 #endif
 	}
 public:
-	teeth_bump_vs20_Dynamic_Index()
+	// CONSTRUCTOR
+	teeth_bump_vs20_Dynamic_Index( IShaderDynamicAPI *pShaderAPI )
 	{
 #ifdef _DEBUG
 		m_bCOMPRESSED_VERTS = false;
 #endif // _DEBUG
 		m_nCOMPRESSED_VERTS = 0;
 #ifdef _DEBUG
-		m_bDOWATERFOG = false;
+		m_bDOWATERFOG = true;
 #endif // _DEBUG
-		m_nDOWATERFOG = 0;
+		m_nDOWATERFOG = ( pShaderAPI->GetSceneFogMode() == MATERIAL_FOG_LINEAR_BELOW_FOG_Z ) ;
 #ifdef _DEBUG
 		m_bSKINNING = false;
 #endif // _DEBUG
@@ -193,6 +254,10 @@ public:
 		m_bSTATIC_LIGHT = false;
 #endif // _DEBUG
 		m_nSTATIC_LIGHT = 0;
+#ifdef _DEBUG
+		m_bMORPHING = true;
+#endif // _DEBUG
+		m_nMORPHING = false ;
 #ifdef _DEBUG
 		m_bNUM_LIGHTS = false;
 #endif // _DEBUG
@@ -203,10 +268,42 @@ public:
 		// Asserts to make sure that we aren't using any skipped combinations.
 		// Asserts to make sure that we are setting all of the combination vars.
 #ifdef _DEBUG
-		bool bAllDynamicVarsDefined = m_bCOMPRESSED_VERTS && m_bDOWATERFOG && m_bSKINNING && m_bSTATIC_LIGHT && m_bNUM_LIGHTS;
+		bool bAllDynamicVarsDefined = m_bCOMPRESSED_VERTS && m_bDOWATERFOG && m_bSKINNING && m_bSTATIC_LIGHT && m_bMORPHING && m_bNUM_LIGHTS;
 		Assert( bAllDynamicVarsDefined );
 #endif // _DEBUG
-		return ( 1 * m_nCOMPRESSED_VERTS ) + ( 2 * m_nDOWATERFOG ) + ( 4 * m_nSKINNING ) + ( 8 * m_nSTATIC_LIGHT ) + ( 16 * m_nNUM_LIGHTS ) + 0;
+		return ( 1 * m_nCOMPRESSED_VERTS ) + ( 2 * m_nDOWATERFOG ) + ( 4 * m_nSKINNING ) + ( 8 * m_nSTATIC_LIGHT ) + ( 16 * m_nMORPHING ) + ( 16 * m_nNUM_LIGHTS ) + 0;
 	}
 };
-#define shaderDynamicTest_teeth_bump_vs20 vsh_forgot_to_set_dynamic_COMPRESSED_VERTS + vsh_forgot_to_set_dynamic_DOWATERFOG + vsh_forgot_to_set_dynamic_SKINNING + vsh_forgot_to_set_dynamic_STATIC_LIGHT + vsh_forgot_to_set_dynamic_NUM_LIGHTS + 0
+#define shaderDynamicTest_teeth_bump_vs20 vsh_forgot_to_set_dynamic_COMPRESSED_VERTS + vsh_forgot_to_set_dynamic_SKINNING + vsh_forgot_to_set_dynamic_STATIC_LIGHT + vsh_forgot_to_set_dynamic_NUM_LIGHTS + 0
+
+static const ShaderComboInformation_t s_DynamicComboArray_teeth_bump_vs20[6] = 
+{
+	{ "COMPRESSED_VERTS", 0, 1 },
+	{ "DOWATERFOG", 0, 1 },
+	{ "SKINNING", 0, 1 },
+	{ "STATIC_LIGHT", 0, 1 },
+	{ "MORPHING", 0, 0 },
+	{ "NUM_LIGHTS", 0, 0 },
+};
+
+static const ShaderComboInformation_t s_StaticComboArray_teeth_bump_vs20[3] = 
+{
+	{ "FLATTEN_STATIC_CONTROL_FLOW", 0, 0 },
+	{ "DOPIXELFOG", 0, 1 },
+	{ "HARDWAREFOGBLEND", 0, 0 },
+};
+static const ShaderComboSemantics_t teeth_bump_vs20_combos =
+{
+	"teeth_bump_vs20", s_DynamicComboArray_teeth_bump_vs20, 6, s_StaticComboArray_teeth_bump_vs20, 3 
+};
+
+class ConstructMe_teeth_bump_vs20
+{
+public:
+	ConstructMe_teeth_bump_vs20()
+	{
+		GetShaderDLL()->AddShaderComboInformation( &teeth_bump_vs20_combos );
+	}
+};
+
+static ConstructMe_teeth_bump_vs20 s_ConstructMe_teeth_bump_vs20;

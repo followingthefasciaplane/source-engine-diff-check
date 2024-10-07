@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -10,12 +10,12 @@
 #pragma once
 
 #include "shareddefs.h"
-#include "weapon_parse.h"
 #include "utldict.h"
 #include "hud.h"
 
 class C_BaseCombatWeapon;
 class CHudTexture;
+typedef unsigned short WEAPON_FILE_INFO_HANDLE;
 
 //-----------------------------------------------------------------------------
 // Purpose: Stores data about the Weapon Definitions passed to the client when

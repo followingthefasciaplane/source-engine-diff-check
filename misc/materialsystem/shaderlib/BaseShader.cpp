@@ -1,42 +1,72 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright (c) 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
-//=====================================================================================//
+//===========================================================================//
 
 #include "shaderlib/BaseShader.h"
 #include "shaderlib/ShaderDLL.h"
 #include "tier0/dbg.h"
 #include "shaderDLL_Global.h"
-#include "IShaderSystem.h"
+#include "materialsystem/ishadersystem.h"
 #include "materialsystem/imaterial.h"
 #include "materialsystem/itexture.h"
 #include "materialsystem/ishaderapi.h"
 #include "materialsystem/materialsystem_config.h"
 #include "shaderlib/cshader.h"
+#include "shaderlib/commandbuilder.h"
+#include "renderparm.h"
 #include "mathlib/vmatrix.h"
 #include "tier1/strtools.h"
 #include "convar.h"
 #include "tier0/vprof.h"
+#include "shaderapifast.h"
 
 // NOTE: This must be the last include file in a .cpp file!
 #include "tier0/memdbgon.h"
 
 
 //-----------------------------------------------------------------------------
+// Storage buffer used for instance command buffers
+//-----------------------------------------------------------------------------
+class CPerInstanceContextData : public CBasePerInstanceContextData
+{
+public:
+	CPerInstanceContextData() : m_pCommandBuffer( NULL ), m_nSize( 0 ) {}
+	virtual ~CPerInstanceContextData()
+	{ 
+		if ( m_pCommandBuffer )
+		{
+			delete m_pCommandBuffer; 
+		}
+	}
+
+	virtual unsigned char* GetInstanceCommandBuffer()
+	{
+		return m_pCommandBuffer;
+	}
+
+	unsigned char *m_pCommandBuffer;
+	int m_nSize;
+};
+
+
+//-----------------------------------------------------------------------------
 // Globals
 //-----------------------------------------------------------------------------
 const char *CBaseShader::s_pTextureGroupName = NULL;
-IMaterialVar **CBaseShader::s_ppParams;
+IMaterialVar **CBaseShader::s_ppParams = NULL;
 IShaderShadow *CBaseShader::s_pShaderShadow;
 IShaderDynamicAPI *CBaseShader::s_pShaderAPI;
 IShaderInit *CBaseShader::s_pShaderInit;
 int CBaseShader::s_nModulationFlags;
-CMeshBuilder *CBaseShader::s_pMeshBuilder;
-static ConVar mat_fullbright( "mat_fullbright","0", FCVAR_CHEAT );
+int CBaseShader::s_nPassCount = 0;
+CPerInstanceContextData** CBaseShader::s_pInstanceDataPtr = NULL;
+static bool s_bBuildingInstanceCommandBuffer = false;
+static CInstanceCommandBufferBuilder< CFixedCommandStorageBuffer< 512 > > s_InstanceCommandBuffer;
 
 bool g_shaderConfigDumpEnable = false; //true;		//DO NOT CHECK IN ENABLED FIXME
-
+	
 //-----------------------------------------------------------------------------
 // constructor
 //-----------------------------------------------------------------------------
@@ -73,40 +103,17 @@ static ShaderParamInfo_t s_StandardParams[NUM_SHADER_MATERIAL_VARS] =
 // Gets the standard shader parameter names
 // FIXME: Turn this into one function?
 //-----------------------------------------------------------------------------
-int CBaseShader::GetNumParams( ) const
+int CBaseShader::GetParamCount( ) const
 { 
 	return NUM_SHADER_MATERIAL_VARS; 
 }
 
-char const* CBaseShader::GetParamName( int nParamIndex ) const
+const ShaderParamInfo_t &CBaseShader::GetParamInfo( int nParamIndex ) const
 {
 	Assert( nParamIndex < NUM_SHADER_MATERIAL_VARS );
-	return s_StandardParams[nParamIndex].m_pName;
+	return s_StandardParams[nParamIndex];
 }
 
-const char *CBaseShader::GetParamHelp( int nParamIndex ) const
-{
-	Assert( nParamIndex < NUM_SHADER_MATERIAL_VARS );
-	return s_StandardParams[nParamIndex].m_pHelp;
-}
-
-ShaderParamType_t CBaseShader::GetParamType( int nParamIndex ) const
-{
-	Assert( nParamIndex < NUM_SHADER_MATERIAL_VARS );
-	return s_StandardParams[nParamIndex].m_Type;
-}
-
-const char *CBaseShader::GetParamDefault( int nParamIndex ) const
-{
-	Assert( nParamIndex < NUM_SHADER_MATERIAL_VARS );
-	return s_StandardParams[nParamIndex].m_pDefaultValue;
-}
-
-int CBaseShader::GetParamFlags( int nParamIndex ) const
-{
-	Assert( nParamIndex < NUM_SHADER_MATERIAL_VARS );
-	return s_StandardParams[nParamIndex].m_nFlags;
-}
 
 //-----------------------------------------------------------------------------
 // Necessary to snag ahold of some important data for the helper methods
@@ -140,7 +147,7 @@ void CBaseShader::InitShaderInstance( IMaterialVar** ppParams, IShaderInit *pSha
 }
 
 void CBaseShader::DrawElements( IMaterialVar **ppParams, int nModulationFlags,
-	IShaderShadow* pShaderShadow, IShaderDynamicAPI* pShaderAPI, VertexCompressionType_t vertexCompression, CBasePerMaterialContextData **pContextDataPtr )
+	IShaderShadow* pShaderShadow, IShaderDynamicAPI* pShaderAPI, VertexCompressionType_t vertexCompression, CBasePerMaterialContextData **pContextDataPtr, CBasePerInstanceContextData** pInstanceDataPtr )
 {
 	VPROF("CBaseShader::DrawElements");
 	// Re-entrancy check
@@ -150,7 +157,8 @@ void CBaseShader::DrawElements( IMaterialVar **ppParams, int nModulationFlags,
 	s_pShaderAPI = pShaderAPI;
 	s_pShaderShadow = pShaderShadow;
 	s_nModulationFlags = nModulationFlags;
-	s_pMeshBuilder = pShaderAPI ? pShaderAPI->GetVertexModifyBuilder() : NULL;
+	s_pInstanceDataPtr = (CPerInstanceContextData**)( pInstanceDataPtr );
+	s_nPassCount = 0;
 
 	if ( IsSnapshotting() )
 	{
@@ -160,11 +168,12 @@ void CBaseShader::DrawElements( IMaterialVar **ppParams, int nModulationFlags,
 
 	OnDrawElements( ppParams, pShaderShadow, pShaderAPI, vertexCompression, pContextDataPtr );
 
+	s_pInstanceDataPtr = NULL;
+	s_nPassCount = 0;
 	s_nModulationFlags = 0;
 	s_ppParams = NULL;
 	s_pShaderAPI = NULL;
 	s_pShaderShadow = NULL;
-	s_pMeshBuilder = NULL;
 }
 
 
@@ -219,6 +228,9 @@ void CBaseShader::SetInitialShadowState( )
 //-----------------------------------------------------------------------------
 void CBaseShader::Draw( bool bMakeActualDrawCall )
 {
+	// You forgot to call PI_EndCommandBuffer
+	Assert( !s_bBuildingInstanceCommandBuffer );
+
 	if ( IsSnapshotting() )
 	{
 		// Turn off transparency if we're asked to....
@@ -230,23 +242,206 @@ void CBaseShader::Draw( bool bMakeActualDrawCall )
 		}
 
 		GetShaderSystem()->TakeSnapshot();
+
+		// Automagically add skinning + vertex lighting
+		if ( !s_pInstanceDataPtr[s_nPassCount] )
+		{
+			bool bIsSkinning = CShader_IsFlag2Set( s_ppParams, MATERIAL_VAR2_SUPPORTS_HW_SKINNING );
+			bool bIsVertexLit = CShader_IsFlag2Set( s_ppParams, MATERIAL_VAR2_LIGHTING_VERTEX_LIT );
+			if ( bIsSkinning || bIsVertexLit )
+			{
+				PI_BeginCommandBuffer();
+				
+				// NOTE: EndCommandBuffer will insert the appropriate commands
+				PI_EndCommandBuffer();
+			}
+		}
 	}
 	else
 	{
-		GetShaderSystem()->DrawSnapshot( bMakeActualDrawCall );
+		//SNPROF("CBaseShader::Draw");
+
+		GetShaderSystem()->DrawSnapshot( s_pInstanceDataPtr[s_nPassCount] ? 
+			s_pInstanceDataPtr[s_nPassCount]->m_pCommandBuffer : NULL, bMakeActualDrawCall );
+	}
+
+	++s_nPassCount;
+}
+
+
+//-----------------------------------------------------------------------------
+// Methods related to building per-instance command buffers
+//-----------------------------------------------------------------------------
+void CBaseShader::PI_BeginCommandBuffer()
+{
+	// NOTE: This assertion is here because the memory allocation strategy
+	// is perhaps not the best if this is used in dynamic states; we should
+	// rethink in that case.
+	Assert( IsSnapshotting() );
+
+	Assert( !s_bBuildingInstanceCommandBuffer );
+	s_bBuildingInstanceCommandBuffer = true;
+	s_InstanceCommandBuffer.Reset();
+}
+
+void CBaseShader::PI_EndCommandBuffer()
+{
+	Assert( s_bBuildingInstanceCommandBuffer );
+
+	// Automagically add skinning
+	if ( CShader_IsFlag2Set( s_ppParams, MATERIAL_VAR2_SUPPORTS_HW_SKINNING ) )
+	{
+		PI_SetSkinningMatrices();
+	}
+
+	if ( CShader_IsFlag2Set( s_ppParams, MATERIAL_VAR2_LIGHTING_VERTEX_LIT ) )
+	{
+		PI_SetVertexShaderLocalLighting();
+	}
+
+	s_bBuildingInstanceCommandBuffer = false;
+	s_InstanceCommandBuffer.End();
+	int nSize = s_InstanceCommandBuffer.Size();
+	if ( nSize > 0 )
+	{
+		CPerInstanceContextData *pContextData = s_pInstanceDataPtr[ s_nPassCount ];
+		if ( !pContextData )
+		{
+			pContextData = new CPerInstanceContextData;
+			s_pInstanceDataPtr[ s_nPassCount ] = pContextData;
+		}
+		unsigned char *pBuf = pContextData->m_pCommandBuffer;
+		if ( pContextData->m_nSize < nSize )
+		{
+			if ( pContextData->m_pCommandBuffer )
+			{
+				delete pContextData->m_pCommandBuffer;
+			}
+			pBuf = new unsigned char[nSize];
+			pContextData->m_pCommandBuffer = pBuf;
+			pContextData->m_nSize = nSize;
+		}
+		memcpy( pBuf, s_InstanceCommandBuffer.Base(), nSize );
 	}
 }
 
+
+//-----------------------------------------------------------------------------
+// Queues commands onto the instance command buffer
+//-----------------------------------------------------------------------------
+void CBaseShader::PI_SetPixelShaderAmbientLightCube( int nFirstRegister )
+{
+	Assert( s_bBuildingInstanceCommandBuffer );
+	s_InstanceCommandBuffer.SetPixelShaderAmbientLightCube( nFirstRegister );
+}
+
+void CBaseShader::PI_SetPixelShaderLocalLighting( int nFirstRegister )
+{
+	Assert( s_bBuildingInstanceCommandBuffer );
+	s_InstanceCommandBuffer.SetPixelShaderLocalLighting( nFirstRegister );
+}
+
+void CBaseShader::PI_SetVertexShaderAmbientLightCube( /*int nFirstRegister*/ )
+{
+	Assert( s_bBuildingInstanceCommandBuffer );
+	s_InstanceCommandBuffer.SetVertexShaderAmbientLightCube( /*nFirstRegister*/ );
+}
+
+void CBaseShader::PI_SetVertexShaderLocalLighting()
+{
+	Assert( s_bBuildingInstanceCommandBuffer );
+	s_InstanceCommandBuffer.SetVertexShaderLocalLighting( );
+}
+
+void CBaseShader::PI_SetSkinningMatrices()
+{
+	Assert( s_bBuildingInstanceCommandBuffer );
+	s_InstanceCommandBuffer.SetSkinningMatrices();
+}
+
+void CBaseShader::PI_SetPixelShaderAmbientLightCubeLuminance( int nFirstRegister )
+{
+	Assert( s_bBuildingInstanceCommandBuffer );
+	s_InstanceCommandBuffer.SetPixelShaderAmbientLightCubeLuminance( nFirstRegister );
+}
+
+void CBaseShader::PI_SetPixelShaderGlintDamping( int nFirstRegister )
+{
+	Assert( s_bBuildingInstanceCommandBuffer );
+	s_InstanceCommandBuffer.SetPixelShaderGlintDamping( nFirstRegister );
+}
+
+void CBaseShader::PI_SetModulationPixelShaderDynamicState_LinearColorSpace_LinearScale( int nRegister, float scale )
+{
+	Assert( s_bBuildingInstanceCommandBuffer );
+	Vector color2( 1.0f, 1.0f, 1.0f );
+	ApplyColor2Factor( color2.Base(), true );
+	s_InstanceCommandBuffer.SetModulationPixelShaderDynamicState_LinearColorSpace_LinearScale( nRegister, color2, scale );
+}
+
+void CBaseShader::PI_SetModulationPixelShaderDynamicState_LinearScale( int nRegister, float scale )
+{
+	Assert( s_bBuildingInstanceCommandBuffer );
+	Vector color2( 1.0f, 1.0f, 1.0f );
+	ApplyColor2Factor( color2.Base() );
+	s_InstanceCommandBuffer.SetModulationPixelShaderDynamicState_LinearScale( nRegister, color2, scale );
+}
+
+void CBaseShader::PI_SetModulationPixelShaderDynamicState_LinearScale_ScaleInW( int nRegister, float scale )
+{
+	Assert( s_bBuildingInstanceCommandBuffer );
+	Vector color2( 1.0f, 1.0f, 1.0f );
+	ApplyColor2Factor( color2.Base() );
+	s_InstanceCommandBuffer.SetModulationPixelShaderDynamicState_LinearScale_ScaleInW( nRegister, color2, scale );
+}
+
+void CBaseShader::PI_SetModulationPixelShaderDynamicState_LinearColorSpace( int nRegister )
+{
+	Assert( s_bBuildingInstanceCommandBuffer );
+	Vector color2( 1.0f, 1.0f, 1.0f );
+	ApplyColor2Factor( color2.Base(), true );
+	s_InstanceCommandBuffer.SetModulationPixelShaderDynamicState_LinearColorSpace( nRegister, color2 );
+}
+
+void CBaseShader::PI_SetModulationPixelShaderDynamicState( int nRegister )
+{
+	Assert( s_bBuildingInstanceCommandBuffer );
+	Vector color2( 1.0f, 1.0f, 1.0f );
+	ApplyColor2Factor( color2.Base() );
+	s_InstanceCommandBuffer.SetModulationPixelShaderDynamicState( nRegister, color2 );
+}
+
+void CBaseShader::PI_SetModulationVertexShaderDynamicState()
+{
+	Assert( s_bBuildingInstanceCommandBuffer );
+	Vector color2( 1.0f, 1.0f, 1.0f );
+	ApplyColor2Factor( color2.Base() );
+	s_InstanceCommandBuffer.SetModulationVertexShaderDynamicState( VERTEX_SHADER_MODULATION_COLOR, color2 );
+}
+
+void CBaseShader::PI_SetModulationVertexShaderDynamicState_LinearScale( float flScale )
+{
+	Assert( s_bBuildingInstanceCommandBuffer );
+	Vector color2( 1.0f, 1.0f, 1.0f );
+	ApplyColor2Factor( color2.Base() );
+	s_InstanceCommandBuffer.SetModulationVertexShaderDynamicState_LinearScale( VERTEX_SHADER_MODULATION_COLOR, color2, flScale );
+}
+
+void CBaseShader::PI_SetModulationPixelShaderDynamicState_Identity( int nRegister )
+{
+	Assert( s_bBuildingInstanceCommandBuffer );
+	s_InstanceCommandBuffer.SetModulationPixelShaderDynamicState_Identity( nRegister );
+}
 
 //-----------------------------------------------------------------------------
 // Finds a particular parameter	(works because the lowest parameters match the shader)
 //-----------------------------------------------------------------------------
 int CBaseShader::FindParamIndex( const char *pName ) const
 {
-	int numParams = GetNumParams();
+	int numParams = GetParamCount();
 	for( int i = 0; i < numParams; i++ )
 	{
-		if( Q_strnicmp( GetParamName( i ), pName, 64 ) == 0 )
+		if( Q_strnicmp( GetParamInfo( i ).m_pName, pName, 64 ) == 0 )
 		{
 			return i;
 		}
@@ -267,18 +462,9 @@ bool CBaseShader::IsUsingGraphics()
 //-----------------------------------------------------------------------------
 // Are we using graphics?
 //-----------------------------------------------------------------------------
-bool CBaseShader::CanUseEditorMaterials()
+bool CBaseShader::CanUseEditorMaterials() const
 {
 	return GetShaderSystem()->CanUseEditorMaterials();
-}
-
-
-//-----------------------------------------------------------------------------
-// Gets the builder...
-//-----------------------------------------------------------------------------
-CMeshBuilder* CBaseShader::MeshBuilder()
-{
-	return s_pMeshBuilder;
 }
 
 
@@ -301,7 +487,7 @@ void CBaseShader::LoadTexture( int nTextureVar, int nAdditionalCreationFlags /* 
 //-----------------------------------------------------------------------------
 // Loads a bumpmap
 //-----------------------------------------------------------------------------
-void CBaseShader::LoadBumpMap( int nTextureVar )
+void CBaseShader::LoadBumpMap( int nTextureVar, int nAdditionalCreationFlags )
 {
 	if ((!s_ppParams) || (nTextureVar == -1))
 		return;
@@ -309,7 +495,7 @@ void CBaseShader::LoadBumpMap( int nTextureVar )
 	IMaterialVar* pNameVar = s_ppParams[nTextureVar];
 	if( pNameVar && pNameVar->IsDefined() )
 	{
-		s_pShaderInit->LoadBumpMap( pNameVar, s_pTextureGroupName );
+		s_pShaderInit->LoadBumpMap( pNameVar, s_pTextureGroupName, nAdditionalCreationFlags );
 	}
 }
 
@@ -332,7 +518,7 @@ void CBaseShader::LoadCubeMap( int nTextureVar, int nAdditionalCreationFlags /* 
 
 ShaderAPITextureHandle_t CBaseShader::GetShaderAPITextureBindHandle( int nTextureVar, int nFrameVar, int nTextureChannel )
 {
-//	Assert( !IsSnapshotting() );
+	Assert( !IsSnapshotting() );
 	Assert( nTextureVar != -1 );
 	Assert ( s_ppParams );
 
@@ -342,19 +528,34 @@ ShaderAPITextureHandle_t CBaseShader::GetShaderAPITextureBindHandle( int nTextur
 	return GetShaderSystem()->GetShaderAPITextureBindHandle( pTextureVar->GetTextureValue(), nFrame, nTextureChannel );
 }
 
+void CBaseShader::BindVertexTexture( VertexTextureSampler_t vtSampler, int nTextureVar, int nFrame /* = 0  */)
+{
+	Assert( !IsSnapshotting() );
+
+	IMaterialVar* pTextureVar = s_ppParams[nTextureVar];
+	if ( !pTextureVar )
+		return;
+
+	GetShaderSystem()->BindVertexTexture( vtSampler, pTextureVar->GetTextureValue() );
+}
+
+ShaderAPITextureHandle_t CBaseShader::GetShaderAPITextureBindHandle( ITexture *pTexture, int nFrame, int nTextureChannel )
+{
+	return GetShaderSystem()->GetShaderAPITextureBindHandle( pTexture, nFrame, nTextureChannel );
+}
 
 //-----------------------------------------------------------------------------
 // Four different flavors of BindTexture(), handling the two-sampler
 // case as well as ITexture* versus textureVar forms
 //-----------------------------------------------------------------------------
 
-void CBaseShader::BindTexture( Sampler_t sampler1, int nTextureVar, int nFrameVar /* = -1 */ )
+void CBaseShader::BindTexture( Sampler_t sampler1, TextureBindFlags_t nBindFlags,  int nTextureVar, int nFrameVar /* = -1 */ )
 {
-	BindTexture( sampler1, (Sampler_t) -1, nTextureVar, nFrameVar );
+	BindTexture( sampler1, SHADER_SAMPLER_INVALID, nBindFlags, nTextureVar, nFrameVar );
 }
 
 
-void CBaseShader::BindTexture( Sampler_t sampler1, Sampler_t sampler2, int nTextureVar, int nFrameVar /* = -1 */ )
+void CBaseShader::BindTexture( Sampler_t sampler1, Sampler_t sampler2, TextureBindFlags_t nBindFlags, int nTextureVar, int nFrameVar /* = -1 */ )
 {
 	Assert( !IsSnapshotting() );
 	Assert( nTextureVar != -1 );
@@ -366,48 +567,34 @@ void CBaseShader::BindTexture( Sampler_t sampler1, Sampler_t sampler2, int nText
 	{
 		int nFrame = pFrameVar ? pFrameVar->GetIntValue() : 0;
 
-		if ( sampler2 == Sampler_t(-1) )
+		if ( sampler2 == -1 )
 		{
-			GetShaderSystem()->BindTexture( sampler1, pTextureVar->GetTextureValue(), nFrame );
+			GetShaderSystem()->BindTexture( sampler1, nBindFlags, pTextureVar->GetTextureValue(), nFrame );
 		}
 		else
 		{
-			GetShaderSystem()->BindTexture( sampler1, sampler2, pTextureVar->GetTextureValue(), nFrame );
+			GetShaderSystem()->BindTexture( sampler1, sampler2, nBindFlags, pTextureVar->GetTextureValue(), nFrame );
 		}
 	}
 }
 
 
-void CBaseShader::BindTexture( Sampler_t sampler1, ITexture *pTexture, int nFrame /* = 0 */ )
+void CBaseShader::BindTexture( Sampler_t sampler1, TextureBindFlags_t nBindFlags, ITexture *pTexture, int nFrame /* = 0 */ )
 {
-	BindTexture( sampler1, (Sampler_t) -1, pTexture, nFrame );
+	BindTexture( sampler1, SHADER_SAMPLER_INVALID, nBindFlags, pTexture, nFrame );
 }
 
-void CBaseShader::BindTexture( Sampler_t sampler1, Sampler_t sampler2, ITexture *pTexture, int nFrame /* = 0 */ )
+void CBaseShader::BindTexture( Sampler_t sampler1, Sampler_t sampler2, TextureBindFlags_t nBindFlags, ITexture *pTexture, int nFrame /* = 0 */ )
 {
 	Assert( !IsSnapshotting() );
 
-	if ( sampler2 == Sampler_t(-1 ) )
+	if ( sampler2 == -1 )
 	{
-		GetShaderSystem()->BindTexture( sampler1, pTexture, nFrame );
+		GetShaderSystem()->BindTexture( sampler1, nBindFlags, pTexture, nFrame );
 	}
 	else
 	{
-		GetShaderSystem()->BindTexture( sampler1, sampler2, pTexture, nFrame );
-	}
-}
-
-void CBaseShader::GetTextureDimensions( float* pOutWidth, float* pOutHeight, int nTextureVar )
-{
-	Assert( pOutWidth && pOutHeight ); // Outputs must be provided.
-	Assert( nTextureVar != -1 );
-
-	IMaterialVar* pTextureVar = s_ppParams[nTextureVar];
-
-	if (pTextureVar && pTextureVar->GetTextureValue())
-	{
-		*pOutWidth = (float) (pTextureVar->GetTextureValue()->GetActualWidth());
-		*pOutHeight = (float) (pTextureVar->GetTextureValue()->GetActualHeight());
+		GetShaderSystem()->BindTexture( sampler1, sampler2, nBindFlags, pTexture, nFrame );
 	}
 }
 
@@ -433,11 +620,20 @@ bool CBaseShader::TextureIsTranslucent( int textureVar, bool isBaseTexture )
 			if (IS_FLAG_SET(MATERIAL_VAR_OPAQUETEXTURE))
 				return false;
 
-			if ( (CurrentMaterialVarFlags() & (MATERIAL_VAR_SELFILLUM | MATERIAL_VAR_BASEALPHAENVMAPMASK)) == 0)
+			bool bHasSelfIllum				= ( ( CurrentMaterialVarFlags() & MATERIAL_VAR_SELFILLUM ) != 0 );
+			bool bHasSelfIllumMask			= ( ( CurrentMaterialVarFlags2() & MATERIAL_VAR2_SELFILLUMMASK ) != 0 );
+			bool bHasBaseAlphaEnvmapMask	= ( ( CurrentMaterialVarFlags() & MATERIAL_VAR_BASEALPHAENVMAPMASK ) != 0 );
+			bool bUsingBaseTextureAlphaForSelfIllum = bHasSelfIllum && !bHasSelfIllumMask;
+			// Check if we are using base texture alpha for something other than translucency.
+			if ( !bUsingBaseTextureAlphaForSelfIllum && !bHasBaseAlphaEnvmapMask )
 			{
+				// We aren't using base alpha for anything other than trancluceny.
+
+				// check if the material is marked as translucent or alpha test.
 				if ((CurrentMaterialVarFlags() & MATERIAL_VAR_TRANSLUCENT) ||
 					(CurrentMaterialVarFlags() & MATERIAL_VAR_ALPHATEST))
 				{
+					// Make sure the texture has an alpha channel.
 					return params[textureVar]->GetTextureValue()->IsTranslucent();
 				}
 			}
@@ -454,7 +650,6 @@ bool CBaseShader::TextureIsTranslucent( int textureVar, bool isBaseTexture )
 //
 //-----------------------------------------------------------------------------
 
-
 //-----------------------------------------------------------------------------
 // Are we alpha or color modulating?
 //-----------------------------------------------------------------------------
@@ -463,33 +658,6 @@ bool CBaseShader::IsAlphaModulating()
 	return (s_nModulationFlags & SHADER_USING_ALPHA_MODULATION) != 0;
 }
 
-bool CBaseShader::IsColorModulating()
-{
-	return (s_nModulationFlags & SHADER_USING_COLOR_MODULATION) != 0;
-}
-
-
-void CBaseShader::GetColorParameter( IMaterialVar **params, float *pColorOut ) const
-{
-	float flColor2[3];
-	params[COLOR]->GetVecValue( pColorOut, 3 );
-	params[COLOR2]->GetVecValue( flColor2, 3 );
-
-	pColorOut[0] *= flColor2[0];
-	pColorOut[1] *= flColor2[1];
-	pColorOut[2] *= flColor2[2];
-
-	if ( g_pHardwareConfig->UsesSRGBCorrectBlending() )
-	{
-		float flSRGBTint[3];
-		params[SRGBTINT]->GetVecValue( flSRGBTint, 3 );
-		
-		pColorOut[0] *= flSRGBTint[0];
-		pColorOut[1] *= flSRGBTint[1];
-		pColorOut[2] *= flSRGBTint[2];
-	}
-
-}
 
 //-----------------------------------------------------------------------------
 // FIXME: Figure out a better way to do this?
@@ -499,20 +667,7 @@ int CBaseShader::ComputeModulationFlags( IMaterialVar** params, IShaderDynamicAP
  	s_pShaderAPI = pShaderAPI;
 
 	int mod = 0;
-	if ( GetAlpha(params) < 1.0f )
-	{
-		mod |= SHADER_USING_ALPHA_MODULATION;
-	}
-
-	float color[3];
-	GetColorParameter( params, color );
-
-	if ((color[0] != 1.0) || (color[1] != 1.0) || (color[2] != 1.0))
-	{
-		mod |= SHADER_USING_COLOR_MODULATION;
-	}
-
-	if( UsingFlashlight(params) )
+	if ( UsingFlashlight(params) )
 	{
 		mod |= SHADER_USING_FLASHLIGHT;
 	}
@@ -522,17 +677,27 @@ int CBaseShader::ComputeModulationFlags( IMaterialVar** params, IShaderDynamicAP
 		mod |= SHADER_USING_EDITOR;
 	}
 
-	if( IS_FLAG2_SET( MATERIAL_VAR2_USE_FIXED_FUNCTION_BAKED_LIGHTING ) )
+	if ( IsRenderingPaint(params) )
 	{
-		AssertOnce( IS_FLAG2_SET( MATERIAL_VAR2_NEEDS_BAKED_LIGHTING_SNAPSHOTS ) );
-		if( IS_FLAG2_SET( MATERIAL_VAR2_NEEDS_BAKED_LIGHTING_SNAPSHOTS ) )
-		{
-			mod |= SHADER_USING_FIXED_FUNCTION_BAKED_LIGHTING;
-		}
+		mod |= SHADER_USING_PAINT;
 	}
 
+	if ( IsSnapshotting() )
+	{
+		if ( IS_FLAG2_SET( MATERIAL_VAR2_USE_GBUFFER0 ) )
+			mod |= SHADER_USING_GBUFFER0;
+		if ( IS_FLAG2_SET( MATERIAL_VAR2_USE_GBUFFER1 ) )
+			mod |= SHADER_USING_GBUFFER1;
+	}
+	else
+	{
+		int nFixedLightingMode = ShaderApiFast( pShaderAPI )->GetIntRenderingParameter( INT_RENDERPARM_ENABLE_FIXED_LIGHTING );
+		if ( nFixedLightingMode & 1 )
+			mod |= SHADER_USING_GBUFFER0;
+		if ( nFixedLightingMode & 2 )
+			mod |= SHADER_USING_GBUFFER1;
+	}
 	s_pShaderAPI = NULL;
-
 	return mod;
 }
 
@@ -563,94 +728,16 @@ bool CBaseShader::IsTranslucent( IMaterialVar **params ) const
 //-----------------------------------------------------------------------------
 // Returns the translucency...
 //-----------------------------------------------------------------------------
-float CBaseShader::GetAlpha( IMaterialVar** ppParams )
+void CBaseShader::ApplyColor2Factor( float *pColorOut, bool isLinearSpace ) const // (*pColorOut) *= COLOR2
 {
-	if ( !ppParams )
+	if ( !g_pConfig->bShowDiffuse )
 	{
-		ppParams = s_ppParams;
-	}
-
-	if (!ppParams)
-		return 1.0f;
-
-	if ( ppParams[FLAGS]->GetIntValue() & MATERIAL_VAR_NOALPHAMOD )
-		return 1.0f;
-
-	float flAlpha = ppParams[ALPHA]->GetFloatValue();
-	return clamp( flAlpha, 0.0f, 1.0f );
-}
-
-
-//-----------------------------------------------------------------------------
-// Sets the color + transparency
-//-----------------------------------------------------------------------------
-void CBaseShader::SetColorState( int colorVar, bool setAlpha )
-{
-	Assert( !IsSnapshotting() );
-	if ( !s_ppParams )
+		pColorOut[0] = pColorOut[1] = pColorOut[2] = 0.0f;
 		return;
-
-	// Use tint instead of color if it was specified...
-	IMaterialVar* pColorVar = (colorVar != -1) ? s_ppParams[colorVar] : 0;
-
-	float color[4] = { 1.0, 1.0, 1.0, 1.0 };
-	if (pColorVar)
-	{
-		if (pColorVar->GetType() == MATERIAL_VAR_TYPE_VECTOR)
-		{
-			pColorVar->GetVecValue( color, 3 );
-		}
-		else
-		{
-			color[0] = color[1] = color[2] = pColorVar->GetFloatValue();
-		}
-		
-		if ( !g_pHardwareConfig->SupportsPixelShaders_1_4() )		// Clamp 0..1 for ps_1_1 and below
-		{
-			color[0] = clamp( color[0], 0.0f, 1.0f );
-			color[1] = clamp( color[1], 0.0f, 1.0f );
-			color[2] = clamp( color[2], 0.0f, 1.0f );
-		}
-		else if ( !g_pHardwareConfig->SupportsPixelShaders_2_0() ) 	// Clamp 0..8 for ps_1_4
-		{
-			color[0] = clamp( color[0], 0.0f, 8.0f );
-			color[1] = clamp( color[1], 0.0f, 8.0f );
-			color[2] = clamp( color[2], 0.0f, 8.0f );
-		}
 	}
-	ApplyColor2Factor( color );
-	color[3] = setAlpha ? GetAlpha() : 1.0f;
-	s_pShaderAPI->Color4fv( color );	
-}
 
-
-void CBaseShader::SetModulationShadowState( int tintVar )
-{
-	// Have have no control over the tint var...
-	bool doModulation = (tintVar != -1);
-
-	// We activate color modulating when we're alpha or color modulating
-	doModulation = doModulation || IsAlphaModulating() || IsColorModulating();
-
-	s_pShaderShadow->EnableConstantColor( doModulation );
-}
-
-void CBaseShader::SetModulationDynamicState( int tintVar )
-{
-	if (tintVar != -1)
-	{
-		SetColorState( tintVar, true );
-	}
-	else
-	{
-		SetColorState( COLOR, true );
-	}
-}
-
-void CBaseShader::ApplyColor2Factor( float *pColorOut ) const // (*pColorOut) *= COLOR2
-{
 	IMaterialVar* pColor2Var = s_ppParams[COLOR2];
-	if (pColor2Var->GetType() == MATERIAL_VAR_TYPE_VECTOR)
+	if ( pColor2Var->GetType() == MATERIAL_VAR_TYPE_VECTOR )
 	{
 		float flColor2[3];
 		pColor2Var->GetVecValue( flColor2, 3 );
@@ -659,6 +746,7 @@ void CBaseShader::ApplyColor2Factor( float *pColorOut ) const // (*pColorOut) *=
 		pColorOut[1] *= flColor2[1];
 		pColorOut[2] *= flColor2[2];
 	}
+#ifndef _PS3
 	if ( g_pHardwareConfig->UsesSRGBCorrectBlending() )
 	{
 		IMaterialVar* pSRGBVar = s_ppParams[SRGBTINT];
@@ -667,40 +755,21 @@ void CBaseShader::ApplyColor2Factor( float *pColorOut ) const // (*pColorOut) *=
 			float flSRGB[3];
 			pSRGBVar->GetVecValue( flSRGB, 3 );
 			
-			pColorOut[0] *= flSRGB[0];
-			pColorOut[1] *= flSRGB[1];
-			pColorOut[2] *= flSRGB[2];
+			if ( isLinearSpace )
+			{
+				pColorOut[0] *= flSRGB[0];
+				pColorOut[1] *= flSRGB[1];
+				pColorOut[2] *= flSRGB[2];
+			}
+			else
+			{
+				pColorOut[0] *= GammaToLinearFullRange( flSRGB[0] );
+				pColorOut[1] *= GammaToLinearFullRange( flSRGB[1] );
+				pColorOut[2] *= GammaToLinearFullRange( flSRGB[2] );
+			}
 		}
 	}
-}
-
-void CBaseShader::ComputeModulationColor( float* color )
-{
-	Assert( !IsSnapshotting() );
-	if (!s_ppParams)          
-		return;
-
-	IMaterialVar* pColorVar = s_ppParams[COLOR];
-	if (pColorVar->GetType() == MATERIAL_VAR_TYPE_VECTOR)
-	{
-		pColorVar->GetVecValue( color, 3 );
-	}
-	else
-	{
-		color[0] = color[1] = color[2] = pColorVar->GetFloatValue();
-	}
-
-	ApplyColor2Factor( color );
-
-	if( !g_pConfig->bShowDiffuse )
-	{
-		color[0] = color[1] = color[2] = 0.0f;
-	}
-	if( mat_fullbright.GetInt() == 2 )
-	{
-		color[0] = color[1] = color[2] = 1.0f;
-	}
-	color[3] = GetAlpha();
+#endif
 }
 
 
@@ -837,184 +906,19 @@ void CBaseShader::SingleTextureLightmapBlendMode( )
 	s_pShaderShadow->BlendFunc( SHADER_BLEND_DST_COLOR, SHADER_BLEND_SRC_COLOR );
 }
 
-
-//-----------------------------------------------------------------------------
-// Loads the identity transform into a matrix
-//-----------------------------------------------------------------------------
-void CBaseShader::LoadIdentity( MaterialMatrixMode_t matrixMode )
+FORCEINLINE void CBaseShader::SetFogMode( ShaderFogMode_t fogMode )
 {
-	Assert( !IsSnapshotting() );
+	bool bVertexFog = ((CurrentMaterialVarFlags() & MATERIAL_VAR_VERTEXFOG) != 0);
 
-	s_pShaderAPI->MatrixMode( matrixMode );
-	s_pShaderAPI->LoadIdentity( );
-}
-
-
-//-----------------------------------------------------------------------------
-// Loads the camera to world transform into a matrix
-//-----------------------------------------------------------------------------
-void CBaseShader::LoadCameraToWorldTransform( MaterialMatrixMode_t matrixMode )
-{
-	s_pShaderAPI->MatrixMode( matrixMode );
-	s_pShaderAPI->LoadCameraToWorld();
-}
-
-void CBaseShader::LoadCameraSpaceSphereMapTransform( MaterialMatrixMode_t matrixMode )
-{
-	static float mat[4][4] = 
+	if (( CurrentMaterialVarFlags() & MATERIAL_VAR_NOFOG ) == 0)
 	{
-		{ 0.5f,  0.0f, 0.0f, 0.0f },
-		{ 0.0f, -0.5f, 0.0f, 0.0f },
-		{ 0.0f,  0.0f, 0.0f, 0.0f },
-		{ 0.5f, -0.5f, 0.0f, 1.0f },
-	};
-
-	s_pShaderAPI->MatrixMode( matrixMode );
-	s_pShaderAPI->LoadMatrix( (float*)mat );
-}
-
-
-//-----------------------------------------------------------------------------
-//
-// Sets a texture translation transform
-//
-//-----------------------------------------------------------------------------
-void CBaseShader::SetFixedFunctionTextureTranslation( MaterialMatrixMode_t textureTransform, int translationVar )
-{
-	Assert( !IsSnapshotting() );
-
-	// handle scrolling of base texture
-	Vector2D vDelta( 0, 0 );
-
-	if (translationVar != -1)
-	{
-		s_ppParams[translationVar]->GetVecValue( vDelta.Base(), 2 );
-	}
-
-	if( vDelta[0] != 0.0f || vDelta[1] != 0.0f )
-	{
-		s_pShaderAPI->MatrixMode( textureTransform );
-
-		// only do the upper 3x3 since this is a 2D matrix
-		float mat[16];
-		mat[0] = 1.0f;		mat[1] = 0.0f;		mat[2] = 0.0f;
-		mat[4] = 0.0f;		mat[5] = 1.0f;		mat[6] = 0.0f;
-		mat[8] = vDelta[0]; mat[9] = vDelta[1]; mat[10] = 1.0f;
-
-		// Better set the stuff we don't set with some sort of value!
-		mat[3] = mat[7] = mat[11] = 0;
-		mat[12] = mat[13] = mat[14] = 0;
-		mat[15] = 1;
-
-		s_pShaderAPI->LoadMatrix( mat );
+		s_pShaderShadow->FogMode( fogMode, bVertexFog );
 	}
 	else
 	{
-		LoadIdentity( textureTransform );
+		s_pShaderShadow->FogMode( SHADER_FOGMODE_DISABLED, bVertexFog );
 	}
 }
-
-void CBaseShader::SetFixedFunctionTextureScale( MaterialMatrixMode_t textureTransform, int scaleVar )
-{
-	Assert( !IsSnapshotting() );
-
-	// handle scrolling of base texture
-	Vector2D vScale;
-	s_ppParams[scaleVar]->GetVecValue( vScale.Base(), 2 );
-	if( vScale[0] != 0.0f || vScale[1] != 0.0f )
-	{
-		s_pShaderAPI->MatrixMode( textureTransform );
-
-		// only do the upper 3x3 since this is a 2D matrix
-		float mat[16];
-		mat[0] = vScale[0];	mat[1] = 0.0f;		mat[2] = 0.0f;
-		mat[4] = 0.0f;		mat[5] = vScale[1];	mat[6] = 0.0f;
-		mat[8] = 0.0f;		mat[9] = 0.0f;		mat[10] = 1.0f;
-
-		// Better set the stuff we don't set with some sort of value!
-		mat[3] = mat[7] = mat[11] = 0;
-		mat[12] = mat[13] = mat[14] = 0;
-		mat[15] = 1;
-
-		s_pShaderAPI->LoadMatrix( mat );
-	}
-	else
-	{
-		LoadIdentity( textureTransform );
-	}
-}
-
-void CBaseShader::SetFixedFunctionTextureTransform( MaterialMatrixMode_t textureTransform, int transformVar )
-{
-	Assert( !IsSnapshotting() );
-
-	IMaterialVar* pTransformationVar = s_ppParams[transformVar];
-	if (pTransformationVar && (pTransformationVar->GetType() == MATERIAL_VAR_TYPE_MATRIX))
-	{
-		s_pShaderAPI->MatrixMode( textureTransform );
-
-		const VMatrix &transformation = pTransformationVar->GetMatrixValue();
-
-		// only do the upper 3x3 since this is a 2D matrix
-		float mat[16];
-		mat[0] = transformation[0][0];	mat[1] = transformation[1][0];	mat[2] = transformation[3][0];
-		mat[4] = transformation[0][1];	mat[5] = transformation[1][1];	mat[6] = transformation[3][1];
-		mat[8] = transformation[0][3];	mat[9] = transformation[1][3];	mat[10] = transformation[3][3];
-
-		// Better set the stuff we don't set with some sort of value!
-		mat[3] = mat[7] = mat[11] = 0;
-		mat[12] = mat[13] = mat[14] = 0;
-		mat[15] = 1;
-
-		s_pShaderAPI->LoadMatrix( mat );
-	}
-	else
-	{
-		LoadIdentity( textureTransform );
-	}
-}
-
-void CBaseShader::SetFixedFunctionTextureScaledTransform( MaterialMatrixMode_t textureTransform, 
-													   int transformVar, int scaleVar )
-{
-	Assert( !IsSnapshotting() );
-
-	float mat[16];
-	IMaterialVar* pTransformationVar = s_ppParams[transformVar];
-	if (pTransformationVar && (pTransformationVar->GetType() == MATERIAL_VAR_TYPE_MATRIX))
-	{
-		Vector2D scale( 1, 1 );
-		IMaterialVar* pScaleVar = s_ppParams[scaleVar];
-		if (pScaleVar)
-		{
-			if (pScaleVar->GetType() == MATERIAL_VAR_TYPE_VECTOR)
-				pScaleVar->GetVecValue( scale.Base(), 2 );
-			else if (pScaleVar->IsDefined())
-				scale[0] = scale[1] = pScaleVar->GetFloatValue();
-		}
-
-		s_pShaderAPI->MatrixMode( textureTransform );
-
-		const VMatrix &transformation = pTransformationVar->GetMatrixValue();
-
-		// only do the upper 3x3 since this is a 2D matrix
-		mat[0] = transformation[0][0] * scale[0]; mat[1] = transformation[1][0] * scale[0]; mat[2] = transformation[3][0] * scale[0];
-		mat[4] = transformation[0][1] * scale[1]; mat[5] = transformation[1][1] * scale[1]; mat[6] = transformation[3][1] * scale[1];
-		mat[8] = transformation[0][3];	mat[9] = transformation[1][3];	mat[10] = transformation[3][3];
-
-		// Better set the stuff we don't set with some sort of value!
-		mat[3] = mat[7] = mat[11] = 0;
-		mat[12] = mat[13] = mat[14] = 0;
-		mat[15] = 1;
-
-		s_pShaderAPI->LoadMatrix( mat );
-	}
-	else
-	{
-		SetFixedFunctionTextureScale( textureTransform, scaleVar );
-	}
-}
-
 
 //-----------------------------------------------------------------------------
 //
@@ -1024,71 +928,36 @@ void CBaseShader::SetFixedFunctionTextureScaledTransform( MaterialMatrixMode_t t
 void CBaseShader::FogToOOOverbright( void )
 {
 	Assert( IsSnapshotting() );
-	if (( CurrentMaterialVarFlags() & MATERIAL_VAR_NOFOG ) == 0)
-	{
-		s_pShaderShadow->FogMode( SHADER_FOGMODE_OO_OVERBRIGHT );
-	}
-	else
-	{
-		s_pShaderShadow->FogMode( SHADER_FOGMODE_DISABLED );
-	}
+	SetFogMode( SHADER_FOGMODE_OO_OVERBRIGHT );
 }
 
 void CBaseShader::FogToWhite( void )
 {
 	Assert( IsSnapshotting() );
-	if (( CurrentMaterialVarFlags() & MATERIAL_VAR_NOFOG ) == 0)
-	{
-		s_pShaderShadow->FogMode( SHADER_FOGMODE_WHITE );
-	}
-	else
-	{
-		s_pShaderShadow->FogMode( SHADER_FOGMODE_DISABLED );
-	}
+	SetFogMode( SHADER_FOGMODE_WHITE );
 }
 void CBaseShader::FogToBlack( void )
 {
 	Assert( IsSnapshotting() );
-	if (( CurrentMaterialVarFlags() & MATERIAL_VAR_NOFOG ) == 0)
-	{
-		s_pShaderShadow->FogMode( SHADER_FOGMODE_BLACK );
-	}
-	else
-	{
-		s_pShaderShadow->FogMode( SHADER_FOGMODE_DISABLED );
-	}
+	SetFogMode( SHADER_FOGMODE_BLACK );
 }
 
 void CBaseShader::FogToGrey( void )
 {
 	Assert( IsSnapshotting() );
-	if (( CurrentMaterialVarFlags() & MATERIAL_VAR_NOFOG ) == 0)
-	{
-		s_pShaderShadow->FogMode( SHADER_FOGMODE_GREY );
-	}
-	else
-	{
-		s_pShaderShadow->FogMode( SHADER_FOGMODE_DISABLED );
-	}
+	SetFogMode( SHADER_FOGMODE_GREY );
 }
 
 void CBaseShader::FogToFogColor( void )
 {
 	Assert( IsSnapshotting() );
-	if (( CurrentMaterialVarFlags() & MATERIAL_VAR_NOFOG ) == 0)
-	{
-		s_pShaderShadow->FogMode( SHADER_FOGMODE_FOGCOLOR );
-	}
-	else
-	{
-		s_pShaderShadow->FogMode( SHADER_FOGMODE_DISABLED );
-	}
+	SetFogMode( SHADER_FOGMODE_FOGCOLOR );
 }
 
 void CBaseShader::DisableFog( void )
 {
 	Assert( IsSnapshotting() );
-	s_pShaderShadow->FogMode( SHADER_FOGMODE_DISABLED );
+	s_pShaderShadow->FogMode( SHADER_FOGMODE_DISABLED, false );
 }
 
 void CBaseShader::DefaultFog( void )
@@ -1101,530 +970,6 @@ void CBaseShader::DefaultFog( void )
 	{
 		FogToFogColor();
 	}
-}
-
-
-//-----------------------------------------------------------------------------
-// Fixed function multiply by detail texture pass
-//-----------------------------------------------------------------------------
-void CBaseShader::FixedFunctionMultiplyByDetailPass( int baseTextureVar, int frameVar, 
-		int textureTransformVar, int detailVar, int detailScaleVar )
-{
-	IMaterialVar** params = s_ppParams;
-
-	if (!params[detailVar]->IsDefined())
-		return;
-
-	if (IsSnapshotting())
-	{
-		SetInitialShadowState();
-
-		s_pShaderShadow->EnableAlphaTest( IS_FLAG_SET(MATERIAL_VAR_ALPHATEST) );
-
-		bool translucentTexture = TextureIsTranslucent( baseTextureVar, true ) ||
-			IS_FLAG_SET(MATERIAL_VAR_ALPHATEST);
-		s_pShaderShadow->EnableTexture( SHADER_SAMPLER0, true );
-		s_pShaderShadow->EnableTexture( SHADER_SAMPLER1, true );
-		s_pShaderShadow->EnableTexGen( SHADER_TEXTURE_STAGE0, false );
-		s_pShaderShadow->EnableTexGen( SHADER_TEXTURE_STAGE1, false );
-
-		// Mod 2x blend here
-		EnableAlphaBlending( SHADER_BLEND_DST_COLOR, SHADER_BLEND_SRC_COLOR );
-
-		s_pShaderShadow->EnableCustomPixelPipe( true );
-		s_pShaderShadow->CustomTextureStages( 2 );
-
-		// We need to blend towards grey based on alpha...
-		// We can never get the perfect alpha (vertex alpha * cc alpha * texture alpha)
-		// so we'll just choose to use cc alpha * texture alpha
-
-		int flags = SHADER_DRAW_POSITION | SHADER_DRAW_TEXCOORD1;
-
-		// Compute alpha, stage 0 is used, stage 1 isn't.
-		if ( translucentTexture )
-		{
-			s_pShaderShadow->CustomTextureOperation( SHADER_TEXTURE_STAGE0, 
-				SHADER_TEXCHANNEL_ALPHA, SHADER_TEXOP_MODULATE, 
-				SHADER_TEXARG_TEXTURE, SHADER_TEXARG_CONSTANTCOLOR );
-			flags |= SHADER_DRAW_TEXCOORD0;
-		}
-		else
-		{
-			bool hasVertexAlpha = (CurrentMaterialVarFlags() & MATERIAL_VAR_VERTEXALPHA) != 0;
-			if (hasVertexAlpha)
-			{
-				flags |= SHADER_DRAW_COLOR;
-			}
-
-			s_pShaderShadow->CustomTextureOperation( SHADER_TEXTURE_STAGE0, 
-				SHADER_TEXCHANNEL_ALPHA, hasVertexAlpha ? SHADER_TEXOP_MODULATE : SHADER_TEXOP_SELECTARG1, 
-				SHADER_TEXARG_CONSTANTCOLOR, SHADER_TEXARG_VERTEXCOLOR );
-		}
-
-		s_pShaderShadow->CustomTextureOperation( SHADER_TEXTURE_STAGE1, 
-			SHADER_TEXCHANNEL_ALPHA, SHADER_TEXOP_SELECTARG1, 
-			SHADER_TEXARG_PREVIOUSSTAGE, SHADER_TEXARG_NONE );
-
-		// This here will perform color = vertex light * alpha + 0.5f * (1 - alpha)
-		// Stage 0 really doesn't do anything
-		s_pShaderShadow->CustomTextureOperation( SHADER_TEXTURE_STAGE0, 
-			SHADER_TEXCHANNEL_COLOR, SHADER_TEXOP_SELECTARG1, 
-			SHADER_TEXARG_TEXTURE, SHADER_TEXARG_CONSTANTCOLOR );
-
-		s_pShaderShadow->CustomTextureOperation( SHADER_TEXTURE_STAGE1, 
-			SHADER_TEXCHANNEL_COLOR, SHADER_TEXOP_BLEND_PREVIOUSSTAGEALPHA, 
-			SHADER_TEXARG_TEXTURE, SHADER_TEXARG_CONSTANTCOLOR );
-
-		s_pShaderShadow->DrawFlags( flags );
-		FogToGrey();
-		Draw( );
-
-		s_pShaderShadow->EnableCustomPixelPipe( false );
-		DisableAlphaBlending();
-	}
-	else
-	{
-		if (TextureIsTranslucent( baseTextureVar, true ) )
-		{
-			SetFixedFunctionTextureTransform( MATERIAL_TEXTURE0, textureTransformVar );
-			BindTexture( SHADER_SAMPLER0, baseTextureVar, frameVar );
-		}
-		else
-		{
-			// Unnecessary... but we get strange colors if we don't put something on stage 0
-			BindTexture( SHADER_SAMPLER0, detailVar, frameVar );
-		}
-
-		BindTexture( SHADER_SAMPLER1, detailVar, frameVar );
-		SetFixedFunctionTextureScaledTransform( MATERIAL_TEXTURE1, textureTransformVar, detailScaleVar );
-		float alpha = GetAlpha();
-		s_pShaderAPI->Color4ub( 128, 128, 128, 255 * alpha );
-
-		Draw( );
-	}
-}
-
-
-//-----------------------------------------------------------------------------
-// Multiply by lightmap pass
-//-----------------------------------------------------------------------------
-void CBaseShader::FixedFunctionMultiplyByLightmapPass( int baseTextureVar, 
-	int frameVar, int baseTextureTransformVar, float alphaOverride )
-{
-	if (IsSnapshotting())
-	{
-		SetInitialShadowState();
-
-		s_pShaderShadow->EnableAlphaTest( false );
-
-		s_pShaderShadow->EnableBlending( true );
-		SingleTextureLightmapBlendMode();
-		
-		s_pShaderShadow->EnableTexture( SHADER_SAMPLER0, true );
-		s_pShaderShadow->EnableTexture( SHADER_SAMPLER1, true );
- 		s_pShaderShadow->EnableTexGen( SHADER_TEXTURE_STAGE0, false );
-		s_pShaderShadow->EnableTexGen( SHADER_TEXTURE_STAGE1, false );
-
-		s_pShaderShadow->EnableCustomPixelPipe( true );
-		s_pShaderShadow->CustomTextureStages( 2 );
-
-		// Stage zero color is not used, this op doesn't matter
-		s_pShaderShadow->CustomTextureOperation( SHADER_TEXTURE_STAGE0, 
-			SHADER_TEXCHANNEL_COLOR, SHADER_TEXOP_SELECTARG1, 
-			SHADER_TEXARG_CONSTANTCOLOR, SHADER_TEXARG_CONSTANTCOLOR );
-
-		// This here will perform color = lightmap * (cc alpha) + 1 * (1- cc alpha)
-		s_pShaderShadow->CustomTextureOperation( SHADER_TEXTURE_STAGE1, 
-			SHADER_TEXCHANNEL_COLOR, SHADER_TEXOP_BLEND_PREVIOUSSTAGEALPHA, 
-			SHADER_TEXARG_TEXTURE, SHADER_TEXARG_CONSTANTCOLOR );
-
-		int flags = SHADER_DRAW_POSITION | SHADER_DRAW_LIGHTMAP_TEXCOORD1;
-
-		// Multiply the constant alpha by the texture alpha for total alpha
-		if (TextureIsTranslucent(baseTextureVar, true))
-		{
-			s_pShaderShadow->CustomTextureOperation( SHADER_TEXTURE_STAGE0, 
-				SHADER_TEXCHANNEL_ALPHA, SHADER_TEXOP_MODULATE, 
-				SHADER_TEXARG_TEXTURE, SHADER_TEXARG_CONSTANTCOLOR );
-
-			flags |= SHADER_DRAW_TEXCOORD0;
-		}
-		else
-		{
-			s_pShaderShadow->EnableTexture( SHADER_SAMPLER0, false );
-			s_pShaderShadow->CustomTextureOperation( SHADER_TEXTURE_STAGE0, 
-				SHADER_TEXCHANNEL_ALPHA, SHADER_TEXOP_SELECTARG2, 
-				SHADER_TEXARG_TEXTURE, SHADER_TEXARG_CONSTANTCOLOR );
-		}
-
-		// Alpha isn't used, it doesn't matter what we set it to.
-		s_pShaderShadow->CustomTextureOperation( SHADER_TEXTURE_STAGE1, 
-			SHADER_TEXCHANNEL_ALPHA, SHADER_TEXOP_SELECTARG1, 
-			SHADER_TEXARG_PREVIOUSSTAGE, SHADER_TEXARG_NONE );
-		 
-		s_pShaderShadow->DrawFlags( flags );
-
-		FogToOOOverbright();
-		Draw();
-
-		s_pShaderShadow->EnableCustomPixelPipe( false );
-	}
-	else
-	{  
-		s_pShaderAPI->SetDefaultState();
-
-		// Put the alpha in the color channel to modulate the color down....
-		float alpha = (alphaOverride < 0) ? GetAlpha() : alphaOverride;
-
-		// NOTE: 128 is a more exact OO_OVERBRIGHT; it prevents some artifacts
-//		s_pShaderAPI->Color4f( OO_OVERBRIGHT, OO_OVERBRIGHT, OO_OVERBRIGHT, alpha );
-		s_pShaderAPI->Color4ub( 128, 128, 128, (int)(alpha * 255));
-
-		if (TextureIsTranslucent(baseTextureVar, true))
-		{
-			SetFixedFunctionTextureTransform( MATERIAL_TEXTURE0, baseTextureTransformVar );
-			BindTexture( SHADER_SAMPLER0, baseTextureVar, frameVar );
-		}
-
-		LoadIdentity( MATERIAL_TEXTURE1 );
-		s_pShaderAPI->BindStandardTexture( SHADER_SAMPLER1, TEXTURE_LIGHTMAP );
-
-		Draw();
-	}
-}
-
-
-//-----------------------------------------------------------------------------
-// Fixed function Self illumination pass
-//-----------------------------------------------------------------------------
-void CBaseShader::FixedFunctionSelfIlluminationPass( Sampler_t sampler, 
-	int baseTextureVar, int frameVar, int baseTextureTransformVar, int selfIllumTintVar )
-{
-//	IMaterialVar** params = s_ppParams;
-
-	if ( IsSnapshotting() )
-	{
-		SetInitialShadowState();
-
-		// A little setup for self illum here...
-		SetModulationShadowState( selfIllumTintVar );
-
-		s_pShaderShadow->EnableTexture( sampler, true );
-
-		// No overbrighting
-		s_pShaderShadow->OverbrightValue( SHADER_TEXTURE_STAGE0, 1.0f );
-		s_pShaderShadow->OverbrightValue( SHADER_TEXTURE_STAGE1, 1.0f );
-
-		// Don't bother with z writes here...
- 		s_pShaderShadow->EnableDepthWrites( false );
-
-		// We're always blending
-		EnableAlphaBlending( SHADER_BLEND_SRC_ALPHA, SHADER_BLEND_ONE_MINUS_SRC_ALPHA );
-
-		int flags = SHADER_DRAW_POSITION;
-		if ( sampler == SHADER_SAMPLER0 )
-			flags |= SHADER_DRAW_TEXCOORD0;
-		else
-			flags |= SHADER_DRAW_TEXCOORD1;
-
-		s_pShaderShadow->DrawFlags( flags );
-		FogToFogColor();
-	}
-	else
-	{
-		s_pShaderAPI->SetDefaultState();
-
-		SetFixedFunctionTextureTransform( 
-			(sampler == SHADER_SAMPLER0) ? MATERIAL_TEXTURE0 : MATERIAL_TEXTURE1, 
-			baseTextureTransformVar );
-		BindTexture( sampler, baseTextureVar, frameVar );
-
-		// NOTE: Texture + texture offset are set from BaseTimesLightmap
-		SetModulationDynamicState( selfIllumTintVar );
-	}
-	Draw();
-}
-
-
-//-----------------------------------------------------------------------------
-// Fixed function Base * detail pass
-//-----------------------------------------------------------------------------
-void CBaseShader::FixedFunctionBaseTimesDetailPass( int baseTextureVar, 
-	int frameVar, int baseTextureTransformVar, int detailVar, int detailScaleVar )
-{
-	IMaterialVar** params = s_ppParams;
-
-	// We can't do this one one pass if CC and VC are both active...
-	bool hasDetail = (detailVar != -1) && params[detailVar]->IsDefined();
-	bool detailInSecondPass = hasDetail &&	IsColorModulating() && 
-		(IS_FLAG_SET(MATERIAL_VAR_VERTEXCOLOR) || IS_FLAG_SET(MATERIAL_VAR_VERTEXALPHA));
-
-	if (IsSnapshotting())
-	{
-		s_pShaderShadow->EnableTexGen( SHADER_TEXTURE_STAGE0, false );
-		s_pShaderShadow->EnableTexGen( SHADER_TEXTURE_STAGE1, false );
-
-		// alpha test
- 		s_pShaderShadow->EnableAlphaTest( IS_FLAG_SET(MATERIAL_VAR_ALPHATEST) );
-
-		// Alpha blending
-		SetDefaultBlendingShadowState( baseTextureVar, true );
-
-		// independently configure alpha and color
-		s_pShaderShadow->EnableAlphaPipe( true );
-
-		// Here's the color	states (NOTE: SHADER_DRAW_COLOR == use Vertex Color)
-		s_pShaderShadow->EnableConstantColor( IsColorModulating() );
-		s_pShaderShadow->EnableTexture( SHADER_SAMPLER0, true );
-
-		int flags = SHADER_DRAW_POSITION | SHADER_DRAW_TEXCOORD0;
-
-		// Detail texture..
-		if (hasDetail && (!detailInSecondPass))
-		{
-			s_pShaderShadow->EnableTexture( SHADER_SAMPLER1, true );
-
-			// Force mod2x
-			s_pShaderShadow->OverbrightValue( SHADER_TEXTURE_STAGE1, 2.0f );
-
-			flags |= SHADER_DRAW_TEXCOORD1;
-		}
-
-		// Here's the alpha states
-		s_pShaderShadow->EnableConstantAlpha( IsAlphaModulating() );
-		s_pShaderShadow->EnableVertexAlpha( IS_FLAG_SET(MATERIAL_VAR_VERTEXALPHA) );
-		s_pShaderShadow->EnableTextureAlpha( SHADER_TEXTURE_STAGE0, TextureIsTranslucent(baseTextureVar, true) );
-
-		if (IS_FLAG_SET(MATERIAL_VAR_VERTEXCOLOR))
-			flags |= SHADER_DRAW_COLOR;
-		s_pShaderShadow->DrawFlags( flags );
-
-		DefaultFog();
-
-		Draw();
-
-		s_pShaderShadow->EnableAlphaPipe( false );
-	}
-	else
-	{
-		SetFixedFunctionTextureTransform( MATERIAL_TEXTURE0, baseTextureTransformVar );
-		BindTexture( SHADER_SAMPLER0, baseTextureVar, frameVar );
-
-		// Detail texture..
-		if (hasDetail && (!detailInSecondPass))
-		{
-			BindTexture( SHADER_SAMPLER1, detailVar, frameVar );
-			SetFixedFunctionTextureScaledTransform( MATERIAL_TEXTURE1, baseTextureTransformVar, detailScaleVar );
-		}
-
-		SetModulationDynamicState();
-
-		Draw();
-	}
-
-	if (detailInSecondPass)
-	{
-		FixedFunctionMultiplyByDetailPass( baseTextureVar, frameVar, baseTextureTransformVar, detailVar, detailScaleVar );
-	}
-}
-
-
-//-----------------------------------------------------------------------------
-// Helpers for environment mapping...
-//-----------------------------------------------------------------------------
-int CBaseShader::SetShadowEnvMappingState( int envMapMaskVar, int tintVar )
-{
-	Assert( IsSnapshotting() );
-	IMaterialVar** params = s_ppParams;
-
-	int varFlags = params[FLAGS]->GetIntValue();
-
-	s_pShaderShadow->EnableAlphaTest( false );
-
-	// envmap on stage 0
-	s_pShaderShadow->EnableTexture( SHADER_SAMPLER0, true );
-	s_pShaderShadow->EnableTexGen( SHADER_TEXTURE_STAGE0, true );
-	if ( (varFlags & MATERIAL_VAR_ENVMAPSPHERE) == 0 )
-		s_pShaderShadow->TexGen( SHADER_TEXTURE_STAGE0, SHADER_TEXGENPARAM_CAMERASPACEREFLECTIONVECTOR );
-	else
-		s_pShaderShadow->TexGen( SHADER_TEXTURE_STAGE0, SHADER_TEXGENPARAM_SPHERE_MAP );
-
-	int flags = SHADER_DRAW_POSITION | SHADER_DRAW_NORMAL;
-
-	// mask on stage 1
-	if (params[envMapMaskVar]->IsDefined() || (varFlags & MATERIAL_VAR_BASEALPHAENVMAPMASK))
-	{
-		s_pShaderShadow->EnableTexture( SHADER_SAMPLER1, true );
-		flags |= SHADER_DRAW_TEXCOORD1;
-	}
-	else
-	{
-		s_pShaderShadow->EnableTexture( SHADER_SAMPLER1, false );
-	}
-
-	if (varFlags & MATERIAL_VAR_BASEALPHAENVMAPMASK)
-	{
-		s_pShaderShadow->EnableCustomPixelPipe( true );
-		s_pShaderShadow->CustomTextureStages( 2 );
-
-		// Color = base texture * envmaptint * (1 - mask alpha)
-		s_pShaderShadow->CustomTextureOperation( SHADER_TEXTURE_STAGE0, 
-			SHADER_TEXCHANNEL_COLOR, SHADER_TEXOP_MODULATE, SHADER_TEXARG_TEXTURE, SHADER_TEXARG_CONSTANTCOLOR );  
-		s_pShaderShadow->CustomTextureOperation( SHADER_TEXTURE_STAGE1, 
-			SHADER_TEXCHANNEL_COLOR, SHADER_TEXOP_MODULATE, SHADER_TEXARG_PREVIOUSSTAGE, SHADER_TEXARG_INVTEXTUREALPHA );
-
-		// Use alpha modulation * vertex alpha * env map alpha
-		s_pShaderShadow->CustomTextureOperation( SHADER_TEXTURE_STAGE0, 
-			SHADER_TEXCHANNEL_ALPHA, SHADER_TEXOP_MODULATE, SHADER_TEXARG_VERTEXCOLOR, SHADER_TEXARG_TEXTURE );  
-		s_pShaderShadow->CustomTextureOperation( SHADER_TEXTURE_STAGE1, 
-			SHADER_TEXCHANNEL_ALPHA, SHADER_TEXOP_SELECTARG1, SHADER_TEXARG_PREVIOUSSTAGE, SHADER_TEXARG_CONSTANTCOLOR );
-	}
-	else
-	{
-		s_pShaderShadow->EnableAlphaPipe( true );
-
-		// Color = base texture * envmaptint * mask
-		s_pShaderShadow->EnableConstantColor( tintVar >= 0 );
-
-		// Alpha = vertex alpha * constant alpha * env map alpha * mask alpha (only if it's not a base alpha mask)
-		s_pShaderShadow->EnableConstantAlpha( IsAlphaModulating() );
-		s_pShaderShadow->EnableVertexAlpha( (varFlags & MATERIAL_VAR_VERTEXALPHA) != 0 );
-		s_pShaderShadow->EnableTextureAlpha( SHADER_TEXTURE_STAGE0, true );
-		s_pShaderShadow->EnableTextureAlpha( SHADER_TEXTURE_STAGE1, params[envMapMaskVar]->IsTexture() );
-	}
-
-	return flags;
-}
-
-void CBaseShader::SetDynamicEnvMappingState( int envMapVar, int envMapMaskVar, 
-	int baseTextureVar, int envMapFrameVar, int envMapMaskFrameVar, int frameVar,  
-	int maskOffsetVar, int maskScaleVar, int tintVar )
-{
-	Assert( !IsSnapshotting() );
-
-	IMaterialVar** params = s_ppParams;
-	int varFlags = params[FLAGS]->GetIntValue();
-
-	if( (varFlags & MATERIAL_VAR_ENVMAPSPHERE) == 0 )
-	{
-		if ( (varFlags & MATERIAL_VAR_ENVMAPCAMERASPACE) == 0 )
-		{
-			LoadCameraToWorldTransform( MATERIAL_TEXTURE0 );
-		}
-		else
-		{
-			LoadIdentity( MATERIAL_TEXTURE0 );
-		}
-	}
-	else
-	{
-		LoadCameraSpaceSphereMapTransform( MATERIAL_TEXTURE0 );
-	}
-
-	BindTexture( SHADER_SAMPLER0, envMapVar, envMapFrameVar );
-
-	if (params[envMapMaskVar]->IsTexture())
-	{
-		SetFixedFunctionTextureScaledTransform( MATERIAL_TEXTURE1, 
-			maskOffsetVar, maskScaleVar );
-		BindTexture( SHADER_SAMPLER1, envMapMaskVar, envMapMaskFrameVar );
-	}
-	else if (varFlags & MATERIAL_VAR_BASEALPHAENVMAPMASK)
-	{
-		SetFixedFunctionTextureScaledTransform( MATERIAL_TEXTURE1, 
-			maskOffsetVar, maskScaleVar );
-		BindTexture( SHADER_SAMPLER1, baseTextureVar, frameVar );
-	}
-
-	SetModulationDynamicState( tintVar );
-}
-
-
-//-----------------------------------------------------------------------------
-// Masked environment map
-//-----------------------------------------------------------------------------
-void CBaseShader::FixedFunctionMaskedEnvmapPass( int envMapVar, int envMapMaskVar, 
-	int baseTextureVar, int envMapFrameVar, int envMapMaskFrameVar, 
-	int frameVar, int maskOffsetVar, int maskScaleVar, int envMapTintVar )
-{
-//	IMaterialVar** params = ShaderState().m_ppParams;
-
-	if (IsSnapshotting())
-	{
-		// Alpha blending
-		SetDefaultBlendingShadowState( envMapMaskVar, false );
-
-		// Disable overbright
-		s_pShaderShadow->OverbrightValue( SHADER_TEXTURE_STAGE0, 1.0f );
-		s_pShaderShadow->OverbrightValue( SHADER_TEXTURE_STAGE1, 1.0f );
-
-		int flags = SetShadowEnvMappingState( envMapMaskVar, envMapTintVar );
-		s_pShaderShadow->DrawFlags( flags );
-
-		DefaultFog();
-		Draw();
-
-		s_pShaderShadow->EnableCustomPixelPipe( false );
-		s_pShaderShadow->EnableAlphaPipe( false );
-	}
-	else
-	{
-		SetDynamicEnvMappingState( envMapVar, envMapMaskVar, baseTextureVar,
-			envMapFrameVar, envMapMaskFrameVar, frameVar, 
-			maskOffsetVar, maskScaleVar, envMapTintVar );
-
-		Draw();
-	}
-}
-
-
-//-----------------------------------------------------------------------------
-// Add masked environment map
-//-----------------------------------------------------------------------------
-void CBaseShader::FixedFunctionAdditiveMaskedEnvmapPass( int envMapVar, int envMapMaskVar, 
-	int baseTextureVar, int envMapFrameVar, int envMapMaskFrameVar, 
-	int frameVar, int maskOffsetVar, int maskScaleVar, int envMapTintVar )
-{
-//	IMaterialVar** params = ShaderState().m_ppParams;
-
-	if (IsSnapshotting())
-	{
-		SetInitialShadowState();
-
-		// Alpha blending
-		SetAdditiveBlendingShadowState( envMapMaskVar, false );
-
-		// Disable overbright
-		s_pShaderShadow->OverbrightValue( SHADER_TEXTURE_STAGE0, 1.0f );
-		s_pShaderShadow->OverbrightValue( SHADER_TEXTURE_STAGE1, 1.0f );
-
-		// Don't bother with z writes here...
- 		s_pShaderShadow->EnableDepthWrites( false );
-
-		int flags = SetShadowEnvMappingState( envMapMaskVar, envMapTintVar );
-		s_pShaderShadow->DrawFlags( flags );
-
-		FogToBlack();
-		Draw();
-
-		s_pShaderShadow->EnableCustomPixelPipe( false );
-		s_pShaderShadow->EnableAlphaPipe( false );
-	}
-	else
-	{
-		SetDynamicEnvMappingState( envMapVar, envMapMaskVar, baseTextureVar,
-			envMapFrameVar, envMapMaskFrameVar, frameVar, 
-			maskOffsetVar, maskScaleVar, envMapTintVar );
-
-		Draw();
-	}
-}
-
-
-void CBaseShader::CleanupDynamicStateFixedFunction( )
-{
-	Assert( !IsSnapshotting() );
-	LoadIdentity( MATERIAL_TEXTURE0 );
 }
 
 bool CBaseShader::UsingFlashlight( IMaterialVar **params ) const
@@ -1651,141 +996,31 @@ bool CBaseShader::UsingEditor( IMaterialVar **params ) const
 	}
 }
 
-void CBaseShader::DrawFlashlight_dx70( 
-	IMaterialVar** params, IShaderDynamicAPI *pShaderAPI, IShaderShadow* pShaderShadow, 
-	int flashlightTextureVar, int flashlightTextureFrameVar,
-	bool suppress_lighting )
+bool CBaseShader::IsRenderingPaint( IMaterialVar **params ) const
 {
-	SHADOW_STATE
+	if( IsSnapshotting() )
 	{
-		SET_FLAGS2( MATERIAL_VAR2_NEEDS_FIXED_FUNCTION_FLASHLIGHT );
-		pShaderShadow->EnableDepthWrites( false );
-		pShaderShadow->EnableAlphaWrites( false );
-
-		// Alpha test
-//		pShaderShadow->EnableAlphaTest( IS_FLAG_SET( MATERIAL_VAR_ALPHATEST ) );
-		bool bIsAlphaTested = IS_FLAG_SET( MATERIAL_VAR_ALPHATEST ) != 0;
-		if( bIsAlphaTested )
-		{
-			// disable alpha test and use the zfunc zequals since alpha isn't guaranteed to 
-			// be the same on both the regular pass and the flashlight pass.
-			s_pShaderShadow->EnableAlphaTest( false );
-			s_pShaderShadow->DepthFunc( SHADER_DEPTHFUNC_EQUAL );
-		}
-
-		// Alpha blend
-		SetAdditiveBlendingShadowState( BASETEXTURE, true );
-		
-		int flags = SHADER_DRAW_POSITION | SHADER_DRAW_TEXCOORD1 | SHADER_DRAW_COLOR | SHADER_DRAW_NORMAL;
-		pShaderShadow->DrawFlags( flags );
-		FogToBlack();
-
-		if ( !suppress_lighting )
-			pShaderShadow->EnableLighting( true );
-
-		pShaderShadow->EnableCustomPixelPipe( true );
-		pShaderShadow->CustomTextureStages( 2 );
-
-		// color stage 0
-		// projected texture * vertex color (lighting)
-		pShaderShadow->CustomTextureOperation( SHADER_TEXTURE_STAGE0, 
-			SHADER_TEXCHANNEL_COLOR, 
-			SHADER_TEXOP_MODULATE,
-			SHADER_TEXARG_TEXTURE, 
-			SHADER_TEXARG_VERTEXCOLOR );
-
-		// color stage 1
-		// * base texture
-		pShaderShadow->CustomTextureOperation( SHADER_TEXTURE_STAGE1, 
-			SHADER_TEXCHANNEL_COLOR, 
-			SHADER_TEXOP_MODULATE,
-			SHADER_TEXARG_TEXTURE, SHADER_TEXARG_PREVIOUSSTAGE );
-
-		// alpha stage 0
-		// get alpha from constant alpha
-		pShaderShadow->CustomTextureOperation( SHADER_TEXTURE_STAGE0, 
-			SHADER_TEXCHANNEL_ALPHA, 
-			SHADER_TEXOP_SELECTARG1,
-			SHADER_TEXARG_CONSTANTCOLOR, SHADER_TEXARG_NONE );
-
-		// alpha stage 1
-		// get alpha from $basetexture
-		pShaderShadow->CustomTextureOperation( SHADER_TEXTURE_STAGE1, 
-			SHADER_TEXCHANNEL_ALPHA, 
-			SHADER_TEXOP_MODULATE,
-			SHADER_TEXARG_TEXTURE, SHADER_TEXARG_PREVIOUSSTAGE );
-
-		pShaderShadow->EnableTexture( SHADER_SAMPLER0, true );
-		pShaderShadow->EnableTexture( SHADER_SAMPLER1, true );
-
-		// Shove the view position into texcoord 0 before the texture matrix.
-		pShaderShadow->TexGen( SHADER_TEXTURE_STAGE0, SHADER_TEXGENPARAM_EYE_LINEAR );
-		pShaderShadow->EnableTexGen( SHADER_TEXTURE_STAGE0, true );
+		// NOTE: This only works because IsRenderingPaint
+		// really only affects lightmappedgeneric in a specific way.
+		// If we make it used more generally, then we'll need a pattern
+		// more similar to UsingEditor or UsingFlashlight
+		return CShader_IsFlag2Set( params, MATERIAL_VAR2_USE_PAINT );
 	}
-	DYNAMIC_STATE
+	else
 	{
-		SetFlashlightFixedFunctionTextureTransform( MATERIAL_TEXTURE0 );
-
-		// NOTE: This has to come after the loadmatrix since the loadmatrix screws with the
-		// transform flags!!!!!!
-		// Specify that we have XYZ texcoords that need to be divided by W before the pixel shader.
-		// NOTE Tried to divide XY by Z, but doesn't work.
-		pShaderAPI->SetTextureTransformDimension( SHADER_TEXTURE_STAGE0, 3, true );
-		
-		BindTexture( SHADER_SAMPLER0, flashlightTextureVar, flashlightTextureFrameVar );
-		if( params[BASETEXTURE]->IsTexture() )
-		{
-			BindTexture( SHADER_SAMPLER1, BASETEXTURE, FRAME );
-		}
-		else
-		{
-			pShaderAPI->BindStandardTexture( SHADER_SAMPLER1, TEXTURE_GREY );
-		}
-		
-		SetModulationDynamicState();
+		if ( !g_pConfig->m_bPaintInGame || !g_pConfig->m_bPaintInMap )
+			return false;
+		return s_pShaderAPI->IsRenderingPaint();
 	}
-	Draw();
-}
-
-void CBaseShader::SetFlashlightFixedFunctionTextureTransform( MaterialMatrixMode_t matrix )
-{
-	VMatrix worldToTexture;
-	s_pShaderAPI->GetFlashlightState( worldToTexture );
-
-	VMatrix worldToView, viewToWorld, viewToTexture;
-	s_pShaderAPI->GetMatrix( MATERIAL_VIEW, &worldToView[0][0] );
-	// The matrix that we get back from the shader api is transposed. . . yuck.
-	MatrixTranspose( worldToView, worldToView );
-	MatrixInverseGeneral( worldToView, viewToWorld );
-	MatrixMultiply( worldToTexture, viewToWorld, viewToTexture );
-
-	s_pShaderAPI->MatrixMode( matrix );
-	// tranpose before going into the shaderapi. . . suck
-	MatrixTranspose( viewToTexture, viewToTexture );
-	s_pShaderAPI->LoadMatrix( &viewToTexture[0][0] );
 }
 
 bool CBaseShader::IsHDREnabled( void )
 {
+#ifdef _PS3
+	return true;
+#else
 	// HDRFIXME!  Need to fix this for vgui materials
-	HDRType_t hdr_mode=g_pHardwareConfig->GetHDRType();
-	switch(hdr_mode)
-	{
-		case HDR_TYPE_NONE:
-			return false;
-
-		case HDR_TYPE_INTEGER:
-			return true;
-
-		case HDR_TYPE_FLOAT:
-		{
-			ITexture *pRT = s_pShaderAPI->GetRenderTargetEx( 0 );
-			if( pRT && pRT->GetImageFormat() == IMAGE_FORMAT_RGBA16161616F )
-			{
-				return true;
-			}
-		}
-	}
-	return false;
+	HDRType_t hdr_mode = g_pHardwareConfig->GetHDRType();
+	return ( hdr_mode == HDR_TYPE_INTEGER ) || ( hdr_mode == HDR_TYPE_FLOAT );
+#endif
 }
-

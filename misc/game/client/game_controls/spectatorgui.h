@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -60,6 +60,7 @@ public:
 	vgui::VPANEL GetVPanel( void ) { return BaseClass::GetVPanel(); }
 	virtual bool IsVisible() { return BaseClass::IsVisible(); }
 	virtual void SetParent(vgui::VPANEL parent) { BaseClass::SetParent(parent); }
+	virtual bool WantsBackgroundBlurred( void ) { return false; }
 	virtual void OnThink();
 
 	virtual int GetTopBarHeight() { return m_pTopBar->GetTall(); }
@@ -69,9 +70,7 @@ public:
 
 	virtual Color GetBlackBarColor( void ) { return BLACK_BAR_COLOR; }
 
-	virtual const char *GetResFile( void );
-
-	virtual GameActionSet_t GetPreferredActionSet() { return GAME_ACTION_SET_SPECTATOR; }
+	virtual const char *GetResFile( void ) { return "Resource/UI/Spectator.res"; }
 	
 protected:
 
@@ -128,8 +127,7 @@ public:
 	virtual bool IsVisible() { return BaseClass::IsVisible(); }
 	vgui::VPANEL GetVPanel( void ) { return BaseClass::GetVPanel(); }
 	virtual void SetParent(vgui::VPANEL parent) { BaseClass::SetParent(parent); }
-
-	virtual GameActionSet_t GetPreferredActionSet() { return GAME_ACTION_SET_SPECTATOR; }
+	virtual bool WantsBackgroundBlurred( void ) { return false; }
 
 private:
 	// VGUI2 overrides

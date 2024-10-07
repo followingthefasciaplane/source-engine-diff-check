@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2006, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: Filesystem abstraction for CSaveRestore - allows for storing temp save files
 //			either in memory or on disk.
@@ -21,18 +21,15 @@
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
-extern ConVar save_spew;
 extern IXboxSystem *g_pXboxSystem;
 
-#define SaveMsg if ( !save_spew.GetBool() ) ; else Msg
+
+#define MOD_DIR "DEFAULT_WRITE_PATH"
+
 
 void SaveInMemoryCallback( IConVar *var, const char *pOldString, float flOldValue );
 
-#ifdef _X360
-ConVar save_in_memory( "save_in_memory", "1", 1, "Set to 1 to save to memory instead of disk (Xbox 360)", SaveInMemoryCallback );
-#else
-ConVar save_in_memory( "save_in_memory", "0", 0, "Set to 1 to save to memory instead of disk (Xbox 360)", SaveInMemoryCallback );
-#endif // _X360
+ConVar save_in_memory( "save_in_memory", IsX360() ? "1" : "0", 0, "Set to 1 to save to memory instead of disk (Xbox 360)", SaveInMemoryCallback );
 
 #define INVALID_INDEX	(GetDirectory().InvalidIndex())
 enum { READ_ONLY, WRITE_ONLY };
@@ -154,7 +151,7 @@ private:
 	CSaveDirectory	*m_pSaveDirectory;
 	CUtlMap<CUtlSymbol, SaveFile_t> &GetDirectory( void ) { return m_pSaveDirectory->m_Files; }
 	SaveFile_t &GetFile( const int idx ) { return m_pSaveDirectory->m_Files[idx]; }
-	SaveFile_t &GetFile( const FileHandle_t hFile ) { return GetFile( (unsigned int)hFile ); }
+	SaveFile_t &GetFile( const FileHandle_t hFile ) { return GetFile( size_cast< unsigned int >( (uintp) hFile ) ); }
 
 	FileHandle_t	GetFileHandle( const char *pFileName );
 	int				GetFileIndex( const char *pFileName );
@@ -315,7 +312,7 @@ FileHandle_t CSaveRestoreFileSystem::GetFileHandle( const char *filename )
 	{
 		idx = 0;
 	}
-	return (void*)idx;
+	return (void*)(intp)idx;
 }
 
 //-----------------------------------------------------------------------------
@@ -331,7 +328,7 @@ bool CSaveRestoreFileSystem::FileExists( const char *pFileName, const char *pPat
 //-----------------------------------------------------------------------------
 bool CSaveRestoreFileSystem::HandleIsValid( FileHandle_t hFile )
 {
-	return hFile && GetDirectory().IsValidIndex( (unsigned int)hFile );
+	return hFile && GetDirectory().IsValidIndex( size_cast< unsigned int >( (uintp) hFile ) );
 }
 
 //-----------------------------------------------------------------------------
@@ -418,7 +415,7 @@ FileHandle_t CSaveRestoreFileSystem::Open( const char *pFullName, const char *pO
 		return (void*)0;
 	}
 
-	return (void*)idx;
+	return (void*)(intp)idx;
 }
 
 //-----------------------------------------------------------------------------
@@ -588,7 +585,7 @@ FSAsyncStatus_t CSaveRestoreFileSystem::AsyncWrite( const char *pFileName, const
 	FileHandle_t hFile = Open( pFileName, "wb" );
 	if ( hFile )
 	{
-		SaveFile_t &file = GetFile( (unsigned int)hFile );
+		SaveFile_t &file = GetFile( size_cast<unsigned int>( (uintp)hFile ) );
 
 		if( file.eType == WRITE_ONLY )
 		{
@@ -941,7 +938,7 @@ void CSaveRestoreFileSystem::WriteSaveDirectoryToDisk( void )
 			// Write the temporary save file to disk
 			Open( pName, "rb" );
 			Q_snprintf( szPath, sizeof( szPath ), "%s%s", saverestore->GetSaveDir(), pName );
-			g_pFileSystem->WriteFile( szPath, "GAME", *file.pBuffer );
+			g_pFileSystem->WriteFile( szPath, MOD_DIR, *file.pBuffer );
 		}
 	}
 }
@@ -954,7 +951,7 @@ void CSaveRestoreFileSystem::LoadSaveDirectoryFromDisk( const char *pPath )
 	char const	*findfn;
 	char		szPath[ MAX_PATH ];
 
-	findfn = Sys_FindFirstEx( pPath, "DEFAULT_WRITE_PATH", NULL, 0 );
+	findfn = Sys_FindFirstEx( pPath, MOD_DIR, NULL, 0 );
 
 	while ( findfn != NULL )
 	{
@@ -965,7 +962,7 @@ void CSaveRestoreFileSystem::LoadSaveDirectoryFromDisk( const char *pPath )
 		if ( hFile )
 		{
 			SaveFile_t &file = GetFile( hFile );
-			g_pFileSystem->ReadFile( szPath, "GAME", *file.pBuffer );
+			g_pFileSystem->ReadFile( szPath, MOD_DIR, *file.pBuffer );
 			file.nSize = file.pBuffer->TellMaxPut();
 			Close( hFile );
 		}
@@ -1009,17 +1006,21 @@ CON_COMMAND( audit_save_in_memory, "Audit the memory usage and files in the save
 	g_pSaveRestoreFileSystem->AuditFiles();
 }
 
-CON_COMMAND( dump_x360_saves, "Dump X360 save games to disk" )
+#ifdef _X360
+CON_COMMAND( dump_x360_data, "Dump X360 save games to disk" )
 {
-	if ( !IsX360() )
-	{
-		Warning("dump_x360 only available on X360 platform!\n");
-		return;
-	}
+	int iController = args.FindArgInt( "-c", XBX_GetPrimaryUserId() );
+	char const *szDataType = args.FindArg( "-t" );
+	if ( !szDataType )
+		szDataType = XBX_USER_SETTINGS_CONTAINER_DRIVE;
 
-	if ( XBX_GetStorageDeviceId() == XBX_INVALID_STORAGE_ID || XBX_GetStorageDeviceId() == XBX_STORAGE_DECLINED )
+	if ( XBX_GetUserIsGuest( iController ) )
+		return;
+
+	DWORD nStorageDevice = XBX_GetStorageDeviceId( iController );
+	if ( !XBX_DescribeStorageDevice( nStorageDevice ) )
 	{
-		Warning( "No storage device attached!\n" );
+		Warning( "No storage device for controller %d!\n", iController );
 		return;
 	}
 
@@ -1029,20 +1030,26 @@ CON_COMMAND( dump_x360_saves, "Dump X360 save games to disk" )
 	FileFindHandle_t findHandle;
 	
 	char szSearchPath[MAX_PATH];
-	Q_snprintf( szSearchPath, sizeof( szSearchPath ), "%s:\\*.*", GetCurrentMod() );
+	
+	XBX_MakeStorageContainerRoot( iController, szDataType, szSearchPath, sizeof( szSearchPath ) );
+	int nLen = strlen( szSearchPath );
+
+	Q_snprintf( szSearchPath + nLen, sizeof( szSearchPath ) - nLen, ":\\*.*" );
 	
 	const char *pFileName = g_pFileSystem->FindFirst( szSearchPath, &findHandle );
 	while (pFileName)
 	{		
 		// Create the proper read path
-		Q_snprintf( szInName, sizeof( szInName ), "%s:\\%s", GetCurrentMod(), pFileName );
+		XBX_MakeStorageContainerRoot( iController, szDataType, szInName, sizeof( szInName ) );
+		int nLen = strlen( szInName );
+		Q_snprintf( szInName + nLen, sizeof( szInName ) - nLen, ":\\%s", pFileName );
 		// Read the file and blat it out
 		CUtlBuffer buf( 0, 0, 0 );
 		if ( g_pFileSystem->ReadFile( szInName, NULL, buf ) )
 		{
 			// Strip us down to just our filename
 			Q_FileBase( pFileName, szFileNameBase, sizeof ( szFileNameBase ) );
-			Q_snprintf( szOutName, sizeof( szOutName ), "save/%s.sav", szFileNameBase );
+			Q_snprintf( szOutName, sizeof( szOutName ), "%s%d/%s", szDataType, iController, szFileNameBase );
 			g_pFileSystem->WriteFile( szOutName, NULL, buf );
 
 			Msg("Copied file: %s to %s\n", szInName, szOutName );
@@ -1057,347 +1064,12 @@ CON_COMMAND( dump_x360_saves, "Dump X360 save games to disk" )
 	
 	g_pFileSystem->FindClose( findHandle );
 }
+#endif
 
-CON_COMMAND( dump_x360_cfg, "Dump X360 config files to disk" )
-{
-	if ( !IsX360() )
-	{
-		Warning("dump_x360 only available on X360 platform!\n");
-		return;
-	}
 
-	if ( XBX_GetStorageDeviceId() == XBX_INVALID_STORAGE_ID || XBX_GetStorageDeviceId() == XBX_STORAGE_DECLINED )
-	{
-		Warning( "No storage device attached!\n" );
-		return;
-	}
 
-	char szInName[MAX_PATH]; // Read path from the container
-	char szOutName[MAX_PATH]; // Output path to the disk
-	char szFileNameBase[MAX_PATH]; // Name of the file minus directories or extensions
-	FileFindHandle_t findHandle;
 
-	char szSearchPath[MAX_PATH];
-	Q_snprintf( szSearchPath, sizeof( szSearchPath ), "cfg:\\*.*" );
-
-	const char *pFileName = g_pFileSystem->FindFirst( szSearchPath, &findHandle );
-	while (pFileName)
-	{		
-		// Create the proper read path
-		Q_snprintf( szInName, sizeof( szInName ), "cfg:\\%s", pFileName );
-		// Read the file and blat it out
-		CUtlBuffer buf( 0, 0, 0 );
-		if ( g_pFileSystem->ReadFile( szInName, NULL, buf ) )
-		{
-			// Strip us down to just our filename
-			Q_FileBase( pFileName, szFileNameBase, sizeof ( szFileNameBase ) );
-			Q_snprintf( szOutName, sizeof( szOutName ), "%s.cfg", szFileNameBase );
-			g_pFileSystem->WriteFile( szOutName, NULL, buf );
-
-			Msg("Copied file: %s to %s\n", szInName, szOutName );
-		}
-
-		// Clean up
-		buf.Clear();
-
-		// Any more save files
-		pFileName = g_pFileSystem->FindNext( findHandle );
-	}
-
-	g_pFileSystem->FindClose( findHandle );
-}
-
-#define FILECOPYBUFSIZE (1024 * 1024)
-//-----------------------------------------------------------------------------
-// Purpose: Copy one file to another file
-//-----------------------------------------------------------------------------
-static bool FileCopy( FileHandle_t pOutput, FileHandle_t pInput, int fileSize )
-{
-	// allocate a reasonably large file copy buffer, since otherwise write performance under steam suffers
-	char	*buf = (char *)malloc(FILECOPYBUFSIZE);
-	int		size;
-	int		readSize;
-	bool	success = true;
-
-	while ( fileSize > 0 )
-	{
-		if ( fileSize > FILECOPYBUFSIZE )
-			size = FILECOPYBUFSIZE;
-		else
-			size = fileSize;
-		if ( ( readSize = g_pSaveRestoreFileSystem->Read( buf, size, pInput ) ) < size )
-		{
-			Warning( "Unexpected end of file expanding save game\n" );
-			fileSize = 0;
-			success = false;
-			break;
-		}
-		g_pSaveRestoreFileSystem->Write( buf, readSize, pOutput );
-		
-		fileSize -= size;
-	}
-
-	free(buf);
-	return success;
-}
-
-struct filelistelem_t
-{
-	char szFileName[MAX_PATH];
-};
-
-//-----------------------------------------------------------------------------
-// Purpose: Implementation to execute traditional save to disk behavior
-//-----------------------------------------------------------------------------
-class CSaveRestoreFileSystemPassthrough : public ISaveRestoreFileSystem
-{
-public:
-	CSaveRestoreFileSystemPassthrough() :  m_iContainerOpens( 0 ) {}
-	
-	bool FileExists( const char *pFileName, const char *pPathID )
-	{
-		return g_pFileSystem->FileExists( pFileName, pPathID );
-	}
-
-	void RemoveFile( char const* pRelativePath, const char *pathID )
-	{
-		g_pFileSystem->RemoveFile( pRelativePath, pathID );
-	}
-
-	void RenameFile( char const *pOldPath, char const *pNewPath, const char *pathID )
-	{
-		g_pFileSystem->RenameFile( pOldPath, pNewPath, pathID );
-	}
-
-	void AsyncFinishAllWrites( void )
-	{
-		g_pFileSystem->AsyncFinishAllWrites();
-	}
-
-	FileHandle_t Open( const char *pFullName, const char *pOptions, const char *pathID )
-	{
-		return g_pFileSystem->OpenEx( pFullName, pOptions, FSOPEN_NEVERINPACK, pathID );
-	}
-
-	void Close( FileHandle_t hSaveFile )
-	{
-		g_pFileSystem->Close( hSaveFile );
-	}
-
-	int Read( void *pOutput, int size, FileHandle_t hFile )
-	{
-		return g_pFileSystem->Read( pOutput, size, hFile );
-	}
-
-	int Write( void const* pInput, int size, FileHandle_t hFile )
-	{
-		return g_pFileSystem->Write( pInput, size, hFile );
-	}
-
-	FSAsyncStatus_t AsyncWrite( const char *pFileName, const void *pSrc, int nSrcBytes, bool bFreeMemory, bool bAppend, FSAsyncControl_t *pControl )
-	{
-		SaveMsg( "AsyncWrite (%s/%d)...\n", pFileName, nSrcBytes );
-		return g_pFileSystem->AsyncWrite( pFileName, pSrc, nSrcBytes, bFreeMemory, bAppend, pControl );
-	}
-
-	void Seek( FileHandle_t hFile, int pos, FileSystemSeek_t method )
-	{
-		g_pFileSystem->Seek( hFile, pos, method );
-	}
-
-	unsigned int Tell( FileHandle_t hFile )
-	{
-		return g_pFileSystem->Tell( hFile );
-	}
-
-	unsigned int Size( FileHandle_t hFile )
-	{
-		return g_pFileSystem->Size( hFile );
-	}
-
-	unsigned int Size( const char *pFileName, const char *pPathID )
-	{
-		return g_pFileSystem->Size( pFileName, pPathID );
-	}
-
-	FSAsyncStatus_t AsyncFinish( FSAsyncControl_t hControl, bool wait )
-	{
-		return g_pFileSystem->AsyncFinish( hControl, wait );
-	}
-
-	void AsyncRelease( FSAsyncControl_t hControl )
-	{
-		g_pFileSystem->AsyncRelease( hControl );
-	}
-
-	FSAsyncStatus_t AsyncAppend(const char *pFileName, const void *pSrc, int nSrcBytes, bool bFreeMemory, FSAsyncControl_t *pControl )
-	{
-		return g_pFileSystem->AsyncAppend( pFileName, pSrc, nSrcBytes, bFreeMemory, pControl );
-	}
-
-	FSAsyncStatus_t AsyncAppendFile(const char *pDestFileName, const char *pSrcFileName, FSAsyncControl_t *pControl )
-	{
-		return g_pFileSystem->AsyncAppendFile( pDestFileName, pSrcFileName, pControl );
-	}
-
-	//-----------------------------------------------------------------------------
-	// Purpose: Copies the contents of the save directory into a single file
-	//-----------------------------------------------------------------------------
-	void DirectoryCopy( const char *pPath, const char *pDestFileName, bool bIsXSave )
-	{
-		SaveMsg( "DirectoryCopy....\n");
-
-		CUtlVector<filelistelem_t> list;
-
-		// force the writes to finish before trying to get the size/existence of a file
-		// @TODO: don't need this if retain sizes for files written earlier in process
-		SaveMsg( "DirectoryCopy: AsyncFinishAllWrites\n");
-		g_pFileSystem->AsyncFinishAllWrites();
-
-		// build the directory list
-		char basefindfn[ MAX_PATH ];
-		const char *findfn = Sys_FindFirstEx(pPath, "DEFAULT_WRITE_PATH", basefindfn, sizeof( basefindfn ) );
-		while ( findfn )
-		{
-			int index = list.AddToTail();
-			memset( list[index].szFileName, 0, sizeof(list[index].szFileName) );
-			Q_strncpy( list[index].szFileName, findfn, sizeof(list[index].szFileName) );
-
-			findfn = Sys_FindNext( basefindfn, sizeof( basefindfn ) );
-		}
-		Sys_FindClose();
-
-		// write the list of files to the save file
-		char szName[MAX_PATH];
-		for ( int i = 0; i < list.Count(); i++ )
-		{
-			if ( !bIsXSave )
-			{
-				Q_snprintf( szName, sizeof( szName ), "%s%s", saverestore->GetSaveDir(), list[i].szFileName );
-			}
-			else
-			{
-				Q_snprintf( szName, sizeof( szName ), "%s:\\%s", GetCurrentMod(), list[i].szFileName );
-			}
-
-			Q_FixSlashes( szName );
-
-			int fileSize = g_pFileSystem->Size( szName );
-			if ( fileSize )
-			{
-				Assert( sizeof(list[i].szFileName) == MAX_PATH );
-
-				SaveMsg( "DirectoryCopy: AsyncAppend %s, %s\n", szName, pDestFileName );
-				g_pFileSystem->AsyncAppend( pDestFileName, memcpy( new char[MAX_PATH], list[i].szFileName, MAX_PATH), MAX_PATH, true );		// Filename can only be as long as a map name + extension
-				g_pFileSystem->AsyncAppend( pDestFileName, new int(fileSize), sizeof(int), true );
-				g_pFileSystem->AsyncAppendFile( pDestFileName, szName );
-			}
-		}
-	}
-
-	//-----------------------------------------------------------------------------
-	// Purpose: Extracts all the files contained within pFile
-	//-----------------------------------------------------------------------------
-	bool DirectoryExtract( FileHandle_t pFile, int fileCount, bool bIsXSave )
-	{
-		int				fileSize;
-		FileHandle_t	pCopy;
-		char			szName[ MAX_PATH ], fileName[ MAX_PATH ];
-		bool			success = true;
-
-		for ( int i = 0; i < fileCount && success; i++ )
-		{
-			// Filename can only be as long as a map name + extension
-			if ( g_pSaveRestoreFileSystem->Read( fileName, MAX_PATH, pFile ) != MAX_PATH )
-				return false;
-
-			if ( g_pSaveRestoreFileSystem->Read( &fileSize, sizeof(int), pFile ) != sizeof(int) )
-				return false;
-
-			if ( !fileSize )
-				return false;
-
-			if ( !bIsXSave )
-			{
-				Q_snprintf( szName, sizeof( szName ), "%s%s", saverestore->GetSaveDir(), fileName );
-			}
-			else
-			{
-				Q_snprintf( szName, sizeof( szName ), "%s:\\%s", GetCurrentMod(), fileName );
-			}
-
-			Q_FixSlashes( szName );
-			pCopy = g_pSaveRestoreFileSystem->Open( szName, "wb", "MOD" );
-			if ( !pCopy )
-				return false;
-			success = FileCopy( pCopy, pFile, fileSize );
-			g_pSaveRestoreFileSystem->Close( pCopy );
-		}
-
-		return success;
-	}
-
-	//-----------------------------------------------------------------------------
-	// Purpose: returns the number of files in the specified filter
-	//-----------------------------------------------------------------------------
-	int DirectoryCount( const char *pPath )
-	{
-		int count = 0;
-		const char *findfn = Sys_FindFirstEx( pPath, "DEFAULT_WRITE_PATH", NULL, 0 );
-
-		while ( findfn != NULL )
-		{
-			count++;
-			findfn = Sys_FindNext(NULL, 0 );
-		}
-		Sys_FindClose();
-
-		return count;
-	}
-
-	//-----------------------------------------------------------------------------
-	// Purpose: Clears the save directory of all temporary files (*.hl)
-	//-----------------------------------------------------------------------------
-	void DirectoryClear( const char *pPath, bool bIsXSave )
-	{
-		char const	*findfn;
-		char		szPath[ MAX_PATH ];
-		
-		findfn = Sys_FindFirstEx( pPath, "DEFAULT_WRITE_PATH", NULL, 0 );
-		while ( findfn != NULL )
-		{
-			if ( !bIsXSave )
-			{
-				Q_snprintf( szPath, sizeof( szPath ), "%s%s", saverestore->GetSaveDir(), findfn );
-			}
-			else
-			{
-				Q_snprintf( szPath, sizeof( szPath ), "%s:\\%s", GetCurrentMod(), findfn );
-			}
-
-			// Delete the temporary save file
-			g_pFileSystem->RemoveFile( szPath, "MOD" );
-
-			// Any more save files
-			findfn = Sys_FindNext( NULL, 0 );
-		}
-		Sys_FindClose();
-	}
-
-	void AuditFiles( void )
-	{
-		Msg("Not using save-in-memory path!\n" );
-	}
-
-	bool LoadFileFromDisk( const char *pFilename )
-	{
-		Msg("Not using save-in-memory path!\n" );
-		return true;
-	}
-
-private:
-	int m_iContainerOpens;
-};
+#include "saverestore_filesystem_passthrough.h"
 
 static CSaveRestoreFileSystem				s_SaveRestoreFileSystem;
 static CSaveRestoreFileSystemPassthrough	s_SaveRestoreFileSystemPassthrough;
@@ -1419,6 +1091,7 @@ void SaveInMemoryCallback( IConVar *pConVar, const char *pOldString, float flOld
 		return;
 	}
 
+#ifdef _X360
 	ConVarRef var( pConVar );
 	if ( var.GetFloat() == flOldValue )
 		return;
@@ -1448,6 +1121,7 @@ void SaveInMemoryCallback( IConVar *pConVar, const char *pOldString, float flOld
 		// Clear memory
 		s_SaveRestoreFileSystem.DirectoryClear( "*.hl?", IsX360() );
 	}
+#endif
 }
 
 //-----------------------------------------------------------------------------
@@ -1471,8 +1145,9 @@ void CSaveRestoreFileSystem::DumpSaveDirectory( void )
 	Msg( "Compression: %.2f Mb to %.2f Mb (%.0f%%)\n", totalUncompressedSize/(1024.f*1024.f), totalCompressedSize/(1024.f*1024.f), percent );
 }
 
+#ifdef _X360
 CON_COMMAND( dumpsavedir, "List the contents of the save directory in memory" )
 {
 	s_SaveRestoreFileSystem.DumpSaveDirectory();
 }
-
+#endif

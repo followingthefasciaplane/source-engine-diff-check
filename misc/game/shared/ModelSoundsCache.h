@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -17,15 +17,25 @@
 
 class CStudioHdr;
 
+
+class CModelSoundsCacheListLess
+{
+public:
+	bool Less( const int &lhs, const int &rhs, void *pCtx )
+	{
+		return lhs < rhs;
+	}
+};
+
+
 #pragma pack(1)
 class CModelSoundsCache : public IBaseCacheInfo
 {
 public:
-	CUtlVector< unsigned short > sounds;
+	CUtlSortVector< int, CModelSoundsCacheListLess > sounds;
 
 	CModelSoundsCache();
 	CModelSoundsCache( const CModelSoundsCache& src );
-	virtual ~CModelSoundsCache(){}
 
 	void PrecacheSoundList();
 
@@ -33,8 +43,8 @@ public:
 	virtual void Restore( CUtlBuffer& buf  );
 	virtual void Rebuild( char const *filename );
 
-	static void FindOrAddScriptSound( CUtlVector< unsigned short >& sounds, char const *soundname );
-	static void BuildAnimationEventSoundList( CStudioHdr *hdr, CUtlVector< unsigned short >& sounds );
+	static void FindOrAddScriptSound( CUtlSortVector< int, CModelSoundsCacheListLess >& sounds, char const *soundname );
+	static void BuildAnimationEventSoundList( CStudioHdr *hdr, CUtlSortVector< int, CModelSoundsCacheListLess >& sounds );
 private:
 	char const *GetSoundName( int index );
 };

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -11,7 +11,7 @@
 #endif
 
 #include "movieobjects/dmeclip.h"
-#include "materialsystem/MaterialSystemUtil.h"
+#include "materialsystem/materialsystemutil.h"
 #include "datamodel/dmelementfactoryhelper.h"
 
 
@@ -38,21 +38,25 @@ public:
 	float      GetAlpha();
 
 private:
-	CDmaString		m_Material;
-	CDmaColor		m_Color;
-	CDmaVar<int>	m_nLeft;
-	CDmaVar<int>	m_nTop;
-	CDmaVar<int>	m_nWidth;
-	CDmaVar<int>	m_nHeight;
-	CDmaVar<bool>	m_bFullScreen;
-	CDmaVar<bool>	m_bUseSubRect;
-	CDmaVar<int>	m_nSubRectLeft;
-	CDmaVar<int>	m_nSubRectTop;
-	CDmaVar<int>	m_nSubRectWidth;
-	CDmaVar<int>	m_nSubRectHeight;
-	CDmaVar<float>	m_flMovementAngle;
-	CDmaVar<float>	m_flMovementSpeed;
-	CMaterialReference		m_OverlayMaterial;
+	CDmaString			m_Material;
+	CDmaColor			m_Color;
+	CDmaVar<int>		m_nLeft;
+	CDmaVar<int>		m_nTop;
+	CDmaVar<int>		m_nWidth;
+	CDmaVar<int>		m_nHeight;
+	CDmaVar<bool>		m_bFullScreen;
+	CDmaVar<bool>		m_bUseSubRect;
+	CDmaVar<int>		m_nSubRectLeft;
+	CDmaVar<int>		m_nSubRectTop;
+	CDmaVar<int>		m_nSubRectWidth;
+	CDmaVar<int>		m_nSubRectHeight;
+	CDmaVar<float>		m_flMovementAngle;
+	CDmaVar<float>		m_flMovementSpeed;
+	CMaterialReference	m_OverlayMaterial;
+	CMaterialReference	m_BltMaterial;
+
+	void DrawQuad( int x, int y, int w, int h, float u0, float v0, float u1, float v1 );
+	void DrawOneToOneQuad( int nWidth, int nHeight );
 };
 
 

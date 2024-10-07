@@ -1,51 +1,32 @@
+// ALL SKIP STATEMENTS THAT AFFECT THIS SHADER!!!
+// defined $PIXELFOGTYPE && defined $WRITEWATERFOGTODESTALPHA && ( $PIXELFOGTYPE != 1 ) && $WRITEWATERFOGTODESTALPHA
+// defined $LIGHTING_PREVIEW && defined $FASTPATHENVMAPTINT && $LIGHTING_PREVIEW && $FASTPATHENVMAPTINT
+// defined $LIGHTING_PREVIEW && defined $FASTPATHENVMAPCONTRAST && $LIGHTING_PREVIEW && $FASTPATHENVMAPCONTRAST
+// defined $LIGHTING_PREVIEW && defined $FASTPATH && $LIGHTING_PREVIEW && $FASTPATH
+// ($FLASHLIGHT || $FLASHLIGHTSHADOWS) && $LIGHTING_PREVIEW
 #include "shaderlib/cshader.h"
 class copy_fp_rt_ps20_Static_Index
 {
-private:
-	int m_nCONVERT_TO_SRGB;
-#ifdef _DEBUG
-	bool m_bCONVERT_TO_SRGB;
-#endif
 public:
-	void SetCONVERT_TO_SRGB( int i )
+	// CONSTRUCTOR
+	copy_fp_rt_ps20_Static_Index( IShaderShadow *pShaderShadow, IMaterialVar **params )
 	{
-		Assert( i >= 0 && i <= 0 );
-		m_nCONVERT_TO_SRGB = i;
-#ifdef _DEBUG
-		m_bCONVERT_TO_SRGB = true;
-#endif
-	}
-	void SetCONVERT_TO_SRGB( bool i )
-	{
-		m_nCONVERT_TO_SRGB = i ? 1 : 0;
-#ifdef _DEBUG
-		m_bCONVERT_TO_SRGB = true;
-#endif
-	}
-public:
-	copy_fp_rt_ps20_Static_Index( )
-	{
-#ifdef _DEBUG
-		m_bCONVERT_TO_SRGB = true;
-#endif // _DEBUG
-		m_nCONVERT_TO_SRGB =  0;
 	}
 	int GetIndex()
 	{
 		// Asserts to make sure that we aren't using any skipped combinations.
 		// Asserts to make sure that we are setting all of the combination vars.
 #ifdef _DEBUG
-		bool bAllStaticVarsDefined = m_bCONVERT_TO_SRGB;
-		Assert( bAllStaticVarsDefined );
 #endif // _DEBUG
-		return ( 1 * m_nCONVERT_TO_SRGB ) + 0;
+		return 0;
 	}
 };
 #define shaderStaticTest_copy_fp_rt_ps20 0
 class copy_fp_rt_ps20_Dynamic_Index
 {
 public:
-	copy_fp_rt_ps20_Dynamic_Index()
+	// CONSTRUCTOR
+	copy_fp_rt_ps20_Dynamic_Index( IShaderDynamicAPI *pShaderAPI )
 	{
 	}
 	int GetIndex()
@@ -58,3 +39,18 @@ public:
 	}
 };
 #define shaderDynamicTest_copy_fp_rt_ps20 0
+static const ShaderComboSemantics_t copy_fp_rt_ps20_combos =
+{
+	"copy_fp_rt_ps20", NULL, 0, NULL, 0 
+};
+
+class ConstructMe_copy_fp_rt_ps20
+{
+public:
+	ConstructMe_copy_fp_rt_ps20()
+	{
+		GetShaderDLL()->AddShaderComboInformation( &copy_fp_rt_ps20_combos );
+	}
+};
+
+static ConstructMe_copy_fp_rt_ps20 s_ConstructMe_copy_fp_rt_ps20;

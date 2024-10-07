@@ -1,9 +1,9 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
 // $NoKeywords: $
-//=============================================================================//
+//===========================================================================//
 
 #ifndef C_BASETEMPENTITY_H
 #define C_BASETEMPENTITY_H
@@ -37,7 +37,7 @@ public:
 public:
 
 	virtual void SetRefEHandle( const CBaseHandle &handle )	{ Assert( false ); }
-	virtual const CBaseHandle& GetRefEHandle() const		{ return *((CBaseHandle*)0); }
+	virtual const CBaseHandle& GetRefEHandle() const		{ Assert( false ); return *( ( CBaseHandle* )0 ); }
 
 	virtual IClientUnknown*		GetIClientUnknown()		{ return this; }
 	virtual ICollideable*		GetCollideable()		{ return 0; }
@@ -46,7 +46,8 @@ public:
 	virtual IClientEntity*		GetIClientEntity()		{ return 0; }
 	virtual C_BaseEntity*		GetBaseEntity()			{ return 0; }
 	virtual IClientThinkable*	GetClientThinkable()	{ return 0; }
-
+	virtual IClientModelRenderable*	GetClientModelRenderable()	{ return 0; }
+	virtual IClientAlphaProperty*	GetClientAlphaProperty()	{ return 0; }
 
 // IClientNetworkable overrides.
 public:
@@ -59,7 +60,7 @@ public:
 	virtual void					OnPreDataChanged( DataUpdateType_t updateType );
 	virtual void					OnDataChanged( DataUpdateType_t updateType );
 	virtual void					SetDormant( bool bDormant );
-	virtual bool					IsDormant( void );
+	virtual bool					IsDormant( void ) const;
 	virtual int						entindex( void ) const;
 	virtual void					ReceiveMessage( int classID, bf_read &msg );
 	virtual void*					GetDataTableBasePtr();

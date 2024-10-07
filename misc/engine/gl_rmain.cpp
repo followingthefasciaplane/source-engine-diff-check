@@ -1,10 +1,10 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright (c) Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
 // $NoKeywords: $
 //
-//===========================================================================//
+//==================================================================//
 
 
 #include "render_pch.h"
@@ -34,6 +34,7 @@
 #include "tier1/utlstack.h"
 #include "r_decal.h"
 #include "cl_main.h"
+#include "paint.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -42,11 +43,7 @@
 extern ConVar r_waterforceexpensive;
 #endif
 
-ConVar r_aspectratio( "r_aspectratio", "0" 
-#if !defined( _X360 )
-					 , FCVAR_CHEAT
-#endif
-					 );
+ConVar r_aspectratio( "r_aspectratio", "0" );
 ConVar r_dynamiclighting( "r_dynamiclighting", "1", FCVAR_CHEAT );
 extern ConVar building_cubemaps;
 extern float scr_demo_override_fov;	
@@ -59,10 +56,15 @@ CEngineStats g_EngineStats;
 // view origin
 //-----------------------------------------------------------------------------
 extern Vector g_CurrentViewOrigin, g_CurrentViewForward, g_CurrentViewRight, g_CurrentViewUp;
-extern Vector g_MainViewOrigin, g_MainViewForward, g_MainViewRight, g_MainViewUp;
+extern Vector g_MainViewOrigin[ MAX_SPLITSCREEN_CLIENTS ];
+extern Vector g_MainViewForward[ MAX_SPLITSCREEN_CLIENTS ];
+extern Vector g_MainViewRight[ MAX_SPLITSCREEN_CLIENTS ];
+extern Vector g_MainViewUp[ MAX_SPLITSCREEN_CLIENTS ];
 bool g_bCanAccessCurrentView = false;
 
 int	d_lightstyleframe[256];
+CUtlVector<LightmapUpdateInfo_t> g_LightmapUpdateList;
+CUtlVector<LightmapTransformInfo_t> g_LightmapTransformList;
 
 void ProjectPointOnPlane( Vector& dst, const Vector& p, const Vector& normal )
 {
@@ -120,21 +122,18 @@ void PerpendicularVector( Vector& dst, const Vector& src )
 
 
 //-----------------------------------------------------------------------------
-// Returns the aspect ratio of the screen
+// Returns the PHYSICAL aspect ratio of the screen (not the pixel aspect ratio)
 //-----------------------------------------------------------------------------
-float GetScreenAspect( )
+float GetScreenAspect( int viewportWidth, int viewportHeight )
 {
 	// use the override if set
 	if ( r_aspectratio.GetFloat() > 0.0f )
 		return r_aspectratio.GetFloat();
 
-	// mikesart: This is just sticking in unnecessary BeginRender/EndRender calls to the queue.
-	//   CMatRenderContextPtr pRenderContext( materials );
-	IMatRenderContext *pRenderContext = g_pMaterialSystem->GetRenderContext();
+	const AspectRatioInfo_t &aspectRatioInfo = materials->GetAspectRatioInfo();
 
-	int width, height;
-	pRenderContext->GetRenderTargetDimensions( width, height );
-	return (height != 0) ? ( (float)width / (float)height ) : 1.0f;
+	// just use the viewport size, but we have to convert from pixels to real-world "size".
+	return ( viewportHeight != 0 ) ? ( aspectRatioInfo.m_flFrameBuffertoPhysicalScalar * ( ( float )viewportWidth / ( float )viewportHeight ) ) : 1.0f;
 }
 
 
@@ -222,7 +221,7 @@ void R_DrawPortals()
 	}
 
 	// Draw the clip rectangles.
-	for( int i=0; i < g_PortalRects.Size(); i++ )
+	for( int i=0; i < g_PortalRects.Count(); i++ )
 	{
 		CPortalRect *pRect = &g_PortalRects[i];
 		R_DrawScreenRect( pRect->left, pRect->top, pRect->right, pRect->bottom );
@@ -249,11 +248,22 @@ public:
 
 	void ViewEnd( void );
 
-	void ViewDrawFade( byte *color, IMaterial* pMaterial );
+	void ViewDrawFade( byte *color, IMaterial* pMaterial, bool mapFullTextureToScreen = true );
 
 	IWorldRenderList * CreateWorldList();
+#if defined(_PS3)
+	IWorldRenderList * CreateWorldList_PS3( int viewID );
+	void BuildWorldLists_PS3_Epilogue( IWorldRenderList *pList, WorldListInfo_t* pInfo, bool bShadowDepth );
+	int GetDrawFlags( void );
+	int GetBuildViewID( void );
+	bool IsSPUBuildWRJobsOn( void );
+	void CacheFrustumData( Frustum_t *pFrustum, Frustum_t *pAreaFrustum, void *pRenderAreaBits, int numArea, bool bViewerInSolidSpace );
+#else
+	void BuildWorldLists_Epilogue( IWorldRenderList *pList, WorldListInfo_t* pInfo, bool bShadowDepth );
+#endif
+
 	void BuildWorldLists( IWorldRenderList *pList, WorldListInfo_t* pInfo, int iForceViewLeaf, const VisOverrideData_t* pVisData, bool bShadowDepth, float *pWaterReflectionHeight );
-	void DrawWorldLists( IWorldRenderList *pList, unsigned long flags, float waterZAdjust );
+	void DrawWorldLists( IMatRenderContext *pRenderContext, IWorldRenderList *pList, unsigned long flags, float waterZAdjust );
 
 	void DrawSceneBegin( void );
 	void DrawSceneEnd( void );
@@ -282,14 +292,13 @@ public:
 	float	GetFovY( void ) { return m_yFOV; };
 	float	GetFovViewmodel( void ) { return CurrentView().fovViewmodel; };
 
-	virtual bool	ClipTransformWithProjection ( const VMatrix& worldToScreen, const Vector& point, Vector* pClip );
 	virtual bool	ClipTransform( const Vector& point, Vector* pClip );
 	virtual bool	ScreenTransform( const Vector& point, Vector* pScreen );
 
-	virtual void Push3DView( const CViewSetup &view, int nFlags, ITexture* pRenderTarget, Frustum frustumPlanes );
-	virtual void Push3DView( const CViewSetup &view, int nFlags, ITexture* pRenderTarget, Frustum frustumPlanes, ITexture* pDepthTexture );
-	virtual void Push2DView( const CViewSetup &view, int nFlags, ITexture* pRenderTarget, Frustum frustumPlanes );
-	virtual void PopView( Frustum frustumPlanes );
+	virtual void Push3DView( IMatRenderContext *pRenderContext, const CViewSetup &view, int nFlags, ITexture* pRenderTarget, Frustum frustumPlanes );
+	virtual void Push3DView( IMatRenderContext *pRenderContext, const CViewSetup &view, int nFlags, ITexture* pRenderTarget, Frustum frustumPlanes, ITexture* pDepthTexture );
+	virtual void Push2DView( IMatRenderContext *pRenderContext, const CViewSetup &view, int nFlags, ITexture* pRenderTarget, Frustum frustumPlanes );
+	virtual void PopView( IMatRenderContext *pRenderContext, Frustum frustumPlanes );
 	virtual void SetMainView( const Vector &vecOrigin, const QAngle &angles );
 
 	virtual void UpdateBrushModelLightmap( model_t *model, IClientRenderable *Renderable );
@@ -302,7 +311,7 @@ private:
 	void OnViewActive( Frustum frustumPlanes );
 
 	// Clear the view (assumes the render target has already been pushed)
-	void ClearView( CViewSetup &view, int nFlags, ITexture* pRenderTarget, ITexture* pDepthTexture = NULL );
+	void ClearView( IMatRenderContext *pRenderContext, CViewSetup &view, int nFlags, ITexture* pRenderTarget, ITexture* pDepthTexture = NULL );
 
 	const CViewSetup &CurrentView() const { return m_ViewStack.Top().m_View; }
 	CViewSetup &CurrentView() { return m_ViewStack.Top().m_View; }
@@ -375,19 +384,53 @@ void CRender::FrameBegin( void )
 		// FIXME: Why isn't this being done in DrawSceneBegin 
 		// or some other client-side simulation of state?
 		r_framecount++;
-		R_AnimateLight ();
-		R_PushDlights();
+		if ( g_RendererInLevel )
+		{
+			R_AnimateLight ();
+			R_PushDlights();
+		}
 
 		if (!r_norefresh.GetInt())
 		{
 			m_frameStartTime = Sys_FloatTime ();
 		}
+
+		g_LightmapTransformList.RemoveAll();
+		int index = g_LightmapTransformList.AddToTail();
+		g_LightmapTransformList[index].pModel = host_state.worldmodel;
+		SetIdentityMatrix( g_LightmapTransformList[index].xform );
 	}
 
 	UpdateStudioRenderConfig();
 	g_pStudioRender->BeginFrame();
 }
 
+#ifndef _CERT
+
+static void PrintRenderedFaceInfoCallback( int nTopN, IStudioRender::FacesRenderedInfo_t *pFaces, int nTotalFaces )
+{
+	if ( nTopN > 0 )
+	{
+		con_nprint_s printdesc;
+		printdesc.time_to_live = -1;
+		printdesc.color[0] = printdesc.color[1] = printdesc.color[2] = 1.0f;
+		printdesc.fixed_width_font = false;
+
+		printdesc.index = 1;
+		Con_NXPrintf( &printdesc, "%d total faces in scene", nTotalFaces );
+		++ printdesc.index;
+		Con_NXPrintf( &printdesc, "Printing %d top offending models", nTopN );
+		++ printdesc.index;
+		Con_NXPrintf( &printdesc, "%50s%15s%15s%15s", "Model Name", "# Renders", "Total Tris", "Avg Tris" );
+		for ( int i = 0; i < nTopN; ++ i )
+		{
+			++ printdesc.index;
+			Con_NXPrintf( &printdesc, "%50s%15d%15d%15d", pFaces[i].pStudioHdr->name, pFaces[i].nRenderCount, pFaces[i].nFaceCount, ( int )( ( float )pFaces[i].nFaceCount / ( float )pFaces[i].nRenderCount ) );
+		}
+	}
+}
+
+#endif // !_CERT
 
 //-----------------------------------------------------------------------------
 // Called when the engine has finished rendering
@@ -399,13 +442,19 @@ void CRender::FrameEnd( void )
 	// where all the other debug overlays are being done in the client DLL?
 	EngineTraceRenderRayCasts();
 
-	m_framerate = cl.GetFrameTime();
+	m_framerate = GetBaseLocalClient().GetFrameTime();
 	if ( m_framerate > 0 )
 	{
 		m_framerate = 1 / m_framerate;
 	}
 
 	g_pStudioRender->EndFrame();
+
+#ifndef _CERT
+	g_pStudioRender->GatherRenderedFaceInfo( PrintRenderedFaceInfoCallback );
+#endif // !_CERT
+
+	g_LightmapTransformList.RemoveAll();
 }
 
 
@@ -477,7 +526,7 @@ void CRender::OnViewActive( Frustum frustumPlanes )
 	// debug, build leaf volume
 	// NOTE: This is pretty hacky, but I want the leaf based on the main view.  The skybox view is reseting
 	// the g_LeafVis here because it is global.  This need to be resolved more correctly some other way!
-	if ( VectorCompare( g_MainViewOrigin, view.origin ) )
+	if ( VectorCompare( MainViewOrigin(), view.origin ) )
 	{
 		LeafVisBuild( view.origin );
 	}
@@ -487,7 +536,7 @@ void CRender::OnViewActive( Frustum frustumPlanes )
 //-----------------------------------------------------------------------------
 // Clear the view (assumes the render target has already been pushed)
 //-----------------------------------------------------------------------------
-void CRender::ClearView( CViewSetup &view, int nFlags, ITexture* pRenderTarget, ITexture* pDepthTexture /* = NULL */ )
+void CRender::ClearView( IMatRenderContext *pRenderContext, CViewSetup &view, int nFlags, ITexture* pRenderTarget, ITexture* pDepthTexture /* = NULL */ )
 {
 	bool bClearColor = (nFlags & VIEW_CLEAR_COLOR) != 0;
 	bool bClearDepth = (nFlags & VIEW_CLEAR_DEPTH) != 0;
@@ -499,14 +548,16 @@ void CRender::ClearView( CViewSetup &view, int nFlags, ITexture* pRenderTarget, 
 	if ( !bClearColor && !bClearDepth && !bClearStencil )
 		return;
 
-	CMatRenderContextPtr pRenderContext( materials );
-
 	if ( !bForceClearWholeRenderTarget )
 	{
 		if( bObeyStencil )
+		{
 			pRenderContext->ClearBuffersObeyStencil( bClearColor, bClearDepth );
+		}
 		else
+		{
 			pRenderContext->ClearBuffers( bClearColor, bClearDepth, bClearStencil );
+		}
 	}
 	else
 	{
@@ -525,9 +576,13 @@ void CRender::ClearView( CViewSetup &view, int nFlags, ITexture* pRenderTarget, 
 		pRenderContext->PushRenderTargetAndViewport( pRenderTarget, pDepthTexture, 0, 0, nWidth, nHeight );
 
 		if( bObeyStencil )
+		{
 			pRenderContext->ClearBuffersObeyStencil( bClearColor, bClearDepth );
+		}
 		else
+		{
 			pRenderContext->ClearBuffers( bClearColor, bClearDepth, bClearStencil );
+		}
 
 		pRenderContext->PopRenderTargetAndViewport( );
 	}
@@ -537,54 +592,10 @@ void CRender::ClearView( CViewSetup &view, int nFlags, ITexture* pRenderTarget, 
 //-----------------------------------------------------------------------------
 // Push, pop views
 //-----------------------------------------------------------------------------
-void CRender::Push3DView( const CViewSetup &view, int nFlags, ITexture* pRenderTarget, Frustum frustumPlanes )
+void CRender::Push3DView( IMatRenderContext *pRenderContext, const CViewSetup &view, int nFlags, ITexture* pRenderTarget, Frustum frustumPlanes )
 {
-	Push3DView( view, nFlags, pRenderTarget, frustumPlanes, NULL );
+	Push3DView( pRenderContext, view, nFlags, pRenderTarget, frustumPlanes, NULL );
 }
-
-
-
-//-----------------------------------------------------------------------------
-// Computes view matrices
-//-----------------------------------------------------------------------------
-float ComputeViewMatrices( VMatrix *pWorldToView, VMatrix *pViewToProjection, VMatrix *pWorldToProjection, const CViewSetup &viewSetup )
-{
-	float flAspectRatio = viewSetup.m_flAspectRatio;
-	if ( flAspectRatio == 0.0f )
-	{
-		flAspectRatio = (viewSetup.height != 0) ? ( (float)viewSetup.width / (float)viewSetup.height ) : 1.0f;
-	}
-
-	ComputeViewMatrix( pWorldToView, viewSetup.origin, viewSetup.angles );
-
-	if ( viewSetup.m_bOrtho )
-	{
-		MatrixBuildOrtho( *pViewToProjection, viewSetup.m_OrthoLeft, viewSetup.m_OrthoTop, 
-			viewSetup.m_OrthoRight, viewSetup.m_OrthoBottom, viewSetup.zNear, viewSetup.zFar );
-	}
-	else if ( viewSetup.m_bOffCenter ) // Off-center projection, useful for AA jitter and tiled output of posters
-	{
-		MatrixBuildPerspectiveOffCenterX( *pViewToProjection, viewSetup.fov, flAspectRatio, 
-			viewSetup.zNear, viewSetup.zFar, viewSetup.m_flOffCenterBottom, viewSetup.m_flOffCenterTop,
-			viewSetup.m_flOffCenterLeft, viewSetup.m_flOffCenterRight );
-	}
-    else if ( viewSetup.m_bViewToProjectionOverride )
-    {
-        *pViewToProjection = viewSetup.m_ViewToProjection;
-		// ...but then override the Z range (needed for correct skybox rendering, etc).
-		MatrixBuildPerspectiveZRange ( *pViewToProjection, viewSetup.zNear, viewSetup.zFar );
-    }
-	else
-	{
-		MatrixBuildPerspectiveX( *pViewToProjection, viewSetup.fov, flAspectRatio, viewSetup.zNear, viewSetup.zFar );
-	}
-
-	MatrixMultiply( *pViewToProjection, *pWorldToView, *pWorldToProjection );
-
-	return flAspectRatio;
-}
-
-
 
 // Flip y, screen y goes down
 static VMatrix g_ProjectionToOffset( 0.5f,  0.0f, 0.0f, 0.5f,  
@@ -611,7 +622,7 @@ void ComputeWorldToScreenMatrix( VMatrix *pWorldToScreen, const VMatrix &worldTo
 //-----------------------------------------------------------------------------
 // Push, pop views
 //-----------------------------------------------------------------------------
-void CRender::Push3DView( const CViewSetup &view, int nFlags, ITexture* pRenderTarget, Frustum frustumPlanes, ITexture* pDepthTexture )
+void CRender::Push3DView( IMatRenderContext *pRenderContext, const CViewSetup &view, int nFlags, ITexture* pRenderTarget, Frustum frustumPlanes, ITexture* pDepthTexture )
 {
 	Assert( !IsX360() || (pDepthTexture == NULL) ); //Don't render to a depth texture on the 360. Instead, render using a normal depth buffer and use IDirect3DDevice9::Resolve()
 
@@ -629,8 +640,8 @@ void CRender::Push3DView( const CViewSetup &view, int nFlags, ITexture* pRenderT
 	}
 
 	ViewStack_t &viewStack = m_ViewStack.Top();
-	topView.m_flAspectRatio = ComputeViewMatrices( &viewStack.m_matrixView, 
-		&viewStack.m_matrixProjection, &viewStack.m_matrixWorldToScreen, topView );
+	topView.m_flAspectRatio = topView.ComputeViewMatrices( &viewStack.m_matrixView, 
+		&viewStack.m_matrixProjection, &viewStack.m_matrixWorldToScreen );
 
 	m_zNear = topView.zNear;
 	m_zFar = topView.zFar;	// cache this for queries
@@ -639,8 +650,6 @@ void CRender::Push3DView( const CViewSetup &view, int nFlags, ITexture* pRenderT
 
 	if ( !m_ViewStack[i].m_bNoDraw )
 	{
-		CMatRenderContextPtr pRenderContext( materials );
-
 		if ( !pRenderTarget )
 		{
 			pRenderTarget = pRenderContext->GetRenderTarget();
@@ -650,7 +659,7 @@ void CRender::Push3DView( const CViewSetup &view, int nFlags, ITexture* pRenderT
 		pRenderContext->PushRenderTargetAndViewport( pRenderTarget, pDepthTexture, topView.x, topView.y, topView.width, topView.height );
 
 		// Handle an initial clear request if asked for
-		ClearView( topView, nFlags, pRenderTarget, pDepthTexture );
+		ClearView( pRenderContext, topView, nFlags, pRenderTarget, pDepthTexture );
 
 		pRenderContext->DepthRange( 0, 1 );
 
@@ -669,7 +678,7 @@ void CRender::Push3DView( const CViewSetup &view, int nFlags, ITexture* pRenderT
 	}
 }
 
-void CRender::Push2DView( const CViewSetup &view, int nFlags, ITexture* pRenderTarget, Frustum frustumPlanes )
+void CRender::Push2DView( IMatRenderContext *pRenderContext, const CViewSetup &view, int nFlags, ITexture* pRenderTarget, Frustum frustumPlanes )
 {
 	int i = m_ViewStack.Push( );
 	m_ViewStack[i].m_View = view;
@@ -682,9 +691,7 @@ void CRender::Push2DView( const CViewSetup &view, int nFlags, ITexture* pRenderT
 	CViewSetup &topView = m_ViewStack[i].m_View;
 	g_bCanAccessCurrentView = false;
 
-	CMatRenderContextPtr pRenderContext( materials );
-
-	if ( !pRenderContext )
+	if ( !pRenderTarget )
 	{
 		pRenderTarget = pRenderContext->GetRenderTarget();
 	}
@@ -693,7 +700,7 @@ void CRender::Push2DView( const CViewSetup &view, int nFlags, ITexture* pRenderT
 	pRenderContext->PushRenderTargetAndViewport( pRenderTarget, topView.x, topView.y, topView.width, topView.height );
 
 	// Handle an initial clear request if asked for
-	ClearView( topView, nFlags, pRenderTarget );
+	ClearView( pRenderContext, topView, nFlags, pRenderTarget );
 
 	pRenderContext->MatrixMode( MATERIAL_PROJECTION );
 	pRenderContext->PushMatrix();
@@ -710,12 +717,10 @@ void CRender::Push2DView( const CViewSetup &view, int nFlags, ITexture* pRenderT
 	pRenderContext->LoadIdentity();
 }
 
-void CRender::PopView( Frustum frustumPlanes )
+void CRender::PopView( IMatRenderContext *pRenderContext, Frustum frustumPlanes )
 {
 	if ( !m_ViewStack.Top().m_bNoDraw )
 	{
-		CMatRenderContextPtr pRenderContext( materials );
-
 		pRenderContext->MatrixMode( MATERIAL_PROJECTION );
 		pRenderContext->PopMatrix();
 
@@ -739,6 +744,10 @@ void CRender::PopView( Frustum frustumPlanes )
 		if ( !m_ViewStack.Top().m_bIs2DView )
 		{
 			ExtractMatrices();
+			
+			m_zNear = m_ViewStack.Top().m_View.zNear;
+			m_zFar = m_ViewStack.Top().m_View.zFar;
+
 			OnViewActive( frustumPlanes );
 		}
 	}
@@ -750,20 +759,11 @@ void CRender::PopView( Frustum frustumPlanes )
 //-----------------------------------------------------------------------------
 void CRender::SetMainView( const Vector &vecOrigin, const QAngle &angles )
 {
-	VectorCopy( vecOrigin, g_MainViewOrigin );
-	AngleVectors( angles, &g_MainViewForward, &g_MainViewRight, &g_MainViewUp );
-}
+	ASSERT_LOCAL_PLAYER_RESOLVABLE();
+	int nSlot = GET_ACTIVE_SPLITSCREEN_SLOT();
 
-CUtlVector<LightmapUpdateInfo_t> g_LightmapUpdateList;
-CUtlVector<LightmapTransformInfo_t> g_LightmapTransformList;
-
-int __cdecl LightmapPageCompareFunc( const void *pElem0, const void *pElem1 )
-{
-	const LightmapUpdateInfo_t *pSurf0 = (const LightmapUpdateInfo_t *)pElem0;
-	const LightmapUpdateInfo_t *pSurf1 = (const LightmapUpdateInfo_t *)pElem1;
-	int page0 = materialSortInfoArray[MSurf_MaterialSortID( (pSurf0->m_SurfHandle) )].lightmapPageID;
-	int page1 = materialSortInfoArray[MSurf_MaterialSortID( (pSurf1->m_SurfHandle) )].lightmapPageID;
-	return page0 - page1;
+	VectorCopy( vecOrigin, g_MainViewOrigin[ nSlot ] );
+	AngleVectors( angles, &g_MainViewForward[ nSlot ], &g_MainViewRight[ nSlot ], &g_MainViewUp[ nSlot ] );
 }
 
 void CRender::BeginUpdateLightmaps( void )
@@ -772,11 +772,6 @@ void CRender::BeginUpdateLightmaps( void )
 	{
 		Assert( g_LightmapUpdateList.Count() == 0 );
 		materials->BeginUpdateLightmaps();
-		// UNDONE: Move this to an init or constructor?
-		g_LightmapTransformList.RemoveAll();
-		int index = g_LightmapTransformList.AddToTail();
-		g_LightmapTransformList[index].pModel = host_state.worldmodel;
-		SetIdentityMatrix( g_LightmapTransformList[index].xform );
 	}
 }
 
@@ -788,7 +783,9 @@ void CRender::UpdateBrushModelLightmap( model_t *model, IClientRenderable *pRend
 		return;
 
 	R_MarkDlightsOnBrushModel( model, pRenderable );
-	if ( model->flags & MODELFLAG_HAS_DLIGHT )
+	bool bLightingChanged = Mod_NeedsLightstyleUpdate( model );
+
+	if ( (model->flags & MODELFLAG_HAS_DLIGHT) || bLightingChanged )
 	{
 		int transformIndex = g_LightmapTransformList.AddToTail();
 		LightmapTransformInfo_t &transform = g_LightmapTransformList[transformIndex];
@@ -800,17 +797,21 @@ void CRender::UpdateBrushModelLightmap( model_t *model, IClientRenderable *pRend
 		{
 			if ( MSurf_Flags(surfID) & (SURFDRAW_HASDLIGHT|SURFDRAW_HASLIGHTSYTLES) )
 			{
-				LightmapUpdateInfo_t tmp;
-				tmp.m_SurfHandle = surfID;
-				tmp.transformIndex = transformIndex;
-				g_LightmapUpdateList.AddToTail( tmp );
-				bLight = true;
+				R_CheckForLightmapUpdates( surfID, transformIndex );
+				if ( MSurf_Flags(surfID) & SURFDRAW_HASDLIGHT )
+				{
+					bLight = true;
+				}
 			}
 		}
 		if ( !bLight )
 		{
 			model->flags &= ~MODELFLAG_HAS_DLIGHT; // don't need to check again unless a dlight hits us
 		}
+	}
+	if ( bLightingChanged )
+	{
+		model->brush.nLightstyleLastComputedFrame = r_framecount;
 	}
 }
 
@@ -822,38 +823,17 @@ void CRender::EndUpdateLightmaps( void )
 		VPROF_BUDGET( "EndUpdateLightmaps", VPROF_BUDGETGROUP_DLIGHT_RENDERING );
 		if ( g_LightmapUpdateList.Count() && r_dynamiclighting.GetBool() && !r_unloadlightmaps.GetBool() )
 		{
-			CMatRenderContextPtr pRenderContext( materials );
-			ICallQueue *pCallQueue = pRenderContext->GetCallQueue();
-			dlight_t *pLights = &cl_dlights[0];
-			// only do the copy when there are valid dlights to process and threading is on
-			if ( g_bActiveDlights && pCallQueue )
-			{
-				// keep a copy of the current dlight state around for the thread to work on 
-				// in parallel.  This way the main thread can continue to modify this state without
-				// generating any bad results
-				static dlight_t threadDlights[MAX_DLIGHTS*2];
-				static int threadFrameCount = 0;
-				pLights = &threadDlights[MAX_DLIGHTS*threadFrameCount];
-				Q_memcpy( pLights, cl_dlights, sizeof(dlight_t) * MAX_DLIGHTS );
-				threadFrameCount = (threadFrameCount+1) & 1;
-			}
-
-			qsort( g_LightmapUpdateList.Base(), g_LightmapUpdateList.Count(), sizeof(g_LightmapUpdateList.Element(0)), LightmapPageCompareFunc );
-			int i;
-			for ( i = g_LightmapUpdateList.Count()-1; i >= 0; --i )
-			{
-				const LightmapUpdateInfo_t &lightmapUpdateInfo = g_LightmapUpdateList.Element(i);
-				// a surface can get queued more than once if it's visible in multiple views (e.g. water reflection can do this)
-				// so check frame to make sure we only recompute once
-				if ( SurfaceLighting(lightmapUpdateInfo.m_SurfHandle)->m_nLastComputedFrame != r_framecount )
-				{
-					R_RenderDynamicLightmaps( pLights, pCallQueue, lightmapUpdateInfo.m_SurfHandle, g_LightmapTransformList[lightmapUpdateInfo.transformIndex].xform );
-				}
-			}
+			VPROF_("R_BuildLightmapUpdateList", 1, VPROF_BUDGETGROUP_DLIGHT_RENDERING, false, 0);
+			R_BuildLightmapUpdateList();
 		}
-		materials->EndUpdateLightmaps();
-		g_LightmapUpdateList.RemoveAll();
-		g_LightmapTransformList.RemoveAll();
+		{
+			VPROF_("materials_EndUpdateLightmaps", 1, VPROF_BUDGETGROUP_DLIGHT_RENDERING, false, 0);
+			materials->EndUpdateLightmaps();
+		}
+		{
+			g_LightmapUpdateList.RemoveAll();
+			VPROF_("lightmap_RemoveAll", 1, VPROF_BUDGETGROUP_DLIGHT_RENDERING, false, 0);
+		}
 	}
 }
 	
@@ -866,10 +846,11 @@ bool CRender::InLightmapUpdate( void ) const
 //-----------------------------------------------------------------------------
 // Compute the scene coordinates of a point in 3D
 //-----------------------------------------------------------------------------
-bool CRender::ClipTransformWithProjection ( const VMatrix& worldToScreen, const Vector& point, Vector* pClip )
+bool CRender::ClipTransform( const Vector& point, Vector* pClip )
 {
 // UNDONE: Clean this up some, handle off-screen vertices
 	float w;
+	const VMatrix &worldToScreen = g_EngineRenderer->WorldToScreenMatrix();
 
 	pClip->x = worldToScreen[0][0] * point[0] + worldToScreen[0][1] * point[1] + worldToScreen[0][2] * point[2] + worldToScreen[0][3];
 	pClip->y = worldToScreen[1][0] * point[0] + worldToScreen[1][1] * point[1] + worldToScreen[1][2] * point[2] + worldToScreen[1][3];
@@ -898,16 +879,6 @@ bool CRender::ClipTransformWithProjection ( const VMatrix& worldToScreen, const 
 }
 
 //-----------------------------------------------------------------------------
-// Compute the scene coordinates of a point in 3D using the current engine's projection
-//-----------------------------------------------------------------------------
-bool CRender::ClipTransform ( const Vector& point, Vector* pClip )
-{
-	const VMatrix &worldToScreen = g_EngineRenderer->WorldToScreenMatrix();
-	return CRender::ClipTransformWithProjection ( worldToScreen, point, pClip );
-}
-
-
-//-----------------------------------------------------------------------------
 // Purpose: Given a point, return the screen position in pixels
 //-----------------------------------------------------------------------------
 bool CRender::ScreenTransform( const Vector& point, Vector* pScreen )
@@ -920,7 +891,7 @@ bool CRender::ScreenTransform( const Vector& point, Vector* pScreen )
 	return retval;
 }
 
-void CRender::ViewDrawFade( byte *color, IMaterial* pFadeMaterial )
+void CRender::ViewDrawFade( byte *color, IMaterial* pFadeMaterial, bool mapFullTextureToScreen )
 {		
 	if ( !color || !color[3] )
 		return;
@@ -931,6 +902,8 @@ void CRender::ViewDrawFade( byte *color, IMaterial* pFadeMaterial )
 	const CViewSetup &view = CurrentView();
 
 	CMatRenderContextPtr pRenderContext( materials );
+
+	pRenderContext->PushRenderTargetAndViewport();
 
 	pRenderContext->Bind( pFadeMaterial );
 	pFadeMaterial->AlphaModulate( color[3] * ( 1.0f / 255.0f ) );
@@ -947,13 +920,17 @@ void CRender::ViewDrawFade( byte *color, IMaterial* pFadeMaterial )
 	float flUOffset = 0.5f / nTexWidth;
 	float flVOffset = 0.5f / nTexHeight;
 
+	int width, height;
+	pRenderContext->GetRenderTargetDimensions( width, height );
+	pRenderContext->Viewport( 0, 0, width, height );
+
 	pRenderContext->MatrixMode( MATERIAL_PROJECTION );
 
 	pRenderContext->PushMatrix();
 	pRenderContext->LoadIdentity();
 
 	pRenderContext->Scale( 1, -1, 1 );
-	pRenderContext->Ortho( 0, 0, view.width, view.height, -99999, 99999 );
+	pRenderContext->Ortho( 0, 0, width, height, -99999, 99999 );
 
 	pRenderContext->MatrixMode( MATERIAL_MODEL );
 	pRenderContext->PushMatrix();
@@ -966,20 +943,32 @@ void CRender::ViewDrawFade( byte *color, IMaterial* pFadeMaterial )
 	IMesh* pMesh = pRenderContext->GetDynamicMesh();
 	CMeshBuilder meshBuilder;
 	meshBuilder.Begin( pMesh, MATERIAL_QUADS, 1 );
-	
-	float flOffset = 0.5f;
 
-	// Note - the viewport has already adjusted the origin
-	float x1=0.0f - flOffset;
-	float x2=view.width - flOffset;
-	float y1=0.0f - flOffset;
-	float y2=view.height - flOffset;
+	// adjusted xys
+	float x1=view.x-.5;
+	float x2=view.x+view.width;
+	float y1=view.y-.5;
+	float y2=view.y+view.height;
 
-	// adjust nominal uvs to reflect adjusted xys
-	float u1=FLerp(flUOffset, 1-flUOffset,view.x,view.x+view.width,x1);
-	float u2=FLerp(flUOffset, 1-flUOffset,view.x,view.x+view.width,x2);
-	float v1=FLerp(flVOffset, 1-flVOffset,view.y,view.y+view.height,y1);
-	float v2=FLerp(flVOffset, 1-flVOffset,view.y,view.y+view.height,y2);
+	float u1, u2, v1, v2;
+
+	if ( mapFullTextureToScreen )
+	{
+		// adjust nominal uvs to reflect adjusted xys
+		u1=FLerp(flUOffset, 1-flUOffset,view.x,view.x+view.width,x1);
+		u2=FLerp(flUOffset, 1-flUOffset,view.x,view.x+view.width,x2);
+		v1=FLerp(flVOffset, 1-flVOffset,view.y,view.y+view.height,y1);
+		v2=FLerp(flVOffset, 1-flVOffset,view.y,view.y+view.height,y2);
+	}
+	else
+	{
+		// Match up the view port window with a corresponding window in the fade texture.
+		// This is mainly for split screen support.
+		u1 = Lerp( x1 / (float)width, flUOffset, 1-flUOffset );
+		u2 = Lerp( x2 / (float)width, flUOffset, 1-flUOffset );
+		v1 = Lerp( y1 / (float)height, flVOffset, 1-flVOffset );
+		v2 = Lerp( y2 / (float)height, flVOffset, 1-flVOffset );
+	}
 
 	for ( int corner=0; corner<4; corner++ )
 	{
@@ -999,6 +988,8 @@ void CRender::ViewDrawFade( byte *color, IMaterial* pFadeMaterial )
     pRenderContext->PopMatrix();
     
 	pFadeMaterial->SetMaterialVarFlag( MATERIAL_VAR_IGNOREZ, bOldIgnoreZ );
+
+	pRenderContext->PopRenderTargetAndViewport();
 }
 
 void CRender::ExtractFrustumPlanes( Frustum frustumPlanes )
@@ -1007,14 +998,8 @@ void CRender::ExtractFrustumPlanes( Frustum frustumPlanes )
 
 	GeneratePerspectiveFrustum( CurrentViewOrigin(), 
 		CurrentViewForward(), CurrentViewRight(), CurrentViewUp(),
-		view.zNear, view.zFar, view.fov, m_yFOV, g_Frustum );
-
-	// Copy out to the planes that the engine renderer uses.
-	for( int i=0; i < FRUSTUM_NUMPLANES; i++ )
-	{
-		frustumPlanes[i].m_Normal = g_Frustum.GetPlane(i)->normal;
-		frustumPlanes[i].m_Dist = g_Frustum.GetPlane(i)->dist;
-	}
+		view.zNear, view.zFar, view.fov, m_yFOV, frustumPlanes );
+	g_Frustum.SetPlanes(frustumPlanes);
 }
 
 void CRender::OrthoExtractFrustumPlanes( Frustum frustumPlanes )
@@ -1045,29 +1030,12 @@ void CRender::OrthoExtractFrustumPlanes( Frustum frustumPlanes )
 	frustumPlanes[FRUSTUM_BOTTOM].m_Normal = -CurrentViewUp();
 	frustumPlanes[FRUSTUM_BOTTOM].m_Dist = -view.m_OrthoBottom - orgOffset;
 
-	// Copy out to the planes that the engine renderer uses.
-	for(int i=0; i < FRUSTUM_NUMPLANES; i++)
-	{
-		/*
-		if (fabs(frustumPlanes[i].m_Normal.x) - 1.0f > -1e-3)
-			frustum[i].type = PLANE_X;
-		else if (fabs(frustumPlanes[i].m_Normal.y) - 1.0f > -1e-3)
-			frustum[i].type = PLANE_Y;
-		else if (fabs(frustumPlanes[i].m_Normal.z) - 1.0f > -1e-3)
-			frustum[i].type = PLANE_Z;
-		else
-		*/
-		g_Frustum.SetPlane( i, PLANE_ANYZ, frustumPlanes[i].m_Normal, frustumPlanes[i].m_Dist );
-	}
+	g_Frustum.SetPlanes( frustumPlanes );
 }
 
 void CRender::OverrideViewFrustum( Frustum custom )
 {
-	// Copy out to the planes that the engine renderer uses.
-	for( int i = 0; i != FRUSTUM_NUMPLANES; ++i )
-	{
-		g_Frustum.SetPlane( i, PLANE_ANYZ, custom[i].m_Normal, custom[i].m_Dist );
-	}
+	g_Frustum.SetPlanes( custom );
 }
 
 void CRender::ExtractMatrices( void )
@@ -1075,26 +1043,6 @@ void CRender::ExtractMatrices( void )
 	m_matrixView = m_ViewStack.Top().m_matrixView;
 	m_matrixProjection = m_ViewStack.Top().m_matrixProjection;
 	m_matrixWorldToScreen = m_ViewStack.Top().m_matrixWorldToScreen;
-}
-
-void ComputeViewMatrix( VMatrix *pViewMatrix, const Vector &origin, const QAngle &angles )
-{
-	static VMatrix baseRotation;
-	static bool bDidInit;
-
-	if ( !bDidInit )
-	{
-		MatrixBuildRotationAboutAxis( baseRotation, Vector( 1, 0, 0 ), -90 );
-		MatrixRotate( baseRotation, Vector( 0, 0, 1 ), 90 );
-		bDidInit = true;
-	}
-
-	*pViewMatrix = baseRotation;
-	MatrixRotate( *pViewMatrix, Vector( 1, 0, 0 ), -angles[2] );
-	MatrixRotate( *pViewMatrix, Vector( 0, 1, 0 ), -angles[0] );
-	MatrixRotate( *pViewMatrix, Vector( 0, 0, 1 ), -angles[1] );
-
-	MatrixTranslate( *pViewMatrix, -origin );
 }
 
 void CRender::SetViewport( int x, int y, int w, int h )
@@ -1147,14 +1095,9 @@ void DrawLightmapPage( int lightmapPageID )
 	CMeshBuilder meshBuilder;
 	meshBuilder.Begin( pMesh, MATERIAL_QUADS, 1 );
 
-#ifndef _XBOX
 	int x = 0;
 	int y = 0;
-#else
-	// xboxissue - border safe
-	int x = 32;
-	int	y = 32;
-#endif
+
 	float s = 1.0f;
 	float t = 1.0f;
 
@@ -1195,19 +1138,44 @@ void R_DrawLightmaps( IWorldRenderList *pList, int pageId )
 
 void R_CheckForLightingConfigChanges()
 {
-	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
+	if ( !materials->CanDownloadTextures() )
+		return;
 
 	UpdateStudioRenderConfig();
 	UpdateMaterialSystemConfig();
 	if( MaterialConfigLightingChanged() || g_RebuildLightmaps )
 	{
 		ClearMaterialConfigLightingChanged();
-		ConMsg( "Redownloading all lightmaps\n" );
+		DevMsg( "Redownloading all lightmaps\n" );
 		BuildGammaTable( 2.2f, 2.2f, 0.0f, OVERBRIGHT );
 		R_RedownloadAllLightmaps();
 		StaticPropMgr()->RecomputeStaticLighting();
 	}
 }
+
+
+ConVar r_redownloadallpaintmaps("r_redownloadallpaintmaps", "0", FCVAR_DEVELOPMENTONLY);
+void R_CheckForPaintmapChanges()
+{
+	if ( !g_PaintManager.m_bShouldRegister )
+		return;
+
+	if ( !materials->CanDownloadTextures() )
+		return;
+
+	if ( r_redownloadallpaintmaps.GetBool() )
+	{
+		R_RedownloadAllPaintmaps();
+		r_redownloadallpaintmaps.SetValue(0);
+		return;
+	}
+
+	{
+		VPROF_BUDGET( "R_CheckForPaintmapChanges", "paint" );
+		g_PaintManager.UpdatePaintmapTextures();
+	}
+}
+
 
 void CRender::DrawSceneBegin( void )
 {
@@ -1225,10 +1193,19 @@ IWorldRenderList * CRender::CreateWorldList()
 	return AllocWorldRenderList();
 }
 
+#if defined(_PS3)
+IWorldRenderList * CRender::CreateWorldList_PS3( int viewID )
+{
+	return AllocWorldRenderList_PS3( viewID );
+}
+#endif
+
 
 // JasonM TODO: optimize in the case of shadow depth mapping (i.e. don't update lightmaps)
 void CRender::BuildWorldLists( IWorldRenderList *pList, WorldListInfo_t* pInfo, int iForceViewLeaf, const VisOverrideData_t* pVisData, bool bShadowDepth, float *pWaterReflectionHeight )
-{
+{	
+	VPROF_INCREMENT_COUNTER( "BuildWorldLists", 1 );
+
 	Assert( pList );
 	Assert( m_iLightmapUpdateDepth > 0 || g_LightmapUpdateList.Count() == 0 );
 
@@ -1247,8 +1224,38 @@ void CRender::BuildWorldLists( IWorldRenderList *pList, WorldListInfo_t* pInfo, 
 	Assert( m_iLightmapUpdateDepth > 0 || g_LightmapUpdateList.Count() == 0 );
 }
 
-void CRender::DrawWorldLists( IWorldRenderList *pList, unsigned long flags, float flWaterZAdjust )
-{
+#if defined(_PS3)
+void CRender::BuildWorldLists_PS3_Epilogue( IWorldRenderList *pList, WorldListInfo_t* pInfo, bool bShadowDepth )
+{	
 	Assert( pList );
-	R_DrawWorldLists( pList, flags, flWaterZAdjust );
+
+	R_BuildWorldLists_PS3_Epilogue( pList, pInfo, bShadowDepth );
 }
+#else
+void CRender::BuildWorldLists_Epilogue( IWorldRenderList *pList, WorldListInfo_t* pInfo, bool bShadowDepth )
+{	
+	Assert( pList );
+	Assert( m_iLightmapUpdateDepth > 0 || g_LightmapUpdateList.Count() == 0 );
+
+	if ( !bShadowDepth )
+	{
+		BeginUpdateLightmaps();
+	}
+
+	R_BuildWorldLists_Epilogue( pList, pInfo, bShadowDepth );
+
+	if ( !bShadowDepth )
+	{
+		EndUpdateLightmaps();
+	}
+
+	Assert( m_iLightmapUpdateDepth > 0 || g_LightmapUpdateList.Count() == 0 );
+}
+#endif
+
+void CRender::DrawWorldLists( IMatRenderContext *pRenderContext, IWorldRenderList *pList, unsigned long flags, float flWaterZAdjust )
+{
+	Assert( ( flags & DRAWWORLDLISTS_DRAW_SIMPLE_WORLD_MODEL ) || pList );
+	R_DrawWorldLists( pRenderContext, pList, flags, flWaterZAdjust );
+}
+

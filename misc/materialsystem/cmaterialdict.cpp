@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========== Copyright © 2005, Valve Corporation, All rights reserved. ========
 //
 // Purpose:
 //
@@ -6,7 +6,9 @@
 
 #include "pch_materialsystem.h"
 
+#ifndef _PS3
 #define MATSYS_INTERNAL
+#endif
 
 #include "cmaterialdict.h"
 
@@ -23,7 +25,6 @@
 bool CMaterialDict::MaterialLessFunc( const MaterialLookup_t& src1, 
 										   const MaterialLookup_t& src2 )
 {
-	Assert( ThreadInMainThread() );
 	// Always sort manually-created materials to the front
 	if ( src1.m_bManuallyCreated != src2.m_bManuallyCreated )
 		return src1.m_bManuallyCreated;
@@ -37,20 +38,17 @@ bool CMaterialDict::MaterialLessFunc( const MaterialLookup_t& src1,
 bool CMaterialDict::MissingMaterialLessFunc( const MissingMaterial_t& src1, 
 											const MissingMaterial_t& src2 )
 {
-	Assert( ThreadInMainThread() );
 	return src1.m_Name < src2.m_Name;
 }
 
 void CMaterialDict::Shutdown( )
 {
-	Assert( ThreadInMainThread() );
 	// Clean up all materials..
 	RemoveAllMaterials();
 
 	// FIXME: Could dump list here...
-	if ( m_MissingList.Count() )
-		DevMsg( "%s m_MissingList count: %d\n", __FUNCTION__, m_MissingList.Count() );
 	m_MissingList.RemoveAll();
+
 }
 
 //-----------------------------------------------------------------------------
@@ -58,18 +56,15 @@ void CMaterialDict::Shutdown( )
 //-----------------------------------------------------------------------------
 void CMaterialDict::AddMaterialToMaterialList( IMaterialInternal *pMaterial )
 {
-	Assert( ThreadInMainThread() );
 	MaterialLookup_t lookup;
 	lookup.m_pMaterial = pMaterial;
 	lookup.m_Name = pMaterial->GetName();
 	lookup.m_bManuallyCreated = pMaterial->IsManuallyCreated();
-
 	m_MaterialDict.Insert( lookup );
 }
 
 void CMaterialDict::RemoveMaterialFromMaterialList( IMaterialInternal *pMaterial )
 {
-	Assert( ThreadInMainThread() );
 	// Gotta iterate over this manually; name-based lookup is bogus if there are two
 	// materials with the same name, which can happen for procedural materials
 	// First remove all the subrect materials, because they'll point at their material pages.
@@ -101,7 +96,6 @@ void CMaterialDict::RemoveMaterialFromMaterialList( IMaterialInternal *pMaterial
 //-----------------------------------------------------------------------------
 IMaterialInternal* CMaterialDict::AddMaterial( char const* pName, const char *pTextureGroupName )
 {
-	Assert( ThreadInMainThread() );
 	IMaterialInternal *pMaterial = IMaterialInternal::CreateMaterial( pName, pTextureGroupName );
 	Assert( pMaterial && pMaterial->IsRealTimeVersion() );
 	AddMaterialToMaterialList( pMaterial );
@@ -110,14 +104,13 @@ IMaterialInternal* CMaterialDict::AddMaterial( char const* pName, const char *pT
 
 void CMaterialDict::RemoveMaterial( IMaterialInternal* pMaterial )
 {
-	Assert( ThreadInMainThread() );
 	Assert( (pMaterial == NULL) || pMaterial->IsRealTimeVersion() );
 	RemoveMaterialFromMaterialList( pMaterial );
+	IMaterialInternal::DestroyMaterial( pMaterial );
 }
 
 IMaterialInternal *CMaterialDict::AddMaterialSubRect( const char *pName, const char *pTextureGroupName, KeyValues *pKeyValues, KeyValues *pPatchKeyValues )
 {
-	Assert( ThreadInMainThread() );
 	IMaterialInternal *pMaterial = IMaterialInternal::CreateMaterialSubRect( pName, pTextureGroupName, pKeyValues, pPatchKeyValues, true );
 	Assert( pMaterial );
 	AddMaterialToMaterialList( pMaterial );
@@ -126,27 +119,22 @@ IMaterialInternal *CMaterialDict::AddMaterialSubRect( const char *pName, const c
 
 void CMaterialDict::RemoveMaterialSubRect( IMaterialInternal *pMaterial )
 {
-	Assert( ThreadInMainThread() );
 	RemoveMaterialFromMaterialList( pMaterial );
 	IMaterialInternal::DestroyMaterialSubRect( pMaterial );
 }
 
 void CMaterialDict::RemoveMaterialFromMaterialList( MaterialHandle_t h )
 {
-	Assert( ThreadInMainThread() );
 	m_MaterialDict.RemoveAt( h );
 }
 
 void CMaterialDict::RemoveAllMaterialsFromMaterialList()
 {
-	Assert( ThreadInMainThread() );
 	m_MaterialDict.RemoveAll();
 }
 
 void CMaterialDict::RemoveAllMaterials()
 {
-	Assert( ThreadInMainThread() );
-
 	// First remove all the subrect materials, because they'll point at their material pages.
 	MaterialHandle_t i, iNext;
 	for (i = FirstMaterial(); i != InvalidMaterial(); i = iNext )

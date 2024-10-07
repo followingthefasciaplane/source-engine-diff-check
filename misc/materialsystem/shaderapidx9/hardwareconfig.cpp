@@ -1,11 +1,11 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright (c) 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
 // $NoKeywords: $
 //
 //=============================================================================//
-
+#define DISABLE_PROTECTED_THINGS
 #include "togl/rendermechanism.h"
 #include "hardwareconfig.h"
 #include "shaderapi/ishaderutil.h"
@@ -15,6 +15,13 @@
 #include "shaderdevicebase.h"
 #include "tier0/icommandline.h"
 
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
+
+extern ConVar mat_slopescaledepthbias_shadowmap;
+extern ConVar mat_depthbias_shadowmap;
+static ConVar developer( "developer", "0", FCVAR_RELEASE, "Set developer message level" ); 
 
 //-----------------------------------------------------------------------------
 //
@@ -27,143 +34,12 @@ CHardwareConfig *g_pHardwareConfig = &s_HardwareConfig;
 EXPOSE_SINGLE_INTERFACE_GLOBALVAR( CHardwareConfig, IMaterialSystemHardwareConfig, 
 	MATERIALSYSTEM_HARDWARECONFIG_INTERFACE_VERSION, s_HardwareConfig )
 
-template<typename T>
-static void ccs_create_convar_from_hwconfig( const T& val, const char *pName )
-{
-	int nValue = static_cast<int>( val );
-
-	ConVar *pConVar = g_pCVar->FindVar( pName );
-	if ( pConVar )
-	{
-		pConVar->SetValue( nValue );
-	}
-	else
-	{
-		// Don't care if this leaks - this is only used for development
-		pConVar = new ConVar( pName, "" );
-	}
-	if ( !nValue )
-		pConVar->SetValue( "0" );
-	else
-		pConVar->SetValue( nValue );
-}
-
-static void ccs_create_convar_from_hwconfig( const char *pVal, const char *pName )
-{
-	ConVar *pConVar = g_pCVar->FindVar( pName );
-	if ( pConVar )
-	{
-		pConVar->SetValue( pVal );
-	}
-	else
-	{
-		// Don't care if this leaks - this is only used for development
-		pConVar = new ConVar( pName, "" );
-	}
-	pConVar->SetValue( pVal );
-}
-
-CON_COMMAND_F( ccs_create_convars_from_hwconfig, "Create convars from the current hardware config, useful for diffing purposes", FCVAR_CHEAT )
-{
-	if ( !g_pHardwareConfig )
-		return;
-
-	const HardwareCaps_t &caps = g_pHardwareConfig->CapsForEdit();
-
-#define HWCFG( Name ) ccs_create_convar_from_hwconfig( caps.Name, #Name )
-	HWCFG( m_NumTextureStages );
-	HWCFG( m_nMaxAnisotropy );
-	HWCFG( m_MaxTextureWidth );
-	HWCFG( m_MaxTextureHeight );
-	HWCFG( m_MaxTextureDepth );
-	HWCFG( m_MaxTextureAspectRatio );
-	HWCFG( m_MaxPrimitiveCount );
-	HWCFG( m_NumPixelShaderConstants );
-	HWCFG( m_NumBooleanPixelShaderConstants );
-	HWCFG( m_NumIntegerPixelShaderConstants );
-	HWCFG( m_NumVertexShaderConstants );
-	HWCFG( m_NumBooleanVertexShaderConstants );
-	HWCFG( m_NumIntegerVertexShaderConstants );
-	HWCFG( m_TextureMemorySize );
-	HWCFG( m_MaxNumLights );
-	HWCFG( m_MaxBlendMatrices );
-	HWCFG( m_MaxBlendMatrixIndices );
-	HWCFG( m_MaxVertexShaderBlendMatrices );
-	HWCFG( m_MaxUserClipPlanes );
-	HWCFG( m_HDRType );
-	HWCFG( m_pShaderDLL );
-	HWCFG( m_ShadowDepthTextureFormat );
-	HWCFG( m_NullTextureFormat );
-	HWCFG( m_nVertexTextureCount );
-	HWCFG( m_nMaxVertexTextureDimension );
-	HWCFG( m_AlphaToCoverageState );					
-	HWCFG( m_AlphaToCoverageEnableValue );				
-	HWCFG( m_AlphaToCoverageDisableValue );			
-	HWCFG( m_nMaxViewports );
-	HWCFG( m_flMinGammaControlPoint );
-	HWCFG( m_flMaxGammaControlPoint );
-	HWCFG( m_nGammaControlPointCount );
-	HWCFG( m_MaxVertexShader30InstructionSlots );
-	HWCFG( m_MaxPixelShader30InstructionSlots );
-	HWCFG( m_MaxSimultaneousRenderTargets );
-	HWCFG( m_bDeviceOk );
-	HWCFG( m_HasSetDeviceGammaRamp );
-	HWCFG( m_SupportsVertexShaders );
-	HWCFG( m_SupportsVertexShaders_2_0 );
-	HWCFG( m_SupportsPixelShaders );
-	HWCFG( m_SupportsPixelShaders_1_4 );
-	HWCFG( m_SupportsPixelShaders_2_0 );
-	HWCFG( m_SupportsPixelShaders_2_b );
-	HWCFG( m_SupportsShaderModel_3_0 );
-	HWCFG( m_bSupportsAnisotropicFiltering );
-	HWCFG( m_bSupportsMagAnisotropicFiltering );
-	HWCFG( m_bSupportsVertexTextures );
-	HWCFG( m_ZBiasAndSlopeScaledDepthBiasSupported );
-	HWCFG( m_SupportsMipmapping );
-	HWCFG( m_SupportsOverbright );
-	HWCFG( m_SupportsCubeMaps );
-	HWCFG( m_SupportsHardwareLighting );
-	HWCFG( m_SupportsMipmappedCubemaps );
-	HWCFG( m_SupportsNonPow2Textures );
-	HWCFG( m_PreferDynamicTextures );
-	HWCFG( m_HasProjectedBumpEnv );
-	HWCFG( m_SupportsSRGB );
-	HWCFG( m_bSupportsSpheremapping );
-	HWCFG( m_UseFastClipping );
-	HWCFG( m_bNeedsATICentroidHack );
-	HWCFG( m_bDisableShaderOptimizations );
-	HWCFG( m_bColorOnSecondStream );
-	HWCFG( m_bSupportsStreamOffset );
-	HWCFG( m_bFogColorSpecifiedInLinearSpace );
-	HWCFG( m_bFogColorAlwaysLinearSpace );
-	HWCFG( m_bSupportsAlphaToCoverage );
-	HWCFG( m_bSupportsShadowDepthTextures );
-	HWCFG( m_bSupportsFetch4 );
-	HWCFG( m_bSoftwareVertexProcessing );
-	HWCFG( m_bScissorSupported );
-	HWCFG( m_bSupportsFloat32RenderTargets );
-	HWCFG( m_bSupportsBorderColor );
-	HWCFG( m_bDX10Card );							
-	HWCFG( m_bDX10Blending );						
-	HWCFG( m_bSupportsStaticControlFlow );			
-	HWCFG( m_FakeSRGBWrite );						
-	HWCFG( m_CanDoSRGBReadFromRTs );				
-	HWCFG( m_bSupportsGLMixedSizeTargets );			
-	HWCFG( m_bCanStretchRectFromTextures );
-
-	HWCFG( m_MaxHDRType );
-#undef HWCFG
-}
 
 CHardwareConfig::CHardwareConfig()
 {
 	memset( &m_Caps, 0, sizeof( HardwareCaps_t ) );
 	memset( &m_ActualCaps, 0, sizeof( HardwareCaps_t ) );
 	memset( &m_UnOverriddenCaps, 0, sizeof( HardwareCaps_t ) );
-
-#ifdef POSIX
-		GLMPRINTF((" CHardwareConfig::CHardwareConfig setting m_bHDREnabled to false on %8x", this ));
-#endif
 
 	m_bHDREnabled = false;
 
@@ -193,407 +69,55 @@ void CHardwareConfig::SetHDREnabled( bool bEnable )
 //-----------------------------------------------------------------------------
 void CHardwareConfig::ForceCapsToDXLevel( HardwareCaps_t *pCaps, int nDxLevel, const HardwareCaps_t &actualCaps )
 {
-	if ( !IsPC() || nDxLevel >= 100 )
+	if ( !IsPC() || nDxLevel > 100 )
 		return;
 
 	pCaps->m_nDXSupportLevel = nDxLevel;
 	switch( nDxLevel )
 	{
-	case 60:
-		// NOTE: Prior to dx9, numsamplers = num texture stages
-		pCaps->m_NumTextureStages = min( 2, actualCaps.m_NumTextureStages );
-		pCaps->m_NumSamplers = pCaps->m_NumTextureStages;
-		pCaps->m_SupportsVertexShaders = false;
-		pCaps->m_SupportsVertexShaders_2_0 = false;
-		pCaps->m_SupportsPixelShaders = false;
-		pCaps->m_SupportsPixelShaders_1_4 = false;
-		pCaps->m_SupportsPixelShaders_2_0 = false;
-		pCaps->m_SupportsPixelShaders_2_b = false;
-		pCaps->m_SupportsShaderModel_3_0 = false;
-		pCaps->m_bSupportsStaticControlFlow = false;
-		pCaps->m_SupportsCompressedTextures = COMPRESSED_TEXTURES_OFF;
-		pCaps->m_SupportsCompressedVertices = VERTEX_COMPRESSION_NONE;
-		pCaps->m_bSupportsAnisotropicFiltering = false;
-		pCaps->m_bSupportsMagAnisotropicFiltering = false;
-		pCaps->m_nMaxAnisotropy = 1;
-		pCaps->m_MaxTextureWidth = max( 256, pCaps->m_MaxTextureWidth );
-		pCaps->m_MaxTextureHeight = max( 256, pCaps->m_MaxTextureHeight );
-		pCaps->m_MaxTextureDepth = max( 256, pCaps->m_MaxTextureDepth );
-		//		m_MaxTextureAspectRatio;
-		//		int  m_MaxPrimitiveCount;
-		pCaps->m_ZBiasAndSlopeScaledDepthBiasSupported = false;
-		//		pCaps->m_SupportsMipmapping = 
-		//		bool m_SupportsOverbright;
-		pCaps->m_SupportsCubeMaps = false;
-		pCaps->m_NumPixelShaderConstants = 0;
-		pCaps->m_NumBooleanPixelShaderConstants = 0;
-		pCaps->m_NumIntegerPixelShaderConstants = 0;
-		pCaps->m_NumVertexShaderConstants = 0;
-		pCaps->m_NumBooleanVertexShaderConstants = 0;
-		pCaps->m_NumIntegerVertexShaderConstants = 0;
-		pCaps->m_NumBooleanPixelShaderConstants = 0;
-		pCaps->m_NumIntegerPixelShaderConstants = 0;
-		pCaps->m_TextureMemorySize = 32 * 1024 * 1024;
-		pCaps->m_MaxNumLights = 0;
-		pCaps->m_SupportsHardwareLighting = 0;
-		pCaps->m_MaxBlendMatrices = 0;
-		pCaps->m_MaxBlendMatrixIndices = 0;
-		pCaps->m_MaxVertexShaderBlendMatrices = 0;
-		pCaps->m_SupportsMipmappedCubemaps = false;
-		pCaps->m_SupportsNonPow2Textures = false;
-		//		pCaps->m_DXSupportLevel = 60;
-		pCaps->m_PreferDynamicTextures = false;
-		pCaps->m_HasProjectedBumpEnv = false;
-		pCaps->m_MaxUserClipPlanes = 0;
-		pCaps->m_SupportsSRGB = false;
-		pCaps->m_FakeSRGBWrite = false;
-		pCaps->m_CanDoSRGBReadFromRTs = true;
-		pCaps->m_bSupportsGLMixedSizeTargets = false;
-		pCaps->m_HDRType = HDR_TYPE_NONE;
-		//		pCaps->m_bSupportsSpheremapping = true;
-		pCaps->m_UseFastClipping = true;
-		pCaps->m_bNeedsATICentroidHack = false;
-		pCaps->m_bColorOnSecondStream = false;
-		pCaps->m_bSupportsStreamOffset = false;
-		pCaps->m_bFogColorSpecifiedInLinearSpace = false;
-		pCaps->m_bFogColorAlwaysLinearSpace = false;
-		pCaps->m_bSupportsAlphaToCoverage = false;
-		pCaps->m_bSupportsShadowDepthTextures = false;
-		pCaps->m_bSupportsFetch4 = false;
-		pCaps->m_bSupportsBorderColor = false;
-		// m_bSoftwareVertexProcessing
-		pCaps->m_nVertexTextureCount = 0;
-		pCaps->m_nMaxVertexTextureDimension = 0;
-		pCaps->m_bSupportsVertexTextures = false;
-		pCaps->m_nMaxViewports = 1;
-		// m_bScissorSupported
-		pCaps->m_bSupportsFloat32RenderTargets = false;
-		// ImageFormat m_ShadowDepthTextureFormat;
-		// ImageFormat m_NullTextureFormat;
-		// m_AlphaToCoverageState;
-		// m_AlphaToCoverageEnableValue;
-		// m_AlphaToCoverageDisableValue;
-		// m_flMinGammaControlPoint
-		// m_flMaxGammaControlPoint
-		// m_nGammaControlPointCount
-		pCaps->m_MaxVertexShader30InstructionSlots = 0;
-		pCaps->m_MaxPixelShader30InstructionSlots = 0;
-		pCaps->m_bCanStretchRectFromTextures = false;
-		break;
-
-	case 70:
-		// NOTE: Prior to dx9, numsamplers = num texture stages
-		pCaps->m_NumTextureStages = min( 2, actualCaps.m_NumTextureStages );
-		pCaps->m_NumSamplers = pCaps->m_NumTextureStages;
-		pCaps->m_SupportsVertexShaders = false;
-		pCaps->m_SupportsVertexShaders_2_0 = false;
-		pCaps->m_SupportsPixelShaders = false;
-		pCaps->m_SupportsPixelShaders_1_4 = false;
-		pCaps->m_SupportsPixelShaders_2_0 = false;
-		pCaps->m_SupportsPixelShaders_2_b = false;
-		pCaps->m_SupportsShaderModel_3_0 = false;
-		pCaps->m_bSupportsStaticControlFlow = false;
-		//		pCaps->m_SupportsCompressedTextures = true;
-		pCaps->m_SupportsCompressedVertices = VERTEX_COMPRESSION_NONE;
-		pCaps->m_bSupportsAnisotropicFiltering = false;
-		pCaps->m_bSupportsMagAnisotropicFiltering = false;
-		pCaps->m_nMaxAnisotropy = 1;
-		//		pCaps->m_MaxTextureWidth = max( 256, pCaps->m_MaxTextureWidth );
-		//		pCaps->m_MaxTextureHeight = max( 256, pCaps->m_MaxTextureHeight );
-//		pCaps->m_MaxTextureDepth = max( 256, pCaps->m_MaxTextureDepth );
-		//		m_MaxTextureAspectRatio;
-		//		int  m_MaxPrimitiveCount;
-		pCaps->m_ZBiasAndSlopeScaledDepthBiasSupported = false;
-		//		pCaps->m_SupportsMipmapping = 
-		//		bool m_SupportsOverbright;
-		//		pCaps->m_SupportsCubeMaps = false;
-		pCaps->m_NumPixelShaderConstants = 0;
-		pCaps->m_NumBooleanPixelShaderConstants = 0;
-		pCaps->m_NumIntegerPixelShaderConstants = 0;
-		pCaps->m_NumBooleanPixelShaderConstants = 0;
-		pCaps->m_NumIntegerPixelShaderConstants = 0;
-		pCaps->m_NumVertexShaderConstants = 0;
-		pCaps->m_NumBooleanVertexShaderConstants = 0;
-		pCaps->m_NumIntegerVertexShaderConstants = 0;
-		pCaps->m_TextureMemorySize = 32 * 1024 * 1024;
-		pCaps->m_MaxNumLights = 2;
-		pCaps->m_SupportsHardwareLighting = 1;
-		pCaps->m_MaxBlendMatrices = 0;
-		pCaps->m_MaxBlendMatrixIndices = 0;
-		pCaps->m_MaxVertexShaderBlendMatrices = 0;
-		pCaps->m_SupportsMipmappedCubemaps = false;
-		pCaps->m_SupportsNonPow2Textures = false;
-		pCaps->m_nDXSupportLevel = 70;
-		pCaps->m_PreferDynamicTextures = false;
-		pCaps->m_HasProjectedBumpEnv = false;
-		pCaps->m_MaxUserClipPlanes = 0;
-		pCaps->m_SupportsSRGB = false;
-		pCaps->m_FakeSRGBWrite = false;
-		pCaps->m_CanDoSRGBReadFromRTs = true;
-		pCaps->m_bSupportsGLMixedSizeTargets = false;
-		pCaps->m_HDRType = HDR_TYPE_NONE;
-		//		pCaps->m_bSupportsSpheremapping = true;
-		pCaps->m_UseFastClipping = true;
-		pCaps->m_bNeedsATICentroidHack = false;
-		//		pCaps->m_bColorOnSecondStream = false;	// dont' force this!
-		pCaps->m_bSupportsStreamOffset = false;
-		pCaps->m_bFogColorSpecifiedInLinearSpace = false;
-		pCaps->m_bFogColorAlwaysLinearSpace = false;
-		pCaps->m_bSupportsAlphaToCoverage = false;
-		pCaps->m_bSupportsShadowDepthTextures = false;
-		pCaps->m_bSupportsFetch4 = false;
-		pCaps->m_bSupportsBorderColor = false;
-		// m_bSoftwareVertexProcessing
-		pCaps->m_nVertexTextureCount = 0;
-		pCaps->m_nMaxVertexTextureDimension = 0;
-		pCaps->m_bSupportsVertexTextures = false;
-		pCaps->m_nMaxViewports = 1;
-		// m_bScissorSupported
-		pCaps->m_bSupportsFloat32RenderTargets = false;
-		pCaps->m_bDX10Card = false;
-		pCaps->m_bDX10Blending = false;
-		pCaps->m_bCanStretchRectFromTextures = false;
-		break;
-
-	case 80:
-		// NOTE: Prior to dx9, numsamplers = num texture stages
-		// We clamp num texture stages to 2, though, since we never use
-		// fixed-function shaders with more than 2 texture stages
-		pCaps->m_NumTextureStages = min( 2, actualCaps.m_NumTextureStages );
-		pCaps->m_NumSamplers = min( 4, actualCaps.m_NumTextureStages );
-		//		pCaps->m_SupportsVertexShaders = true;
-		pCaps->m_SupportsVertexShaders_2_0 = false;
-		//		pCaps->m_SupportsPixelShaders = false;
-		pCaps->m_SupportsPixelShaders_1_4 = false;
-		pCaps->m_SupportsPixelShaders_2_0 = false;
-		pCaps->m_SupportsPixelShaders_2_b = false;
-		pCaps->m_SupportsShaderModel_3_0 = false;
-		pCaps->m_bSupportsStaticControlFlow = false;
-		//		pCaps->m_SupportsCompressedTextures = true;
-		pCaps->m_SupportsCompressedVertices = VERTEX_COMPRESSION_NONE;
-		//		pCaps->m_bSupportsAnisotropicFiltering = false;
-		//		pCaps->m_bSupportsMagAnisotropicFiltering = false;
-		//		pCaps->m_nMaxAnisotropy = 1;
-		//		pCaps->m_MaxTextureWidth = max( 256, pCaps->m_MaxTextureWidth );
-		//		pCaps->m_MaxTextureHeight = max( 256, pCaps->m_MaxTextureHeight );
-		//		pCaps->m_MaxTextureDepth = max( 256, pCaps->m_MaxTextureDepth );
-		//		m_MaxTextureAspectRatio;
-		//		int  m_MaxPrimitiveCount;
-		//		pCaps->m_ZBiasAndSlopeScaledDepthBiasSupported = false;
-		//		pCaps->m_SupportsMipmapping = 
-		//		bool m_SupportsOverbright;
-		//		pCaps->m_SupportsCubeMaps = false;
-		pCaps->m_NumPixelShaderConstants = 8;
-		pCaps->m_NumVertexShaderConstants = min( 96, pCaps->m_NumVertexShaderConstants );
-		pCaps->m_NumBooleanVertexShaderConstants = 0;
-		pCaps->m_NumIntegerVertexShaderConstants = 0;
-		pCaps->m_NumBooleanPixelShaderConstants = 0;
-		pCaps->m_NumIntegerPixelShaderConstants = 0;
-		//		pCaps->m_TextureMemorySize = 32 * 1024 * 1024;
-		//		pCaps->m_MaxNumLights = 0;
-		//		pCaps->m_SupportsHardwareLighting = 0;
-		//		pCaps->m_MaxBlendMatrices = 0;
-		//		pCaps->m_MaxBlendMatrixIndices = 0;
-		pCaps->m_MaxVertexShaderBlendMatrices = min( 16, pCaps->m_MaxVertexShaderBlendMatrices );
-		//		pCaps->m_SupportsMipmappedCubemaps = false;
-		//		pCaps->m_SupportsNonPow2Textures = false;
-		pCaps->m_nDXSupportLevel = 80;
-		//		pCaps->m_PreferDynamicTextures = false;
-		//		pCaps->m_HasProjectedBumpEnv = false;
-		//		pCaps->m_MaxUserClipPlanes = 0;
-		pCaps->m_bSupportsGLMixedSizeTargets = false;
-		pCaps->m_HDRType = HDR_TYPE_NONE;
-		//		pCaps->m_bSupportsSpheremapping = true;
-		//		pCaps->m_UseFastClipping = true;
-		//		pCaps->m_bNeedsATICentroidHack = false;
-		//		pCaps->m_bColorOnSecondStream = false;	
-		pCaps->m_bSupportsStreamOffset = false;
-		pCaps->m_bFogColorSpecifiedInLinearSpace = false;
-		pCaps->m_bFogColorAlwaysLinearSpace = false;
-		pCaps->m_bSupportsAlphaToCoverage = false;
-		pCaps->m_bSupportsShadowDepthTextures = false;
-		pCaps->m_bSupportsFetch4 = false;
-		// m_bSoftwareVertexProcessing
-		pCaps->m_nVertexTextureCount = 0;
-		pCaps->m_nMaxVertexTextureDimension = 0;
-		pCaps->m_bSupportsVertexTextures = false;
-		pCaps->m_MaxNumLights = 2;
-		pCaps->m_nMaxViewports = 1;
-		// m_bScissorSupported
-		pCaps->m_SupportsSRGB = false;
-		pCaps->m_FakeSRGBWrite = false;
-		pCaps->m_CanDoSRGBReadFromRTs = true;
-		pCaps->m_bSupportsGLMixedSizeTargets = false;
-		pCaps->m_bSupportsFetch4 = false;
-		pCaps->m_bSupportsBorderColor = false;
-		pCaps->m_bSupportsFloat32RenderTargets = false;
-		// ImageFormat m_ShadowDepthTextureFormat;
-		// ImageFormat m_NullTextureFormat;
-		// m_AlphaToCoverageState;
-		// m_AlphaToCoverageEnableValue;
-		// m_AlphaToCoverageDisableValue;
-		// m_flMinGammaControlPoint
-		// m_flMaxGammaControlPoint
-		// m_nGammaControlPointCount
-		pCaps->m_MaxVertexShader30InstructionSlots = 0;
-		pCaps->m_MaxPixelShader30InstructionSlots = 0;
-		pCaps->m_bDX10Card = false;
-		pCaps->m_bDX10Blending = false;
-		pCaps->m_bCanStretchRectFromTextures = false;
-		break;
-
-	case 81:
-		// NOTE: Prior to dx9, numsamplers = num texture stages
-		// We clamp num texture stages to 2, though, since we never use
-		// fixed-function shaders with more than 2 texture stages
-		pCaps->m_NumTextureStages = min( 2, actualCaps.m_NumTextureStages );
-		pCaps->m_NumSamplers = min( 6, actualCaps.m_NumTextureStages );
-		//		pCaps->m_SupportsVertexShaders = true;
-		pCaps->m_SupportsVertexShaders_2_0 = false;
-		//		pCaps->m_SupportsPixelShaders = false;
-		pCaps->m_SupportsPixelShaders_1_4 = true;
-		pCaps->m_SupportsPixelShaders_2_0 = false;
-		pCaps->m_SupportsPixelShaders_2_b = false;
-		pCaps->m_SupportsShaderModel_3_0 = false;
-		pCaps->m_bSupportsStaticControlFlow = false;
-		//		pCaps->m_SupportsCompressedTextures = true;
-		pCaps->m_SupportsCompressedVertices = VERTEX_COMPRESSION_NONE;
-		//		pCaps->m_bSupportsAnisotropicFiltering = false;
-		//		pCaps->m_bSupportsMagAnisotropicFiltering = false;
-		//		pCaps->m_nMaxAnisotropy = 1;
-		//		pCaps->m_MaxTextureWidth = max( 256, pCaps->m_MaxTextureWidth );
-		//		pCaps->m_MaxTextureHeight = max( 256, pCaps->m_MaxTextureHeight );
-		//		pCaps->m_MaxTextureDepth = max( 256, pCaps->m_MaxTextureDepth );
-		//		m_MaxTextureAspectRatio;
-		//		int  m_MaxPrimitiveCount;
-		//		pCaps->m_ZBiasAndSlopeScaledDepthBiasSupported = false;
-		//		pCaps->m_SupportsMipmapping = 
-		//		bool m_SupportsOverbright;
-		//		pCaps->m_SupportsCubeMaps = false;
-		pCaps->m_NumPixelShaderConstants = 8;
-		pCaps->m_NumVertexShaderConstants = min( 96, pCaps->m_NumVertexShaderConstants );
-		pCaps->m_NumBooleanVertexShaderConstants = 0;
-		pCaps->m_NumIntegerVertexShaderConstants = 0;
-		pCaps->m_NumBooleanPixelShaderConstants = 0;
-		pCaps->m_NumIntegerPixelShaderConstants = 0;
-		//		pCaps->m_TextureMemorySize = 32 * 1024 * 1024;
-		pCaps->m_MaxNumLights = 2;
-		//		pCaps->m_SupportsHardwareLighting = 0;
-		//		pCaps->m_MaxBlendMatrices = 0;
-		//		pCaps->m_MaxBlendMatrixIndices = 0;
-		pCaps->m_MaxVertexShaderBlendMatrices = min( 16, pCaps->m_MaxVertexShaderBlendMatrices );
-		//		pCaps->m_SupportsMipmappedCubemaps = false;
-		//		pCaps->m_SupportsNonPow2Textures = false;
-		pCaps->m_nDXSupportLevel = 81;
-		//		pCaps->m_PreferDynamicTextures = false;
-		//		pCaps->m_HasProjectedBumpEnv = false;
-		//		pCaps->m_MaxUserClipPlanes = 0;
-		pCaps->m_SupportsSRGB = false;
-		pCaps->m_FakeSRGBWrite = false;
-		pCaps->m_CanDoSRGBReadFromRTs = true;
-		pCaps->m_bSupportsGLMixedSizeTargets = false;
-		pCaps->m_HDRType = HDR_TYPE_NONE;
-		//		pCaps->m_bSupportsSpheremapping = true;
-		//		pCaps->m_UseFastClipping = true;
-		//		pCaps->m_bNeedsATICentroidHack = false;
-		//		pCaps->m_bColorOnSecondStream = false;
-		pCaps->m_bSupportsStreamOffset = false;
-		pCaps->m_bFogColorSpecifiedInLinearSpace = false;
-		pCaps->m_bFogColorAlwaysLinearSpace = false;
-		pCaps->m_bSupportsAlphaToCoverage = false;
-		pCaps->m_bSupportsShadowDepthTextures = false;
-		pCaps->m_bSupportsFetch4 = false;
-		pCaps->m_bSupportsBorderColor = false;
-		// m_bSoftwareVertexProcessing
-		pCaps->m_nVertexTextureCount = 0;
-		pCaps->m_nMaxVertexTextureDimension = 0;
-		pCaps->m_bSupportsVertexTextures = false;
-		pCaps->m_nMaxViewports = 1;
-		// m_bScissorSupported
-		pCaps->m_bSupportsFloat32RenderTargets = false;
-		// ImageFormat m_ShadowDepthTextureFormat;
-		// ImageFormat m_NullTextureFormat;
-		// m_AlphaToCoverageState;
-		// m_AlphaToCoverageEnableValue;
-		// m_AlphaToCoverageDisableValue;
-		// m_flMinGammaControlPoint
-		// m_flMaxGammaControlPoint
-		// m_nGammaControlPointCount
-		pCaps->m_MaxVertexShader30InstructionSlots = 0;
-		pCaps->m_MaxPixelShader30InstructionSlots = 0;
-		pCaps->m_bDX10Card = false;
-		pCaps->m_bDX10Blending = false;
-		pCaps->m_bCanStretchRectFromTextures = false;
-		break;
-
 	case 90:
-		pCaps->m_nVertexTextureCount = 0;
-		pCaps->m_nMaxVertexTextureDimension = 0;
-		pCaps->m_bSupportsVertexTextures = false;
-		pCaps->m_bSupportsStreamOffset = true;
-		pCaps->m_bSupportsGLMixedSizeTargets = true;
-
-		if ( IsOpenGL() )
-		{
-			//FIXME this is way too complicated, we should just check the caps bit from GLM
-
-			pCaps->m_bSupportsStaticControlFlow = false;
-
-			if (1)	//(CommandLine()->FindParm("-glslmode"))
-			{
-				// rbarris 03Feb10: this is now hardwired because we are defaulting GLSL mode "on".
-				// so this will mean that the engine will always ask for user clip planes.
-				// this will misbehave under ARB mode, since ARB shaders won't respect that state.
-				// it's difficult to make this fluid without teaching the engine about a cap that could change during run.
-
-				pCaps->m_MaxUserClipPlanes = 2;
-				pCaps->m_UseFastClipping = false;
-			}
-			else
-			{
-				pCaps->m_MaxUserClipPlanes = 0;
-				pCaps->m_UseFastClipping = true;
-			}
-
-			pCaps->m_MaxNumLights = 2;
-		}
-		else
-		{
-			pCaps->m_bSupportsStaticControlFlow = true;
-			pCaps->m_MaxNumLights = pCaps->m_SupportsPixelShaders_2_b ? 4 : 2;	// 2b gets four lights, 2.0 gets two...
-		}
-
-		pCaps->m_bSupportsBorderColor = false;
-		pCaps->m_nMaxViewports = 1;
-		pCaps->m_NumPixelShaderConstants = 32;
-		pCaps->m_nMaxVertexTextureDimension = 0;
-		pCaps->m_MaxVertexShader30InstructionSlots = 0;
-		pCaps->m_MaxPixelShader30InstructionSlots  = 0;
-		pCaps->m_bCanStretchRectFromTextures = false;
-		break;
-
-	case 92:
-		pCaps->m_nVertexTextureCount = 0;
+		pCaps->m_NumVertexSamplers = 0;
 		pCaps->m_nMaxVertexTextureDimension = 0;
 		pCaps->m_bSupportsVertexTextures = false;
 		pCaps->m_bSupportsBorderColor = false;
 
 		// 2b gets four lights, 2.0 gets two...
+		pCaps->m_SupportsPixelShaders_2_b = false;
+		pCaps->m_SupportsShaderModel_3_0 = false;
+		pCaps->m_MaxNumLights = 2;
+		pCaps->m_nMaxViewports = 1;
+		pCaps->m_NumPixelShaderConstants = 32;
+		pCaps->m_nMaxVertexTextureDimension = 0;
+		pCaps->m_bDX10Card = false;
+		pCaps->m_bDX10Blending = false;
+		pCaps->m_MaxVertexShader30InstructionSlots = 0;
+		pCaps->m_MaxPixelShader30InstructionSlots  = 0;
+		pCaps->m_bSupportsCascadedShadowMapping = false;
+		pCaps->m_nCSMQuality = 0;
+		break;
+
+	case 92:
+		pCaps->m_NumVertexSamplers = 0;
+		pCaps->m_nMaxVertexTextureDimension = 0;
+		pCaps->m_bSupportsVertexTextures = false;
+		pCaps->m_bSupportsBorderColor = false;
+
+		// 2b gets four lights (iff supports static control flow otherwise 2), 2.0 gets two...
 		pCaps->m_SupportsShaderModel_3_0 = false;
 		if ( IsOpenGL() )
 		{
-			if ( IsOSX() )
-			{
-				pCaps->m_bSupportsStaticControlFlow = CommandLine()->CheckParm( "-glslcontrolflow" ) != NULL;
-			}
-			else
-			{
-				pCaps->m_bSupportsStaticControlFlow = !CommandLine()->CheckParm( "-noglslcontrolflow" );
-			}
-
+            if ( IsOSX() )
+            {
+                pCaps->m_bSupportsStaticControlFlow = CommandLine()->CheckParm( "-glslcontrolflow" ) != NULL;
+            }
+            else
+            {
+                pCaps->m_bSupportsStaticControlFlow = !CommandLine()->CheckParm( "-noglslcontrolflow" );
+            }
+            
 			pCaps->m_MaxUserClipPlanes = 2;
 			pCaps->m_UseFastClipping = false;
-			pCaps->m_MaxNumLights = pCaps->m_bSupportsStaticControlFlow ? MAX_NUM_LIGHTS : ( MAX_NUM_LIGHTS - 2 );
+			pCaps->m_MaxNumLights = pCaps->m_bSupportsStaticControlFlow ? 4 : 2;
 		}
 		else
 		{
@@ -607,27 +131,68 @@ void CHardwareConfig::ForceCapsToDXLevel( HardwareCaps_t *pCaps, int nDxLevel, c
 		pCaps->m_bDX10Blending = false;
 		pCaps->m_MaxVertexShader30InstructionSlots = 0;
 		pCaps->m_MaxPixelShader30InstructionSlots  = 0;
-		pCaps->m_bCanStretchRectFromTextures = false;
+        pCaps->m_bSupportsCascadedShadowMapping = false;
+		pCaps->m_nCSMQuality = 0;
 		break;
 
 	case 95:
-		pCaps->m_bSupportsStreamOffset = true;
-		pCaps->m_bSupportsStaticControlFlow = true;
 		pCaps->m_bDX10Card = false;
 		pCaps->m_bDX10Blending = false;
-		pCaps->m_MaxNumLights = MAX_NUM_LIGHTS;
 		pCaps->m_nMaxViewports = 1;
 		pCaps->m_bSupportsBorderColor = false;
-		pCaps->m_bCanStretchRectFromTextures = false;
+            
+        if ( IsOpenGL() )
+        {
+            if ( IsOSX() )
+            {
+                pCaps->m_bSupportsStaticControlFlow = CommandLine()->CheckParm( "-glslcontrolflow" ) != NULL;
+            }
+            else
+            {
+                pCaps->m_bSupportsStaticControlFlow = !CommandLine()->CheckParm( "-noglslcontrolflow" );
+            }
+                
+            pCaps->m_MaxUserClipPlanes = 2;
+            pCaps->m_UseFastClipping = false;
+            pCaps->m_MaxNumLights = pCaps->m_bSupportsStaticControlFlow ? 4 : 2;
+        }
+        else
+        {
+            pCaps->m_MaxNumLights = MAX_NUM_LIGHTS;
+        }
+
 		break;
 
 	case 100:
+        if ( IsOpenGL() )
+        {
+            if ( IsOSX() )
+            {
+                pCaps->m_bSupportsStaticControlFlow = CommandLine()->CheckParm( "-glslcontrolflow" ) != NULL;
+            }
+            else
+            {
+                pCaps->m_bSupportsStaticControlFlow = !CommandLine()->CheckParm( "-noglslcontrolflow" );
+            }
+                
+            pCaps->m_MaxUserClipPlanes = 2;
+            pCaps->m_UseFastClipping = false;
+            pCaps->m_MaxNumLights = pCaps->m_bSupportsStaticControlFlow ? 4 : 2;
+        }
+        else
+        {
+            pCaps->m_MaxNumLights = MAX_NUM_LIGHTS;
+        }
 		break;
 
 	default:
 		Assert( 0 );
 		break;
 	}
+
+#ifdef _PS3
+	pCaps->m_NumPixelShaderConstants = MAX_FRAGMENT_PROGRAM_CONSTS; // this is somewhat of a lie... fragment shader constants are special on PS3 and we actually have a larger number of these
+#endif
 }
 
 
@@ -637,6 +202,15 @@ void CHardwareConfig::ForceCapsToDXLevel( HardwareCaps_t *pCaps, int nDxLevel, c
 void CHardwareConfig::SetupHardwareCaps( int nDXLevel, const HardwareCaps_t &actualCaps )
 {
 	Assert( nDXLevel != 0 );
+
+	if ( nDXLevel < actualCaps.m_nMinDXSupportLevel )
+	{
+		Warning( "Trying to set dxlevel (%d) which is lower than the card can support (%d)!\n", nDXLevel, actualCaps.m_nMinDXSupportLevel );
+	}
+	if ( nDXLevel > actualCaps.m_nMaxDXSupportLevel )
+	{
+		Warning( "Trying to set dxlevel (%d) which is higher than the card can support (%d)!\n", nDXLevel, actualCaps.m_nMaxDXSupportLevel );
+	}
 
 	memcpy( &m_Caps, &actualCaps, sizeof(HardwareCaps_t) );
 	memcpy( &m_UnOverriddenCaps, &actualCaps, sizeof(HardwareCaps_t) );
@@ -649,17 +223,35 @@ void CHardwareConfig::SetupHardwareCaps( int nDXLevel, const HardwareCaps_t &act
 #endif
 		return;
 
+	// Don't bother with fallbacks for consoles.
+	if ( IsGameConsole() )
+		return;
+
+	int nForceDXLevel = CommandLine()->ParmValue( "-maxdxlevel", 0 );
+	if ( nForceDXLevel >= 90 )
+	{
+		nDXLevel = nForceDXLevel;
+	}
+	else 
+	{
+		// Don't bother with fallbacks for DX10 or consoles
+		if ( !IsPC() || !IsPosix() || ( nDXLevel >= 100 ) )
+			return;
+	}
+	
 	// Slam the support level to what we were requested
 	m_Caps.m_nDXSupportLevel = nDXLevel;
-	if ( m_Caps.m_nDXSupportLevel != m_Caps.m_nMaxDXSupportLevel || CommandLine()->ParmValue( "-maxdxlevel", 0 ) > 0 )
+	int nMaxDXLevel = CommandLine()->ParmValue( "-maxdxlevel", m_Caps.m_nMaxDXSupportLevel );
+	if ( IsOpenGL() )
+	{
+		// Prevent customers from ever trying to slam the dxlevel too low in GL mode.
+		nMaxDXLevel = MAX( nMaxDXLevel, 90 );
+	}
 	{
 		// We're falling back to some other dx level
 		ForceCapsToDXLevel( &m_Caps, m_Caps.m_nDXSupportLevel, m_ActualCaps );
 	}
 
-	// Clamp num texture stages to 2, since it's only used for fixed function
-	m_Caps.m_NumTextureStages = min( 2, m_Caps.m_NumTextureStages );
-	
 	// Read dxsupport.cfg which has config overrides for particular cards.
 	g_pShaderDeviceMgr->ReadHardwareCaps( m_Caps, m_Caps.m_nDXSupportLevel );
 
@@ -673,25 +265,23 @@ void CHardwareConfig::SetupHardwareCaps( int nDXLevel, const HardwareCaps_t &act
 		m_Caps.m_UseFastClipping = true;
 	}
 
-	if ( IsOpenGL() )
+	// 2b supports more lights than just 2.0
+	if ( ( m_Caps.m_SupportsPixelShaders_2_b ) && ( m_Caps.m_nDXSupportLevel >= 92 ) )
 	{
-		m_Caps.m_MaxNumLights = MIN( m_Caps.m_MaxNumLights, ( m_Caps.m_bSupportsStaticControlFlow && m_Caps.m_SupportsPixelShaders_2_b ) ? MAX_NUM_LIGHTS : ( MAX_NUM_LIGHTS - 2 ) );
-		m_Caps.m_bSupportsShadowDepthTextures = true;
+		m_Caps.m_MaxNumLights = MAX_NUM_LIGHTS;
 	}
-	else // not POSIX or emulated
+	else
 	{
-		// 2b supports more lights than just 2.0
-		if ( m_Caps.m_SupportsPixelShaders_2_b )
-		{
-			m_Caps.m_MaxNumLights = MIN( m_Caps.m_MaxNumLights, MAX_NUM_LIGHTS );
-		}
-		else
-		{
-			m_Caps.m_MaxNumLights = MIN( m_Caps.m_MaxNumLights, MAX_NUM_LIGHTS - 2 );
-		}
+		m_Caps.m_MaxNumLights = MAX_NUM_LIGHTS-2;
 	}
 
-	m_Caps.m_MaxNumLights = min( m_Caps.m_MaxNumLights, (int)MAX_NUM_LIGHTS );
+	if ( IsOpenGL() )
+	{
+		m_Caps.m_MaxNumLights = MIN( m_Caps.m_bSupportsStaticControlFlow ? MAX_NUM_LIGHTS : 2, m_Caps.m_MaxNumLights );
+		m_Caps.m_bSupportsShadowDepthTextures = true;
+	}
+	
+	m_Caps.m_MaxNumLights = MIN( m_Caps.m_MaxNumLights, MAX_NUM_LIGHTS );
 
 	memcpy( &m_UnOverriddenCaps, &m_Caps, sizeof(HardwareCaps_t) );
 }
@@ -728,13 +318,6 @@ void CHardwareConfig::OverrideStreamOffsetSupport( bool bOverrideEnabled, bool b
 //-----------------------------------------------------------------------------
 // Implementation of IMaterialSystemHardwareConfig
 //-----------------------------------------------------------------------------
-bool CHardwareConfig::HasDestAlphaBuffer() const
-{
-	if ( !g_pShaderDevice )
-		return false;
-	return (g_pShaderDevice->GetBackBufferFormat() == IMAGE_FORMAT_BGRA8888);
-}
-
 bool CHardwareConfig::HasStencilBuffer() const
 {
 	return StencilBufferBits() > 0;
@@ -744,7 +327,7 @@ int	 CHardwareConfig::GetFrameBufferColorDepth() const
 {
 	if ( !g_pShaderDevice )
 		return 0;
-	return ShaderUtil()->ImageFormatInfo( g_pShaderDevice->GetBackBufferFormat() ).m_NumBytes;
+	return ShaderUtil()->ImageFormatInfo( g_pShaderDevice->GetBackBufferFormat() ).m_nNumBytes;
 }
 
 int CHardwareConfig::GetSamplerCount() const
@@ -752,15 +335,14 @@ int CHardwareConfig::GetSamplerCount() const
 	return m_Caps.m_NumSamplers;
 }
 
+int CHardwareConfig::GetVertexSamplerCount() const
+{
+	return m_Caps.m_NumVertexSamplers;
+}
+
 bool CHardwareConfig::HasSetDeviceGammaRamp() const
 {
 	return m_Caps.m_HasSetDeviceGammaRamp;
-}
-
-bool CHardwareConfig::SupportsCompressedTextures() const
-{
-	Assert( m_Caps.m_SupportsCompressedTextures != COMPRESSED_TEXTURES_NOT_INITIALIZED );
-	return m_Caps.m_SupportsCompressedTextures == COMPRESSED_TEXTURES_ON;
 }
 
 VertexCompressionType_t CHardwareConfig::SupportsCompressedVertices() const
@@ -778,51 +360,36 @@ bool CHardwareConfig::SupportsFetch4() const
 	return m_Caps.m_bSupportsFetch4;
 }
 
-bool CHardwareConfig::CanStretchRectFromTextures() const
+float CHardwareConfig::GetShadowDepthBias() const
 {
-	return m_Caps.m_bCanStretchRectFromTextures;
+	// FIXME: Should these not use convars?
+	return mat_depthbias_shadowmap.GetFloat();
 }
 
-bool CHardwareConfig::SupportsVertexAndPixelShaders() const
+float CHardwareConfig::GetShadowSlopeScaleDepthBias() const
 {
-	if ( (ShaderUtil()->GetConfig().dxSupportLevel != 0) && (GetDXSupportLevel() < 80) )
-		return false;
-
-	return m_Caps.m_SupportsPixelShaders;
+	// FIXME: Should these not use convars?
+	return mat_slopescaledepthbias_shadowmap.GetFloat();
 }
 
-bool CHardwareConfig::SupportsPixelShaders_1_4() const
+bool CHardwareConfig::PreferZPrepass() const
 {
-	if ( (ShaderUtil()->GetConfig().dxSupportLevel != 0) && (GetDXSupportLevel() < 81) )
-		return false;
-
-	return m_Caps.m_SupportsPixelShaders_1_4;
+	return m_Caps.m_bPreferZPrepass;
 }
 
-bool CHardwareConfig::SupportsPixelShaders_2_0() const
+bool CHardwareConfig::SuppressPixelShaderCentroidHackFixup() const
 {
-	if ( (ShaderUtil()->GetConfig().dxSupportLevel != 0) && (GetDXSupportLevel() < 90) )
-		return false;
-
-	return m_Caps.m_SupportsPixelShaders_2_0;
+	return m_Caps.m_bSuppressPixelShaderCentroidHackFixup;
 }
 
-bool CHardwareConfig::SupportsPixelShaders_2_b() const
+bool CHardwareConfig::PreferTexturesInHWMemory() const
 {
-	if ((ShaderUtil()->GetConfig().dxSupportLevel != 0) &&
-		(GetDXSupportLevel() < 90))
-		return false;
-
-	return m_Caps.m_SupportsPixelShaders_2_b;
+	return m_Caps.m_bPreferTexturesInHWMemory;
 }
 
-bool CHardwareConfig::SupportsVertexShaders_2_0() const
+bool CHardwareConfig::PreferHardwareSync() const
 {
-	if ((ShaderUtil()->GetConfig().dxSupportLevel != 0) &&
-		(GetDXSupportLevel() < 90))
-		return false;
-
-	return m_Caps.m_SupportsVertexShaders_2_0;
+	return m_Caps.m_bPreferHardwareSync;
 }
 
 bool CHardwareConfig::SupportsStaticControlFlow() const
@@ -830,68 +397,120 @@ bool CHardwareConfig::SupportsStaticControlFlow() const
 	return m_Caps.m_bSupportsStaticControlFlow;
 }
 
-
-bool CHardwareConfig::SupportsShaderModel_3_0() const
+bool CHardwareConfig::IsUnsupported() const
 {
-	if ((ShaderUtil()->GetConfig().dxSupportLevel != 0) &&
-		(GetDXSupportLevel() < 95))
-		return false;
-
-	return m_Caps.m_SupportsShaderModel_3_0;
+	return m_Caps.m_bUnsupported;
 }
 
-// If you change these, make the corresponding change in common_ps_fxc.h
-#define NVIDIA_PCF_POISSON	0
-#define ATI_NOPCF			1
-#define ATI_NO_PCF_FETCH4	2
-
-int CHardwareConfig::GetShadowFilterMode() const
+ShadowFilterMode_t CHardwareConfig::GetShadowFilterMode( bool bForceLowQualityShadows, bool bPS30 ) const
 {
-
-#ifdef DX_TO_GL_ABSTRACTION
-	if ( !m_Caps.m_bSupportsShadowDepthTextures )
-		return 0;
-#else	
-	if ( !m_Caps.m_bSupportsShadowDepthTextures || !ShaderUtil()->GetConfig().ShadowDepthTexture() )
-		return 0;
+#if PLATFORM_POSIX || !defined( PLATFORM_X360 )
+	static ConVarRef gpu_level( "gpu_level" );
+	int nGPULevel = gpu_level.GetInt();
+	
+    const bool bUseLowQualityShadows = ( nGPULevel < 2 ) || ( bForceLowQualityShadows );
 #endif
+	
+#if PLATFORM_POSIX
+	// Currently Mac or PS3
+	if ( !m_Caps.m_bSupportsShadowDepthTextures )
+		return SHADOWFILTERMODE_DEFAULT;
 
+    if ( IsOSXOpenGL() &&
+         ( bUseLowQualityShadows || ( m_Caps.m_VendorID == VENDORID_INTEL ) ) )
+    {
+        return NVIDIA_PCF_CHEAP;
+    }
+
+	if( IsPS3() )
+	{
+		// PS3 shaders doesn't use the regular PC/POSIX values. It supports either 9 (the default) or 1 tap (fast) filtering.
+		return bForceLowQualityShadows ? GAMECONSOLE_SINGLE_TAP_PCF : GAMECONSOLE_NINE_TAP_PCF;
+	}
+#elif defined( PLATFORM_X360 )
+	// X360
+	return bForceLowQualityShadows ? GAMECONSOLE_SINGLE_TAP_PCF : GAMECONSOLE_NINE_TAP_PCF;
+#else
+	// PC
+	if ( !m_Caps.m_bSupportsShadowDepthTextures || !ShaderUtil()->GetConfig().ShadowDepthTexture() )
+		return SHADOWFILTERMODE_DEFAULT;
+			
 	switch ( m_Caps.m_ShadowDepthTextureFormat )
 	{
-		case IMAGE_FORMAT_NV_DST16:
-		case IMAGE_FORMAT_NV_DST24:
+		case IMAGE_FORMAT_D16_SHADOW:
+		case IMAGE_FORMAT_D24X8_SHADOW:
+			if ( ( m_Caps.m_VendorID == VENDORID_NVIDIA ) || ( m_Caps.m_VendorID == VENDORID_INTEL ) )
+			{
+				if ( bUseLowQualityShadows )
+					return NVIDIA_PCF_CHEAP;				// NVIDIA hardware bilinear PCF
+				else
+					return NVIDIA_PCF;						// NVIDIA hardware PCF with larger kernel
+			}
 
-			return NVIDIA_PCF_POISSON;							// NVIDIA hardware bilinear PCF
+			if ( m_Caps.m_VendorID == VENDORID_ATI )
+			{
+				// PS30 shaders purposely don't support ATI_NOPCF to reduce the combo permutation space.
+				if ( ( !bPS30 ) && ( bUseLowQualityShadows ) )
+				{
+					return ATI_NOPCF;						// Don't bother with a cheap Fetch 4
+				}
+				else
+				{
+					static bool bForceATIFetch4 = CommandLine()->CheckParm( "-forceatifetch4" ) ? true : false;
 
-		case IMAGE_FORMAT_ATI_DST16:
-		case IMAGE_FORMAT_ATI_DST24:
-
-			if ( m_Caps.m_bSupportsFetch4 )
-				return ATI_NO_PCF_FETCH4;						// ATI fetch4 depth texture sampling
-
-			return ATI_NOPCF;									// ATI vanilla depth texture sampling
-
-#if defined( _X360 )
-		case IMAGE_FORMAT_X360_DST16:
-		case IMAGE_FORMAT_X360_DST24:
-		case IMAGE_FORMAT_X360_DST24F:
-			return 0;
-#endif
+					// Either PS30, or high quality shadows.
+					if ( m_Caps.m_bDX10Card && !bForceATIFetch4 )
+						return ( bUseLowQualityShadows ) ? NVIDIA_PCF_CHEAP : NVIDIA_PCF;					// ATI wants us to run NVIDIA PCF on DX10 parts (this is the common case)
+					else if ( m_Caps.m_bSupportsFetch4 )
+						return ATI_NO_PCF_FETCH4;			// ATI fetch4 depth texture sampling
+					else if ( bPS30 )
+					{
+						// We can't return ATI_NOPCF when using PS30 shaders. (This path should actually never get hit - either we're on a DX10 card or its fetch10 capable, I think.)
+						return ATI_NO_PCF_FETCH4;
+					}
+					else
+					{
+						return ATI_NOPCF;					// ATI vanilla depth texture sampling
+					}
+				}
+			}
+			break;
 
 		default:
-			return 0;
+			return SHADOWFILTERMODE_DEFAULT;
 	}
+#endif
 
-	return 0;
+	return SHADOWFILTERMODE_DEFAULT;
 }
 
-static ConVar r_shader_srgb( "r_shader_srgb", "0", FCVAR_ALLOWED_IN_COMPETITIVE, "-1 = use hardware caps. 0 = use hardware srgb. 1 = use shader srgb(software lookup)" );		// -1=use caps 0=off 1=on
+#if defined( CSTRIKE15 ) && defined( _X360 )
+static ConVar r_shader_srgb( "r_shader_srgb", "0", 0, "-1 = use hardware caps. 0 = use hardware srgb. 1 = use shader srgb(software lookup)" );		// -1=use caps 0=off 1=on
+static ConVar r_shader_srgbread( "r_shader_srgbread", "1", 0, "1 = use shader srgb texture reads, 0 = use HW" );
+#else
+static ConVar r_shader_srgb( "r_shader_srgb", "0", 0, "-1 = use hardware caps. 0 = use hardware srgb. 1 = use shader srgb(software lookup)" );		// -1=use caps 0=off 1=on
+static ConVar r_shader_srgbread( "r_shader_srgbread", "0", 0, "1 = use shader srgb texture reads, 0 = use HW" );
+#endif
 
 int CHardwareConfig::NeedsShaderSRGBConversion() const
 {
 	if ( IsX360() )
 	{
+#if defined( CSTRIKE15 )
+		// [mariod] TODO - tidy up the use of this (now mostly obsolete) convar after PAX
+		if( r_shader_srgbread.GetBool() )
+		{
+			return false;
+		}
+#else
 		// 360 always now uses a permanent hw solution
+		return false;
+#endif
+	}
+
+	if ( IsPS3() )
+	{
+		// PS3 natively supports srgb in hardware
 		return false;
 	}
 
@@ -905,35 +524,49 @@ int CHardwareConfig::NeedsShaderSRGBConversion() const
 			return true;
 
 		default:
-			return m_Caps.m_bDX10Blending;						// !!! change to return false after portal deport built!!!!!
+			return m_ActualCaps.m_bDX10Blending;			// !!! change to return false after portal depot built!!!!!
 	}
 }
 
 bool CHardwareConfig::UsesSRGBCorrectBlending() const
 {
 	int cValue = r_shader_srgb.GetInt();
-	return ( cValue == 0 ) && ( ( m_Caps.m_bDX10Blending ) || IsX360() );
+	return ( cValue == 0 ) && ( ( m_ActualCaps.m_bDX10Blending ) || IsX360() );
 }
 
-static ConVar mat_disablehwmorph( "mat_disablehwmorph", "0", FCVAR_ALLOWED_IN_COMPETITIVE, "Disables HW morphing for particular mods" );
+static ConVar mat_disablehwmorph( "mat_disablehwmorph", "0", FCVAR_DEVELOPMENTONLY, "Disables HW morphing for particular mods" );
+static int s_bEnableFastVertexTextures = -1;
+static bool s_bDisableHWMorph = false;
 bool CHardwareConfig::HasFastVertexTextures() const
 {
-	static int bEnableFastVertexTextures = -1;
-	static bool bDisableHWMorph = false;
-	if ( bEnableFastVertexTextures < 0 )
+	// NOTE: This disallows you to change mat_disablehwmorph on the fly
+	if ( s_bEnableFastVertexTextures < 0 )
 	{
-		bEnableFastVertexTextures = 1;
+		s_bEnableFastVertexTextures = 1;
 		if ( CommandLine()->FindParm( "-disallowhwmorph" ) )
 		{
-			bEnableFastVertexTextures = 0;
+			s_bEnableFastVertexTextures = 0;
 		}
-		bDisableHWMorph = ( mat_disablehwmorph.GetInt() != 0 );
+		s_bDisableHWMorph = ( mat_disablehwmorph.GetInt() != 0 );
 	}
 
-	// JasonM - turned this off for Orange Box release...
-	return false;
+	return ( s_bEnableFastVertexTextures != 0 ) && ( !s_bDisableHWMorph ) && ( GetDXSupportLevel() >= 100 );
+}
 
-//	return m_Caps.m_bDX10Card && ( GetDXSupportLevel() >= 95 ) && ( bEnableFastVertexTextures != 0 ) && ( !bDisableHWMorph );
+bool CHardwareConfig::ActualHasFastVertexTextures() const
+{
+	// NOTE: This disallows you to change mat_disablehwmorph on the fly
+	if ( s_bEnableFastVertexTextures < 0 )
+	{
+		s_bEnableFastVertexTextures = 1;
+		if ( CommandLine()->FindParm( "-disallowhwmorph" ) )
+		{
+			s_bEnableFastVertexTextures = 0;
+		}
+		s_bDisableHWMorph = ( mat_disablehwmorph.GetInt() != 0 );
+	}
+
+	return ( s_bEnableFastVertexTextures != 0 ) && ( !s_bDisableHWMorph ) && ( GetMaxDXSupportLevel() >= 100 );
 }
 
 int CHardwareConfig::MaxHWMorphBatchCount() const
@@ -961,35 +594,9 @@ int	CHardwareConfig::TextureMemorySize() const
 	return m_Caps.m_TextureMemorySize;
 }
 
-bool CHardwareConfig::SupportsOverbright() const
-{
-	return m_Caps.m_SupportsOverbright;
-}
-
-bool CHardwareConfig::SupportsCubeMaps() const
-{
-	if ( (ShaderUtil()->GetConfig().dxSupportLevel > 0) && (GetDXSupportLevel() < 70) )
-		return false;
-
-	return m_Caps.m_SupportsCubeMaps;
-}
-
 bool CHardwareConfig::SupportsMipmappedCubemaps() const
 {
-	if ( (ShaderUtil()->GetConfig().dxSupportLevel > 0) && (GetDXSupportLevel() < 70) )
-		return false;
-
 	return m_Caps.m_SupportsMipmappedCubemaps;
-}
-
-bool CHardwareConfig::SupportsNonPow2Textures() const
-{
-	return m_Caps.m_SupportsNonPow2Textures;
-}
-
-int  CHardwareConfig::GetTextureStageCount() const
-{
-	return m_Caps.m_NumTextureStages;
 }
 
 int	 CHardwareConfig::NumVertexShaderConstants() const
@@ -1027,30 +634,6 @@ int	 CHardwareConfig::MaxNumLights() const
 	return m_Caps.m_MaxNumLights;
 }
 
-bool CHardwareConfig::SupportsHardwareLighting() const
-{
-	if ( (ShaderUtil()->GetConfig().dxSupportLevel > 0) && (GetDXSupportLevel() < 70) )
-		return false;
-
-	return m_Caps.m_SupportsHardwareLighting;
-}
-
-int	 CHardwareConfig::MaxBlendMatrices() const
-{
-	if ( (ShaderUtil()->GetConfig().dxSupportLevel > 0) && (GetDXSupportLevel() < 70) )
-		return 1;
-
-	return m_Caps.m_MaxBlendMatrices;
-}
-
-int	 CHardwareConfig::MaxBlendMatrixIndices() const
-{
-	if ( (ShaderUtil()->GetConfig().dxSupportLevel > 0) && (GetDXSupportLevel() < 70) )
-		return 1;
-
-	return m_Caps.m_MaxBlendMatrixIndices;
-}
-
 int CHardwareConfig::MaxTextureAspectRatio() const
 {
 	return m_Caps.m_MaxTextureAspectRatio;
@@ -1058,9 +641,6 @@ int CHardwareConfig::MaxTextureAspectRatio() const
 
 int	 CHardwareConfig::MaxVertexShaderBlendMatrices() const
 {
-	if ( (ShaderUtil()->GetConfig().dxSupportLevel > 0) && (GetDXSupportLevel() < 70) )
-		return 1;
-
 	return m_Caps.m_MaxVertexShaderBlendMatrices;
 }
 
@@ -1092,11 +672,6 @@ int CHardwareConfig::MaxTextureDepth() const
 
 int CHardwareConfig::GetDXSupportLevel() const
 {
-	if ( ShaderUtil()->GetConfig().dxSupportLevel != 0 )
-	{
-		return min( ShaderUtil()->GetConfig().dxSupportLevel, m_Caps.m_nDXSupportLevel );
-	}
-
 	return m_Caps.m_nDXSupportLevel;
 }
 
@@ -1153,16 +728,6 @@ bool CHardwareConfig::SupportsHDRMode( HDRType_t nHDRType ) const
 
 }
 
-bool CHardwareConfig::HasProjectedBumpEnv() const
-{
-	return m_Caps.m_HasProjectedBumpEnv;
-}
-
-bool CHardwareConfig::SupportsSpheremapping() const
-{
-	return m_Caps.m_bSupportsSpheremapping;
-}
-
 bool CHardwareConfig::NeedsAAClamp() const
 {
 	return false;
@@ -1173,25 +738,15 @@ bool CHardwareConfig::NeedsATICentroidHack() const
 	return m_Caps.m_bNeedsATICentroidHack;
 }
 
-bool CHardwareConfig::SupportsColorOnSecondStream() const
-{
-	return m_Caps.m_bColorOnSecondStream;
-}
-
-bool CHardwareConfig::SupportsStaticPlusDynamicLighting() const
-{
-	return GetDXSupportLevel() >= 80;
-}
-
-bool CHardwareConfig::PreferReducedFillrate() const
-{
-	return ShaderUtil()->GetConfig().ReduceFillrate();
-}
-
 // This is the max dx support level supported by the card
 int CHardwareConfig::GetMaxDXSupportLevel() const
 {
 	return m_ActualCaps.m_nMaxDXSupportLevel;
+}
+
+int	CHardwareConfig::GetMinDXSupportLevel() const
+{
+	return ( developer.GetInt() > 0 ) ? 90 : m_ActualCaps.m_nMinDXSupportLevel;
 }
 
 bool CHardwareConfig::SpecifiesFogColorInLinearSpace() const
@@ -1226,11 +781,6 @@ bool CHardwareConfig::IsAAEnabled() const
 //	return bAntialiasing;
 }
 
-int CHardwareConfig::GetVertexTextureCount() const
-{
-	return m_Caps.m_nVertexTextureCount;
-}
-
 int CHardwareConfig::GetMaxVertexTextureDimension() const
 {
 	return m_Caps.m_nMaxVertexTextureDimension;
@@ -1238,6 +788,12 @@ int CHardwareConfig::GetMaxVertexTextureDimension() const
 
 HDRType_t CHardwareConfig::GetHDRType() const
 {
+	// On MacOS, this value comes down from the engine, which read it from the registry...which doesn't exist on Mac, so we're slamming to true here
+	if ( IsOpenGL() )
+	{
+		g_pHardwareConfig->SetHDREnabled( true );
+	}
+
 	bool enabled = m_bHDREnabled;
 	int dxlev = GetDXSupportLevel();
 	int dxsupp = dxlev >= 90;
@@ -1265,6 +821,28 @@ HDRType_t CHardwareConfig::GetHDRType() const
 */
 }
 
+float CHardwareConfig::GetLightMapScaleFactor( void ) const
+{
+#ifdef _PS3
+	// PS3 uses floating point lightmaps but not the full HDR_TYPE_FLOAT codepath
+	return 1.0f;
+#else // _PS3
+	switch( GetHDRType() )
+	{
+	case HDR_TYPE_FLOAT:
+		return 1.0;
+		break;
+
+	case HDR_TYPE_INTEGER:
+		return 16.0;
+
+	case HDR_TYPE_NONE:
+	default:
+		return GammaToLinearFullRange( 2.0 );	// light map scale
+	}
+#endif // !_PS3
+}
+
 HDRType_t CHardwareConfig::GetHardwareHDRType() const
 {
 	return m_Caps.m_HDRType;
@@ -1272,7 +850,7 @@ HDRType_t CHardwareConfig::GetHardwareHDRType() const
 
 bool CHardwareConfig::SupportsStreamOffset() const
 {
-	return ( (GetDXSupportLevel() >= 90) && m_Caps.m_bSupportsStreamOffset );
+	return m_Caps.m_bSupportsStreamOffset;
 }
 
 int CHardwareConfig::StencilBufferBits() const
@@ -1290,9 +868,9 @@ int CHardwareConfig::GetActualSamplerCount() const
 	return m_ActualCaps.m_NumSamplers;
 }
 
-int CHardwareConfig::GetActualTextureStageCount() const
+int CHardwareConfig::GetActualVertexSamplerCount() const
 {
-	return m_ActualCaps.m_NumTextureStages;
+	return m_ActualCaps.m_NumVertexSamplers;
 }
 
 const char *CHardwareConfig::GetHWSpecificShaderDLLName()	const
@@ -1300,12 +878,149 @@ const char *CHardwareConfig::GetHWSpecificShaderDLLName()	const
 	return m_Caps.m_pShaderDLL && m_Caps.m_pShaderDLL[0] ? m_Caps.m_pShaderDLL : NULL;
 }
 
-bool CHardwareConfig::SupportsMipmapping() const
+bool CHardwareConfig::SupportsShadowDepthTextures( void ) const
 {
-	return m_Caps.m_SupportsMipmapping;
+	return m_Caps.m_bSupportsShadowDepthTextures;
 }
 
-bool CHardwareConfig::ActuallySupportsPixelShaders_2_b() const
+ImageFormat CHardwareConfig::GetShadowDepthTextureFormat( void ) const
 {
-	return m_ActualCaps.m_SupportsPixelShaders_2_b;
+	return m_Caps.m_ShadowDepthTextureFormat;
 }
+
+ImageFormat CHardwareConfig::GetHighPrecisionShadowDepthTextureFormat( void ) const
+{
+	return m_Caps.m_HighPrecisionShadowDepthTextureFormat;
+}
+
+ImageFormat CHardwareConfig::GetNullTextureFormat( void ) const
+{
+	return m_Caps.m_NullTextureFormat;
+}
+
+bool CHardwareConfig::SupportsCascadedShadowMapping( void ) const
+{
+#if defined(_PS3) 
+	return m_Caps.m_bSupportsCascadedShadowMapping;
+#elif defined(_X360)
+	return m_Caps.m_bSupportsCascadedShadowMapping;
+#else
+    return m_Caps.m_bSupportsCascadedShadowMapping && ( GetDXSupportLevel() >= 95 );
+#endif
+}
+
+CSMQualityMode_t CHardwareConfig::GetCSMQuality( void ) const
+{
+#if defined( _X360 ) || defined( _PS3 )
+	return CSMQUALITY_VERY_LOW;
+#else
+	return (CSMQualityMode_t)m_Caps.m_nCSMQuality;
+#endif
+}
+
+bool CHardwareConfig::SupportsBilinearPCFSampling() const
+{
+	if( IsOpenGL() || IsPS3() || IsX360() )
+		return true;
+
+	if ( ( m_Caps.m_VendorID == VENDORID_NVIDIA ) || ( m_Caps.m_VendorID == VENDORID_INTEL ) )
+		return true;
+	
+	static bool bForceATIFetch4 = CommandLine()->CheckParm( "-forceatifetch4" ) ? true : false;
+	if ( bForceATIFetch4 )
+		return false;
+
+	// Non-DX10 class ATI cards (pre-X2000) don't support bilinear PCF in hardware.
+	if ( ( m_Caps.m_VendorID == VENDORID_ATI ) && ( m_Caps.m_bDX10Card ) )
+		return true;
+
+	return false;
+}
+
+// Returns the CSM static combo to select given the current card's capablities and the configured CSM quality level.
+CSMShaderMode_t CHardwareConfig::GetCSMShaderMode( CSMQualityMode_t nQualityLevel ) const
+{
+#if defined( _X360 ) || defined( _PS3 )
+	return CSMSHADERMODE_LOW_OR_VERY_LOW;
+#endif
+
+	// Special case for ATI DX9-class (pre ATI HD 2xxx) cards that don't support NVidia-style PCF filtering - always set to CSMSHADERMODE_ATIFETCH4.
+	if ( !SupportsBilinearPCFSampling() )
+		return CSMSHADERMODE_ATIFETCH4;
+
+	int nMode = nQualityLevel - 1;
+	if ( nMode < CSMSHADERMODE_LOW_OR_VERY_LOW )
+		nMode = CSMSHADERMODE_LOW_OR_VERY_LOW;
+	else if ( nMode > CSMSHADERMODE_HIGH )
+		nMode = CSMSHADERMODE_HIGH;
+
+	return static_cast< CSMShaderMode_t >( nMode );
+}
+
+bool CHardwareConfig::GetCSMAccurateBlending( void ) const
+{
+	return m_bCSMAccurateBlending;
+}
+
+void CHardwareConfig::SetCSMAccurateBlending( bool bEnable )
+{
+	m_bCSMAccurateBlending = bEnable;
+}
+
+bool CHardwareConfig::SupportsResolveDepth( void ) const
+{
+	static ConVarRef mat_resolveFullFrameDepth( "mat_resolveFullFrameDepth" );
+	static ConVarRef gpu_level( "gpu_level" );
+
+	if ( ( gpu_level.GetInt() >= 2 ) &&
+		 ( mat_resolveFullFrameDepth.GetInt() == 1 ) )
+	{
+#if defined(DX_TO_GL_ABSTRACTION)
+		{
+			if ( gGL->m_bHave_GL_EXT_framebuffer_blit )
+			{
+				return true;
+			}
+			else
+			{
+				return false;
+			}
+		}
+#else
+		{
+			if ( g_pHardwareConfig->ActualCaps().m_bSupportsINTZ &&
+				 ( g_pHardwareConfig->ActualCaps().m_bSupportsRESZ || ( g_pHardwareConfig->ActualCaps().m_VendorID == VENDORID_NVIDIA ) ) )
+			{
+				return true;
+			}
+			else
+			{
+				return false;
+			}
+		}
+#endif
+	}
+	else
+	{
+		return false;
+	}
+}
+
+bool CHardwareConfig::HasFullResolutionDepthTexture(void) const
+{
+	static ConVarRef mat_resolveFullFrameDepth( "mat_resolveFullFrameDepth" );
+
+	if ( SupportsResolveDepth() || ( mat_resolveFullFrameDepth.GetInt() == 2 ) )
+	{
+		return true;
+	}
+	else
+	{
+		return false;
+	}
+}
+
+#ifdef _PS3
+#include "hardwareconfig_ps3nonvirt.h"
+#include "hardwareconfig_ps3nonvirt.inl"
+#endif

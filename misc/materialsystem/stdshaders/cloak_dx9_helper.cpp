@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright (c) 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -14,10 +14,14 @@
 #include "cloak_ps20.inc"
 #include "cloak_ps20b.inc"
 
-#ifndef _X360
+#if !defined( _X360 ) && !defined( _PS3 )
 #include "cloak_vs30.inc"
 #include "cloak_ps30.inc"
 #endif
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
 
 static ConVar r_lightwarpidentity( "r_lightwarpidentity", "0", FCVAR_CHEAT );
 
@@ -105,16 +109,17 @@ void DrawCloak_DX9( CBaseVSShader *pShader, IMaterialVar** params, IShaderDynami
 
 		pShaderShadow->VertexShaderVertexFormat( flags, nTexCoordCount, NULL, userDataSize );
 
-#ifndef _X360
+#if !defined( _X360 ) && !defined( _PS3 )
 		if ( !g_pHardwareConfig->HasFastVertexTextures() )
 #endif
 		{
-			bool bUseStaticControlFlow = g_pHardwareConfig->SupportsStaticControlFlow();
+			bool bFlattenStaticControlFlow = !g_pHardwareConfig->SupportsStaticControlFlow();
 
 			DECLARE_STATIC_VERTEX_SHADER( cloak_vs20 );
 			SET_STATIC_VERTEX_SHADER_COMBO( MODEL,  bIsModel );
-			SET_STATIC_VERTEX_SHADER_COMBO( USE_STATIC_CONTROL_FLOW, bUseStaticControlFlow );
+			SET_STATIC_VERTEX_SHADER_COMBO( FLATTEN_STATIC_CONTROL_FLOW, bFlattenStaticControlFlow );
 			SET_STATIC_VERTEX_SHADER( cloak_vs20 );
+
 
 			// Bind ps_2_b shader so we can get Phong terms
 			if ( g_pHardwareConfig->SupportsPixelShaders_2_b() )
@@ -130,7 +135,7 @@ void DrawCloak_DX9( CBaseVSShader *pShader, IMaterialVar** params, IShaderDynami
 				SET_STATIC_PIXEL_SHADER( cloak_ps20 );
 			}
 		}
-#ifndef _X360
+#if !defined( _X360 ) && !defined( _PS3 )
 		else
 		{
 			// The vertex shader uses the vertex id stream
@@ -153,43 +158,47 @@ void DrawCloak_DX9( CBaseVSShader *pShader, IMaterialVar** params, IShaderDynami
 		{
 			pShader->EnableAlphaBlending( SHADER_BLEND_ONE_MINUS_SRC_ALPHA, SHADER_BLEND_SRC_ALPHA );
 		}
+
+		// Lighting constants
+		pShader->PI_BeginCommandBuffer();
+		pShader->PI_SetPixelShaderAmbientLightCube( PSREG_AMBIENT_CUBE );
+		pShader->PI_SetPixelShaderLocalLighting( PSREG_LIGHT_INFO_ARRAY );
+		pShader->PI_EndCommandBuffer();
 	}
 	DYNAMIC_STATE
 	{
 		pShaderAPI->SetDefaultState();
 
 		// Bind textures
-		pShader->BindTexture( SHADER_SAMPLER0, info.m_nBaseTexture, 0 );							// Base Map
-		pShaderAPI->BindStandardTexture( SHADER_SAMPLER2, TEXTURE_FRAME_BUFFER_FULL_TEXTURE_0 );	// Refraction Map
-		pShader->BindTexture( SHADER_SAMPLER3, info.m_nNormalMap, info.m_nBumpFrame );				// Normal Map
-		pShaderAPI->BindStandardTexture( SHADER_SAMPLER5, TEXTURE_NORMALIZATION_CUBEMAP_SIGNED );	// Normalization cube map
+		pShader->BindTexture( SHADER_SAMPLER0, TEXTURE_BINDFLAGS_SRGBREAD, info.m_nBaseTexture, 0 );							// Base Map
+		pShaderAPI->BindStandardTexture( SHADER_SAMPLER2, TEXTURE_BINDFLAGS_NONE, TEXTURE_FRAME_BUFFER_FULL_TEXTURE_0 );	// Refraction Map
+		pShader->BindTexture( SHADER_SAMPLER3, TEXTURE_BINDFLAGS_NONE, info.m_nNormalMap, info.m_nBumpFrame );				// Normal Map
+		pShaderAPI->BindStandardTexture( SHADER_SAMPLER5, TEXTURE_BINDFLAGS_NONE, TEXTURE_NORMALIZATION_CUBEMAP_SIGNED );	// Normalization cube map
 
 		if ( hasDiffuseWarp )
 		{
 			if ( r_lightwarpidentity.GetBool() )
 			{
-				pShaderAPI->BindStandardTexture( SHADER_SAMPLER1, TEXTURE_IDENTITY_LIGHTWARP );
+				pShaderAPI->BindStandardTexture( SHADER_SAMPLER1, TEXTURE_BINDFLAGS_NONE, TEXTURE_IDENTITY_LIGHTWARP );
 			}
 			else
 			{
-				pShader->BindTexture( SHADER_SAMPLER1, info.m_nDiffuseWarpTexture );					// Light warp texture
+				pShader->BindTexture( SHADER_SAMPLER1, TEXTURE_BINDFLAGS_NONE, info.m_nDiffuseWarpTexture );					// Light warp texture
 			}
 		}
 
 		MaterialFogMode_t fogType = pShaderAPI->GetSceneFogMode();
-		int fogIndex = ( fogType == MATERIAL_FOG_LINEAR_BELOW_FOG_Z ) ? 1 : 0;
 
-		LightState_t lightState;
+		LightState_t lightState = {0, false, false};
 		pShaderAPI->GetDX9LightState( &lightState );
 
-#ifndef _X360
+#if !defined( _X360 ) && !defined( _PS3 )
 		if ( !g_pHardwareConfig->HasFastVertexTextures() )
 #endif
 		{
 			bool bUseStaticControlFlow = g_pHardwareConfig->SupportsStaticControlFlow();
 
 			DECLARE_DYNAMIC_VERTEX_SHADER( cloak_vs20 );
-			SET_DYNAMIC_VERTEX_SHADER_COMBO( DOWATERFOG,    fogIndex );
 			SET_DYNAMIC_VERTEX_SHADER_COMBO( SKINNING,      pShaderAPI->GetCurrentNumBones() > 0 );
 			SET_DYNAMIC_VERTEX_SHADER_COMBO( COMPRESSED_VERTS, (int)vertexCompression );
 			SET_DYNAMIC_VERTEX_SHADER_COMBO( NUM_LIGHTS, bUseStaticControlFlow ? 0 : lightState.m_nNumLights );
@@ -201,7 +210,6 @@ void DrawCloak_DX9( CBaseVSShader *pShader, IMaterialVar** params, IShaderDynami
 				DECLARE_DYNAMIC_PIXEL_SHADER( cloak_ps20b );
 				SET_DYNAMIC_PIXEL_SHADER_COMBO( NUM_LIGHTS, lightState.m_nNumLights );
 				SET_DYNAMIC_PIXEL_SHADER_COMBO( WRITEWATERFOGTODESTALPHA,  fogType == MATERIAL_FOG_LINEAR_BELOW_FOG_Z );
-				SET_DYNAMIC_PIXEL_SHADER_COMBO( PIXELFOGTYPE, pShaderAPI->GetPixelFogCombo() );
 				SET_DYNAMIC_PIXEL_SHADER( cloak_ps20b );
 			}
 			else
@@ -210,30 +218,26 @@ void DrawCloak_DX9( CBaseVSShader *pShader, IMaterialVar** params, IShaderDynami
 				//
 				// In general, cloaking on ps_2_0 needs re-working for multipass...yuck...
 				//
-				int nPS20NumLights = max( lightState.m_nNumLights, 1 );
+				int nPS20NumLights = MAX( lightState.m_nNumLights, 1 );
 				DECLARE_DYNAMIC_PIXEL_SHADER( cloak_ps20 );
 				SET_DYNAMIC_PIXEL_SHADER_COMBO( NUM_LIGHTS, nPS20NumLights );
 				SET_DYNAMIC_PIXEL_SHADER_COMBO( WRITEWATERFOGTODESTALPHA,  fogType == MATERIAL_FOG_LINEAR_BELOW_FOG_Z );
-				SET_DYNAMIC_PIXEL_SHADER_COMBO( PIXELFOGTYPE, pShaderAPI->GetPixelFogCombo() );
 				SET_DYNAMIC_PIXEL_SHADER( cloak_ps20 );
 			}
 		}
-#ifndef _X360
+#if !defined( _X360 ) && !defined( _PS3 )
 		else
 		{
 			pShader->SetHWMorphVertexShaderState( VERTEX_SHADER_SHADER_SPECIFIC_CONST_6, VERTEX_SHADER_SHADER_SPECIFIC_CONST_7, SHADER_VERTEXTEXTURE_SAMPLER0 );
 
 			DECLARE_DYNAMIC_VERTEX_SHADER( cloak_vs30 );
-			SET_DYNAMIC_VERTEX_SHADER_COMBO( DOWATERFOG,    fogIndex );
 			SET_DYNAMIC_VERTEX_SHADER_COMBO( SKINNING,      pShaderAPI->GetCurrentNumBones() > 0 );
-			SET_DYNAMIC_VERTEX_SHADER_COMBO( MORPHING,		pShaderAPI->IsHWMorphingEnabled() );
 			SET_DYNAMIC_VERTEX_SHADER_COMBO( COMPRESSED_VERTS, (int)vertexCompression );
 			SET_DYNAMIC_VERTEX_SHADER( cloak_vs30 );
 
 			DECLARE_DYNAMIC_PIXEL_SHADER( cloak_ps30 );
 			SET_DYNAMIC_PIXEL_SHADER_COMBO( NUM_LIGHTS, lightState.m_nNumLights );
 			SET_DYNAMIC_PIXEL_SHADER_COMBO( WRITEWATERFOGTODESTALPHA,  fogType == MATERIAL_FOG_LINEAR_BELOW_FOG_Z );
-			SET_DYNAMIC_PIXEL_SHADER_COMBO( PIXELFOGTYPE, pShaderAPI->GetPixelFogCombo() );
 			SET_DYNAMIC_PIXEL_SHADER( cloak_ps30 );
 		}
 #endif
@@ -252,7 +256,7 @@ void DrawCloak_DX9( CBaseVSShader *pShader, IMaterialVar** params, IShaderDynami
 		pShaderAPI->SetPixelShaderFogParams( PSREG_FOG_PARAMS );
 
 		// Pack phong exponent in with the eye position
-		float vEyePos_SpecExponent[4], vFresnelRanges_SpecBoost[4] = {1, 0.5, 1, 1};
+		float vEyePos_SpecExponent[4], vFresnelRanges_SpecBoost[4] = {0, 0.5, 1, 1};
 		float vSpecularTint[4] = {1, 1, 1, 1}, vRimBoost[4] = {1, 1, 1, 1};
 		pShaderAPI->GetWorldSpaceCameraPosition( vEyePos_SpecExponent );
 
@@ -268,7 +272,7 @@ void DrawCloak_DX9( CBaseVSShader *pShader, IMaterialVar** params, IShaderDynami
 		if ( bHasRimLight && (info.m_nRimLightPower != -1) && params[info.m_nRimLightPower]->IsDefined() )
 		{
 			vSpecularTint[3] = params[info.m_nRimLightPower]->GetFloatValue();
-			vSpecularTint[3] = max(vSpecularTint[3], 1.0f);	// Make sure this is at least 1
+			vSpecularTint[3] = MAX(vSpecularTint[3], 1.0f);	// Make sure this is at least 1
 		}
 
 		// Get the rim boost power (goes in w of flashlight position)
@@ -301,12 +305,7 @@ void DrawCloak_DX9( CBaseVSShader *pShader, IMaterialVar** params, IShaderDynami
 		}
 
 		if ( (info.m_nPhongFresnelRanges != -1 ) && params[info.m_nPhongFresnelRanges]->IsDefined() )
-		{
 			params[info.m_nPhongFresnelRanges]->GetVecValue( vFresnelRanges_SpecBoost, 3 );	// Grab optional fresnel range parameters
-			// Change fresnel range encoding from (min, mid, max) to ((mid-min)*2, mid, (max-mid)*2)
-			vFresnelRanges_SpecBoost[0] = (vFresnelRanges_SpecBoost[1] - vFresnelRanges_SpecBoost[0]) * 2;
-			vFresnelRanges_SpecBoost[2] = (vFresnelRanges_SpecBoost[2] - vFresnelRanges_SpecBoost[1]) * 2;
-		}
 
 		if ( ( info.m_nPhongBoost != -1 ) &&params[info.m_nPhongBoost]->IsDefined() )		// Grab optional phong boost param
 			vFresnelRanges_SpecBoost[3] = params[info.m_nPhongBoost]->GetFloatValue();
@@ -320,11 +319,6 @@ void DrawCloak_DX9( CBaseVSShader *pShader, IMaterialVar** params, IShaderDynami
 		pShaderAPI->SetPixelShaderConstant( PSREG_FLASHLIGHT_POSITION_RIM_BOOST, vRimBoost, 1 );	// Rim boost in w on non-flashlight pass
 
 		pShaderAPI->SetPixelShaderFogParams( PSREG_FOG_PARAMS );
-
-		// Lighting constants
-		
-		pShaderAPI->SetPixelShaderStateAmbientLightCube( PSREG_AMBIENT_CUBE, !lightState.m_bAmbientLight );
-		pShaderAPI->CommitPixelShaderLighting( PSREG_LIGHT_INFO_ARRAY );
 
 		// Set c0 and c1 to contain first two rows of ViewProj matrix
 		VMatrix matView, matProj, matViewProj;

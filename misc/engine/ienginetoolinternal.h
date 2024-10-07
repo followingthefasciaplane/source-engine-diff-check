@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright  1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: Methods of IEngineTool visible only inside the engine
 //
@@ -19,8 +19,9 @@ public:
 	virtual void	SetIsInGame( bool bIsInGame ) = 0;
 };
 
+#if !defined( DEICATED )
 extern IEngineToolInternal *g_pEngineToolInternal;
-
+#endif // !LINUX
 
 #endif // IENGINETOOLINTERNAL_H
 

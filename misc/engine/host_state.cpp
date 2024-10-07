@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright (c) 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Runs the state machine for the host & server
 //
@@ -18,6 +18,7 @@
 #include "icliententitylist.h"
 #include "client.h"
 #include "host_jmp.h"
+#include "cdll_engine_int.h"
 #include "tier0/vprof.h"
 #include "tier0/icommandline.h"
 #include "filesystem_engine.h"
@@ -25,7 +26,7 @@
 #include "iengine.h"
 #include "snd_audio_source.h"
 #include "sv_steamauth.h"
-#ifndef SWDS
+#ifndef DEDICATED
 #include "vgui_baseui_interface.h"
 #endif
 #include "sv_plugin.h"
@@ -34,20 +35,19 @@
 #include "datacache/imdlcache.h"
 #include "sys_dll.h"
 #include "testscriptmgr.h"
-#if defined( REPLAY_ENABLED )
-#include "replay_internal.h"
-#include "replayserver.h"
+#include "cvar.h"
+#include "MapReslistGenerator.h"
+#include "filesystem/IQueuedLoader.h"
+#include "matchmaking/imatchframework.h"
+#ifdef _PS3
+#include "tls_ps3.h"
 #endif
-#include "GameEventManager.h"
-#include "tier0/etwprof.h"
-
-#include "ccs.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
 extern bool		g_bAbortServerSet;
-#ifndef SWDS
+#ifndef DEDICATED
 extern ConVar	reload_materials;
 #endif
 
@@ -97,6 +97,7 @@ public:
 	Vector		m_vecLocation;
 	QAngle		m_angLocation;
 	char		m_levelName[256];
+	char		m_mapGroupName[256];
 	char		m_landmarkName[256];
 	char		m_saveName[256];
 	float		m_flShortFrameTime;		// run a few one-tick frames to avoid large timesteps while loading assets
@@ -105,6 +106,10 @@ public:
 	bool		m_bRememberLocation;
 	bool		m_bBackgroundLevel;
 	bool		m_bWaitingForConnection;
+	bool		m_bLetToolsOverrideLoadGameEnts;	// During a load game, this tells Foundry to override ents that are selected in Hammer.
+	bool		m_bSplitScreenConnect;
+	bool		m_bGameHasShutDownAndFlushedMemory;	// This is false once we load a map into memory, and set to true once the map is unloaded and all memory flushed
+	bool		m_bWorkshopMapDownloadPending;
 };
 
 static bool Host_ValidGame( void );
@@ -133,14 +138,18 @@ void HostState_RunGameInit()
 //-----------------------------------------------------------------------------
 // start a new game as soon as possible
 //-----------------------------------------------------------------------------
-void HostState_NewGame( char const *pMapName, bool remember_location, bool background )
+void HostState_NewGame( char const *pMapName, bool remember_location, bool background, bool bSplitScreenConnect )
 {
-	Q_strncpy( g_HostState.m_levelName, pMapName, sizeof( g_HostState.m_levelName ) );
+	char szMapName[_MAX_PATH];
+	Q_StripExtension( pMapName, szMapName, sizeof(szMapName) );
+	Q_strncpy( g_HostState.m_levelName, szMapName, sizeof( g_HostState.m_levelName ) );
+	Q_FixSlashes( g_HostState.m_levelName, '/' ); // Store with forward slashes internally to be consistent. 
 
 	g_HostState.m_landmarkName[0] = 0;
 	g_HostState.m_bRememberLocation = remember_location;
 	g_HostState.m_bWaitingForConnection = true;
 	g_HostState.m_bBackgroundLevel = background;
+	g_HostState.m_bSplitScreenConnect = bSplitScreenConnect;
 	if ( remember_location )
 	{
 		g_HostState.RememberLocation();
@@ -151,9 +160,9 @@ void HostState_NewGame( char const *pMapName, bool remember_location, bool backg
 //-----------------------------------------------------------------------------
 // load a new game as soon as possible
 //-----------------------------------------------------------------------------
-void HostState_LoadGame( char const *pSaveFileName, bool remember_location )
+void HostState_LoadGame( char const *pSaveFileName, bool remember_location, bool bLetToolsOverrideLoadGameEnts )
 {
-#ifndef SWDS
+#ifndef DEDICATED
 	// Make sure the freaking save file exists....
 	if ( !saverestore->SaveFileExists( pSaveFileName ) )
 	{
@@ -170,6 +179,8 @@ void HostState_LoadGame( char const *pSaveFileName, bool remember_location )
 	g_HostState.m_bRememberLocation = remember_location;
 	g_HostState.m_bBackgroundLevel = false;
 	g_HostState.m_bWaitingForConnection = true;
+	g_HostState.m_bSplitScreenConnect = false;
+	g_HostState.m_bLetToolsOverrideLoadGameEnts = bLetToolsOverrideLoadGameEnts;
 	if ( remember_location )
 	{
 		g_HostState.RememberLocation();
@@ -183,6 +194,7 @@ void HostState_LoadGame( char const *pSaveFileName, bool remember_location )
 void HostState_ChangeLevelSP( char const *pNewLevel, char const *pLandmarkName )
 {
 	Q_strncpy( g_HostState.m_levelName, pNewLevel, sizeof( g_HostState.m_levelName ) );
+	Q_FixSlashes( g_HostState.m_levelName, '/' ); // Store with forward slashes internally to be consistent. 
 	Q_strncpy( g_HostState.m_landmarkName, pLandmarkName, sizeof( g_HostState.m_landmarkName ) );
 	g_HostState.SetNextState( HS_CHANGE_LEVEL_SP );
 }
@@ -193,8 +205,30 @@ void HostState_ChangeLevelMP( char const *pNewLevel, char const *pLandmarkName )
 	Steam3Server().NotifyOfLevelChange();
 
 	Q_strncpy( g_HostState.m_levelName, pNewLevel, sizeof( g_HostState.m_levelName ) );
+	Q_FixSlashes( g_HostState.m_levelName, '/' ); // Store with forward slashes internally to be consistent. 
 	Q_strncpy( g_HostState.m_landmarkName, pLandmarkName, sizeof( g_HostState.m_landmarkName ) );
-	g_HostState.SetNextState( HS_CHANGE_LEVEL_MP );
+
+	PublishedFileId_t id = serverGameDLL->GetUGCMapFileID( pNewLevel );
+	if ( sv.IsDedicated() && id != 0 )
+	{
+		// If we're hosting a workshop map, don't change level until we've made sure we're hosting the latest version.
+		serverGameDLL->UpdateUGCMap( id );
+		g_HostState.m_bWorkshopMapDownloadPending = true;
+	}	
+	else
+	{
+		g_HostState.SetNextState( HS_CHANGE_LEVEL_MP );
+	}
+}
+
+// set the mapgroup name
+void HostState_SetMapGroupName( char const *pMapGroupName )
+{
+	if ( pMapGroupName )
+	{
+		V_strncpy( g_HostState.m_mapGroupName, pMapGroupName, sizeof ( g_HostState.m_mapGroupName ) );
+		sv.SetMapGroupName( pMapGroupName );
+	}
 }
 
 // shutdown the game as soon as possible
@@ -215,15 +249,6 @@ void HostState_GameShutdown()
 // shutdown the engine/program as soon as possible
 void HostState_Shutdown()
 {
-#if defined( REPLAY_ENABLED )
-	// If we're recording the game, finalize the replay so players can download it.
-	if ( sv.IsDedicated() && g_pReplay && g_pReplay->IsRecording() )
-	{
-		// Stop recording and publish all blocks/session info data synchronously.
-		g_pReplay->SV_EndRecordingSession( true );
-	}
-#endif
-
 	g_HostState.SetNextState( HS_SHUTDOWN );
 }
 
@@ -239,14 +264,6 @@ bool HostState_IsGameShuttingDown()
 {
 	return g_HostState.IsGameShuttingDown();
 }
-
-bool HostState_IsShuttingDown()
-{
-	return ( g_HostState.m_currentState == HS_SHUTDOWN ||
-		g_HostState.m_currentState == HS_RESTART ||
-			g_HostState.m_currentState == HS_GAME_SHUTDOWN );
-}
-
 
 void HostState_OnClientConnected()
 {
@@ -265,11 +282,45 @@ void HostState_SetSpawnPoint(Vector &position, QAngle &angle)
 	g_HostState.m_bRememberLocation = true;
 }
 
-//-----------------------------------------------------------------------------
-static void WatchDogHandler()
+bool HostState_IsTransitioningToLoad()
 {
-	Host_Error( "WatchdogHandler called - server exiting.\n" );
+	if ( g_HostState.m_nextState == HS_NEW_GAME ||
+		g_HostState.m_nextState == HS_LOAD_GAME ||
+		g_HostState.m_nextState == HS_CHANGE_LEVEL_SP ||
+		g_HostState.m_nextState == HS_CHANGE_LEVEL_MP )
+	{
+		return true;
+	}
+
+	return false;
 }
+
+bool HostState_GameHasShutDownAndFlushedMemory()
+{
+	// False if map-related assets are still in memory
+	// True once all such have been flushed from memory
+	return g_HostState.m_bGameHasShutDownAndFlushedMemory;
+}
+
+void HostState_Pre_LoadMapIntoMemory()
+{
+	// About to load a map into memory
+	g_HostState.m_bGameHasShutDownAndFlushedMemory = false;
+}
+
+void HostState_Post_FlushMapFromMemory()
+{
+	// Map-related assets have been flushed from memory
+	g_HostState.m_bGameHasShutDownAndFlushedMemory = true;
+}
+
+const char *HostState_GetNewLevel()
+{
+	return g_HostState.m_levelName;
+}
+
+//-----------------------------------------------------------------------------
+
 
 //-----------------------------------------------------------------------------
 // Class implementation
@@ -277,27 +328,41 @@ static void WatchDogHandler()
 
 CHostState::CHostState()
 {
+	m_bGameHasShutDownAndFlushedMemory = true;
+	SetState( HS_RUN, true );
 }
+
+
 
 void CHostState::Init()
 {
-	SetState( HS_RUN, true );
-	m_currentState = HS_RUN;
-	m_nextState = HS_RUN;
+	// This can occur if user pressed close button during opening cinematic
+	if ( m_nextState != HS_SHUTDOWN )
+	{
+		if ( IsPS3QuitRequested() && m_nextState == HS_GAME_SHUTDOWN )
+		{
+			// do nothing; the state is set to game shutdown, leave it there. Otherwise engine goes into infinite "RUN" frame loop
+		}
+		else
+		{
+			SetState( HS_RUN, true );
+		}
+	}
+	m_bLetToolsOverrideLoadGameEnts = false;
 	m_activeGame = false;
 	m_levelName[0] = 0;
+	m_mapGroupName[0] = 0;
 	m_saveName[0] = 0;
 	m_landmarkName[0] = 0;
 	m_bRememberLocation = 0;
 	m_bBackgroundLevel = false;
+	m_bSplitScreenConnect = false;
 	m_vecLocation.Init();
 	m_angLocation.Init();
 	m_bWaitingForConnection = false;
 	m_flShortFrameTime = 1.0;
-
-	CCS_Init();
-
-	Plat_SetWatchdogHandlerFunction( WatchDogHandler );
+	m_bGameHasShutDownAndFlushedMemory = true;
+	m_bWorkshopMapDownloadPending = false;
 }
 
 void CHostState::SetState( HOSTSTATES newState, bool clearNext )
@@ -317,6 +382,7 @@ void CHostState::SetNextState( HOSTSTATES next )
 
 void CHostState::RunGameInit()
 {
+	materials->OnDebugEvent( "CHostState::RunGameInit" );
 	Assert( !m_activeGame );
 
 	if ( serverGameDLL )
@@ -330,8 +396,15 @@ void CHostState::GameShutdown()
 {
 	if ( m_activeGame )
 	{
+		materials->OnDebugEvent( "HostState::GameShutdown(active)");
 		serverGameDLL->GameShutdown();
+ 		//if (! sv.IsLevelMainMenuBackground() )    can't do this here - it will overwrite variables that are part of the game setup (these vars are set _before_ the previous game is ended). hibernate is
+		//    ResetGameConVarsToDefaults();         how we deal with this on the dedicated server.
 		m_activeGame = false;
+	}
+	else
+	{
+		materials->OnDebugEvent( "HostState::GameShutdown" );
 	}
 }
 
@@ -340,7 +413,9 @@ void CHostState::GameShutdown()
 // The external API queues up state changes to happen when the state machine is processed.
 void CHostState::State_NewGame()
 {
-	CETWScope timer( "CHostState::State_NewGame" );
+	bool bSplitScreenConnect = m_bSplitScreenConnect;
+	m_bSplitScreenConnect = false;
+	materials->OnDebugEvent( "CHostState::State_NewGame" );
 
 	if ( Host_ValidGame() )
 	{
@@ -356,11 +431,14 @@ void CHostState::State_NewGame()
 		}
 		else
 		{
-			if ( Host_NewGame( m_levelName, false, m_bBackgroundLevel ) )
+			if ( modelloader->Map_IsValid( m_levelName ) )
 			{
-				// succesfully started the new game
-				SetState( HS_RUN, true );
-				return;
+				if ( Host_NewGame( m_levelName, m_mapGroupName, false, m_bBackgroundLevel, bSplitScreenConnect ) )
+				{
+					// succesfully started the new game
+					SetState( HS_RUN, true );
+					return;
+				}
 			}
 		}
 	}
@@ -371,14 +449,18 @@ void CHostState::State_NewGame()
 	GameShutdown();
 	// run the server at the console
 	SetState( HS_RUN, true );
+
+	sv.ClearReservationStatus();
 }
 
 void CHostState::State_LoadGame()
 {
-#ifndef SWDS
+	materials->OnDebugEvent( "CHostState::State_LoadGame" );
+
+#ifndef DEDICATED
 	HostState_RunGameInit();
 	
-	if ( saverestore->LoadGame( m_saveName ) )
+	if ( saverestore->LoadGame( m_saveName, m_bLetToolsOverrideLoadGameEnts ) )
 	{
 		// succesfully started the new game
         GetTestScriptMgr()->CheckPoint( "load_game" );
@@ -393,30 +475,44 @@ void CHostState::State_LoadGame()
 	GameShutdown();
 	// run the server at the console
 	SetState( HS_RUN, true );
-	
+
+	if ( g_pMatchFramework->GetMatchSession() )
+	{
+		g_pMatchFramework->CloseSession();
+		return;
+	}
+
+#if 0
 	if ( IsX360() )
 	{
 		// On the 360 we need to return to the background map
 		g_ServerGlobalVariables.bMapLoadFailed = true;
-		Cbuf_Clear();
-		Cbuf_AddText( "startupmenu force" );
+		Cbuf_Clear( Cbuf_GetCurrentPlayer() );
+		Cbuf_AddText( Cbuf_GetCurrentPlayer(), "startupmenu force" );
 		Cbuf_Execute();
 	}
+#endif
 }
 
 
 void CHostState::State_ChangeLevelMP()
 {
+	materials->OnDebugEvent( "CHostState::State_ChangeLevelMP" );
 	if ( Host_ValidGame() )
 	{
 		Steam3Server().NotifyOfLevelChange();
 
-#ifndef SWDS
-		// start progress bar immediately for multiplayer level transitions
-		EngineVGui()->EnabledProgressBarForNextLoad();
+		g_pServerPluginHandler->LevelShutdown();
+#if !defined(DEDICATED)
+		audiosourcecache->LevelShutdown();
 #endif
-		if ( Host_Changelevel( false, m_levelName, m_landmarkName ) )
+		if ( modelloader->Map_IsValid( m_levelName ) )
 		{
+#ifndef DEDICATED
+			// start progress bar immediately for multiplayer level transitions
+			EngineVGui()->EnabledProgressBarForNextLoad();
+#endif
+			Host_Changelevel( false, m_levelName, m_mapGroupName, m_landmarkName );
 			SetState( HS_RUN, true );
 			return;
 		}
@@ -424,23 +520,20 @@ void CHostState::State_ChangeLevelMP()
 	// fail
 	ConMsg( "Unable to change level!\n" );
 	SetState( HS_RUN, true );
-
-	IGameEvent *event = g_GameEventManager.CreateEvent( "server_changelevel_failed" );
-	if ( event )
-	{
-		event->SetString( "levelname", m_levelName );
-		g_GameEventManager.FireEvent( event );
-	}
 }
 
 
 void CHostState::State_ChangeLevelSP()
 {
+	materials->OnDebugEvent( "CHostState::State_ChangeLevelSP" );
 	if ( Host_ValidGame() )
 	{
-		Host_Changelevel( true, m_levelName, m_landmarkName );
-		SetState( HS_RUN, true );
-		return;
+		if ( modelloader->Map_IsValid( m_levelName ) )
+		{
+			Host_Changelevel( true, m_levelName, m_mapGroupName, m_landmarkName );
+			SetState( HS_RUN, true );
+			return;
+		}
 	}
 	// fail
 	ConMsg( "Unable to change level!\n" );
@@ -450,35 +543,51 @@ void CHostState::State_ChangeLevelSP()
 static bool IsClientActive()
 {
 	if ( !sv.IsActive() )
-		return cl.IsActive();
-
-	for ( int i = 0; i < sv.GetClientCount(); i++ )
 	{
+#ifdef DEDICATED
+    return false;
+#else
+        return GetBaseLocalClient().IsActive();
+#endif
+	}
+
+    for ( int i = 0; i < sv.GetClientCount(); i++ )
+    {
 		CGameClient *pClient = sv.Client( i );
 		if ( pClient->IsActive() )
+		{
 			return true;
-	}
-	return false;
+		}
+    }
+    return false;
 }
 
 static bool IsClientConnected()
 {
-	if ( !sv.IsActive() )
-		return cl.IsConnected();
-
-	for ( int i = 0; i < sv.GetClientCount(); i++ )
+    if ( !sv.IsActive() )
 	{
+#ifndef DEDICATED
+        return GetBaseLocalClient().IsConnected();
+#else
+		return false;
+#endif
+	}
+
+    for ( int i = 0; i < sv.GetClientCount(); i++ )
+    {
 		CGameClient *pClient = sv.Client( i );
 		if ( pClient->IsConnected() )
 			return true;
-	}
-	return false;
+    }
+    return false;
 }
+
+static bool s_bFirstRunFrame = true;
+
 
 void CHostState::State_Run( float frameTime )
 {
-	static bool s_bFirstRunFrame = true;
-
+	//materials->OnDebugEvent( "CHostState::State_Run" );
 	if ( m_flShortFrameTime > 0 )
 	{
 		if ( IsClientActive() )
@@ -488,29 +597,26 @@ void CHostState::State_Run( float frameTime )
 		// Only clamp time if client is in process of connecting or is already connected.
 		if ( IsClientConnected() )
 		{
-			frameTime = min( frameTime, host_state.interval_per_tick );
+			frameTime = MIN( frameTime, host_state.interval_per_tick );
 		}
 	}
-
-	// Nice big timeout to play it safe while still ensuring that we don't get stuck in
-	// infinite loops.
-	int nTimerWaitSeconds = 60;
-	if ( s_bFirstRunFrame ) 
+	int nTimerWait = 15;
+	if ( s_bFirstRunFrame )									// the first frame can take a while especially during fork startup
 	{
-		// The first frame can take a while especially during fork startup.
 		s_bFirstRunFrame = false;
-		nTimerWaitSeconds *= 2;
+		nTimerWait *= 2;
 	}
 	if ( sv.IsDedicated() )
-	{
-		Plat_BeginWatchdogTimer( nTimerWaitSeconds );
-	}
-
-	Host_RunFrame( frameTime );
-
+		BeginWatchdogTimer( nTimerWait );
+	Host_RunFrame( frameTime );								// 5 seconds allowed unless map load
 	if ( sv.IsDedicated() )
+		EndWatchdogTimer();
+
+	// Continue loading process once we've tried to update the new map
+	if ( sv.IsDedicated() && g_HostState.m_bWorkshopMapDownloadPending && !serverGameDLL->HasPendingMapDownloads() )
 	{
-		Plat_EndWatchdogTimer();
+		g_HostState.SetNextState( HS_CHANGE_LEVEL_MP );
+		g_HostState.m_bWorkshopMapDownloadPending = false;
 	}
 
 	switch( m_nextState )
@@ -520,8 +626,8 @@ void CHostState::State_Run( float frameTime )
 
 	case HS_LOAD_GAME:
 	case HS_NEW_GAME:
-#if !defined( SWDS )
-		SCR_BeginLoadingPlaque();
+#if !defined( DEDICATED )
+		SCR_BeginLoadingPlaque( m_levelName );
 #endif
 		// FALL THROUGH INTENTIONALLY TO SHUTDOWN
 
@@ -548,32 +654,70 @@ void CHostState::State_Run( float frameTime )
 
 void CHostState::State_GameShutdown()
 {
+	materials->OnDebugEvent( "CHostState::State_GameShutdown" );
 	if ( serverGameDLL )
 	{
 		Steam3Server().NotifyOfLevelChange();
 		g_pServerPluginHandler->LevelShutdown();
-#if !defined(SWDS)
+#if !defined(DEDICATED)
 		audiosourcecache->LevelShutdown();
 #endif
 	}
 
 	GameShutdown();
-#ifndef SWDS
+#ifndef DEDICATED
 	saverestore->ClearSaveDir();
 #endif
 	Host_ShutdownServer();
 
-	switch( m_nextState )
+	MapReslistGenerator().OnLevelShutdown();
+
+	if ( IsGameConsole() )
 	{
-	case HS_LOAD_GAME:
-	case HS_NEW_GAME:
-	case HS_SHUTDOWN:
-	case HS_RESTART:
-		SetState( m_nextState, true );
-		break;
-	default:
-		SetState( HS_RUN, true );
-		break;
+		if ( m_nextState == HS_GAME_SHUTDOWN )
+		{
+			// game consoles needs some memory to do main menu (movie, installer, etc)
+			// this is an attempt to purge map related data
+			g_pQueuedLoader->PurgeAll();			
+			g_pDataCache->Flush();
+			wavedatacache->Flush();
+			g_pMDLCache->ReleaseAnimBlockAllocator();
+			materials->OnLevelShutdown();
+			materials->UncacheUnusedMaterials(); 
+			// Record the fact that this memory flush completed
+			HostState_Post_FlushMapFromMemory();
+
+			// the above leaves resources in a bad state for Queued Loader
+			// this ensures there a full purge necessary before any map gets loaded
+			SV_FlushMemoryOnNextServer();
+
+			// When ejecting BD right after starting loading a savegame, the game sometimes never calls State_shutdown, never sets engine state to DLL_CLOSE and goes into infinite loop
+			// calling shutdown here to prevent that.
+			if( IsPS3QuitRequested() )
+			{
+				State_Shutdown();
+			}
+		}
+	}
+
+	if( IsPS3QuitRequested() && m_nextState == HS_GAME_SHUTDOWN )
+	{
+		SetState( HS_GAME_SHUTDOWN, true );
+	}
+	else
+	{
+		switch( m_nextState )
+		{
+		case HS_LOAD_GAME:
+		case HS_NEW_GAME:
+		case HS_SHUTDOWN:
+		case HS_RESTART:
+			SetState( m_nextState, true );
+			break;
+		default:
+			SetState( HS_RUN, true );
+			break;
+		}
 	}
 }
 
@@ -581,9 +725,7 @@ void CHostState::State_GameShutdown()
 // Tell the launcher we're done.
 void CHostState::State_Shutdown()
 {
-	CCS_Shutdown();
-
-#if !defined(SWDS)
+#if !defined(DEDICATED)
 	CL_EndMovie();
 #endif
 
@@ -607,10 +749,9 @@ void CHostState::State_Restart( void )
 //-----------------------------------------------------------------------------
 // this is the state machine's main processing loop
 //-----------------------------------------------------------------------------
+char const *g_szHostStateDelayedMessage = NULL;
 void CHostState::FrameUpdate( float time )
 {
-	CCS_Tick( time );
-
 #if _DEBUG
 	int loopCount = 0;
 #endif
@@ -625,6 +766,18 @@ void CHostState::FrameUpdate( float time )
 
 	while ( true )
 	{
+		if ( g_szHostStateDelayedMessage )
+		{
+			struct tm newtime;
+			char tString[ 128 ] = {};
+			Plat_GetLocalTime( &newtime );
+			Plat_GetTimeString( &newtime, tString, sizeof( tString ) );
+
+			Warning( "Host state %d at %s -- %s\n", m_currentState, tString, g_szHostStateDelayedMessage );
+
+			g_szHostStateDelayedMessage = NULL;
+		}
+
 		int oldState = m_currentState;
 
 		// execute the current state (and transition to the next state if not in HS_RUN)
@@ -672,6 +825,12 @@ void CHostState::FrameUpdate( float time )
 			 oldState == HS_RESTART )
 			break;
 
+		// we may be required to quit when in GAME_SHUTDOWN state on PS3, which state doesn't change to SHUTDOWN at this point
+		// so in case we have user request to quit (or a disk ejected), to avoid infinite loop, we need to break out of this loop now.
+		if( IsPS3QuitRequested() && oldState == HS_GAME_SHUTDOWN )
+			break;
+
+
 		// Only HS_RUN is allowed to persist across loops!!!
 		// Also, detect circular state graphs (more than 8 cycling changes is probably a loop)
 		// NOTE: In the current graph, there are at most 2.
@@ -692,13 +851,13 @@ bool CHostState::IsGameShuttingDown( void )
 
 void CHostState::RememberLocation()
 {
-#ifndef SWDS
+#ifndef DEDICATED
 	Assert( m_bRememberLocation );
 
 	m_vecLocation = MainViewOrigin();
 	VectorAngles( MainViewForward(), m_angLocation );
 
-	IClientEntity *localPlayer = entitylist ? entitylist->GetClientEntity( cl.m_nPlayerSlot + 1 ) : NULL;
+	IClientEntity *localPlayer = entitylist ? entitylist->GetClientEntity( GetLocalClient().m_nPlayerSlot + 1 ) : NULL;
 	if ( localPlayer )
 	{
 		m_vecLocation = localPlayer->GetAbsOrigin();
@@ -710,6 +869,8 @@ void CHostState::RememberLocation()
 
 void CHostState::OnClientConnected()
 {
+	materials->OnDebugEvent( "CHostState::OnClientConnected" );
+
 	if ( !m_bWaitingForConnection )
 		return;
 	m_bWaitingForConnection = false;
@@ -717,16 +878,16 @@ void CHostState::OnClientConnected()
 	if ( m_bRememberLocation )
 	{
 		m_bRememberLocation = false;
-		Cbuf_AddText( va( "setpos_exact %f %f %f\n", m_vecLocation.x, m_vecLocation.y, m_vecLocation.z ) ); 
-		Cbuf_AddText( va( "setang_exact %f %f %f\n", m_angLocation.x, m_angLocation.y, m_angLocation.z ) );
+		Cbuf_AddText( Cbuf_GetCurrentPlayer(), va( "setpos_exact %f %f %f\n", m_vecLocation.x, m_vecLocation.y, m_vecLocation.z ) ); 
+		Cbuf_AddText( Cbuf_GetCurrentPlayer(), va( "setang_exact %f %f %f\n", m_angLocation.x, m_angLocation.y, m_angLocation.z ) );
 	}
 
-#if !defined( SWDS )
+#if !defined( DEDICATED )
 	if ( reload_materials.GetBool() )
 	{
 		// building cubemaps requires the materials to reload after map
 		reload_materials.SetValue( 0 );
-		Cbuf_AddText( "mat_reloadallmaterials\n" );
+		Cbuf_AddText( Cbuf_GetCurrentPlayer(), "mat_reloadallmaterials\n" );
 	}
 
 	// Spew global texture memory usage if asked to
@@ -740,7 +901,7 @@ void CHostState::OnClientConnected()
 #ifdef VPROF_ENABLED
 		CVProfile *pProf = &g_VProfCurrentProfile;
 
-		int prefixLen = strlen( "TexGroup_Global_" );
+		int prefixLen = V_strlen( "TexGroup_Global_" );
 		float total = 0.0f;
 		for ( int i=0; i < pProf->GetNumCounters(); i++ )
 		{
@@ -750,7 +911,7 @@ void CHostState::OnClientConnected()
 				float value = pProf->GetCounterValue( i ) * ( 1.0f /  ( 1024.0f * 1024.0f ) );
 				total += value;
 				const char *pName = pProf->GetCounterName( i );
-				if( Q_strnicmp( pName, "TexGroup_Global_", prefixLen ) == 0 )
+				if ( StringHasPrefix( pName, "TexGroup_Global_" ) )
 				{
 					pName += prefixLen;
 				}
@@ -767,37 +928,31 @@ void CHostState::OnClientConnected()
 #endif
 		g_pFileSystem->FPrintf( fp, "---------------------------------\n" );
 		g_pFileSystem->Close( fp );
-		Cbuf_AddText( "quit\n" );
+		Cbuf_AddText( Cbuf_GetCurrentPlayer(), "quit\n" );
+	}
+#endif
+#ifndef DEDICATED
+	if ( !sv.IsDedicated() )
+	{
+		ClientDLL_GameInit();
 	}
 #endif
 }
 
 void CHostState::OnClientDisconnected() 
 {
+	materials->OnDebugEvent( "CHostState::OnClientDisconnected" );
+#ifndef DEDICATED
+	if ( !sv.IsDedicated() )
+	{
+		ClientDLL_GameShutdown();
+	}
+#endif
 }
 
 // Determine if this is a valid game
 static bool Host_ValidGame( void )
 {
-	// No multi-client single player games
-	if ( sv.IsMultiplayer() )
-	{
-		if ( deathmatch.GetInt() )
-			return true;
-	}
-	else
-	{
-		/*
-		// Single player must have CD validation
-		if ( IsValidCD() )
-		{
-			return true;
-		}
-		*/
-		return true;
-	}
-
-	ConDMsg("Unable to launch game\n");
-	return false;
+	return true;
 }
 

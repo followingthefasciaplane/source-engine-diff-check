@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//=========== (C) Copyright 2000 Valve, L.L.C. All rights reserved. ===========
 //
 // The copyright to the contents herein is the property of Valve, L.L.C.
 // The contents may be used and/or copied only with the written permission of
@@ -58,7 +58,7 @@ public:
 
 	static void * operator new( size_t size )
 	{
-		CThreadSafeMemoryPool *pNode = (CThreadSafeMemoryPool *)MemAlloc_AllocAligned( size, 8, __FILE__, __LINE__ 
+		CThreadSafeMemoryPool *pNode = (CThreadSafeMemoryPool *)MemAlloc_AllocAlignedFileLine( size, 8, __FILE__, __LINE__ 
 #ifdef STEAM
 			, true // new operator
 #endif
@@ -68,7 +68,7 @@ public:
 	
 	static void * operator new( size_t size, int nBlockUse, const char *pFileName, int nLine )
 	{
-		CThreadSafeMemoryPool *pNode = (CThreadSafeMemoryPool *)MemAlloc_AllocAligned( size, 8, pFileName, nLine
+		CThreadSafeMemoryPool *pNode = (CThreadSafeMemoryPool *)MemAlloc_AllocAlignedFileLine( size, 8, pFileName, nLine
 #ifdef STEAM
 			, true // new operator
 #endif
@@ -94,10 +94,6 @@ public:
 			);
 	}
 		
-#ifdef DBGFLAG_VALIDATE
-	void Validate( CValidator &validator, const char *pchName );		// Validate our internal structures
-#endif // DBGFLAG_VALIDATE
-
 private:
 	// These ain't gonna work
 	static void * operator new[] ( size_t size );

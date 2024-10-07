@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -73,6 +73,8 @@ public:
 
 	int FrameCount() const { return m_totalNumFrames; }
 
+	void EnableVProfStatsRecording( const char *pFileName );
+
 private:
 	void ComputeFrameTimeStats( void );
 
@@ -97,6 +99,8 @@ private:
 
 	float m_flFrameTime;
 	float m_flFPSVariability;
+
+	char m_szVProfStatsFileName[MAX_PATH];
 };
 
 

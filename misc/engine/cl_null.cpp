@@ -1,17 +1,17 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright � 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: replaces the cl_*.cpp files with stubs
 //
 //=============================================================================//
 
 #include "client_pch.h"
-#ifdef SWDS
+#ifdef DEDICATED
 #include "hltvclientstate.h"
+#include "netconsole.h"
 #include "convar.h"
 #include "enginestats.h"
 #include "bspfile.h" // dworldlight_t
 #include "audio/public/soundservice.h"
-#include "tier0/systeminformation.h"
 
 ISoundServices *g_pSoundServices = NULL;
 Vector		listener_origin;
@@ -24,6 +24,8 @@ Vector		listener_origin;
 CEngineStats g_EngineStats;
 
 ClientClass *g_pClientClassHead = NULL;
+
+bool g_bReplayLoadedTools = false;
 
 bool CL_IsHL2Demo()
 {
@@ -59,8 +61,15 @@ void Con_ColorPrintf( const Color& clr, const char *fmt, ... )
 	{
 		return;
 	}
-	return;
-//	printf( "%s", msg );
+
+	SendStringToNetConsoles( msg );
+#if defined( LINUX )
+	// linux prints output elsewhere.  This disables standard printf's to keep from double printing all linux output
+#elif POSIX
+	printf( "%s", msg );
+#else
+	Msg( "%s", msg );
+#endif
 }
 
 void Con_NPrintf( int pos, const char *fmt, ... )
@@ -140,54 +149,55 @@ float ComputeLightRadius( dworldlight_t *pLight, bool bIsHDR )
 
 CClientState::CClientState() {}
 CClientState::~CClientState() {}
+void CClientState::ConnectionStart( INetChannel *chan ){}
+void CClientState::ConnectionStop(){}
+bool CClientState::SVCMsg_HltvReplay( const CSVCMsg_HltvReplay &msg ){ return false; }
 void CClientState::ConnectionClosing( const char * reason ) {}
 void CClientState::ConnectionCrashed( const char * reason ) {}
 bool CClientState::ProcessConnectionlessPacket( netpacket_t *packet ){ return false; }
 void CClientState::PacketStart(int incoming_sequence, int outgoing_acknowledged) {}
 void CClientState::PacketEnd( void ) {}
-void CClientState::FileReceived( const char *fileName, unsigned int transferID ) {}
-void CClientState::FileRequested( const char *fileName, unsigned int transferID ) {}
-void CClientState::FileDenied(const char *fileName, unsigned int transferID ) {}
-void CClientState::FileSent( const char *fileName, unsigned int transferID ) {}
-void CClientState::Disconnect( const char *pszReason, bool showmainmenu  ) {}
-void CClientState::FullConnect( netadr_t &adr ) {}
-bool CClientState::SetSignonState ( int state, int count ) { return false;}
+void CClientState::FileRequested(const char *fileName, unsigned int transferID, bool bIsReplayDemoFile ) {}
+void CClientState::Disconnect( bool showmainmenu  ) {}
+void CClientState::FullConnect( const ns_address &adr, int nEncryptionKey ) {}
+bool CClientState::SetSignonState ( int state, int count, const CNETMsg_SignonState *msg ) { return false;}
 void CClientState::SendClientInfo( void ) {}
+void CClientState::SendLoadingProgress( int nProgress ) {}
 void CClientState::SendServerCmdKeyValues( KeyValues *pKeyValues ) {}
 void CClientState::InstallStringTableCallback( char const *tableName ) {}
 bool CClientState::InstallEngineStringTableCallback( char const *tableName ) { return false;}
-void CClientState::ReadEnterPVS( CEntityReadInfo &u ) {}
-void CClientState::ReadLeavePVS( CEntityReadInfo &u ) {}
-void CClientState::ReadDeltaEnt( CEntityReadInfo &u ) {}
-void CClientState::ReadPreserveEnt( CEntityReadInfo &u ) {}
-void CClientState::ReadDeletions( CEntityReadInfo &u ) {}
+void CClientState::ReadPacketEntities( CEntityReadInfo &u ) {}
 const char *CClientState::GetCDKeyHash( void ) { return "123";}
 void CClientState::Clear( void ) {}
-bool CClientState::ProcessGameEvent(SVC_GameEvent *msg) { return true; }
-bool CClientState::ProcessUserMessage(SVC_UserMessage *msg) { return true; }
-bool CClientState::ProcessEntityMessage(SVC_EntityMessage *msg) { return true; }
-bool CClientState::ProcessBSPDecal( SVC_BSPDecal *msg ) { return true; }
-bool CClientState::ProcessCrosshairAngle( SVC_CrosshairAngle *msg ) { return true; }
-bool CClientState::ProcessFixAngle( SVC_FixAngle *msg ) { return true; }
-bool CClientState::ProcessVoiceData( SVC_VoiceData *msg ) { return true; }
-bool CClientState::ProcessVoiceInit( SVC_VoiceInit *msg ) { return true; }
-bool CClientState::ProcessSetPause( SVC_SetPause *msg ) { return true; }
-bool CClientState::ProcessSetPauseTimed( SVC_SetPauseTimed *msg ) { return true; }
-bool CClientState::ProcessClassInfo( SVC_ClassInfo *msg ) { return true; }
-bool CClientState::ProcessStringCmd( NET_StringCmd *msg ) { return true; }
-bool CClientState::ProcessServerInfo( SVC_ServerInfo *msg ) { return true; }
-bool CClientState::ProcessTick( NET_Tick *msg ) { return true; }
-bool CClientState::ProcessTempEntities( SVC_TempEntities *msg ) { return true; }
-bool CClientState::ProcessPacketEntities( SVC_PacketEntities *msg ) { return true; }
-bool CClientState::ProcessSounds( SVC_Sounds *msg )	 { return true; }
-bool CClientState::ProcessPrefetch( SVC_Prefetch *msg ) {return true;}
+bool CClientState::SVCMsg_UserMessage( const CSVCMsg_UserMessage& msg ) { return true; }
+bool CClientState::SVCMsg_GameEvent( const CSVCMsg_GameEvent& msg) { return true; }
+bool CClientState::SVCMsg_BSPDecal( const CSVCMsg_BSPDecal& msg ) OVERRIDE { return true; }
+bool CClientState::SVCMsg_CrosshairAngle( const CSVCMsg_CrosshairAngle& msg ) OVERRIDE { return true; }
+bool CClientState::SVCMsg_FixAngle( const CSVCMsg_FixAngle &msg ) OVERRIDE { return true; }
+bool CClientState::SVCMsg_VoiceData( const CSVCMsg_VoiceData& msg ) OVERRIDE { return true; }
+bool CClientState::SVCMsg_VoiceInit( const CSVCMsg_VoiceInit& msg ) OVERRIDE { return true; }
+bool CClientState::SVCMsg_SetPause( const CSVCMsg_SetPause& msg ) OVERRIDE { return true; } 
+bool CClientState::SVCMsg_ClassInfo( const CSVCMsg_ClassInfo& msg ) OVERRIDE { return true; }
+bool CClientState::NETMsg_StringCmd( const CNETMsg_StringCmd& msg ) OVERRIDE { return true; }
+bool CClientState::SVCMsg_ServerInfo( const CSVCMsg_ServerInfo& msg ) OVERRIDE { return true; }
+bool CClientState::NETMsg_Tick( const CNETMsg_Tick& msg ) OVERRIDE { return true; }
+bool CClientState::SVCMsg_TempEntities( const CSVCMsg_TempEntities& msg ) { return true; }
+bool CClientState::SVCMsg_PacketEntities( const CSVCMsg_PacketEntities& msg ) { return true; }
+bool CClientState::SVCMsg_Sounds( const CSVCMsg_Sounds& msg ) OVERRIDE { return true; }
+bool CClientState::SVCMsg_Prefetch( const CSVCMsg_Prefetch& msg ) OVERRIDE { return true; }
+bool CClientState::SVCMsg_PaintmapData( const CSVCMsg_PaintmapData& msg ) { return true; }
+bool CClientState::SVCMsg_EntityMsg( const CSVCMsg_EntityMsg& msg ) { return true; }
 float CClientState::GetTime() const { return 0.0f;}
+void CClientState::FileDenied(const char *fileName, unsigned int transferID, bool bIsReplayDemoFile ){}
+void CClientState::FileReceived( const char * fileName, unsigned int transferID, bool bIsReplayDemoFile ) {}
 void CClientState::RunFrame() {}
+void CClientState::ConsistencyCheck( bool bChanged ) {}
 bool CClientState::HookClientStringTable( char const *tableName ) { return false; }
 
 CClientState	cl;
-
-char g_minidumpinfo[ 4096 ] = {0};
-PAGED_POOL_INFO_t g_pagedpoolinfo = { 0 };
+float CL_GetHltvReplayTimeScale()
+{
+	return 1.0f; 
+}
 
 #endif

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =======
 //
 // A class representing a light
 //
@@ -33,7 +33,6 @@ public:
 	void SetIntensity( float flIntensity );
 
 	// Sets up render state in the material system for rendering
-	virtual void SetupRenderState( int nLightIndex );
 	virtual bool GetLightDesc( LightDesc_t *pDesc ) { return false; }
 
 protected:
@@ -53,14 +52,8 @@ class CDmeDirectionalLight : public CDmeLight
 	DEFINE_ELEMENT( CDmeDirectionalLight, CDmeLight );
 
 public:
-	void SetDirection( const Vector &direction );
-	const Vector &GetDirection() const { return m_Direction; }
-
 	// Sets up render state in the material system for rendering
 	virtual bool GetLightDesc( LightDesc_t *pDesc );
-
-private:
-	CDmaVar<Vector> m_Direction;
 };
 
 
@@ -72,9 +65,6 @@ class CDmePointLight : public CDmeLight
 	DEFINE_ELEMENT( CDmePointLight, CDmeLight );
 
 public:
-	void SetPosition( const Vector &pos ) { m_Position = pos; }
-	const Vector &GetPosition() const { return m_Position; }
-
 	// Sets the attenuation factors
 	void SetAttenuation( float flConstant, float flLinear, float flQuadratic );
 
@@ -85,7 +75,6 @@ public:
 	virtual bool GetLightDesc( LightDesc_t *pDesc );
 
 protected:
-	CDmaVar< Vector >	m_Position;
 	CDmaVar< float >	m_flAttenuation0;
 	CDmaVar< float >	m_flAttenuation1;
 	CDmaVar< float >	m_flAttenuation2;
@@ -101,9 +90,6 @@ class CDmeSpotLight : public CDmePointLight
 	DEFINE_ELEMENT( CDmeSpotLight, CDmePointLight );
 
 public:
-	// Sets the spotlight direction
-	void SetDirection( const Vector &direction );
-
 	// Sets the spotlight angle factors
 	// Angles are specified in degrees, as full angles (as opposed to half-angles)
 	void SetAngles( float flInnerAngle, float flOuterAngle, float flAngularFalloff );
@@ -112,7 +98,6 @@ public:
 	virtual bool GetLightDesc( LightDesc_t *pDesc );
 
 private:
-	CDmaVar<Vector> m_Direction;
 	CDmaVar<float>	m_flSpotInnerAngle;
 	CDmaVar<float>	m_flSpotOuterAngle;
 	CDmaVar<float>	m_flSpotAngularFalloff;
@@ -125,10 +110,6 @@ private:
 class CDmeAmbientLight : public CDmeLight
 {
 	DEFINE_ELEMENT( CDmeAmbientLight, CDmeLight );
-
-public:
-	// Sets up render state in the material system for rendering
-	virtual void SetupRenderState( int nLightIndex );
 };
 
 

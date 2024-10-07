@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -46,8 +46,8 @@ public:
 // --------------------------------------------------------------------------- //
 // Globals.
 // --------------------------------------------------------------------------- //
-CDecalVert ALIGN16 g_DecalClipVerts[MAX_DECALCLIPVERT] ALIGN16_POST;
-static CDecalVert ALIGN16 g_DecalClipVerts2[MAX_DECALCLIPVERT] ALIGN16_POST;
+CDecalVert ALIGN16 g_DecalClipVerts[MAX_DECALCLIPVERT];
+static CDecalVert ALIGN16 g_DecalClipVerts2[MAX_DECALCLIPVERT];
 
 
 
@@ -190,7 +190,6 @@ void R_SetupDecalVertsForMSurface(
 void R_DecalComputeBasis( Vector const& surfaceNormal, Vector const* pSAxis, 
 								 Vector* textureSpaceBasis )
 {
-	/*
 	// s, t, textureSpaceNormal (T cross S = textureSpaceNormal(N))
 	//   N     
 	//   \   
@@ -203,7 +202,6 @@ void R_DecalComputeBasis( Vector const& surfaceNormal, Vector const* pSAxis,
 	// S = textureSpaceBasis[0]
 	// T = textureSpaceBasis[1]
 	// N = textureSpaceBasis[2]
-	*/
 
 	// Get the surface normal.
 	VectorCopy( surfaceNormal, textureSpaceBasis[2] );
@@ -260,34 +258,37 @@ void R_DecalComputeBasis( Vector const& surfaceNormal, Vector const* pSAxis,
 
 #define MAX_PLAYERSPRAY_SIZE		64
 
-void R_SetupDecalTextureSpaceBasis( decal_t *pDecal, Vector &vSurfNormal, IMaterial *pMaterial, Vector textureSpaceBasis[3], float decalWorldScale[2] )
+void R_SetupDecalTextureSpaceBasis(
+	decal_t *pDecal,
+	Vector &vSurfNormal,
+	IMaterial *pMaterial,
+	Vector textureSpaceBasis[3],
+	float decalWorldScale[2] )
 {
 	// Compute the non-scaled decal basis
-	R_DecalComputeBasis( vSurfNormal, (pDecal->flags & FDECAL_USESAXIS) ? &pDecal->saxis : 0, textureSpaceBasis );
+	R_DecalComputeBasis( vSurfNormal,
+		(pDecal->flags & FDECAL_USESAXIS) ? &pDecal->saxis : 0,
+		textureSpaceBasis );
 
 	// world width of decal = ptexture->width / pDecal->scale
 	// world height of decal = ptexture->height / pDecal->scale
 	// scale is inverse, scales world space to decal u/v space [0,1]
 	// OPTIMIZE: Get rid of these divides
+	int nWidth = MAX( pMaterial->GetMappingWidth(), 1 );
+	int nHeight = MAX( pMaterial->GetMappingHeight(), 1 );
+	decalWorldScale[0] = pDecal->scale / nWidth;
+	decalWorldScale[1] = pDecal->scale / nHeight;
+
 	if ( pDecal->flags & FDECAL_PLAYERSPRAY )
 	{
-		int nWidthScale = pMaterial->GetMappingWidth() / MAX_PLAYERSPRAY_SIZE;
-		int nHeightScale = pMaterial->GetMappingHeight() / MAX_PLAYERSPRAY_SIZE;
-		float flScale = static_cast<float>( max( nWidthScale, nHeightScale ) );
-
-		decalWorldScale[0] = pDecal->scale / pMaterial->GetMappingWidth();
-		decalWorldScale[1] = pDecal->scale / pMaterial->GetMappingHeight();
-
+		int nWidthScale = nWidth / MAX_PLAYERSPRAY_SIZE;
+		int nHeightScale = nHeight / MAX_PLAYERSPRAY_SIZE;
+		float flScale = static_cast<float>( MAX( nWidthScale, nHeightScale ) );
 		if ( flScale > 1.0f )
 		{
 			decalWorldScale[0] *= flScale;
 			decalWorldScale[1] *= flScale;
 		}
-	}
-	else
-	{
-		decalWorldScale[0] = pDecal->scale / pMaterial->GetMappingWidth();
-		decalWorldScale[1] = pDecal->scale / pMaterial->GetMappingHeight();
 	}
 
 	VectorScale( textureSpaceBasis[0], decalWorldScale[0], textureSpaceBasis[0] );
@@ -296,7 +297,13 @@ void R_SetupDecalTextureSpaceBasis( decal_t *pDecal, Vector &vSurfNormal, IMater
 
 
 // Figure out where the decal maps onto the surface.
-void R_SetupDecalClip( CDecalVert* &pOutVerts, decal_t *pDecal, Vector &vSurfNormal, IMaterial *pMaterial, Vector textureSpaceBasis[3], float decalWorldScale[2] )
+void R_SetupDecalClip( 
+	CDecalVert* &pOutVerts,
+	decal_t *pDecal,
+	Vector &vSurfNormal,
+	IMaterial *pMaterial,
+	Vector textureSpaceBasis[3],
+	float decalWorldScale[2] )
 {
 //	if ( pOutVerts == NULL )
 //		pOutVerts = &g_DecalClipVerts[0];
@@ -320,7 +327,12 @@ CDecalVert* R_DecalVertsClip( CDecalVert *pOutVerts, decal_t *pDecal, SurfaceHan
 	Vector textureSpaceBasis[3]; 
 
 	// Figure out where the decal maps onto the surface.
-	R_SetupDecalClip( pOutVerts, pDecal, MSurf_Plane( surfID ).normal, pMaterial, textureSpaceBasis, decalWorldScale );
+	R_SetupDecalClip( 
+		pOutVerts,
+		pDecal,
+		MSurf_Plane( surfID ).normal,
+		pMaterial,
+		textureSpaceBasis, decalWorldScale );
 
 	// Build the initial list of vertices from the surface verts.
 	R_SetupDecalVertsForMSurface( pDecal, surfID, textureSpaceBasis, g_DecalClipVerts );

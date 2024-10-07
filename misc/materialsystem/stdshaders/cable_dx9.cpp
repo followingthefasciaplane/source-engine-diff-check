@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright (c) 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: A wet version of base * lightmap
 //
@@ -16,8 +16,6 @@
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
-extern ConVar mat_fullbright;
-
 DEFINE_FALLBACK_SHADER( Cable, Cable_DX9 )
 
 BEGIN_VS_SHADER( Cable_DX9, 
@@ -30,11 +28,6 @@ BEGIN_VS_SHADER( Cable_DX9,
 
 	SHADER_FALLBACK
 	{
-		if ( !(g_pHardwareConfig->SupportsPixelShaders_2_0() && g_pHardwareConfig->SupportsVertexShaders_2_0()) ||
-				(g_pHardwareConfig->GetDXSupportLevel() < 90) )
-		{
-			return "Cable_DX8";
-		}
 		return 0;
 	}
 
@@ -62,11 +55,9 @@ BEGIN_VS_SHADER( Cable_DX9,
 			pShaderShadow->EnableAlphaTest( IS_FLAG_SET(MATERIAL_VAR_ALPHATEST) );
 
 			pShaderShadow->EnableTexture( SHADER_SAMPLER0, true );
+
 			pShaderShadow->EnableTexture( SHADER_SAMPLER1, true );
-			if ( g_pHardwareConfig->GetDXSupportLevel() >= 90)
-			{
-				pShaderShadow->EnableSRGBRead( SHADER_SAMPLER1, true );
-			}
+			pShaderShadow->EnableSRGBRead( SHADER_SAMPLER1, true );
 			
 			int tCoordDimensions[] = {2,2};
 			pShaderShadow->VertexShaderVertexFormat( 
@@ -98,17 +89,17 @@ BEGIN_VS_SHADER( Cable_DX9,
 		}
 		DYNAMIC_STATE
 		{
-			bool bLightingOnly = mat_fullbright.GetInt() == 2 && !IS_FLAG_SET( MATERIAL_VAR_NO_DEBUG_OVERRIDE );
+			bool bLightingOnly = g_pConfig->nFullbright == 2 && !IS_FLAG_SET( MATERIAL_VAR_NO_DEBUG_OVERRIDE );
 
-			BindTexture( SHADER_SAMPLER0, BUMPMAP );
+			BindTexture( SHADER_SAMPLER0, TEXTURE_BINDFLAGS_NONE, BUMPMAP );
 			if ( bLightingOnly )
 			{
-				pShaderAPI->BindStandardTexture( SHADER_SAMPLER1, TEXTURE_GREY );
+				pShaderAPI->BindStandardTexture( SHADER_SAMPLER1, TEXTURE_BINDFLAGS_SRGBREAD, TEXTURE_GREY );
 
 			}
 			else
 			{
-				BindTexture( SHADER_SAMPLER1, BASETEXTURE );			
+				BindTexture( SHADER_SAMPLER1, TEXTURE_BINDFLAGS_SRGBREAD, BASETEXTURE );			
 			}
 
 			pShaderAPI->SetPixelShaderFogParams( PSREG_FOG_PARAMS );		
@@ -119,20 +110,17 @@ BEGIN_VS_SHADER( Cable_DX9,
 			pShaderAPI->SetPixelShaderConstant( PSREG_EYEPOS_SPEC_EXPONENT, vEyePos_SpecExponent, 1 );
 
 			DECLARE_DYNAMIC_VERTEX_SHADER( cable_vs20 );
-			SET_DYNAMIC_VERTEX_SHADER_COMBO( DOWATERFOG, pShaderAPI->GetSceneFogMode() == MATERIAL_FOG_LINEAR_BELOW_FOG_Z );
 			SET_DYNAMIC_VERTEX_SHADER( cable_vs20 );
 
 			if( g_pHardwareConfig->SupportsPixelShaders_2_b() )
 			{
 				DECLARE_DYNAMIC_PIXEL_SHADER( cable_ps20b );
-				SET_DYNAMIC_PIXEL_SHADER_COMBO( PIXELFOGTYPE, pShaderAPI->GetPixelFogCombo() );
 				SET_DYNAMIC_PIXEL_SHADER_COMBO( WRITE_DEPTH_TO_DESTALPHA, bFullyOpaque && pShaderAPI->ShouldWriteDepthToDestAlpha() );
 				SET_DYNAMIC_PIXEL_SHADER( cable_ps20b );
 			}
 			else
 			{
 				DECLARE_DYNAMIC_PIXEL_SHADER( cable_ps20 );
-				SET_DYNAMIC_PIXEL_SHADER_COMBO( PIXELFOGTYPE, pShaderAPI->GetPixelFogCombo() );
 				SET_DYNAMIC_PIXEL_SHADER( cable_ps20 );
 			}
 		}

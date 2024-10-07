@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Expose functions from sys_dll.cpp.
 //
@@ -12,6 +12,7 @@
 #pragma once
 #endif
 
+
 #include "interface.h"
 
 //-----------------------------------------------------------------------------
@@ -22,8 +23,8 @@ class IDataCache;
 class IPhysics;
 class IMDLCache;
 class IMatSystemSurface;
-class IVideoServices;
-class IVideoRecorder;
+class IAvi;
+class IBik;
 class IInputSystem;
 class IDedicatedExports;
 class ISoundEmitterSystemBase;
@@ -46,23 +47,25 @@ extern CreateInterfaceFn g_GameSystemFactory;
 // Singleton interfaces
 //-----------------------------------------------------------------------------
 extern IHammer *g_pHammer;
-extern IDataCache *g_pDataCache;
 extern IPhysics *g_pPhysics;
-extern IMDLCache *g_pMDLCache;
-extern IMatSystemSurface *g_pMatSystemSurface;
-extern IInputSystem *g_pInputSystem;
-extern IVideoServices *g_pVideo;
+extern IAvi *avi;
+extern IBik *bik;
+#ifdef _PS3
+extern class IPS3SaveRestoreToUI *ps3saveuiapi;
+#endif
 extern IDedicatedExports *dedicated;
 
 //-----------------------------------------------------------------------------
 // Other singletons
 //-----------------------------------------------------------------------------
-extern IVideoRecorder *g_pVideoRecorder;
+extern AVIHandle_t g_hCurrentAVI;
+
 
 inline bool InEditMode()
 {
 	return g_pHammer != NULL;
 }
+
 
 struct modinfo_t
 {
@@ -77,7 +80,7 @@ struct modinfo_t
 
 extern modinfo_t gmodinfo;
 
-void LoadEntityDLLs( const char *szBaseDir, bool bIsServerOnly );
+void LoadEntityDLLs( const char *szBaseDir, bool bServerOnly );
 void UnloadEntityDLLs( void );
 
 // This returns true if someone called Error() or Sys_Error() and we're exiting.
@@ -87,25 +90,19 @@ bool IsInErrorExit();
 // error message
 bool Sys_MessageBox(const char *title, const char *info, bool bShowOkAndCancel);
 
-bool ServerDLL_Load( bool bIsServerOnly );
+bool ServerDLL_Load( bool bServerOnly );
 void ServerDLL_Unload();
-
-typedef uint32 AppId_t;
-
-// steam.inf information.
-struct SteamInfVersionInfo_t
-{
-	int32 ClientVersion; // PatchVersion
-	int32 ServerVersion; // ServerVersion
-	char szVersionString[ 32 ]; // PatchVersion string
-	char szProductString[ 32 ]; // ProductName string
-
-	AppId_t AppID; // Steam AppID. Read from steam.inf(AppID) or gameinfo.txt(SteamAppId)
-	AppId_t ServerAppID; // ServerAppID. Used for dedicated server crash reporting.
-};
-const SteamInfVersionInfo_t& GetSteamInfIDVersionInfo();
 
 extern CreateInterfaceFn g_ServerFactory;
 
+const char *Sys_GetVersionString();
+const char *Sys_GetProductString();
+
+// SysDlls 3 loading and unloading entry points
+bool SysDll3_Load();
+void SysDll3_Unload();
+DECLARE_LOGGING_CHANNEL( LOG_SERVER_LOG );
+
 #endif
+
 

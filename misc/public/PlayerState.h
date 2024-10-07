@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -46,7 +46,9 @@ public:
 	bool		hltv;
 	bool		replay;
 	int			frags;
+	int			assists;
 	int			deaths;
+	int			score;
 #endif
 
 // NOTE:  Only care about this stuff in game/client dlls

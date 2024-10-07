@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -9,6 +9,9 @@
 #include "demo.h"
 #include "server.h"
 #include "enginethreads.h"
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
 
 
 ConVar cl_clock_correction( "cl_clock_correction", "1", FCVAR_CHEAT, "Enable/disable clock correction on the client." );
@@ -78,27 +81,28 @@ void CClockDriftMgr::Clear()
 // NOTE: and frame end on the client
 void CClockDriftMgr::SetServerTick( int nTick )
 {
-#if !defined( SWDS )
+#if !defined( DEDICATED )
 	m_nServerTick = nTick;
 
 	int nMaxDriftTicks = IsEngineThreaded() ? 
 		TIME_TO_TICKS( (cl_clockdrift_max_ms_threadmode.GetFloat() / 1000.0) ) :
 		TIME_TO_TICKS( (cl_clockdrift_max_ms.GetFloat() / 1000.0) );
 
-	int clientTick = cl.GetClientTickCount() + g_ClientGlobalVariables.simTicksThisFrame - 1;
+	int clientTick = GetBaseLocalClient().GetClientTickCount() + g_ClientGlobalVariables.simTicksThisFrame - 1;
 	if ( cl_clock_correction_force_server_tick.GetInt() == 999 )
 	{
 		// If this is the first tick from the server, or if we get further than cl_clockdrift_max_ticks off, then 
 		// use the old behavior and slam the server's tick into the client tick.
 		if ( !IsClockCorrectionEnabled() ||
 			 clientTick == 0 || 
-			 abs(nTick - clientTick) > nMaxDriftTicks
+			 abs(nTick - clientTick) > nMaxDriftTicks ||
+			 ( demoplayer && demoplayer->IsPlayingBack() && clientTick > nTick )
 			)
 		{
-			cl.SetClientTickCount( nTick - (g_ClientGlobalVariables.simTicksThisFrame - 1) );
-			if ( cl.GetClientTickCount() < cl.oldtickcount )
+			GetBaseLocalClient().SetClientTickCount( nTick - (g_ClientGlobalVariables.simTicksThisFrame - 1) );
+			if ( GetBaseLocalClient().GetClientTickCount() < GetBaseLocalClient().oldtickcount )
 			{
-				cl.oldtickcount = cl.GetClientTickCount();
+				GetBaseLocalClient().oldtickcount = GetBaseLocalClient().GetClientTickCount();
 			}
 			memset( m_ClockOffsets, 0, sizeof( m_ClockOffsets ) );
 		}
@@ -106,13 +110,13 @@ void CClockDriftMgr::SetServerTick( int nTick )
 	else
 	{
 		// Used for testing..
-		cl.SetClientTickCount( nTick + cl_clock_correction_force_server_tick.GetInt() );
+		GetBaseLocalClient().SetClientTickCount( nTick + cl_clock_correction_force_server_tick.GetInt() );
 	}
 
 	// adjust the clock offset by the clock with thread mode compensation
 	m_ClockOffsets[m_iCurClockOffset] = clientTick - m_nServerTick;
 	m_iCurClockOffset = (m_iCurClockOffset + 1) % NUM_CLOCKDRIFT_SAMPLES;
-#endif // SWDS
+#endif // DEDICATED
 }
 
 
@@ -121,7 +125,7 @@ float CClockDriftMgr::AdjustFrameTime( float inputFrameTime )
 	float flAdjustmentThisFrame = 0;
 	float flAdjustmentPerSec = 0;
 	if ( IsClockCorrectionEnabled() 
-#if !defined( _XBOX ) && !defined( SWDS )
+#if !defined( DEDICATED )
 		 && !demoplayer->IsPlayingBack()
 #endif
 		)
@@ -135,13 +139,13 @@ float CClockDriftMgr::AdjustFrameTime( float inputFrameTime )
 		{
 			flAdjustmentPerSec = -GetClockAdjustmentAmount( flCurDiffInMS );
 			flAdjustmentThisFrame = inputFrameTime * flAdjustmentPerSec;
-			flAdjustmentThisFrame = max( flAdjustmentThisFrame, -flCurDiffInSeconds );
+			flAdjustmentThisFrame = MAX( flAdjustmentThisFrame, -flCurDiffInSeconds );
 		}
 		else if ( flCurDiffInMS < -cl_clock_correction_adjustment_min_offset.GetFloat() )
 		{
 			flAdjustmentPerSec = GetClockAdjustmentAmount( -flCurDiffInMS );
 			flAdjustmentThisFrame = inputFrameTime * flAdjustmentPerSec;
-			flAdjustmentThisFrame = min( flAdjustmentThisFrame, -flCurDiffInSeconds );
+			flAdjustmentThisFrame = MIN( flAdjustmentThisFrame, -flCurDiffInSeconds );
 		}
 
 		if ( IsEngineThreaded() )
@@ -171,25 +175,29 @@ float CClockDriftMgr::GetCurrentClockDifference() const
 
 void CClockDriftMgr::ShowDebugInfo( float flAdjustment )
 {
+#ifndef DEDICATED
 	if ( !cl_clock_showdebuginfo.GetInt() )
 		return;
 
+#ifndef DEDICATED
 	if ( IsClockCorrectionEnabled() )
 	{
 		int high=-999, low=999;
-		int exactDiff = cl.GetClientTickCount() - m_nServerTick;
+		int exactDiff = GetBaseLocalClient().GetClientTickCount() - m_nServerTick;
 		for ( int i=0; i < NUM_CLOCKDRIFT_SAMPLES; i++ )
 		{
-			high = max( (float)high, m_ClockOffsets[i] );
-			low = min( (float)low, m_ClockOffsets[i] );
+			high = MAX( high, m_ClockOffsets[i] );
+			low = MIN( low, m_ClockOffsets[i] );
 		}
 
 		Msg( "Clock drift: adjustment (per sec): %.2fms, avg: %.3f, lo: %d, hi: %d, ex: %d\n", flAdjustment*1000.0f, GetCurrentClockDifference(), low, high, exactDiff );
 	}
 	else
+#endif
 	{
 		Msg( "Clock drift disabled.\n" );
 	}
+#endif
 }
 
 
@@ -214,27 +222,17 @@ extern ConVar net_usesocketsforloopback;
 
 bool CClockDriftMgr::IsClockCorrectionEnabled()
 {
-#ifdef SWDS
+#ifdef DEDICATED
 	return false;
 #else
-
-	bool bIsMultiplayer = NET_IsMultiplayer();
-	// Assume we always want it in multiplayer
-	bool bWantsClockDriftMgr = bIsMultiplayer;
-	// If we're a multiplayer listen server, we can back off of that if we have zero latency (faked or due to sockets)
-	if ( bIsMultiplayer )
+	if ( sv.IsActive() && ( IsGameConsole() || NET_GetFakeLag() <= 0.0f ) )
 	{
-		bool bIsListenServer = sv.IsActive();
-		bool bLocalConnectionHasZeroLatency = ( NET_GetFakeLag() <= 0.0f ) && !net_usesocketsforloopback.GetBool();
-
-		if ( bIsListenServer && bLocalConnectionHasZeroLatency )
-		{
-			bWantsClockDriftMgr = false;
-		}
+		// Never want this in listen server. Has the result of slamming the server time
+		// as well in host.cpp, thus can never recover. Yields the server simulation running
+		// noticably faster until a full network update is triggered. [3/31/2009 tom]
+		return false;
 	}
 
-	// Only in multi-threaded client/server OR in multi player, but don't use it if we're the listen server w/ no fake lag
-	return cl_clock_correction.GetInt() && 
-		( IsEngineThreaded() ||	bWantsClockDriftMgr );		
+	return cl_clock_correction.GetBool();
 #endif
 }

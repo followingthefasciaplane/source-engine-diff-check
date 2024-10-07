@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -23,10 +23,6 @@ public:
 					CTEPhysicsProp( const char *name );
 	virtual			~CTEPhysicsProp( void );
 
-	virtual void	Test( const Vector& current_origin, const QAngle& current_angles );
-	
-	virtual void	Precache( void );
-
 	DECLARE_SERVERCLASS();
 
 public:
@@ -37,6 +33,7 @@ public:
 	CNetworkVar( int, m_nSkin );
 	CNetworkVar( int, m_nFlags );
 	CNetworkVar( int, m_nEffects );
+	CNetworkColor32( m_clrRender );
 };
 
 //-----------------------------------------------------------------------------
@@ -46,6 +43,8 @@ public:
 CTEPhysicsProp::CTEPhysicsProp( const char *name ) :
 	CBaseTempEntity( name )
 {
+	color32 white = {255, 255, 255, 255};
+
 	m_vecOrigin.Init();
 	m_angRotation.Init();
 	m_vecVelocity.Init();
@@ -53,6 +52,7 @@ CTEPhysicsProp::CTEPhysicsProp( const char *name ) :
 	m_nSkin				= 0;
 	m_nFlags			= 0;
 	m_nEffects			= 0;
+	m_clrRender			= white;
 }
 
 //-----------------------------------------------------------------------------
@@ -60,46 +60,6 @@ CTEPhysicsProp::CTEPhysicsProp( const char *name ) :
 //-----------------------------------------------------------------------------
 CTEPhysicsProp::~CTEPhysicsProp( void )
 {
-}
-
-//-----------------------------------------------------------------------------
-// Purpose: 
-//-----------------------------------------------------------------------------
-void CTEPhysicsProp::Precache( void )
-{
-	CBaseEntity::PrecacheModel( "models/gibs/hgibs.mdl" );
-}
-
-//-----------------------------------------------------------------------------
-// Purpose: 
-// Input  : *current_origin - 
-//			*current_angles - 
-//-----------------------------------------------------------------------------
-void CTEPhysicsProp::Test( const Vector& current_origin, const QAngle& current_angles )
-{
-	// Fill in data
-	m_nModelIndex = CBaseEntity::PrecacheModel( "models/gibs/hgibs.mdl" );
-	m_nSkin = 0;
-	m_vecOrigin = current_origin;
-	m_angRotation = current_angles;
-	
-	m_vecVelocity.Init( random->RandomFloat( -10, 10 ), random->RandomFloat( -10, 10 ), random->RandomFloat( 0, 20 ) );
-	m_nFlags = 0;
-	m_nEffects = 0;
-	
-	Vector forward, right;
-
-	m_vecOrigin += Vector( 0, 0, 24 );
-
-	AngleVectors( current_angles, &forward, &right, 0 );
-	forward[2] = 0.0;
-	VectorNormalize( forward );
-
-	VectorMA( m_vecOrigin, 50.0, forward, m_vecOrigin.GetForModify() );
-	VectorMA( m_vecOrigin, 25.0, right, m_vecOrigin.GetForModify() );
-
-	CBroadcastRecipientFilter filter;
-	Create( filter, 0.0 );
 }
 
 IMPLEMENT_SERVERCLASS_ST(CTEPhysicsProp, DT_TEPhysicsProp)
@@ -112,14 +72,21 @@ IMPLEMENT_SERVERCLASS_ST(CTEPhysicsProp, DT_TEPhysicsProp)
 	SendPropInt( SENDINFO(m_nSkin), ANIMATION_SKIN_BITS),
 	SendPropInt( SENDINFO(m_nFlags), 2, SPROP_UNSIGNED ),
 	SendPropInt( SENDINFO(m_nEffects), EF_MAX_BITS, SPROP_UNSIGNED),
+	SendPropInt( SENDINFO(m_clrRender), 32,	SPROP_UNSIGNED, SendProxy_Color32ToInt32 ),
 END_SEND_TABLE()
 
 // Singleton to fire TEBreakModel objects
 static CTEPhysicsProp s_TEPhysicsProp( "physicsprop" );
 
 void TE_PhysicsProp( IRecipientFilter& filter, float delay,
-	int modelindex, int skin, const Vector& pos, const QAngle &angles, const Vector& vel, int flags, int effects )
+	int modelindex, int skin, const Vector& pos, const QAngle &angles, const Vector& vel, int flags, int effects, color24 renderColor )
 {
+	color32 clrRenderConverted;
+	clrRenderConverted.r = renderColor.r;
+	clrRenderConverted.g = renderColor.g;
+	clrRenderConverted.b = renderColor.b;
+	clrRenderConverted.a = 255;
+
 	s_TEPhysicsProp.m_vecOrigin		= pos;
 	s_TEPhysicsProp.m_angRotation	= angles;
 	s_TEPhysicsProp.m_vecVelocity	= vel;
@@ -127,6 +94,7 @@ void TE_PhysicsProp( IRecipientFilter& filter, float delay,
 	s_TEPhysicsProp.m_nSkin			= skin;
 	s_TEPhysicsProp.m_nFlags		= flags;
 	s_TEPhysicsProp.m_nEffects		= effects;
+	s_TEPhysicsProp.m_clrRender		= clrRenderConverted;
 
 	// Send it over the wire
 	s_TEPhysicsProp.Create( filter, delay );

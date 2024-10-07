@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -10,7 +10,7 @@
 #ifdef CLIENT_DLL
 
 #else
-
+	#include "globalstate.h"
 	#include "player.h"
 	#include "basecombatweapon.h"
 	#include "gamerules.h"
@@ -22,6 +22,21 @@
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
+
+#ifndef CLIENT_DLL
+	// This allows us to test regenerative health systems on the fly
+	void RegenerationForceOnChangeCallback( IConVar *pConVar, const char *pOldValue, float flOldValue )
+	{
+		ConVarRef var( pConVar );
+
+		if ( !GlobalEntity_IsInTable( "player_regenerates_health" ) )
+			GlobalEntity_Add( MAKE_STRING("player_regenerates_health"), gpGlobals->mapname, ( var.GetBool() ) ? ( GLOBAL_ON ) : ( GLOBAL_OFF ) );
+		else
+			GlobalEntity_SetState( MAKE_STRING("player_regenerates_health"), ( var.GetBool() ) ? ( GLOBAL_ON ) : ( GLOBAL_OFF ) );
+	}
+
+	ConVar sv_regeneration_force_on( "sv_regeneration_force_on", "0", FCVAR_CHEAT, "Cheat to test regenerative health systems", RegenerationForceOnChangeCallback );
+#endif
 
 
 //=========================================================
@@ -146,7 +161,6 @@ bool CSingleplayRules::Damage_ShouldNotBleed( int iDmgType )
 	//=========================================================
 	CSingleplayRules::CSingleplayRules( void )
 	{
-		RefreshSkillData( true );
 	}
 
 	//=========================================================
@@ -177,7 +191,7 @@ bool CSingleplayRules::Damage_ShouldNotBleed( int iDmgType )
 	bool CSingleplayRules::FShouldSwitchWeapon( CBasePlayer *pPlayer, CBaseCombatWeapon *pWeapon )
 	{
 		//Must have ammo
-		if ( ( pWeapon->HasAnyAmmo() == false ) && ( pPlayer->GetAmmoCount( pWeapon->m_iPrimaryAmmoType ) <= 0 ) )
+		if ( ( pWeapon->HasAnyAmmo() == false ) && ( pWeapon->GetReserveAmmoCount( AMMO_POSITION_PRIMARY ) <= 0 ) )
 			return false;
 
 		//Always take a loaded gun if we have nothing else
@@ -224,6 +238,11 @@ bool CSingleplayRules::Damage_ShouldNotBleed( int iDmgType )
 			if ( pWeapon == NULL )
 				continue;
 
+#ifdef PORTAL2
+			if ( pWeapon == pCurrentWeapon )
+				continue;
+#endif // PORTAL2
+
 			// If we have an active weapon and this weapon doesn't allow autoswitching away
 			// from another weapon, skip it.
 			if ( pCurrentWeapon && !pWeapon->AllowsAutoSwitchTo() )
@@ -238,7 +257,7 @@ bool CSingleplayRules::Damage_ShouldNotBleed( int iDmgType )
 				continue;
 
 			// We must have primary ammo
-			if ( pWeapon->UsesClipsForAmmo1() && pWeapon->Clip1() <= 0 && !pPlayer->GetAmmoCount( pWeapon->GetPrimaryAmmoType() ) )
+			if ( pWeapon->UsesClipsForAmmo1() && pWeapon->Clip1() <= 0 && !pWeapon->GetReserveAmmoCount( AMMO_POSITION_PRIMARY ) )
 				continue;
 
 			// This is a better candidate than what we had.
@@ -286,8 +305,7 @@ bool CSingleplayRules::Damage_ShouldNotBleed( int iDmgType )
 	{
 		// subtract off the speed at which a player is allowed to fall without being hurt,
 		// so damage will be based on speed beyond that, not the entire fall
-		pPlayer->m_Local.m_flFallVelocity -= PLAYER_MAX_SAFE_FALL_SPEED;
-		return pPlayer->m_Local.m_flFallVelocity * DAMAGE_FOR_FALL_SPEED;
+		return (pPlayer->m_Local.m_flFallVelocity - PLAYER_MAX_SAFE_FALL_SPEED) * DAMAGE_FOR_FALL_SPEED;
 	}
 
 	//=========================================================
@@ -484,9 +502,9 @@ bool CSingleplayRules::Damage_ShouldNotBleed( int iDmgType )
 
 	//=========================================================
 	//=========================================================
-	bool CSingleplayRules::PlayerCanHearChat( CBasePlayer *pListener, CBasePlayer *pSpeaker )
+	bool CSingleplayRules::PlayerCanHearChat( CBasePlayer *pListener, CBasePlayer *pSpeaker, bool bTeamOnly )
 	{
-		return ( PlayerRelationship( pListener, pSpeaker ) == GR_TEAMMATE );
+		return !bTeamOnly || PlayerRelationship( pListener, pSpeaker ) == GR_TEAMMATE;
 	}
 
 	//=========================================================

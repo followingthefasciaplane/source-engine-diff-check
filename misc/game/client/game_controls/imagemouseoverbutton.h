@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright 1996-2006, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -9,7 +9,7 @@
 #define IMAGE_MOUSE_OVER_BUTTON_H
 
 #include "vgui/ISurface.h"
-#include "vgui/IScheme.h"
+#include "vgui/ischeme.h"
 #include "mouseoverpanelbutton.h"
 
 //===============================================
@@ -64,7 +64,7 @@ CImageMouseOverButton<T>::CImageMouseOverButton( vgui::Panel *parent, const char
 template <class T>
 void CImageMouseOverButton<T>::ApplySettings( KeyValues *inResourceData )
 {
-	m_bScaleImage = inResourceData->GetInt( "scaleImage", 0 );
+	m_bScaleImage = inResourceData->GetBool( "scaleImage", false );
 
 	// Active Image
 	delete [] m_pszActiveImageName;
@@ -251,6 +251,9 @@ template <class T>
 void CImageMouseOverButton<T>::HidePage( void )
 {
 	MouseOverButton<T>::HidePage();
+
+	// send message to parent that we triggered something
+	this->PostActionSignal( new KeyValues( "ShowPage", "page", this->GetName() ) );
 }
 
 #endif //IMAGE_MOUSE_OVER_BUTTON_H

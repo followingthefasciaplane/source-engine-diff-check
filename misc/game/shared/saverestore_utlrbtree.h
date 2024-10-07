@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose:
 //
@@ -33,7 +33,7 @@ public:
 		{
 			(fieldtype_t)FIELD_TYPE, 
 			"elem", 
-			{ 0, 0 },
+			0,
 			1, 
 			FTYPEDESC_SAVE, 
 			NULL, 
@@ -49,9 +49,8 @@ public:
 			1,
 			"urb",
 			NULL,
-			false,
-			false,
 			0,
+			NULL,
 #ifdef _DEBUG
 			true
 #endif
@@ -83,7 +82,7 @@ public:
 		{
 			(fieldtype_t)FIELD_TYPE, 
 			"elems", 
-			{ 0, 0 },
+			0,
 			1, 
 			FTYPEDESC_SAVE, 
 			NULL, 
@@ -99,9 +98,8 @@ public:
 			1,
 			"uv",
 			NULL,
-			false,
-			false,
 			0,
+			NULL,
 #ifdef _DEBUG
 			true
 #endif

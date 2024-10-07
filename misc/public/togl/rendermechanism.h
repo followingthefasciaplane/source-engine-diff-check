@@ -1,27 +1,3 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
-//                       TOGL CODE LICENSE
-//
-//  Copyright 2011-2014 Valve Corporation
-//  All Rights Reserved.
-//
-//  Permission is hereby granted, free of charge, to any person obtaining a copy
-//  of this software and associated documentation files (the "Software"), to deal
-//  in the Software without restriction, including without limitation the rights
-//  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-//  copies of the Software, and to permit persons to whom the Software is
-//  furnished to do so, subject to the following conditions:
-//
-//  The above copyright notice and this permission notice shall be included in
-//  all copies or substantial portions of the Software.
-//
-//  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-//  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-//  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-//  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-//  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-//  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-//  THE SOFTWARE.
-//
 #ifndef RENDERMECHANISM_H
 #define RENDERMECHANISM_H
 
@@ -35,21 +11,21 @@
 #include "tier0/basetypes.h"
 #include "tier0/platform.h"
 
-#include "togl/linuxwin/glmdebug.h"
-#include "togl/linuxwin/glbase.h"
-#include "togl/linuxwin/glentrypoints.h"
-#include "togl/linuxwin/glmdisplay.h"
-#include "togl/linuxwin/glmdisplaydb.h"
-#include "togl/linuxwin/glmgrbasics.h"
-#include "togl/linuxwin/glmgrext.h"
-#include "togl/linuxwin/cglmbuffer.h"
-#include "togl/linuxwin/cglmtex.h"
-#include "togl/linuxwin/cglmfbo.h"
-#include "togl/linuxwin/cglmprogram.h"
-#include "togl/linuxwin/cglmquery.h"
-#include "togl/linuxwin/glmgr.h"
-#include "togl/linuxwin/dxabstract_types.h"
-#include "togl/linuxwin/dxabstract.h"
+#include "togl/glmdebug.h"
+#include "togl/glbase.h"
+#include "togl/glentrypoints.h"
+#include "togl/glmdisplay.h"
+#include "togl/glmdisplaydb.h"
+#include "togl/glmgrbasics.h"
+#include "togl/glmgrext.h"
+#include "togl/cglmbuffer.h"
+#include "togl/cglmtex.h"
+#include "togl/cglmfbo.h"
+#include "togl/cglmprogram.h"
+#include "togl/cglmquery.h"
+#include "togl/glmgr.h"
+#include "togl/dxabstract_types.h"
+#include "togl/dxabstract.h"
 
 #else
 	//USE_ACTUAL_DX

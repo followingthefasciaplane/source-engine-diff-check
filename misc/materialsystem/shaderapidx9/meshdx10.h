@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -208,16 +208,25 @@ public:
 	int  VertexCount() const;
 
 	virtual void BeginPass( ) {}
-	virtual void RenderPass() {}
+	virtual void RenderPass( const unsigned char *pInstanceCommandBuffer ) {}
 	virtual bool HasColorMesh() const { return false; }
 	virtual bool IsUsingMorphData() const { return false; }
 	virtual bool HasFlexMesh() const { return false; }
+	virtual VertexStreamSpec_t *GetVertexStreamSpec() const { return NULL; }
+	virtual void DrawInstances( MaterialPrimitiveType_t type, int nCount, const MeshInstanceData_t *pInstanceData ) {}
 
 	// Sets the primitive type
 	void SetPrimitiveType( MaterialPrimitiveType_t type );
 
+	// Using vertex ID stream?
+	bool IsUsingVertexID() const { return false; }
+
+	// Using tessellation for subd surfaces?
+	TessellationMode_t GetTessellationType() const { return TESSELLATION_MODE_DISABLED; }
+
 	// Draws the entire mesh
 	void Draw(int firstIndex, int numIndices);
+	void DrawModulated( const Vector4D &vecDiffuseModulation, int firstIndex, int numIndices) {}
 
 	void Draw(CPrimList *pPrims, int nPrims);
 
@@ -259,8 +268,6 @@ public:
 	virtual void DisableFlexMesh() {}
 
 	virtual void MarkAsDrawn() {}
-
-	virtual unsigned ComputeMemoryUsed() { return 0; }
 
 	virtual VertexFormat_t GetVertexFormat() const { return VERTEX_POSITION; }
 

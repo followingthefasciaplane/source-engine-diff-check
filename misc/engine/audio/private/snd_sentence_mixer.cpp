@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Sentence Mixing
 //
@@ -20,7 +20,7 @@ public:
 	~CSentenceMixer( void );
 
 	// return number of samples mixed
-	virtual int			MixDataToDevice( IAudioDevice *pDevice, channel_t *pChannel, int sampleCount, int outputRate, int outputOffset );
+	virtual int			MixDataToDevice( channel_t *pChannel, int sampleCount, int outputRate, int outputOffset );
 	virtual int			SkipSamples( channel_t *pChannel, int sampleCount, int outputRate, int outputOffset );
 	virtual bool		ShouldContinueMixing( void );
 
@@ -32,6 +32,7 @@ public:
 	virtual float		GetVolumeScale( void );
 
 	// BUGBUG: These are only applied to the current word, not the whole sentence!!!!
+	virtual bool		IsSetSampleStartSupported() const;
 	virtual void		SetSampleStart( int newPosition );
 	virtual void		SetSampleEnd( int newEndPosition );
 
@@ -76,8 +77,7 @@ CSentenceMixer::CSentenceMixer( voxword_t *pWords )
 	while ( pWords[m_nNumWords].sfx != NULL )
 	{
 		// get a private copy of the words
-		m_VoxWords[m_nNumWords] = pWords[m_nNumWords];
-		m_nNumWords++;
+		m_VoxWords[m_nNumWords] = pWords[m_nNumWords++];
 		if ( m_nNumWords >= ARRAYSIZE( m_VoxWords ) )
 		{
 			// very long sentence, prevent overflow
@@ -204,6 +204,11 @@ int CSentenceMixer::GetSamplePosition( void )
 	return 0;
 }
 
+bool CSentenceMixer::IsSetSampleStartSupported() const
+{
+	return true;
+}
+
 void CSentenceMixer::SetSampleStart( int newPosition )
 {
 	if ( m_pCurrentWordMixer )
@@ -264,11 +269,13 @@ CAudioMixer *CSentenceMixer::LoadWord( int nWord )
 	CAudioMixer *pMixer = NULL;
 	if ( m_VoxWords[nWord].sfx )
 	{
-		CAudioSource *pSource = S_LoadSound( m_VoxWords[nWord].sfx, NULL );
+		SoundError soundError;
+		CAudioSource *pSource = S_LoadSound( m_VoxWords[nWord].sfx, NULL, soundError );
 		if ( pSource )
 		{
 			pSource->SetSentenceWord( true );
-			pMixer = pSource->CreateMixer();
+			SoundError soundError;
+			pMixer = pSource->CreateMixer( 0, 0, false, soundError, nullptr );
 		}
 	}
 
@@ -308,7 +315,7 @@ int  CSentenceMixer::SkipSamples( channel_t *pChannel, int sampleCount, int outp
 }
 
 // return number of samples mixed
-int CSentenceMixer::MixDataToDevice( IAudioDevice *pDevice, channel_t *pChannel, int sampleCount, int outputRate, int outputOffset )
+int CSentenceMixer::MixDataToDevice( channel_t *pChannel, int sampleCount, int outputRate, int outputOffset )
 {
 	if ( !m_pCurrentWordMixer )
 	{
@@ -320,19 +327,17 @@ int CSentenceMixer::MixDataToDevice( IAudioDevice *pDevice, channel_t *pChannel,
 
 	while ( sampleCount > 0 && m_pCurrentWordMixer )
 	{
-		int outputCount = m_pCurrentWordMixer->MixDataToDevice( pDevice, pChannel, sampleCount, outputRate, outputOffset );
+		int outputCount = m_pCurrentWordMixer->MixDataToDevice( pChannel, sampleCount, outputRate, outputOffset );
 
 		outputOffset += outputCount;
 		sampleCount -= outputCount;
 
 		if ( !m_pCurrentWordMixer->ShouldContinueMixing() )
 		{
-			bool bMouth = SND_IsMouth( pChannel );
-			if ( bMouth )
+			if ( pChannel->flags.m_bHasMouth )
 			{
 				SND_ClearMouth( pChannel );
 			}
-
 			// advance to next valid word mixer
 			do 
 			{
@@ -352,10 +357,6 @@ int CSentenceMixer::MixDataToDevice( IAudioDevice *pDevice, channel_t *pChannel,
 				m_bNewWord = true;
 
 				pChannel->sfx = m_VoxWords[m_currentWordIndex].sfx;
-				if ( bMouth )
-				{
-					SND_UpdateMouth( pChannel );
-				}
 				if ( !IsReadyToMix() )
 				{
 					// current word isn't ready, stop mixing

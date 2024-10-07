@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2008, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -134,16 +134,23 @@ public:
 	virtual void BindVertexBuffer( int nStreamID, IVertexBuffer *pVertexBuffer, int nOffsetInBytes, int nFirstVertex, int nVertexCount, VertexFormat_t fmt, int nRepetitions = 1 );
 	virtual void BindIndexBuffer( IIndexBuffer *pIndexBuffer, int nOffsetInBytes );
 	virtual void Draw( MaterialPrimitiveType_t primitiveType, int nFirstIndex, int nIndexCount );
+	virtual void OnPresent( void );
+	virtual void UpdateGameTime( float ) {}
 
 	// Methods of IShaderDynamicAPI
 public:
 	virtual void GetBackBufferDimensions( int& nWidth, int& nHeight ) const;
+	virtual void GetCurrentRenderTargetDimensions( int& nWidth, int& nHeight ) const;
+	virtual void GetCurrentViewport( int& nX, int& nY, int& nWidth, int& nHeight ) const;
+	virtual void SetScreenSizeForVPOS( int pshReg = 32 );
+	virtual void SetVSNearAndFarZ( int vshReg );
+	virtual float GetFarZ();
 
 public:
 	// Methods of CShaderAPIBase
 	virtual bool OnDeviceInit() { ResetRenderState(); return true; }
 	virtual void OnDeviceShutdown() {}
-	virtual void ReleaseShaderObjects();
+	virtual void ReleaseShaderObjects( bool bReleaseManagedResources = true );
 	virtual void RestoreShaderObjects();
 	virtual void BeginPIXEvent( unsigned long color, const char *szName ) {}
 	virtual void EndPIXEvent() {}
@@ -169,7 +176,7 @@ public:
 	void UnbindIndexBuffer( ID3D10Buffer *pBuffer );
 
 	void PrintfVA( char *fmt, va_list vargs ) {}
-	void Printf( PRINTF_FORMAT_STRING const char *fmt, ... ) {}
+	void Printf( char *fmt, ... ) {}
 	float Knob( char *knobname, float *setvalue = NULL ) { return 0.0f;}
 
 private:
@@ -200,7 +207,7 @@ private:
 	}
 
 	// Called when the dx support level has changed
-	virtual void DXSupportLevelChanged() {}
+	virtual void DXSupportLevelChanged( int nDXLevel ) {}
 
 	virtual void EnableUserClipTransformOverride( bool bEnable ) {}
 	virtual void UserClipTransform( const VMatrix &worldToView ) {}
@@ -230,57 +237,15 @@ private:
 	// Uses a state snapshot
 	void UseSnapshot( StateSnapshot_t snapshot );
 
-	// Use this to get the mesh builder that allows us to modify vertex data
-	CMeshBuilder* GetVertexModifyBuilder();
-
-	// Sets the color to modulate by
-	void Color3f( float r, float g, float b );
-	void Color3fv( float const* pColor );
-	void Color4f( float r, float g, float b, float a );
-	void Color4fv( float const* pColor );
-
-	// Faster versions of color
-	void Color3ub( unsigned char r, unsigned char g, unsigned char b );
-	void Color3ubv( unsigned char const* rgb );
-	void Color4ub( unsigned char r, unsigned char g, unsigned char b, unsigned char a );
-	void Color4ubv( unsigned char const* rgba );
-
 	// Sets the lights
-	void SetLight( int lightNum, const LightDesc_t& desc );
-	void SetAmbientLight( float r, float g, float b );
+	void SetLights( int lightNum, const LightDesc_t* pDesc );
+	void SetLightingState( const MaterialLightingState_t &state );
 	void SetAmbientLightCube( Vector4D cube[6] );
 	virtual void SetLightingOrigin( Vector vLightingOrigin ) {}
 
-	// Get the lights
-	int GetMaxLights( void ) const;
-	const LightDesc_t& GetLight( int lightNum ) const;
-
 	// Render state for the ambient light cube (vertex shaders)
-	void SetVertexShaderStateAmbientLightCube();
-	virtual void SetPixelShaderStateAmbientLightCube( int pshReg, bool bForceToBlack = false ) {}
-	void SetPixelShaderStateAmbientLightCube( int pshReg )
-	{
-	}
 	virtual void GetDX9LightState( LightState_t *state ) const {}
 
-	float GetAmbientLightCubeLuminance(void)
-	{
-		return 0.0f;
-	}
-
-	void SetSkinningMatrices();
-
-	// Lightmap texture binding
-	void BindLightmap( TextureStage_t stage );
-	void BindLightmapAlpha( TextureStage_t stage )
-	{
-	}
-	void BindBumpLightmap( TextureStage_t stage );
-	void BindFullbrightLightmap( TextureStage_t stage );
-	void BindWhite( TextureStage_t stage );
-	void BindBlack( TextureStage_t stage );
-	void BindGrey( TextureStage_t stage );
-	void BindFBTexture( TextureStage_t stage, int textureIdex );
 	void CopyRenderTargetToTexture( ShaderAPITextureHandle_t texID )
 	{
 	}
@@ -289,15 +254,6 @@ private:
 	{
 	}
 
-	void CopyTextureToRenderTargetEx( int nRenderTargetID, ShaderAPITextureHandle_t textureHandle, Rect_t *pSrcRect = NULL, Rect_t *pDstRect = NULL )
-	{
-	}
-
-	// Special system flat normal map binding.
-	void BindFlatNormalMap( TextureStage_t stage );
-	void BindNormalizationCubeMap( TextureStage_t stage );
-	void BindSignedNormalizationCubeMap( TextureStage_t stage );
-
 	// Set the number of bone weights
 	void SetNumBoneWeights( int numBones );
 
@@ -305,7 +261,7 @@ private:
 	void FlushBufferedPrimitives();
 
 	// Creates/destroys Mesh
-	IMesh* CreateStaticMesh( VertexFormat_t fmt, const char *pTextureBudgetGroup, IMaterial * pMaterial = NULL );
+	IMesh* CreateStaticMesh( VertexFormat_t fmt, const char *pTextureBudgetGroup, IMaterial * pMaterial = NULL, VertexStreamSpec_t *pStreamSpec = NULL );
 	void DestroyStaticMesh( IMesh* mesh );
 
 	// Gets the dynamic mesh; note that you've got to render the mesh
@@ -318,15 +274,10 @@ private:
 		Assert( 0 );
 		return NULL;
 	}
-	IIndexBuffer *GetDynamicIndexBuffer( IMaterial* pMaterial, bool buffered )
-	{
-		Assert( 0 );
-		return NULL;
-	}
 	IMesh* GetFlexMesh();
 
 	// Renders a single pass of a material
-	void RenderPass( int nPass, int nPassCount );
+	void RenderPass( const unsigned char *pInstanceCommandBuffer, int nPass, int nPassCount );
 
 	// stuff related to matrix stacks
 	void MatrixMode( MaterialMatrixMode_t matrixMode );
@@ -367,7 +318,7 @@ private:
 	virtual void SceneFogMode( MaterialFogMode_t fogMode );
 	virtual void GetSceneFogColor( unsigned char *rgb );
 	virtual MaterialFogMode_t GetSceneFogMode( );
-	virtual int GetPixelFogCombo( );
+	virtual int GetPixelFogCombo( ); // deprecated. . don't use.
 
 	void SetHeightClipZ( float z ); 
 	void SetHeightClipMode( enum MaterialHeightClipMode_t heightClipMode ); 
@@ -437,6 +388,7 @@ private:
 
 	// Cull mode
 	void CullMode( MaterialCullMode_t cullMode );
+	void FlipCullMode( void );
 
 	// Force writes only when z matches. . . useful for stenciling things out
 	// by rendering the desired Z values ahead of time.
@@ -462,6 +414,8 @@ private:
 	// Sets the texture state
 	void BindTexture( Sampler_t stage, ShaderAPITextureHandle_t textureHandle );
 
+	void BindVertexTexture( VertexTextureSampler_t vtSampler, ShaderAPITextureHandle_t textureHandle );
+
 	void SetRenderTarget( ShaderAPITextureHandle_t colorTextureHandle, ShaderAPITextureHandle_t depthTextureHandle )
 	{
 	}
@@ -480,11 +434,15 @@ private:
 		ImageFormat srcFormat, bool bSrcIsTiled, void *imageData );
 	void TexSubImage2D( int level, int cubeFace, int xOffset, int yOffset, int zOffset, int width, int height,
 		ImageFormat srcFormat, int srcStride, bool bSrcIsTiled, void *imageData );
-	void TexImageFromVTF( IVTFTexture *pVTF, int iVTFFrame );
 
 	bool TexLock( int level, int cubeFaceID, int xOffset, int yOffset, 
 		int width, int height, CPixelWriter& writer );
 	void TexUnlock( );
+
+	void UpdateTexture( int xOffset, int yOffset, int w, int h, ShaderAPITextureHandle_t hDstTexture, ShaderAPITextureHandle_t hSrcTexture );
+
+	void *LockTex( ShaderAPITextureHandle_t hTexture );
+	void UnlockTex( ShaderAPITextureHandle_t hTexture );
 
 	// These are bound to the texture, not the texture environment
 	void TexMinFilter( ShaderTexFilterMode_t texFilterMode );
@@ -552,24 +510,23 @@ private:
 
 	// Get the current camera position in world space.
 	void GetWorldSpaceCameraPosition( float * pPos ) const;
+	void GetWorldSpaceCameraDirection( float* pDir ) const;
 
 	void ForceHardwareSync( void );
 
 	int GetCurrentNumBones( void ) const;
 	bool IsHWMorphingEnabled( ) const;
+	TessellationMode_t GetTessellationMode( ) const;
 	int GetCurrentLightCombo( void ) const;
 	int MapLightComboToPSLightCombo( int nLightCombo ) const;
-	MaterialFogMode_t GetCurrentFogType( void ) const;
+	MaterialFogMode_t GetCurrentFogType( void ) const; // deprecated. don't use.
 
 	void RecordString( const char *pStr );
 
 	void EvictManagedResources();
 
-	void SetTextureTransformDimension( TextureStage_t textureStage, int dimension, bool projected );
-	void DisableTextureTransform( TextureStage_t textureStage )
-	{
-	}
-	void SetBumpEnvMatrix( TextureStage_t textureStage, float m00, float m01, float m10, float m11 );
+	// Get stats on GPU memory usage
+	void GetGPUMemoryStats( GPUMemoryStats &stats );
 
 	// Gets the lightmap dimensions
 	virtual void GetLightmapDimensions( int *w, int *h );
@@ -649,20 +606,9 @@ private:
 		return false;
 	}
 
-	// What fields in the morph do we actually use?
-	virtual MorphFormat_t ComputeMorphFormat( int numSnapshots, StateSnapshot_t* pIds ) const
-	{
-		return 0;
-	}
-
-	// Gets the bound morph's vertex format; returns 0 if no morph is bound
-	virtual MorphFormat_t GetBoundMorphFormat()
-	{
-		return 0;
-	}
-
 	void GetStandardTextureDimensions( int *pWidth, int *pHeight, StandardTextureId_t id );
 
+	float GetSubDHeight();
 	// Binds a standard texture
 	virtual void BindStandardTexture( Sampler_t stage, StandardTextureId_t id )
 	{
@@ -692,6 +638,14 @@ private:
 		return blah;
 	}
 
+	virtual void GetFlashlightShaderInfo( bool *pShadowsEnabled, bool *pUberLight ) const
+	{
+		*pShadowsEnabled = false;
+		*pUberLight = false;
+	}
+
+	virtual float GetFlashlightAmbientOcclusion( ) const { return 1.0f; }
+
 	virtual void SetModeChangeCallback( ModeChangeCallbackFunc_t func )
 	{
 	}
@@ -705,18 +659,13 @@ private:
 	{
 	}
 
-	// Binds a vertex texture to a particular texture stage in the vertex pipe
-	virtual void BindVertexTexture( VertexTextureSampler_t nStage, ShaderAPITextureHandle_t hTexture )
-	{
-	}
-
 	// Sets morph target factors
 	virtual void SetFlexWeights( int nFirstWeight, int nCount, const MorphWeight_t* pWeights )
 	{
 	}
 
 	// NOTE: Stuff after this is added after shipping HL2.
-	ITexture *GetRenderTargetEx( int nRenderTargetID )
+	ITexture *GetRenderTargetEx( int nRenderTargetID ) const
 	{
 		return NULL;
 	}
@@ -729,11 +678,6 @@ private:
 	{
 		static Vector dummy;
 		return dummy;
-	}
-
-	virtual float GetLightMapScaleFactor( void ) const
-	{
-		return 1.0;
 	}
 
 	// For dealing with device lost in cases where SwapBuffers isn't called all the time (Hammer)
@@ -757,6 +701,11 @@ private:
 	void SetIntRenderingParameter(int parm_number, int value)
 	{
 	}
+
+	void SetTextureRenderingParameter(int parm_number, ITexture *pTexture)
+	{
+	}
+
 	void SetVectorRenderingParameter(int parm_number, Vector const &value)
 	{
 	}
@@ -771,51 +720,21 @@ private:
 		return 0;
 	}
 
+	ITexture *GetTextureRenderingParameter(int parm_number) const
+	{
+		return NULL;
+	}
+
 	Vector GetVectorRenderingParameter(int parm_number) const
 	{
 		return Vector(0,0,0);
 	}
 
 	// Methods related to stencil
-	void SetStencilEnable(bool onoff)
-	{
-	}
-
-	void SetStencilFailOperation(StencilOperation_t op)
-	{
-	}
-
-	void SetStencilZFailOperation(StencilOperation_t op)
-	{
-	}
-
-	void SetStencilPassOperation(StencilOperation_t op)
-	{
-	}
-
-	void SetStencilCompareFunction(StencilComparisonFunction_t cmpfn)
-	{
-	}
-
-	void SetStencilReferenceValue(int ref)
-	{
-	}
-
-	void SetStencilTestMask(uint32 msk)
-	{
-	}
-
-	void SetStencilWriteMask(uint32 msk)
-	{
-	}
+	virtual void SetStencilState( const ShaderStencilState_t &state ) {}
 
 	void ClearStencilBufferRectangle( int xmin, int ymin, int xmax, int ymax,int value)
 	{
-	}
-
-	virtual void GetDXLevelDefaults(uint &max_dxlevel,uint &recommended_dxlevel)
-	{
-		max_dxlevel=recommended_dxlevel=90;
 	}
 
 	virtual void GetMaxToRender( IMesh *pMesh, bool bMaxUntilFlush, int *pMaxVerts, int *pMaxIndices )
@@ -877,13 +796,14 @@ private:
 	{
 	}
 
+	virtual void DrawInstances( int nInstanceCount, const MeshInstanceData_t *pInstances )
+	{
+	}
+
 	void SetStandardTextureHandle(StandardTextureId_t,ShaderAPITextureHandle_t)
 	{
 	}
 
-	virtual void SetPSNearAndFarZ( int pshReg )
-	{
-	}
 
 	int GetPackedDeformationInformation( int nMaskOfUnderstoodDeformations,
 										 float *pConstantValuesOut,
@@ -898,6 +818,15 @@ private:
 	virtual bool OwnGPUResources( bool bEnable )
 	{
 		return false;
+	}
+
+	virtual void FlipCulling( bool bFlipCulling ) {}
+
+	virtual void EnableSinglePassFlashlightMode( bool bEnable ) {}
+	virtual bool SinglePassFlashlightModeEnabled( void ) { return false; }
+
+	virtual void SetTextureFilterMode( Sampler_t sampler, TextureFilterMode_t nMode )
+	{
 	}
 
 private:

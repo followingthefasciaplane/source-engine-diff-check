@@ -1,27 +1,18 @@
+// ALL SKIP STATEMENTS THAT AFFECT THIS SHADER!!!
+// ( $FLASHLIGHT != 0 ) && ( $NUM_LIGHTS > 0 ) 
+// defined $PIXELFOGTYPE && defined $WRITEWATERFOGTODESTALPHA && ( $PIXELFOGTYPE != 1 ) && $WRITEWATERFOGTODESTALPHA
+// defined $LIGHTING_PREVIEW && defined $FASTPATHENVMAPTINT && $LIGHTING_PREVIEW && $FASTPATHENVMAPTINT
+// defined $LIGHTING_PREVIEW && defined $FASTPATHENVMAPCONTRAST && $LIGHTING_PREVIEW && $FASTPATHENVMAPCONTRAST
+// defined $LIGHTING_PREVIEW && defined $FASTPATH && $LIGHTING_PREVIEW && $FASTPATH
+// ($FLASHLIGHT || $FLASHLIGHTSHADOWS) && $LIGHTING_PREVIEW
+// defined $PIXELFOGTYPE && defined $WRITEWATERFOGTODESTALPHA && ( $PIXELFOGTYPE != 1 ) && $WRITEWATERFOGTODESTALPHA
+// defined $LIGHTING_PREVIEW && defined $FASTPATHENVMAPTINT && $LIGHTING_PREVIEW && $FASTPATHENVMAPTINT
+// defined $LIGHTING_PREVIEW && defined $FASTPATHENVMAPCONTRAST && $LIGHTING_PREVIEW && $FASTPATHENVMAPCONTRAST
+// defined $LIGHTING_PREVIEW && defined $FASTPATH && $LIGHTING_PREVIEW && $FASTPATH
+// ($FLASHLIGHT || $FLASHLIGHTSHADOWS) && $LIGHTING_PREVIEW
 #include "shaderlib/cshader.h"
 class vortwarp_ps30_Static_Index
 {
-private:
-	int m_nCONVERT_TO_SRGB;
-#ifdef _DEBUG
-	bool m_bCONVERT_TO_SRGB;
-#endif
-public:
-	void SetCONVERT_TO_SRGB( int i )
-	{
-		Assert( i >= 0 && i <= 1 );
-		m_nCONVERT_TO_SRGB = i;
-#ifdef _DEBUG
-		m_bCONVERT_TO_SRGB = true;
-#endif
-	}
-	void SetCONVERT_TO_SRGB( bool i )
-	{
-		m_nCONVERT_TO_SRGB = i ? 1 : 0;
-#ifdef _DEBUG
-		m_bCONVERT_TO_SRGB = true;
-#endif
-	}
 private:
 	int m_nBASETEXTURE;
 #ifdef _DEBUG
@@ -38,6 +29,7 @@ public:
 	}
 	void SetBASETEXTURE( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nBASETEXTURE = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bBASETEXTURE = true;
@@ -59,6 +51,7 @@ public:
 	}
 	void SetCUBEMAP( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nCUBEMAP = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bCUBEMAP = true;
@@ -80,6 +73,7 @@ public:
 	}
 	void SetDIFFUSELIGHTING( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nDIFFUSELIGHTING = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bDIFFUSELIGHTING = true;
@@ -101,6 +95,7 @@ public:
 	}
 	void SetNORMALMAPALPHAENVMAPMASK( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nNORMALMAPALPHAENVMAPMASK = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bNORMALMAPALPHAENVMAPMASK = true;
@@ -122,6 +117,7 @@ public:
 	}
 	void SetHALFLAMBERT( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nHALFLAMBERT = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bHALFLAMBERT = true;
@@ -143,6 +139,7 @@ public:
 	}
 	void SetFLASHLIGHT( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nFLASHLIGHT = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bFLASHLIGHT = true;
@@ -164,18 +161,16 @@ public:
 	}
 	void SetTRANSLUCENT( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nTRANSLUCENT = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bTRANSLUCENT = true;
 #endif
 	}
 public:
-	vortwarp_ps30_Static_Index( )
+	// CONSTRUCTOR
+	vortwarp_ps30_Static_Index( IShaderShadow *pShaderShadow, IMaterialVar **params )
 	{
-#ifdef _DEBUG
-		m_bCONVERT_TO_SRGB = true;
-#endif // _DEBUG
-		m_nCONVERT_TO_SRGB =  g_pHardwareConfig->NeedsShaderSRGBConversion();
 #ifdef _DEBUG
 		m_bBASETEXTURE = false;
 #endif // _DEBUG
@@ -210,10 +205,10 @@ public:
 		// Asserts to make sure that we aren't using any skipped combinations.
 		// Asserts to make sure that we are setting all of the combination vars.
 #ifdef _DEBUG
-		bool bAllStaticVarsDefined = m_bCONVERT_TO_SRGB && m_bBASETEXTURE && m_bCUBEMAP && m_bDIFFUSELIGHTING && m_bNORMALMAPALPHAENVMAPMASK && m_bHALFLAMBERT && m_bFLASHLIGHT && m_bTRANSLUCENT;
+		bool bAllStaticVarsDefined = m_bBASETEXTURE && m_bCUBEMAP && m_bDIFFUSELIGHTING && m_bNORMALMAPALPHAENVMAPMASK && m_bHALFLAMBERT && m_bFLASHLIGHT && m_bTRANSLUCENT;
 		Assert( bAllStaticVarsDefined );
 #endif // _DEBUG
-		return ( 80 * m_nCONVERT_TO_SRGB ) + ( 160 * m_nBASETEXTURE ) + ( 320 * m_nCUBEMAP ) + ( 640 * m_nDIFFUSELIGHTING ) + ( 1280 * m_nNORMALMAPALPHAENVMAPMASK ) + ( 2560 * m_nHALFLAMBERT ) + ( 5120 * m_nFLASHLIGHT ) + ( 10240 * m_nTRANSLUCENT ) + 0;
+		return ( 80 * m_nBASETEXTURE ) + ( 160 * m_nCUBEMAP ) + ( 320 * m_nDIFFUSELIGHTING ) + ( 640 * m_nNORMALMAPALPHAENVMAPMASK ) + ( 1280 * m_nHALFLAMBERT ) + ( 2560 * m_nFLASHLIGHT ) + ( 5120 * m_nTRANSLUCENT ) + 0;
 	}
 };
 #define shaderStaticTest_vortwarp_ps30 psh_forgot_to_set_static_BASETEXTURE + psh_forgot_to_set_static_CUBEMAP + psh_forgot_to_set_static_DIFFUSELIGHTING + psh_forgot_to_set_static_NORMALMAPALPHAENVMAPMASK + psh_forgot_to_set_static_HALFLAMBERT + psh_forgot_to_set_static_FLASHLIGHT + psh_forgot_to_set_static_TRANSLUCENT + 0
@@ -235,6 +230,7 @@ public:
 	}
 	void SetWRITEWATERFOGTODESTALPHA( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nWRITEWATERFOGTODESTALPHA = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bWRITEWATERFOGTODESTALPHA = true;
@@ -256,6 +252,7 @@ public:
 	}
 	void SetPIXELFOGTYPE( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nPIXELFOGTYPE = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bPIXELFOGTYPE = true;
@@ -277,6 +274,7 @@ public:
 	}
 	void SetWARPINGIN( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nWARPINGIN = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bWARPINGIN = true;
@@ -298,6 +296,7 @@ public:
 	}
 	void SetAMBIENT_LIGHT( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nAMBIENT_LIGHT = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bAMBIENT_LIGHT = true;
@@ -319,22 +318,24 @@ public:
 	}
 	void SetNUM_LIGHTS( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 4 );
 		m_nNUM_LIGHTS = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bNUM_LIGHTS = true;
 #endif
 	}
 public:
-	vortwarp_ps30_Dynamic_Index()
+	// CONSTRUCTOR
+	vortwarp_ps30_Dynamic_Index( IShaderDynamicAPI *pShaderAPI )
 	{
 #ifdef _DEBUG
 		m_bWRITEWATERFOGTODESTALPHA = false;
 #endif // _DEBUG
 		m_nWRITEWATERFOGTODESTALPHA = 0;
 #ifdef _DEBUG
-		m_bPIXELFOGTYPE = false;
+		m_bPIXELFOGTYPE = true;
 #endif // _DEBUG
-		m_nPIXELFOGTYPE = 0;
+		m_nPIXELFOGTYPE = ( pShaderAPI->GetSceneFogMode() == MATERIAL_FOG_LINEAR_BELOW_FOG_Z ) ;
 #ifdef _DEBUG
 		m_bWARPINGIN = false;
 #endif // _DEBUG
@@ -359,4 +360,39 @@ public:
 		return ( 1 * m_nWRITEWATERFOGTODESTALPHA ) + ( 2 * m_nPIXELFOGTYPE ) + ( 4 * m_nWARPINGIN ) + ( 8 * m_nAMBIENT_LIGHT ) + ( 16 * m_nNUM_LIGHTS ) + 0;
 	}
 };
-#define shaderDynamicTest_vortwarp_ps30 psh_forgot_to_set_dynamic_WRITEWATERFOGTODESTALPHA + psh_forgot_to_set_dynamic_PIXELFOGTYPE + psh_forgot_to_set_dynamic_WARPINGIN + psh_forgot_to_set_dynamic_AMBIENT_LIGHT + psh_forgot_to_set_dynamic_NUM_LIGHTS + 0
+#define shaderDynamicTest_vortwarp_ps30 psh_forgot_to_set_dynamic_WRITEWATERFOGTODESTALPHA + psh_forgot_to_set_dynamic_WARPINGIN + psh_forgot_to_set_dynamic_AMBIENT_LIGHT + psh_forgot_to_set_dynamic_NUM_LIGHTS + 0
+
+static const ShaderComboInformation_t s_DynamicComboArray_vortwarp_ps30[5] = 
+{
+	{ "WRITEWATERFOGTODESTALPHA", 0, 1 },
+	{ "PIXELFOGTYPE", 0, 1 },
+	{ "WARPINGIN", 0, 1 },
+	{ "AMBIENT_LIGHT", 0, 1 },
+	{ "NUM_LIGHTS", 0, 4 },
+};
+
+static const ShaderComboInformation_t s_StaticComboArray_vortwarp_ps30[7] = 
+{
+	{ "BASETEXTURE", 0, 1 },
+	{ "CUBEMAP", 0, 1 },
+	{ "DIFFUSELIGHTING", 0, 1 },
+	{ "NORMALMAPALPHAENVMAPMASK", 0, 1 },
+	{ "HALFLAMBERT", 0, 1 },
+	{ "FLASHLIGHT", 0, 1 },
+	{ "TRANSLUCENT", 0, 1 },
+};
+static const ShaderComboSemantics_t vortwarp_ps30_combos =
+{
+	"vortwarp_ps30", s_DynamicComboArray_vortwarp_ps30, 5, s_StaticComboArray_vortwarp_ps30, 7 
+};
+
+class ConstructMe_vortwarp_ps30
+{
+public:
+	ConstructMe_vortwarp_ps30()
+	{
+		GetShaderDLL()->AddShaderComboInformation( &vortwarp_ps30_combos );
+	}
+};
+
+static ConstructMe_vortwarp_ps30 s_ConstructMe_vortwarp_ps30;

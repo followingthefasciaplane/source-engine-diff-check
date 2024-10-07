@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -10,6 +10,9 @@
 #include "server.h"
 #include "filetransfermgr.h"
 #include "filesystem_engine.h"
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
 
 
 ConVar sv_logo_rate( "sv_logo_rate", "1024", 0, "How fast (bytes per second) the server sends logo files to clients." );

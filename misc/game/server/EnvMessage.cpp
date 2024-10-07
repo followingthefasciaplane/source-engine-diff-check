@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Implements visual effects entities: sprites, beams, bubbles, etc.
 //
@@ -8,10 +8,10 @@
 #include "cbase.h"
 #include "EnvMessage.h"
 #include "engine/IEngineSound.h"
-#include "KeyValues.h"
+#include "keyvalues.h"
 #include "filesystem.h"
-#include "Color.h"
-#include "gamestats.h"
+#include "color.h"
+#include "GameStats.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -95,7 +95,11 @@ void CMessage::InputShowMessage( inputdata_t &inputdata )
 
 	if ( m_spawnflags & SF_MESSAGE_ALL )
 	{
+#ifdef CSTRIKE15
+		UTIL_ClientPrintAll( HUD_PRINTCENTER, STRING( m_iszMessage ) );
+#else
 		UTIL_ShowMessageAll( STRING( m_iszMessage ) );
+#endif
 	}
 	else
 	{
@@ -110,7 +114,15 @@ void CMessage::InputShowMessage( inputdata_t &inputdata )
 
 		if ( pPlayer && pPlayer->IsPlayer() )
 		{
+#ifdef CSTRIKE15
+			CRecipientFilter filterPlayer;
+			filterPlayer.MakeReliable();
+			filterPlayer.AddRecipient( ToBasePlayer( pPlayer ) );
+			UTIL_ClientPrintFilter( filterPlayer, HUD_PRINTCENTER, STRING( m_iszMessage ) );
+			filterPlayer.RemoveAllRecipients();
+#else
 			UTIL_ShowMessage( STRING( m_iszMessage ), ToBasePlayer( pPlayer ) );
+#endif
 		}
 	}
 
@@ -189,6 +201,8 @@ void CCredits::Spawn( void )
 	SetMoveType( MOVETYPE_NONE );
 }
 
+#ifndef PORTAL
+
 static void CreditsDone_f( void )
 {
 	CCredits *pCredits = (CCredits*)gEntList.FindEntityByClassname( NULL, "env_credits" );
@@ -200,6 +214,8 @@ static void CreditsDone_f( void )
 }
 
 static ConCommand creditsdone("creditsdone", CreditsDone_f );
+
+#endif // PORTAL
 
 extern ConVar sv_unlockedchapters;
 
@@ -218,15 +234,16 @@ void CCredits::OnRestore()
 void CCredits::RollOutroCredits()
 {
 	sv_unlockedchapters.SetValue( "15" );
-	
-	CBasePlayer *pPlayer = UTIL_GetLocalPlayer();
 
-	CSingleUserRecipientFilter user( pPlayer );
-	user.MakeReliable();
+	// Gurjeets - Not used in CSGO
+	//CBasePlayer *pPlayer = UTIL_GetLocalPlayer();
 
-	UserMessageBegin( user, "CreditsMsg" );
-		WRITE_BYTE( 3 );
-	MessageEnd();
+	//CSingleUserRecipientFilter user( pPlayer );
+	//user.MakeReliable();
+
+	//UserMessageBegin( user, "CreditsMsg" );
+	//	WRITE_BYTE( 3 );
+	//MessageEnd();
 }
 
 void CCredits::InputRollOutroCredits( inputdata_t &inputdata )
@@ -236,28 +253,33 @@ void CCredits::InputRollOutroCredits( inputdata_t &inputdata )
 	// In case we save restore
 	m_bRolledOutroCredits = true;
 
+	#ifndef _GAMECONSOLE
 	gamestats->Event_Credits();
+	#endif
 }
 
 void CCredits::InputShowLogo( inputdata_t &inputdata )
 {
-	CBasePlayer *pPlayer = UTIL_GetLocalPlayer();
+	ASSERT(0);
 
-	CSingleUserRecipientFilter user( pPlayer );
-	user.MakeReliable();
+	// Gurjeets - Not used in CSGO
+	//CBasePlayer *pPlayer = UTIL_GetLocalPlayer();
 
-	if ( m_flLogoLength )
-	{
-		UserMessageBegin( user, "LogoTimeMsg" );
-			WRITE_FLOAT( m_flLogoLength );
-		MessageEnd();
-	}
-	else
-	{
-		UserMessageBegin( user, "CreditsMsg" );
-			WRITE_BYTE( 1 );
-		MessageEnd();
-	}
+	//CSingleUserRecipientFilter user( pPlayer );
+	//user.MakeReliable();
+
+	//if ( m_flLogoLength )
+	//{
+	//	UserMessageBegin( user, "LogoTimeMsg" );
+	//		WRITE_FLOAT( m_flLogoLength );
+	//	MessageEnd();
+	//}
+	//else
+	//{
+	//	UserMessageBegin( user, "CreditsMsg" );
+	//		WRITE_BYTE( 1 );
+	//	MessageEnd();
+	//}
 }
 
 void CCredits::InputSetLogoLength( inputdata_t &inputdata )
@@ -267,12 +289,127 @@ void CCredits::InputSetLogoLength( inputdata_t &inputdata )
 
 void CCredits::InputRollCredits( inputdata_t &inputdata )
 {
-	CBasePlayer *pPlayer = UTIL_GetLocalPlayer();
+	// Gurjeets - Not used in CSGO
+	//CBasePlayer *pPlayer = UTIL_GetLocalPlayer();
 
-	CSingleUserRecipientFilter user( pPlayer );
-	user.MakeReliable();
+	//CSingleUserRecipientFilter user( pPlayer );
+	//user.MakeReliable();
 
-	UserMessageBegin( user, "CreditsMsg" );
-		WRITE_BYTE( 2 );
-	MessageEnd();
+	//UserMessageBegin( user, "CreditsMsg" );
+	//	WRITE_BYTE( 2 );
+	//MessageEnd();
 }
+
+//-----------------------------------------------------------------------------
+// Purpose: Play the outtro stats at the end of the campaign
+//-----------------------------------------------------------------------------
+class COuttroStats : public CPointEntity
+{
+public:
+	DECLARE_CLASS( COuttroStats, CPointEntity );
+	DECLARE_DATADESC();
+
+	void Spawn( void );
+	void InputRollCredits( inputdata_t &inputdata );
+	void InputRollStatsCrawl( inputdata_t &inputdata );
+	void InputSkipStateChanged( inputdata_t &inputdata );
+
+	void SkipThink( void );
+	void CalcSkipState( int &skippingPlayers, int &totalPlayers );
+
+	COutputEvent m_OnOuttroStatsDone;
+};
+
+//-----------------------------------------------------------------------------
+LINK_ENTITY_TO_CLASS( env_outtro_stats, COuttroStats );
+
+BEGIN_DATADESC( COuttroStats )
+	DEFINE_INPUTFUNC( FIELD_VOID, "RollStatsCrawl", InputRollStatsCrawl ),
+	DEFINE_INPUTFUNC( FIELD_VOID, "RollCredits", InputRollCredits ),
+	DEFINE_INPUTFUNC( FIELD_VOID, "SkipStateChanged", InputSkipStateChanged ),
+	DEFINE_OUTPUT( m_OnOuttroStatsDone, "OnOuttroStatsDone"),
+END_DATADESC()
+
+//-----------------------------------------------------------------------------
+void COuttroStats::Spawn( void )
+{
+	SetSolid( SOLID_NONE );
+	SetMoveType( MOVETYPE_NONE );
+}
+
+//-----------------------------------------------------------------------------
+void COuttroStats::InputRollStatsCrawl( inputdata_t &inputdata )
+{
+	// Gurjeets - Not used in CSGO
+	//CReliableBroadcastRecipientFilter players;
+	//UserMessageBegin( players, "StatsCrawlMsg" );
+	//MessageEnd();
+
+	SetThink( &COuttroStats::SkipThink );
+	SetNextThink( gpGlobals->curtime + 1.0 );
+}
+
+//-----------------------------------------------------------------------------
+void COuttroStats::InputRollCredits( inputdata_t &inputdata )
+{
+	ASSERT(0);
+
+	// Gurjeets - Not used in CSGO
+
+	//CReliableBroadcastRecipientFilter players;
+	//UserMessageBegin( players, "creditsMsg" );
+	//MessageEnd();
+}
+
+void COuttroStats::SkipThink( void )
+{
+	// if all valid players are skipping, then end
+	int iNumSkips = 0;
+	int iNumPlayers = 0;
+	CalcSkipState( iNumSkips, iNumPlayers );
+
+	if ( iNumSkips >= iNumPlayers )
+	{
+//		TheDirector->StartScenarioExit();
+	}
+	else
+		SetNextThink( gpGlobals->curtime + 1.0 );
+}
+
+void COuttroStats::CalcSkipState( int &skippingPlayers, int &totalPlayers )
+{
+	// calc skip state
+	skippingPlayers = 0;
+	totalPlayers = 0;
+}
+
+void COuttroStats::InputSkipStateChanged( inputdata_t &inputdata )
+{
+	int iNumSkips = 0;
+	int iNumPlayers = 0;
+	CalcSkipState( iNumSkips, iNumPlayers );
+
+	DevMsg( "COuttroStats: Skip state changed. %d players, %d skips\n", iNumPlayers, iNumSkips );
+	
+	// Gurjeets - Not used in CSGO
+	//// Don't send to players in singleplayer
+	//if ( iNumPlayers > 1 )
+	//{
+	//	CReliableBroadcastRecipientFilter players;
+	//	UserMessageBegin( players, "StatsSkipState" );
+	//		WRITE_BYTE( iNumSkips );
+	//		WRITE_BYTE( iNumPlayers );
+	//	MessageEnd();
+	//}
+}
+
+void CC_Test_Outtro_Stats( const CCommand& args )
+{
+	CBaseEntity *pOuttro = gEntList.FindEntityByClassname( NULL, "env_outtro_stats" );
+	if ( pOuttro )
+	{
+		variant_t emptyVariant;
+		pOuttro->AcceptInput( "RollStatsCrawl", NULL, NULL, emptyVariant, 0 );
+	}
+}
+static ConCommand test_outtro_stats("test_outtro_stats", CC_Test_Outtro_Stats, 0, FCVAR_CHEAT);

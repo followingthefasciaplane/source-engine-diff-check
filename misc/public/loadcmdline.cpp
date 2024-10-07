@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: loads additional command line options from a config file
 //
@@ -22,7 +22,8 @@ static void AddArguments( int &argc, char **&argv, const char *str )
 	char   *argList	 = 0;
 	int		argCt	 = argc;
 
-	argList = V_strdup( str );
+	argList = new char[ Q_strlen( str ) + 1 ];
+	Q_strcpy( argList, str );
 
 	// Parse the arguments out of the string
 	char *token = strtok( argList, " " );
@@ -44,7 +45,8 @@ static void AddArguments( int &argc, char **&argv, const char *str )
 		int i;
 		for( i = 0; i < argc - 1; ++i )
 		{
-			args[ i ] = V_strdup( argv[ i ] );
+			args[ i ] = new char[ Q_strlen( argv[ i ] ) + 1 ];
+			Q_strcpy( args[ i ], argv[ i ] );
 		}
 
 		// copy new arguments
@@ -52,12 +54,14 @@ static void AddArguments( int &argc, char **&argv, const char *str )
 		token = strtok( argList, " " );
 		for( ; i < argCt - 1; ++i )
 		{
-			args[ i ] = V_strdup( token );
+			args[ i ] = new char[ Q_strlen( token ) + 1 ];
+			Q_strcpy( args[ i ], token );
 			token = strtok( NULL, " " );
 		}
 
 		// Copy the last original argument
-		args[ i ] = V_strdup( argv[ argc - 1 ] );
+		args[ i ] = new char[ Q_strlen( argv[ argc - 1 ] ) + 1 ];
+		Q_strcpy( args[ i ], argv[ argc - 1 ] );
 
 		argc = argCt;
 		argv = args;
@@ -76,7 +80,7 @@ void LoadCmdLineFromFile( int &argc, char **&argv, const char *keyname, const ch
 {
 	sFoundConfigArgs = false;
 
-	assert( g_pFileSystem );
+	Assert( g_pFileSystem );
 	if( !g_pFileSystem )
 		return;
 
@@ -84,7 +88,10 @@ void LoadCmdLineFromFile( int &argc, char **&argv, const char *keyname, const ch
 	KeyValues *kv = new KeyValues( "CommandLine" );
 
 	char filename[512];
-	Q_snprintf( filename, sizeof( filename ), "%s/cfg/commandline.cfg", gamedir );
+	filename[0] = '\0';
+	V_strcpy( filename, gamedir );
+	V_StripTrailingSlash( filename );
+	V_strncat( filename, "\\cfg\\commandline.cfg", sizeof( filename ) );
 
 	if ( kv->LoadFromFile( g_pFileSystem, filename ) )
 	{

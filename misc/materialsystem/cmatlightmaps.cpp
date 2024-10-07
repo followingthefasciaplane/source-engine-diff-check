@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========== Copyright (c) Valve Corporation, All rights reserved. ========
 //
 // Purpose:
 //
@@ -6,7 +6,9 @@
 
 #include "pch_materialsystem.h"
 
+#ifndef _PS3
 #define MATSYS_INTERNAL
+#endif
 
 #include "cmatlightmaps.h"
 
@@ -17,14 +19,16 @@
 
 // NOTE: This must be the last file included!!!
 #include "tier0/memdbgon.h"
-#include "bitmap/float_bm.h"
+#include "bitmap/floatbitmap.h"
 
 static ConVar mat_lightmap_pfms( "mat_lightmap_pfms", "0", FCVAR_MATERIAL_SYSTEM_THREAD, "Outputs .pfm files containing lightmap data for each lightmap page when a level exits." ); // Write PFM files for each lightmap page in the game directory when exiting a level 
 
-#define USE_32BIT_LIGHTMAPS_ON_360 //uncomment to use 32bit lightmaps, be sure to keep this in sync with the same #define in stdshaders/lightmappedgeneric_ps2_3_x.h
+// Turning off 32 bit lightmaps for Portal 2, to save shader perf --Thorsten
+//#define USE_32BIT_LIGHTMAPS_ON_360 //uncomment to use 32bit lightmaps, be sure to keep this in sync with the same #define in stdshaders/lightmappedgeneric_ps2_3_x.h
 
 #ifdef _X360
-#define X360_USE_SIMD_LIGHTMAP
+// 7LS - fixup support for lightmap alpha channel data for csm's, definitely do this when/if turning dynamic lightmaps back on
+// #define X360_USE_SIMD_LIGHTMAP
 #endif
 
 //-----------------------------------------------------------------------------
@@ -211,35 +215,36 @@ int CMatLightmaps::GetLightmapHeight( int lightmapPageID ) const
 //-----------------------------------------------------------------------------
 void CMatLightmaps::CleanupLightmaps()
 {
-   if ( mat_lightmap_pfms.GetBool())
-   {
-      // Write PFM files containing lightmap data for this page
-      for (int lightmap = 0; lightmap < GetNumLightmapPages(); lightmap++)
-      {
-         if ((NULL != m_pLightmapDataPtrArray) && (NULL != m_pLightmapDataPtrArray[lightmap]))
-         {
-            char szPFMFileName[MAX_PATH];
+	GetMaterialSystem()->GetPaintmaps()->CleanupPaintmaps();
+	if ( mat_lightmap_pfms.GetBool())
+	{
+	  // Write PFM files containing lightmap data for this page
+	  for (int lightmap = 0; lightmap < GetNumLightmapPages(); lightmap++)
+	  {
+		 if ((NULL != m_pLightmapDataPtrArray) && (NULL != m_pLightmapDataPtrArray[lightmap]))
+		 {
+			char szPFMFileName[MAX_PATH];
 
-            sprintf(szPFMFileName, "Lightmap-Page-%d.pfm", lightmap);
-            m_pLightmapDataPtrArray[lightmap]->WritePFM(szPFMFileName);
-         }
-      }
-   }
+			sprintf(szPFMFileName, "Lightmap-Page-%d.pfm", lightmap);
+			m_pLightmapDataPtrArray[lightmap]->WritePFM(szPFMFileName);
+		 }
+	  }
+	}
 
-   // Remove the lightmap data bitmap representations
-   if (m_pLightmapDataPtrArray)
-   {
-      int i;
-      for( i = 0; i < GetNumLightmapPages(); i++ )
-      {
-         delete m_pLightmapDataPtrArray[i];
-      }
+	// Remove the lightmap data bitmap representations
+	if (m_pLightmapDataPtrArray)
+	{
+	  int i;
+	  for( i = 0; i < GetNumLightmapPages(); i++ )
+	  {
+		 delete m_pLightmapDataPtrArray[i];
+	  }
 
-      delete [] m_pLightmapDataPtrArray;
-      m_pLightmapDataPtrArray = NULL;
-   }
-   
-   // delete old lightmap pages
+	  delete [] m_pLightmapDataPtrArray;
+	  m_pLightmapDataPtrArray = NULL;
+	}
+
+	// delete old lightmap pages
 	if( m_pLightmapPages )
 	{
 		int i;
@@ -272,9 +277,12 @@ void CMatLightmaps::ResetMaterialLightmapPageInfo( void )
 // This is called before any lightmap allocations take place
 //-----------------------------------------------------------------------------
 void CMatLightmaps::BeginLightmapAllocation()
-{	
-	// delete old lightmap pages
-	CleanupLightmaps();
+{
+	// we clean up lightmaps on console right before we load the next map
+	if ( IsPC() )
+	{
+		CleanupLightmaps();
+	}
 
 	m_ImagePackers.RemoveAll();
 	int i = m_ImagePackers.AddToTail();
@@ -404,6 +412,11 @@ void CMatLightmaps::EndLightmapAllocation()
       m_pLightmapDataPtrArray = new FloatBitMap_t*[GetNumLightmapPages()];
    }
 
+   if( GetMaterialSystem()->GetPaintmaps()->IsEnabled() )
+   {
+		GetMaterialSystem()->GetPaintmaps()->BeginPaintTextureAllocation( GetNumLightmapPages() );
+   }
+
 	int i;
 	m_LightmapPageTextureHandles.EnsureCapacity( GetNumLightmapPages() );
 	for ( i = 0; i < GetNumLightmapPages(); i++ )
@@ -415,6 +428,11 @@ void CMatLightmaps::EndLightmapAllocation()
 		m_pLightmapPages[i].m_Flags = 0;
 
 		AllocateLightmapTexture( i );
+		
+		if ( GetMaterialSystem()->GetPaintmaps()->IsEnabled() )
+		{
+			GetMaterialSystem()->GetPaintmaps()->AllocatePaintmap( i, GetLightmapWidth(i), GetLightmapHeight(i) );
+		}
 
         if ( mat_lightmap_pfms.GetBool())
         {
@@ -422,18 +440,39 @@ void CMatLightmaps::EndLightmapAllocation()
            m_pLightmapDataPtrArray[i] = NULL;
         }
 	}
+
+	if( GetMaterialSystem()->GetPaintmaps()->IsEnabled() )
+	{
+		GetMaterialSystem()->GetPaintmaps()->EndPaintTextureAllocation();
+	}
 }
+
+
+ConVar mat_dynamiclightmaps( "mat_dynamiclightmaps", "0", FCVAR_CHEAT );
 
 //-----------------------------------------------------------------------------
 // Allocate lightmap textures
 //-----------------------------------------------------------------------------
 void CMatLightmaps::AllocateLightmapTexture( int lightmap )
 {
-	bool bUseDynamicTextures = HardwareConfig()->PreferDynamicTextures();
+	bool bUseDynamicTextures = HardwareConfig()->PreferDynamicTextures() && mat_dynamiclightmaps.GetBool();
 
-	int flags = bUseDynamicTextures ? TEXTURE_CREATE_DYNAMIC : TEXTURE_CREATE_MANAGED;
+	int flags = 0;
+	if ( bUseDynamicTextures || IsPS3() ) // On PS3, we need the dynamic flag as a hint that we're going to update this texture incrementally in the future
+	{
+		flags |= TEXTURE_CREATE_DYNAMIC;
+	}
+	else
+	{
+		flags |= TEXTURE_CREATE_MANAGED;
+	}
 
+	int nPreviousTextureHandles = m_LightmapPageTextureHandles.Count();
 	m_LightmapPageTextureHandles.EnsureCount( lightmap + 1 );
+	for ( int nLightmap = nPreviousTextureHandles; nLightmap <= lightmap; ++nLightmap )
+	{
+		m_LightmapPageTextureHandles[ nLightmap ] = INVALID_SHADERAPI_TEXTURE_HANDLE;
+	}
 
 	char debugName[256];
 	Q_snprintf( debugName, sizeof( debugName ), "[lightmap %d]", lightmap );
@@ -471,13 +510,23 @@ void CMatLightmaps::AllocateLightmapTexture( int lightmap )
 		break;
 	}
 
+#ifdef _PS3
+	// PS3 needs 16F textures...but the HDR_TYPE_FLOAT codepath has a lot of other baggage with it.  Just lie here.
+	imageFormat = IMAGE_FORMAT_RGBA16161616F;
+
+#endif // _PS3
+
+
 	switch ( m_eLightmapsState )
 	{
 	case STATE_DEFAULT:
 		// Allow allocations in default state
 		{
+			int iWidth = GetLightmapWidth(lightmap);
+			int iHeight = GetLightmapHeight(lightmap);
+
 			m_LightmapPageTextureHandles[lightmap] = g_pShaderAPI->CreateTexture( 
-				GetLightmapWidth(lightmap), GetLightmapHeight(lightmap), 1,
+				iWidth, iHeight, 1,
 				imageFormat, 
 				1, 1, flags, debugName, TEXTURE_GROUP_LIGHTMAP );	// don't mipmap lightmaps
 
@@ -567,6 +616,8 @@ void CMatLightmaps::ReleaseLightmapPages()
 	{
 		g_pShaderAPI->DeleteTexture( m_LightmapPageTextureHandles[i] );
 	}
+
+	GetMaterialSystem()->GetPaintmaps()->ReleasePaintmaps();
 	
 	// We are now in released state
 	m_eLightmapsState = STATE_RELEASED;
@@ -588,6 +639,11 @@ void CMatLightmaps::RestoreLightmapPages()
 
 	// Switch to default state to allow allocations
 	m_eLightmapsState = STATE_DEFAULT;
+
+	if( GetMaterialSystem()->GetPaintmaps()->IsEnabled() )
+	{
+		GetMaterialSystem()->GetPaintmaps()->RestorePaintmaps( GetNumLightmapPages() );
+	}
 
 	for( int i = 0; i < GetNumLightmapPages(); i++ )
 	{
@@ -636,6 +692,10 @@ void CMatLightmaps::InitLightmapBits( int lightmap )
 	}
 	else
 	{
+#if defined( _X360 ) && defined( _DEBUG )
+		float vGreenData[4] =  { 0.0f, 2.0f, 0.0f, 0.0f };
+		fltx4 vGreen = LoadUnalignedSIMD( vGreenData );
+#endif
 		for ( int j = 0; j < height; ++j )
 		{
 			writer.Seek( 0, j );
@@ -644,16 +704,39 @@ void CMatLightmaps::InitLightmapBits( int lightmap )
 #ifndef _DEBUG
 				// note: make this white to find multisample centroid sampling problems.
 				//				writer.WritePixel( 255, 255, 255 );
-				writer.WritePixel( 0, 0, 0 );
-#else // _DEBUG
-				if ( ( j + k ) & 1 )
+				#ifdef _X360
 				{
-					writer.WritePixel( 0, 255, 0 );
+					writer.WritePixel( Four_Zeros );
 				}
-				else
+				#else
 				{
 					writer.WritePixel( 0, 0, 0 );
 				}
+				#endif
+#else // _DEBUG
+				#ifdef _X360
+				{
+					if ( ( j + k ) & 1 )
+					{
+						writer.WritePixel( vGreen );
+					}
+					else
+					{
+						writer.WritePixel( Four_Zeros );
+					}
+				}
+				#else
+				{
+					if ( ( j + k ) & 1 )
+					{
+						writer.WritePixel( 0, 255, 0 );
+					}
+					else
+					{
+						writer.WritePixel( 0, 0, 0 );
+					}
+				}
+				#endif // _X360
 #endif // _DEBUG
 			}
 		}
@@ -686,6 +769,7 @@ Vector4D ConvertLightmapColorToRGBScale( const float *lightmapColor )
 {
 	Vector4D result;
 
+
 	float fScale = lightmapColor[0];
 	for( int i = 1; i != 3; ++i )
 	{
@@ -694,7 +778,7 @@ Vector4D ConvertLightmapColorToRGBScale( const float *lightmapColor )
 	}
 
 	fScale = ceil( fScale * (255.0f/16.0f) ) * (16.0f/255.0f);
-	fScale = min( fScale, 16.0f );
+	fScale = MIN( fScale, 16.0f );
 
 	float fInvScale = 1.0f / fScale;
 
@@ -702,7 +786,7 @@ Vector4D ConvertLightmapColorToRGBScale( const float *lightmapColor )
 	{
 		result[i] = lightmapColor[i] * fInvScale;
 		result[i] = ceil( result[i] * 255.0f ) * (1.0f/255.0f);
-		result[i] = min( result[i], 1.0f );
+		result[i] = MIN( result[i], 1.0f );
 	}
 
 	fScale /= 16.0f;
@@ -786,24 +870,38 @@ void CMatLightmaps::BumpedLightmapBitsToPixelWriter_LDR( float* pFloatImage, flo
 		for( int s = 0; s < nLightmapSize0; 
 			s++, m_LightmapPixelWriter.SkipBytes(nRewindToNextPixel),srcTexelOffset += (sizeof(Vector4D)/sizeof(float)))
 		{
-			unsigned char color[4][3];
+			unsigned char color[4][4];
 
 			ColorSpace::LinearToBumpedLightmap( &pFloatImage[srcTexelOffset],
 				&pFloatImageBump1[srcTexelOffset], &pFloatImageBump2[srcTexelOffset],
 				&pFloatImageBump3[srcTexelOffset],
 				color[0], color[1], color[2], color[3] );
 
-			unsigned char alpha =  RoundFloatToByte( pFloatImage[srcTexelOffset+3] * 255.0f );
-			m_LightmapPixelWriter.WritePixelNoAdvance( color[0][0], color[0][1], color[0][2], alpha );
+			if ( HardwareConfig()->GetCSMAccurateBlending() )
+			{
+				ColorSpace::LinearToBumpedLightmapAlpha( &pFloatImage[srcTexelOffset + 3], 
+														 &pFloatImageBump1[srcTexelOffset + 3], &pFloatImageBump2[srcTexelOffset + 3], &pFloatImageBump3[srcTexelOffset + 3],
+														 &color[0][3], &color[1][3], &color[2][3], &color[3][3] );
+			}
+			else
+			{
+				unsigned char alpha =  RoundFloatToByte( pFloatImage[srcTexelOffset+3] * 255.0f );
+				color[0][3] = alpha;
+				color[1][3] = alpha;
+				color[2][3] = alpha;
+				color[3][3] = alpha;
+			}
+
+			m_LightmapPixelWriter.WritePixelNoAdvance( color[0][0], color[0][1], color[0][2], color[0][3] );
 
 			m_LightmapPixelWriter.SkipBytes( nLightmap0WriterSizeBytes );
-			m_LightmapPixelWriter.WritePixelNoAdvance( color[1][0], color[1][1], color[1][2], alpha );
+			m_LightmapPixelWriter.WritePixelNoAdvance( color[1][0], color[1][1], color[1][2], color[1][3] );
 
 			m_LightmapPixelWriter.SkipBytes( nLightmap0WriterSizeBytes );
-			m_LightmapPixelWriter.WritePixelNoAdvance( color[2][0], color[2][1], color[2][2], alpha );
+			m_LightmapPixelWriter.WritePixelNoAdvance( color[2][0], color[2][1], color[2][2], color[2][3] );
 
 			m_LightmapPixelWriter.SkipBytes( nLightmap0WriterSizeBytes );
-			m_LightmapPixelWriter.WritePixelNoAdvance( color[3][0], color[3][1], color[3][2], alpha );
+			m_LightmapPixelWriter.WritePixelNoAdvance( color[3][0], color[3][1], color[3][2], color[3][3] );
 		}
 	}
 	if ( pfmOut )
@@ -813,7 +911,7 @@ void CMatLightmaps::BumpedLightmapBitsToPixelWriter_LDR( float* pFloatImage, flo
 			int srcTexelOffset = ( sizeof( Vector4D ) / sizeof( float ) ) * ( 0 + t * nLightmapSize0 );
 			for( int s = 0;  s < nLightmapSize0; s++,srcTexelOffset += (sizeof(Vector4D)/sizeof(float)))
 			{
-				unsigned char color[4][3];
+				unsigned char color[4][4];
 
 				ColorSpace::LinearToBumpedLightmap( &pFloatImage[srcTexelOffset],
 					&pFloatImageBump1[srcTexelOffset], &pFloatImageBump2[srcTexelOffset],
@@ -827,7 +925,7 @@ void CMatLightmaps::BumpedLightmapBitsToPixelWriter_LDR( float* pFloatImage, flo
 				pixelData.Green = color[0][1];                  
 				pixelData.Blue = color[0][2];
 				pixelData.Alpha = alpha;
-				pfmOut->WritePixelRGBAF( pOffsetIntoLightmapPage[0] + s, pOffsetIntoLightmapPage[1] + t, pixelData);
+				pfmOut->WritePixelRGBAF( pOffsetIntoLightmapPage[0] + s, pOffsetIntoLightmapPage[1] + t, 0, pixelData);
 			}
 		}
 
@@ -856,25 +954,91 @@ void CMatLightmaps::BumpedLightmapBitsToPixelWriter_HDRF( float* pFloatImage, fl
 		int srcTexelOffset = ( sizeof( Vector4D ) / sizeof( float ) ) * ( 0 + t * nLightmapSize0 );
 		m_LightmapPixelWriter.Seek( pOffsetIntoLightmapPage[0], pOffsetIntoLightmapPage[1] + t );
 
-		for( int s = 0; 
-			s < nLightmapSize0; 
-			s++, m_LightmapPixelWriter.SkipBytes(nRewindToNextPixel),srcTexelOffset += (sizeof(Vector4D)/sizeof(float)))
+		// if it's anything but 4 x float16 on a PPC...
+ 		/*
+		// The 'else' path uses ConvertFourFloatsTo16BitsAtOnce which is entirely broken
+		// so we need to always use the main path.
+		if ( !IsGameConsole() ||
+ 			 !(m_LightmapPixelWriter.GetPixelSize() == 4*sizeof(unsigned short)) ||
+ 			 !(m_LightmapPixelWriter.IsUsing16BitFloatFormat())						
+			 )*/
 		{
-			m_LightmapPixelWriter.WritePixelNoAdvanceF( pFloatImage[srcTexelOffset], pFloatImage[srcTexelOffset+1],
-				pFloatImage[srcTexelOffset+2], pFloatImage[srcTexelOffset+3] );
+			for( int s = 0; 
+				s < nLightmapSize0; 
+				s++, m_LightmapPixelWriter.SkipBytes(nRewindToNextPixel),srcTexelOffset += (sizeof(Vector4D)/sizeof(float)))
+			{
+				float color[4][4];
 
-			m_LightmapPixelWriter.SkipBytes( nLightmap0WriterSizeBytes );
-			m_LightmapPixelWriter.WritePixelNoAdvanceF( pFloatImageBump1[srcTexelOffset], pFloatImageBump1[srcTexelOffset+1],
-				pFloatImageBump1[srcTexelOffset+2], pFloatImage[srcTexelOffset+3] );
+				// [mariod] - LinearToBumpedLightmap() was entirely missing in the float path as of September '11
+				// looks like this only affected PS3 (PC/X360 use linear 16bit tex formats)
+				ColorSpace::LinearToBumpedLightmap( &pFloatImage[srcTexelOffset],
+					&pFloatImageBump1[srcTexelOffset], &pFloatImageBump2[srcTexelOffset],
+					&pFloatImageBump3[srcTexelOffset],
+					color[0], color[1], color[2], color[3] );
 
-			m_LightmapPixelWriter.SkipBytes( nLightmap0WriterSizeBytes );
-			m_LightmapPixelWriter.WritePixelNoAdvanceF( pFloatImageBump2[srcTexelOffset], pFloatImageBump2[srcTexelOffset+1],
-				pFloatImageBump2[srcTexelOffset+2], pFloatImage[srcTexelOffset+3] );
+				if ( HardwareConfig()->GetCSMAccurateBlending() )
+				{
+					ColorSpace::LinearToBumpedLightmapAlpha( &pFloatImage[srcTexelOffset + 3],
+															 &pFloatImageBump1[srcTexelOffset + 3], &pFloatImageBump2[srcTexelOffset + 3], &pFloatImageBump3[srcTexelOffset + 3],
+															 &color[0][3], &color[1][3], &color[2][3], &color[3][3] );
+				}
+				else
+				{
+					float alpha = pFloatImage[srcTexelOffset+3];
+					color[0][3] = alpha;
+					color[1][3] = alpha;
+					color[2][3] = alpha;
+					color[3][3] = alpha;
+				}
 
-			m_LightmapPixelWriter.SkipBytes( nLightmap0WriterSizeBytes );
-			m_LightmapPixelWriter.WritePixelNoAdvanceF( pFloatImageBump3[srcTexelOffset], pFloatImageBump3[srcTexelOffset+1],
-				pFloatImageBump3[srcTexelOffset+2], pFloatImage[srcTexelOffset+3] );
+				m_LightmapPixelWriter.WritePixelNoAdvanceF( color[0][0], color[0][1], color[0][2], color[0][3] );
+
+				m_LightmapPixelWriter.SkipBytes( nLightmap0WriterSizeBytes );
+				m_LightmapPixelWriter.WritePixelNoAdvanceF( color[1][0], color[1][1], color[1][2], color[1][3] );
+
+				m_LightmapPixelWriter.SkipBytes( nLightmap0WriterSizeBytes );
+				m_LightmapPixelWriter.WritePixelNoAdvanceF( color[2][0], color[2][1], color[2][2], color[2][3] );
+
+				m_LightmapPixelWriter.SkipBytes( nLightmap0WriterSizeBytes );
+				m_LightmapPixelWriter.WritePixelNoAdvanceF( color[3][0], color[3][1], color[3][2], color[3][3] );
+			}
 		}
+		/*
+		else // use a faster technique on PPC cores for float16 lightmaps, that's not so branchy and load-hit-store-y
+		{
+			for( int s = 0; 
+				s < nLightmapSize0; 
+				s++, m_LightmapPixelWriter.SkipBytes(nRewindToNextPixel),srcTexelOffset += (sizeof(Vector4D)/sizeof(float)))
+			{
+
+				float color[4][4];
+
+				// [mariod] - LinearToBumpedLightmap() was entirely missing in the float path as of September '11
+				// looks like this only affected PS3 (PC/X360 use linear 16bit tex formats)
+				ColorSpace::LinearToBumpedLightmap( &pFloatImage[srcTexelOffset],
+					&pFloatImageBump1[srcTexelOffset], &pFloatImageBump2[srcTexelOffset],
+					&pFloatImageBump3[srcTexelOffset],
+					color[0], color[1], color[2], color[3] );
+
+				float alpha = pFloatImage[srcTexelOffset+3];
+
+				float16::ConvertFourFloatsTo16BitsAtOnce( (float16*) m_LightmapPixelWriter.GetCurrentPixel(),
+					&color[0][0], &color[0][1], &color[0][2], &alpha );
+
+				m_LightmapPixelWriter.SkipBytes( nLightmap0WriterSizeBytes );
+				float16::ConvertFourFloatsTo16BitsAtOnce( (float16*) m_LightmapPixelWriter.GetCurrentPixel(),
+					&color[1][0], &color[1][1], &color[1][2], &alpha );
+
+				m_LightmapPixelWriter.SkipBytes( nLightmap0WriterSizeBytes );
+				float16::ConvertFourFloatsTo16BitsAtOnce( (float16*) m_LightmapPixelWriter.GetCurrentPixel(),
+					&color[2][0], &color[2][1], &color[2][2], &alpha );
+
+				m_LightmapPixelWriter.SkipBytes( nLightmap0WriterSizeBytes );
+				float16::ConvertFourFloatsTo16BitsAtOnce( (float16*) m_LightmapPixelWriter.GetCurrentPixel(),
+					&color[3][0], &color[3][1], &color[3][2], &alpha );
+			}
+		}
+		*/
 	}
 }
 
@@ -1338,7 +1502,7 @@ static void BumpedLightmapBitsToPixelWriter_HDRI_BGRA_X360( float* RESTRICT pFlo
 	}
 }
 
-#endif // _X360
+#endif //_X360
 
 // write bumped lightmap update to HDR integer lightmap
 void CMatLightmaps::BumpedLightmapBitsToPixelWriter_HDRI( float* RESTRICT pFloatImage, float * RESTRICT pFloatImageBump1, float * RESTRICT pFloatImageBump2, 
@@ -1370,7 +1534,30 @@ void CMatLightmaps::BumpedLightmapBitsToPixelWriter_HDRI( float* RESTRICT pFloat
 						color[0], color[1], color[2], color[3] );
 					float alpha = pFloatImage[srcTexelOffset+3];
 					Assert( alpha >= 0.0f && alpha <= 1.0f );
-					color[0][3] = color[1][3] = color[2][3] = color[3][3] = alpha;
+
+					if ( HardwareConfig()->GetCSMAccurateBlending() )
+					{
+						float alphaF[4];
+
+						ColorSpace::LinearToBumpedLightmapAlpha( &pFloatImage[srcTexelOffset + 3],
+																 &pFloatImageBump1[srcTexelOffset + 3], &pFloatImageBump2[srcTexelOffset + 3], &pFloatImageBump3[srcTexelOffset + 3],
+																 &alphaF[0], &alphaF[1], &alphaF[2], &alphaF[3] );
+
+						unsigned short alphaUS[4];
+						alphaUS[0] = ColorSpace::LinearToUnsignedShort( alphaF[0], 16 );
+						alphaUS[1] = ColorSpace::LinearToUnsignedShort( alphaF[1], 16 );
+						alphaUS[2] = ColorSpace::LinearToUnsignedShort( alphaF[2], 16 );
+						alphaUS[3] = ColorSpace::LinearToUnsignedShort( alphaF[3], 16 );
+
+						color[0][3] = alphaUS[0];
+						color[1][3] = alphaUS[1];
+						color[2][3] = alphaUS[2];
+						color[3][3] = alphaUS[3];
+					}
+					else
+					{
+						color[0][3] = color[1][3] = color[2][3] = color[3][3] = alpha;
+					}
 
 					float toFloat = ( 1.0f / ( float )( 1 << 16 ) );
 
@@ -1429,8 +1616,30 @@ void CMatLightmaps::BumpedLightmapBitsToPixelWriter_HDRI( float* RESTRICT pFloat
 					&pFloatImageBump1[srcTexelOffset], &pFloatImageBump2[srcTexelOffset],
 					&pFloatImageBump3[srcTexelOffset],
 					color[0], color[1], color[2], color[3] );
-				unsigned short alpha = ColorSpace::LinearToUnsignedShort( pFloatImage[srcTexelOffset+3], 16 );
-				color[0][3] = color[1][3] = color[2][3] = color[3][3] = alpha;
+
+				if ( HardwareConfig()->GetCSMAccurateBlending() )
+				{
+					float alpha[4];
+					ColorSpace::LinearToBumpedLightmapAlpha( &pFloatImage[srcTexelOffset + 3],
+															 &pFloatImageBump1[srcTexelOffset + 3], &pFloatImageBump2[srcTexelOffset + 3], &pFloatImageBump3[srcTexelOffset + 3],
+															 &alpha[0], &alpha[1], &alpha[2], &alpha[3] );
+
+					unsigned short alphaUS[4];
+					alphaUS[0] = ColorSpace::LinearToUnsignedShort( alpha[0], 16 );
+					alphaUS[1] = ColorSpace::LinearToUnsignedShort( alpha[1], 16 );
+					alphaUS[2] = ColorSpace::LinearToUnsignedShort( alpha[2], 16 );
+					alphaUS[3] = ColorSpace::LinearToUnsignedShort( alpha[3], 16 );
+
+					color[0][3] = alphaUS[0];
+					color[1][3] = alphaUS[1];
+					color[2][3] = alphaUS[2];
+					color[3][3] = alphaUS[3];
+				}
+				else
+				{
+					unsigned short alpha = ColorSpace::LinearToUnsignedShort( pFloatImage[srcTexelOffset+3], 16 );
+					color[0][3] = color[1][3] = color[2][3] = color[3][3] = alpha;
+				}
 
 #if ( defined( USE_32BIT_LIGHTMAPS_ON_360 ) )
 				if( IsX360() )
@@ -1468,8 +1677,8 @@ void CMatLightmaps::BumpedLightmapBitsToPixelWriter_HDRI( float* RESTRICT pFloat
 					pixelData.Red = color[0][0];                  
 					pixelData.Green = color[0][1];                  
 					pixelData.Blue = color[0][2];
-					pixelData.Alpha = alpha;
-					pfmOut->WritePixelRGBAF(pOffsetIntoLightmapPage[0] + s, pOffsetIntoLightmapPage[1] + t, pixelData);
+					pixelData.Alpha = color[0][3];
+					pfmOut->WritePixelRGBAF(pOffsetIntoLightmapPage[0] + s, pOffsetIntoLightmapPage[1] + t, 0, pixelData);
 				}
 			}
 		}
@@ -1487,7 +1696,10 @@ void CMatLightmaps::BumpedLightmapBitsToPixelWriter_HDRI( float* RESTRICT pFloat
 				pFloatImageBump3, pLightmapSize, pOffsetIntoLightmapPage, pfmOut, &m_LightmapPixelWriter );
 		}
 		else
-		{	// This case should actually never be hit -- we do not use RGBA.
+		{
+			// This case is used in Portal 2 to fill RGBA16161616 lightmaps
+			Assert( m_LightmapPixelWriter.GetPixelSize() == 8 );
+
 			for( int t = 0; t < pLightmapSize[1]; t++ )
 			{
 				// assert that 1 * 4 = 4 
@@ -1525,6 +1737,8 @@ void CMatLightmaps::BumpedLightmapBitsToPixelWriter_HDRI( float* RESTRICT pFloat
 					vColor[2] = MinSIMD(vColor[2], vSixteen);
 					vColor[3] = MinSIMD(vColor[3], vSixteen);
 
+					// Not doing the following anymore. This path is for writing 16161616 int lightmaps.
+					/*
 					// compute the scaling factor, transform the RGB,
 					// and place the scale in w. Obliterates whatever was
 					// already in alpha.
@@ -1535,7 +1749,7 @@ void CMatLightmaps::BumpedLightmapBitsToPixelWriter_HDRI( float* RESTRICT pFloat
 					vColor[1] = ConvertLightmapColorToRGBScale( vColor[1] );
 					vColor[2] = ConvertLightmapColorToRGBScale( vColor[2] );
 					vColor[3] = ConvertLightmapColorToRGBScale( vColor[3] );
-
+					*/
 
 					m_LightmapPixelWriter.WritePixelNoAdvance( vColor[0] );
 					m_LightmapPixelWriter.SkipBytes( nLightmap0WriterSizeBytes );
@@ -1583,7 +1797,16 @@ void CMatLightmaps::LightmapBitsToPixelWriter_LDR( float* pFloatImage, int pLigh
 		{
 			unsigned char color[4];
 			ColorSpace::LinearToLightmap( color, pSrc );
-			color[3] =  RoundFloatToByte( pSrc[3] * 255.0f );
+
+			if ( HardwareConfig()->GetCSMAccurateBlending() )
+			{
+				ColorSpace::LinearToLightmapAlpha( &color[3], pSrc[3] );
+			}
+			else
+			{
+				color[3] = RoundFloatToByte( pSrc[3] * 255.0f );
+			}
+
 			m_LightmapPixelWriter.WritePixel( color[0], color[1], color[2], color[3] );
 
 			if ( pfmOut )
@@ -1594,7 +1817,7 @@ void CMatLightmaps::LightmapBitsToPixelWriter_LDR( float* pFloatImage, int pLigh
 				pixelData.Green = color[1];                  
 				pixelData.Blue = color[2];
 				pixelData.Alpha = color[3];
-				pfmOut->WritePixelRGBAF( pOffsetIntoLightmapPage[0] + s, pOffsetIntoLightmapPage[1] + t, pixelData );
+				pfmOut->WritePixelRGBAF( pOffsetIntoLightmapPage[0] + s, pOffsetIntoLightmapPage[1] + t, 0, pixelData );
 			}
 		}
 	}
@@ -1615,6 +1838,12 @@ void CMatLightmaps::LightmapBitsToPixelWriter_HDRF( float* pFloatImage, int pLig
 	for ( int t = 0; t < pLightmapSize[1]; ++t )
 	{
 		m_LightmapPixelWriter.Seek( pOffsetIntoLightmapPage[0], pOffsetIntoLightmapPage[1] + t );
+
+		if ( HardwareConfig()->GetCSMAccurateBlending() )
+		{
+			ColorSpace::LinearToLightmapAlpha( &pSrc[3] );
+		}
+
 		for ( int s = 0; s < pLightmapSize[0]; ++s, pSrc += (sizeof(Vector4D)/sizeof(*pSrc)) )
 		{
 			m_LightmapPixelWriter.WritePixelF( pSrc[0], pSrc[1], pSrc[2], pSrc[3] );
@@ -1641,7 +1870,15 @@ void CMatLightmaps::LightmapBitsToPixelWriter_HDRI( float* RESTRICT pFloatImage,
 				r = ColorSpace::LinearFloatToCorrectedShort( pSrc[0] );
 				g = ColorSpace::LinearFloatToCorrectedShort( pSrc[1] );
 				b = ColorSpace::LinearFloatToCorrectedShort( pSrc[2] );
-				a = ColorSpace::LinearToUnsignedShort( pSrc[3], 16 );
+
+				if ( HardwareConfig()->GetCSMAccurateBlending() )
+				{
+					ColorSpace::LinearToLightmapAlpha( &a, pSrc[3] );
+				}
+				else
+				{
+					a = ColorSpace::LinearToUnsignedShort( pSrc[3], 16 );
+				}
 
 				float toFloat = ( 1.0f / ( float )( 1 << 16 ) );
 
@@ -1683,7 +1920,15 @@ void CMatLightmaps::LightmapBitsToPixelWriter_HDRI( float* RESTRICT pFloatImage,
 				r = ColorSpace::LinearFloatToCorrectedShort( pSrc[0] );
 				g = ColorSpace::LinearFloatToCorrectedShort( pSrc[1] );
 				b = ColorSpace::LinearFloatToCorrectedShort( pSrc[2] );
-				a = ColorSpace::LinearToUnsignedShort( pSrc[3], 16 );
+
+				if ( HardwareConfig()->GetCSMAccurateBlending() )
+				{
+					ColorSpace::LinearToLightmapAlpha( &a, pSrc[3] );
+				}
+				else
+				{
+					a = ColorSpace::LinearToUnsignedShort( pSrc[3], 16 );
+				}
 
 #if ( defined( USE_32BIT_LIGHTMAPS_ON_360 ) )
 				if( IsX360() )
@@ -1711,7 +1956,7 @@ void CMatLightmaps::LightmapBitsToPixelWriter_HDRI( float* RESTRICT pFloatImage,
 					pixelData.Green = pSrc[1];                  
 					pixelData.Blue = pSrc[2];
 					pixelData.Alpha = pSrc[3];
-					pfmOut->WritePixelRGBAF( pOffsetIntoLightmapPage[0] + s, pOffsetIntoLightmapPage[1] + t, pixelData );
+					pfmOut->WritePixelRGBAF( pOffsetIntoLightmapPage[0] + s, pOffsetIntoLightmapPage[1] + t, 0, pixelData );
 				}				
 			}
 		}
@@ -1777,9 +2022,6 @@ void CMatLightmaps::LightmapBitsToPixelWriter_HDRI( float* RESTRICT pFloatImage,
 		float * RESTRICT pSrc = pFloatImage;
 		// Assert((reinterpret_cast<unsigned int>(pSrc) & 15) == 0); // 16-byte aligned?
 		COMPILE_TIME_ASSERT(sizeof(Vector4D)/sizeof(*pSrc) == 4); // assert that 1 * 4 = 4
-#ifndef USE_32BIT_LIGHTMAPS_ON_360 
-#pragma error("This function only supports 32 bit lightmaps.")
-#endif
 
 		// input numbers from pSrc are on the domain [0..+inf]
 		// we clamp them to the range [0..16]
@@ -1882,6 +2124,24 @@ void CMatLightmaps::LightmapBitsToPixelWriter_HDRI( float* RESTRICT pFloatImage,
 			}
 			break;
 		}
+
+		case IMAGE_FORMAT_RGBA16161616:
+		case IMAGE_FORMAT_LINEAR_RGBA16161616:
+			{
+				for ( int t = 0; t < pLightmapSize[1]; ++t )
+				{
+					m_LightmapPixelWriter.Seek( pOffsetIntoLightmapPage[0], pOffsetIntoLightmapPage[1] + t );
+					for ( int s = 0; s < pLightmapSize[0]; ++s, pSrc += 4 )
+					{	
+						static const fltx4 vSixteen = {16.0f, 16.0f, 16.0f, 16.0f};
+						fltx4 rgba = LoadUnalignedSIMD(pSrc);
+						rgba = MinSIMD(rgba, vSixteen);	// clamp to 0..16 float
+						m_LightmapPixelWriter.WritePixelNoAdvance_RGBA16161616(rgba);
+						m_LightmapPixelWriter.SkipBytes(8);
+					}
+				}
+				break;
+			}
 
 		default:
 			AssertMsg1(false,"Unsupported pixel format %d while writing lightmaps!", m_LightmapPixelWriter.GetFormat() );
@@ -2021,6 +2281,19 @@ void CMatLightmaps::UpdateLightmap( int lightmapPageID, int lightmapSize[2],
 	{
 		// account for the part spent in math:
 		VPROF_( "LightmapBitsToPixelWriter", 2, VPROF_BUDGETGROUP_DLIGHT_RENDERING, false, 0 );
+#ifdef _PS3
+		// PS3 uses 16-bit half floats per channel...but the HDR_TYPE_FLOAT codepath has a lot of other assumptions, so just
+		// lie about the format right here on PS3 only
+		if ( hasBump )
+		{
+			BumpedLightmapBitsToPixelWriter_HDRF( pFloatImage, pFloatImageBump1, pFloatImageBump2, pFloatImageBump3, 
+				lightmapSize, bLockSubRect ? subRectOffset : offsetIntoLightmapPage, pfmOut );
+		}
+		else
+		{
+			LightmapBitsToPixelWriter_HDRF( pFloatImage, lightmapSize, bLockSubRect ? subRectOffset : offsetIntoLightmapPage, pfmOut );
+		}
+#else // _PS3
 		if ( hasBump )
 		{
 			switch( HardwareConfig()->GetHDRType() )
@@ -2060,6 +2333,7 @@ void CMatLightmaps::UpdateLightmap( int lightmapPageID, int lightmapSize[2],
 				break;
 			}
 		}
+#endif // !_PS3
 	}
 
 	if( bLockSubRect )

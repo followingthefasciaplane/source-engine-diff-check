@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -8,6 +8,9 @@
 #include "logofile_shared.h"
 #include "filesystem_engine.h"
 #include "vtf/vtf.h"
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
 
 
 // ------------------------------------------------------------------------------------ //
@@ -41,7 +44,7 @@ bool SVC_LogoFileData::ReadFromBuffer( bf_read &buffer )
 	return !buffer.IsOverflowed();
 }
 
-bool SVC_LogoFileData::WriteToBuffer( bf_write &buffer )
+bool SVC_LogoFileData::WriteToBuffer( bf_write &buffer ) const
 {
 	buffer.WriteUBitLong( GetType(), NETMSG_TYPE_BITS );
 	buffer.WriteShort( m_Data.Count() );
@@ -66,7 +69,7 @@ bool CLC_LogoFileData::ReadFromBuffer( bf_read &buffer )
 	return !buffer.IsOverflowed();
 }
 
-bool CLC_LogoFileData::WriteToBuffer( bf_write &buffer )
+bool CLC_LogoFileData::WriteToBuffer( bf_write &buffer ) const
 {
 	buffer.WriteUBitLong( GetType(), NETMSG_TYPE_BITS );
 	buffer.WriteShort( m_Data.Count() );
@@ -90,7 +93,7 @@ bool SVC_LogoFileCRC::ReadFromBuffer( bf_read &buffer )
 	return !buffer.IsOverflowed();
 }
 
-bool SVC_LogoFileCRC::WriteToBuffer( bf_write &buffer )
+bool SVC_LogoFileCRC::WriteToBuffer( bf_write &buffer ) const
 {
 	buffer.WriteUBitLong( GetType(), NETMSG_TYPE_BITS );
 	buffer.WriteLong( m_nLogoFileCRC );
@@ -113,7 +116,7 @@ bool CLC_LogoFileRequest::ReadFromBuffer( bf_read &buffer )
 	return !buffer.IsOverflowed();
 }
 
-bool CLC_LogoFileRequest::WriteToBuffer( bf_write &buffer )
+bool CLC_LogoFileRequest::WriteToBuffer( bf_write &buffer ) const
 {
 	buffer.WriteUBitLong( GetType(), NETMSG_TYPE_BITS );
 	buffer.WriteLong( m_nLogoFileCRC );
@@ -136,7 +139,7 @@ bool SVC_LogoFileRequest::ReadFromBuffer( bf_read &buffer )
 	return !buffer.IsOverflowed();
 }
 
-bool SVC_LogoFileRequest::WriteToBuffer( bf_write &buffer )
+bool SVC_LogoFileRequest::WriteToBuffer( bf_write &buffer ) const
 {
 	buffer.WriteUBitLong( GetType(), NETMSG_TYPE_BITS );
 	buffer.WriteLong( m_nLogoFileCRC );

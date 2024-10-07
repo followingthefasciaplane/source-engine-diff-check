@@ -1,10 +1,10 @@
-//	DYNAMIC: "DOWATERFOG"				"0..1"
+#include "common_fog_vs_fxc.h"
 
-//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =======
+//========== Copyright (c) Valve Corporation, All rights reserved. ==========//
 //
 // Purpose: 
 //
-//=============================================================================
+//===========================================================================
 
 #include "common_vs_fxc.h"
 
@@ -18,7 +18,7 @@ struct VS_INPUT
 struct VS_OUTPUT
 {
     float4 projPos			: POSITION;	
-#if !defined( _X360 )
+#if !defined( _X360 ) && !defined( SHADER_MODEL_VS_3_0 )
 	float  fog				: FOG;
 #endif
 	float3 eyeToVertVector	: TEXCOORD0;
@@ -31,14 +31,23 @@ VS_OUTPUT main( const VS_INPUT v )
 {
 	VS_OUTPUT o = ( VS_OUTPUT )0;
 
-	o.projPos = mul( float4( v.vPos, 1 ), cModelViewProj );
+	float3 worldPos = mul4x3( float4( v.vPos, 1 ), cModel[0] );
+	o.projPos = mul( float4( worldPos, 1 ), cViewProj );
 
-	float3 worldPos = mul( float4( v.vPos, 1 ), cModel[0] );
+
+#ifdef _PS3
+	// Account for OpenGL's flipped y coordinate and expanded z range [-1,1] instead of [0,1]
+	o.projPos.y = -o.projPos.y;
+	o.projPos.z = 2.0f * o.projPos.z - o.projPos.w;
+#endif // _PS3
+
 	o.worldPos_projPosZ = float4( worldPos.xyz, o.projPos.z );
 	o.eyeToVertVector = worldPos - cEyePos;
-#if !defined( _X360 )
-	o.fog = CalcFog( worldPos, o.projPos, g_FogType );
+	
+#if !defined( _X360 ) && !defined( SHADER_MODEL_VS_3_0 )
+	o.fog = CalcFixedFunctionFog( worldPos, g_FogType );
 #endif
+
 	o.vertexColor = cModulationColor;
 	return o;
 }

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright (c) 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -9,12 +9,10 @@
 #if defined( USE_SDL )
 #include "snd_dev_sdl.h"
 #endif
-#ifdef OSX
+
+#if defined(OSX)
 #include "snd_dev_openal.h"
 #include "snd_dev_mac_audioqueue.h"
-
-ConVar snd_audioqueue( "snd_audioqueue", "1" );
-
 #endif
 
 // memdbgon must be the last include file in a .cpp file!!!
@@ -26,7 +24,11 @@ bool snd_firsttime = true;
  * Global variables. Must be visible to window-procedure function 
  *  so it can unlock and free the data block after it has been played. 
  */ 
+#if USE_AUDIO_DEVICE_V1
 IAudioDevice *g_AudioDevice = NULL;
+#else
+IAudioDevice2 *g_AudioDevice = NULL;
+#endif
 
 /*
 ==================
@@ -54,6 +56,16 @@ void S_UnblockSound( void )
 	g_AudioDevice->UnPause();
 }
 
+void S_UpdateWindowFocus( bool bWindowHasFocus )
+{
+	if ( !g_AudioDevice )
+		return;
+
+#if !USE_AUDIO_DEVICE_V1
+	g_AudioDevice->UpdateFocus( bWindowHasFocus );
+#endif
+}
+
 /*
 ==================
 AutoDetectInit
@@ -62,19 +74,14 @@ Try to find a sound device to mix for.
 Returns a CAudioNULLDevice if nothing is found.
 ==================
 */
-IAudioDevice *IAudioDevice::AutoDetectInit( bool waveOnly )
+#if USE_AUDIO_DEVICE_V1
+IAudioDevice *IAudioDevice::AutoDetectInit()
 {
 	IAudioDevice *pDevice = NULL;
 
 	if ( IsPC() )
 	{
 #if defined( WIN32 ) && !defined( USE_SDL )
-		if ( waveOnly )
-		{
-			pDevice = Audio_CreateWaveDevice();
-			if ( !pDevice )
-				goto NULLDEVICE;
-		}
 
 		if ( !pDevice )
 		{
@@ -84,15 +91,6 @@ IAudioDevice *IAudioDevice::AutoDetectInit( bool waveOnly )
 			}
 		}
 
-		// if DirectSound didn't succeed in initializing, try to initialize
-		// waveOut sound, unless DirectSound failed because the hardware is
-		// already allocated (in which case the user has already chosen not
-		// to have sound)
-		// UNDONE: JAY: This doesn't test for the hardware being in use anymore, REVISIT
-		if ( !pDevice )
-		{
-			pDevice = Audio_CreateWaveDevice();
-		}
 #elif defined(OSX)
 		if ( !CommandLine()->CheckParm( "-snd_openal" ) )
 		{
@@ -145,9 +143,6 @@ IAudioDevice *IAudioDevice::AutoDetectInit( bool waveOnly )
 	}
 #endif
 
-#if defined( WIN32 ) && !defined( USE_SDL )
-NULLDEVICE:
-#endif
 	snd_firsttime = false;
 
 	if ( !pDevice )
@@ -160,7 +155,7 @@ NULLDEVICE:
 
 	return pDevice;
 }
-
+#endif
 /*
 ==============
 SNDDMA_Shutdown
@@ -170,16 +165,8 @@ Reset the sound device for exiting
 */
 void SNDDMA_Shutdown( void )
 {
-	if ( g_AudioDevice != Audio_GetNullDevice() )
-	{
-		if ( g_AudioDevice )
-		{
-			g_AudioDevice->Shutdown();
-			delete g_AudioDevice;
-		}
-
-		// the NULL device is always valid
-		g_AudioDevice = Audio_GetNullDevice();
-	}
+	g_AudioDevice->Shutdown();
+	delete g_AudioDevice;
+	g_AudioDevice = NULL;
 }
 

@@ -1,9 +1,6 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2008, Valve Corporation, All rights reserved. ====
 //
-// Purpose: 
-//
-// $NoKeywords: $
-//=============================================================================//
+//=============================================================================
 #include "cbase.h"
 #include "gamemovement.h"
 #include "in_buttons.h"
@@ -14,13 +11,23 @@
 #include "decals.h"
 #include "coordsize.h"
 #include "rumble_shared.h"
+#include "cstrike15/basecsgrenade_projectile.h"
 
 #if defined(HL2_DLL) || defined(HL2_CLIENT_DLL)
 	#include "hl_movedata.h"
 #endif
 
+#if defined(HL2_EP3) && !defined(CLIENT_DLL)
+	#include "ep3/weapon_icegun.h"
+#endif
+
+#if (PREDICTION_ERROR_CHECK_LEVEL > 0) && (PREDICTION_ERROR_CHECK_STACKS_FOR_MISSING > 0)
+#include "tier0/stacktools.h"
+#endif
+
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
+
 
 #define	STOP_EPSILON		0.1
 #define	MAX_CLIP_PLANES		5
@@ -35,6 +42,9 @@ extern IFileSystem *filesystem;
 	static ConVar dispcoll_drawplane( "dispcoll_drawplane", "0" );
 #endif
 
+#if defined ( PORTAL2 ) &&  !defined ( CLIENT_DLL )
+#include "portal_player.h"
+#endif 
 
 // tickcount currently isn't set during prediction, although gpGlobals->curtime and
 // gpGlobals->frametime are. We should probably set tickcount (to player->m_nTickBase),
@@ -48,17 +58,6 @@ ConVar xc_uncrouch_on_jump( "xc_uncrouch_on_jump", "1", FCVAR_ARCHIVE, "Uncrouch
 
 #if defined( HL2_DLL ) || defined( HL2_CLIENT_DLL )
 ConVar player_limit_jump_speed( "player_limit_jump_speed", "1", FCVAR_REPLICATED );
-#endif
-
-// option_duck_method is a carrier convar. Its sole purpose is to serve an easy-to-flip
-// convar which is ONLY set by the X360 controller menu to tell us which way to bind the
-// duck controls. Its value is meaningless anytime we don't have the options window open.
-ConVar option_duck_method("option_duck_method", "1", FCVAR_REPLICATED|FCVAR_ARCHIVE );// 0 = HOLD to duck, 1 = Duck is a toggle
-
-#ifdef STAGING_ONLY
-#ifdef CLIENT_DLL
-ConVar debug_latch_reset_onduck( "debug_latch_reset_onduck", "1", FCVAR_CHEAT );
-#endif
 #endif
 
 // [MD] I'll remove this eventually. For now, I want the ability to A/B the optimizations.
@@ -75,12 +74,65 @@ bool g_bMovementOptimizations = true;
 #define CHECK_STUCK_INTERVAL_SP			0.2f
 #define CHECK_STUCK_TICK_INTERVAL_SP	( (int)( CHECK_STUCK_INTERVAL_SP / TICK_INTERVAL ) )
 
-#define CHECK_LADDER_INTERVAL			0.2f
-#define CHECK_LADDER_TICK_INTERVAL		( (int)( CHECK_LADDER_INTERVAL / TICK_INTERVAL ) )
+//#define CHECK_LADDER_INTERVAL			0.2f
+//#define CHECK_LADDER_TICK_INTERVAL		( (int)( CHECK_LADDER_INTERVAL / TICK_INTERVAL ) )
+#define	 CHECK_LADDER_TICK_INTERVAL		2	// every other tick
+
+#define CHECK_LADDER_WEDGE_INTERVAL			0.5f
+#define CHECK_LADDER_WEDGE_TICK_INTERVAL		( (int)( CHECK_LADDER_WEDGE_INTERVAL / TICK_INTERVAL ) )
 
 #define	NUM_CROUCH_HINTS	3
 
+#define MINIMUM_MOVE_FRACTION			0.0001f
+#define EFFECTIVELY_HORIZONTAL_NORMAL_Z	0.0001f
+
 extern IGameMovement *g_pGameMovement;
+
+//-----------------------------------------------------------------------------
+// Purpose: 
+// Input  : &vecSrc - 
+//			flDist - 
+//			flDelta - 
+// Output : Vector
+//-----------------------------------------------------------------------------
+class CTraceFilterSkipTwoEntitiesAndCheckTeamMask : public CTraceFilterSkipTwoEntities
+{
+public:
+	CTraceFilterSkipTwoEntitiesAndCheckTeamMask( const IHandleEntity *passentity = NULL, const IHandleEntity *passentity2 = NULL, int collisionGroup = COLLISION_GROUP_NONE ) :
+		CTraceFilterSkipTwoEntities( passentity, passentity2, collisionGroup )
+	{
+	}
+
+	bool ShouldHitEntity( IHandleEntity *pHandleEntity, int contentsMask )
+	{
+		CBaseEntity *pEntity = EntityFromEntityHandle( pHandleEntity );
+		if ( !pEntity )
+			return false;
+
+		const CBaseEntity *pSelf = EntityFromEntityHandle( GetPassEntity() );
+		if ( !pSelf )
+			return false;
+
+		if ( GetCollisionGroup() == COLLISION_GROUP_PLAYER_MOVEMENT )
+		{
+			if ( pEntity->GetCollisionGroup() == COLLISION_GROUP_PROJECTILE && pSelf->GetTeamNumber() == pEntity->GetTeamNumber() )
+				return false;
+
+			unsigned int myTeamMask = ( pSelf->PhysicsSolidMaskForEntity() & ( CONTENTS_TEAM1 | CONTENTS_TEAM2 ) );
+			unsigned int otherTeamMask = ( pEntity->PhysicsSolidMaskForEntity() & ( CONTENTS_TEAM1 | CONTENTS_TEAM2 ) );
+		
+			// See if we have a team and we're on the same team.
+			// If we are on the same team, then don't collide.
+			if ( myTeamMask != 0x0 && myTeamMask == otherTeamMask  )
+			{
+				return false;
+			}
+		}
+
+		return CTraceFilterSkipTwoEntities::ShouldHitEntity( pHandleEntity, contentsMask );
+	}
+};
+
 
 #if defined( PLAYER_GETTING_STUCK_TESTING )
 
@@ -110,13 +162,14 @@ void CMoveData::SetAbsOrigin( const Vector &vec )
 #if PREDICTION_ERROR_CHECK_LEVEL > 0
 
 static ConVar diffcheck( "diffcheck", "0", FCVAR_REPLICATED );
-
+static ConVar diffcheck_playerslot( "diffcheck_playerslot", "0", FCVAR_REPLICATED );
+static ConVar diffcheck_spew( "diffcheck_spew", "1", FCVAR_REPLICATED, "Actually show diffcheck results." );
 class IDiffMgr
 {
 public:
-	virtual void StartCommand( bool bServer, int nCommandNumber ) = 0;
-	virtual void AddToDiff( bool bServer, int nCommandNumber, char const *string ) = 0;
-	virtual void Validate( bool bServer, int nCommandNumber ) = 0;
+	virtual void StartCommand( int nSlot, bool bServer, int nCommandNumber ) = 0;
+	virtual void AddToDiff( int nSlot, bool bServer, int nCommandNumber, char const *string ) = 0;
+	virtual void Validate( int nSlot, bool bServer, int nCommandNumber ) = 0;
 };
 
 static IDiffMgr *g_pDiffMgr = NULL;
@@ -127,25 +180,52 @@ public:
 	CDiffStr()
 	{
 		m_str[ 0 ] = 0;
+#if PREDICTION_ERROR_CHECK_STACKS_FOR_MISSING > 0
+		m_stackEntries = 0;
+#endif
 	}
 
 	CDiffStr( char const *str )
 	{
 		Q_strncpy( m_str, str, sizeof( m_str ) );
+#if PREDICTION_ERROR_CHECK_STACKS_FOR_MISSING > 0
+		m_stackEntries = GetCallStack( m_stackAddresses, ARRAYSIZE(m_stackAddresses), 4 ); //skip this constructor, IDiffMgr::AddToDiff(), DiffPrint(), and IGameMovement::DiffPrint() 
+#endif
 	}
 
 	CDiffStr( const CDiffStr &src )
 	{
 		Q_strncpy( m_str, src.m_str, sizeof( m_str ) );
+#if PREDICTION_ERROR_CHECK_STACKS_FOR_MISSING > 0
+		memcpy( m_stackAddresses, src.m_stackAddresses, sizeof( m_stackAddresses ) );
+		m_stackEntries = src.m_stackEntries;
+#endif
 	}
 
 	char const *String()
 	{
 		return m_str;
 	}
+
+#if PREDICTION_ERROR_CHECK_STACKS_FOR_MISSING > 0
+	void **StackAddresses( void )
+	{
+		return m_stackAddresses;
+	}
+
+	const int StackEntries( void )
+	{
+		return m_stackEntries;
+	}
+#endif
+
 private:
 
 	char m_str[ 128 ];
+#if PREDICTION_ERROR_CHECK_STACKS_FOR_MISSING > 0
+	void *m_stackAddresses[8];
+	int m_stackEntries;
+#endif
 };
 
 // Per tick data
@@ -175,14 +255,12 @@ class CDiffManager : public IDiffMgr
 {
 public:
 	CDiffManager() : 
-		m_Client( 0, 0, CDiffInfo::Less ),
-		m_Server( 0, 0, CDiffInfo::Less ),
 		m_flLastSpew( -1.0f )
 	{
 		g_pDiffMgr = this;
 	}
 
-	virtual void StartCommand( bool bServer, int nCommandNumber )
+	virtual void StartCommand( int nSlot, bool bServer, int nCommandNumber )
 	{
 #if defined( CLIENT_DLL )
 
@@ -190,7 +268,7 @@ public:
 			return;
 
 		g_pDiffMgr = reinterpret_cast< IDiffMgr * >( diffcheck.GetInt() );
-		g_pDiffMgr->StartCommand( bServer, nCommandNumber );
+		g_pDiffMgr->StartCommand( nSlot, bServer, nCommandNumber );
 		return;
 #endif
 
@@ -200,10 +278,11 @@ public:
 
 		Assert( CBaseEntity::IsServer() );
 
-		CUtlRBTree< CDiffInfo, int >& rb = bServer ? m_Server : m_Client;
+		CUtlRBTree< CDiffInfo, int >& rb = bServer ? m_Data[ nSlot ].m_Server : m_Data[ nSlot ].m_Client;
 
 		CDiffInfo search;
 		search.m_nCommandNumber = nCommandNumber;
+
 		int idx = rb.Find( search );
 		if ( idx == rb.InvalidIndex() )
 		{
@@ -214,7 +293,7 @@ public:
 		slot->m_Lines.RemoveAll();
 	}
 
-	virtual void AddToDiff( bool bServer, int nCommandNumber, char const *string )
+	virtual void AddToDiff( int nSlot, bool bServer, int nCommandNumber, char const *string )
 	{
 #if defined( CLIENT_DLL )
 
@@ -222,14 +301,14 @@ public:
 			return;
 
 		g_pDiffMgr = reinterpret_cast< IDiffMgr * >( diffcheck.GetInt() );
-		g_pDiffMgr->AddToDiff( bServer, nCommandNumber, string );
+		g_pDiffMgr->AddToDiff( nSlot, bServer, nCommandNumber, string );
 		return;
 #endif
 		Assert( CBaseEntity::IsServer() );
 
 		// Msg( "%s Add %d %s\n", bServer ? "sv" : "cl", nCommandNumber, string );
 
-		CUtlRBTree< CDiffInfo, int >& rb = bServer ? m_Server : m_Client;
+		CUtlRBTree< CDiffInfo, int >& rb = bServer ? m_Data[ nSlot ].m_Server : m_Data[ nSlot ].m_Client;
 
 		CDiffInfo search;
 		search.m_nCommandNumber = nCommandNumber;
@@ -252,27 +331,27 @@ public:
 		DIFFCHECK_DIFFERS
 	};
 
-	bool ClientRecordExists( int cmd )
+	bool ClientRecordExists( int nSlot, int cmd )
 	{
 		CDiffInfo clsearch;
 		clsearch.m_nCommandNumber = cmd;
-		int clidx = m_Client.Find( clsearch );
-		return m_Client.IsValidIndex( clidx );
+		int clidx = m_Data[ nSlot ].m_Client.Find( clsearch );
+		return m_Data[ nSlot ].m_Client.IsValidIndex( clidx );
 	}
 
-	EMismatched IsMismatched( int svidx )
+	EMismatched IsMismatched( int nSlot, int svidx )
 	{
-		CDiffInfo *serverslot = &m_Server[ svidx ];
+		CDiffInfo *serverslot = &m_Data[ nSlot ].m_Server[ svidx ];
 
 		// Now find the client version of this one
 		CDiffInfo clsearch;
 		clsearch.m_nCommandNumber = serverslot->m_nCommandNumber;
-		int clidx = m_Client.Find( clsearch );
-		if ( clidx == m_Client.InvalidIndex() )
+		int clidx = m_Data[ nSlot ].m_Client.Find( clsearch );
+		if ( clidx == m_Data[ nSlot ].m_Client.InvalidIndex() )
 			return DIFFCHECK_NOTREADY;
 
 		// Now compare them
-		CDiffInfo *clientslot = &m_Client[ clidx ];
+		CDiffInfo *clientslot = &m_Data[ nSlot ].m_Client[ clidx ];
 
 		bool bSpew = false;
 		if ( serverslot->m_Lines.Count() != 
@@ -307,7 +386,7 @@ public:
 		return DIFFCHECK_MATCHED;
 	}
 
-	virtual void Validate( bool bServer, int nCommandNumber )
+	virtual void Validate( int nSlot, bool bServer, int nCommandNumber )
 	{
 #if defined( CLIENT_DLL )
 
@@ -315,7 +394,7 @@ public:
 			return;
 
 		g_pDiffMgr = reinterpret_cast< IDiffMgr * >( diffcheck.GetInt() );
-		g_pDiffMgr->Validate( bServer, nCommandNumber );
+		g_pDiffMgr->Validate( nSlot, bServer, nCommandNumber );
 		return;
 #endif
 		Assert( CBaseEntity::IsServer() );
@@ -324,12 +403,19 @@ public:
 		if ( !bServer )
 			return;
 
-		// Find the last server command number
-		if ( m_Server.Count() <= 0 )
+		if ( !diffcheck_spew.GetBool() )
 			return;
 
-		int svidx = m_Server.LastInorder();
-		EMismatched eMisMatched = IsMismatched( svidx );
+		// Don't care about this player slot
+		if ( diffcheck_playerslot.GetInt() != nSlot )
+			return;
+
+		// Find the last server command number
+		if ( m_Data[ nSlot ].m_Server.Count() <= 0 )
+			return;
+
+		int svidx = m_Data[ nSlot ].m_Server.LastInorder();
+		EMismatched eMisMatched = IsMismatched( nSlot, svidx );
 		if ( eMisMatched == DIFFCHECK_NOTREADY )
 		{
 			return;
@@ -342,9 +428,9 @@ public:
 			int nCur = svidx;
 			do 
 			{
-				int prev = m_Server.PrevInorder( nCur );
-				if ( m_Server.IsValidIndex( prev ) && 
-					ClientRecordExists( m_Server[ prev ].m_nCommandNumber ) )
+				int prev = m_Data[ nSlot ].m_Server.PrevInorder( nCur );
+				if ( m_Data[ nSlot ].m_Server.IsValidIndex( prev ) && 
+					ClientRecordExists( nSlot, m_Data[ nSlot ].m_Server[ prev ].m_nCommandNumber ) )
 				{
 					//SpewRecords( "prev", prev );
 					vecPrev.AddToHead( prev );
@@ -361,26 +447,26 @@ public:
 
 			for ( int p = 0; p < vecPrev.Count(); ++p )
 			{
-				SpewRecords( "prev", vecPrev[ p ] );
+				SpewRecords( nSlot, "prev", vecPrev[ p ] );
 			}
 
-			SpewRecords( "bad ", svidx );
+			SpewRecords( nSlot, "bad ", svidx );
 		}
 	}
 
-	void SpewRecords( char const *prefix, int svidx )
+	void SpewRecords( int nSlot, char const *prefix, int svidx )
 	{
-		CDiffInfo *serverslot = &m_Server[ svidx ];
+		CDiffInfo *serverslot = &m_Data[ nSlot ].m_Server[ svidx ];
 
 		// Now find the client version of this one
 		CDiffInfo clsearch;
 		clsearch.m_nCommandNumber = serverslot->m_nCommandNumber;
-		int clidx = m_Client.Find( clsearch );
-		if ( clidx == m_Client.InvalidIndex() )
+		int clidx = m_Data[ nSlot ].m_Client.Find( clsearch );
+		if ( clidx == m_Data[ nSlot ].m_Client.InvalidIndex() )
 			return;
 
 		// Now compare them
-		CDiffInfo *clientslot = &m_Client[ clidx ];
+		CDiffInfo *clientslot = &m_Data[ nSlot ].m_Client[ clidx ];
 
 		int maxSlot = MAX( serverslot->m_Lines.Count(), clientslot->m_Lines.Count() );
 
@@ -389,39 +475,83 @@ public:
 			char const *sv = "(missing)";
 			char const *cl = "(missing)";
 
+#if PREDICTION_ERROR_CHECK_STACKS_FOR_MISSING > 0
+			int iHaveString = 0;
+#endif
+
 			if ( i < serverslot->m_Lines.Count() )
 			{
 				sv = serverslot->m_Lines[ i ].String();
+#if PREDICTION_ERROR_CHECK_STACKS_FOR_MISSING > 0
+				iHaveString |= 1;
+#endif
 			}
 			if ( i < clientslot->m_Lines.Count() )
 			{
 				cl = clientslot->m_Lines[ i ].String();
+#if PREDICTION_ERROR_CHECK_STACKS_FOR_MISSING > 0
+				iHaveString |= 2;
+#endif
 			}
 
 			bool bDiffers = Q_stricmp( sv, cl ) ? true : false;
 
-			Msg( "%s%s%d:  sv[%50.50s] cl[%50.50s]\n",
+			Msg( "%s%s%d:  sv[%100.100s] cl[%100.100s]\n",
 				prefix,
 				bDiffers ? "+++" : "   ",
 				serverslot->m_nCommandNumber, 
 				sv,
 				cl );
+
+#if PREDICTION_ERROR_CHECK_STACKS_FOR_MISSING > 0
+			if( (iHaveString > 0) && (iHaveString < 3) )
+			{
+				CDiffStr *pHaveString = (iHaveString == 1) ? &serverslot->m_Lines[ i ] : &clientslot->m_Lines[ i ];
+				char szFormattedStack[4096];
+				szFormattedStack[0] = '\0';
+				TranslateStackInfo( pHaveString->StackAddresses(), pHaveString->StackEntries(), szFormattedStack, ARRAYSIZE( szFormattedStack ), "\n\t" );
+				Msg( "Stack for existing side:\n\t%s\n", szFormattedStack );
+			}
+#endif
 		}
 	}
 private:
 
-	CUtlRBTree< CDiffInfo, int >	m_Server;
-	CUtlRBTree< CDiffInfo, int >	m_Client;
+	struct User_t
+	{
+		User_t() :
+			m_Client( 0, 0, CDiffInfo::Less ),
+			m_Server( 0, 0, CDiffInfo::Less )
+		{
+		}
+
+		CUtlRBTree< CDiffInfo, int >	m_Server;
+		CUtlRBTree< CDiffInfo, int >	m_Client;
+	};
+
+	User_t							m_Data[ MAX_SPLITSCREEN_PLAYERS ];
 	float							m_flLastSpew;
 };
 
 static CDiffManager g_DiffMgr;
 
+bool IsValidForErrorCheck( CBasePlayer *pl )
+{
+	Assert( pl );
+	if ( !pl->GetCurrentUserCommand() )
+		return false;
+	if ( pl->entindex() == 1 )
+		return true;
+	if ( pl->IsSplitScreenPlayer() )
+		return true;
+	return false;
+}
+
 void DiffPrint( bool bServer, int nCommandNumber, char const *fmt, ... )
 {
 	// Only track stuff for local player
-	CBasePlayer *pPlayer = CBaseEntity::GetPredictionPlayer();
-	if ( pPlayer && pPlayer->entindex() != 1 )
+	CBasePlayer *player = CBaseEntity::GetPredictionPlayer();
+	if ( !player || !IsValidForErrorCheck( player ) )
 	{
 		return;
 	}
@@ -440,7 +570,7 @@ void DiffPrint( bool bServer, int nCommandNumber, char const *fmt, ... )
 			string[ len - 1 ] = 0;
 		}
 		
-		g_pDiffMgr->AddToDiff( bServer, nCommandNumber, string );
+		g_pDiffMgr->AddToDiff( player->GetSplitScreenPlayerSlot(), bServer, nCommandNumber, string );
 	}
 }
 
@@ -454,23 +584,23 @@ void _CheckV( int tick, char const *ctx, const Vector &vel )
 static void StartCommand( bool bServer, int nCommandNumber )
 {
 	// Only track stuff for local player
-	CBasePlayer *pPlayer = CBaseEntity::GetPredictionPlayer();
-	if ( pPlayer && pPlayer->entindex() != 1 )
+	CBasePlayer *player = CBaseEntity::GetPredictionPlayer();
+	if ( !player || !IsValidForErrorCheck( player ) )
 	{
 		return;
 	}
 
 	if ( g_pDiffMgr )
 	{
-		g_pDiffMgr->StartCommand( bServer, nCommandNumber );
+		g_pDiffMgr->StartCommand( player->GetSplitScreenPlayerSlot(), bServer, nCommandNumber );
 	}
 }
 
 static void Validate( bool bServer, int nCommandNumber )
 {
 	// Only track stuff for local player
-	CBasePlayer *pPlayer = CBaseEntity::GetPredictionPlayer();
-	if ( pPlayer && pPlayer->entindex() != 1 )
+	CBasePlayer *player = CBaseEntity::GetPredictionPlayer();
+	if ( !player || !IsValidForErrorCheck( player ) )
 	{
 		return;
 	}
@@ -478,13 +608,13 @@ static void Validate( bool bServer, int nCommandNumber )
 
 	if ( g_pDiffMgr )
 	{
-		g_pDiffMgr->Validate( bServer, nCommandNumber );
+		g_pDiffMgr->Validate( player->GetSplitScreenPlayerSlot(), bServer, nCommandNumber );
 	}
 }
 
 void CGameMovement::DiffPrint( char const *fmt, ... )
 {
-	if ( !player )
+	if ( !player || !player->GetCurrentUserCommand() )
 		return;
 
 	va_list		argptr;
@@ -497,7 +627,7 @@ void CGameMovement::DiffPrint( char const *fmt, ... )
 }
 
 #else
-static void DiffPrint( bool bServer, int nCommandNumber, char const *fmt, ... )
+void DiffPrint( bool bServer, int nCommandNumber, char const *fmt, ... )
 {
 	// Nothing
 }
@@ -517,7 +647,6 @@ void CGameMovement::DiffPrint( char const *fmt, ... )
 
 #endif // !PREDICTION_ERROR_CHECK_LEVEL
 
-#ifndef _XBOX
 void COM_Log( const char *pszFile, const char *fmt, ...)
 {
 	va_list		argptr;
@@ -544,7 +673,6 @@ void COM_Log( const char *pszFile, const char *fmt, ...)
 		filesystem->Close(fp);
 	}
 }
-#endif
 
 #ifndef CLIENT_DLL
 //-----------------------------------------------------------------------------
@@ -621,10 +749,12 @@ CGameMovement::CGameMovement( void )
 	m_nOldWaterLevel	= WL_NotInWater;
 	m_flWaterEntryTime	= 0;
 	m_nOnLadder			= 0;
+	m_bProcessingMovement = false;
 
 	mv					= NULL;
 
 	memset( m_flStuckCheckTime, 0, sizeof(m_flStuckCheckTime) );
+	m_pTraceListData = NULL;
 }
 
 //-----------------------------------------------------------------------------
@@ -632,12 +762,48 @@ CGameMovement::CGameMovement( void )
 //-----------------------------------------------------------------------------
 CGameMovement::~CGameMovement( void )
 {
+	if ( enginetrace )
+	{
+		enginetrace->FreeTraceListData(m_pTraceListData);
+	}
 }
+
+//--------------------------------------------------------------------------------------------------------
+enum
+{
+	MAX_NESTING = 8
+};
+
+static CTraceFilterSkipTwoEntitiesAndCheckTeamMask s_TraceFilter[MAX_NESTING];
+static int s_nTraceFilterCount = 0;
+
+ITraceFilter *CGameMovement::LockTraceFilter( int collisionGroup )
+{
+	// If this assertion triggers, you forgot to call UnlockTraceFilter
+	Assert( s_nTraceFilterCount < MAX_NESTING );
+	if ( s_nTraceFilterCount >= MAX_NESTING )
+		return NULL;
+
+	CTraceFilterSkipTwoEntitiesAndCheckTeamMask *pFilter = &s_TraceFilter[s_nTraceFilterCount++];
+	pFilter->SetPassEntity( mv->m_nPlayerHandle.Get() );
+	pFilter->SetCollisionGroup( collisionGroup );
+
+	return pFilter;
+}
+
+void CGameMovement::UnlockTraceFilter( ITraceFilter *&pFilter )
+{
+	Assert( s_nTraceFilterCount > 0 );
+	--s_nTraceFilterCount;
+	Assert( &s_TraceFilter[s_nTraceFilterCount] == pFilter );
+	pFilter = NULL;
+}
+
 
 //-----------------------------------------------------------------------------
 // Purpose: Allow bots etc to use slightly different solid masks
 //-----------------------------------------------------------------------------
-unsigned int CGameMovement::PlayerSolidMask( bool brushOnly )
+unsigned int CGameMovement::PlayerSolidMask( bool brushOnly, CBasePlayer *testPlayer ) const
 {
 	return ( brushOnly ) ? MASK_PLAYERSOLID_BRUSHONLY : MASK_PLAYERSOLID;
 }
@@ -679,6 +845,9 @@ int CGameMovement::GetCheckInterval( IntervalType_t type )
 	case LADDER:
 		tickInterval = CHECK_LADDER_TICK_INTERVAL;
 		break;
+	case LADDER_WEDGE:
+		tickInterval = CHECK_LADDER_WEDGE_TICK_INTERVAL;
+		break;
 	}
 	return tickInterval;
 }
@@ -708,9 +877,9 @@ bool CGameMovement::CheckInterval( IntervalType_t type )
 // Input  : ducked - 
 // Output : const Vector
 //-----------------------------------------------------------------------------
-Vector CGameMovement::GetPlayerMins( bool ducked ) const
+const Vector& CGameMovement::GetPlayerMins( bool ducked ) const
 {
-	return ducked ? VEC_DUCK_HULL_MIN_SCALED( player ) : VEC_HULL_MIN_SCALED( player );
+	return ducked ? VEC_DUCK_HULL_MIN : VEC_HULL_MIN;
 }
 
 //-----------------------------------------------------------------------------
@@ -718,9 +887,9 @@ Vector CGameMovement::GetPlayerMins( bool ducked ) const
 // Input  : ducked - 
 // Output : const Vector
 //-----------------------------------------------------------------------------
-Vector CGameMovement::GetPlayerMaxs( bool ducked ) const
+const Vector& CGameMovement::GetPlayerMaxs( bool ducked ) const
 {	
-	return ducked ? VEC_DUCK_HULL_MAX_SCALED( player ) : VEC_HULL_MAX_SCALED( player );
+	return ducked ? VEC_DUCK_HULL_MAX : VEC_HULL_MAX;
 }
 
 //-----------------------------------------------------------------------------
@@ -728,15 +897,15 @@ Vector CGameMovement::GetPlayerMaxs( bool ducked ) const
 // Input  : 
 // Output : const Vector
 //-----------------------------------------------------------------------------
-Vector CGameMovement::GetPlayerMins( void ) const
+const Vector& CGameMovement::GetPlayerMins( void ) const
 {
 	if ( player->IsObserver() )
 	{
-		return VEC_OBS_HULL_MIN_SCALED( player );	
+		return VEC_OBS_HULL_MIN;	
 	}
 	else
 	{
-		return player->m_Local.m_bDucked  ? VEC_DUCK_HULL_MIN_SCALED( player ) : VEC_HULL_MIN_SCALED( player );
+		return player->m_Local.m_bDucked  ? VEC_DUCK_HULL_MIN : VEC_HULL_MIN;
 	}
 }
 
@@ -745,15 +914,15 @@ Vector CGameMovement::GetPlayerMins( void ) const
 // Input  : 
 // Output : const Vector
 //-----------------------------------------------------------------------------
-Vector CGameMovement::GetPlayerMaxs( void ) const
+const Vector& CGameMovement::GetPlayerMaxs( void ) const
 {	
 	if ( player->IsObserver() )
 	{
-		return VEC_OBS_HULL_MAX_SCALED( player );	
+		return VEC_OBS_HULL_MAX;	
 	}
 	else
 	{
-		return player->m_Local.m_bDucked  ? VEC_DUCK_HULL_MAX_SCALED( player ) : VEC_HULL_MAX_SCALED( player );
+		return player->m_Local.m_bDucked  ? VEC_DUCK_HULL_MAX : VEC_HULL_MAX;
 	}
 }
 
@@ -762,38 +931,22 @@ Vector CGameMovement::GetPlayerMaxs( void ) const
 // Input  : ducked - 
 // Output : const Vector
 //-----------------------------------------------------------------------------
-Vector CGameMovement::GetPlayerViewOffset( bool ducked ) const
+const Vector& CGameMovement::GetPlayerViewOffset( bool ducked ) const
 {
-	return ducked ? VEC_DUCK_VIEW_SCALED( player ) : VEC_VIEW_SCALED( player );
+	return ducked ? VEC_DUCK_VIEW : VEC_VIEW;
 }
-
-#if 0
-//-----------------------------------------------------------------------------
-// Traces player movement + position
-//-----------------------------------------------------------------------------
-inline void CGameMovement::TracePlayerBBox( const Vector& start, const Vector& end, unsigned int fMask, int collisionGroup, trace_t& pm )
-{
-	VPROF( "CGameMovement::TracePlayerBBox" );
-
-	Ray_t ray;
-	ray.Init( start, end, GetPlayerMins(), GetPlayerMaxs() );
-	UTIL_TraceRay( ray, fMask, mv->m_nPlayerHandle.Get(), collisionGroup, &pm );
-}
-#endif
 
 CBaseHandle CGameMovement::TestPlayerPosition( const Vector& pos, int collisionGroup, trace_t& pm )
 {
+	++m_nTraceCount;
 	Ray_t ray;
 	ray.Init( pos, pos, GetPlayerMins(), GetPlayerMaxs() );
-	UTIL_TraceRay( ray, PlayerSolidMask(), mv->m_nPlayerHandle.Get(), collisionGroup, &pm );
+	ITraceFilter *filter = LockTraceFilter( collisionGroup );
+	UTIL_TraceRay( ray, PlayerSolidMask(), filter, &pm );
+	UnlockTraceFilter( filter );
 	if ( (pm.contents & PlayerSolidMask()) && pm.m_pEnt )
-	{
 		return pm.m_pEnt->GetRefEHandle();
-	}
-	else
-	{	
-		return INVALID_EHANDLE_INDEX;
-	}
+	return INVALID_EHANDLE;
 }
 
 
@@ -920,9 +1073,10 @@ void CBasePlayer::UpdateWetness()
 //-----------------------------------------------------------------------------
 void CGameMovement::CategorizeGroundSurface( trace_t &pm )
 {
+	IPhysicsSurfaceProps *physprops = MoveHelper()->GetSurfaceProps();
 	player->m_surfaceProps = pm.surface.surfaceProps;
-	player->m_pSurfaceData = MoveHelper()->GetSurfaceProps()->GetSurfaceData( player->m_surfaceProps );
-	MoveHelper()->GetSurfaceProps()->GetPhysicsProperties( player->m_surfaceProps, NULL, NULL, &player->m_surfaceFriction, NULL );
+	player->m_pSurfaceData = physprops->GetSurfaceData( player->m_surfaceProps );
+	physprops->GetPhysicsProperties( player->m_surfaceProps, NULL, NULL, &player->m_surfaceFriction, NULL );
 	
 	// HACKHACK: Scale this to fudge the relationship between vphysics friction values and player friction values.
 	// A value of 0.8f feels pretty normal for vphysics, whereas 1.0f is normal for players.
@@ -936,7 +1090,7 @@ void CGameMovement::CategorizeGroundSurface( trace_t &pm )
 
 bool CGameMovement::IsDead( void ) const
 {
-	return ( player->m_iHealth <= 0 && !player->IsAlive() );
+	return ( player->m_iHealth <= 0 ) ? true : false;
 }
 
 //-----------------------------------------------------------------------------
@@ -1048,13 +1202,13 @@ void CGameMovement::CheckParameters( void )
 		mv->m_flUpMove      = 0;
 	}
 
-	DecayPunchAngle();
+	DecayViewPunchAngle();
 
 	// Take angles from command.
 	if ( !IsDead() )
 	{
 		v_angle = mv->m_vecAngles;
-		v_angle = v_angle + player->m_Local.m_vecPunchAngle;
+		v_angle = v_angle + player->m_Local.m_viewPunchAngle;
 
 		// Now adjust roll angle
 		if ( player->GetMoveType() != MOVETYPE_ISOMETRIC  &&
@@ -1077,7 +1231,7 @@ void CGameMovement::CheckParameters( void )
 	// Set dead player view_offset
 	if ( IsDead() )
 	{
-		player->SetViewOffset( VEC_DEAD_VIEWHEIGHT_SCALED( player ) );
+		player->SetViewOffset( VEC_DEAD_VIEWHEIGHT );
 	}
 
 	// Adjust client view angles to match values used on server.
@@ -1090,29 +1244,30 @@ void CGameMovement::CheckParameters( void )
 void CGameMovement::ReduceTimers( void )
 {
 	float frame_msec = 1000.0f * gpGlobals->frametime;
+	int nFrameMsec = (int)frame_msec;
 
-	if ( player->m_Local.m_flDucktime > 0 )
+	if ( player->m_Local.m_nDuckTimeMsecs > 0 )
 	{
-		player->m_Local.m_flDucktime -= frame_msec;
-		if ( player->m_Local.m_flDucktime < 0 )
+		player->m_Local.m_nDuckTimeMsecs -= nFrameMsec;
+		if ( player->m_Local.m_nDuckTimeMsecs < 0 )
 		{
-			player->m_Local.m_flDucktime = 0;
+			player->m_Local.m_nDuckTimeMsecs = 0;
 		}
 	}
-	if ( player->m_Local.m_flDuckJumpTime > 0 )
+	if ( player->m_Local.m_nDuckJumpTimeMsecs > 0 )
 	{
-		player->m_Local.m_flDuckJumpTime -= frame_msec;
-		if ( player->m_Local.m_flDuckJumpTime < 0 )
+		player->m_Local.m_nDuckJumpTimeMsecs -= nFrameMsec;
+		if ( player->m_Local.m_nDuckJumpTimeMsecs < 0 )
 		{
-			player->m_Local.m_flDuckJumpTime = 0;
+			player->m_Local.m_nDuckJumpTimeMsecs = 0;
 		}
 	}
-	if ( player->m_Local.m_flJumpTime > 0 )
+	if ( player->m_Local.m_nJumpTimeMsecs > 0 )
 	{
-		player->m_Local.m_flJumpTime -= frame_msec;
-		if ( player->m_Local.m_flJumpTime < 0 )
+		player->m_Local.m_nJumpTimeMsecs -= nFrameMsec;
+		if ( player->m_Local.m_nJumpTimeMsecs < 0 )
 		{
-			player->m_Local.m_flJumpTime = 0;
+			player->m_Local.m_nJumpTimeMsecs = 0;
 		}
 	}
 	if ( player->m_flSwimSoundTime > 0 )
@@ -1125,12 +1280,52 @@ void CGameMovement::ReduceTimers( void )
 	}
 }
 
+
+// get a conservative bounds for this player's movement traces
+// This allows gamemovement to optimize those traces
+void CGameMovement::SetupMovementBounds( CMoveData *move )
+{
+	if ( m_pTraceListData )
+	{
+		m_pTraceListData->Reset();
+	}
+	else
+	{
+		m_pTraceListData = enginetrace->AllocTraceListData();
+	}
+	if ( !move->m_nPlayerHandle.IsValid() )
+	{
+		return;
+	}
+
+	CBasePlayer *pPlayer = (CBasePlayer *)move->m_nPlayerHandle.Get();
+
+	Vector moveMins, moveMaxs;
+	ClearBounds( moveMins, moveMaxs );
+	Vector start = move->GetAbsOrigin();
+	float radius = ((move->m_vecVelocity.Length() + move->m_flMaxSpeed) * gpGlobals->frametime) + 1.0f;
+	// NOTE: assumes the unducked bbox encloses the ducked bbox
+	Vector boxMins = GetPlayerMins(false);
+	Vector boxMaxs = GetPlayerMaxs(false);
+
+	// bloat by traveling the max velocity in all directions, plus the stepsize up/down
+	Vector bloat;
+	bloat.Init(radius, radius, radius);
+	bloat.z += pPlayer->m_Local.m_flStepSize;
+	AddPointToBounds( start + boxMaxs + bloat, moveMins, moveMaxs );
+	AddPointToBounds( start + boxMins - bloat, moveMins, moveMaxs );
+	// now build an optimized trace within these bounds
+	enginetrace->SetupLeafAndEntityListBox( moveMins, moveMaxs, m_pTraceListData );
+}
+
 //-----------------------------------------------------------------------------
 // Purpose: 
 // Input  : *pMove - 
 //-----------------------------------------------------------------------------
 void CGameMovement::ProcessMovement( CBasePlayer *pPlayer, CMoveData *pMove )
 {
+	m_nTraceCount = 0;
+
 	Assert( pMove && pPlayer );
 
 	float flStoreFrametime = gpGlobals->frametime;
@@ -1139,7 +1334,7 @@ void CGameMovement::ProcessMovement( CBasePlayer *pPlayer, CMoveData *pMove )
 	//!!Blame Yahn for this one.
 	gpGlobals->frametime *= pPlayer->GetLaggedMovementValue();
 
-	ResetGetPointContentsCache();
+	ResetGetWaterContentsForPointCache();
 
 	// Cropping movement speed scales mv->m_fForwardSpeed etc. globally
 	// Once we crop, we don't want to recursively crop again, so we set the crop
@@ -1147,11 +1342,13 @@ void CGameMovement::ProcessMovement( CBasePlayer *pPlayer, CMoveData *pMove )
 	m_iSpeedCropped = SPEED_CROPPED_RESET;
 	
 	// StartTrackPredictionErrors should have set this
-	Assert( player == pPlayer );
+	Assert( pPlayer->IsBot() ||  player == pPlayer );
 	player = pPlayer;
 
 	mv = pMove;
 	mv->m_flMaxSpeed = pPlayer->GetPlayerMaxSpeed();
+	m_bProcessingMovement = true;
+	m_bInStuckTest = false;
 
 	// CheckV( player->CurrentCommandNumber(), "StartPos", mv->GetAbsOrigin() );
 
@@ -1169,11 +1366,26 @@ void CGameMovement::ProcessMovement( CBasePlayer *pPlayer, CMoveData *pMove )
 	//This is probably not needed, but just in case.
 	gpGlobals->frametime = flStoreFrametime;
 
-// 	player = NULL;
+	m_bProcessingMovement = false;
+
+#if !defined( CLIENT_DLL )
+	if ( !player->IsBot() )
+	{
+		VPROF_INCREMENT_COUNTER( "PlayerMovementTraces", m_nTraceCount );
+	}
+#endif
+}
+
+void CGameMovement::Reset( void )
+{
+	player = NULL;
 }
 
 void CGameMovement::StartTrackPredictionErrors( CBasePlayer *pPlayer )
 {
+	if ( pPlayer->IsBot() )
+		return;
+
 	player = pPlayer;
 
 #if PREDICTION_ERROR_CHECK_LEVEL > 0
@@ -1183,9 +1395,12 @@ void CGameMovement::StartTrackPredictionErrors( CBasePlayer *pPlayer )
 
 void CGameMovement::FinishTrackPredictionErrors( CBasePlayer *pPlayer )
 {
-#if PREDICTION_ERROR_CHECK_LEVEL > 0
+	if ( pPlayer->IsBot() )
+		return;
+
 	Assert( player == pPlayer );
 
+#if PREDICTION_ERROR_CHECK_LEVEL > 0
 	// DiffPrint( "end %f", player->m_Local.m_vecPunchAngleVel.m_Value.x );
 
 	// Call validate at end of checking
@@ -1199,47 +1414,74 @@ void CGameMovement::FinishTrackPredictionErrors( CBasePlayer *pPlayer )
 void CGameMovement::FinishMove( void )
 {
 	mv->m_nOldButtons = mv->m_nButtons;
-	mv->m_flOldForwardMove = mv->m_flForwardMove;
 }
 
 #define PUNCH_DAMPING		9.0f		// bigger number makes the response more damped, smaller is less damped
 										// currently the system will overshoot, with larger damping values it won't
 #define PUNCH_SPRING_CONSTANT	65.0f	// bigger number increases the speed at which the view corrects
 
+
+void CGameMovement::DecayAngles( QAngle& v, float fExp, float fLin, float dT )
+{
+	fExp *= dT;
+	fLin *= dT;
+
+	v *= expf(-fExp);
+
+	float fMag = v.Length();
+	if ( fMag > fLin )
+	{
+		v *= (1.0f - fLin / fMag);
+	}
+	else
+	{
+		v.Init(0.0f, 0.0f, 0.0f);
+	}
+}
+
+
+extern ConVar view_punch_decay;
+
 //-----------------------------------------------------------------------------
 // Purpose: Decays the punchangle toward 0,0,0.
 //			Modelled as a damped spring
 //-----------------------------------------------------------------------------
-void CGameMovement::DecayPunchAngle( void )
+void CGameMovement::DecayViewPunchAngle( void )
 {
-	if ( player->m_Local.m_vecPunchAngle->LengthSqr() > 0.001 || player->m_Local.m_vecPunchAngleVel->LengthSqr() > 0.001 )
+	QAngle punchAngle = player->m_Local.m_viewPunchAngle;
+	DecayAngles(punchAngle, view_punch_decay.GetFloat(), 0.0f, TICK_INTERVAL);
+	player->m_Local.m_viewPunchAngle = punchAngle;
+
+/*
+	if ( player->m_Local.m_viewPunchAngle->LengthSqr() > 0.001 || player->m_Local.m_vecPunchAngleVel->LengthSqr() > 0.001 )
 	{
-		player->m_Local.m_vecPunchAngle += player->m_Local.m_vecPunchAngleVel * gpGlobals->frametime;
+		player->m_Local.m_viewPunchAngle += player->m_Local.m_viewPunchAngleVel * gpGlobals->frametime;
 		float damping = 1 - (PUNCH_DAMPING * gpGlobals->frametime);
 		
 		if ( damping < 0 )
 		{
 			damping = 0;
 		}
-		player->m_Local.m_vecPunchAngleVel *= damping;
+		player->m_Local.m_viewPunchAngleVel *= damping;
 		 
 		// torsional spring
 		// UNDONE: Per-axis spring constant?
 		float springForceMagnitude = PUNCH_SPRING_CONSTANT * gpGlobals->frametime;
-		springForceMagnitude = clamp(springForceMagnitude, 0.f, 2.f );
-		player->m_Local.m_vecPunchAngleVel -= player->m_Local.m_vecPunchAngle * springForceMagnitude;
+		springForceMagnitude = clamp(springForceMagnitude, 0, 2 );
+		player->m_Local.m_viewPunchAngleVel -= player->m_Local.m_vecPunchAngle * springForceMagnitude;
 
 		// don't wrap around
 		player->m_Local.m_vecPunchAngle.Init( 
-			clamp(player->m_Local.m_vecPunchAngle->x, -89.f, 89.f ), 
-			clamp(player->m_Local.m_vecPunchAngle->y, -179.f, 179.f ),
-			clamp(player->m_Local.m_vecPunchAngle->z, -89.f, 89.f ) );
+			clamp(player->m_Local.m_viewPunchAngle->x, -89, 89 ), 
+			clamp(player->m_Local.m_viewPunchAngle->y, -179, 179 ),
+			clamp(player->m_Local.m_viewPunchAngle->z, -89, 89 ) );
 	}
 	else
 	{
-		player->m_Local.m_vecPunchAngle.Init( 0, 0, 0 );
-		player->m_Local.m_vecPunchAngleVel.Init( 0, 0, 0 );
+		player->m_Local.m_viewPunchAngle.Init( 0, 0, 0 );
+		player->m_Local.m_viewPunchAngleVel.Init( 0, 0, 0 );
 	}
+*/
 }
 
 //-----------------------------------------------------------------------------
@@ -1256,7 +1498,7 @@ void CGameMovement::StartGravity( void )
 
 	// Add gravity so they'll be in the correct position during movement
 	// yes, this 0.5 looks wrong, but it's not.  
-	mv->m_vecVelocity[2] -= (ent_gravity * GetCurrentGravity() * 0.5 * gpGlobals->frametime );
+	mv->m_vecVelocity[2] -= (ent_gravity * sv_gravity.GetFloat() * 0.5 * gpGlobals->frametime );
 	mv->m_vecVelocity[2] += player->GetBaseVelocity()[2] * gpGlobals->frametime;
 
 	Vector temp = player->GetBaseVelocity();
@@ -1272,11 +1514,10 @@ void CGameMovement::StartGravity( void )
 void CGameMovement::CheckWaterJump( void )
 {
 	Vector	flatforward;
-	Vector forward;
 	Vector	flatvelocity;
 	float curspeed;
 
-	AngleVectors( mv->m_vecViewAngles, &forward );  // Determine movement angles
+	Vector forward = m_vecForward;
 
 	// Already water jumping.
 	if (player->m_flWaterJumpTime)
@@ -1306,11 +1547,11 @@ void CGameMovement::CheckWaterJump( void )
 
 	Vector vecStart;
 	// Start line trace at waist height (using the center of the player for this here)
-	vecStart = mv->GetAbsOrigin() + (GetPlayerMins() + GetPlayerMaxs() ) * 0.5;
+	vecStart= mv->GetAbsOrigin() + (GetPlayerMins() + GetPlayerMaxs() ) * 0.5;
 
 	Vector vecEnd;
 	VectorMA( vecStart, 24.0f, flatforward, vecEnd );
-	
+
 	trace_t tr;
 	TracePlayerBBox( vecStart, vecEnd, PlayerSolidMask(), COLLISION_GROUP_PLAYER_MOVEMENT, tr );
 	if ( tr.fraction < 1.0 )		// solid at waist
@@ -1406,7 +1647,7 @@ void CGameMovement::WaterMove( void )
 	{
 		// exaggerate upward movement along forward as well
 		float upwardMovememnt = mv->m_flForwardMove * forward.z * 2;
-		upwardMovememnt = clamp( upwardMovememnt, 0.f, mv->m_flClientMaxSpeed );
+		upwardMovememnt = clamp( upwardMovememnt, 0, mv->m_flClientMaxSpeed );
 		wishvel[2] += mv->m_flUpMove + upwardMovememnt;
 	}
 
@@ -1516,44 +1757,56 @@ void CGameMovement::WaterMove( void )
 //-----------------------------------------------------------------------------
 void CGameMovement::StepMove( Vector &vecDestination, trace_t &trace )
 {
-	Vector vecEndPos;
-	VectorCopy( vecDestination, vecEndPos );
-
-	// Try sliding forward both on ground and up 16 pixels
-	//  take the move that goes farthest
+	//
+	// Save the move position and velocity in case we need to put it back later.
+	//
 	Vector vecPos, vecVel;
 	VectorCopy( mv->GetAbsOrigin(), vecPos );
 	VectorCopy( mv->m_vecVelocity, vecVel );
 
-	// Slide move down.
+	//
+	// First try walking straight to where they want to go.
+	//
+	Vector vecEndPos;
+	VectorCopy( vecDestination, vecEndPos );
 	TryPlayerMove( &vecEndPos, &trace );
 	
-	// Down results.
+	//
+	// mv now contains where they ended up if they tried to walk straight there.
+	// Save those results for use later.
+	//	
 	Vector vecDownPos, vecDownVel;
 	VectorCopy( mv->GetAbsOrigin(), vecDownPos );
 	VectorCopy( mv->m_vecVelocity, vecDownVel );
 	
-	// Reset original values.
+	//
+	// Reset original values to try some other things.
+	//
 	mv->SetAbsOrigin( vecPos );
 	VectorCopy( vecVel, mv->m_vecVelocity );
 	
+	//
 	// Move up a stair height.
+	// Slide forward at the same velocity but from the higher position.
+	//
 	VectorCopy( mv->GetAbsOrigin(), vecEndPos );
 	if ( player->m_Local.m_bAllowAutoMovement )
 	{
 		vecEndPos.z += player->m_Local.m_flStepSize + DIST_EPSILON;
 	}
-	
+
+	// Only step up as high as we have headroom to do so.	
 	TracePlayerBBox( mv->GetAbsOrigin(), vecEndPos, PlayerSolidMask(), COLLISION_GROUP_PLAYER_MOVEMENT, trace );
 	if ( !trace.startsolid && !trace.allsolid )
 	{
 		mv->SetAbsOrigin( trace.endpos );
 	}
-	
-	// Slide move up.
 	TryPlayerMove();
 	
+	//
 	// Move down a stair (attempt to).
+	// Slide forward at the same velocity from the lower position.
+	//
 	VectorCopy( mv->GetAbsOrigin(), vecEndPos );
 	if ( player->m_Local.m_bAllowAutoMovement )
 	{
@@ -1638,7 +1891,7 @@ void CGameMovement::Friction( void )
 		// Bleed off some speed, but if we have less than the bleed
 		//  threshold, bleed the threshold amount.
 
-		if ( IsX360() )
+		if ( IsGameConsole() )
 		{
 			if( player->m_Local.m_bDucked )
 			{
@@ -1694,7 +1947,7 @@ void CGameMovement::FinishGravity( void )
 		ent_gravity = 1.0;
 
 	// Get the correct velocity for the end of the dt 
-  	mv->m_vecVelocity[2] -= (ent_gravity * GetCurrentGravity() * gpGlobals->frametime * 0.5);
+  	mv->m_vecVelocity[2] -= (ent_gravity * sv_gravity.GetFloat() * gpGlobals->frametime * 0.5);
 
 	CheckVelocity();
 }
@@ -1719,8 +1972,8 @@ void CGameMovement::AirAccelerate( Vector& wishdir, float wishspeed, float accel
 		return;
 
 	// Cap speed
-	if ( wishspd > GetAirSpeedCap() )
-		wishspd = GetAirSpeedCap();
+	if (wishspd > 30)
+		wishspd = 30;
 
 	// Determine veer amount
 	currentspeed = mv->m_vecVelocity.Dot(wishdir);
@@ -1839,8 +2092,10 @@ void CGameMovement::Accelerate( Vector& wishdir, float wishspeed, float accel )
 	if (addspeed <= 0)
 		return;
 
-	// Determine amount of accleration.
-	accelspeed = accel * gpGlobals->frametime * wishspeed * player->m_surfaceFriction;
+	const float kAccelerationScale = MAX(250.0f, wishspeed);
+
+	// Determine amount of acceleration.
+	accelspeed = accel * gpGlobals->frametime * kAccelerationScale * player->m_surfaceFriction;
 
 	// Cap at addspeed
 	if (accelspeed > addspeed)
@@ -1958,8 +2213,15 @@ void CGameMovement::WalkMove( void )
 
 	// Set pmove velocity
 	mv->m_vecVelocity[2] = 0;
-	Accelerate ( wishdir, wishspeed, sv_accelerate.GetFloat() );
+	Accelerate( wishdir, wishspeed, sv_accelerate.GetFloat() );
 	mv->m_vecVelocity[2] = 0;
+
+	// Additional max speed clamp to keep us from going faster than allowed while turning
+	if ( mv->m_vecVelocity.LengthSqr() > mv->m_flMaxSpeed * mv->m_flMaxSpeed )
+	{
+		float fRatio = mv->m_flMaxSpeed / mv->m_vecVelocity.Length();
+		mv->m_vecVelocity *= fRatio;
+	}
 
 	// Add in any base velocity to the current velocity.
 	VectorAdd (mv->m_vecVelocity, player->GetBaseVelocity(), mv->m_vecVelocity );
@@ -1996,7 +2258,7 @@ void CGameMovement::WalkMove( void )
 	}
 
 	// Don't walk up stairs if not on ground.
-	if ( oldground == NULL && player->GetWaterLevel()  == 0 )
+	if ( oldground == NULL && player->GetWaterLevel()  == WL_NotInWater )
 	{
 		// Now pull the base velocity back out.   Base velocity is set if you are on a moving object, like a conveyor (or maybe another monster?)
 		VectorSubtract( mv->m_vecVelocity, player->GetBaseVelocity(), mv->m_vecVelocity );
@@ -2095,6 +2357,7 @@ void CGameMovement::FullWalkMove( )
 		if (player->GetGroundEntity() != NULL)
 		{
 			mv->m_vecVelocity[2] = 0.0;
+			player->m_Local.m_flFallVelocity = 0.0f;
 			Friction();
 		}
 
@@ -2104,6 +2367,9 @@ void CGameMovement::FullWalkMove( )
 		if (player->GetGroundEntity() != NULL)
 		{
 			WalkMove();
+
+			// the player is on the ground again
+			player->m_bHasWalkMovedSinceLastJump = true;
 		}
 		else
 		{
@@ -2133,10 +2399,13 @@ void CGameMovement::FullWalkMove( )
 	if  ( ( m_nOldWaterLevel == WL_NotInWater && player->GetWaterLevel() != WL_NotInWater ) ||
 		  ( m_nOldWaterLevel != WL_NotInWater && player->GetWaterLevel() == WL_NotInWater ) )
 	{
-		PlaySwimSound();
+		if ( player->GetAbsVelocity().Length() > 135 )
+		{
+			PlaySwimSound();
 #if !defined( CLIENT_DLL )
-		player->Splash();
+			player->Splash();
 #endif
+		}
 	}
 }
 
@@ -2147,7 +2416,7 @@ void CGameMovement::FullObserverMove( void )
 {
 	int mode = player->GetObserverMode();
 
-	if ( mode == OBS_MODE_IN_EYE || mode == OBS_MODE_CHASE || mode == OBS_MODE_POI )
+	if ( mode == OBS_MODE_IN_EYE || mode == OBS_MODE_CHASE )
 	{
 		CBaseEntity * target = player->GetObserverTarget();
 
@@ -2261,7 +2530,13 @@ void CGameMovement::FullNoClipMove( float factor, float maxacceleration )
 	float wishspeed;
 	float maxspeed = sv_maxspeed.GetFloat() * factor;
 
+#ifdef INFESTED_DLL		// ignore roll component for Alien Swarm, this is used for vertical aiming
+	QAngle vecViewAngles = mv->m_vecViewAngles;
+	vecViewAngles[ROLL] = 0;
+	AngleVectors (vecViewAngles, &forward, &right, &up);  // Determine movement angles
+#else
 	AngleVectors (mv->m_vecViewAngles, &forward, &right, &up);  // Determine movement angles
+#endif
 
 	if ( mv->m_nButtons & IN_SPEED )
 	{
@@ -2370,7 +2645,7 @@ bool CGameMovement::CheckJumpButton( void )
 	}
 
 	// If we are in the water most of the way...
-	if ( player->GetWaterLevel() >= 2 )
+	if ( player->GetWaterLevel() >= WL_Waist )
 	{	
 		// swimming, not jumping
 		SetGroundEntity( NULL );
@@ -2390,6 +2665,9 @@ bool CGameMovement::CheckJumpButton( void )
 
 		return false;
 	}
+
+	// the player jumped so this bool will remain false until the player next walks
+	player->m_bHasWalkMovedSinceLastJump = false;
 
 	// No more effect
  	if (player->GetGroundEntity() == NULL)
@@ -2412,7 +2690,7 @@ bool CGameMovement::CheckJumpButton( void )
 		return false;
 
 	// Still updating the eye position.
-	if ( player->m_Local.m_flDuckJumpTime > 0.0f )
+	if ( player->m_Local.m_nDuckJumpTimeMsecs > 0 )
 		return false;
 
 
@@ -2433,17 +2711,17 @@ bool CGameMovement::CheckJumpButton( void )
 	if ( g_bMovementOptimizations )
 	{
 #if defined(HL2_DLL) || defined(HL2_CLIENT_DLL)
-		Assert( GetCurrentGravity() == 600.0f );
+		Assert( sv_gravity.GetFloat() == 600.0f );
 		flMul = 160.0f;	// approx. 21 units.
 #else
-		Assert( GetCurrentGravity() == 800.0f );
+		Assert( sv_gravity.GetFloat() == 800.0f );
 		flMul = 268.3281572999747f;
 #endif
 
 	}
 	else
 	{
-		flMul = sqrt(2 * GetCurrentGravity() * GAMEMOVEMENT_JUMP_HEIGHT);
+		flMul = sqrt(2 * sv_gravity.GetFloat() * GAMEMOVEMENT_JUMP_HEIGHT);
 	}
 
 	// Acclerate upward
@@ -2466,7 +2744,13 @@ bool CGameMovement::CheckJumpButton( void )
 
 	// Add a little forward velocity based on your current forward velocity - if you are not sprinting.
 #if defined( HL2_DLL ) || defined( HL2_CLIENT_DLL )
-	if ( gpGlobals->maxClients == 1 )
+#ifdef PORTAL
+	const bool bAllowBunnyHopperSpeedBoost = true;
+#else
+	bool bAllowBunnyHopperSpeedBoost = ( gpGlobals->maxClients == 1 );
+#endif
+
+	if ( bAllowBunnyHopperSpeedBoost )
 	{
 		CHLMoveData *pMoveData = ( CHLMoveData* )mv;
 		Vector vecForward;
@@ -2504,10 +2788,16 @@ bool CGameMovement::CheckJumpButton( void )
 
 	OnJump(mv->m_outJumpVel.z);
 
+#if !defined( PORTAL2 )
+	bool bSetDuckJump = (gpGlobals->maxClients == 1); //most games we only set duck jump if the game is single player
+#else
+	const bool bSetDuckJump = true; //in portal 2, do it for both single and multiplayer
+#endif
+
 	// Set jump time.
-	if ( gpGlobals->maxClients == 1 )
+	if ( bSetDuckJump )
 	{
-		player->m_Local.m_flJumpTime = GAMEMOVEMENT_JUMP_TIME;
+		player->m_Local.m_nJumpTimeMsecs = GAMEMOVEMENT_JUMP_TIME;
 		player->m_Local.m_bInDuckJump = true;
 	}
 
@@ -2598,8 +2888,10 @@ int CGameMovement::TryPlayerMove( Vector *pFirstDest, trace_t *pFirstTrace )
 		if ( g_bMovementOptimizations )
 		{
 			// If their velocity Z is 0, then we can avoid an extra trace here during WalkMove.
-			if ( pFirstDest && end == *pFirstDest )
+			if ( pFirstDest && ( end == *pFirstDest ) )
+			{
 				pm = *pFirstTrace;
+			}
 			else
 			{
 #if defined( PLAYER_GETTING_STUCK_TESTING )
@@ -2616,6 +2908,12 @@ int CGameMovement::TryPlayerMove( Vector *pFirstDest, trace_t *pFirstTrace )
 		else
 		{
 			TracePlayerBBox( mv->GetAbsOrigin(), end, PlayerSolidMask(), COLLISION_GROUP_PLAYER_MOVEMENT, pm );
+		}
+
+		if ( pm.fraction > 0 && pm.fraction < MINIMUM_MOVE_FRACTION )
+		{
+			//HACK: extremely tiny move fractions cause problems in later computations that determine values using portions of distance moved.
+			pm.fraction = 0;
 		}
 
 		allFraction += pm.fraction;
@@ -2685,8 +2983,9 @@ int CGameMovement::TryPlayerMove( Vector *pFirstDest, trace_t *pFirstTrace )
 		}
 		// If the plane has a zero z component in the normal, then it's a 
 		//  step or wall
-		if (!pm.plane.normal[2])
+		if ( abs(pm.plane.normal[2]) < EFFECTIVELY_HORIZONTAL_NORMAL_Z )
 		{
+			pm.plane.normal[2] = 0;
 			blocked |= 2;		// step / wall
 		}
 
@@ -2740,19 +3039,18 @@ int CGameMovement::TryPlayerMove( Vector *pFirstDest, trace_t *pFirstTrace )
 		{
 			for (i=0 ; i < numplanes ; i++)
 			{
-				ClipVelocity (
-					original_velocity,
-					planes[i],
-					mv->m_vecVelocity,
-					1);
+				ClipVelocity( original_velocity, planes[i], mv->m_vecVelocity, 1 );
 
 				for (j=0 ; j<numplanes ; j++)
+				{
 					if (j != i)
 					{
 						// Are we now moving against this plane?
 						if (mv->m_vecVelocity.Dot(planes[j]) < 0)
 							break;	// not ok
 					}
+				}
+				
 				if (j == numplanes)  // Didn't have to clip, so we're ok
 					break;
 			}
@@ -2808,7 +3106,10 @@ int CGameMovement::TryPlayerMove( Vector *pFirstDest, trace_t *pFirstTrace )
 		fSlamVol = 0.85f;
 	}
 
-	PlayerRoughLandingEffects( fSlamVol );
+	if ( fSlamVol > 0.0f )
+	{
+		PlayerRoughLandingEffects( fSlamVol );
+	}
 
 	return blocked;
 }
@@ -2836,17 +3137,19 @@ inline bool CGameMovement::OnLadder( trace_t &trace )
 	return false;
 }
 
-//=============================================================================
-// HPE_BEGIN
 // [sbodenbender] make ladders easier to climb in cstrike
-//=============================================================================
 #if defined (CSTRIKE_DLL)
 ConVar sv_ladder_dampen ( "sv_ladder_dampen", "0.2", FCVAR_REPLICATED, "Amount to dampen perpendicular movement on a ladder", true, 0.0f, true, 1.0f );
 ConVar sv_ladder_angle( "sv_ladder_angle", "-0.707", FCVAR_REPLICATED, "Cos of angle of incidence to ladder perpendicular for applying ladder_dampen", true, -1.0f, true, 1.0f );
+ConVar sv_ladder_scale_speed( "sv_ladder_scale_speed", "0.78", FCVAR_REPLICATED | FCVAR_RELEASE, "Scale top speed on ladders", true, 0.0f, true, 1.0f );
 #endif
-//=============================================================================
-// HPE_END
-//=============================================================================
+
+// note, this lets us do some specific code when we start using the ladder Movetype
+#define IGNORE_JUMP_TIME 0.2f
+void CGameMovement::OnStartMoveTypeLadder()
+{
+	player->m_ignoreLadderJumpTime = gpGlobals->curtime + IGNORE_JUMP_TIME; // ignore jumpping for IGNORE_JUMP_TIME seconds to give us a chance to catch the ladder without bouncing off
+}
 
 //-----------------------------------------------------------------------------
 // Purpose: 
@@ -2868,7 +3171,7 @@ bool CGameMovement::LadderMove( void )
 	// If I'm already moving on a ladder, use the previous ladder direction
 	if ( player->GetMoveType() == MOVETYPE_LADDER )
 	{
-		wishdir = -player->m_vecLadderNormal;
+		wishdir = -player->m_vecLadderNormal.Get();
 	}
 	else
 	{
@@ -2893,7 +3196,60 @@ bool CGameMovement::LadderMove( void )
 
 	// no ladder in that direction, return
 	if ( pm.fraction == 1.0f || !OnLadder( pm ) )
-		return false;
+	{
+		// we may have walked off the edge of a cliff, check backward to see if we can grab a ladder once over the edge
+		bool bCatchCliffLadder = false;
+		
+		if( player->m_bHasWalkMovedSinceLastJump &&								// the player is not in the air due to an intentional jump
+			player->GetMoveType() != MOVETYPE_LADDER &&							// not already laddering
+			player->GetGroundEntity() == NULL &&								// in the air
+			mv->m_vecVelocity.z <= 0 &&											// not flying upward
+			mv->m_vecVelocity.z > -50.0f &&										// not falling too fast
+			( abs(mv->m_vecVelocity.x) > 0 && abs(mv->m_vecVelocity.y) > 0 )	// lateral velocity present
+			)
+		{
+
+			#define LADDER_EDGE_GRAB_DISTACE 24.0f
+			#define LADDER_EDGE_GRAB_HEIGHT_DELTA 6.0f
+
+			Vector vecTraceFrom = mv->GetAbsOrigin(); vecTraceFrom.z -= LADDER_EDGE_GRAB_HEIGHT_DELTA;
+			Vector vecTraceTo = mv->GetAbsOrigin() - mv->m_vecVelocity.Normalized() * LADDER_EDGE_GRAB_DISTACE;
+			
+			TracePlayerBBox( vecTraceFrom, vecTraceTo, (PlayerSolidMask() & (~CONTENTS_PLAYERCLIP)), COLLISION_GROUP_PLAYER_MOVEMENT, pm );
+
+			//debugoverlay->AddLineOverlay( vecTraceFrom, vecTraceTo, 100,0,0,20,1, 1 );
+
+			if ( pm.fraction != 1.0f && OnLadder( pm ) && pm.plane.normal.z != 1.0f )
+			{
+				//debugoverlay->AddLineOverlay( vecTraceFrom, vecTraceTo, 255,0,0,20,1, 5 );
+
+				player->SetMoveType( MOVETYPE_LADDER );
+				player->SetMoveCollide( MOVECOLLIDE_DEFAULT );
+
+				player->SetLadderNormal( pm.plane.normal );
+				mv->m_vecVelocity.Init();
+
+				// The ladder check ignored playerclips, to fix a bug exposed by de_train, where a clipbrush is
+				// flush with a ladder.  This causes the above tracehull to fail unless we ignore playerclips.
+				// However, we have to check for playerclips before we snap to that pos, so we don't warp a
+				// player into a clipbrush.
+				TracePlayerBBox( vecTraceFrom, vecTraceTo, PlayerSolidMask(), COLLISION_GROUP_PLAYER_MOVEMENT, pm );
+
+				mv->SetAbsOrigin( pm.endpos );
+
+				bCatchCliffLadder = true;
+			}
+		}
+
+		// we didn't catch a ladder, so bail on any further laddering
+		if ( !bCatchCliffLadder )
+			return false;
+	}
+
+	if( player->GetMoveType() != MOVETYPE_LADDER )
+	{
+		OnStartMoveTypeLadder();
+	}
 
 	player->SetMoveType( MOVETYPE_LADDER );
 	player->SetMoveCollide( MOVECOLLIDE_DEFAULT );
@@ -2933,10 +3289,13 @@ bool CGameMovement::LadderMove( void )
 
 	if ( mv->m_nButtons & IN_JUMP )
 	{
-		player->SetMoveType( MOVETYPE_WALK );
-		player->SetMoveCollide( MOVECOLLIDE_DEFAULT );
+		if( player->m_ignoreLadderJumpTime <= gpGlobals->curtime )
+		{
+			player->SetMoveType( MOVETYPE_WALK );
+			player->SetMoveCollide( MOVECOLLIDE_DEFAULT );
 
-		VectorScale( pm.plane.normal, 270, mv->m_vecVelocity );
+			VectorScale( pm.plane.normal, 270, mv->m_vecVelocity );
+		}
 	}
 	else
 	{
@@ -2973,30 +3332,32 @@ bool CGameMovement::LadderMove( void )
 			// velocity through the face of the ladder -- by design.
 			CrossProduct( pm.plane.normal, perp, tmp );
 
-			//=============================================================================
-			// HPE_BEGIN
 			// [sbodenbender] make ladders easier to climb in cstrike
-			//=============================================================================
 #if defined (CSTRIKE_DLL)
 			// break lateral into direction along tmp (up the ladder) and direction along perp (perpendicular to ladder)
-			float tmpDist = DotProduct ( tmp, lateral );
-			float perpDist = DotProduct ( perp, lateral );
+			float tmpDist = DotProduct( tmp, lateral );
+			float perpDist = DotProduct( perp, lateral );
 
 			Vector angleVec = perp * perpDist;
 			angleVec += cross;
 			// angleVec is our desired movement in the ladder normal/perpendicular plane
-			VectorNormalize(angleVec);
-			float angleDot = DotProduct(angleVec, pm.plane.normal);
+			VectorNormalize( angleVec );
+			float angleDot = DotProduct( angleVec, pm.plane.normal );
 			// angleDot is our angle of incidence to the laddernormal in the ladder normal/perpendicular plane
 
-			if (angleDot < sv_ladder_angle.GetFloat())
-				lateral = (tmp * tmpDist) + (perp * sv_ladder_dampen.GetFloat() * perpDist);
+			if ( angleDot < sv_ladder_angle.GetFloat() )
+				lateral = ( tmp * tmpDist ) + ( perp * sv_ladder_dampen.GetFloat() * perpDist );
 #endif // CSTRIKE_DLL
-			//=============================================================================
-			// HPE_END
-			//=============================================================================
 
 			VectorMA( lateral, -normal, tmp, mv->m_vecVelocity );
+
+#if defined (CSTRIKE_DLL)
+			if ( sv_ladder_scale_speed.GetFloat() > 0 )
+			{
+				// scale max climb speed
+				VectorScale( mv->m_vecVelocity, sv_ladder_scale_speed.GetFloat(), mv->m_vecVelocity );
+			}
+#endif // CSTRIKE_DLL
 
 			if ( onFloor && normal > 0 )	// On ground moving away from the ladder
 			{
@@ -3102,7 +3463,7 @@ void CGameMovement::AddGravity( void )
 		ent_gravity = 1.0;
 
 	// Add gravity incorrectly
-	mv->m_vecVelocity[2] -= (ent_gravity * GetCurrentGravity() * gpGlobals->frametime);
+	mv->m_vecVelocity[2] -= (ent_gravity * sv_gravity.GetFloat() * gpGlobals->frametime);
 	mv->m_vecVelocity[2] += player->GetBaseVelocity()[2] * gpGlobals->frametime;
 	Vector temp = player->GetBaseVelocity();
 	temp[2] = 0;
@@ -3171,6 +3532,8 @@ int CGameMovement::ClipVelocity( Vector& in, Vector& normal, Vector& out, float 
 	float adjust = DotProduct( out, normal );
 	if( adjust < 0.0f )
 	{
+		// min this against a small number (but no further from zero than -DIST_EPSILON) to account for crossing a plane with a near-parallel normal
+		adjust = MIN( adjust, -DIST_EPSILON );
 		out -= ( normal * adjust );
 //		Msg( "Adjustment = %lf\n", adjust );
 	}
@@ -3371,11 +3734,44 @@ void ResetStuckOffsets( CBasePlayer *pPlayer )
 
 //-----------------------------------------------------------------------------
 // Purpose: 
+//-----------------------------------------------------------------------------
+bool CGameMovement::IsMovingPlayerStuck( void ) const
+{
+	return m_bProcessingMovement && !m_bInStuckTest && player && player->m_StuckLast > 0;
+}
+
+//-----------------------------------------------------------------------------
+// Purpose: 
+//-----------------------------------------------------------------------------
+CBasePlayer *CGameMovement::GetMovingPlayer( void ) const
+{
+	return m_bProcessingMovement ? player : NULL;
+}
+
+//--------------------------------------------------------------------------------------------------------
+void CGameMovement::UnblockPusher( CBasePlayer *pPlayer, CBaseEntity *pPusher )
+{
+	// TODO
+}
+
+#if defined( CLIENT_DLL )
+static ConVar cl_pred_checkstuck( "cl_pred_checkstuck", "0", FCVAR_DEVELOPMENTONLY, "Perform the additional 'stuck' traces on the client side during prediction." );
+#endif
+//-----------------------------------------------------------------------------
+// Purpose: 
 // Input  : &input - 
 // Output : int
 //-----------------------------------------------------------------------------
 int CGameMovement::CheckStuck( void )
 {
+#if defined( CLIENT_DLL )
+	// Don't bother trying to jitter the player on the client, the server position will fix any true "stuck" issues and
+	//  we send player origins with full precision anyway so getting stuck due to epsilon issues shouldn't occur...
+	// The potential bad effect would be interacting with NPCs with a lot of lag might feel more warpy w/o the unstuck code running
+	if ( !cl_pred_checkstuck.GetBool() )
+		return 0;
+#endif
+
 	Vector base;
 	Vector offset;
 	Vector test;
@@ -3386,7 +3782,11 @@ int CGameMovement::CheckStuck( void )
 
 	CreateStuckTable();
 
+	// player->SetStuckCharacter( NULL );
+
+	m_bInStuckTest = true;
 	hitent = TestPlayerPosition( mv->GetAbsOrigin(), COLLISION_GROUP_PLAYER_MOVEMENT, traceresult );
+	m_bInStuckTest = false;
 	if ( hitent == INVALID_ENTITY_HANDLE )
 	{
 		ResetStuckOffsets( player );
@@ -3435,7 +3835,7 @@ int CGameMovement::CheckStuck( void )
 	// Only an issue on the client.
 	idx = player->IsServer() ? 0 : 1;
 
-	fTime = engine->Time();
+	fTime = Plat_FloatTime();
 	// Too soon?
 	if ( m_flStuckCheckTime[ player->entindex() ][ idx ] >=  fTime - CHECKSTUCK_MINTIME )
 	{
@@ -3444,6 +3844,7 @@ int CGameMovement::CheckStuck( void )
 	m_flStuckCheckTime[ player->entindex() ][ idx ] = fTime;
 
 	MoveHelper( )->AddToTouched( traceresult, mv->m_vecVelocity );
+	m_bInStuckTest = true;
 	GetRandomStuckOffsets( player, offset );
 	VectorAdd( base, offset, test );
 
@@ -3453,6 +3854,7 @@ int CGameMovement::CheckStuck( void )
 		mv->SetAbsOrigin( test );
 		return 0;
 	}
+	m_bInStuckTest = false;
 
 	return 1;
 }
@@ -3467,7 +3869,7 @@ bool CGameMovement::InWater( void )
 }
 
 
-void CGameMovement::ResetGetPointContentsCache()
+void CGameMovement::ResetGetWaterContentsForPointCache()
 {
 	for ( int slot = 0; slot < MAX_PC_CACHE_SLOTS; ++slot )
 	{
@@ -3479,7 +3881,7 @@ void CGameMovement::ResetGetPointContentsCache()
 }
 
 
-int CGameMovement::GetPointContentsCached( const Vector &point, int slot )
+int CGameMovement::GetWaterContentsForPointCached( const Vector &point, int slot )
 {
 	if ( g_bMovementOptimizations ) 
 	{
@@ -3490,7 +3892,7 @@ int CGameMovement::GetPointContentsCached( const Vector &point, int slot )
 
 		if ( m_CachedGetPointContents[ idx ][ slot ] == -9999 || point.DistToSqr( m_CachedGetPointContentsPoint[ idx ][ slot ] ) > 1 )
 		{
-			m_CachedGetPointContents[ idx ][ slot ] = enginetrace->GetPointContents ( point );
+			m_CachedGetPointContents[ idx ][ slot ] = enginetrace->GetPointContents ( point, MASK_WATER );
 			m_CachedGetPointContentsPoint[ idx ][ slot ] = point;
 		}
 		
@@ -3498,10 +3900,32 @@ int CGameMovement::GetPointContentsCached( const Vector &point, int slot )
 	}
 	else
 	{
-		return enginetrace->GetPointContents ( point );
+		return enginetrace->GetPointContents ( point, MASK_WATER );
 	}
 }
 
+//-----------------------------------------------------------------------------
+// Purpose: returns the height to check for water
+//-----------------------------------------------------------------------------
+void CGameMovement::GetWaterCheckPosition( int waterLevel, Vector *pos )
+{
+	(*pos)[0] = mv->GetAbsOrigin()[0] + (GetPlayerMins()[0] + GetPlayerMaxs()[0]) * 0.5;
+	(*pos)[1] = mv->GetAbsOrigin()[1] + (GetPlayerMins()[1] + GetPlayerMaxs()[1]) * 0.5;
+
+	switch ( waterLevel )
+	{
+	case WL_Eyes:
+		(*pos)[2] = mv->GetAbsOrigin()[2] + player->GetViewOffset()[2];
+		return;
+
+	case WL_Waist:
+		(*pos)[2] = mv->GetAbsOrigin()[2] + (GetPlayerMins()[2] + GetPlayerMaxs()[2])*0.5;
+		return;
+
+	default:
+		(*pos)[2] = mv->GetAbsOrigin()[2] + GetPlayerMins()[2] + 1;
+	}
+}
 
 //-----------------------------------------------------------------------------
 // Purpose: 
@@ -3513,20 +3937,15 @@ bool CGameMovement::CheckWater( void )
 	Vector	point;
 	int		cont;
 
-	Vector vPlayerMins = GetPlayerMins();
-	Vector vPlayerMaxs = GetPlayerMaxs();
-
 	// Pick a spot just above the players feet.
-	point[0] = mv->GetAbsOrigin()[0] + (vPlayerMins[0] + vPlayerMaxs[0]) * 0.5;
-	point[1] = mv->GetAbsOrigin()[1] + (vPlayerMins[1] + vPlayerMaxs[1]) * 0.5;
-	point[2] = mv->GetAbsOrigin()[2] + vPlayerMins[2] + 1;
-	
+	GetWaterCheckPosition( WL_Feet, &point );
+
 	// Assume that we are not in water at all.
 	player->SetWaterLevel( WL_NotInWater );
 	player->SetWaterType( CONTENTS_EMPTY );
 
 	// Grab point contents.
-	cont = GetPointContentsCached( point, 0 );	
+	cont = GetWaterContentsForPointCached( point, 0 );	
 	
 	// Are we under water? (not solid and not empty?)
 	if ( cont & MASK_WATER )
@@ -3538,8 +3957,8 @@ bool CGameMovement::CheckWater( void )
 		player->SetWaterLevel( WL_Feet );
 
 		// Now check a point that is at the player hull midpoint.
-		point[2] = mv->GetAbsOrigin()[2] + (vPlayerMins[2] + vPlayerMaxs[2])*0.5;
-		cont = GetPointContentsCached( point, 1 );
+		GetWaterCheckPosition( WL_Waist, &point );
+		cont = GetWaterContentsForPointCached( point, 1 );
 		// If that point is also under water...
 		if ( cont & MASK_WATER )
 		{
@@ -3547,35 +3966,10 @@ bool CGameMovement::CheckWater( void )
 			player->SetWaterLevel( WL_Waist );
 
 			// Now check the eye position.  (view_ofs is relative to the origin)
-			point[2] = mv->GetAbsOrigin()[2] + player->GetViewOffset()[2];
-			cont = GetPointContentsCached( point, 2 );
+			GetWaterCheckPosition( WL_Eyes, &point );
+			cont = GetWaterContentsForPointCached( point, 2 );
 			if ( cont & MASK_WATER )
 				player->SetWaterLevel( WL_Eyes );  // In over our eyes
-		}
-
-		// Adjust velocity based on water current, if any.
-		if ( cont & MASK_CURRENT )
-		{
-			Vector v;
-			VectorClear(v);
-			if ( cont & CONTENTS_CURRENT_0 )
-				v[0] += 1;
-			if ( cont & CONTENTS_CURRENT_90 )
-				v[1] += 1;
-			if ( cont & CONTENTS_CURRENT_180 )
-				v[0] -= 1;
-			if ( cont & CONTENTS_CURRENT_270 )
-				v[1] -= 1;
-			if ( cont & CONTENTS_CURRENT_UP )
-				v[2] += 1;
-			if ( cont & CONTENTS_CURRENT_DOWN )
-				v[2] -= 1;
-
-			// BUGBUG -- this depends on the value of an unspecified enumerated type
-			// The deeper we are, the stronger the current.
-			Vector temp;
-			VectorMA( player->GetBaseVelocity(), 50.0*player->GetWaterLevel(), v, temp );
-			player->SetBaseVelocity( temp );
 		}
 	}
 
@@ -3626,20 +4020,35 @@ void CGameMovement::SetGroundEntity( trace_t *pm )
 			MoveHelper()->AddToTouched( *pm, mv->m_vecVelocity );
 		}
 
-		mv->m_vecVelocity.z = 0.0f;
+		if( player->GetMoveType() != MOVETYPE_NOCLIP )
+			mv->m_vecVelocity.z = 0.0f;
+	}
+}
+
+static inline void DoTrace( ITraceListData *pTraceListData, const Ray_t &ray, uint32 fMask, ITraceFilter *filter, trace_t *ptr, int *counter )
+{
+	++*counter;
+
+	if ( pTraceListData && pTraceListData->CanTraceRay(ray) )
+	{
+		enginetrace->TraceRayAgainstLeafAndEntityList( ray, pTraceListData, fMask, filter, ptr );
+	}
+	else
+	{
+		enginetrace->TraceRay( ray, fMask, filter, ptr );
 	}
 }
 
 //-----------------------------------------------------------------------------
 // Traces the player's collision bounds in quadrants, looking for a plane that
-// can be stood upon (normal's z >= 0.7f).  Regardless of success or failure,
+// can be stood upon (normal's z >= flStandableZ).  Regardless of success or failure,
 // replace the fraction and endpos with the original ones, so we don't try to
 // move the player down to the new floor and get stuck on a leaning wall that
 // the original trace hit first.
 //-----------------------------------------------------------------------------
-void TracePlayerBBoxForGround( const Vector& start, const Vector& end, const Vector& minsSrc,
-							  const Vector& maxsSrc, IHandleEntity *player, unsigned int fMask,
-							  int collisionGroup, trace_t& pm )
+void TracePlayerBBoxForGround( ITraceListData *pTraceListData, const Vector& start, const Vector& end, const Vector& minsSrc,
+							  const Vector& maxsSrc, unsigned int fMask,
+							  ITraceFilter *filter, trace_t& pm, float minGroundNormalZ, bool overwriteEndpos, int *pCounter )
 {
 	VPROF( "TracePlayerBBoxForGround" );
 
@@ -3653,11 +4062,14 @@ void TracePlayerBBoxForGround( const Vector& start, const Vector& end, const Vec
 	mins = minsSrc;
 	maxs.Init( MIN( 0, maxsSrc.x ), MIN( 0, maxsSrc.y ), maxsSrc.z );
 	ray.Init( start, end, mins, maxs );
-	UTIL_TraceRay( ray, fMask, player, collisionGroup, &pm );
-	if ( pm.m_pEnt && pm.plane.normal[2] >= 0.7)
+	DoTrace( pTraceListData, ray, fMask, filter, &pm, pCounter );
+	if ( pm.m_pEnt && pm.plane.normal[2] >= minGroundNormalZ)
 	{
-		pm.fraction = fraction;
-		pm.endpos = endpos;
+		if ( overwriteEndpos )
+		{
+			pm.fraction = fraction;
+			pm.endpos = endpos;
+		}
 		return;
 	}
 
@@ -3665,11 +4077,14 @@ void TracePlayerBBoxForGround( const Vector& start, const Vector& end, const Vec
 	mins.Init( MAX( 0, minsSrc.x ), MAX( 0, minsSrc.y ), minsSrc.z );
 	maxs = maxsSrc;
 	ray.Init( start, end, mins, maxs );
-	UTIL_TraceRay( ray, fMask, player, collisionGroup, &pm );
-	if ( pm.m_pEnt && pm.plane.normal[2] >= 0.7)
+	DoTrace( pTraceListData, ray, fMask, filter, &pm, pCounter );
+	if ( pm.m_pEnt && pm.plane.normal[2] >= minGroundNormalZ)
 	{
-		pm.fraction = fraction;
-		pm.endpos = endpos;
+		if ( overwriteEndpos )
+		{
+			pm.fraction = fraction;
+			pm.endpos = endpos;
+		}
 		return;
 	}
 
@@ -3677,11 +4092,14 @@ void TracePlayerBBoxForGround( const Vector& start, const Vector& end, const Vec
 	mins.Init( minsSrc.x, MAX( 0, minsSrc.y ), minsSrc.z );
 	maxs.Init( MIN( 0, maxsSrc.x ), maxsSrc.y, maxsSrc.z );
 	ray.Init( start, end, mins, maxs );
-	UTIL_TraceRay( ray, fMask, player, collisionGroup, &pm );
+	DoTrace( pTraceListData, ray, fMask, filter, &pm, pCounter );
 	if ( pm.m_pEnt && pm.plane.normal[2] >= 0.7)
 	{
-		pm.fraction = fraction;
-		pm.endpos = endpos;
+		if ( overwriteEndpos )
+		{
+			pm.fraction = fraction;
+			pm.endpos = endpos;
+		}
 		return;
 	}
 
@@ -3689,87 +4107,42 @@ void TracePlayerBBoxForGround( const Vector& start, const Vector& end, const Vec
 	mins.Init( MAX( 0, minsSrc.x ), minsSrc.y, minsSrc.z );
 	maxs.Init( maxsSrc.x, MIN( 0, maxsSrc.y ), maxsSrc.z );
 	ray.Init( start, end, mins, maxs );
-	UTIL_TraceRay( ray, fMask, player, collisionGroup, &pm );
-	if ( pm.m_pEnt && pm.plane.normal[2] >= 0.7)
+	DoTrace( pTraceListData, ray, fMask, filter, &pm, pCounter );
+	if ( pm.m_pEnt && pm.plane.normal[2] >= minGroundNormalZ)
 	{
-		pm.fraction = fraction;
-		pm.endpos = endpos;
+		if ( overwriteEndpos )
+		{
+			pm.fraction = fraction;
+			pm.endpos = endpos;
+		}
 		return;
 	}
 
-	pm.fraction = fraction;
-	pm.endpos = endpos;
+	if ( overwriteEndpos )
+	{
+		pm.fraction = fraction;
+		pm.endpos = endpos;
+	}
 }
 
-//-----------------------------------------------------------------------------
-// Traces the player's collision bounds in quadrants, looking for a plane that
-// can be stood upon (normal's z >= 0.7f).  Regardless of success or failure,
-// replace the fraction and endpos with the original ones, so we don't try to
-// move the player down to the new floor and get stuck on a leaning wall that
-// the original trace hit first.
-//-----------------------------------------------------------------------------
-void CGameMovement::TryTouchGroundInQuadrants( const Vector& start, const Vector& end, unsigned int fMask, int collisionGroup, trace_t& pm )
+bool CGameMovement::CheckValidStandableGroundCandidate( trace_t &pm, float flStandableZ )
 {
-	VPROF( "CGameMovement::TryTouchGroundInQuadrants" );
+	//if the trace didn't hit or it hit something bogus, it's not standable.
+	if ( !pm.DidHit() || !pm.m_pEnt )
+		return false;
 
-	Vector mins, maxs;
-	Vector minsSrc = GetPlayerMins();
-	Vector maxsSrc = GetPlayerMaxs();
-
-	float fraction = pm.fraction;
-	Vector endpos = pm.endpos;
-
-	// Check the -x, -y quadrant
-	mins = minsSrc;
-	maxs.Init( MIN( 0, maxsSrc.x ), MIN( 0, maxsSrc.y ), maxsSrc.z );
-	TryTouchGround( start, end, mins, maxs, fMask, collisionGroup, pm );
-	if ( pm.m_pEnt && pm.plane.normal[2] >= 0.7)
-	{
-		pm.fraction = fraction;
-		pm.endpos = endpos;
-		return;
-	}
-
-	// Check the +x, +y quadrant
-	mins.Init( MAX( 0, minsSrc.x ), MAX( 0, minsSrc.y ), minsSrc.z );
-	maxs = maxsSrc;
-	TryTouchGround( start, end, mins, maxs, fMask, collisionGroup, pm );
-	if ( pm.m_pEnt && pm.plane.normal[2] >= 0.7)
-	{
-		pm.fraction = fraction;
-		pm.endpos = endpos;
-		return;
-	}
-
-	// Check the -x, +y quadrant
-	mins.Init( minsSrc.x, MAX( 0, minsSrc.y ), minsSrc.z );
-	maxs.Init( MIN( 0, maxsSrc.x ), maxsSrc.y, maxsSrc.z );
-	TryTouchGround( start, end, mins, maxs, fMask, collisionGroup, pm );
-	if ( pm.m_pEnt && pm.plane.normal[2] >= 0.7)
-	{
-		pm.fraction = fraction;
-		pm.endpos = endpos;
-		return;
-	}
-
-	// Check the +x, -y quadrant
-	mins.Init( MAX( 0, minsSrc.x ), minsSrc.y, minsSrc.z );
-	maxs.Init( maxsSrc.x, MIN( 0, maxsSrc.y ), maxsSrc.z );
-	TryTouchGround( start, end, mins, maxs, fMask, collisionGroup, pm );
-	if ( pm.m_pEnt && pm.plane.normal[2] >= 0.7)
-	{
-		pm.fraction = fraction;
-		pm.endpos = endpos;
-		return;
-	}
-
-	pm.fraction = fraction;
-	pm.endpos = endpos;
+	//players are a special case. Strictly speaking they ARE standable. Note this is not 
+	//where we check for and prevent stacks of players, this is just an answer to the question
+	//can I stand on this thing, and in the case of players the answer is Yes until 
+	//we prove otherwise elsewhere in code.
+	if ( pm.m_pEnt->IsPlayer() )
+		return true;
+	
+	//can't stand if the floor is too steep.
+	return ( pm.plane.normal[2] >= flStandableZ );
 }
 
 //-----------------------------------------------------------------------------
-// Purpose: 
-// Input  : &input - 
 //-----------------------------------------------------------------------------
 void CGameMovement::CategorizePosition( void )
 {
@@ -3829,24 +4202,47 @@ void CGameMovement::CategorizePosition( void )
 		}
 	}
 
+	// NOTE YWB 7/5/07:  Since we're already doing a traceline here, we'll subsume the StayOnGround (stair debouncing) check into the main traceline we do here to see what we're standing on
+	bool bUnderwater = ( player->GetWaterLevel() >= WL_Eyes );
+	bool bMoveToEndPos = false;
+	if ( player->GetMoveType() == MOVETYPE_WALK && 
+		player->GetGroundEntity() != NULL && !bUnderwater )
+	{
+		// if walking and still think we're on ground, we'll extend trace down by stepsize so we don't bounce down slopes
+		bMoveToEndPos = true;
+		point.z -= player->m_Local.m_flStepSize;
+	}
+
 	// Was on ground, but now suddenly am not
 	if ( bMovingUpRapidly || 
 		( bMovingUp && player->GetMoveType() == MOVETYPE_LADDER ) )   
 	{
 		SetGroundEntity( NULL );
+		bMoveToEndPos = false;
 	}
 	else
 	{
 		// Try and move down.
-		TryTouchGround( bumpOrigin, point, GetPlayerMins(), GetPlayerMaxs(), MASK_PLAYERSOLID, COLLISION_GROUP_PLAYER_MOVEMENT, pm );
-		
+		TracePlayerBBox( bumpOrigin, point, PlayerSolidMask(), COLLISION_GROUP_PLAYER_MOVEMENT, pm );
+
 		// Was on ground, but now suddenly am not.  If we hit a steep plane, we are not on ground
-		if ( !pm.m_pEnt || pm.plane.normal[2] < 0.7 )
+		float flStandableZ = 0.7;
+
+#if defined(HL2_EP3) && !defined(CLIENT_DLL)
+		if ( Icegun_IsPlayerIceSurfing() )
+		{
+			flStandableZ = 0;
+		}
+#endif
+
+		if ( !CheckValidStandableGroundCandidate( pm, flStandableZ ) )
 		{
 			// Test four sub-boxes, to see if any of them would have found shallower slope we could actually stand on
-			TryTouchGroundInQuadrants( bumpOrigin, point, MASK_PLAYERSOLID, COLLISION_GROUP_PLAYER_MOVEMENT, pm );
-
-			if ( !pm.m_pEnt || pm.plane.normal[2] < 0.7 )
+			ITraceFilter *pFilter = LockTraceFilter( COLLISION_GROUP_PLAYER_MOVEMENT );
+			TracePlayerBBoxForGround( m_pTraceListData, bumpOrigin, point, GetPlayerMins(), 
+				GetPlayerMaxs(), PlayerSolidMask(), pFilter, pm, flStandableZ, true, &m_nTraceCount );
+			UnlockTraceFilter( pFilter );
+			if ( !CheckValidStandableGroundCandidate( pm, flStandableZ ) )
 			{
 				SetGroundEntity( NULL );
 				// probably want to add a check for a +z velocity too!
@@ -3855,19 +4251,41 @@ void CGameMovement::CategorizePosition( void )
 				{
 					player->m_surfaceFriction = 0.25f;
 				}
+				bMoveToEndPos = false;
 			}
 			else
 			{
-				SetGroundEntity( &pm );
+
+#ifndef CLIENT_DLL
+				CBaseCSGrenadeProjectile* pGrenadeProjectile = dynamic_cast<CBaseCSGrenadeProjectile*>( pm.m_pEnt );
+				if ( pGrenadeProjectile )
+				{
+					pm.m_pEnt->SetCollisionGroup( COLLISION_GROUP_DEBRIS );
+				}
+				else
+#endif
+				{
+					SetGroundEntity( &pm );
+				}
 			}
 		}
 		else
 		{
-			SetGroundEntity( &pm );  // Otherwise, point to index of ent under us.
+#ifndef CLIENT_DLL
+			CBaseCSGrenadeProjectile* pGrenadeProjectile = dynamic_cast<CBaseCSGrenadeProjectile*>( pm.m_pEnt );
+			if ( pGrenadeProjectile )
+			{
+				pm.m_pEnt->SetCollisionGroup( COLLISION_GROUP_DEBRIS );
+			}
+			else
+#endif
+			{
+				SetGroundEntity( &pm );  // Otherwise, point to index of ent under us.
+			}				
 		}
 
 #ifndef CLIENT_DLL
-		
+
 		//Adrian: vehicle code handles for us.
 		if ( player->IsInAVehicle() == false )
 		{
@@ -3890,7 +4308,27 @@ void CGameMovement::CategorizePosition( void )
 		}
 #endif
 	}
+
+	// YWB:  This logic block essentially lifted from StayOnGround implementation
+	if ( bMoveToEndPos &&
+		!pm.startsolid &&				// not sure we need this check as fraction would == 0.0f?
+		pm.fraction > 0.0f &&			// must go somewhere
+		pm.fraction < 1.0f ) 			// must hit something
+	{
+#ifndef CLIENT_DLL
+		CBaseCSGrenadeProjectile* pGrenadeProjectile = dynamic_cast<CBaseCSGrenadeProjectile*>( pm.m_pEnt );
+		if ( pGrenadeProjectile )
+		{
+			pm.m_pEnt->SetCollisionGroup( COLLISION_GROUP_DEBRIS );
+		}
+		else
+#endif
+		{
+			mv->SetAbsOrigin( pm.endpos );
+		}		
+	}
 }
+
 
 //-----------------------------------------------------------------------------
 // Purpose: Determine if the player has hit the ground while falling, apply
@@ -3898,7 +4336,7 @@ void CGameMovement::CategorizePosition( void )
 //-----------------------------------------------------------------------------
 void CGameMovement::CheckFalling( void )
 {
-	// this function really deals with landing, not falling, so early out otherwise
+	// this function really deals with landing, not falling, so ignore everything else
 	if ( player->GetGroundEntity() == NULL || player->m_Local.m_flFallVelocity <= 0 )
 		return;
 
@@ -3907,7 +4345,7 @@ void CGameMovement::CheckFalling( void )
 		bool bAlive = true;
 		float fvol = 0.5;
 
-		if ( player->GetWaterLevel() > 0 )
+		if ( player->GetWaterLevel() > WL_NotInWater )
 		{
 			// They landed in water.
 		}
@@ -3926,7 +4364,7 @@ void CGameMovement::CheckFalling( void )
 			{
 				// Player landed on a descending object. Subtract the velocity of the ground entity.
 				player->m_Local.m_flFallVelocity += player->GetGroundEntity()->GetAbsVelocity().z;
-				player->m_Local.m_flFallVelocity = MAX( 0.1f, player->m_Local.m_flFallVelocity );
+				player->m_Local.m_flFallVelocity = Max( 0.1f, (float)player->m_Local.m_flFallVelocity );
 			}
 
 			if ( player->m_Local.m_flFallVelocity > PLAYER_MAX_SAFE_FALL_SPEED )
@@ -3955,12 +4393,25 @@ void CGameMovement::CheckFalling( void )
 		}
 	}
 
-	// let any subclasses know that the player has landed and how hard
-	OnLand(player->m_Local.m_flFallVelocity);
+#if defined( CSTRIKE15 )
+	float flFallVel = player->m_Local.m_flFallVelocity;
+	if ( flFallVel > 16.0f && flFallVel <= PLAYER_FATAL_FALL_SPEED )
+	{
+		// punch view when we hit the ground
+		QAngle punchAngle = player->GetViewPunchAngle();
+		punchAngle.x = (flFallVel * 0.001);
 	
+		if ( punchAngle.x < 0.75 )
+			punchAngle.x = 0.75;
+
+		player->SetViewPunchAngle( punchAngle );
+	}
+#endif
+
 	//
 	// Clear the fall velocity so the impact doesn't happen again.
 	//
+	OnLand(player->m_Local.m_flFallVelocity);
 	player->m_Local.m_flFallVelocity = 0;
 }
 
@@ -3973,16 +4424,16 @@ void CGameMovement::PlayerRoughLandingEffects( float fvol )
 		player->m_flStepSoundTime = 400;
 
 		// Play step sound for current texture.
-		player->PlayStepSound( (Vector &)mv->GetAbsOrigin(), player->m_pSurfaceData, fvol, true );
+		player->PlayStepSound( (Vector &)mv->GetAbsOrigin(), player->m_pSurfaceData, MAX( fvol, 0.1f ), false );
 
 		//
 		// Knock the screen around a little bit, temporary effect.
 		//
-		player->m_Local.m_vecPunchAngle.Set( ROLL, player->m_Local.m_flFallVelocity * 0.013 );
+		player->m_Local.m_viewPunchAngle.Set( ROLL, (player->m_Local.m_flFallVelocity - PLAYER_MAX_SAFE_FALL_SPEED) * 0.013 );
 
-		if ( player->m_Local.m_vecPunchAngle[PITCH] > 8 )
+		if ( player->m_Local.m_viewPunchAngle[PITCH] > 8 )
 		{
-			player->m_Local.m_vecPunchAngle.Set( PITCH, 8 );
+			player->m_Local.m_viewPunchAngle.Set( PITCH, 8 );
 		}
 
 #if !defined( CLIENT_DLL )
@@ -4051,15 +4502,15 @@ bool CGameMovement::CanUnduck()
 	{
 		for ( i = 0; i < 3; i++ )
 		{
-			newOrigin[i] += ( VEC_DUCK_HULL_MIN_SCALED( player )[i] - VEC_HULL_MIN_SCALED( player )[i] );
+			newOrigin[i] += ( VEC_DUCK_HULL_MIN[i] - VEC_HULL_MIN[i] );
 		}
 	}
 	else
 	{
 		// If in air an letting go of crouch, make sure we can offset origin to make
 		//  up for uncrouching
-		Vector hullSizeNormal = VEC_HULL_MAX_SCALED( player ) - VEC_HULL_MIN_SCALED( player );
-		Vector hullSizeCrouch = VEC_DUCK_HULL_MAX_SCALED( player ) - VEC_DUCK_HULL_MIN_SCALED( player );
+		Vector hullSizeNormal = VEC_HULL_MAX - VEC_HULL_MIN;
+		Vector hullSizeCrouch = VEC_DUCK_HULL_MAX - VEC_DUCK_HULL_MIN;
 		Vector viewDelta = ( hullSizeNormal - hullSizeCrouch );
 		viewDelta.Negate();
 		VectorAdd( newOrigin, viewDelta, newOrigin );
@@ -4090,39 +4541,32 @@ void CGameMovement::FinishUnDuck( void )
 	{
 		for ( i = 0; i < 3; i++ )
 		{
-			newOrigin[i] += ( VEC_DUCK_HULL_MIN_SCALED( player )[i] - VEC_HULL_MIN_SCALED( player )[i] );
+			newOrigin[i] += ( VEC_DUCK_HULL_MIN[i] - VEC_HULL_MIN[i] );
 		}
 	}
 	else
 	{
 		// If in air an letting go of crouch, make sure we can offset origin to make
 		//  up for uncrouching
-		Vector hullSizeNormal = VEC_HULL_MAX_SCALED( player ) - VEC_HULL_MIN_SCALED( player );
-		Vector hullSizeCrouch = VEC_DUCK_HULL_MAX_SCALED( player ) - VEC_DUCK_HULL_MIN_SCALED( player );
+		Vector hullSizeNormal = VEC_HULL_MAX - VEC_HULL_MIN;
+		Vector hullSizeCrouch = VEC_DUCK_HULL_MAX - VEC_DUCK_HULL_MIN;
 		Vector viewDelta = ( hullSizeNormal - hullSizeCrouch );
 		viewDelta.Negate();
 		VectorAdd( newOrigin, viewDelta, newOrigin );
 	}
 
 	player->m_Local.m_bDucked = false;
-	player->RemoveFlag( FL_DUCKING );
+	player->RemoveFlag( FL_DUCKING | FL_ANIMDUCKING );
 	player->m_Local.m_bDucking  = false;
 	player->m_Local.m_bInDuckJump  = false;
 	player->SetViewOffset( GetPlayerViewOffset( false ) );
-	player->m_Local.m_flDucktime = 0;
-
+	player->m_Local.m_nDuckTimeMsecs = 0;
+	
 	mv->SetAbsOrigin( newOrigin );
 
 #ifdef CLIENT_DLL
-#ifdef STAGING_ONLY
-	if ( debug_latch_reset_onduck.GetBool() )
-	{
-		player->ResetLatched();
-	}
-#else
 	player->ResetLatched();
 #endif
-#endif // CLIENT_DLL
 
 	// Recategorize position since ducking can change origin
 	CategorizePosition();
@@ -4133,18 +4577,17 @@ void CGameMovement::FinishUnDuck( void )
 //-----------------------------------------------------------------------------
 void CGameMovement::UpdateDuckJumpEyeOffset( void )
 {
-	if ( player->m_Local.m_flDuckJumpTime != 0.0f )
+	if ( player->m_Local.m_nDuckJumpTimeMsecs != 0 )
 	{
- 		float flDuckMilliseconds = MAX( 0.0f, GAMEMOVEMENT_DUCK_TIME - ( float )player->m_Local.m_flDuckJumpTime );
-		float flDuckSeconds = flDuckMilliseconds / GAMEMOVEMENT_DUCK_TIME;						
-		if ( flDuckSeconds > TIME_TO_UNDUCK )
+		int nDuckMilliseconds = MAX( 0, GAMEMOVEMENT_DUCK_TIME - player->m_Local.m_nDuckJumpTimeMsecs );
+		if ( nDuckMilliseconds > TIME_TO_UNDUCK_MSECS )
 		{
-			player->m_Local.m_flDuckJumpTime = 0.0f;
+			player->m_Local.m_nDuckJumpTimeMsecs = 0;
 			SetDuckedEyeOffset( 0.0f );
 		}
 		else
 		{
-			float flDuckFraction = SimpleSpline( 1.0f - ( flDuckSeconds / TIME_TO_UNDUCK ) );
+			float flDuckFraction = SimpleSpline( 1.0f - FractionUnDucked( nDuckMilliseconds ) );
 			SetDuckedEyeOffset( flDuckFraction );
 		}
 	}
@@ -4159,22 +4602,22 @@ void CGameMovement::FinishUnDuckJump( trace_t &trace )
 	VectorCopy( mv->GetAbsOrigin(), vecNewOrigin );
 
 	//  Up for uncrouching.
-	Vector hullSizeNormal = VEC_HULL_MAX_SCALED( player ) - VEC_HULL_MIN_SCALED( player );
-	Vector hullSizeCrouch = VEC_DUCK_HULL_MAX_SCALED( player ) - VEC_DUCK_HULL_MIN_SCALED( player );
+	Vector hullSizeNormal = VEC_HULL_MAX - VEC_HULL_MIN;
+	Vector hullSizeCrouch = VEC_DUCK_HULL_MAX - VEC_DUCK_HULL_MIN;
 	Vector viewDelta = ( hullSizeNormal - hullSizeCrouch );
 
 	float flDeltaZ = viewDelta.z;
 	viewDelta.z *= trace.fraction;
 	flDeltaZ -= viewDelta.z;
 
-	player->RemoveFlag( FL_DUCKING );
+	player->RemoveFlag( FL_DUCKING | FL_ANIMDUCKING );
 	player->m_Local.m_bDucked = false;
 	player->m_Local.m_bDucking  = false;
 	player->m_Local.m_bInDuckJump = false;
-	player->m_Local.m_flDucktime = 0.0f;
-	player->m_Local.m_flDuckJumpTime = 0.0f;
-	player->m_Local.m_flJumpTime = 0.0f;
-
+	player->m_Local.m_nDuckTimeMsecs = 0;
+	player->m_Local.m_nDuckJumpTimeMsecs = 0;
+	player->m_Local.m_nJumpTimeMsecs = 0;
+	
 	Vector vecViewOffset = GetPlayerViewOffset( false );
 	vecViewOffset.z -= flDeltaZ;
 	player->SetViewOffset( vecViewOffset );
@@ -4206,29 +4649,22 @@ void CGameMovement::FinishDuck( void )
 		for ( int i = 0; i < 3; i++ )
 		{
 			Vector org = mv->GetAbsOrigin();
-			org[ i ]-= ( VEC_DUCK_HULL_MIN_SCALED( player )[i] - VEC_HULL_MIN_SCALED( player )[i] );
+			org[ i ]-= ( VEC_DUCK_HULL_MIN[i] - VEC_HULL_MIN[i] );
 			mv->SetAbsOrigin( org );
 		}
 	}
 	else
 	{
-		Vector hullSizeNormal = VEC_HULL_MAX_SCALED( player ) - VEC_HULL_MIN_SCALED( player );
-		Vector hullSizeCrouch = VEC_DUCK_HULL_MAX_SCALED( player ) - VEC_DUCK_HULL_MIN_SCALED( player );
+		Vector hullSizeNormal = VEC_HULL_MAX - VEC_HULL_MIN;
+		Vector hullSizeCrouch = VEC_DUCK_HULL_MAX - VEC_DUCK_HULL_MIN;
 		Vector viewDelta = ( hullSizeNormal - hullSizeCrouch );
 		Vector out;
    		VectorAdd( mv->GetAbsOrigin(), viewDelta, out );
 		mv->SetAbsOrigin( out );
 
 #ifdef CLIENT_DLL
-#ifdef STAGING_ONLY
-		if ( debug_latch_reset_onduck.GetBool() )
-		{
-			player->ResetLatched();
-		}
-#else
 		player->ResetLatched();
 #endif
-#endif // CLIENT_DLL
 	}
 
 	// See if we are stuck?
@@ -4249,8 +4685,8 @@ void CGameMovement::StartUnDuckJump( void )
 
 	player->SetViewOffset( GetPlayerViewOffset( true ) );
 
-	Vector hullSizeNormal = VEC_HULL_MAX_SCALED( player ) - VEC_HULL_MIN_SCALED( player );
-	Vector hullSizeCrouch = VEC_DUCK_HULL_MAX_SCALED( player ) - VEC_DUCK_HULL_MIN_SCALED( player );
+	Vector hullSizeNormal = VEC_HULL_MAX - VEC_HULL_MIN;
+	Vector hullSizeCrouch = VEC_DUCK_HULL_MAX - VEC_DUCK_HULL_MIN;
 	Vector viewDelta = ( hullSizeNormal - hullSizeCrouch );
 	Vector out;
 	VectorAdd( mv->GetAbsOrigin(), viewDelta, out );
@@ -4270,7 +4706,10 @@ void CGameMovement::StartUnDuckJump( void )
 //-----------------------------------------------------------------------------
 void CGameMovement::SetDuckedEyeOffset( float duckFraction )
 {
- 	Vector vDuckHullMin = GetPlayerMins( true );
+
+	duckFraction = SimpleSpline( duckFraction );
+
+	Vector vDuckHullMin = GetPlayerMins( true );
 	Vector vStandHullMin = GetPlayerMins( false );
 
 	float fMore = ( vDuckHullMin.z - vStandHullMin.z );
@@ -4340,8 +4779,8 @@ void CGameMovement::Duck( void )
 	// Check to see if we are in the air.
 	bool bInAir = ( player->GetGroundEntity() == NULL );
 	bool bInDuck = ( player->GetFlags() & FL_DUCKING ) ? true : false;
-	bool bDuckJump = ( player->m_Local.m_flJumpTime > 0.0f );
-	bool bDuckJumpTime = ( player->m_Local.m_flDuckJumpTime > 0.0f );
+	bool bDuckJump = ( player->m_Local.m_nJumpTimeMsecs > 0 );
+	bool bDuckJumpTime = ( player->m_Local.m_nDuckJumpTimeMsecs > 0 );
 
 	if ( mv->m_nButtons & IN_DUCK )
 	{
@@ -4367,7 +4806,7 @@ void CGameMovement::Duck( void )
 		{
 // XBOX SERVER ONLY
 #if !defined(CLIENT_DLL)
-			if ( IsX360() && buttonsPressed & IN_DUCK )
+			if ( IsGameConsole() && buttonsPressed & IN_DUCK )
 			{
 				// Hinting logic
 				if ( player->GetToggledDuckState() && player->m_nNumCrouches < NUM_CROUCH_HINTS )
@@ -4380,25 +4819,24 @@ void CGameMovement::Duck( void )
 			// Have the duck button pressed, but the player currently isn't in the duck position.
 			if ( ( buttonsPressed & IN_DUCK ) && !bInDuck && !bDuckJump && !bDuckJumpTime )
 			{
-				player->m_Local.m_flDucktime = GAMEMOVEMENT_DUCK_TIME;
+				player->m_Local.m_nDuckTimeMsecs = GAMEMOVEMENT_DUCK_TIME;
 				player->m_Local.m_bDucking = true;
 			}
 			
 			// The player is in duck transition and not duck-jumping.
 			if ( player->m_Local.m_bDucking && !bDuckJump && !bDuckJumpTime )
 			{
-				float flDuckMilliseconds = MAX( 0.0f, GAMEMOVEMENT_DUCK_TIME - ( float )player->m_Local.m_flDucktime );
-				float flDuckSeconds = flDuckMilliseconds * 0.001f;
+				int nDuckMilliseconds = MAX( 0, GAMEMOVEMENT_DUCK_TIME - player->m_Local.m_nDuckTimeMsecs );
 				
 				// Finish in duck transition when transition time is over, in "duck", in air.
-				if ( ( flDuckSeconds > TIME_TO_DUCK ) || bInDuck || bInAir )
+				if ( ( nDuckMilliseconds > TIME_TO_DUCK_MSECS ) || bInDuck || bInAir )
 				{
 					FinishDuck();
 				}
 				else
 				{
 					// Calc parametric time
-					float flDuckFraction = SimpleSpline( flDuckSeconds / TIME_TO_DUCK );
+					float flDuckFraction = SimpleSpline( FractionDucked( nDuckMilliseconds ) );
 					SetDuckedEyeOffset( flDuckFraction );
 				}
 			}
@@ -4418,8 +4856,19 @@ void CGameMovement::Duck( void )
 						trace_t trace;
 						if ( CanUnDuckJump( trace ) )
 						{
+#if defined ( PORTAL2 ) &&  !defined ( CLIENT_DLL )
+							if ( EntityFromEntityHandle( mv->m_nPlayerHandle.Get() ) )
+							{
+								CPortal_Player *pPortalPlayer = (CPortal_Player*)EntityFromEntityHandle( mv->m_nPlayerHandle.Get() );
+								if ( pPortalPlayer && pPortalPlayer->m_hPortalEnvironment.Get() )
+								{
+									Warning( "--===Portal player unduckedjumped near a portal! This could cause the trajectory to go screwy===--\n" );
+								}
+							}
+							
+#endif 
 							FinishUnDuckJump( trace );
-							player->m_Local.m_flDuckJumpTime = ( GAMEMOVEMENT_TIME_TO_UNDUCK * ( 1.0f - trace.fraction ) ) + GAMEMOVEMENT_TIME_TO_UNDUCK_INV;
+							player->m_Local.m_nDuckJumpTimeMsecs = (int)( ( (float)GAMEMOVEMENT_TIME_TO_UNDUCK_MSECS * ( 1.0f - trace.fraction ) ) + (float)GAMEMOVEMENT_TIME_TO_UNDUCK_MSECS_INV );
 						}
 					}
 				}
@@ -4440,7 +4889,7 @@ void CGameMovement::Duck( void )
 					
 						if ( trace.fraction < 1.0f )
 						{
-							player->m_Local.m_flDuckJumpTime = ( GAMEMOVEMENT_TIME_TO_UNDUCK * ( 1.0f - trace.fraction ) ) + GAMEMOVEMENT_TIME_TO_UNDUCK_INV;
+							player->m_Local.m_nDuckJumpTimeMsecs = (int)( ( (float)GAMEMOVEMENT_TIME_TO_UNDUCK_MSECS * ( 1.0f - trace.fraction ) ) + (float)GAMEMOVEMENT_TIME_TO_UNDUCK_MSECS_INV );
 						}
 					}
 				}
@@ -4462,19 +4911,17 @@ void CGameMovement::Duck( void )
 				{
 					if ( bInDuck && !bDuckJump )
 					{
-						player->m_Local.m_flDucktime = GAMEMOVEMENT_DUCK_TIME;
+						player->m_Local.m_nDuckTimeMsecs = GAMEMOVEMENT_DUCK_TIME;
 					}
 					else if ( player->m_Local.m_bDucking && !player->m_Local.m_bDucked )
 					{
 						// Invert time if release before fully ducked!!!
-						float unduckMilliseconds = 1000.0f * TIME_TO_UNDUCK;
-						float duckMilliseconds = 1000.0f * TIME_TO_DUCK;
-						float elapsedMilliseconds = GAMEMOVEMENT_DUCK_TIME - player->m_Local.m_flDucktime;
+						int elapsedMilliseconds = GAMEMOVEMENT_DUCK_TIME - player->m_Local.m_nDuckTimeMsecs;
 
-						float fracDucked = elapsedMilliseconds / duckMilliseconds;
-						float remainingUnduckMilliseconds = fracDucked * unduckMilliseconds;
+						float fracDucked = FractionDucked( elapsedMilliseconds );
+						int remainingUnduckMilliseconds = (int)( fracDucked * TIME_TO_UNDUCK_MSECS );
 
-						player->m_Local.m_flDucktime = GAMEMOVEMENT_DUCK_TIME - unduckMilliseconds + remainingUnduckMilliseconds;
+						player->m_Local.m_nDuckTimeMsecs = GAMEMOVEMENT_DUCK_TIME - TIME_TO_UNDUCK_MSECS + remainingUnduckMilliseconds;
 					}
 				}
 				
@@ -4485,18 +4932,17 @@ void CGameMovement::Duck( void )
 					// or unducking
 					if ( ( player->m_Local.m_bDucking || player->m_Local.m_bDucked ) )
 					{
-						float flDuckMilliseconds = MAX( 0.0f, GAMEMOVEMENT_DUCK_TIME - (float)player->m_Local.m_flDucktime );
-						float flDuckSeconds = flDuckMilliseconds * 0.001f;
+						int nDuckMilliseconds = MAX( 0, GAMEMOVEMENT_DUCK_TIME - player->m_Local.m_nDuckTimeMsecs );
 						
 						// Finish ducking immediately if duck time is over or not on ground
-						if ( flDuckSeconds > TIME_TO_UNDUCK || ( bInAir && !bDuckJump ) )
+						if ( nDuckMilliseconds > TIME_TO_UNDUCK_MSECS || ( bInAir && !bDuckJump ) )
 						{
 							FinishUnDuck();
 						}
 						else
 						{
 							// Calc parametric time
-							float flDuckFraction = SimpleSpline( 1.0f - ( flDuckSeconds / TIME_TO_UNDUCK ) );
+							float flDuckFraction = SimpleSpline( 1.0f - FractionUnDucked( nDuckMilliseconds ) );
 							SetDuckedEyeOffset( flDuckFraction );
 							player->m_Local.m_bDucking = true;
 						}
@@ -4506,10 +4952,10 @@ void CGameMovement::Duck( void )
 				{
 					// Still under something where we can't unduck, so make sure we reset this timer so
 					//  that we'll unduck once we exit the tunnel, etc.
-					if ( player->m_Local.m_flDucktime != GAMEMOVEMENT_DUCK_TIME )
+					if ( player->m_Local.m_nDuckTimeMsecs != GAMEMOVEMENT_DUCK_TIME )
 					{
 						SetDuckedEyeOffset(1.0f);
-						player->m_Local.m_flDucktime = GAMEMOVEMENT_DUCK_TIME;
+						player->m_Local.m_nDuckTimeMsecs = GAMEMOVEMENT_DUCK_TIME;
 						player->m_Local.m_bDucked = true;
 						player->m_Local.m_bDucking = false;
 						player->AddFlag( FL_DUCKING );
@@ -4529,11 +4975,10 @@ void CGameMovement::Duck( void )
 	// his view height is at the standing height.
 	else if ( !IsDead() && !player->IsObserver() && !player->IsInAVehicle() )
 	{
-		if ( ( player->m_Local.m_flDuckJumpTime == 0.0f ) && ( fabs(player->GetViewOffset().z - GetPlayerViewOffset( false ).z) > 0.1 ) )
+		if ( ( player->m_Local.m_nDuckJumpTimeMsecs == 0 ) && ( fabs(player->GetViewOffset().z - GetPlayerViewOffset( false ).z) > 0.1 ) )
 		{
 			// we should rarely ever get here, so assert so a coder knows when it happens
-			Assert(0);
-			DevMsg( 1, "Restoring player view height\n" );
+			AssertMsgOnce( 0, "Restoring player view height\n" );
 
 			// set the eye height to the non-ducked height
 			SetDuckedEyeOffset(0.0f);
@@ -4560,13 +5005,20 @@ void CGameMovement::PlayerMove( void )
 
 	ReduceTimers();
 
+#ifdef INFESTED_DLL		// ignore roll component for Alien Swarm, this is used for vertical aiming
+	QAngle vecViewAngles = mv->m_vecViewAngles;
+	vecViewAngles[ROLL] = 0;
+	AngleVectors (vecViewAngles, &m_vecForward, &m_vecRight, &m_vecUp);  // Determine movement angles
+#else
 	AngleVectors (mv->m_vecViewAngles, &m_vecForward, &m_vecRight, &m_vecUp );  // Determine movement angles
+#endif
 
 	// Always try and unstick us unless we are using a couple of the movement modes
-	if ( player->GetMoveType() != MOVETYPE_NOCLIP && 
-		 player->GetMoveType() != MOVETYPE_NONE && 		 
-		 player->GetMoveType() != MOVETYPE_ISOMETRIC && 
-		 player->GetMoveType() != MOVETYPE_OBSERVER && 
+	MoveType_t moveType = player->GetMoveType();
+	if ( moveType != MOVETYPE_NOCLIP && 
+		 moveType != MOVETYPE_NONE && 		 
+		 moveType != MOVETYPE_ISOMETRIC && 
+		 moveType != MOVETYPE_OBSERVER && 
 		 !player->pl.deadflag )
 	{
 		if ( CheckInterval( STUCK ) )
@@ -4630,18 +5082,6 @@ void CGameMovement::PlayerMove( void )
 			}
 		}
 	}
-
-#if 0
-	Msg("%i, %i, %s, player = %8x, move type = %2i, ground entity = %8x, velocity = (%f %f %f)\n",
-		player->CurrentCommandNumber(),
-		player->m_nTickBase,
-		player->IsServer() ? "SERVER" : "CLIENT", 
-		player, 
-		player->GetMoveType(),
-		player->GetGroundEntity(), 
-		mv->m_vecVelocity[0], mv->m_vecVelocity[1], mv->m_vecVelocity[2]);
-
-#endif
 
 	// Handle movement modes.
 	switch (player->GetMoveType())
@@ -4726,7 +5166,7 @@ void CGameMovement::PerformFlyCollisionResolution( trace_t &pm, Vector &move )
 	if (pm.plane.normal[2] > 0.7)
 	{		
 		base.Init();
-		if (mv->m_vecVelocity[2] < GetCurrentGravity() * gpGlobals->frametime)
+		if (mv->m_vecVelocity[2] < sv_gravity.GetFloat() * gpGlobals->frametime)
 		{
 			// we're rolling on the ground, add static friction.
 			SetGroundEntity( &pm ); 
@@ -4900,30 +5340,18 @@ bool CGameMovement::GameHasLadders() const
 	return true;
 }
 
-//-----------------------------------------------------------------------------
-// Purpose: Traces player movement + position
-//-----------------------------------------------------------------------------
-void CGameMovement::TracePlayerBBox( const Vector& start, const Vector& end, unsigned int fMask, int collisionGroup, trace_t& pm )
+
+#if (PREDICTION_ERROR_CHECK_LEVEL > 0)
+void _Easy_DiffPrint( CBaseEntity *pEntity, const char *szFormatSTring, ... )
 {
-	VPROF( "CGameMovement::TracePlayerBBox" );
+	va_list args;
+	va_start( args, szFormatSTring );
 
-	Ray_t ray;
-	ray.Init( start, end, GetPlayerMins(), GetPlayerMaxs() );
-	UTIL_TraceRay( ray, fMask, mv->m_nPlayerHandle.Get(), collisionGroup, &pm );
-
+	//convert the va_list into something we can pass to diffprint
+	char szText[4096];
+	Q_vsnprintf( szText, sizeof( szText ), szFormatSTring, args );
+	
+	g_pGameMovement->DiffPrint( "%s", szText );
+	va_end( args );
 }
-
-
-
-//-----------------------------------------------------------------------------
-// Purpose: overridded by game classes to limit results (to standable objects for example)
-//-----------------------------------------------------------------------------
-void  CGameMovement::TryTouchGround( const Vector& start, const Vector& end, const Vector& mins, const Vector& maxs, unsigned int fMask, int collisionGroup, trace_t& pm )
-{
-	VPROF( "CGameMovement::TryTouchGround" );
-
-	Ray_t ray;
-	ray.Init( start, end, mins, maxs );
-	UTIL_TraceRay( ray, fMask, mv->m_nPlayerHandle.Get(), collisionGroup, &pm );
-}
-
+#endif

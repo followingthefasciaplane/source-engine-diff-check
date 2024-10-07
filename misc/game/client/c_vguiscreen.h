@@ -1,9 +1,9 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
 // $NoKeywords: $
-//=============================================================================//
+//===========================================================================//
 
 #ifndef C_VGUISCREEN_H
 #define C_VGUISCREEN_H
@@ -29,7 +29,7 @@ struct VGuiScreenInitData_t
 	C_BaseEntity *m_pEntity;
 
 	VGuiScreenInitData_t() : m_pEntity(NULL) {}
-	VGuiScreenInitData_t( C_BaseEntity *pEntity ) : m_pEntity(pEntity) {}
+	explicit VGuiScreenInitData_t( C_BaseEntity *pEntity ) : m_pEntity(pEntity) {}
 };
 
 #define DECLARE_VGUI_SCREEN_FACTORY( _PanelClass, _nameString )	\
@@ -71,12 +71,12 @@ public:
 
 	virtual void PreDataUpdate( DataUpdateType_t updateType );
 	virtual void OnDataChanged( DataUpdateType_t type );
-	virtual int DrawModel( int flags );
+	virtual int DrawModel( int flags, const RenderableInstance_t &instance );
 	virtual bool ShouldDraw( void );
 	virtual void ClientThink( );
 	virtual void GetAimEntOrigin( IClientEntity *pAttachedTo, Vector *pOrigin, QAngle *pAngles );
 	virtual bool IsVisibleToPlayer( C_BasePlayer *pViewingPlayer );
-	virtual bool IsTransparent( void );
+	virtual RenderableTranslucencyType_t ComputeTranslucencyType();
 
 	const char *PanelName() const;
 
@@ -104,13 +104,13 @@ public:
 
 	bool IsAttachedToViewModel() const;
 
-	virtual RenderGroup_t GetRenderGroup();
-
 	bool AcceptsInput() const;
 	void SetAcceptsInput( bool acceptsinput );
 
 	C_BasePlayer *GetPlayerOwner( void );
 	bool IsInputOnlyToOwner( void );
+
+	int GetScreenFlags( void ) const;
 
 private:
 	// Vgui screen management
@@ -177,6 +177,10 @@ void DeactivateVguiScreen( C_BaseEntity *pVguiScreen );
 // Updates vgui screen button state
 //-----------------------------------------------------------------------------
 void SetVGuiScreenButtonState( C_BaseEntity *pVguiScreen, int nButtonState );
+
+
+// Called at shutdown.
+void ClearKeyValuesCache();
 
 
 #endif // C_VGUISCREEN_H

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -141,7 +141,7 @@ void CInitTracker::Shutdown( const char *shutdown, int listnum )
 
 	for ( i = 0; i < m_nNumFuncs[ listnum ]; i++ )
 	{
-		f = m_Funcs[ listnum ][ i ];
+		InitFunc *f = m_Funcs[ listnum ][ i ];
 
 		if ( !stricmp( f->shutdownname, shutdown ) )
 		{

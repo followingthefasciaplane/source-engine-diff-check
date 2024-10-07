@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -17,6 +17,7 @@
 
 struct edict_t;
 class ICollideable;
+class IClientEntity;
 
 void SV_ClearWorld (void);
 // called after the world model has been loaded, before linking any entities
@@ -34,5 +35,9 @@ void SV_TriggerMoved( edict_t *pTriggerEnt, bool testSurroundingBoundsOnly );
 int SV_FastUnlink( edict_t *ent );
 void SV_FastRelink( edict_t *ent, int tempHandle );
 
+// Client side versions of above:
+
+void CL_TriggerMoved( IClientEntity *pTriggerEnt, bool accurateBboxTriggerChecks );
+void CL_SolidMoved( IClientEntity *pTriggerEnt, ICollideable *pSolidCollide, const Vector* pPrevAbsOrigin, bool accurateBboxTriggerChecks );
 
 #endif // WORLD_H

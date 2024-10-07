@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2006, Valve Corporation, All rights reserved. =======//
 //
 // Purpose: Make dynamic loading of dx_proxy.dll and methods acquisition easier.
 //

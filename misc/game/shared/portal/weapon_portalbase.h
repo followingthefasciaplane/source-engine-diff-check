@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -28,37 +28,7 @@ class CPortal_Player;
 // MIKETODO: this should use indexing instead of searching and strcmp()'ing all the time.
 bool IsAmmoType( int iAmmoType, const char *pAmmoName );
 
-typedef enum
-{
-	WEAPON_NONE = 0,
-
-	//Melee
-	WEAPON_CROWBAR,
-
-	//Special
-	WEAPON_PORTALGUN,
-	WEAPON_PHYSCANNON,
-
-	//Pistols
-	WEAPON_PISTOL,
-	WEAPON_357,	
-
-	//Machineguns
-	WEAPON_SMG,
-	WEAPON_AR2,
-
-	//Grenades
-	WEAPON_FRAG,
-	WEAPON_BUGBAIT,
-	
-	//Other
-	WEAPON_SHOTGUN,
-	WEAPON_CROSSBOW,
-	WEAPON_RPG,
-
-	WEAPON_MAX,		// number of weapons weapon index
-
-} PortalWeaponID;
+#include "weapons_portal.h"
 
 class CWeaponPortalBase : public CBaseCombatWeapon
 {
@@ -84,20 +54,21 @@ public:
 	CPortal_Player* GetPortalPlayerOwner() const;
 
 	// Get specific Portal weapon ID (ie: WEAPON_PORTALGUN, etc)
-	virtual PortalWeaponID GetWeaponID( void ) const { return WEAPON_NONE; }
+	virtual int GetWeaponID( void ) const { return WEAPON_NONE; }
 
 	void WeaponSound( WeaponSound_t sound_type, float soundtime = 0.0f );
 	
 	CPortalSWeaponInfo const	&GetPortalWpnData() const;
 
-
 	virtual void FireBullets( const FireBulletsInfo_t &info );
 	
+	virtual int ObjectCaps( void ) { return BaseClass::ObjectCaps() | FCAP_FORCE_TRANSITION; }
+
 public:
 	#if defined( CLIENT_DLL )
 	
-		virtual int		DrawModel( int flags );
-		virtual bool	ShouldDraw( void );
+		virtual IClientModelRenderable*	GetClientModelRenderable();
+		virtual int		DrawModel( int flags, const RenderableInstance_t &instance );
 		virtual bool	ShouldDrawCrosshair( void ) { return true; }
 		virtual bool	ShouldPredict();
 		virtual void	OnDataChanged( DataUpdateType_t type );

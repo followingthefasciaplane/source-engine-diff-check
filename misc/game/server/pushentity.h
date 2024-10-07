@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2008, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -32,6 +32,9 @@ public:
 	int			CountMovedEntities() { return m_rgMoved.Count(); }
 	void		StoreMovedEntities( physicspushlist_t &list );
 	void		BeginPush( CBaseEntity *pRootEntity );
+	// updates physics for all pushers that moved this tick
+	void		UpdatePusherPhysicsEndOfTick();
+	void		QueueChildUpdate( CBaseEntity *pChild ) { m_rgUpdatedChildren.AddToTail(pChild); }
 
 protected:
 
@@ -71,10 +74,10 @@ protected:
 	void	ComputeRotationalPushDirection( CBaseEntity *pBlocker, const RotatingPushMove_t &rotPushMove, Vector *pMove, CBaseEntity *pRoot );
 
 	// Speculatively checks to see if all entities in this list can be pushed
-	bool SpeculativelyCheckPush( PhysicsPushedInfo_t &info, const Vector &vecAbsPush, bool bRotationalPush );
+	bool SpeculativelyCheckPush( PhysicsPushedInfo_t &info, const Vector &vecAbsPush, bool bRotationalPush, CBaseEntity *pRoot, bool bIgnoreTeammates = false );
 
 	// Speculatively checks to see if all entities in this list can be pushed
-	virtual bool SpeculativelyCheckRotPush( const RotatingPushMove_t &rotPushMove, CBaseEntity *pRoot );
+	virtual bool SpeculativelyCheckRotPush( const RotatingPushMove_t &rotPushMove, CBaseEntity *pRoot = NULL );
 
 	// Speculatively checks to see if all entities in this list can be pushed
 	virtual bool	SpeculativelyCheckLinearPush( const Vector &vecAbsPush );
@@ -108,7 +111,12 @@ protected:
 	// Purpose: Linearly moves the root entity
 	void	LinearlyMoveRootEntity( CBaseEntity *pRoot, float movetime, Vector *pAbsPushVector );
 
-	bool	IsPushedPositionValid( CBaseEntity *pBlocker );
+	bool	IsPushedPositionValid( CBaseEntity *pBlocker, bool bIgnoreTeammates );
+	void	TraceBlockerEntity( CBaseEntity *pBlocker, const Vector& absStart, const Vector& absEnd, bool bIgnoreTeammates, trace_t *pOutTrace );
+
+	bool	FindValidLocationUpwards( float *pOutLengthUp, CBaseEntity *pBlocker, float maxDist, float slop );
+	bool	FindValidLocationAlongVector( Vector *pOutDelta, CBaseEntity *pBlocker, const Vector &vEndPoint, float slop );
+
 
 protected:
 
@@ -121,6 +129,8 @@ protected:
 	float							m_rootPusherStartLocaltime;
 	float							m_flMoveTime;
 
+	CUtlVector<PhysicsPusherInfo_t>	m_rgUpdatedPushers;
+	CUtlVector<CBaseEntity *>	m_rgUpdatedChildren;
 	friend class CPushBlockerEnum;
 };
 

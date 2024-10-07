@@ -1,11 +1,11 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright (c) 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: builds an intended movement command to send to the server
 //
 // $Workfile:     $
 // $Date:         $
 // $NoKeywords: $
-//=============================================================================//
+//=======================================================================================//
 
 
 #include "cbase.h"
@@ -20,76 +20,98 @@
 #include "checksum_md5.h"
 #include "hltvcamera.h"
 #if defined( REPLAY_ENABLED )
-#include "replay/replaycamera.h"
+#include "replaycamera.h"
 #endif
+#include "ivieweffects.h"
+#include "inputsystem/iinputsystem.h"
 #include <ctype.h> // isalnum()
 #include <voice_status.h>
-#include "cam_thirdperson.h"
-
 #ifdef SIXENSE
 #include "sixense/in_sixense.h"
 #endif
 
-#include "client_virtualreality.h"
-#include "sourcevr/isourcevirtualreality.h"
-
-// NVNT Include
-#include "haptics/haptic_utils.h"
-#include <vgui/ISurface.h>
-
-extern ConVar in_joystick;
 extern ConVar cam_idealpitch;
 extern ConVar cam_idealyaw;
-
+#ifdef INFESTED_DLL
+extern ConVar asw_cam_marine_yaw;
+#endif
 // For showing/hiding the scoreboard
 #include <game/client/iviewport.h>
-
-// Need this for steam controller
-#include "clientsteamcontext.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
-// FIXME, tie to entity state parsing for player!!!
-int g_iAlive = 1;
-
-static int s_ClearInputState = 0;
-
-// Defined in pm_math.c
-float anglemod( float a );
-
-// FIXME void V_Init( void );
-static int in_impulse = 0;
-static int in_cancel = 0;
-
+int in_impulse[ MAX_SPLITSCREEN_PLAYERS ];
+static int in_cancel[ MAX_SPLITSCREEN_PLAYERS ];
 ConVar cl_anglespeedkey( "cl_anglespeedkey", "0.67", 0 );
-ConVar cl_yawspeed( "cl_yawspeed", "210", FCVAR_NONE, "Client yaw speed.", true, -100000, true, 100000 );
-ConVar cl_pitchspeed( "cl_pitchspeed", "225", FCVAR_NONE, "Client pitch speed.", true, -100000, true, 100000 );
+ConVar cl_yawspeed( "cl_yawspeed", "210", 0 );
+ConVar cl_pitchspeed( "cl_pitchspeed", "225", 0 );
 ConVar cl_pitchdown( "cl_pitchdown", "89", FCVAR_CHEAT );
 ConVar cl_pitchup( "cl_pitchup", "89", FCVAR_CHEAT );
-#if defined( CSTRIKE_DLL )
-ConVar cl_sidespeed( "cl_sidespeed", "400", FCVAR_CHEAT );
-ConVar cl_upspeed( "cl_upspeed", "320", FCVAR_ARCHIVE|FCVAR_CHEAT );
-ConVar cl_forwardspeed( "cl_forwardspeed", "400", FCVAR_ARCHIVE|FCVAR_CHEAT );
-ConVar cl_backspeed( "cl_backspeed", "400", FCVAR_ARCHIVE|FCVAR_CHEAT );
-#else
-ConVar cl_sidespeed( "cl_sidespeed", "450", FCVAR_REPLICATED | FCVAR_CHEAT );
-ConVar cl_upspeed( "cl_upspeed", "320", FCVAR_REPLICATED | FCVAR_CHEAT );
-ConVar cl_forwardspeed( "cl_forwardspeed", "450", FCVAR_REPLICATED | FCVAR_CHEAT );
-ConVar cl_backspeed( "cl_backspeed", "450", FCVAR_REPLICATED | FCVAR_CHEAT );
-#endif // CSTRIKE_DLL
+ConVar cl_upspeed( "cl_upspeed", "320", FCVAR_CHEAT );
 ConVar lookspring( "lookspring", "0", FCVAR_ARCHIVE );
 ConVar lookstrafe( "lookstrafe", "0", FCVAR_ARCHIVE );
-ConVar in_joystick( "joystick","0", FCVAR_ARCHIVE );
+
+#ifdef PORTAL2
+#define MAX_LINEAR_SPEED "175"
+#else
+#define MAX_LINEAR_SPEED "450"
+#endif
+
+ConVar cl_sidespeed( "cl_sidespeed", MAX_LINEAR_SPEED, FCVAR_CHEAT );
+ConVar cl_forwardspeed( "cl_forwardspeed", MAX_LINEAR_SPEED, FCVAR_CHEAT );
+ConVar cl_backspeed( "cl_backspeed", MAX_LINEAR_SPEED, FCVAR_CHEAT );
+
+void IN_JoystickChangedCallback_f( IConVar *pConVar, const char *pOldString, float flOldValue );
+ConVar in_joystick( "joystick", "1", FCVAR_ARCHIVE, "True if the joystick is enabled, false otherwise.", true, 0.0f, true, 1.0f, IN_JoystickChangedCallback_f );
 
 ConVar thirdperson_platformer( "thirdperson_platformer", "0", 0, "Player will aim in the direction they are moving." );
 ConVar thirdperson_screenspace( "thirdperson_screenspace", "0", 0, "Movement will be relative to the camera, eg: left means screen-left" );
 
 ConVar sv_noclipduringpause( "sv_noclipduringpause", "0", FCVAR_REPLICATED | FCVAR_CHEAT, "If cheats are enabled, then you can noclip with the game paused (for doing screenshots, etc.)." );
+static ConVar cl_lagcomp_errorcheck( "cl_lagcomp_errorcheck", "0", 0, "Player index of other player to check for position errors." );
 
-extern ConVar cl_mouselook;
+static ConVar option_duck_method( "option_duck_method", "0", FCVAR_ARCHIVE | FCVAR_SS  );// 0 = HOLD to duck, 1 = Duck is a toggle
+static ConVar option_speed_method( "option_speed_method", "0", FCVAR_ARCHIVE | FCVAR_SS );// 0 = HOLD to go slow speed, 1 = speed is a toggle
+static ConVar round_start_reset_duck( "round_start_reset_duck", "0", 0 );
+static ConVar round_start_reset_speed( "round_start_reset_speed", "0", 0 );
 
-#define UsingMouselook() cl_mouselook.GetBool()
+
+bool UsingMouselook( int nSlot ) 
+{
+	static SplitScreenConVarRef s_MouseLook( "cl_mouselook" );
+	return s_MouseLook.GetBool( nSlot );
+}
+
+ConVar in_forceuser( "in_forceuser", "0", FCVAR_CHEAT | FCVAR_DEVELOPMENTONLY, "Force user input to this split screen player." );
+static ConVar ss_mimic( "ss_mimic", "0", FCVAR_CHEAT | FCVAR_DEVELOPMENTONLY, "Split screen users mimic base player's CUserCmds" );
+
+static void SplitScreenTeleport( int nSlot )
+{
+	C_BasePlayer *pPlayer = C_BasePlayer::GetLocalPlayer( nSlot );
+	if ( !pPlayer )
+		return;
+
+	Vector vecOrigin = pPlayer->GetAbsOrigin();
+	QAngle angles = pPlayer->GetAbsAngles();
+
+	int nOther = ( nSlot + 1 ) % MAX_SPLITSCREEN_PLAYERS;
+
+	if ( C_BasePlayer::GetLocalPlayer( nOther ) )
+	{
+		char cmd[ 256 ];
+		Q_snprintf( cmd, sizeof( cmd ), "cmd%d setpos %f %f %f;setang %f %f %f\n",
+			nOther + 1,
+			VectorExpand( vecOrigin ),
+			VectorExpand( angles ) );
+		engine->ClientCmd( cmd );
+	}
+}
+
+CON_COMMAND_F( ss_teleport, "Teleport other splitscreen player to my location.", FCVAR_CHEAT | FCVAR_DEVELOPMENTONLY )
+{
+	SplitScreenTeleport( GET_ACTIVE_SPLITSCREEN_SLOT() );
+}
 
 /*
 ===============================================================================
@@ -111,7 +133,6 @@ state bit 2 is edge triggered on the down to up transition
 
 ===============================================================================
 */
-
 kbutton_t	in_speed;
 kbutton_t	in_walk;
 kbutton_t	in_jlook;
@@ -124,16 +145,22 @@ kbutton_t	in_moveright;
 // Display the netgraph
 kbutton_t	in_graph;  
 kbutton_t	in_joyspeed;		// auto-speed key from the joystick (only works for player movement, not vehicles)
+kbutton_t	in_ducktoggle;
+kbutton_t	in_speedtoggle;
+kbutton_t	in_lookspin;
+
+kbutton_t	in_attack;
+kbutton_t	in_attack2;
+kbutton_t	in_zoom;
 
 static	kbutton_t	in_klook;
-kbutton_t	in_left;
-kbutton_t	in_right;
+static	kbutton_t	in_left;
+static	kbutton_t	in_right;
 static	kbutton_t	in_lookup;
 static	kbutton_t	in_lookdown;
 static	kbutton_t	in_use;
 static	kbutton_t	in_jump;
-static	kbutton_t	in_attack;
-static	kbutton_t	in_attack2;
+
 static	kbutton_t	in_up;
 static	kbutton_t	in_down;
 static	kbutton_t	in_duck;
@@ -142,11 +169,21 @@ static	kbutton_t	in_alt1;
 static	kbutton_t	in_alt2;
 static	kbutton_t	in_score;
 static	kbutton_t	in_break;
-static	kbutton_t	in_zoom;
 static  kbutton_t   in_grenade1;
 static  kbutton_t   in_grenade2;
-static	kbutton_t	in_attack3;
-kbutton_t	in_ducktoggle;
+
+#ifdef INFESTED_DLL
+static  kbutton_t   in_currentability;
+static  kbutton_t   in_prevability;
+static  kbutton_t   in_nextability;
+static  kbutton_t   in_ability1;
+static  kbutton_t   in_ability2;
+static  kbutton_t   in_ability3;
+static  kbutton_t   in_ability4;
+static  kbutton_t   in_ability5;
+#endif
+
+bool		joystick_forced_speed = false;
 
 /*
 ===========
@@ -157,7 +194,7 @@ void IN_CenterView_f (void)
 {
 	QAngle viewangles;
 
-	if ( UsingMouselook() == false )
+	if ( UsingMouselook( GET_ACTIVE_SPLITSCREEN_SLOT() ) == false )
 	{
 		if ( !::input->CAM_InterceptingMouse() )
 		{
@@ -173,9 +210,15 @@ void IN_CenterView_f (void)
 IN_Joystick_Advanced_f
 ===========
 */
-void IN_Joystick_Advanced_f (void)
+void IN_Joystick_Advanced_f (const CCommand& args)
 {
-	::input->Joystick_Advanced();
+	::input->Joystick_Advanced( args.ArgC() == 2 );
+}
+
+
+void IN_JoystickChangedCallback_f( IConVar *pConVar, const char *pOldString, float flOldValue )
+{
+	::input->Joystick_Advanced( true );
 }
 
 /*
@@ -311,11 +354,13 @@ void CInput::AddKeyButton( const char *name, kbutton_t *pkb )
 //-----------------------------------------------------------------------------
 CInput::CInput( void )
 {
-	m_pCommands = NULL;
-	m_pCameraThirdData = NULL;
-	m_pVerifiedCommands = NULL;
-	m_PreferredGameActionSet = GAME_ACTION_SET_MENUCONTROLS;
-	m_bSteamControllerGameActionsInitialized = false;
+	for ( int i = 0; i < MAX_SPLITSCREEN_PLAYERS; ++i )
+	{
+		m_PerUser[ i ].m_pCommands = NULL;
+		m_PerUser[ i ].m_pCameraThirdData = NULL;
+		m_PerUser[ i ].m_pVerifiedCommands = NULL;
+	}
+	m_lastAutoAimValue = 1.0f; 
 }
 
 //-----------------------------------------------------------------------------
@@ -338,6 +383,7 @@ void CInput::Init_Keyboard( void )
 
 	AddKeyButton( "in_graph", &in_graph );
 	AddKeyButton( "in_jlook", &in_jlook );
+	AddKeyButton( "in_reload", &in_reload );
 }
 
 /*
@@ -360,6 +406,16 @@ void CInput::Shutdown_Keyboard( void )
 	m_pKeys = NULL;
 }
 
+kbutton_t::Split_t &kbutton_t::GetPerUser( int nSlot /*=-1*/ )
+{
+	if ( nSlot == -1 )
+	{
+		ASSERT_LOCAL_PLAYER_RESOLVABLE();
+		nSlot = GET_ACTIVE_SPLITSCREEN_SLOT();
+	}
+	return m_PerUser[ nSlot ];
+}
+
 /*
 ============
 KeyDown
@@ -367,31 +423,33 @@ KeyDown
 */
 void KeyDown( kbutton_t *b, const char *c )
 {
+	kbutton_t::Split_t &data = b->GetPerUser();
+
 	int		k = -1;
 	if ( c && c[0] )
 	{
 		k = atoi(c);
 	}
 
-	if (k == b->down[0] || k == b->down[1])
+	if (k == data.down[0] || k == data.down[1])
 		return;		// repeating key
 	
-	if (!b->down[0])
-		b->down[0] = k;
-	else if (!b->down[1])
-		b->down[1] = k;
+	if (!data.down[0])
+		data.down[0] = k;
+	else if (!data.down[1])
+		data.down[1] = k;
 	else
 	{
 		if ( c[0] )
 		{
-			DevMsg( 1,"Three keys down for a button '%c' '%c' '%c'!\n", b->down[0], b->down[1], c[0]);
+			DevMsg( 1,"Three keys down for a button '%c' '%c' '%c'!\n", data.down[0], data.down[1], c[0]);
 		}
 		return;
 	}
 	
-	if (b->state & 1)
+	if (data.state & 1)
 		return;		// still down
-	b->state |= 1 + 2;	// down + impulse down
+	data.state |= 1 + 2;	// down + impulse down
 }
 
 /*
@@ -401,35 +459,53 @@ KeyUp
 */
 void KeyUp( kbutton_t *b, const char *c )
 {	
+	kbutton_t::Split_t &data = b->GetPerUser();
 	if ( !c || !c[0] )
 	{
-		b->down[0] = b->down[1] = 0;
-		b->state = 4;	// impulse up
+		data.down[0] = data.down[1] = 0;
+		data.state = 4;	// impulse up
 		return;
 	}
 
 	int k = atoi(c);
 
-	if (b->down[0] == k)
-		b->down[0] = 0;
-	else if (b->down[1] == k)
-		b->down[1] = 0;
+	if (data.down[0] == k)
+		data.down[0] = 0;
+	else if (data.down[1] == k)
+		data.down[1] = 0;
 	else
 		return;		// key up without coresponding down (menu pass through)
 
-	if (b->down[0] || b->down[1])
+	if (data.down[0] || data.down[1])
 	{
-		//Msg ("Keys down for button: '%c' '%c' '%c' (%d,%d,%d)!\n", b->down[0], b->down[1], c, b->down[0], b->down[1], c);
+		//Msg ("Keys down for button: '%c' '%c' '%c' (%d,%d,%d)!\n", data.down[0], data.down[1], c, data.down[0], data.down[1], c);
 		return;		// some other key is still holding it down
 	}
 
-	if (!(b->state & 1))
+	if (!(data.state & 1))
 		return;		// still up (this should not happen)
 
-	b->state &= ~1;		// now up
-	b->state |= 4; 		// impulse up
+	data.state &= ~1;		// now up
+	data.state |= 4; 		// impulse up
 }
 
+void IN_ClearDuckToggle()
+{
+	if ( ::input->KeyState( &in_ducktoggle ) )
+	{
+		KeyUp( &in_ducktoggle, NULL ); 
+	}
+}
+
+void IN_ClearSpeedToggle()
+{
+	if ( ::input->KeyState( &in_speedtoggle ) )
+	{
+		KeyUp( &in_speedtoggle, NULL ); 
+	}
+}
+void IN_ForceSpeedDown( ) {joystick_forced_speed = true;}
+void IN_ForceSpeedUp( ) {joystick_forced_speed = false;}
 void IN_CommanderMouseMoveDown( const CCommand &args ) {KeyDown(&in_commandermousemove, args[1] );}
 void IN_CommanderMouseMoveUp( const CCommand &args ) {KeyUp(&in_commandermousemove, args[1] );}
 void IN_BreakDown( const CCommand &args ) { KeyDown( &in_break , args[1] );}
@@ -464,10 +540,6 @@ void IN_MoveleftDown( const CCommand &args ) {KeyDown(&in_moveleft, args[1] );}
 void IN_MoveleftUp( const CCommand &args ) {KeyUp(&in_moveleft, args[1] );}
 void IN_MoverightDown( const CCommand &args ) {KeyDown(&in_moveright, args[1] );}
 void IN_MoverightUp( const CCommand &args ) {KeyUp(&in_moveright, args[1] );}
-void IN_WalkDown( const CCommand &args ) {KeyDown(&in_walk, args[1] );}
-void IN_WalkUp( const CCommand &args ) {KeyUp(&in_walk, args[1] );}
-void IN_SpeedDown( const CCommand &args ) {KeyDown(&in_speed, args[1] );}
-void IN_SpeedUp( const CCommand &args ) {KeyUp(&in_speed, args[1] );}
 void IN_StrafeDown( const CCommand &args ) {KeyDown(&in_strafe, args[1] );}
 void IN_StrafeUp( const CCommand &args ) {KeyUp(&in_strafe, args[1] );}
 void IN_Attack2Down( const CCommand &args ) { KeyDown(&in_attack2, args[1] );}
@@ -475,9 +547,96 @@ void IN_Attack2Up( const CCommand &args ) {KeyUp(&in_attack2, args[1] );}
 void IN_UseDown ( const CCommand &args ) {KeyDown(&in_use, args[1] );}
 void IN_UseUp ( const CCommand &args ) {KeyUp(&in_use, args[1] );}
 void IN_JumpDown ( const CCommand &args ) {KeyDown(&in_jump, args[1] );}
-void IN_JumpUp ( const CCommand &args ) {KeyUp(&in_jump, args[1] );}
-void IN_DuckDown( const CCommand &args ) {KeyDown(&in_duck, args[1] );}
-void IN_DuckUp( const CCommand &args ) {KeyUp(&in_duck, args[1] );}
+void IN_JumpUp ( const CCommand &args ) 
+{	
+	KeyUp(&in_jump, args[1] );
+}
+
+
+void IN_DuckToggle( const CCommand &args ) 
+{ 
+	if ( ::input->KeyState(&in_ducktoggle) )
+	{
+		IN_ClearDuckToggle();
+	}
+	else
+	{
+		KeyDown( &in_ducktoggle, args[1] ); 
+	}
+}
+
+void IN_DuckDown( const CCommand &args ) 
+{
+	SplitScreenConVarRef option_duck_method( "option_duck_method" );
+
+	if ( option_duck_method.IsValid() && option_duck_method.GetBool( GET_ACTIVE_SPLITSCREEN_SLOT() ) )
+	{
+		IN_DuckToggle( args );
+	}
+	else
+	{
+		KeyDown(&in_duck, args[1] );
+		IN_ClearDuckToggle();
+	}
+}
+void IN_DuckUp( const CCommand &args ) 
+{
+	SplitScreenConVarRef option_duck_method( "option_duck_method" );
+
+	if ( option_duck_method.IsValid() && option_duck_method.GetBool( GET_ACTIVE_SPLITSCREEN_SLOT() ) )
+	{
+		// intentionally blank
+	}
+	else
+	{
+		KeyUp(&in_duck, args[1] );
+		IN_ClearDuckToggle();
+	}
+}
+
+
+void IN_SpeedToggle( const CCommand &args ) 
+{ 
+	if ( ::input->KeyState(&in_speedtoggle) )
+	{
+		IN_ClearSpeedToggle();
+	}
+	else
+	{
+		KeyDown( &in_speedtoggle, args[1] ); 
+	}
+}
+void IN_SpeedDown( const CCommand &args ) 
+{
+	SplitScreenConVarRef option_speed_method( "option_speed_method" );
+
+	if ( option_speed_method.IsValid() && option_speed_method.GetBool( GET_ACTIVE_SPLITSCREEN_SLOT() ) )
+	{
+		IN_SpeedToggle( args );
+	}
+	else
+	{
+		KeyDown(&in_speed, args[1] );
+		IN_ClearSpeedToggle();
+	}
+}
+void IN_SpeedUp( const CCommand &args ) 
+{
+	SplitScreenConVarRef option_speed_method( "option_speed_method" );
+	 
+	if ( option_speed_method.IsValid() && option_speed_method.GetBool( GET_ACTIVE_SPLITSCREEN_SLOT() ) )
+	{
+		// intentionally blank
+	}
+	else
+	{
+		KeyUp(&in_speed, args[1] );
+		IN_ClearSpeedToggle();
+	}
+}
+void IN_WalkDown( const CCommand &args ) {KeyDown(&in_walk, args[1] );}
+void IN_WalkUp( const CCommand &args ) {KeyUp(&in_walk, args[1] );}
+
 void IN_ReloadDown( const CCommand &args ) {KeyDown(&in_reload, args[1] );}
 void IN_ReloadUp( const CCommand &args ) {KeyUp(&in_reload, args[1] );}
 void IN_Alt1Down( const CCommand &args ) {KeyDown(&in_alt1, args[1] );}
@@ -488,25 +647,93 @@ void IN_GraphDown( const CCommand &args ) {KeyDown(&in_graph, args[1] );}
 void IN_GraphUp( const CCommand &args ) {KeyUp(&in_graph, args[1] );}
 void IN_ZoomDown( const CCommand &args ) {KeyDown(&in_zoom, args[1] );}
 void IN_ZoomUp( const CCommand &args ) {KeyUp(&in_zoom, args[1] );}
+void IN_ZoomInDown( const CCommand &args ) {KeyDown(&in_grenade1, args[1] );}
+void IN_ZoomInUp( const CCommand &args ) {KeyUp(&in_grenade1, args[1] );}
+void IN_ZoomOutDown( const CCommand &args ) {KeyDown(&in_grenade2, args[1] );}
+void IN_ZoomOutUp( const CCommand &args ) {KeyUp(&in_grenade2, args[1] );}
 void IN_Grenade1Up( const CCommand &args ) { KeyUp( &in_grenade1, args[1] ); }
 void IN_Grenade1Down( const CCommand &args ) { KeyDown( &in_grenade1, args[1] ); }
 void IN_Grenade2Up( const CCommand &args ) { KeyUp( &in_grenade2, args[1] ); }
 void IN_Grenade2Down( const CCommand &args ) { KeyDown( &in_grenade2, args[1] ); }
 void IN_XboxStub( const CCommand &args ) { /*do nothing*/ }
-void IN_Attack3Down( const CCommand &args ) { KeyDown(&in_attack3, args[1] );}
-void IN_Attack3Up( const CCommand &args ) { KeyUp(&in_attack3, args[1] );}
 
-void IN_DuckToggle( const CCommand &args ) 
+#ifdef PORTAL2
+
+#if USE_SLOWTIME
+
+	// Slow-time
+	kbutton_t	in_slowtoggle;
+
+	void IN_SlowTimeUp( const CCommand &args ) { KeyUp( &in_slowtoggle, args[1] ); }
+	void IN_SlowTimeDown( const CCommand &args ) { KeyDown( &in_slowtoggle, args[1] ); }
+
+	static ConCommand startslowtime( "+slowtime", IN_SlowTimeDown );
+	static ConCommand endslowtime( "-slowtime", IN_SlowTimeUp );
+
+#endif // USE_SLOWTIME
+
+kbutton_t	in_remote_view_toggle;
+
+
+static bool g_bRemoteViewKeyWasUp = true;
+
+void IN_RemoteViewUp( const CCommand &args ) 
 { 
-	if ( ::input->KeyState(&in_ducktoggle) )
-	{
-		KeyUp( &in_ducktoggle, args[1] ); 
-	}
-	else
-	{
-		KeyDown( &in_ducktoggle, args[1] ); 
-	}
+	g_bRemoteViewKeyWasUp = true;
+	KeyUp( &in_remote_view_toggle, args[1] ); 
 }
+void IN_RemoteViewDown( const CCommand &args ) 
+{
+	if ( g_bRemoteViewKeyWasUp )
+	{
+		g_bRemoteViewKeyWasUp = false;
+		IGameEvent * event = gameeventmanager->CreateEvent( "remote_view_activated" );
+		if ( event )
+		{
+			gameeventmanager->FireEvent( event );
+		}
+	}
+	KeyDown( &in_remote_view_toggle, args[1] ); 
+}
+
+static ConCommand startremoteview( "+remote_view", IN_RemoteViewDown );
+static ConCommand endremoteview( "-remote_view", IN_RemoteViewUp );
+
+extern bool g_bShowGhostedPortals;
+void IN_ShowPortalsUp( const CCommand &args ) { g_bShowGhostedPortals = false; }
+void IN_ShowPortalsDown( const CCommand &args ) { g_bShowGhostedPortals = true; }
+static ConCommand showportals( "+showportals", IN_ShowPortalsDown );
+static ConCommand hideportals( "-showportals", IN_ShowPortalsUp );
+
+kbutton_t	in_coop_ping;
+
+void IN_CoopPingUp( const CCommand &args) { KeyUp( &in_coop_ping, args[1] ); }
+void IN_CoopPingDown( const CCommand &args) { KeyDown( &in_coop_ping, args[1] ); }
+
+static ConCommand presscoopping( "+coop_ping", IN_CoopPingDown );
+static ConCommand unpresscoopping( "-coop_ping", IN_CoopPingUp );
+
+#endif // PORTAL2
+
+#ifdef INFESTED_DLL
+void IN_PrevAbilityUp( const CCommand &args ) { KeyUp( &in_prevability, args[1] ); }
+void IN_PrevAbilityDown( const CCommand &args ) { KeyDown( &in_prevability, args[1] ); }
+void IN_NextAbilityUp( const CCommand &args ) { KeyUp( &in_nextability, args[1] ); }
+void IN_NextAbilityDown( const CCommand &args ) { KeyDown( &in_nextability, args[1] ); }
+void IN_CurrentAbilityUp( const CCommand &args ) { KeyUp( &in_currentability, args[1] ); }
+void IN_CurrentAbilityDown( const CCommand &args ) { KeyDown( &in_currentability, args[1] ); }
+
+void IN_Ability1Up( const CCommand &args ) { KeyUp( &in_ability1, args[1] ); }
+void IN_Ability1Down( const CCommand &args ) { KeyDown( &in_ability1, args[1] ); }
+void IN_Ability2Up( const CCommand &args ) { KeyUp( &in_ability2, args[1] ); }
+void IN_Ability2Down( const CCommand &args ) { KeyDown( &in_ability2, args[1] ); }
+void IN_Ability3Up( const CCommand &args ) { KeyUp( &in_ability3, args[1] ); }
+void IN_Ability3Down( const CCommand &args ) { KeyDown( &in_ability3, args[1] ); }
+void IN_Ability4Up( const CCommand &args ) { KeyUp( &in_ability4, args[1] ); }
+void IN_Ability4Down( const CCommand &args ) { KeyDown( &in_ability4, args[1] ); }
+void IN_Ability5Up( const CCommand &args ) { KeyUp( &in_ability5, args[1] ); }
+void IN_Ability5Down( const CCommand &args ) { KeyDown( &in_ability5, args[1] ); }
+#endif
 
 void IN_AttackDown( const CCommand &args )
 {
@@ -516,39 +743,35 @@ void IN_AttackDown( const CCommand &args )
 void IN_AttackUp( const CCommand &args )
 {
 	KeyUp( &in_attack, args[1] );
-	in_cancel = 0;
+	ASSERT_LOCAL_PLAYER_RESOLVABLE();
+	in_cancel[ GET_ACTIVE_SPLITSCREEN_SLOT() ] = 0;
 }
 
 // Special handling
 void IN_Cancel( const CCommand &args )
 {
-	in_cancel = 1;
+	ASSERT_LOCAL_PLAYER_RESOLVABLE();
+	in_cancel[ GET_ACTIVE_SPLITSCREEN_SLOT() ] = 1;
 }
 
 void IN_Impulse( const CCommand &args )
 {
-	in_impulse = atoi( args[1] );
+	ASSERT_LOCAL_PLAYER_RESOLVABLE();
+	in_impulse[ GET_ACTIVE_SPLITSCREEN_SLOT() ] = atoi( args[1] );
 }
 
 void IN_ScoreDown( const CCommand &args )
 {
 	KeyDown( &in_score, args[1] );
-	if ( gViewPortInterface )
-	{
-		gViewPortInterface->ShowPanel( PANEL_SCOREBOARD, true );
-	}
 }
 
 void IN_ScoreUp( const CCommand &args )
 {
 	KeyUp( &in_score, args[1] );
-	if ( gViewPortInterface )
-	{
-		gViewPortInterface->ShowPanel( PANEL_SCOREBOARD, false );
-		GetClientVoiceMgr()->StopSquelchMode();
-	}
 }
 
+void IN_LookSpinDown( const CCommand &args ) {KeyDown( &in_lookspin, args[1] );}
+void IN_LookSpinUp( const CCommand &args ) {KeyUp( &in_lookspin, args[1] );}
 
 /*
 ============
@@ -559,15 +782,18 @@ Return 1 to allow engine to process the key, otherwise, act on it as needed
 */
 int CInput::KeyEvent( int down, ButtonCode_t code, const char *pszCurrentBinding )
 {
+
 	// Deal with camera intercepting the mouse
-	if ( ( code == MOUSE_LEFT ) || ( code == MOUSE_RIGHT ) )
+	if ( down && 
+		( ( code == MOUSE_LEFT ) || ( code == MOUSE_RIGHT ) || ( code == MOUSE_MIDDLE ) || ( code == MOUSE_WHEEL_UP ) || ( code == MOUSE_WHEEL_DOWN ) ) )
 	{
-		if ( m_fCameraInterceptingMouse )
+		ConVarRef cl_mouseenable( "cl_mouseenable" );
+		if ( GetPerUser().m_fCameraInterceptingMouse ||  !cl_mouseenable.GetBool() )
 			return 0;
 	}
 
-	if ( g_pClientMode )
-		return g_pClientMode->KeyInput(down, code, pszCurrentBinding);
+	if ( GetClientMode() )
+		return GetClientMode()->KeyInput(down, code, pszCurrentBinding);
 
 	return 1;
 }
@@ -586,12 +812,14 @@ Returns 0.25 if a key was pressed and released during the frame,
 */
 float CInput::KeyState ( kbutton_t *key )
 {
+	kbutton_t::Split_t &data = key->GetPerUser();
+
 	float		val = 0.0;
 	int			impulsedown, impulseup, down;
 	
-	impulsedown = key->state & 2;
-	impulseup	= key->state & 4;
-	down		= key->state & 1;
+	impulsedown = data.state & 2;
+	impulseup	= data.state & 4;
+	down		= data.state & 1;
 	
 	if ( impulsedown && !impulseup )
 	{
@@ -626,13 +854,16 @@ float CInput::KeyState ( kbutton_t *key )
 	}
 
 	// clear impulses
-	key->state &= 1;		
+	data.state &= 1;		
 	return val;
 }
 
 void CInput::IN_SetSampleTime( float frametime )
 {
-	m_flKeyboardSampleTime = frametime;
+	FOR_EACH_VALID_SPLITSCREEN_PLAYER( i )
+	{
+		m_PerUser[ i ].m_flKeyboardSampleTime = frametime;
+	}
 }
 
 /*
@@ -643,23 +874,24 @@ DetermineKeySpeed
 */
 static ConVar in_usekeyboardsampletime( "in_usekeyboardsampletime", "1", 0, "Use keyboard sample time smoothing." );
 
-float CInput::DetermineKeySpeed( float frametime )
+float CInput::DetermineKeySpeed( int nSlot, float frametime )
 {
-
 	if ( in_usekeyboardsampletime.GetBool() )
 	{
-		if ( m_flKeyboardSampleTime <= 0 )
+		PerUserInput_t &user = GetPerUser( nSlot );
+
+		if ( user.m_flKeyboardSampleTime <= 0 )
 			return 0.0f;
 	
-		frametime = MIN( m_flKeyboardSampleTime, frametime );
-		m_flKeyboardSampleTime -= frametime;
+		frametime = MIN( user.m_flKeyboardSampleTime, frametime );
+		user.m_flKeyboardSampleTime -= frametime;
 	}
 	
 	float speed;
 
 	speed = frametime;
 
-	if ( in_speed.state & 1 )
+	if ( in_speed.GetPerUser( nSlot ).state & 1 )
 	{
 		speed *= cl_anglespeedkey.GetFloat();
 	}
@@ -673,13 +905,15 @@ AdjustYaw
 
 ==============================
 */
-void CInput::AdjustYaw( float speed, QAngle& viewangles )
+void CInput::AdjustYaw( int nSlot, float speed, QAngle& viewangles )
 {
-	if ( !(in_strafe.state & 1) )
+	if ( !(in_strafe.GetPerUser( nSlot ).state & 1) )
 	{
 		viewangles[YAW] -= speed*cl_yawspeed.GetFloat() * KeyState (&in_right);
 		viewangles[YAW] += speed*cl_yawspeed.GetFloat() * KeyState (&in_left);
 	}
+
+	const PerUserInput_t &user = GetPerUser( nSlot );
 
 	// thirdperson platformer mode
 	// use movement keys to aim the player relative to the thirdperson camera
@@ -690,11 +924,11 @@ void CInput::AdjustYaw( float speed, QAngle& viewangles )
 
 		if ( side || forward )
 		{
-			viewangles[YAW] = RAD2DEG(atan2(side, forward)) + g_ThirdPersonManager.GetCameraOffsetAngles()[ YAW ];
+			viewangles[YAW] = RAD2DEG(atan2(side, forward)) + user.m_vecCameraOffset[ YAW ];
 		}
 		if ( side || forward || KeyState (&in_right) || KeyState (&in_left) )
 		{
-			cam_idealyaw.SetValue( g_ThirdPersonManager.GetCameraOffsetAngles()[ YAW ] - viewangles[ YAW ] );
+			cam_idealyaw.SetValue( user.m_vecCameraOffset[ YAW ] - viewangles[ YAW ] );
 		}
 	}
 }
@@ -705,14 +939,14 @@ AdjustPitch
 
 ==============================
 */
-void CInput::AdjustPitch( float speed, QAngle& viewangles )
+void CInput::AdjustPitch( int nSlot, float speed, QAngle& viewangles )
 {
 	// only allow keyboard looking if mouse look is disabled
-	if ( UsingMouselook() == false )
+	if ( !UsingMouselook( nSlot ) )
 	{
 		float	up, down;
 
-		if ( in_klook.state & 1 )
+		if ( in_klook.GetPerUser( nSlot ).state & 1 )
 		{
 			view->StopPitchDrift ();
 			viewangles[PITCH] -= speed*cl_pitchspeed.GetFloat() * KeyState (&in_forward);
@@ -749,7 +983,8 @@ void CInput::ClampAngles( QAngle& viewangles )
 		viewangles[PITCH] = -cl_pitchup.GetFloat();
 	}
 
-#ifndef PORTAL	// Don't constrain Roll in Portal because the player can be upside down! -Jeep
+// Don't constrain Roll in Portal because the player can be upside down! -Jeep
+#if !defined( PORTAL )
 	if ( viewangles[ROLL] > 50 )
 	{
 		viewangles[ROLL] = 50;
@@ -768,13 +1003,13 @@ AdjustAngles
 Moves the local angle positions
 ================
 */
-void CInput::AdjustAngles ( float frametime )
+void CInput::AdjustAngles ( int nSlot, float frametime )
 {
 	float	speed;
 	QAngle viewangles;
 	
 	// Determine control scaling factor ( multiplies time )
-	speed = DetermineKeySpeed( frametime );
+	speed = DetermineKeySpeed( nSlot, frametime );
 	if ( speed <= 0.0f )
 	{
 		return;
@@ -783,11 +1018,22 @@ void CInput::AdjustAngles ( float frametime )
 	// Retrieve latest view direction from engine
 	engine->GetViewAngles( viewangles );
 
+	// Undo tilting from previous frame
+	viewangles -= GetPerUser().m_angPreviousViewAnglesTilt;
+
+	// Apply tilting effects here (it affects aim)
+	QAngle vecAnglesBeforeTilt = viewangles;
+	GetViewEffects()->CalcTilt();
+	GetViewEffects()->ApplyTilt( viewangles, 1.0f );
+
+	// Remember the tilt delta so we can undo it before applying tilt next frame
+	GetPerUser().m_angPreviousViewAnglesTilt = viewangles - vecAnglesBeforeTilt;
+
 	// Adjust YAW
-	AdjustYaw( speed, viewangles );
+	AdjustYaw( nSlot, speed, viewangles );
 
 	// Adjust PITCH if keyboard looking
-	AdjustPitch( speed, viewangles );
+	AdjustPitch( nSlot, speed, viewangles );
 	
 	// Make sure values are legitimate
 	ClampAngles( viewangles );
@@ -802,7 +1048,7 @@ ComputeSideMove
 
 ==============================
 */
-void CInput::ComputeSideMove( CUserCmd *cmd )
+void CInput::ComputeSideMove( int nSlot, CUserCmd *cmd )
 {
 	// thirdperson platformer movement
 	if ( CAM_IsThirdPerson() && thirdperson_platformer.GetInt() )
@@ -814,7 +1060,11 @@ void CInput::ComputeSideMove( CUserCmd *cmd )
 	// thirdperson screenspace movement
 	if ( CAM_IsThirdPerson() && thirdperson_screenspace.GetInt() )
 	{
+#ifdef INFESTED_DLL
+		float ideal_yaw = asw_cam_marine_yaw.GetFloat() - 90.0f;
+#else
 		float ideal_yaw = cam_idealyaw.GetFloat();
+#endif
 		float ideal_sin = sin(DEG2RAD(ideal_yaw));
 		float ideal_cos = cos(DEG2RAD(ideal_yaw));
 		
@@ -829,7 +1079,7 @@ void CInput::ComputeSideMove( CUserCmd *cmd )
 	}
 
 	// If strafing, check left and right keys and act like moveleft and moveright keys
-	if ( in_strafe.state & 1 )
+	if ( in_strafe.GetPerUser( nSlot ).state & 1 )
 	{
 		cmd->sidemove += cl_sidespeed.GetFloat() * KeyState (&in_right);
 		cmd->sidemove -= cl_sidespeed.GetFloat() * KeyState (&in_left);
@@ -846,7 +1096,7 @@ ComputeUpwardMove
 
 ==============================
 */
-void CInput::ComputeUpwardMove( CUserCmd *cmd )
+void CInput::ComputeUpwardMove( int nSlot, CUserCmd *cmd )
 {
 	cmd->upmove += cl_upspeed.GetFloat() * KeyState (&in_up);
 	cmd->upmove -= cl_upspeed.GetFloat() * KeyState (&in_down);
@@ -858,7 +1108,7 @@ ComputeForwardMove
 
 ==============================
 */
-void CInput::ComputeForwardMove( CUserCmd *cmd )
+void CInput::ComputeForwardMove( int nSlot, CUserCmd *cmd )
 {
 	// thirdperson platformer movement
 	if ( CAM_IsThirdPerson() && thirdperson_platformer.GetInt() )
@@ -877,7 +1127,11 @@ void CInput::ComputeForwardMove( CUserCmd *cmd )
 	// thirdperson screenspace movement
 	if ( CAM_IsThirdPerson() && thirdperson_screenspace.GetInt() )
 	{
+#ifdef INFESTED_DLL
+		float ideal_yaw = asw_cam_marine_yaw.GetFloat() - 90.0f;
+#else
 		float ideal_yaw = cam_idealyaw.GetFloat();
+#endif
 		float ideal_sin = sin(DEG2RAD(ideal_yaw));
 		float ideal_cos = cos(DEG2RAD(ideal_yaw));
 		
@@ -891,7 +1145,7 @@ void CInput::ComputeForwardMove( CUserCmd *cmd )
 		return;
 	}
 
-	if ( !(in_klook.state & 1 ) )
+	if ( !(in_klook.GetPerUser( nSlot ).state & 1 ) )
 	{	
 		cmd->forwardmove += cl_forwardspeed.GetFloat() * KeyState (&in_forward);
 		cmd->forwardmove -= cl_backspeed.GetFloat() * KeyState (&in_back);
@@ -940,46 +1194,24 @@ void CInput::ScaleMovements( CUserCmd *cmd )
 ControllerMove
 ===========
 */
-void CInput::ControllerMove( float frametime, CUserCmd *cmd )
+void CInput::ControllerMove( int nSlot, float frametime, CUserCmd *cmd )
 {
-	if ( IsPC() )
+	ConVarRef cl_mouseenable( "cl_mouseenable" );
+
+	if ( (IsPC() || IsPlatformPS3()) && 
+		 cl_mouseenable.GetBool() && 
+		 nSlot == in_forceuser.GetInt() && 
+		 g_pInputSystem->IsDeviceReadingInput( INPUT_DEVICE_KEYBOARD_MOUSE ) )
 	{
-		if ( !m_fCameraInterceptingMouse && m_fMouseActive )
+		if ( !GetPerUser( nSlot ).m_fCameraInterceptingMouse && m_fMouseActive )
 		{
-			MouseMove( cmd);
+			MouseMove( nSlot, cmd );
 		}
 	}
+
+	JoyStickMove( frametime, cmd);
 
 	SteamControllerMove( frametime, cmd );
-	JoyStickMove( frametime, cmd );
-
-	// NVNT if we have a haptic device..
-	if(haptics && haptics->HasDevice())
-	{
-		if(engine->IsPaused() || engine->IsLevelMainMenuBackground() || vgui::surface()->IsCursorVisible() || !engine->IsInGame())
-		{
-			// NVNT send a menu process to the haptics system.
-			haptics->MenuProcess();
-			return;
-		}
-#ifdef CSTRIKE_DLL
-		// NVNT cstrike fov grabing.
-		C_BasePlayer *player = C_BasePlayer::GetLocalPlayer();
-		if(player){
-			haptics->UpdatePlayerFOV(player->GetFOV());
-		}
-#endif
-		// NVNT calculate move with the navigation on the haptics system.
-		haptics->CalculateMove(cmd->forwardmove, cmd->sidemove, frametime);
-		// NVNT send a game process to the haptics system.
-		haptics->GameProcess();
-#if defined( WIN32 ) && !defined( _X360 )
-		// NVNT update our avatar effect.
-		UpdateAvatarEffect();
-#endif
-	}
-
-
 }
 
 //-----------------------------------------------------------------------------
@@ -988,7 +1220,121 @@ void CInput::ControllerMove( float frametime, CUserCmd *cmd )
 //-----------------------------------------------------------------------------
 void CInput::MakeWeaponSelection( C_BaseCombatWeapon *weapon )
 {
-	m_hSelectedWeapon = weapon;
+	GetPerUser().m_hSelectedWeapon = weapon;
+}
+
+CInput::PerUserInput_t &CInput::GetPerUser( int nSlot /*=-1*/ )
+{
+	if ( nSlot == -1 )
+	{
+		ASSERT_LOCAL_PLAYER_RESOLVABLE();
+		return m_PerUser[ GET_ACTIVE_SPLITSCREEN_SLOT() ];
+	}
+	return m_PerUser[ nSlot ];
+}
+
+const CInput::PerUserInput_t &CInput::GetPerUser( int nSlot /*=-1*/ ) const
+{
+	if ( nSlot == -1 )
+	{
+		ASSERT_LOCAL_PLAYER_RESOLVABLE();
+		return m_PerUser[ GET_ACTIVE_SPLITSCREEN_SLOT() ];
+	}
+	return m_PerUser[ nSlot ];
+}
+
+void CInput::ExtraMouseSample( float frametime, bool active )
+{
+	ASSERT_LOCAL_PLAYER_RESOLVABLE();
+	int nSlot = GET_ACTIVE_SPLITSCREEN_SLOT();
+
+	static CUserCmd dummy[ MAX_SPLITSCREEN_PLAYERS ];
+	CUserCmd *cmd = &dummy[ nSlot ];
+
+	cmd->Reset();
+
+	QAngle viewangles;
+
+	if ( active )
+	{
+		// Determine view angles
+		AdjustAngles ( nSlot, frametime );
+
+		// Determine sideways movement
+		if ( g_pInputSystem->IsDeviceReadingInput( INPUT_DEVICE_KEYBOARD_MOUSE ) )
+			ComputeSideMove( nSlot, cmd );
+
+		// Determine vertical movement
+		ComputeUpwardMove( nSlot, cmd );
+
+		// Determine forward movement
+		if ( g_pInputSystem->IsDeviceReadingInput( INPUT_DEVICE_KEYBOARD_MOUSE ) )
+			ComputeForwardMove( nSlot, cmd );
+
+		// Scale based on holding speed key or having too fast of a velocity based on client maximum speed.
+		ScaleMovements( cmd );
+
+		// Allow mice and other controllers to add their inputs
+		ControllerMove( nSlot, frametime, cmd );
+
+#ifdef SIXENSE
+			if ( nSlot == in_forceuser.GetInt() )
+			{
+			g_pSixenseInput->SixenseFrame( frametime, cmd ); 
+
+				if( g_pSixenseInput->IsEnabled() )
+				{
+					g_pSixenseInput->SetView( frametime, cmd );
+				}
+			}
+#endif
+	}
+
+	// Retrieve view angles from engine ( could have been set in AdjustAngles above )
+	engine->GetViewAngles( viewangles );
+
+	if ( round_start_reset_duck.GetBool( ) == true )
+	{
+		IN_ClearDuckToggle( );
+		round_start_reset_duck.SetValue( false );
+	}
+	
+	if ( round_start_reset_speed.GetBool( ) == true )
+	{
+		IN_ClearSpeedToggle( );
+		joystick_forced_speed = false;
+		round_start_reset_speed.SetValue( false );
+	}	// Set button and flag bits, don't blow away state
+
+#ifdef SIXENSE
+	if( g_pSixenseInput->IsEnabled() )
+	{
+		// Some buttons were set in SixenseUpdateKeys, so or in any real keypresses
+		cmd->buttons |= GetButtonBits( false );
+	}
+	else
+	{
+		cmd->buttons = GetButtonBits( false );
+	}
+#else
+	cmd->buttons = GetButtonBits( false );
+#endif
+
+	// Use new view angles if alive, otherwise user last angles we stored off.
+	VectorCopy( viewangles, cmd->viewangles );
+	VectorCopy( viewangles, GetPerUser().m_angPreviousViewAngles );
+
+	// Let the move manager override anything it wants to.
+	if ( GetClientMode()->CreateMove( frametime, cmd ) )
+	{
+		// Get current view angles after the client mode tweaks with it
+		engine->SetViewAngles( cmd->viewangles );
+		prediction->SetLocalViewAngles( cmd->viewangles );
+	}
+
+	CheckPaused( cmd );
+
+	CheckSplitScreenMimic( nSlot, cmd, &dummy[ 0 ] );
 }
 
 /*
@@ -1001,117 +1347,13 @@ if active == 1 then we are 1) not playing back demos ( where our commands are ig
 ================
 */
 
-void CInput::ExtraMouseSample( float frametime, bool active )
-{
-	CUserCmd dummy;
-	CUserCmd *cmd = &dummy;
-
-	cmd->Reset();
-
-
-	QAngle viewangles;
-	engine->GetViewAngles( viewangles );
-	QAngle originalViewangles = viewangles;
-
-	if ( active )
-	{
-		// Determine view angles
-		AdjustAngles ( frametime );
-
-		// Determine sideways movement
-		ComputeSideMove( cmd );
-
-		// Determine vertical movement
-		ComputeUpwardMove( cmd );
-
-		// Determine forward movement
-		ComputeForwardMove( cmd );
-
-		// Scale based on holding speed key or having too fast of a velocity based on client maximum
-		//  speed.
-		ScaleMovements( cmd );
-
-		// Allow mice and other controllers to add their inputs
-		ControllerMove( frametime, cmd );
-#ifdef SIXENSE
-		g_pSixenseInput->SixenseFrame( frametime, cmd ); 
-
-		if( g_pSixenseInput->IsEnabled() )
-		{
-			g_pSixenseInput->SetView( frametime, cmd );
-		}
-#endif
-	}
-
-	// Retreive view angles from engine ( could have been set in IN_AdjustAngles above )
-	engine->GetViewAngles( viewangles );
-
-	// Set button and flag bits, don't blow away state
-#ifdef SIXENSE
-	if( g_pSixenseInput->IsEnabled() )
-	{
-		// Some buttons were set in SixenseUpdateKeys, so or in any real keypresses
-		cmd->buttons |= GetButtonBits( 0 );
-	}
-	else
-	{
-		cmd->buttons = GetButtonBits( 0 );
-	}
-#else
-	cmd->buttons = GetButtonBits( 0 );
-#endif
-
-	// Use new view angles if alive, otherwise user last angles we stored off.
-	if ( g_iAlive )
-	{
-		VectorCopy( viewangles, cmd->viewangles );
-		VectorCopy( viewangles, m_angPreviousViewAngles );
-	}
-	else
-	{
-		VectorCopy( m_angPreviousViewAngles, cmd->viewangles );
-	}
-
-	// Let the move manager override anything it wants to.
-	if ( g_pClientMode->CreateMove( frametime, cmd ) )
-	{
-		// Get current view angles after the client mode tweaks with it
-		engine->SetViewAngles( cmd->viewangles );
-		prediction->SetLocalViewAngles( cmd->viewangles );
-	}
-
-	// Let the headtracker override the view at the very end of the process so
-	// that vehicles and other stuff in g_pClientMode->CreateMove can override 
-	// first
-	if ( active && UseVR() )
-	{
-		C_BasePlayer *pPlayer = C_BasePlayer::GetLocalPlayer();
-		if( pPlayer && !pPlayer->GetVehicle() )
-		{
-			QAngle curViewangles, newViewangles;
-			Vector curMotion, newMotion;
-			engine->GetViewAngles( curViewangles );
-			curMotion.Init ( 
-				cmd->forwardmove,
-				cmd->sidemove,
-				cmd->upmove );
-			g_ClientVirtualReality.OverridePlayerMotion ( frametime, originalViewangles, curViewangles, curMotion, &newViewangles, &newMotion );
-			engine->SetViewAngles( newViewangles );
-			cmd->forwardmove = newMotion[0];
-			cmd->sidemove = newMotion[1];
-			cmd->upmove = newMotion[2];
-
-			cmd->viewangles = newViewangles;
-			prediction->SetLocalViewAngles( cmd->viewangles );
-		}
-	}
-
-}
-
 void CInput::CreateMove ( int sequence_number, float input_sample_frametime, bool active )
 {	
-	CUserCmd *cmd = &m_pCommands[ sequence_number % MULTIPLAYER_BACKUP ];
-	CVerifiedUserCmd *pVerified = &m_pVerifiedCommands[ sequence_number % MULTIPLAYER_BACKUP ];
+	ASSERT_LOCAL_PLAYER_RESOLVABLE();
+	int nSlot = GET_ACTIVE_SPLITSCREEN_SLOT();
+
+	CUserCmd *cmd = &GetPerUser( nSlot ).m_pCommands[ sequence_number % MULTIPLAYER_BACKUP];
+	CVerifiedUserCmd *pVerified = &GetPerUser( nSlot ).m_pVerifiedCommands[ sequence_number % MULTIPLAYER_BACKUP];
 
 	cmd->Reset();
 
@@ -1119,88 +1361,93 @@ void CInput::CreateMove ( int sequence_number, float input_sample_frametime, boo
 	cmd->tick_count = gpGlobals->tickcount;
 
 	QAngle viewangles;
-	engine->GetViewAngles( viewangles );
-	QAngle originalViewangles = viewangles;
 
 	if ( active || sv_noclipduringpause.GetInt() )
 	{
-		// Determine view angles
-		AdjustAngles ( input_sample_frametime );
+		if ( nSlot == in_forceuser.GetInt() )
+		{
+			// Determine view angles
+			AdjustAngles ( nSlot, input_sample_frametime );
 
-		// Determine sideways movement
-		ComputeSideMove( cmd );
+			// Determine sideways movement
+			if ( g_pInputSystem->IsDeviceReadingInput( INPUT_DEVICE_KEYBOARD_MOUSE ) )
+				ComputeSideMove( nSlot, cmd );
 
-		// Determine vertical movement
-		ComputeUpwardMove( cmd );
+			// Determine vertical movement
+			ComputeUpwardMove( nSlot, cmd );
 
-		// Determine forward movement
-		ComputeForwardMove( cmd );
+			// Determine forward movement
+			if ( g_pInputSystem->IsDeviceReadingInput( INPUT_DEVICE_KEYBOARD_MOUSE ) )
+				ComputeForwardMove( nSlot, cmd );
 
-		// Scale based on holding speed key or having too fast of a velocity based on client maximum
-		//  speed.
-		ScaleMovements( cmd );
+			// Scale based on holding speed key or having too fast of a velocity based on client maximum
+			//  speed.
+			ScaleMovements( cmd );
+		}
 
 		// Allow mice and other controllers to add their inputs
-		ControllerMove( input_sample_frametime, cmd );
-#ifdef SIXENSE
-		g_pSixenseInput->SixenseFrame( input_sample_frametime, cmd ); 
+		ControllerMove( nSlot, input_sample_frametime, cmd );
 
-		if( g_pSixenseInput->IsEnabled() )
+#ifdef SIXENSE
+		if ( nSlot == in_forceuser.GetInt() )
 		{
-			g_pSixenseInput->SetView( input_sample_frametime, cmd );
+			g_pSixenseInput->SixenseFrame( input_sample_frametime, cmd ); 
+
+			if( g_pSixenseInput->IsEnabled() )
+			{
+				g_pSixenseInput->SetView( input_sample_frametime, cmd );
+			}
 		}
 #endif
 	}
 	else
 	{
 		// need to run and reset mouse input so that there is no view pop when unpausing
-		if ( !m_fCameraInterceptingMouse && m_fMouseActive )
+		if ( !GetPerUser( nSlot ).m_fCameraInterceptingMouse && m_fMouseActive )
 		{
 			float mx, my;
-			GetAccumulatedMouseDeltasAndResetAccumulators( &mx, &my );
+			GetAccumulatedMouseDeltasAndResetAccumulators( nSlot, &mx, &my );
 			ResetMouse();
 		}
 	}
 	// Retreive view angles from engine ( could have been set in IN_AdjustAngles above )
 	engine->GetViewAngles( viewangles );
 
-	// Latch and clear impulse
-	cmd->impulse = in_impulse;
-	in_impulse = 0;
+	cmd->impulse = in_impulse[ nSlot ];
+	in_impulse[ nSlot ] = 0;
 
 	// Latch and clear weapon selection
-	if ( m_hSelectedWeapon != NULL )
+	if ( GetPerUser( nSlot ).m_hSelectedWeapon != NULL )
 	{
-		C_BaseCombatWeapon *weapon = m_hSelectedWeapon;
+		C_BaseCombatWeapon *weapon = GetPerUser( nSlot ).m_hSelectedWeapon;
 
 		cmd->weaponselect = weapon->entindex();
 		cmd->weaponsubtype = weapon->GetSubType();
 
 		// Always clear weapon selection
-		m_hSelectedWeapon = NULL;
+		GetPerUser( nSlot ).m_hSelectedWeapon = NULL;
 	}
 
-	// Set button and flag bits
 #ifdef SIXENSE
 	if( g_pSixenseInput->IsEnabled() )
 	{
 		// Some buttons were set in SixenseUpdateKeys, so or in any real keypresses
-		cmd->buttons |= GetButtonBits( 1 );
+		cmd->buttons |= GetButtonBits( true );
 	}
 	else
 	{
-		cmd->buttons = GetButtonBits( 1 );
+		cmd->buttons = GetButtonBits( true );
 	}
 #else
 	// Set button and flag bits
-	cmd->buttons = GetButtonBits( 1 );
+	cmd->buttons = GetButtonBits( true );
 #endif
 
 	// Using joystick?
 #ifdef SIXENSE
-	if ( in_joystick.GetInt() || g_pSixenseInput->IsEnabled() )
+	if ( g_pInputSystem->IsDeviceReadingInput( INPUT_DEVICE_GAMEPAD ) && ( in_joystick.GetInt() || g_pSixenseInput->IsEnabled() ) )
 #else
-	if ( in_joystick.GetInt() )
+	if ( ( g_pInputSystem->IsDeviceReadingInput( INPUT_DEVICE_GAMEPAD ) && in_joystick.GetInt() ) || g_pInputSystem->MotionControllerActive() || g_pInputSystem->IsSteamControllerActive() )
 #endif
 	{
 		if ( cmd->forwardmove > 0 )
@@ -1214,18 +1461,11 @@ void CInput::CreateMove ( int sequence_number, float input_sample_frametime, boo
 	}
 
 	// Use new view angles if alive, otherwise user last angles we stored off.
-	if ( g_iAlive )
-	{
-		VectorCopy( viewangles, cmd->viewangles );
-		VectorCopy( viewangles, m_angPreviousViewAngles );
-	}
-	else
-	{
-		VectorCopy( m_angPreviousViewAngles, cmd->viewangles );
-	}
+	VectorCopy( viewangles, cmd->viewangles );
+	VectorCopy( viewangles, GetPerUser( nSlot ).m_angPreviousViewAngles );
 
 	// Let the move manager override anything it wants to.
-	if ( g_pClientMode->CreateMove( input_sample_frametime, cmd ) )
+	if ( GetClientMode()->CreateMove( input_sample_frametime, cmd ) )
 	{
 		// Get current view angles after the client mode tweaks with it
 #ifdef SIXENSE
@@ -1236,38 +1476,15 @@ void CInput::CreateMove ( int sequence_number, float input_sample_frametime, boo
 		}
 #else
 		engine->SetViewAngles( cmd->viewangles );
-
 #endif
-
-		if ( UseVR() )
-		{
-			C_BasePlayer *pPlayer = C_BasePlayer::GetLocalPlayer();
-			if( pPlayer && !pPlayer->GetVehicle() )
-			{
-				QAngle curViewangles, newViewangles;
-				Vector curMotion, newMotion;
-				engine->GetViewAngles( curViewangles );
-				curMotion.Init ( 
-					cmd->forwardmove,
-					cmd->sidemove,
-					cmd->upmove );
-				g_ClientVirtualReality.OverridePlayerMotion ( input_sample_frametime, originalViewangles, curViewangles, curMotion, &newViewangles, &newMotion );
-				engine->SetViewAngles( newViewangles );
-				cmd->forwardmove = newMotion[0];
-				cmd->sidemove = newMotion[1];
-				cmd->upmove = newMotion[2];
-				cmd->viewangles = newViewangles;
-			}
-			else
-			{
-				Vector vPos;
-				g_ClientVirtualReality.GetTorsoRelativeAim( &vPos, &cmd->viewangles );
-				engine->SetViewAngles( cmd->viewangles );
-			}
-		}
 	}
 
-	m_flLastForwardMove = cmd->forwardmove;
+	CheckPaused( cmd );
+
+	CUserCmd *pPlayer0Command = &m_PerUser[ 0 ].m_pCommands[ sequence_number % MULTIPLAYER_BACKUP ];
+	CheckSplitScreenMimic( nSlot, cmd, pPlayer0Command );
+
+	GetPerUser( nSlot ).m_flLastForwardMove = cmd->forwardmove;
 
 	cmd->random_seed = MD5_PseudoRandom( sequence_number ) & 0x7fffffff;
 
@@ -1279,15 +1496,115 @@ void CInput::CreateMove ( int sequence_number, float input_sample_frametime, boo
 #if defined( HL2_CLIENT_DLL )
 	// copy backchannel data
 	int i;
-	for (i = 0; i < m_EntityGroundContact.Count(); i++)
+	for (i = 0; i < GetPerUser( nSlot ).m_EntityGroundContact.Count(); i++)
 	{
-		cmd->entitygroundcontact.AddToTail( m_EntityGroundContact[i] );
+		cmd->entitygroundcontact.AddToTail( GetPerUser().m_EntityGroundContact[i] );
 	}
-	m_EntityGroundContact.RemoveAll();
+	GetPerUser( nSlot ).m_EntityGroundContact.RemoveAll();
 #endif
 
 	pVerified->m_cmd = *cmd;
 	pVerified->m_crc = cmd->GetChecksum();
+}
+
+void CInput::CheckSplitScreenMimic( int nSlot, CUserCmd *cmd, CUserCmd *pPlayer0Command )
+{
+	// ss_mimic 2 is more of a "follow" mode
+	int nMimicMode = ss_mimic.GetInt();
+	if ( nMimicMode <= 0 || nSlot == 0 )
+		return;
+
+	*cmd = *pPlayer0Command;
+
+	// We can't copy these over, since we send the weapon index it'll make the server attach the weapon to the other split screen player, even
+	//  though he doesn't own it!!!
+	cmd->weaponsubtype = 0;
+	cmd->weaponselect = 0;
+
+	// Get current view angles after the client mode tweaks with it
+	engine->SetViewAngles( cmd->viewangles );
+
+	int nLeader = ( nSlot + 1 ) % MAX_SPLITSCREEN_PLAYERS;
+
+	C_BasePlayer *pLeader = C_BasePlayer::GetLocalPlayer( nLeader );
+	C_BasePlayer *pFollower = C_BasePlayer::GetLocalPlayer( nSlot );
+
+	if ( !pLeader || !pFollower )
+		return;
+
+	Vector leaderPos = pLeader->GetAbsOrigin();
+	Vector followerPos = pFollower->GetAbsOrigin();
+
+	float flFarDist = 256.0f * 256.0f;
+	float flNearDist = 64.0f * 64.0f;
+
+	Vector delta = leaderPos - followerPos;
+	float flLength2DSqr = delta.Length2DSqr();
+	if ( flLength2DSqr > flFarDist )
+	{
+		SplitScreenTeleport( nLeader );
+	}
+	else if ( flLength2DSqr > flNearDist )
+	{
+		// Run toward other guy
+		cmd->buttons &= ~( IN_FORWARD | IN_BACK | IN_MOVELEFT | IN_MOVERIGHT );
+
+		Vector lookDir;
+		Vector rightDir;
+		AngleVectors( cmd->viewangles, &lookDir, &rightDir, NULL );
+		lookDir.z = 0.0f;
+		lookDir.NormalizeInPlace();
+		Vector moveDir = delta;
+		moveDir.z = 0.0f;
+		moveDir.NormalizeInPlace();
+
+		// This is the cos of the angle between them
+		float fdot = lookDir.Dot( moveDir );
+		float rdot = rightDir.Dot( moveDir );
+
+		cmd->forwardmove = fdot * cl_forwardspeed.GetFloat();
+		cmd->sidemove = rdot * cl_sidespeed.GetFloat();
+
+		// We'll only be moving fwd or sideways
+		cmd->upmove = 0.0f;
+
+		if ( cmd->forwardmove > 0.0f )
+		{
+			cmd->buttons |= IN_FORWARD;
+		}
+		else if ( cmd->forwardmove < 0.0f )
+		{
+			cmd->buttons |= IN_BACK;
+		}
+
+		if ( cmd->sidemove > 0.0f )
+		{
+			cmd->buttons |= IN_MOVELEFT;
+		}
+		else if ( cmd->sidemove < 0.0f )
+		{
+			cmd->buttons |= IN_MOVERIGHT;
+		}
+	}
+	else
+	{
+		// Stop movement buttons
+		cmd->forwardmove = cmd->sidemove = cmd->upmove = 0.0f;
+		cmd->buttons &= ~( IN_FORWARD | IN_BACK | IN_MOVELEFT | IN_MOVERIGHT );
+	}
+}
+
+void CInput::CheckPaused( CUserCmd *cmd )
+{
+	if ( !engine->IsPaused() )
+		return;
+	cmd->buttons = 0;
+	cmd->forwardmove = 0;
+	cmd->sidemove = 0;
+	cmd->upmove = 0;
+
+	// Don't allow changing weapons while paused
+	cmd->weaponselect = 0;
 }
 
 //-----------------------------------------------------------------------------
@@ -1296,10 +1613,10 @@ void CInput::CreateMove ( int sequence_number, float input_sample_frametime, boo
 //			buffersize - 
 //			slot - 
 //-----------------------------------------------------------------------------
-void CInput::EncodeUserCmdToBuffer( bf_write& buf, int sequence_number )
+void CInput::EncodeUserCmdToBuffer( int nSlot, bf_write& buf, int sequence_number )
 {
 	CUserCmd nullcmd;
-	CUserCmd *cmd = GetUserCmd( sequence_number);
+	CUserCmd *cmd = GetUserCmd( nSlot, sequence_number);
 
 	WriteUsercmd( &buf, cmd, &nullcmd );
 }
@@ -1310,10 +1627,10 @@ void CInput::EncodeUserCmdToBuffer( bf_write& buf, int sequence_number )
 //			buffersize - 
 //			slot - 
 //-----------------------------------------------------------------------------
-void CInput::DecodeUserCmdFromBuffer( bf_read& buf, int sequence_number )
+void CInput::DecodeUserCmdFromBuffer( int nSlot, bf_read& buf, int sequence_number )
 {
 	CUserCmd nullcmd;
-	CUserCmd *cmd = &m_pCommands[ sequence_number % MULTIPLAYER_BACKUP];
+	CUserCmd *cmd = &GetPerUser( nSlot ).m_pCommands[ sequence_number % MULTIPLAYER_BACKUP ];
 
 	ReadUsercmd( &buf, cmd, &nullcmd );
 }
@@ -1322,9 +1639,9 @@ void CInput::ValidateUserCmd( CUserCmd *usercmd, int sequence_number )
 {
 	// Validate that the usercmd hasn't been changed
 	CRC32_t crc = usercmd->GetChecksum();
-	if ( crc != m_pVerifiedCommands[ sequence_number % MULTIPLAYER_BACKUP ].m_crc )
+	if ( crc != GetPerUser().m_pVerifiedCommands[ sequence_number % MULTIPLAYER_BACKUP ].m_crc )
 	{
-		*usercmd = m_pVerifiedCommands[ sequence_number % MULTIPLAYER_BACKUP ].m_cmd;
+		*usercmd = GetPerUser().m_pVerifiedCommands[ sequence_number % MULTIPLAYER_BACKUP ].m_cmd;
 	}
 }
 
@@ -1334,23 +1651,22 @@ void CInput::ValidateUserCmd( CUserCmd *usercmd, int sequence_number )
 //			from - 
 //			to - 
 //-----------------------------------------------------------------------------
-bool CInput::WriteUsercmdDeltaToBuffer( bf_write *buf, int from, int to, bool isnewcommand )
+bool CInput::WriteUsercmdDeltaToBuffer( int nSlot, bf_write *buf, int from, int to, bool isnewcommand )
 {
-	Assert( m_pCommands );
+	Assert( GetPerUser( nSlot ).m_pCommands );
 
 	CUserCmd nullcmd;
-
 	CUserCmd *f, *t;
+	int startbit;
 
-	int startbit = buf->GetNumBitsWritten();
-
+	startbit = buf->GetNumBitsWritten();
 	if ( from == -1 )
 	{
 		f = &nullcmd;
 	}
 	else
 	{
-		f = GetUserCmd( from );
+		f = GetUserCmd( nSlot, from );
 
 		if ( !f )
 		{
@@ -1363,7 +1679,7 @@ bool CInput::WriteUsercmdDeltaToBuffer( bf_write *buf, int from, int to, bool is
 		}
 	}
 
-	t = GetUserCmd( to );
+	t = GetUserCmd( nSlot, to );
 
 	if ( !t )
 	{
@@ -1380,8 +1696,8 @@ bool CInput::WriteUsercmdDeltaToBuffer( bf_write *buf, int from, int to, bool is
 
 	if ( buf->IsOverflowed() )
 	{
-		int endbit = buf->GetNumBitsWritten();
-
+		int endbit;
+		endbit = buf->GetNumBitsWritten();
 		Msg( "WARNING! User command buffer overflow(%i %i), last cmd was %i bits long\n",
 			from, to,  endbit - startbit );
 
@@ -1396,11 +1712,11 @@ bool CInput::WriteUsercmdDeltaToBuffer( bf_write *buf, int from, int to, bool is
 // Input  : slot - 
 // Output : CUserCmd
 //-----------------------------------------------------------------------------
-CUserCmd *CInput::GetUserCmd( int sequence_number )
+CUserCmd *CInput::GetUserCmd( int nSlot, int sequence_number )
 {
-	Assert( m_pCommands );
+	Assert( GetPerUser( nSlot ).m_pCommands );
 
-	CUserCmd *usercmd = &m_pCommands[ sequence_number % MULTIPLAYER_BACKUP ];
+	CUserCmd *usercmd = &GetPerUser( nSlot ).m_pCommands[ sequence_number % MULTIPLAYER_BACKUP ];
 
 	if ( usercmd->command_number != sequence_number )
 	{
@@ -1419,10 +1735,12 @@ CUserCmd *CInput::GetUserCmd( int sequence_number )
 //			reset - 
 // Output : static void
 //-----------------------------------------------------------------------------
-static void CalcButtonBits( int& bits, int in_button, int in_ignore, kbutton_t *button, bool reset )
+static void CalcButtonBits( int nSlot, int& bits, int in_button, int in_ignore, kbutton_t *button, bool reset )
 {
+	kbutton_t::Split_t *pButtonState = &button->GetPerUser( nSlot );
+
 	// Down or still down?
-	if ( button->state & 3 )
+	if ( pButtonState->state & 3 )
 	{
 		bits |= in_button;
 	}
@@ -1438,7 +1756,7 @@ static void CalcButtonBits( int& bits, int in_button, int in_ignore, kbutton_t *
 
 	if ( reset )
 	{
-		button->state &= clearmask;
+		pButtonState->state &= clearmask;
 	}
 }
 
@@ -1450,59 +1768,90 @@ Returns appropriate button info for keyboard and mouse state
 Set bResetState to 1 to clear old state info
 ============
 */
-int CInput::GetButtonBits( int bResetState )
+int CInput::GetButtonBits( bool bResetState )
 {
-	int bits = 0;
+	ASSERT_LOCAL_PLAYER_RESOLVABLE();
+	int nSlot = GET_ACTIVE_SPLITSCREEN_SLOT();
 
-	CalcButtonBits( bits, IN_SPEED, s_ClearInputState, &in_speed, bResetState );
-	CalcButtonBits( bits, IN_WALK, s_ClearInputState, &in_walk, bResetState );
-	CalcButtonBits( bits, IN_ATTACK, s_ClearInputState, &in_attack, bResetState );
-	CalcButtonBits( bits, IN_DUCK, s_ClearInputState, &in_duck, bResetState );
-	CalcButtonBits( bits, IN_JUMP, s_ClearInputState, &in_jump, bResetState );
-	CalcButtonBits( bits, IN_FORWARD, s_ClearInputState, &in_forward, bResetState );
-	CalcButtonBits( bits, IN_BACK, s_ClearInputState, &in_back, bResetState );
-	CalcButtonBits( bits, IN_USE, s_ClearInputState, &in_use, bResetState );
-	CalcButtonBits( bits, IN_LEFT, s_ClearInputState, &in_left, bResetState );
-	CalcButtonBits( bits, IN_RIGHT, s_ClearInputState, &in_right, bResetState );
-	CalcButtonBits( bits, IN_MOVELEFT, s_ClearInputState, &in_moveleft, bResetState );
-	CalcButtonBits( bits, IN_MOVERIGHT, s_ClearInputState, &in_moveright, bResetState );
-	CalcButtonBits( bits, IN_ATTACK2, s_ClearInputState, &in_attack2, bResetState );
-	CalcButtonBits( bits, IN_RELOAD, s_ClearInputState, &in_reload, bResetState );
-	CalcButtonBits( bits, IN_ALT1, s_ClearInputState, &in_alt1, bResetState );
-	CalcButtonBits( bits, IN_ALT2, s_ClearInputState, &in_alt2, bResetState );
-	CalcButtonBits( bits, IN_SCORE, s_ClearInputState, &in_score, bResetState );
-	CalcButtonBits( bits, IN_ZOOM, s_ClearInputState, &in_zoom, bResetState );
-	CalcButtonBits( bits, IN_GRENADE1, s_ClearInputState, &in_grenade1, bResetState );
-	CalcButtonBits( bits, IN_GRENADE2, s_ClearInputState, &in_grenade2, bResetState );
-	CalcButtonBits( bits, IN_ATTACK3, s_ClearInputState, &in_attack3, bResetState );
+	int bits = 0;
+	
+
+	int ignore = GetPerUser( nSlot ).m_nClearInputState;
+	CalcButtonBits( nSlot, bits, IN_SPEED, ignore, &in_speed, bResetState );
+	CalcButtonBits( nSlot, bits, IN_WALK, ignore, &in_walk, bResetState );
+	CalcButtonBits( nSlot, bits, IN_ATTACK, ignore, &in_attack, bResetState );
+	CalcButtonBits( nSlot, bits, IN_DUCK, ignore, &in_duck, bResetState );
+	CalcButtonBits( nSlot, bits, IN_JUMP, ignore, &in_jump, bResetState );
+	CalcButtonBits( nSlot, bits, IN_FORWARD, ignore, &in_forward, bResetState );
+	CalcButtonBits( nSlot, bits, IN_BACK, ignore, &in_back, bResetState );
+	CalcButtonBits( nSlot, bits, IN_USE, ignore, &in_use, bResetState );
+	CalcButtonBits( nSlot, bits, IN_LEFT, ignore, &in_left, bResetState );
+	CalcButtonBits( nSlot, bits, IN_RIGHT, ignore, &in_right, bResetState );
+	CalcButtonBits( nSlot, bits, IN_MOVELEFT, ignore, &in_moveleft, bResetState );
+	CalcButtonBits( nSlot, bits, IN_MOVERIGHT, ignore, &in_moveright, bResetState );
+	CalcButtonBits( nSlot, bits, IN_ATTACK2, ignore, &in_attack2, bResetState );
+	CalcButtonBits( nSlot, bits, IN_RELOAD, ignore, &in_reload, bResetState );
+	CalcButtonBits( nSlot, bits, IN_ALT1, ignore, &in_alt1, bResetState );
+	CalcButtonBits( nSlot, bits, IN_ALT2, ignore, &in_alt2, bResetState );
+	CalcButtonBits( nSlot, bits, IN_SCORE, ignore, &in_score, bResetState );
+	CalcButtonBits( nSlot, bits, IN_ZOOM, ignore, &in_zoom, bResetState );
+	CalcButtonBits( nSlot, bits, IN_GRENADE1, ignore, &in_grenade1, bResetState );
+	CalcButtonBits( nSlot, bits, IN_GRENADE2, ignore, &in_grenade2, bResetState );
+	CalcButtonBits( nSlot, bits, IN_LOOKSPIN, ignore, &in_lookspin, bResetState );
+
+#ifdef PORTAL2
+
+	#if USE_SLOWTIME
+		CalcButtonBits( nSlot, bits, IN_SLOWTIME, ignore, &in_slowtoggle, bResetState );
+	#endif // USE_SLOWTIME
+
+	CalcButtonBits( nSlot, bits, IN_COOP_PING, ignore, &in_coop_ping, bResetState );
+	CalcButtonBits( nSlot, bits, IN_REMOTE_VIEW, ignore, &in_remote_view_toggle, bResetState );
+#endif // PORTAL2
+
+#ifdef INFESTED_DLL
+	CalcButtonBits( nSlot, bits, IN_PREV_ABILITY, ignore, &in_prevability, bResetState );
+	CalcButtonBits( nSlot, bits, IN_NEXT_ABILITY, ignore, &in_nextability, bResetState );
+	CalcButtonBits( nSlot, bits, IN_CURRENT_ABILITY, ignore, &in_currentability, bResetState );
+	CalcButtonBits( nSlot, bits, IN_ABILITY1, ignore, &in_ability1, bResetState );
+	CalcButtonBits( nSlot, bits, IN_ABILITY2, ignore, &in_ability2, bResetState );
+	CalcButtonBits( nSlot, bits, IN_ABILITY3, ignore, &in_ability3, bResetState );
+	CalcButtonBits( nSlot, bits, IN_ABILITY4, ignore, &in_ability4, bResetState );
+	CalcButtonBits( nSlot, bits, IN_ABILITY5, ignore, &in_ability5, bResetState );
+#endif
 
 	if ( KeyState(&in_ducktoggle) )
 	{
 		bits |= IN_DUCK;
 	}
 
-	// Cancel is a special flag
-	if (in_cancel)
+	// dkorus: handle the toggle OR the joystick feature to force a move speed when going slow
+	if ( KeyState(&in_speedtoggle) || joystick_forced_speed )
+	{
+		bits |= IN_SPEED;
+	}
+
+	if ( in_cancel[ nSlot ] )
 	{
 		bits |= IN_CANCEL;
 	}
 
-	if ( gHUD.m_iKeyBits & IN_WEAPON1 )
+	if ( GetHud( nSlot ).m_iKeyBits & IN_WEAPON1 )
 	{
 		bits |= IN_WEAPON1;
 	}
 
-	if ( gHUD.m_iKeyBits & IN_WEAPON2 )
+	if ( GetHud( nSlot ).m_iKeyBits & IN_WEAPON2 )
 	{
 		bits |= IN_WEAPON2;
 	}
 
 	// Clear out any residual
-	bits &= ~s_ClearInputState;
+	bits &= ~ignore;
 
 	if ( bResetState )
 	{
-		s_ClearInputState = 0;
+		GetPerUser( nSlot ).m_nClearInputState = 0;
 	}
 
 	return bits;
@@ -1514,7 +1863,14 @@ int CInput::GetButtonBits( int bResetState )
 //-----------------------------------------------------------------------------
 void CInput::ClearInputButton( int bits )
 {
-	s_ClearInputState |= bits;
+	ASSERT_LOCAL_PLAYER_RESOLVABLE();
+
+	if ( GET_ACTIVE_SPLITSCREEN_SLOT() != in_forceuser.GetInt() )
+	{
+		return;
+	}
+
+	GetPerUser().m_nClearInputState |= bits;
 }
 
 
@@ -1535,7 +1891,7 @@ float CInput::GetLookSpring( void )
 //-----------------------------------------------------------------------------
 float CInput::GetLastForwardMove( void )
 {
-	return m_flLastForwardMove;
+	return GetPerUser().m_flLastForwardMove;
 }
 
 
@@ -1552,15 +1908,18 @@ void CInput::AddIKGroundContactInfo( int entindex, float minheight, float maxhei
 	data.minheight = minheight;
 	data.maxheight = maxheight;
 
-	if (m_EntityGroundContact.Count() >= MAX_EDICTS)
+	AUTO_LOCK_FM( m_IKContactPointMutex );
+
+	// These all route through the main player's slot!!!
+	ACTIVE_SPLITSCREEN_PLAYER_GUARD( 0 );
+	if ( m_PerUser[ 0 ].m_EntityGroundContact.Count() >= MAX_EDICTS )
 	{
 		// some overflow here, probably bogus anyway
-		Assert(0);
-		m_EntityGroundContact.RemoveAll();
+		AssertOnce( "CInput::AddIKGroundContactInfo:  Overflow!!!" );
+		m_PerUser[ 0 ].m_EntityGroundContact.RemoveAll();
 		return;
 	}
-
-	m_EntityGroundContact.AddToTail( data );
+	m_PerUser[ 0 ].m_EntityGroundContact.AddToTail( data );
 }
 #endif
 
@@ -1626,15 +1985,35 @@ static ConCommand force_centerview("force_centerview", IN_CenterView_f);
 static ConCommand joyadvancedupdate("joyadvancedupdate", IN_Joystick_Advanced_f, "", FCVAR_CLIENTCMD_CAN_EXECUTE);
 static ConCommand startzoom("+zoom", IN_ZoomDown);
 static ConCommand endzoom("-zoom", IN_ZoomUp);
+static ConCommand startzoomin("+zoom_in", IN_ZoomInDown);
+static ConCommand endzoomin("-zoom_in", IN_ZoomInUp);
+static ConCommand startzoomout("+zoom_out", IN_ZoomOutDown);
+static ConCommand endzoomout("-zoom_out", IN_ZoomOutUp);
 static ConCommand endgrenade1( "-grenade1", IN_Grenade1Up );
 static ConCommand startgrenade1( "+grenade1", IN_Grenade1Down );
 static ConCommand endgrenade2( "-grenade2", IN_Grenade2Up );
 static ConCommand startgrenade2( "+grenade2", IN_Grenade2Down );
-static ConCommand startattack3("+attack3", IN_Attack3Down);
-static ConCommand endattack3("-attack3", IN_Attack3Up);
-
-#ifdef TF_CLIENT_DLL
+static ConCommand startlookspin("+lookspin", IN_LookSpinDown);
+static ConCommand endlookspin("-lookspin", IN_LookSpinUp);
 static ConCommand toggle_duck( "toggle_duck", IN_DuckToggle );
+
+#ifdef INFESTED_DLL
+static ConCommand endprevability( "-prevability", IN_PrevAbilityUp );
+static ConCommand startprevability( "+prevability", IN_PrevAbilityDown );
+static ConCommand endnextability( "-nextability", IN_NextAbilityUp );
+static ConCommand startnextability( "+nextability", IN_NextAbilityDown );
+static ConCommand endcurrentability( "-currentability", IN_CurrentAbilityUp );
+static ConCommand startcurrentability( "+currentability", IN_CurrentAbilityDown );
+static ConCommand endability1( "-ability1", IN_Ability1Up );
+static ConCommand startability1( "+ability1", IN_Ability1Down );
+static ConCommand endability2( "-ability2", IN_Ability2Up );
+static ConCommand startability2( "+ability2", IN_Ability2Down );
+static ConCommand endability3( "-ability3", IN_Ability3Up );
+static ConCommand startability3( "+ability3", IN_Ability3Down );
+static ConCommand endability4( "-ability4", IN_Ability4Up );
+static ConCommand startability4( "+ability4", IN_Ability4Down );
+static ConCommand endability5( "-ability5", IN_Ability5Up );
+static ConCommand startability5( "+ability5", IN_Ability5Down );
 #endif
 
 // Xbox 360 stub commands
@@ -1648,9 +2027,18 @@ Init_All
 */
 void CInput::Init_All (void)
 {
-	Assert( !m_pCommands );
-	m_pCommands = new CUserCmd[ MULTIPLAYER_BACKUP ];
-	m_pVerifiedCommands = new CVerifiedUserCmd[ MULTIPLAYER_BACKUP ];
+	InitMouse( );
+
+	m_hInputContext = engine->GetInputContext( ENGINE_INPUT_CONTEXT_GAME );
+
+	for ( int i = 0; i < MAX_SPLITSCREEN_PLAYERS; ++i )
+	{
+		Assert( !m_PerUser[ i ].m_pCommands );
+		Assert( !m_PerUser[ i ].m_pVerifiedCommands );
+
+		m_PerUser[ i ].m_pCommands = new CUserCmd[ MULTIPLAYER_BACKUP ];
+		m_PerUser[ i ].m_pVerifiedCommands = new CVerifiedUserCmd[ MULTIPLAYER_BACKUP ];
+	}
 
 	m_fMouseInitialized	= false;
 	m_fRestoreSPI		= false;
@@ -1665,14 +2053,12 @@ void CInput::Init_All (void)
 
 	m_fMouseParmsValid	= false;
 	m_fJoystickAdvancedInit = false;
-	m_fHadJoysticks = false;
-	m_flLastForwardMove = 0.0;
-
-	// Make sure this is activated now so steam controller stuff works
-	ClientSteamContext().Activate();
+	m_bControllerMode = !IsPC();
+	m_fAccumulatedMouseMove = 0.0f;
+	m_lastAutoAimValue = 1.0f;
 
 	// Initialize inputs
-	if ( IsPC() )
+	if ( IsPC() || IsPlatformPS3() )
 	{
 		Init_Mouse ();
 		Init_Keyboard();
@@ -1680,9 +2066,6 @@ void CInput::Init_All (void)
 		
 	// Initialize third person camera controls.
 	Init_Camera();
-
-	// Initialize steam controller action sets
-	m_bSteamControllerGameActionsInitialized = InitializeSteamControllerGameActionSets();
 }
 
 /*
@@ -1695,18 +2078,25 @@ void CInput::Shutdown_All(void)
 	DeactivateMouse();
 	Shutdown_Keyboard();
 
-	delete[] m_pCommands;
-	m_pCommands = NULL;
+	for ( int i = 0; i < MAX_SPLITSCREEN_PLAYERS; ++i )
+	{
+		delete[] m_PerUser[ i ].m_pCommands;
+		m_PerUser[ i ].m_pCommands = NULL;
 
-	delete[] m_pVerifiedCommands;
-	m_pVerifiedCommands = NULL;
+		delete[] m_PerUser[ i ].m_pVerifiedCommands;
+		m_PerUser[ i ].m_pVerifiedCommands = NULL;
+	}
 }
 
 void CInput::LevelInit( void )
 {
 #if defined( HL2_CLIENT_DLL )
 	// Remove any IK information
-	m_EntityGroundContact.RemoveAll();
+	for ( int i = 0; i < MAX_SPLITSCREEN_PLAYERS; ++i )
+	{
+		ACTIVE_SPLITSCREEN_PLAYER_GUARD( i );
+		GetPerUser().m_EntityGroundContact.RemoveAll();
+	}
 #endif
 }
 

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -19,29 +19,27 @@
 #include "materialsystem/imaterialvar.h"
 #include "materialsystem/imaterialsystemhardwareconfig.h"
 #include "materialsystem/materialsystem_config.h"
-extern IMaterialSystem *materials;
 
 #include "vphysics_interface.h"
 #include "sys_dll.h"
-#include "tier2/tier2.h"
+#include "tier3/tier3.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
-extern int g_iServerGameDLLVersion;
-IPhysicsSurfaceProps *physprop = NULL;
+IPhysicsSurfaceProps *physprops = NULL;
 IPhysicsCollision	 *physcollision = NULL;
 
 // local forward declarations
 void CollisionBSPData_LoadTextures( CCollisionBSPData *pBSPData );
-void CollisionBSPData_LoadTexinfo( CCollisionBSPData *pBSPData, CUtlVector<unsigned short> &map_texinfo );
+void CollisionBSPData_LoadTexinfo( CCollisionBSPData *pBSPData, texinfo_t *pTexinfo, int texinfoCount );
 void CollisionBSPData_LoadLeafs_Version_0( CCollisionBSPData *pBSPData );
 void CollisionBSPData_LoadLeafs_Version_1( CCollisionBSPData *pBSPData );
 void CollisionBSPData_LoadLeafs( CCollisionBSPData *pBSPData );
 void CollisionBSPData_LoadLeafBrushes( CCollisionBSPData *pBSPData );
 void CollisionBSPData_LoadPlanes( CCollisionBSPData *pBSPData );
 void CollisionBSPData_LoadBrushes( CCollisionBSPData *pBSPData );
-void CollisionBSPData_LoadBrushSides( CCollisionBSPData *pBSPData, CUtlVector<unsigned short> &map_texinfo );
+void CollisionBSPData_LoadBrushSides( CCollisionBSPData *pBSPData, texinfo_t *pTexinfo, int texinfoCount );
 void CollisionBSPData_LoadSubmodels( CCollisionBSPData *pBSPData );
 void CollisionBSPData_LoadNodes( CCollisionBSPData *pBSPData );
 void CollisionBSPData_LoadAreas( CCollisionBSPData *pBSPData );
@@ -49,7 +47,7 @@ void CollisionBSPData_LoadAreaPortals( CCollisionBSPData *pBSPData );
 void CollisionBSPData_LoadVisibility( CCollisionBSPData *pBSPData );
 void CollisionBSPData_LoadEntityString( CCollisionBSPData *pBSPData );
 void CollisionBSPData_LoadPhysics( CCollisionBSPData *pBSPData );
-void CollisionBSPData_LoadDispInfo( CCollisionBSPData *pBSPData );
+void CollisionBSPData_LoadDispInfo( CCollisionBSPData *pBSPData, texinfo_t *pTexinfo, int texinfoCount );
 
 
 //=============================================================================
@@ -157,6 +155,12 @@ void CollisionBSPData_Destroy( CCollisionBSPData *pBSPData )
 		pBSPData->map_brushsides.Detach();
 	}
 
+	if ( pBSPData->map_boxbrushes.Base() )
+	{
+		pBSPData->map_boxbrushes.Detach();
+	}
+
+
 	if ( pBSPData->map_vis )
 	{
 		pBSPData->map_vis = NULL;
@@ -168,6 +172,7 @@ void CollisionBSPData_Destroy( CCollisionBSPData *pBSPData )
 	pBSPData->numnodes = 0;
 	pBSPData->numleafs = 0;
 	pBSPData->numbrushes = 0;
+	pBSPData->numboxbrushes = 0;
 	pBSPData->numdisplist = 0;
 	pBSPData->numleafbrushes = 0;
 	pBSPData->numareas = 0;
@@ -179,8 +184,9 @@ void CollisionBSPData_Destroy( CCollisionBSPData *pBSPData )
 	pBSPData->numvisibility = 0;
 	pBSPData->numentitychars = 0;
 	pBSPData->numportalopen = 0;
-	pBSPData->map_name[0] = 0;
+	pBSPData->mapPathName[0] = 0;
 	pBSPData->map_rootnode = NULL;
+
 }
 
 //-----------------------------------------------------------------------------
@@ -202,12 +208,12 @@ void CollisionBSPData_LinkPhysics( void )
 	//
 	// initialize the physics surface properties -- if necessary!
 	//
-	if( !physprop )
+	if( !physprops )
 	{
-		physprop = ( IPhysicsSurfaceProps* )g_AppSystemFactory( VPHYSICS_SURFACEPROPS_INTERFACE_VERSION, NULL );
+		physprops = ( IPhysicsSurfaceProps* )g_AppSystemFactory( VPHYSICS_SURFACEPROPS_INTERFACE_VERSION, NULL );
 		physcollision = ( IPhysicsCollision* )g_AppSystemFactory( VPHYSICS_COLLISION_INTERFACE_VERSION, NULL );
 
-		if ( !physprop || !physcollision )
+		if ( !physprops || !physcollision )
 		{
 			Sys_Error( "CollisionBSPData_PreLoad: Can't link physics" );
 		}
@@ -233,14 +239,12 @@ void CollisionBSPData_PreLoad( CCollisionBSPData *pBSPData )
 
 //-----------------------------------------------------------------------------
 //-----------------------------------------------------------------------------
-bool CollisionBSPData_Load( const char *pName, CCollisionBSPData *pBSPData )
+bool CollisionBSPData_Load( const char *pPathName, CCollisionBSPData *pBSPData, texinfo_t *pTexinfo, int texinfoCount )
 {
 	// This is a table that maps texinfo references to csurface_t
 	// It is freed after the map has been loaded
-	CUtlVector<unsigned short> 	map_texinfo;
-
 	// copy map name
-	Q_strncpy( pBSPData->map_name, pName, sizeof( pBSPData->map_name ) );
+	Q_strncpy( pBSPData->mapPathName, pPathName, sizeof( pBSPData->mapPathName ) );
 
 	//
 	// load bsp file data
@@ -249,7 +253,7 @@ bool CollisionBSPData_Load( const char *pName, CCollisionBSPData *pBSPData )
 	CollisionBSPData_LoadTextures( pBSPData );
 
 	COM_TimestampedLog( "  CollisionBSPData_LoadTexinfo" );
-	CollisionBSPData_LoadTexinfo( pBSPData, map_texinfo );
+	CollisionBSPData_LoadTexinfo( pBSPData, pTexinfo, texinfoCount );
 
 	COM_TimestampedLog( "  CollisionBSPData_LoadLeafs" );
 	CollisionBSPData_LoadLeafs( pBSPData );
@@ -264,7 +268,7 @@ bool CollisionBSPData_Load( const char *pName, CCollisionBSPData *pBSPData )
 	CollisionBSPData_LoadBrushes( pBSPData );
 
 	COM_TimestampedLog( "  CollisionBSPData_LoadBrushSides" );
-	CollisionBSPData_LoadBrushSides( pBSPData, map_texinfo );
+	CollisionBSPData_LoadBrushSides( pBSPData, pTexinfo, texinfoCount );
 
 	COM_TimestampedLog( "  CollisionBSPData_LoadSubmodels" );
 	CollisionBSPData_LoadSubmodels( pBSPData );
@@ -288,7 +292,8 @@ bool CollisionBSPData_Load( const char *pName, CCollisionBSPData *pBSPData )
 	CollisionBSPData_LoadPhysics( pBSPData );
 
 	COM_TimestampedLog( "  CollisionBSPData_LoadDispInfo" );
-    CollisionBSPData_LoadDispInfo( pBSPData );
+    CollisionBSPData_LoadDispInfo( pBSPData, pTexinfo, texinfoCount );
+
 
 	return true;
 }
@@ -328,11 +333,11 @@ void CollisionBSPData_LoadTextures( CCollisionBSPData *pBSPData )
 	}
 
 	int nSize = count * sizeof(csurface_t);
-	pBSPData->map_surfaces.Attach( count, (csurface_t*)Hunk_Alloc( nSize ) );
+	pBSPData->map_surfaces.Attach( count, (csurface_t*)Hunk_AllocName( nSize, va( "%s [%s]", lh.GetLoadName(), "Textures" ) ) );
 
 	pBSPData->numtextures = count;
 
-	pBSPData->map_texturenames = (char *)Hunk_Alloc( lhStringData.LumpSize() * sizeof(char), false );
+	pBSPData->map_texturenames = (char *)Hunk_AllocName( lhStringData.LumpSize() * sizeof(char), va( "%s [%s]", lh.GetLoadName(), "Textures" ), false );
 	memcpy( pBSPData->map_texturenames, pStringData, lhStringData.LumpSize() );
  
 	for ( i=0 ; i<count ; i++, in++ )
@@ -357,7 +362,7 @@ void CollisionBSPData_LoadTextures( CCollisionBSPData *pBSPData )
 			if ( varFound )
 			{
 				const char *pProps = var->GetStringValue();
-				pBSPData->map_surfaces[i].surfaceProps = physprop->GetSurfaceIndex( pProps );
+				pBSPData->map_surfaces[i].surfaceProps = physprops->GetSurfaceIndex( pProps );
 			}
 		}
 	}
@@ -366,38 +371,17 @@ void CollisionBSPData_LoadTextures( CCollisionBSPData *pBSPData )
 
 //-----------------------------------------------------------------------------
 //-----------------------------------------------------------------------------
-void CollisionBSPData_LoadTexinfo( CCollisionBSPData *pBSPData, 
-									CUtlVector<unsigned short> &map_texinfo )
+void CollisionBSPData_LoadTexinfo( CCollisionBSPData *pBSPData, texinfo_t *pTexinfo, int texinfoCount )
 {
-	CMapLoadHelper lh( LUMP_TEXINFO );
-
-	texinfo_t	*in;
-	unsigned short	out;
-	int			i, count;
-
-	in = (texinfo_t *)lh.LumpBase();
-	if (lh.LumpSize() % sizeof(*in))
-		Sys_Error( "CollisionBSPData_LoadTexinfo: funny lump size");
-	count = lh.LumpSize() / sizeof(*in);
-	if (count < 1)
-		Sys_Error( "Map with no texinfo");
-	if (count > MAX_MAP_TEXINFO)
-		Sys_Error( "Map has too many surfaces");
-
-	MEM_ALLOC_CREDIT();
-	map_texinfo.RemoveAll();
-	map_texinfo.EnsureCapacity( count );
-
-	for ( i=0 ; i<count ; i++, in++ )
+	for ( int i=0 ; i<texinfoCount; i++ )
 	{
-		out = in->texdata;
+		unsigned short out = pTexinfo[i].texdata;
 		
 		if ( out >= pBSPData->numtextures )
 			out = 0;
 
 		// HACKHACK: Copy this over for the whole material!!!
-		pBSPData->map_surfaces[out].flags |= in->flags;
-		map_texinfo.AddToTail(out);
+		pBSPData->map_surfaces[out].flags |= pTexinfo[i].flags;
 	}
 }
 
@@ -431,11 +415,11 @@ void CollisionBSPData_LoadLeafs_Version_0( CCollisionBSPData *pBSPData, CMapLoad
 
 	// Need an extra one for the emptyleaf below
 	int nSize = (count + 1) * sizeof(cleaf_t);
-	pBSPData->map_leafs.Attach( count + 1, (cleaf_t*)Hunk_Alloc( nSize ) );
+	pBSPData->map_leafs.Attach( count + 1, (cleaf_t*)Hunk_AllocName( nSize, va( "%s [%s]", lh.GetLoadName(), "Leafs" ) ) );
 
 	pBSPData->numleafs = count;
 	pBSPData->numclusters = 0;
-
+	int allcontents = 0;
 	for ( i=0 ; i<count ; i++, in++ )
 	{
 		cleaf_t	*out = &pBSPData->map_leafs[i];	
@@ -452,8 +436,10 @@ void CollisionBSPData_LoadLeafs_Version_0( CCollisionBSPData *pBSPData, CMapLoad
 		{
 			pBSPData->numclusters = out->cluster + 1;
 		}
+		allcontents |= in->contents;
 	}
 
+	pBSPData->allcontents = allcontents;
 	if (pBSPData->map_leafs[0].contents != CONTENTS_SOLID)
 	{
 		Sys_Error( "Map leaf 0 is not CONTENTS_SOLID");
@@ -494,11 +480,11 @@ void CollisionBSPData_LoadLeafs_Version_1( CCollisionBSPData *pBSPData, CMapLoad
 
 	// Need an extra one for the emptyleaf below
 	int nSize = (count + 1) * sizeof(cleaf_t);
-	pBSPData->map_leafs.Attach( count + 1, (cleaf_t*)Hunk_Alloc( nSize ) );
+	pBSPData->map_leafs.Attach( count + 1, (cleaf_t*)Hunk_AllocName( nSize, va( "%s [%s]", lh.GetLoadName(), "Leafs" ) ) );
 
 	pBSPData->numleafs = count;
 	pBSPData->numclusters = 0;
-
+	int allcontents = 0;
 	for ( i=0 ; i<count ; i++, in++ )
 	{
 		cleaf_t	*out = &pBSPData->map_leafs[i];	
@@ -515,7 +501,9 @@ void CollisionBSPData_LoadLeafs_Version_1( CCollisionBSPData *pBSPData, CMapLoad
 		{
 			pBSPData->numclusters = out->cluster + 1;
 		}
+		allcontents |= in->contents;
 	}
+	pBSPData->allcontents = allcontents;
 
 	if (pBSPData->map_leafs[0].contents != CONTENTS_SOLID)
 	{
@@ -530,6 +518,7 @@ void CollisionBSPData_LoadLeafs_Version_1( CCollisionBSPData *pBSPData, CMapLoad
 
 void CollisionBSPData_LoadLeafs( CCollisionBSPData *pBSPData )
 {
+	pBSPData->allcontents = MASK_ALL;
 	CMapLoadHelper lh( LUMP_LEAFS );
 	switch( lh.LumpVersion() )
 	{
@@ -575,7 +564,7 @@ void CollisionBSPData_LoadLeafBrushes( CCollisionBSPData *pBSPData )
 		Sys_Error( "Map has too many leafbrushes");
 	}
 
-	pBSPData->map_leafbrushes.Attach( count, (unsigned short*)Hunk_Alloc( count * sizeof(unsigned short), false ) );
+	pBSPData->map_leafbrushes.Attach( count, (unsigned short*)Hunk_AllocName( count * sizeof(unsigned short), va( "%s [%s]", lh.GetLoadName(), "LeafBrushes" ), false ) );
 	pBSPData->numleafbrushes = count;
 
 	for ( i=0 ; i<count ; i++, in++)
@@ -616,7 +605,7 @@ void CollisionBSPData_LoadPlanes( CCollisionBSPData *pBSPData )
 	}
 
 	int nSize = count * sizeof(cplane_t);
-	pBSPData->map_planes.Attach( count, (cplane_t*)Hunk_Alloc( nSize ) );
+	pBSPData->map_planes.Attach( count, (cplane_t*)Hunk_AllocName( nSize, va( "%s [%s]", lh.GetLoadName(), "Planes" ) ) );
 
 	pBSPData->numplanes = count;
 
@@ -662,7 +651,7 @@ void CollisionBSPData_LoadBrushes( CCollisionBSPData *pBSPData )
 	}
 
 	int nSize = count * sizeof(cbrush_t);
-	pBSPData->map_brushes.Attach( count, (cbrush_t*)Hunk_Alloc( nSize ) );
+	pBSPData->map_brushes.Attach( count, (cbrush_t*)Hunk_AllocName( nSize, va( "%s [%s]", lh.GetLoadName(), "Brushes" ) ) );
 
 	pBSPData->numbrushes = count;
 
@@ -691,22 +680,25 @@ inline bool IsBoxBrush( const cbrush_t &brush, dbrushside_t *pSides, cplane_t *p
 	return (countAxial == brush.numsides) ? true : false;
 }
 
-inline void ExtractBoxBrush( cboxbrush_t *pBox, const cbrush_t &brush, dbrushside_t *pSides, cplane_t *pPlanes, CUtlVector<unsigned short> &map_texinfo )
+inline void ExtractBoxBrush( cboxbrush_t *pBox, const cbrush_t &brush, dbrushside_t *pSides, cplane_t *pPlanes, texinfo_t *pTexinfo, int texinfoCount )
 {
 	// brush.numsides is no longer valid.  Assume numsides == 6
+	pBox->thinMask = 0;
 	for ( int i = 0; i < 6; i++ )
 	{
 		dbrushside_t *side = pSides + i + brush.firstbrushside;
 		cplane_t *plane = pPlanes + side->planenum;
 		int t = side->texinfo;
-		Assert(t<map_texinfo.Count());
-		int surfaceIndex = (t<0) ? SURFACE_INDEX_INVALID : map_texinfo[t];
+		Assert(t<texinfoCount);
+		int surfaceIndex = (t<0) ? SURFACE_INDEX_INVALID : pTexinfo[t].texdata;
 		int axis = plane->type;
 		Assert(fabs(plane->normal[axis])==1.0f);
+		int maskIndex = axis;
 		if ( plane->normal[axis] == 1.0f )
 		{
 			pBox->maxs[axis] = plane->dist;
 			pBox->surfaceIndex[axis+3] = surfaceIndex;
+			maskIndex += 3;
 		}
 		else if ( plane->normal[axis] == -1.0f )
 		{
@@ -717,14 +709,14 @@ inline void ExtractBoxBrush( cboxbrush_t *pBox, const cbrush_t &brush, dbrushsid
 		{
 			Assert(0);
 		}
+		pBox->thinMask |= side->thin << maskIndex;
 	}
-	pBox->pad2[0] = 0;
-	pBox->pad2[1] = 0;
+	pBox->pad = 0;
 }
 
 //-----------------------------------------------------------------------------
 //-----------------------------------------------------------------------------
-void CollisionBSPData_LoadBrushSides( CCollisionBSPData *pBSPData, CUtlVector<unsigned short> &map_texinfo )
+void CollisionBSPData_LoadBrushSides( CCollisionBSPData *pBSPData, texinfo_t *pTexinfo, int texinfoCount )
 {
 	CMapLoadHelper lh( LUMP_BRUSHSIDES );
 
@@ -774,8 +766,8 @@ void CollisionBSPData_LoadBrushSides( CCollisionBSPData *pBSPData, CUtlVector<un
 	}
 
 	int nSize = brushSideCount * sizeof(cbrushside_t);
-	pBSPData->map_brushsides.Attach( brushSideCount, (cbrushside_t*)Hunk_Alloc( nSize, false ) );
-	pBSPData->map_boxbrushes.Attach( boxBrushCount, (cboxbrush_t*)Hunk_Alloc( boxBrushCount*sizeof(cboxbrush_t), false ) );
+	pBSPData->map_brushsides.Attach( brushSideCount, (cbrushside_t*)Hunk_AllocName( nSize, va( "%s [%s]", lh.GetLoadName(), "BrushSides" ), false ) );
+	pBSPData->map_boxbrushes.Attach( boxBrushCount, (cboxbrush_t*)Hunk_AllocName( boxBrushCount*sizeof(cboxbrush_t), va( "%s [%s]", lh.GetLoadName(), "BrushSides" ), false ) );
 
 	pBSPData->numbrushsides = brushSideCount;
 	pBSPData->numboxbrushes = boxBrushCount;
@@ -790,7 +782,7 @@ void CollisionBSPData_LoadBrushSides( CCollisionBSPData *pBSPData, CUtlVector<un
 		{
 			// fill out the box brush - extract from the input sides
 			cboxbrush_t *pBox = &pBSPData->map_boxbrushes[outBoxBrush];
-			ExtractBoxBrush( pBox, *pBrush, in, pBSPData->map_planes.Base(), map_texinfo );
+			ExtractBoxBrush( pBox, *pBrush, in, pBSPData->map_planes.Base(), pTexinfo, texinfoCount );
 			pBrush->SetBox(outBoxBrush);
 			outBoxBrush++;
 		}
@@ -805,14 +797,15 @@ void CollisionBSPData_LoadBrushSides( CCollisionBSPData *pBSPData, CUtlVector<un
 				dbrushside_t * RESTRICT pInputSide = in + firstInputSide + j;
 				pSide->plane = &pBSPData->map_planes[pInputSide->planenum];
 				int t = pInputSide->texinfo;
-				if (t >= map_texinfo.Size())
+				if (t >= texinfoCount)
 				{
 					Sys_Error( "Bad brushside texinfo");
 				}
 
 				// BUGBUG: Why is vbsp writing out -1 as the texinfo id?  (TEXINFO_NODE ?)
-				pSide->surfaceIndex = (t < 0) ? SURFACE_INDEX_INVALID : map_texinfo[t];
-				pSide->bBevel = pInputSide->bevel ? true : false;
+				pSide->surfaceIndex = (t < 0) ? SURFACE_INDEX_INVALID : pTexinfo[t].texdata;
+				pSide->bBevel = pInputSide->bevel;
+				pSide->bThin = pInputSide->thin;
 				outBrushSide++;
 			}
 		}
@@ -841,7 +834,7 @@ void CollisionBSPData_LoadSubmodels( CCollisionBSPData *pBSPData )
 		Sys_Error( "Map has too many models" );
 
 	int nSize = count * sizeof(cmodel_t);
-	pBSPData->map_cmodels.Attach( count, (cmodel_t*)Hunk_Alloc( nSize ) );
+	pBSPData->map_cmodels.Attach( count, (cmodel_t*)Hunk_AllocName( nSize, va( "%s [%s]", lh.GetLoadName(), "Submodels" ) ) );
 	pBSPData->numcmodels = count;
 
 	for ( i=0 ; i<count ; i++, in++ )
@@ -880,7 +873,7 @@ void CollisionBSPData_LoadNodes( CCollisionBSPData *pBSPData )
 
 	// 6 extra for box hull
 	int nSize = ( count + 6 ) * sizeof(cnode_t);
-	pBSPData->map_nodes.Attach( count + 6, (cnode_t*)Hunk_Alloc( nSize ) );
+	pBSPData->map_nodes.Attach( count + 6, (cnode_t*)Hunk_AllocName( nSize, va( "%s [%s]", lh.GetLoadName(), "Nodes" ) ) );
 
 	pBSPData->numnodes = count;
 	pBSPData->map_rootnode = pBSPData->map_nodes.Base();
@@ -920,7 +913,7 @@ void CollisionBSPData_LoadAreas( CCollisionBSPData *pBSPData )
 	}
 
 	int nSize = count * sizeof(carea_t);
-	pBSPData->map_areas.Attach( count, (carea_t*)Hunk_Alloc( nSize ) );
+	pBSPData->map_areas.Attach( count, (carea_t*)Hunk_AllocName( nSize, va( "%s [%s]", lh.GetLoadName(), "Areas" ) ) );
 
 	pBSPData->numareas = count;
 
@@ -960,7 +953,7 @@ void CollisionBSPData_LoadAreaPortals( CCollisionBSPData *pBSPData )
 	++count;
 
 	pBSPData->numportalopen = count;
-	pBSPData->portalopen.Attach( count, (bool*)Hunk_Alloc( pBSPData->numportalopen * sizeof(bool), false ) );
+	pBSPData->portalopen.Attach( count, (bool*)Hunk_AllocName( pBSPData->numportalopen * sizeof(bool), va( "%s [%s]", lh.GetLoadName(), "AreaPortals" ), false ) );
 	for ( int i=0; i < pBSPData->numportalopen; i++ )
 	{
 		pBSPData->portalopen[i] = false;
@@ -968,7 +961,7 @@ void CollisionBSPData_LoadAreaPortals( CCollisionBSPData *pBSPData )
 
 	pBSPData->numareaportals = count;
 	int nSize = count * sizeof(dareaportal_t);
-	pBSPData->map_areaportals.Attach( count, (dareaportal_t*)Hunk_Alloc( nSize ) );
+	pBSPData->map_areaportals.Attach( count, (dareaportal_t*)Hunk_AllocName( nSize, va( "%s [%s]", lh.GetLoadName(), "AreaPortals" ) ) );
 
 	Assert( nSize >= lh.LumpSize() ); 
 	memcpy( pBSPData->map_areaportals.Base(), in, lh.LumpSize() );
@@ -992,7 +985,7 @@ void CollisionBSPData_LoadVisibility( CCollisionBSPData *pBSPData )
 	}
 	else
 	{
-		pBSPData->map_vis = (dvis_t *) Hunk_Alloc( visDataSize, false );
+		pBSPData->map_vis = (dvis_t *) Hunk_AllocName( visDataSize, va( "%s [%s]", lh.GetLoadName(), "Visibility" ), false );
 		memcpy( pBSPData->map_vis, lh.LumpBase(), visDataSize );
 	}
 }
@@ -1006,9 +999,7 @@ void CollisionBSPData_LoadEntityString( CCollisionBSPData *pBSPData )
 
 	pBSPData->numentitychars = lh.LumpSize();
 	MEM_ALLOC_CREDIT();
-	char szMapName[MAX_PATH] = { 0 };
-	V_strncpy( szMapName, lh.GetMapName(), sizeof( szMapName ) );
-	pBSPData->map_entitystring.Init( szMapName, lh.LumpOffset(), lh.LumpSize(), lh.LumpBase() );
+	pBSPData->map_entitystring.Init( lh.GetDiskName(), lh.LumpOffset(), lh.LumpSize(), lh.LumpBase() );
 }
 
 
@@ -1016,32 +1007,9 @@ void CollisionBSPData_LoadEntityString( CCollisionBSPData *pBSPData )
 //-----------------------------------------------------------------------------
 void CollisionBSPData_LoadPhysics( CCollisionBSPData *pBSPData )
 {
-#ifdef _WIN32
 	CMapLoadHelper lh( LUMP_PHYSCOLLIDE );
-#else
-	int nLoadLump = LUMP_PHYSCOLLIDE;
-	// backwards compat support for older game dlls
-	// they crash if they don't have vcollide data for terrain 
-	// even though the new engine ignores it
-	if ( g_iServerGameDLLVersion >= 5 )
-	{
-		// if there's a linux lump present, go ahead and load it
-		// otherwise, the win32 lump will work as long as it doesn't have any
-		// mopp surfaces in it (if compiled with the current vbsp.exe or a map without any displacements).  
-		// The legacy server game DLLs will crash when mopps are present but since 
-		// they also crash with a NULL lump there's nothing lost in that case.
-		if ( CMapLoadHelper::LumpSize(LUMP_PHYSCOLLIDESURFACE) > 0 )
-		{
-			nLoadLump = LUMP_PHYSCOLLIDESURFACE;
-		}
-		else
-		{
-			DevWarning("Legacy game DLL may not support terrain vphysics collisions with this BSP!\n");
-		}
-	}
 
-	CMapLoadHelper lh( nLoadLump );
-#endif
+
 	if ( !lh.LumpSize() )
 		return;
 
@@ -1075,10 +1043,11 @@ void CollisionBSPData_LoadPhysics( CCollisionBSPData *pBSPData )
 
 //-----------------------------------------------------------------------------
 //-----------------------------------------------------------------------------
-void CollisionBSPData_LoadDispInfo( CCollisionBSPData *pBSPData )
+void CollisionBSPData_LoadDispInfo( CCollisionBSPData *pBSPData, texinfo_t *pTexinfo, int texinfoCount )
 {
 	// How many displacements in the map?
-	int coreDispCount = CMapLoadHelper::LumpSize( LUMP_DISPINFO ) / sizeof( ddispinfo_t );
+	CMapLoadHelper lhDispInfo( LUMP_DISPINFO );
+	int coreDispCount = lhDispInfo.LumpSize() / sizeof( ddispinfo_t );
 	if ( coreDispCount == 0 )
 		return;	
 
@@ -1125,18 +1094,10 @@ void CollisionBSPData_LoadDispInfo( CCollisionBSPData *pBSPData )
 	if ( !pFaceList )
 		return;
 
-    //
-    // get texinfo data
-    //
- 	CMapLoadHelper lhti( LUMP_TEXINFO );
-    texinfo_t *pTexinfoList = ( texinfo_t* )lhti.LumpBase();
-    if ( lhti.LumpSize() % sizeof( texinfo_t ) )
-        Sys_Error( "CMod_LoadDispInfo: bad texinfo lump size!" );
-
 	// allocate displacement collision trees
 	g_DispCollTreeCount = coreDispCount;
 	g_pDispCollTrees = DispCollTrees_Alloc( g_DispCollTreeCount );
-	g_pDispBounds = (alignedbbox_t *)Hunk_Alloc( g_DispCollTreeCount * sizeof(alignedbbox_t), false );
+	g_pDispBounds = (alignedbbox_t *)Hunk_AllocName( g_DispCollTreeCount * sizeof(alignedbbox_t), va( "%s [%s]", lhDispInfo.GetLoadName(), "DispInfo" ), false );
 
 	// Build the inverse mapping from disp index to face
 	int nMemSize = coreDispCount * sizeof(unsigned short);
@@ -1160,16 +1121,19 @@ void CollisionBSPData_LoadDispInfo( CCollisionBSPData *pBSPData )
 	// Load one dispinfo from disk at a time and set it up.
 	int iCurVert = 0;
 	int iCurTri = 0;
+	int iCurMultiBlend = 0;
 	CDispVert tempVerts[MAX_DISPVERTS];
 	CDispTri  tempTris[MAX_DISPTRIS];
+	CDispMultiBlend tempMultiBlend[MAX_DISPVERTS];
+
 
 	int nSize = 0;
 	int nCacheSize = 0;
 	int nPowerCount[3] = { 0, 0, 0 };
 
-	CMapLoadHelper lhDispInfo( LUMP_DISPINFO );
 	CMapLoadHelper lhDispVerts( LUMP_DISP_VERTS );
 	CMapLoadHelper lhDispTris( LUMP_DISP_TRIS );
+	CMapLoadHelper lhDispMultiBLend( LUMP_DISP_MULTIBLEND );
 
 	for ( i = 0; i < coreDispCount; ++i )
 	{
@@ -1192,12 +1156,20 @@ void CollisionBSPData_LoadDispInfo( CCollisionBSPData *pBSPData )
 		lhDispTris.LoadLumpData( iCurTri * sizeof( CDispTri ), nTris*sizeof( CDispTri), tempTris );
 		iCurTri += nTris;
 
+		int nFlags = 0;
+		if ( ( dispInfo.minTess & DISP_INFO_FLAG_HAS_MULTIBLEND ) != 0 )
+		{
+			lhDispMultiBLend.LoadLumpData( iCurMultiBlend * sizeof( CDispMultiBlend ), nVerts * sizeof( CDispMultiBlend ), tempMultiBlend );
+			iCurMultiBlend += nVerts;
+			nFlags = DISP_INFO_FLAG_HAS_MULTIBLEND;
+		}
+
 		CCoreDispInfo coreDisp;
 		CCoreDispSurface *pDispSurf = coreDisp.GetSurface();
 		pDispSurf->SetPointStart( dispInfo.startPosition );
 		pDispSurf->SetContents( dispInfo.contents );
 	
-		coreDisp.InitDispInfo( dispInfo.power, dispInfo.minTess, dispInfo.smoothingAngle, tempVerts, tempTris );
+		coreDisp.InitDispInfo( dispInfo.power, dispInfo.minTess, dispInfo.smoothingAngle, tempVerts, tempTris, nFlags, tempMultiBlend );
 
 		// Hook the disp surface to the face
 		pFaces = &pFaceList[ nFaceIndex ];
@@ -1254,7 +1226,7 @@ void CollisionBSPData_LoadDispInfo( CCollisionBSPData *pBSPData )
 		nPowerCount[pDispTree->GetPower()-2]++;
 
 		// Surface props.
-		texinfo_t *pTex = &pTexinfoList[pFaces->texinfo];
+		texinfo_t *pTex = &pTexinfo[pFaces->texinfo];
 		if ( pTex->texdata >= 0 )
 		{
 			IMaterial *pMaterial = materials->FindMaterial( pBSPData->map_surfaces[pTex->texdata].name, TEXTURE_GROUP_WORLD, true );
@@ -1266,17 +1238,36 @@ void CollisionBSPData_LoadDispInfo( CCollisionBSPData *pBSPData )
 				if ( bVarFound )
 				{
 					const char *pProps = pVar->GetStringValue();
-					pDispTree->SetSurfaceProps( 0, physprop->GetSurfaceIndex( pProps ) );
-					pDispTree->SetSurfaceProps( 1, physprop->GetSurfaceIndex( pProps ) );
+					int nPropIndex = physprops->GetSurfaceIndex( pProps );
+					pDispTree->SetSurfaceProps( 0, nPropIndex );
+					pDispTree->SetSurfaceProps( 1, nPropIndex );
+					pDispTree->SetSurfaceProps( 2, nPropIndex );
+					pDispTree->SetSurfaceProps( 3, nPropIndex );
 				}
 
 				pVar = pMaterial->FindVar( "$surfaceprop2", &bVarFound, false );
 				if ( bVarFound )
 				{
 					const char *pProps = pVar->GetStringValue();
-					pDispTree->SetSurfaceProps( 1, physprop->GetSurfaceIndex( pProps ) );
+					pDispTree->SetSurfaceProps( 1, physprops->GetSurfaceIndex( pProps ) );
+				}
+
+				pVar = pMaterial->FindVar( "$surfaceprop3", &bVarFound, false );
+				if ( bVarFound )
+				{
+					const char *pProps = pVar->GetStringValue();
+					pDispTree->SetSurfaceProps( 2, physprops->GetSurfaceIndex( pProps ) );
+				}
+
+				pVar = pMaterial->FindVar( "$surfaceprop4", &bVarFound, false );
+				if ( bVarFound )
+				{
+					const char *pProps = pVar->GetStringValue();
+					pDispTree->SetSurfaceProps( 3, physprops->GetSurfaceIndex( pProps ) );
 				}
 			}
+
+			pDispTree->SetTexinfoFlags( pBSPData->map_surfaces[pTex->texdata].flags );
 		}
 	}
 

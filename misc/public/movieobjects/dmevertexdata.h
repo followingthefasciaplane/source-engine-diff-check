@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =======
 //
 // A class representing vertex data
 //
@@ -51,6 +51,7 @@ public:
 		FIELD_MORPH_SPEED,		// Used to author morph speeds
 		FIELD_WRINKLE,			// Used to author morphed wrinklemaps
 		FIELD_WEIGHT,			// Weight is just the different between the base position and the delta position
+		FIELD_CLOTH_ENABLE,
 		STANDARD_FIELD_COUNT,
 	};
 
@@ -136,6 +137,8 @@ public:
 
 	// Do we have skinning data?
 	bool HasSkinningData() const;
+	// Do we have cloth_enable data? 
+	bool HasClothData();
 	
 	// Do we need tangent data? (Utility method for applications to know if they should call ComputeDefaultTangentData)
 	bool NeedsTangentData() const;
@@ -155,6 +158,10 @@ public:
 	void CopyFrom( CDmeVertexDataBase *pSrc );
 
 	void CopyTo( CDmeVertexDataBase *pDst ) const;
+
+	// Reskins the vertex data to new bones
+	// The joint index remap maps an initial bone index to a new bone index
+	void Reskin( const int *pJointTransformIndexRemap );
 
 protected:
 	struct FieldInfo_t
@@ -318,13 +325,17 @@ class CDmeVertexDeltaData : public CDmeVertexDataBase
 public:
 	// Computes wrinkle data from position deltas
 	// NOTE: Pass in negative scales to get 'compression', positive to get 'expansion'
-	void GenerateWrinkleDelta( CDmeVertexData *pBindState, float flScale, bool bOverwrite );
+	void GenerateWrinkleDelta( CDmeVertexData *pBindState, float flScale, bool bOverwrite, bool bUseNormalForSign = false );
+
+	// Updates existing data or generates new data
+	void UpdateWrinkleDelta( CDmeVertexData *pBindState, float flOldScale, float flNewScale );
 
 	// Computes a float map which is the distance between the base and delta position
 	// The maximum distance any vertex is moved is returned
 	float GenerateWeightDelta( CDmeVertexData *pBindState );
 
 	CDmaVar< bool > m_bCorrected;
+	CDmaVar< bool > m_bRenderVerts;
 
 private:
 	virtual bool IsVertexDeltaData() const { return true; }

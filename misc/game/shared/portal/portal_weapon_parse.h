@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -23,7 +23,7 @@ public:
 	
 	CPortalSWeaponInfo();
 	
-	virtual void Parse( ::KeyValues *pKeyValuesData, const char *szWeaponName );
+	virtual void Parse( KeyValues *pKeyValuesData, const char *szWeaponName );
 
 
 public:

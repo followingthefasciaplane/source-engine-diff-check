@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -61,6 +61,8 @@ public:
 	void StartBackdoorMode();
 	void StopBackdoorMode();
 
+	// Used by Foundry when it changes an entity (and possibly its class) but preserves its serial number.
+	void ForceFlushEntity( int iEntity );
 	
 	// This is called when the client DLL is loaded to precalculate data to let it copy data faster.
 	static void InitFastCopy();

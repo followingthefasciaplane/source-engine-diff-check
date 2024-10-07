@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Lightmap only shader
 //
@@ -24,14 +24,7 @@ BEGIN_VS_SHADER( LightmappedGeneric_Decal,
 	// Set up anything that is necessary to make decisions in SHADER_FALLBACK.
 	SHADER_INIT_PARAMS()
 	{
-		if ( g_pHardwareConfig->SupportsBorderColor() )
-		{
-			params[FLASHLIGHTTEXTURE]->SetStringValue( "effects/flashlight_border" );
-		}
-		else
-		{
-			params[FLASHLIGHTTEXTURE]->SetStringValue( "effects/flashlight001" );
-		}
+		params[FLASHLIGHTTEXTURE]->SetStringValue( GetFlashlightTextureFilename() );
 
 		// No texture means no self-illum or env mask in base alpha
 		if ( !params[BASETEXTURE]->IsDefined() )

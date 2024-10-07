@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -36,7 +36,7 @@ public:
 							CDatatableStack( CSendTablePrecalc *pPrecalc, unsigned char *pStructBase, int objectID );
 
 	// This must be called before accessing properties.
-	void Init( bool bExplicitRoutes=false );
+	void Init( bool bExplicitRoutes, bool bLocalNetworkBackDoor );
 
 	// The stack is meant to be used by calling SeekToProp with increasing property
 	// numbers.
@@ -60,7 +60,7 @@ public:
 	
 	enum
 	{
-		MAX_PROXY_RESULTS = 256
+		MAX_PROXY_RESULTS = 64
 	};
 
 	// These point at the various values that the proxies returned. They are setup once, then 
@@ -76,6 +76,7 @@ protected:
 	int m_ObjectID;
 
 	bool m_bInitted;
+	bool m_bLocalNetworkBackDoor;
 };
 
 inline bool CDatatableStack::IsPropProxyValid(int iProp ) const
@@ -139,6 +140,7 @@ inline unsigned char* UpdateRoutesExplicit_Template( DTStack *pStack, ProxyCalle
 			if ( !pStack->m_pProxies[iProxy] )
 			{
 				*pTest = NULL;
+				pStructBase = NULL;
 				break;
 			}			
 		}
@@ -168,9 +170,6 @@ public:
 
 		void *pVal = NULL;
 
-		Assert( pProp );
-
-		// We may crash later for doing this, but at least this will allow users to watch their demos
 		if ( !pProp )
 			return NULL;
 
@@ -237,11 +236,11 @@ public:
 class CServerDatatableStack : public CDatatableStack
 {
 public:
-						CServerDatatableStack( CSendTablePrecalc *pPrecalc, unsigned char *pStructBase, int objectID ) :
+						CServerDatatableStack( CSendTablePrecalc *pPrecalc, unsigned char *pStructBase, int objectID, CUtlMemory< CSendProxyRecipients > *pRecipients = NULL ) :
 							CDatatableStack( pPrecalc, pStructBase, objectID )
 						{
 							m_pPrecalc = pPrecalc;
-							m_pRecipients = NULL;
+							m_pRecipients = pRecipients;
 						}
 
 	inline unsigned char*	CallPropProxy( CSendNode *pNode, int iProp, unsigned char *pStructBase )
@@ -269,6 +268,9 @@ public:
 			pRecipients,
 			GetObjectID()
 			);
+
+		if ( m_bLocalNetworkBackDoor && (pRecipients != &s_Recipients) && !pRecipients->m_Bits.IsBitSet( 0 ) )
+			return NULL;
 	
 		return pRet;
 	}
@@ -301,14 +303,33 @@ public:
 		static inline unsigned char* CallProxy( CServerDatatableStack *pStack, unsigned char *pStructBase, unsigned short iDatatableProp )
 		{
 			const SendProp *pProp = pStack->m_pPrecalc->GetDatatableProp( iDatatableProp );
+
+			CSendProxyRecipients *pRecipients;
+
+			if ( pStack->m_bLocalNetworkBackDoor && pStack->m_pRecipients && pStack->m_pRecipients->Count() > 0 )
+			{
+				// set recipients pointer and all clients by default
+				pRecipients = &pStack->m_pRecipients->Element( 0 );//pNode->GetDataTableProxyIndex() );
+				pRecipients->SetAllRecipients();
+			}
+			else
+			{
+				// we don't care about recipients, just provide a valid pointer
+				pRecipients = &s_Recipients; 
+			}
 			
-			return (unsigned char*)pProp->GetDataTableProxyFn()( 
+			unsigned char *pRet = (unsigned char*)pProp->GetDataTableProxyFn()( 
 				pProp,
 				pStructBase, 
 				pStructBase + pProp->GetOffset(), 
-				&s_Recipients,
+				pRecipients,
 				pStack->GetObjectID()
 				);
+
+			if ( pStack->m_bLocalNetworkBackDoor && (pRecipients != &s_Recipients) && !pRecipients->m_Bits.IsBitSet( 0 ) )
+				return NULL;
+
+			return pRet;
 		}
 	};
 	

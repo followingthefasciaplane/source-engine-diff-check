@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -14,7 +14,7 @@
 #endif
 
 #include "interface.h"
-#include "vgui/VGUI.h"
+#include "vgui/vgui.h"
 
 // Forward declarations.
 namespace vgui
@@ -25,12 +25,15 @@ namespace vgui
 enum VGuiPanel_t
 {
 	PANEL_ROOT = 0,
-	PANEL_GAMEUIDLL,
+	PANEL_GAMEUIDLL,  // the console, game menu
 	PANEL_CLIENTDLL,
 	PANEL_TOOLS,
 	PANEL_INGAMESCREENS,
 	PANEL_GAMEDLL,
-	PANEL_CLIENTDLL_TOOLS
+	PANEL_CLIENTDLL_TOOLS,
+	PANEL_GAMEUIBACKGROUND, // the console background, shows under all other stuff in 3d engine view
+	PANEL_TRANSITIONEFFECT,
+	PANEL_STEAMOVERLAY,
 };
 
 // In-game panels are cropped to the current engine viewport size
@@ -38,7 +41,6 @@ enum PaintMode_t
 {
 	PAINT_UIPANELS		= (1<<0),
 	PAINT_INGAMEPANELS  = (1<<1),
-	PAINT_CURSOR		= (1<<2), // software cursor, if appropriate
 };
 
 abstract_class IEngineVGui
@@ -49,6 +51,8 @@ public:
 	virtual vgui::VPANEL	GetPanel( VGuiPanel_t type ) = 0;
 
 	virtual bool			IsGameUIVisible() = 0;
+
+	virtual void			ActivateGameUI() = 0;
 };
 
 #define VENGINE_VGUI_VERSION	"VEngineVGui001"

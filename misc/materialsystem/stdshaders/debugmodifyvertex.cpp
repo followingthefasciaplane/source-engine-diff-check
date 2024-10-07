@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright (c) 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: This is an example of a material that modifies vertex data
 // in the shader. NOTE: Every pass is given a clean set of vertex data.
@@ -14,7 +14,7 @@
 // $NoKeywords: $
 //===========================================================================//
 
-#include "shaderlib/cshader.h"
+#include "shaderlib/CShader.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -44,7 +44,7 @@ BEGIN_SHADER_FLAGS( DebugModifyVertex, "Help for DebugModifyVertex", SHADER_NOT_
 
 			DYNAMIC_STATE
 			{
-				BindTexture( SHADER_SAMPLER0, BASETEXTURE, FRAME );
+				BindTexture( SHADER_SAMPLER0, false, BASETEXTURE, FRAME );
 
 				float amp = params[WAVE]->GetFloatValue();
 				float currTime = pShaderAPI->CurrentTime();
@@ -68,7 +68,7 @@ BEGIN_SHADER_FLAGS( DebugModifyVertex, "Help for DebugModifyVertex", SHADER_NOT_
 			}
 			DYNAMIC_STATE
 			{
-				BindTexture( SHADER_SAMPLER0, BASETEXTURE, FRAME );
+				BindTexture( SHADER_SAMPLER0, false,  BASETEXTURE, FRAME );
 
 				// Notice here that since we didn't modify the position, and this is a second
 				// pass, the position has been reset to it's initial, unmodified position

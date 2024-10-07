@@ -1,7 +1,7 @@
 // NextBotChasePath.h
 // Maintain and follow a "chase path" to a selected Actor
 // Author: Michael Booth, September 2006
-//========= Copyright Valve Corporation, All rights reserved. ============//
+// Copyright (c) 2006 Turtle Rock Studios, Inc. - All Rights Reserved
 
 #ifndef _NEXT_BOT_CHASE_PATH_
 #define _NEXT_BOT_CHASE_PATH_
@@ -222,8 +222,8 @@ inline void ChasePath::RefreshPath( INextBot *bot, CBaseEntity *subject, const I
 		{
 			if ( bot->IsDebugging( NEXTBOT_PATH ) )
 			{
-				//const float size = 20.0f;			
-				//NDebugOverlay::VertArrow( bot->GetPosition() + Vector( 0, 0, size ), bot->GetPosition(), size, 255, RandomInt( 0, 200 ), 255, 255, true, 30.0f );
+				const float size = 20.0f;			
+				NDebugOverlay::VertArrow( bot->GetPosition() + Vector( 0, 0, size ), bot->GetPosition(), size, 255, RandomInt( 0, 200 ), 255, 255, true, 30.0f );
 
 				DevMsg( "%3.2f: bot(#%d) REPATH\n", gpGlobals->curtime, bot->GetEntity()->entindex() );
 			}
@@ -254,10 +254,10 @@ inline void ChasePath::RefreshPath( INextBot *bot, CBaseEntity *subject, const I
 
 			if ( bot->IsDebugging( NEXTBOT_PATH ) )
 			{
-				//const float size = 20.0f;	
+				const float size = 20.0f;	
 				const float dT = 90.0f;		
 				int c = RandomInt( 0, 100 );
-				//NDebugOverlay::VertArrow( bot->GetPosition() + Vector( 0, 0, size ), bot->GetPosition(), size, 255, c, c, 255, true, dT );
+				NDebugOverlay::VertArrow( bot->GetPosition() + Vector( 0, 0, size ), bot->GetPosition(), size, 255, c, c, 255, true, dT );
 				NDebugOverlay::HorzArrow( bot->GetPosition(), pathTarget, 5.0f, 255, c, c, 255, true, dT );
 
 				DevMsg( "%3.2f: bot(#%d) REPATH FAILED\n", gpGlobals->curtime, bot->GetEntity()->entindex() );

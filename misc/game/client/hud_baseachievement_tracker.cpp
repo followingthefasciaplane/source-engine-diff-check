@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Draws achievement progress bars on the HUD
 //
@@ -8,8 +8,8 @@
 #include "hudelement.h"
 #include "hud_macros.h"
 #include <game_controls/baseviewport.h>
-#include <vgui_controls/Controls.h>
-#include <vgui_controls/Panel.h>
+#include <vgui_controls/controls.h>
+#include <vgui_controls/panel.h>
 #include <vgui_controls/ImagePanel.h>
 #include <vgui_controls/TextImage.h>
 #include "vgui/ILocalize.h"
@@ -23,18 +23,9 @@
 #include "fmtstr.h"
 #include "engine/IEngineSound.h"
 
-//=============================================================================
-// HPE_BEGIN
-// [dwenger] Necessary for HUD Achievement display
-//=============================================================================
-
 #include "cdll_client_int.h"
 #include "steam/isteamuserstats.h"
 #include "steam/steam_api.h"
-
-//=============================================================================
-// HPE_END
-//=============================================================================
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -68,7 +59,7 @@ ConVar hud_achievement_tracker("hud_achievement_tracker", "1", FCVAR_NONE, "Show
 CHudBaseAchievementTracker::CHudBaseAchievementTracker( const char *pElementName ) :
 	CHudElement( pElementName ), BaseClass( NULL, "HudAchievementTracker" )
 {
-	vgui::Panel *pParent = g_pClientMode->GetViewport();
+	vgui::Panel *pParent = GetClientMode()->GetViewport();
 	SetParent( pParent );
 
 	SetHiddenBits( HIDEHUD_HEALTH | HIDEHUD_PLAYERDEAD );
@@ -125,9 +116,6 @@ void CHudBaseAchievementTracker::ApplySchemeSettings( IScheme *pScheme )
 //-----------------------------------------------------------------------------
 bool CHudBaseAchievementTracker::ShouldDraw()
 {
-	if ( engine->IsPlayingDemo() )
-		return false;
-
 	return CHudElement::ShouldDraw();
 }
 
@@ -139,7 +127,7 @@ void CHudBaseAchievementTracker::OnThink()
 	if ( m_flNextThink < gpGlobals->curtime )
 	{
 		UpdateAchievementItems();
-		m_flNextThink = gpGlobals->curtime + 0.5f;
+		m_flNextThink = gpGlobals->curtime + 0.1f;
 	}
 }
 
@@ -170,12 +158,14 @@ void CHudBaseAchievementTracker::UpdateAchievementItems()
 	if ( !pAchievementMgr )
 		return;
 
+// $FIXME(hpe): needs split screen support; use playerSlot 0 for now; should we be using m_AchievementItem slot?
+	int playerSlot = 0;
 	int iCount = pAchievementMgr->GetAchievementCount();
 	int iShown = 0;
 	for ( int i = 0; i < iCount; ++i )
-	{		
-		IAchievement* pCur = pAchievementMgr->GetAchievementByIndex( i );
-		if ( !ShouldShowAchievement( pCur ) )
+	{
+		IAchievement* pCur = pAchievementMgr->GetAchievementByIndex( i, playerSlot );
+		if ( !ShouldShowAchievement( pCur) )
 		{
 			// don't remove achievements that are still glowing (typically a just completed achievement)
 			if ( pCur && m_AchievementItem.Count() > iShown && m_AchievementItem[iShown]->GetAchievementID() == pCur->GetAchievementID() 
@@ -265,35 +255,11 @@ CAchievementTrackerItem::CAchievementTrackerItem( vgui::Panel* pParent, const ch
 
 CAchievementTrackerItem::~CAchievementTrackerItem()
 {
-	if ( m_pAchievementName )
-	{
-		m_pAchievementName->MarkForDeletion();
-		m_pAchievementName = NULL;
-	}
-
-	if ( m_pAchievementNameGlow )
-	{
-		m_pAchievementNameGlow->MarkForDeletion();
-		m_pAchievementNameGlow = NULL;
-	}
-
-	if ( m_pAchievementDesc )
-	{
-		m_pAchievementDesc->MarkForDeletion();
-		m_pAchievementDesc = NULL;
-	}
-
-	if ( m_pProgressBarBackground )
-	{
-		m_pProgressBarBackground->MarkForDeletion();
-		m_pProgressBarBackground = NULL;
-	}
-
-	if ( m_pProgressBar )
-	{
-		m_pProgressBar->MarkForDeletion();
-		m_pProgressBar = NULL;
-	}
+	delete m_pAchievementName;
+	delete m_pAchievementNameGlow;
+	delete m_pAchievementDesc;
+	delete m_pProgressBarBackground;
+	delete m_pProgressBar;
 }
 
 //-----------------------------------------------------------------------------
@@ -317,17 +283,8 @@ void CAchievementTrackerItem::PerformLayout()
 
 	int x, y, w, t;
 
-    //=============================================================================
-    // HPE_BEGIN
-    // [dwenger] Necessary for HUD Achievement display
-    //=============================================================================
-
     m_pAchievementName->GetContentSize( w, t );     // needed in order to load up font for the name
     m_pAchievementNameGlow->GetContentSize( w, t ); // needed in order to load up font for the glow
-
-    //=============================================================================
-    // HPE_END
-    //=============================================================================
 
     if ( hud_achievement_description.GetBool() )
 	{
@@ -391,7 +348,9 @@ void CAchievementTrackerItem::UpdateAchievementDisplay()
 	if ( !pAchievementMgr )
 		return;
 
-	CBaseAchievement* pAchievement = pAchievementMgr->GetAchievementByID( m_iAchievementID );
+// $FIXME(hpe): needs split screen support; use playerslot 0 for now
+	int playerSlot = 0;
+	CBaseAchievement* pAchievement = pAchievementMgr->GetAchievementByID( m_iAchievementID, playerSlot );
 	if ( !pAchievement )
 		return;
 	
@@ -399,18 +358,9 @@ void CAchievementTrackerItem::UpdateAchievementDisplay()
 	{
 		// need to update labels
 
-        //=============================================================================
-        // HPE_BEGIN
-        // [dwenger] Necessary for HUD Achievement display
-        //=============================================================================
-
         m_pAchievementName->SetText( ACHIEVEMENT_LOCALIZED_NAME( pAchievement ) );
         m_pAchievementNameGlow->SetText( ACHIEVEMENT_LOCALIZED_NAME( pAchievement ) );
         m_pAchievementDesc->SetText( ACHIEVEMENT_LOCALIZED_DESC( pAchievement ) );
-
-        //=============================================================================
-        // HPE_END
-        //=============================================================================
 
 		m_pProgressBarBackground->SetVisible( pAchievement->GetGoal() > 1 );
 		m_pProgressBar->SetVisible( pAchievement->GetGoal() > 1 );
@@ -531,11 +481,7 @@ CFloatingAchievementNumber::CFloatingAchievementNumber( int iProgress, int x, in
 
 CFloatingAchievementNumber::~CFloatingAchievementNumber()
 {
-	if ( m_pNumberLabel )
-	{
-		m_pNumberLabel->MarkForDeletion();
-		m_pNumberLabel = NULL;
-	}
+	delete m_pNumberLabel;
 }
 
 void CFloatingAchievementNumber::ApplySchemeSettings( vgui::IScheme *scheme )

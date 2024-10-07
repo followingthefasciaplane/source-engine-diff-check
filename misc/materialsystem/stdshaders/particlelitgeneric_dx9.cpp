@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -8,6 +8,10 @@
 
 #include "BaseVSShader.h"
 #include "particlelitgeneric_dx9_helper.h"
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
 
 BEGIN_VS_SHADER( ParticleLitGeneric_DX9, 
 				"Help for ParticleLitGeneric_DX9" )
@@ -39,14 +43,6 @@ BEGIN_VS_SHADER( ParticleLitGeneric_DX9,
 
 	SHADER_FALLBACK
 	{	
-		if (g_pHardwareConfig->GetDXSupportLevel() < 70)
-			return "ParticleLitGeneric_DX6";
-
-		if (g_pHardwareConfig->GetDXSupportLevel() < 80)
-			return "ParticleLitGeneric_DX7";
-
-		return "ParticleLitGeneric_DX8";
-
 		return 0;
 	}
 

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose:
 //
@@ -39,6 +39,7 @@ enum seentype_t
 #define SENSING_FLAGS_NONE			0x00000000
 #define SENSING_FLAGS_DONT_LOOK		0x00000001 // Effectively makes the NPC blind
 #define SENSING_FLAGS_DONT_LISTEN	0x00000002 // Effectively makes the NPC deaf
+#define SENSING_FLAGS_IGNORE_PORTALS	0x00000004 // Don't use portals to extend the senses
 
 //-----------------------------------------------------------------------------
 // class CAI_ScriptConditions
@@ -67,7 +68,7 @@ public:
 	float			GetDistLook() const				{ return m_LookDist; }
 	void			SetDistLook( float flDistLook ) { m_LookDist = flDistLook; }
 
-	void			PerformSensing();
+	virtual void	PerformSensing();
 
 	void			Listen( void );
 	void			Look( int iDistance );// basic sight function for npcs
@@ -75,7 +76,7 @@ public:
 	bool			ShouldSeeEntity( CBaseEntity *pEntity ); // logical query
 	bool			CanSeeEntity( CBaseEntity *pSightEnt ); // more expensive cone & raycast test
 #ifdef PORTAL
-	bool			CanSeeEntityThroughPortal( const CProp_Portal *pPortal, CBaseEntity *pSightEnt ); // more expensive cone & raycast test
+	bool			CanSeeEntityThroughPortal( const CPortal_Base2D *pPortal, CBaseEntity *pSightEnt ); // more expensive cone & raycast test
 #endif
 	
 	bool			DidSeeEntity( CBaseEntity *pSightEnt ) const; //  a less expensive query that looks at cached results from recent conditionsa gathering
@@ -89,6 +90,9 @@ public:
 
 	bool 			CanHearSound( CSound *pSound );
 
+	// children of this class may need to overload this function to allow for more specialized checks such as angle of elevation, etc.
+	virtual bool	IsWithinSenseDistance( const Vector &source, const Vector &dest, float dist ) { return ( source.DistToSqr( dest ) < dist * dist ); }
+
 	//---------------------------------
 	
 	float			GetTimeLastUpdate( CBaseEntity *pEntity );
@@ -101,10 +105,10 @@ public:
 
 	DECLARE_SIMPLE_DATADESC();
 
-private:
+protected:
 	int				GetAudibleList() const { return m_iAudibleList; }
 
-	bool			WaitingUntilSeen( CBaseEntity *pSightEnt );
+	virtual bool	WaitingUntilSeen( CBaseEntity *pSightEnt );
 
 	void			BeginGather();
 	void 			NoteSeenEntity( CBaseEntity *pSightEnt );
@@ -112,15 +116,16 @@ private:
 	
 	bool 			Look( CBaseEntity *pSightEnt );
 #ifdef PORTAL
-	bool 			LookThroughPortal( const CProp_Portal *pPortal, CBaseEntity *pSightEnt );
+	bool 			LookThroughPortal( const CPortal_Base2D *pPortal, CBaseEntity *pSightEnt );
 #endif
 
-	int 			LookForHighPriorityEntities( int iDistance );
+	virtual int 	LookForHighPriorityEntities( int iDistance );
 	int 			LookForNPCs( int iDistance );
 	int 			LookForObjects( int iDistance );
 	
 	bool			SeeEntity( CBaseEntity *pEntity );
 	
+private:
 	float			m_LookDist;				// distance npc sees (Default 2048)
 	float			m_LastLookDist;
 	float			m_TimeLastLook;

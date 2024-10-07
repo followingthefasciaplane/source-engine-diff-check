@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -37,7 +37,7 @@ CClientSendTable::CClientSendTable()
 
 CClientSendTable::~CClientSendTable()
 {
-	delete [] m_SendTable.m_pNetTableName;
+	delete m_SendTable.m_pNetTableName;
 	
 	for ( int iProp=0; iProp < m_SendTable.m_nProps; iProp++ )
 	{

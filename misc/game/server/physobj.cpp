@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -24,6 +24,11 @@
 #include "collisionutils.h"
 #include "decals.h"
 #include "bone_setup.h"
+
+#ifdef PORTAL
+#include "portal_base2d_shared.h"
+#include "particle_system.h"
+#endif // PORTAL
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -380,6 +385,7 @@ BEGIN_DATADESC( CPhysBox )
 	DEFINE_KEYFIELD( m_flForceToEnableMotion, FIELD_FLOAT, "forcetoenablemotion" ), 
 	DEFINE_KEYFIELD( m_angPreferredCarryAngles, FIELD_VECTOR, "preferredcarryangles" ),
 	DEFINE_KEYFIELD( m_bNotSolidToWorld, FIELD_BOOLEAN, "notsolid" ),
+	DEFINE_KEYFIELD( m_iExploitableByPlayer, FIELD_INTEGER, "ExploitableByPlayer" ),
 
 	DEFINE_INPUTFUNC( FIELD_VOID, "Wake", InputWake ),
 	DEFINE_INPUTFUNC( FIELD_VOID, "Sleep", InputSleep ),
@@ -387,6 +393,10 @@ BEGIN_DATADESC( CPhysBox )
 	DEFINE_INPUTFUNC( FIELD_VOID, "DisableMotion", InputDisableMotion ),
 	DEFINE_INPUTFUNC( FIELD_VOID, "ForceDrop", InputForceDrop ),
 	DEFINE_INPUTFUNC( FIELD_VOID, "DisableFloating", InputDisableFloating ),
+	DEFINE_INPUTFUNC( FIELD_VOID, "BecomeDebris", InputBecomeDebris ),
+
+	DEFINE_INPUTFUNC( FIELD_VOID, "Enable", InputEnable),
+	DEFINE_INPUTFUNC( FIELD_VOID, "Disable", InputDisable),
 
 	// Function pointers
 	DEFINE_ENTITYFUNC( BreakTouch ),
@@ -419,6 +429,7 @@ void CPhysBox::Spawn( void )
 	m_flDmgModBullet = func_breakdmg_bullet.GetFloat();
 	m_flDmgModClub = func_breakdmg_club.GetFloat();
 	m_flDmgModExplosive = func_breakdmg_explosive.GetFloat();
+	m_flDmgModFire = 1.0f;
 
 	ParsePropData();
 
@@ -646,6 +657,24 @@ void CPhysBox::InputSleep( inputdata_t &inputdata )
 }
 
 //-----------------------------------------------------------------------------
+// Purpose: Show and make solid
+//-----------------------------------------------------------------------------
+void CPhysBox::InputEnable( inputdata_t &inputdata )
+{
+	RemoveSolidFlags( FSOLID_NOT_SOLID );
+	RemoveEffects( EF_NODRAW );
+}
+
+//-----------------------------------------------------------------------------
+// Purpose: Hide and make not solid
+//-----------------------------------------------------------------------------
+void CPhysBox::InputDisable( inputdata_t &inputdata )
+{
+	AddSolidFlags( FSOLID_NOT_SOLID );
+	AddEffects( EF_NODRAW );
+}
+
+//-----------------------------------------------------------------------------
 // Purpose: Enable physics motion and collision response (on by default)
 //-----------------------------------------------------------------------------
 void CPhysBox::InputEnableMotion( inputdata_t &inputdata )
@@ -687,6 +716,12 @@ void CPhysBox::InputDisableMotion( inputdata_t &inputdata )
 void CPhysBox::InputDisableFloating( inputdata_t &inputdata )
 {
 	PhysEnableFloating( VPhysicsGetObject(), false );
+}
+
+// Switch our collision to debris
+void CPhysBox::InputBecomeDebris( inputdata_t &inputdata )
+{
+	SetCollisionGroup( COLLISION_GROUP_DEBRIS );
 }
 
 //-----------------------------------------------------------------------------
@@ -854,11 +889,6 @@ bool CPhysBox::HasPreferredCarryAnglesForPlayer( CBasePlayer *pPlayer )
 // CPhysExplosion -- physically simulated explosion
 //
 // ---------------------------------------------------------------------
-#define SF_PHYSEXPLOSION_NODAMAGE			0x0001
-#define SF_PHYSEXPLOSION_PUSH_PLAYER		0x0002
-#define SF_PHYSEXPLOSION_RADIAL				0x0004
-#define	SF_PHYSEXPLOSION_TEST_LOS			0x0008
-#define SF_PHYSEXPLOSION_DISORIENT_PLAYER	0x0010
 
 LINK_ENTITY_TO_CLASS( env_physexplosion, CPhysExplosion );
 
@@ -871,6 +901,7 @@ BEGIN_DATADESC( CPhysExplosion )
 
 	// Inputs
 	DEFINE_INPUTFUNC( FIELD_VOID, "Explode", InputExplode ),
+	DEFINE_INPUTFUNC( FIELD_VOID, "ExplodeAndRemove", InputExplodeAndRemove ),
 
 	// Outputs 
 	DEFINE_OUTPUT( m_OnPushedPlayer, "OnPushedPlayer" ),
@@ -922,6 +953,11 @@ CBaseEntity *CPhysExplosion::FindEntity( CBaseEntity *pEntity, CBaseEntity *pAct
 void CPhysExplosion::InputExplode( inputdata_t &inputdata )
 {
 	Explode( inputdata.pActivator, inputdata.pCaller );
+}
+
+void CPhysExplosion::InputExplodeAndRemove( inputdata_t &inputdata )
+{
+	ExplodeAndRemove( inputdata.pActivator, inputdata.pCaller );
 }
 
 
@@ -1054,6 +1090,13 @@ void CPhysExplosion::Explode( CBaseEntity *pActivator, CBaseEntity *pCaller )
 	}
 }
 
+
+void CPhysExplosion::ExplodeAndRemove( CBaseEntity *pActivator, CBaseEntity *pCaller )
+{
+	Explode( pActivator, pCaller );
+	UTIL_Remove( this );
+}
+
 //-----------------------------------------------------------------------------
 // Purpose: Draw any debug text overlays
 // Output : Current text offset from the top
@@ -1072,12 +1115,31 @@ int CPhysExplosion::DrawDebugTextOverlays( void )
 		text_offset++;
 
 		// print target entity
-		Q_snprintf(tempstr,sizeof(tempstr),"    limit to: %s", STRING(m_targetEntityName));
+		Q_snprintf(tempstr,sizeof(tempstr),"    limit to: %s", STRING( m_targetEntityName ) );
 		EntityText(text_offset,tempstr,0);
 		text_offset++;
 	}
 	return text_offset;
 }
+
+//-----------------------------------------------------------------------------
+// Purpose: Create a CPhysExplosion entity on the fly and call the explode method.
+//-----------------------------------------------------------------------------
+void CreatePhysExplosion( Vector origin, float magnitude, float radius, string_t target, float innerRadius, int flags )
+{
+	CPhysExplosion *pExplosion = (CPhysExplosion*)CBaseEntity::Create( "env_physexplosion", origin, vec3_angle, NULL );
+
+	pExplosion->m_damage = magnitude;
+	pExplosion->m_radius = radius;
+	pExplosion->m_flInnerRadius = innerRadius;
+	pExplosion->m_targetEntityName = target;
+	pExplosion->AddSpawnFlags( flags );
+
+	variant_t emptyVariant;
+	pExplosion->Spawn();
+	pExplosion->AcceptInput( "ExplodeAndRemove", NULL, NULL, emptyVariant, 0 );
+}
+
 
 
 //==================================================
@@ -1168,14 +1230,7 @@ void CPhysImpact::InputImpact( inputdata_t &inputdata )
 	Vector	end		= start + ( dir * dist );
 
 	//Trace out
-	UTIL_TraceLine( start, end, MASK_SHOT, this, COLLISION_GROUP_NONE, &trace );
-	if ( trace.startsolid )
-	{
-		// ep1_citadel_04 has a phys_impact just behind another entity, so if we startsolid then
-		// bump out just a little and retry the trace
-		Vector startOffset = start +  ( dir * 0.1 );
-		UTIL_TraceLine( startOffset , end, MASK_SHOT, this, COLLISION_GROUP_NONE, &trace );
-	}
+	UTIL_TraceLine( start, end, MASK_SHOT, this, 0, &trace );
 
 	if( debug_physimpact.GetBool() )
 	{
@@ -1671,7 +1726,7 @@ void CPhysMagnet::VPhysicsCollision( int index, gamevcollisionevent_t *pEvent )
 			return;
 
 		// If we have a model that wants to be metal, even though we hit a non-metal texture, we'll stick to it
-		if ( Q_strncmp( Studio_GetDefaultSurfaceProps( pOther->GetBaseAnimating()->GetModelPtr() ), "metal", 5 ) )
+		if ( !StringHasPrefixCaseSensitive( Studio_GetDefaultSurfaceProps( pOther->GetBaseAnimating()->GetModelPtr() ), "metal" ) )
 			return;
 	}
 
@@ -1921,223 +1976,3 @@ public:
 	}
 };
 LINK_ENTITY_TO_CLASS( info_mass_center, CInfoMassCenter );
-
-// =============================================================
-// point_push
-// =============================================================
-
-class CPointPush : public CPointEntity
-{
-public:
-	DECLARE_CLASS( CPointPush, CPointEntity );
-
-	virtual void Activate( void );
-	void PushThink( void );
-	
-	void	InputEnable( inputdata_t &inputdata );
-	void	InputDisable( inputdata_t &inputdata );
-
-	DECLARE_DATADESC();
-
-private:
-	inline void PushEntity( CBaseEntity *pTarget );
-
-	bool	m_bEnabled;
-	float	m_flMagnitude;
-	float	m_flRadius;
-	float	m_flInnerRadius;	// Inner radius where the push eminates from (on a sphere)
-};
-
-LINK_ENTITY_TO_CLASS( point_push, CPointPush );
-
-BEGIN_DATADESC( CPointPush )
-
-	DEFINE_THINKFUNC( PushThink ),
-	
-	DEFINE_KEYFIELD( m_bEnabled,	FIELD_BOOLEAN,	"enabled" ),
-	DEFINE_KEYFIELD( m_flMagnitude, FIELD_FLOAT,	"magnitude" ),
-	DEFINE_KEYFIELD( m_flRadius,	FIELD_FLOAT,	"radius" ),
-	DEFINE_KEYFIELD( m_flInnerRadius,FIELD_FLOAT,	"inner_radius" ),
-
-	DEFINE_INPUTFUNC( FIELD_VOID, "Enable", InputEnable ),
-	DEFINE_INPUTFUNC( FIELD_VOID, "Disable", InputDisable ),
-
-END_DATADESC();
-
-// Spawnflags
-#define	SF_PUSH_TEST_LOS			0x0001
-#define SF_PUSH_DIRECTIONAL			0x0002
-#define SF_PUSH_NO_FALLOFF			0x0004
-#define	SF_PUSH_PLAYER				0x0008
-#define SF_PUSH_PHYSICS				0x0010
-
-//-----------------------------------------------------------------------------
-// Purpose: 
-//-----------------------------------------------------------------------------
-void CPointPush::Activate( void )
-{
-	if ( m_bEnabled )
-	{
-		SetThink( &CPointPush::PushThink );
-		SetNextThink( gpGlobals->curtime + 0.05f );
-	}
-
-	BaseClass::Activate();
-}
-
-//-----------------------------------------------------------------------------
-// Purpose: 
-// Input  : *pTarget - 
-//-----------------------------------------------------------------------------
-void CPointPush::PushEntity( CBaseEntity *pTarget )
-{
-	Vector vecPushDir;
-	
-	if ( HasSpawnFlags( SF_PUSH_DIRECTIONAL ) )
-	{
-		GetVectors( &vecPushDir, NULL, NULL );
-	}
-	else
-	{
-		vecPushDir = ( pTarget->BodyTarget( GetAbsOrigin(), false ) - GetAbsOrigin() );
-	}
-
-	float dist = VectorNormalize( vecPushDir );
-	
-	float flFalloff = ( HasSpawnFlags( SF_PUSH_NO_FALLOFF ) ) ? 1.0f : RemapValClamped( dist, m_flRadius, m_flRadius*0.25f, 0.0f, 1.0f );
-	
-	switch( pTarget->GetMoveType() )
-	{
-	case MOVETYPE_NONE:
-	case MOVETYPE_PUSH:
-	case MOVETYPE_NOCLIP:
-		break;
-
-	case MOVETYPE_VPHYSICS:
-		{
-			IPhysicsObject *pPhys = pTarget->VPhysicsGetObject();
-			if ( pPhys )
-			{
-				// UNDONE: Assume the velocity is for a 100kg object, scale with mass
-				pPhys->ApplyForceCenter( m_flMagnitude * flFalloff * 100.0f * vecPushDir * pPhys->GetMass() * gpGlobals->frametime );
-				return;
-			}
-		}
-		break;
-
-	case MOVETYPE_STEP:
-		{
-			// NPCs cannot be lifted up properly, they need to move in 2D
-			vecPushDir.z = 0.0f;
-			
-			// NOTE: Falls through!
-		}
-
-	default:
-		{
-			Vector vecPush = (m_flMagnitude * vecPushDir * flFalloff);
-			if ( pTarget->GetFlags() & FL_BASEVELOCITY )
-			{
-				vecPush = vecPush + pTarget->GetBaseVelocity();
-			}
-			if ( vecPush.z > 0 && (pTarget->GetFlags() & FL_ONGROUND) )
-			{
-				pTarget->SetGroundEntity( NULL );
-				Vector origin = pTarget->GetAbsOrigin();
-				origin.z += 1.0f;
-				pTarget->SetAbsOrigin( origin );
-			}
-
-			pTarget->SetBaseVelocity( vecPush );
-			pTarget->AddFlag( FL_BASEVELOCITY );
-		}
-		break;
-	}
-}
-
-//-----------------------------------------------------------------------------
-// Purpose: 
-//-----------------------------------------------------------------------------
-void CPointPush::PushThink( void )
-{
-	// Get a collection of entities in a radius around us
-	CBaseEntity *pEnts[256];
-	int numEnts = UTIL_EntitiesInSphere( pEnts, 256, GetAbsOrigin(), m_flRadius, 0 );
-	for ( int i = 0; i < numEnts; i++ )
-	{
-		// Must be solid
-		if ( pEnts[i]->IsSolid() == false )
-			continue;
-
-		// Cannot be parented (only push parents)
-		if ( pEnts[i]->GetMoveParent() != NULL )
-			continue;
-
-		// Must be moveable
-		if ( pEnts[i]->GetMoveType() != MOVETYPE_VPHYSICS && 
-			 pEnts[i]->GetMoveType() != MOVETYPE_WALK && 
-			 pEnts[i]->GetMoveType() != MOVETYPE_STEP )
-			continue; 
-
-		// If we don't want to push players, don't
-		if ( pEnts[i]->IsPlayer() && HasSpawnFlags( SF_PUSH_PLAYER ) == false )
-			continue;
-
-		// If we don't want to push physics, don't
-		if ( pEnts[i]->GetMoveType() == MOVETYPE_VPHYSICS && HasSpawnFlags( SF_PUSH_PHYSICS ) == false )
-			continue;
-
-		// Test for LOS if asked to
-		if ( HasSpawnFlags( SF_PUSH_TEST_LOS ) )
-		{
-			Vector vecStartPos = GetAbsOrigin();
-			Vector vecEndPos = pEnts[i]->BodyTarget( vecStartPos, false );
-
-			if ( m_flInnerRadius != 0.0f )
-			{
-				// Find a point on our inner radius sphere to begin from
-				Vector vecDirToTarget = ( vecEndPos - vecStartPos );
-				VectorNormalize( vecDirToTarget );
-				vecStartPos = GetAbsOrigin() + ( vecDirToTarget * m_flInnerRadius );
-			}
-
-			trace_t tr;
-			UTIL_TraceLine( vecStartPos, 
-							pEnts[i]->BodyTarget( vecStartPos, false ), 
-							MASK_SOLID_BRUSHONLY, 
-							this, 
-							COLLISION_GROUP_NONE, 
-							&tr );
-
-			// Shielded
-			if ( tr.fraction < 1.0f && tr.m_pEnt != pEnts[i] )
-				continue;
-		}
-
-		// Push it along
-		PushEntity( pEnts[i] );
-	}
-
-	// Set us up for the next think
-	SetNextThink( gpGlobals->curtime + 0.05f );
-}
-
-//-----------------------------------------------------------------------------
-// Purpose: 
-//-----------------------------------------------------------------------------
-void CPointPush::InputEnable( inputdata_t &inputdata )
-{
-	m_bEnabled = true;
-	SetThink( &CPointPush::PushThink );
-	SetNextThink( gpGlobals->curtime + 0.05f );
-}
-
-//-----------------------------------------------------------------------------
-// Purpose: 
-//-----------------------------------------------------------------------------
-void CPointPush::InputDisable( inputdata_t &inputdata )
-{
-	m_bEnabled = false;
-	SetThink( NULL );
-	SetNextThink( gpGlobals->curtime );
-}

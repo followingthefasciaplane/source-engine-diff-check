@@ -1,8 +1,11 @@
+// ALL SKIP STATEMENTS THAT AFFECT THIS SHADER!!!
+// defined $LIGHTING_PREVIEW && defined $FASTPATH && $LIGHTING_PREVIEW && $FASTPATH
 #include "shaderlib/cshader.h"
 class debugtextureview_vs20_Static_Index
 {
 public:
-	debugtextureview_vs20_Static_Index( )
+	// CONSTRUCTOR
+	debugtextureview_vs20_Static_Index( IShaderShadow *pShaderShadow, IMaterialVar **params )
 	{
 	}
 	int GetIndex()
@@ -33,13 +36,15 @@ public:
 	}
 	void SetCOMPRESSED_VERTS( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nCOMPRESSED_VERTS = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bCOMPRESSED_VERTS = true;
 #endif
 	}
 public:
-	debugtextureview_vs20_Dynamic_Index()
+	// CONSTRUCTOR
+	debugtextureview_vs20_Dynamic_Index( IShaderDynamicAPI *pShaderAPI )
 	{
 #ifdef _DEBUG
 		m_bCOMPRESSED_VERTS = false;
@@ -58,3 +63,23 @@ public:
 	}
 };
 #define shaderDynamicTest_debugtextureview_vs20 vsh_forgot_to_set_dynamic_COMPRESSED_VERTS + 0
+
+static const ShaderComboInformation_t s_DynamicComboArray_DebugTextureView_vs20[1] = 
+{
+	{ "COMPRESSED_VERTS", 0, 1 },
+};
+static const ShaderComboSemantics_t DebugTextureView_vs20_combos =
+{
+	"DebugTextureView_vs20", s_DynamicComboArray_DebugTextureView_vs20, 1, NULL, 0 
+};
+
+class ConstructMe_DebugTextureView_vs20
+{
+public:
+	ConstructMe_DebugTextureView_vs20()
+	{
+		GetShaderDLL()->AddShaderComboInformation( &DebugTextureView_vs20_combos );
+	}
+};
+
+static ConstructMe_DebugTextureView_vs20 s_ConstructMe_DebugTextureView_vs20;

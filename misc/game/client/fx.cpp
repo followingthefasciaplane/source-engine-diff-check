@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -12,12 +12,12 @@
 #include "dlight.h"
 #include "iefx.h"
 #include "clientsideeffects.h"
-#include "clienteffectprecachesystem.h"
+#include "precache_register.h"
 #include "glow_overlay.h"
 #include "effect_dispatch_data.h"
 #include "c_te_effect_dispatch.h"
 #include "tier0/vprof.h"
-#include "tier1/KeyValues.h"
+#include "tier1/keyvalues.h"
 #include "effect_color_tables.h"
 #include "iviewrender_beams.h"
 #include "view.h"
@@ -30,25 +30,23 @@
 #include "tier0/memdbgon.h"
 
 //Precahce the effects
-#ifndef TF_CLIENT_DLL
-CLIENTEFFECT_REGISTER_BEGIN( PrecacheMuzzleFlash )
-CLIENTEFFECT_MATERIAL( "effects/muzzleflash1" )
-CLIENTEFFECT_MATERIAL( "effects/muzzleflash2" )
-CLIENTEFFECT_MATERIAL( "effects/muzzleflash3" )
-CLIENTEFFECT_MATERIAL( "effects/muzzleflash4" )
-#ifndef CSTRIKE_DLL
-CLIENTEFFECT_MATERIAL( "effects/bluemuzzle" )
-CLIENTEFFECT_MATERIAL( "effects/gunshipmuzzle" )
-CLIENTEFFECT_MATERIAL( "effects/gunshiptracer" )
-#ifndef HL2MP
-CLIENTEFFECT_MATERIAL( "effects/huntertracer" )
+#if !defined(TF_CLIENT_DLL) && !defined(DOTA_CLIENT_DLL)
+PRECACHE_REGISTER_BEGIN( GLOBAL, PrecacheMuzzleFlash )
+PRECACHE( MATERIAL, "effects/muzzleflash1" )
+PRECACHE( MATERIAL, "effects/muzzleflash2" )
+PRECACHE( MATERIAL, "effects/muzzleflash3" )
+PRECACHE( MATERIAL, "effects/muzzleflash4" )
+#if !defined( CSTRIKE_DLL )
+PRECACHE( MATERIAL, "effects/bluemuzzle" )
+PRECACHE( MATERIAL, "effects/gunshipmuzzle" )
+PRECACHE( MATERIAL, "effects/gunshiptracer" )
+PRECACHE( MATERIAL, "effects/huntertracer" )
+PRECACHE( MATERIAL, "sprites/physcannon_bluelight2" )
+PRECACHE( MATERIAL, "effects/combinemuzzle1" )
+PRECACHE( MATERIAL, "effects/combinemuzzle2" )
+PRECACHE( MATERIAL, "effects/combinemuzzle2_nocull" )
 #endif
-CLIENTEFFECT_MATERIAL( "sprites/physcannon_bluelight2" )
-CLIENTEFFECT_MATERIAL( "effects/combinemuzzle1" )
-CLIENTEFFECT_MATERIAL( "effects/combinemuzzle2" )
-CLIENTEFFECT_MATERIAL( "effects/combinemuzzle2_nocull" )
-#endif
-CLIENTEFFECT_REGISTER_END()
+PRECACHE_REGISTER_END()
 #endif
 
 //Whether or not we should emit a dynamic light
@@ -103,6 +101,12 @@ void FX_RicochetSound( const Vector& pos )
 	Vector org = pos;
 	CLocalPlayerFilter filter;
  	C_BaseEntity::EmitSound( filter, SOUND_FROM_WORLD, "FX_RicochetSound.Ricochet", &org );
+
+	if (RandomFloat() < 0.01) // 1% chance of playing legacy cs 1.6 ric sound.
+	{
+		C_BaseEntity::EmitSound(filter, SOUND_FROM_WORLD, "FX_RicochetSound.Ricochet_Legacy", &org);
+	}
+
 }
 
 //-----------------------------------------------------------------------------
@@ -116,7 +120,7 @@ void FX_RicochetSound( const Vector& pos )
 bool FX_GetAttachmentTransform( ClientEntityHandle_t hEntity, int attachmentIndex, Vector *origin, QAngle *angles )
 {
 	// Validate our input
-	if ( ( hEntity == INVALID_EHANDLE_INDEX ) || ( attachmentIndex < 1 ) )
+	if ( ( hEntity == INVALID_EHANDLE ) || ( attachmentIndex < 1 ) )
 	{
 		if ( origin != NULL )
 		{
@@ -303,12 +307,6 @@ void FX_MuzzleEffectAttached(
 	bool bOneFrame )
 {
 	VPROF_BUDGET( "FX_MuzzleEffect", VPROF_BUDGETGROUP_PARTICLE_RENDERING );
-
-	// If the material isn't available, let's not do anything.
-	if ( g_Mat_SMG_Muzzleflash[0] == NULL )
-	{
-		return;
-	}
 	
 	CSmartPtr<CLocalSpaceEmitter> pSimple = CLocalSpaceEmitter::Create( "MuzzleFlash", hEntity, attachmentIndex );
 	Assert( pSimple );
@@ -487,7 +485,7 @@ void MuzzleFlashCallback( const CEffectData &data )
 	tempents->MuzzleFlash( vecOrigin, vecAngles, data.m_fFlags & (~MUZZLEFLASH_FIRSTPERSON), data.m_hEntity, (data.m_fFlags & MUZZLEFLASH_FIRSTPERSON) != 0 );	
 }
 
-DECLARE_CLIENT_EFFECT( "MuzzleFlash", MuzzleFlashCallback );
+DECLARE_CLIENT_EFFECT( MuzzleFlash, MuzzleFlashCallback );
  
 //-----------------------------------------------------------------------------
 // Purpose: 
@@ -520,9 +518,9 @@ CSmartPtr<CSimpleEmitter> FX_Smoke( const Vector &origin, const Vector &velocity
 		pParticle->m_flLifetime = 0.0f;
 		pParticle->m_flDieTime = flDietime;
 		pParticle->m_vecVelocity = velocity;
-		for( int j = 0; j < 3; ++j )
+		for( int i = 0; i < 3; ++i )
 		{
-			pParticle->m_uchColor[j] = pColor[j];
+			pParticle->m_uchColor[i] = pColor[i];
 		}
 		pParticle->m_uchStartAlpha	= iAlpha;
 		pParticle->m_uchEndAlpha	= 0;
@@ -673,10 +671,10 @@ public:
 
 			// Randomize the color a little
 			int color[3][2];
-			for( int j = 0; j < 3; ++j )
+			for( int i = 0; i < 3; ++i )
 			{
-				color[j][0] = MAX( 0, m_SpurtColor[j] - 64 );
-				color[j][1] = MIN( 255, m_SpurtColor[j] + 64 );
+				color[i][0] = MAX( 0, m_SpurtColor[i] - 64 );
+				color[i][1] = MIN( 255, m_SpurtColor[i] + 64 );
 			}
 			pParticle->m_uchColor[0] = random->RandomInt( color[0][0], color[0][1] );
 			pParticle->m_uchColor[1] = random->RandomInt( color[1][0], color[1][1] );
@@ -752,7 +750,7 @@ void SmokeCallback( const CEffectData &data )
 	FX_BuildSmoke( vecOrigin, vecAngles, data.m_hEntity, data.m_nAttachmentIndex, 100.0, color ); 
 }
 
-DECLARE_CLIENT_EFFECT( "Smoke", SmokeCallback );
+DECLARE_CLIENT_EFFECT( Smoke, SmokeCallback );
 
 
 //-----------------------------------------------------------------------------
@@ -791,7 +789,7 @@ void GunshipImpactCallback( const CEffectData & data )
 
 	FX_GunshipImpact( vecPosition, Vector( 0, 0, 1 ), 100, 0, 200 );
 }
-DECLARE_CLIENT_EFFECT( "GunshipImpact", GunshipImpactCallback );
+DECLARE_CLIENT_EFFECT( GunshipImpact, GunshipImpactCallback );
 
 //-----------------------------------------------------------------------------
 //-----------------------------------------------------------------------------
@@ -809,7 +807,7 @@ void CommandPointerCallback( const CEffectData & data )
 	}
 }
 
-DECLARE_CLIENT_EFFECT( "CommandPointer", CommandPointerCallback );
+DECLARE_CLIENT_EFFECT( CommandPointer, CommandPointerCallback );
 
 
 //-----------------------------------------------------------------------------
@@ -1085,9 +1083,11 @@ void FX_Tesla( const CTeslaInfo &teslaInfo )
 		{
 			if ( !EffectOccluded( tr.endpos, 0 ) )
 			{
+				int nSlot = GET_ACTIVE_SPLITSCREEN_SLOT();
 				// Move it towards the camera
 				Vector vecFlash = tr.endpos;
-				AngleVectors( MainViewAngles(), &vecForward );
+				Vector vecForward;
+				AngleVectors( MainViewAngles(nSlot), &vecForward );
 				vecFlash -= (vecForward * 8);
 
 				g_pEffects->EnergySplash( vecFlash, -vecForward, false );
@@ -1281,7 +1281,7 @@ void FX_BuildTeslaHitbox( const CEffectData &data )
 	}
 }
 
-DECLARE_CLIENT_EFFECT( "TeslaHitboxes", FX_BuildTeslaHitbox );
+DECLARE_CLIENT_EFFECT( TeslaHitboxes, FX_BuildTeslaHitbox );
 
 
 //-----------------------------------------------------------------------------
@@ -1323,5 +1323,5 @@ void FX_BuildTeslaZap( const CEffectData &data )
 	beams->CreateBeamEntPoint( beamInfo );
 }
 
-DECLARE_CLIENT_EFFECT( "TeslaZap", FX_BuildTeslaZap );
+DECLARE_CLIENT_EFFECT( TeslaZap, FX_BuildTeslaZap );
 

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -15,11 +15,15 @@
 #include "dt_send.h"
 #include "bitbuf.h"
 #include "utlmemory.h"
+#include "tier1/utlvector.h"
+#include "tier0/platform.h"
 
-typedef unsigned int CRC32_t;
+
+typedef uint32 CRC32_t;
 
 class CStandardSendProxies;
-
+struct edict_t;
+typedef intp SerializedEntityHandle_t;
 
 #define MAX_DELTABITS_SIZE 2048
 
@@ -36,46 +40,45 @@ SendTable	*SendTabe_GetTable(int index);
 
 
 // Return the number of unique properties in the table.
-int	SendTable_GetNumFlatProps( SendTable *pTable );
+int	SendTable_GetNumFlatProps( const SendTable *pTable );
 
 // compares properties and writes delta properties
 int SendTable_WriteAllDeltaProps(
 	const SendTable *pTable,					
-	const void *pFromData,
-	const int	nFromDataBits,
-	const void *pToData,
-	const int nToDataBits,
+	SerializedEntityHandle_t fromEntity, // Can be invalid
+	SerializedEntityHandle_t toEntity,
 	const int nObjectID,
 	bf_write *pBufOut );
+
+//the buffer used to hold a list of delta changes between objects
+typedef CUtlVectorFixedGrowable< int, 128 > CalcDeltaResultsList_t;
 
 // Write the properties listed in pCheckProps and nCheckProps.
 void SendTable_WritePropList(
 	const SendTable *pTable,
-	const void *pState,
-	const int nBits,
+	SerializedEntityHandle_t toEntity,
 	bf_write *pOut,
 	const int objectID,
-	const int *pCheckProps,
-	const int nCheckProps
+	CalcDeltaResultsList_t *pCheckProps // NULL == Send ALL!
 	);
+
+//given an entity that has had a partial change, this will take the previous data block, and splice in the new values, setting new change fields to the specified tick for ones that have actually changed. This will
+//return false if a delta table is not applicable and instead a full pack needs to be done
+SerializedEntityHandle_t SendTable_BuildDeltaProperties(	edict_t *pEdict, int nObjectID, const SendTable* pTable, SerializedEntityHandle_t OldProps, 
+															CalcDeltaResultsList_t &deltaProps, CUtlMemory<CSendProxyRecipients> *pRecipients, bool& bCanReuseOldData );
+
 
 //
 // Writes the property indices that must be written to move from pFromState to pToState into pDeltaProps.
 // Returns the number of indices written to pDeltaProps.
 //
-int	SendTable_CalcDelta(
-	const SendTable *pTable,
-	
-	const void *pFromState,
-	const int nFromBits,
+void SendTable_CalcDelta(
+	const SendTable *pTable,	
+	SerializedEntityHandle_t fromEntity, // Can be invalid
+	SerializedEntityHandle_t toEntity,
+	const int objectID,
 
-	const void *pToState,
-	const int nToBits,
-
-	int *pDeltaProps,
-	int nMaxDeltaProps,
-
-	const int objectID );
+	CalcDeltaResultsList_t &deltaProps );
 
 
 // This function takes the list of property indices in startProps and the values from
@@ -87,8 +90,7 @@ int	SendTable_CalcDelta(
 int SendTable_CullPropsFromProxies( 
 	const SendTable *pTable,
 	
-	const int *pStartProps,
-	int nStartProps,
+	const CalcDeltaResultsList_t &startProps,
 
 	const int iClient,
 	
@@ -98,8 +100,7 @@ int SendTable_CullPropsFromProxies(
 	const CSendProxyRecipients *pNewStateProxies,
 	const int nNewStateProxies,
 	
-	int *pOutProps,
-	int nMaxOutProps
+	CalcDeltaResultsList_t &outProps
 	);
 
 
@@ -107,19 +108,17 @@ int SendTable_CullPropsFromProxies(
 // If pDeltaBits is NULL, then all the properties are encoded.
 bool SendTable_Encode(
 	const SendTable *pTable,
+	SerializedEntityHandle_t handle,
 	const void *pStruct, 
-	bf_write *pOut, 
 	int objectID = -1,
-	CUtlMemory<CSendProxyRecipients> *pRecipients = NULL,	// If non-null, this is an array of CSendProxyRecipients.
+	CUtlMemory<CSendProxyRecipients> *pRecipients = NULL	// If non-null, this is an array of CSendProxyRecipients.
 															// The array must have room for pTable->GetNumDataTableProxies().
-	bool bNonZeroOnly = false								// If this is true, then it will write all properties that have
-															// nonzero values.
 	);
 
 
 // In order to receive a table, you must send it from the server and receive its info
 // on the client so the client knows how to unpack it.
-bool SendTable_WriteInfos( SendTable *pTable, bf_write *pBuf );
+bool SendTable_WriteInfos( const SendTable *pTable, bf_write& bfWrite, bool bNeedsDecoder, bool bIsEnd );
 
 // do all kinds of checks on a packed entity bitbuffer
 bool SendTable_CheckIntegrity( SendTable *pTable, const void *pData, const int nDataBits );

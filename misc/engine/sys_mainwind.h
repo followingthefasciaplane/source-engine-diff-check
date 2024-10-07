@@ -1,8 +1,8 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
-//=============================================================================//
+//===========================================================================//
 
 #ifndef SYS_MAINWIND_H
 #define SYS_MAINWIND_H
@@ -10,6 +10,7 @@
 #pragma once
 #endif
 
+FORWARD_DECLARE_HANDLE( InputContextHandle_t );
 
 int MapEngineKeyToVirtualKey( int keyCode );
 
@@ -26,5 +27,6 @@ extern bool g_bVCRSingleStep;
 
 extern bool g_bShowVCRPlaybackDisplay;
 
+InputContextHandle_t GetGameInputContext();
 
 #endif // SYS_MAINWIND_H

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -34,13 +34,7 @@ public:
 
 	virtual void	PlayStartupVideos( void ) = 0;
 
-        // This will be the SDL_Window* under SDL, the WindowRef under Mac, and
-        // the HWND on Win32.
 	virtual void*	GetMainWindow( void ) = 0;
-        // This will be the HWND under Direct3D, and the SDL_Window* or
-        // WindowRef under GL.
-	virtual void*	GetMainDeviceWindow( void ) = 0;
-
 	virtual void**	GetMainWindowAddress( void ) = 0;
 	virtual void	GetDesktopInfo( int &width, int &height, int &refreshrate ) = 0;
 
@@ -53,6 +47,8 @@ public:
 	virtual bool	IsActiveApp( void ) = 0;
 
 	virtual void	DispatchAllStoredGameMessages() = 0;
+
+	virtual void    OnScreenSizeChanged( int nOldWidth, int nOldHeight ) = 0;
 };
 
 extern IGame *game;

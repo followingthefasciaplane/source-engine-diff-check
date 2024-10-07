@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright (c) 1996-2004, Valve Corporation, All rights reserved. =======
 //
 // A class representing a mesh
 //
@@ -13,7 +13,7 @@
 
 #include "movieobjects/dmeshape.h"
 #include "movieobjects/dmevertexdata.h"
-#include "materialsystem/MaterialSystemUtil.h"
+#include "materialsystem/materialsystemutil.h"
 #include "mathlib/vector.h"
 #include "tier1/utllinkedlist.h"
 #include "Color.h"
@@ -101,7 +101,7 @@ public:
 	void Draw( const matrix3x4_t &shapeToWorld, CDmeDrawSettings *pDrawSettings = NULL );
 
 	// Compute triangulated indices
-	void ComputeTriangulatedIndices( const CDmeVertexData *pBaseState, CDmeFaceSet *pFaceSet, int nFirstIndex, int *pIndices, int nOutCount );
+	void ComputeTriangulatedIndices( const CDmeVertexData *pBaseState, const CDmeFaceSet *pFaceSet, int nFirstIndex, int *pIndices, int nOutCount ) const;
 
 	// Compute a default per-vertex tangent given normal data + uv data for all vertex data referenced by this mesh
 	void ComputeDefaultTangentData( bool bSmoothTangents = false );
@@ -112,11 +112,11 @@ public:
 	// Delta states
 	int DeltaStateCount() const;
 	CDmeVertexDeltaData *GetDeltaState( int nDeltaIndex ) const;
-	CDmeVertexDeltaData *FindDeltaState( const char *pDeltaName ) const;
-	CDmeVertexDeltaData *FindOrCreateDeltaState( const char *pDeltaName );
+	CDmeVertexDeltaData *FindDeltaState( const char *pDeltaName, bool bSortDeltaName = true ) const;
+	CDmeVertexDeltaData *FindOrCreateDeltaState( const char *pDeltaName, bool bSortDeltaName = true );
 	bool DeleteDeltaState( const char *pDeltaName );
 	bool ResetDeltaState( const char *pDeltaName );
-	int FindDeltaStateIndex( const char *pDeltaName ) const;
+	int FindDeltaStateIndex( const char *pDeltaName, bool bSortDeltaName = true ) const;
 	void SetDeltaStateWeight( int nDeltaIndex, MeshDeltaWeightType_t type, float flMorphWeight );
 	void SetDeltaStateWeight( int nDeltaIndex, MeshDeltaWeightType_t type, float flLeftWeight, float flRightWeight );
 	CDmeVertexDeltaData *ModifyOrCreateDeltaStateFromBaseState( const char *pDeltaName, CDmeVertexData *pPassedBase = NULL, bool absolute = false );
@@ -141,6 +141,13 @@ public:
 
 	// Add the delta into the vertex data state weighted by the weight and masked by the weight map
 	bool AddMaskedDelta(
+		CDmeVertexDeltaData *pDelta,
+		CDmeVertexData *pDst = NULL,
+		float weight = 1.0f,
+		const CDmeSingleIndexedComponent *pMask = NULL );
+
+	// Add the delta into the vertex data state weighted by the weight and masked by the weight map
+	bool AddCorrectedMaskedDelta(
 		CDmeVertexDeltaData *pDelta,
 		CDmeVertexData *pDst = NULL,
 		float weight = 1.0f,
@@ -213,7 +220,13 @@ public:
 	// Replace all instances of a material with a different material
 	void ReplaceMaterial( const char *pOldMaterialName, const char *pNewMaterialName );
 
-	// makes all the normals in the mesh unit length
+	// Reskins the mesh to new bones
+	// The joint index remap maps an initial bone index to a new bone index
+	void Reskin( const int *pJointTransformIndexRemap );
+
+	template < class T_t > static int GenerateCompleteDataForDelta( const CDmeVertexDeltaData *pDelta, T_t *pFullData, int nFullData, CDmeVertexData::StandardFields_t standardField );
+
+	// Normalizes all normals
 	void NormalizeNormals();
 
 	// Collapses redundant normals in the model
@@ -223,7 +236,6 @@ public:
 
 	// SWIG errors on the parsing of something in the private section of DmeMesh, it isn't exposed by SWIG anyway, so have SWIG ignore it
 #ifndef SWIG
-	template < class T_t > static int GenerateCompleteDataForDelta( const CDmeVertexDeltaData *pDelta, T_t *pFullData, int nFullData, CDmeVertexData::StandardFields_t standardField );
 
 private:
 	friend class CDmMeshComp;
@@ -298,12 +310,15 @@ private:
 	void SetDeltaNormalData( int nDeltaIndex, int nNormalCount, Vector *pNormals );
 	// Renders normals 
 	void RenderNormals( matrix3x4_t *pPoseToWorld, RenderVertexDelta_t *pDelta );
+	void CacheHighlightVerts( matrix3x4_t *pPoseToWorld, RenderVertexDelta_t *pDelta, CDmeDrawSettings *pDmeDrawSettings );
 
 	// Writes triangulated indices for a face set into a meshbuilder
 	void WriteTriangluatedIndices( const CDmeVertexData *pBaseState, CDmeFaceSet *pFaceSet, CMeshBuilder &meshBuilder );
 
 	// Initializes the normal material
 	static void InitializeNormalMaterial();
+	// Initializes the wireframe material
+	static void InitializeWireframeMaterial();
 
 	// Sort function 
 	static int DeltaStateLessFunc( const void * lhs, const void * rhs );
@@ -329,6 +344,9 @@ private:
 	// Builds a list of all of the dependent delta states that do not already exist
 	bool BuildMissingDependentDeltaList( CDmeVertexDeltaData *pDeltaState, CUtlVector< int > &controlIndices, CUtlVector< CUtlVector< int > > &dependentStates ) const;
 
+	// Cleans up the hw meshes
+	void CleanupHWMesh();
+
 	static void ComputeCorrectedPositionsFromActualPositions( const CUtlVector< int > &deltaStateList, int nPositionCount, Vector *pPositions );
 
 	template < class T_t > void AddCorrectedDelta(
@@ -344,13 +362,6 @@ private:
 		const CUtlVector< int > &baseIndices,
 		const DeltaComputation_t &deltaComputation,
 		const char *pFieldName,
-		float weight = 1.0f,
-		const CDmeSingleIndexedComponent *pMask = NULL );
-
-	// Add the delta into the vertex data state weighted by the weight and masked by the weight map
-	bool AddCorrectedMaskedDelta(
-		CDmeVertexDeltaData *pDelta,
-		CDmeVertexData *pDst = NULL,
 		float weight = 1.0f,
 		const CDmeSingleIndexedComponent *pMask = NULL );
 
@@ -460,15 +471,14 @@ private:
 	// Normal rendering materials
 	static bool s_bNormalMaterialInitialized;
 	static CMaterialReference s_NormalMaterial;
-	static CMaterialReference s_NormalErrorMaterial;
 
-	static bool s_bMaterialsInitialized;
+	// Wireframe rendering materials
+	static bool s_bWireframeMaterialInitialized;
 	static CMaterialReference s_WireframeMaterial;
-	static CMaterialReference s_WireframeOnShadedMaterial;
 
-	friend class CRenderInfo;
+	friend class CDmeMeshRenderInfo;
 
-#endif // ndef SWIG
+#endif // #ifndef SWIG
 };
 
 
@@ -491,6 +501,37 @@ inline CDmeVertexData *CDmeMesh::GetBaseState( int nBaseIndex ) const
 // Utility method to compute default tangent data on all meshes in the sub-dag hierarchy
 //-----------------------------------------------------------------------------
 void ComputeDefaultTangentData( CDmeDag *pDag, bool bSmoothTangents );
+
+
+//-----------------------------------------------------------------------------
+// Helper class to deal with software skinning 
+//-----------------------------------------------------------------------------
+class CDmeMeshRenderInfo
+{
+public:
+	CDmeMeshRenderInfo( CDmeVertexData *pBaseState );
+
+	void ComputePosition( int nPosIndex, const matrix3x4_t *pPoseToWorld, Vector *pDeltaPosition, Vector *pPosition );
+	void ComputePosition( int nPosIndex, const matrix3x4_t *pPoseToWorld, CDmeMesh::RenderVertexDelta_t *pDelta, Vector *pPosition );
+	void ComputeVertex( int vi, const matrix3x4_t *pPoseToWorld, CDmeMesh::RenderVertexDelta_t *pDelta, Vector *pPosition, Vector *pNormal, Vector4D *pTangent );
+
+	inline bool HasPositionData() const { return m_bHasPositionData; }
+	inline bool HasNormalData() const { return m_bHasNormalData; }
+	inline bool HasTangentData() const { return m_bHasTangentData; }
+private:
+	const CUtlVector<int>& m_PositionIndices;
+	const CUtlVector<Vector>& m_PositionData;
+	const CUtlVector<int>& m_NormalIndices;
+	const CUtlVector<Vector>& m_NormalData;
+	const CUtlVector<int>& m_TangentIndices;
+	const CUtlVector<Vector4D>& m_TangentData;
+	const CDmeVertexData *m_pBaseState;
+	int m_nJointCount;
+	bool m_bHasPositionData;
+	bool m_bHasNormalData;
+	bool m_bHasTangentData;
+	bool m_bHasSkinningData;
+};
 
 
 #endif // DMEMESH_H

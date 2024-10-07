@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose:
 //
@@ -9,17 +9,10 @@
 
 #include "utlmap.h"
 #include "simtimer.h"
-#include "AI_Criteria.h"
+#include "ai_criteria.h"
 #include "ai_baseactor.h"
 #include "ai_speechfilter.h"
-#ifndef _WIN32
-#undef min
-#endif
 #include "stdstring.h"
-#ifndef _WIN32
-#undef MINMAX_H
-#include "minmax.h"
-#endif
 
 #if defined( _WIN32 )
 #pragma once
@@ -248,9 +241,29 @@ enum AISpeechTargetSearchFlags_t
 
 struct AISpeechSelection_t
 {
-	std::string		concept;
-	AI_Response		Response;
-	EHANDLE			hSpeechTarget;
+	AISpeechSelection_t()
+	 :	response()
+	{
+	}
+	
+	void Set( AIConcept_t newConcept, AI_Response &nuResponse, CBaseEntity *pTarget = NULL )
+	{
+		response = nuResponse;
+		concept = newConcept;
+		hSpeechTarget = pTarget;
+	}
+
+	// Use in a specific case where the response has already been set.
+	void Set( AIConcept_t newConcept, CBaseEntity *pTarget  )
+	{
+		Assert( !response.IsEmpty() );
+		concept = newConcept;
+		hSpeechTarget = pTarget;
+	}
+	
+	std::string 		concept;
+	AI_Response 		response;
+	EHANDLE			hSpeechTarget;				
 };
 
 //-------------------------------------
@@ -292,7 +305,7 @@ public:
 	//---------------------------------
 	// Damage handling
 	//---------------------------------
-	void		TraceAttack( const CTakeDamageInfo &info, const Vector &vecDir, trace_t *ptr, CDmgAccumulator *pAccumulator );
+	void		TraceAttack( const CTakeDamageInfo &info, const Vector &vecDir, trace_t *ptr );
 	int			OnTakeDamage_Alive( const CTakeDamageInfo &info );
 	int			TakeHealth( float flHealth, int bitsDamageType );
 	void		Event_Killed( const CTakeDamageInfo &info );
@@ -335,7 +348,7 @@ public:
 	//---------------------------------
 
 	bool 		SelectSpeechResponse( AIConcept_t concept, const char *pszModifiers, CBaseEntity *pTarget, AISpeechSelection_t *pSelection );
-	void		SetPendingSpeech( AIConcept_t concept, AI_Response &Response );
+	void		SetPendingSpeech( AIConcept_t concept, AI_Response *pResponse );
 	void 		ClearPendingSpeech();
 	bool		HasPendingSpeech()	{ return !m_PendingConcept.empty(); }
 
@@ -356,7 +369,7 @@ public:
 	
 	bool		IsOkToSpeak( void );
 	bool		IsOkToCombatSpeak( void );
-	bool		IsOkToSpeakInResponseToPlayer( void );
+	virtual bool IsOkToSpeakInResponseToPlayer( void );
 	
 	bool		ShouldSpeakRandom( AIConcept_t concept, int iChance );
 	bool		IsAllowedToSpeak( AIConcept_t concept, bool bRespondingToPlayer = false );
@@ -462,9 +475,6 @@ private:
 	float	m_flTimeLastRegen;		// Last time I regenerated a bit of health.
 	float	m_flHealthAccumulator;	// Counterpart to the damage accumulator in CBaseCombatCharacter. So ally health regeneration is accurate over time.
 
-#ifdef _XBOX
-protected:
-#endif
 	DECLARE_DATADESC();
 protected:
 	DEFINE_CUSTOM_AI;

@@ -1,8 +1,8 @@
-//====== Copyright © 1996-2006, Valve Corporation, All rights reserved. =======
+//========== Copyright (c) Valve Corporation, All rights reserved. ==========//
 //
 // Purpose: 
 //
-//=============================================================================
+//===========================================================================//
 
 #include "common_flashlight_fxc.h"
 #include "shader_constant_register_map.h"
@@ -18,6 +18,16 @@ sampler IrisSampler				: register( s3 );
 sampler FlashlightDepthSampler	: register( s4 );
 sampler RandomRotationSampler	: register( s5 );
 #endif
+
+#if UBERLIGHT && defined( SHADER_MODEL_PS_3_0 )
+const float3 g_vSmoothEdge0							: register( PSREG_UBERLIGHT_SMOOTH_EDGE_0 );		// ps_3_0 and up (over 32 registers)
+const float3 g_vSmoothEdge1							: register( PSREG_UBERLIGHT_SMOOTH_EDGE_1 );
+const float3 g_vSmoothOneOverWidth					: register( PSREG_UBERLIGHT_SMOOTH_EDGE_OOW );
+const float4 g_vShearRound							: register( PSREG_UBERLIGHT_SHEAR_ROUND );
+const float4 g_aAbB									: register( PSREG_UBERLIGHT_AABB );
+const float4x4 g_FlashlightWorldToLight				: register( PSREG_UBERLIGHT_WORLD_TO_LIGHT );
+#endif
+
 
 #if defined( SHADER_MODEL_PS_1_1 ) || defined ( SHADER_MODEL_PS_1_4 )
 
@@ -43,10 +53,10 @@ struct PS_INPUT
 float4 main( PS_INPUT i ) : COLOR
 {
 #if defined(SHADER_MODEL_PS_2_0)
-	float3 spotColor = tex2Dproj( SpotSampler, i.spotTexCoord.xyzw ) * cFlashlightColor;
+	float3 spotColor = tex2Dproj( SpotSampler, i.spotTexCoord.xyzw ) * cFlashlightColor.rgb;
 #elif ( defined(SHADER_MODEL_PS_2_B) || defined(SHADER_MODEL_PS_3_0) )
 	float3 vProjCoords = i.spotTexCoord.xyz / i.spotTexCoord.w;
-	float3 spotColor = tex2D( SpotSampler, vProjCoords ) * cFlashlightColor;
+	float3 spotColor = tex2D( SpotSampler, vProjCoords ).rgb * cFlashlightColor.rgb;
 #else
 	float3 spotColor = tex2D( SpotSampler, i.spotTexCoord );
 #endif
@@ -72,16 +82,25 @@ float4 main( PS_INPUT i ) : COLOR
 
 	// Do shadow depth mapping...
 #if FLASHLIGHTSHADOWS && ( defined(SHADER_MODEL_PS_2_B) || defined(SHADER_MODEL_PS_3_0) )
-	float flShadow = DoFlashlightShadow( FlashlightDepthSampler, RandomRotationSampler, vProjCoords, i.projPos.xy / i.projPos.z, FLASHLIGHTDEPTHFILTERMODE, g_vShadowTweaks, true );
+	float flShadow = DoFlashlightShadow( FlashlightDepthSampler, RandomRotationSampler, vProjCoords, i.projPos.xy / i.projPos.z, FLASHLIGHTDEPTHFILTERMODE, g_vShadowTweaks );
 	float flAttenuated = lerp( flShadow, 1.0f, g_vShadowTweaks.y );								// Blend between fully attenuated and not attenuated
 	flShadow = lerp( flAttenuated, flShadow, dot(i.vertAtten, float3(0.30f, 0.59f, 0.11f) ) );	// Blend between shadow and above, according to light attenuation
 	outcolor *= flShadow * spotColor * albedo;
+
+#if UBERLIGHT && defined( SHADER_MODEL_PS_3_0 )
+	float4 uberLightPosition = mul( float4( i.worldPos, 1.0f ), g_FlashlightWorldToLight ).yzxw;
+	outcolor *= uberlight( uberLightPosition, g_vSmoothEdge0, g_vSmoothEdge1,
+			    g_vSmoothOneOverWidth, g_vShearRound.xy, g_aAbB, g_vShearRound.zw );
+#endif
+
 #else
 	outcolor *= spotColor * albedo;
 #endif
 
 	// NOTE!!  This has to be last to avoid loss of range.
 	outcolor *= i.vertAtten;
+	outcolor  = max( 0, outcolor );
+
 #if defined( SHADER_MODEL_PS_1_1 ) || defined ( SHADER_MODEL_PS_1_4 )
 	return float4( outcolor, baseSample.a );
 #else

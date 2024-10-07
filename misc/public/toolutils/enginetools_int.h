@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -11,6 +11,8 @@
 #pragma once
 #endif
 
+#include "tier1/interface.h"
+#include "interfaces/interfaces.h"
 
 //-----------------------------------------------------------------------------
 // Forward declarations
@@ -23,6 +25,7 @@ class IFileSystem;
 class IP4;
 class IVDebugOverlay;
 class IDmSerializers;
+class IVModelInfoClient;
 
 
 //-----------------------------------------------------------------------------
@@ -32,8 +35,13 @@ extern IEngineTool	*enginetools;
 extern IEngineVGui	*enginevgui;
 extern IServerTools	*servertools;
 extern IClientTools	*clienttools;
+extern IVModelInfoClient *modelinfoclient;
+
+#ifndef HAMMER_FILESYSTEM_DEFINED
 extern IFileSystem	*g_pFileSystem;
-extern IP4			*p4;
+#endif
+
+DECLARE_TIER2_INTERFACE( IP4, p4 );
 extern IVDebugOverlay *debugoverlay;
 extern IDmSerializers *dmserializers;
 

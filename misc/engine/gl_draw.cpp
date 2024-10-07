@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -21,8 +21,28 @@
 #include "tier0/memdbgon.h"
 
 Vector g_CurrentViewOrigin(0, 0, 0), g_CurrentViewForward(1, 0, 0), g_CurrentViewRight(0, -1, 0), g_CurrentViewUp(0, 0, 1);
-Vector g_MainViewOrigin(0, 0, 0), g_MainViewForward(1, 0, 0), g_MainViewRight(0, -1, 0), g_MainViewUp(0, 0, 1);
 
+Vector g_MainViewOrigin[ MAX_SPLITSCREEN_CLIENTS ];
+Vector g_MainViewForward[ MAX_SPLITSCREEN_CLIENTS ];
+Vector g_MainViewRight[ MAX_SPLITSCREEN_CLIENTS ];
+Vector g_MainViewUp[ MAX_SPLITSCREEN_CLIENTS ];
+
+class CInitMainView
+{
+public:
+	CInitMainView()
+	{
+		for ( int i = 0 ; i < MAX_SPLITSCREEN_CLIENTS; ++i )
+		{
+			g_MainViewOrigin[ i ]	= vec3_origin;
+			g_MainViewForward[ i ]	= Vector( 1, 0, 0 );
+			g_MainViewRight[ i ]	= Vector( 0, -1, 0 );
+			g_MainViewUp[ i ]		= Vector( 0, 0, 1 );
+		}
+	}
+};
+
+CInitMainView g_InitMainView;
 
 //-----------------------------------------------------------------------------
 // Purpose: 
@@ -45,7 +65,7 @@ static IMaterial *GL_LoadMaterialNoRef( const char *pName, const char *pTextureG
 {
 	IMaterial *material = NULL;
 
-	if( mat_loadtextures.GetInt() )
+	if ( mat_loadtextures.GetInt() )
 	{
 		material = materials->FindMaterial( pName, pTextureGroupName );
 	}
@@ -62,14 +82,19 @@ static IMaterial *GL_LoadMaterialNoRef( const char *pName, const char *pTextureG
 // Input  : *pName - 
 // Output : IMaterial
 //-----------------------------------------------------------------------------
-IMaterial *GL_LoadMaterial( const char *pName, const char *pTextureGroupName )
+IMaterial *GL_LoadMaterial( const char *pName, const char *pTextureGroupName, bool bPrecache )
 {
 	IMaterial *material;
 	
 	material = GL_LoadMaterialNoRef( pName, pTextureGroupName );
-	if( material )
+	if ( material )
 	{
 		material->IncrementReferenceCount();
+		if ( bPrecache )
+		{
+			// forces the material to finalize its load
+			material->GetMappingWidth();
+		}
 	}
 	return material;
 }

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -32,7 +32,7 @@
 #include "mathlib/compressed_light_cube.h"
 #include "datacache/imdlcache.h"
 #include "bitmap/cubemap.h"
-
+#include "memstack.h"
 
 //-----------------------------------------------------------------------------
 // forward declarations
@@ -220,15 +220,22 @@ typedef CCubeMap< LightShadowZBufferSample_t, SHADOW_ZBUF_RES> lightzbuffer_t;
 #define MODELFLAG_TRANSLUCENT_TWOPASS			0x0008	// render opaque part in opaque pass
 #define MODELFLAG_FRAMEBUFFER_TEXTURE			0x0010	// we need the framebuffer as a texture
 #define MODELFLAG_HAS_DLIGHT					0x0020	// need to check dlights
+#define MODELFLAG_VIEW_WEAPON_MODEL				0x0040	// monitored by weapon model cache
+#define MODELFLAG_RENDER_DISABLED				0x0080	// excluded for compliance with government regulations
 #define MODELFLAG_STUDIOHDR_USES_FB_TEXTURE		0x0100	// persisted from studiohdr
 #define MODELFLAG_STUDIOHDR_USES_BUMPMAPPING	0x0200	// persisted from studiohdr
 #define MODELFLAG_STUDIOHDR_USES_ENV_CUBEMAP	0x0400	// persisted from studiohdr
 #define MODELFLAG_STUDIOHDR_AMBIENT_BOOST		0x0800	// persisted from studiohdr
 #define MODELFLAG_STUDIOHDR_DO_NOT_CAST_SHADOWS	0x1000	// persisted from studiohdr
+#define MODELFLAG_STUDIOHDR_IS_STATIC_PROP		0x2000	// persisted from studiohdr
+#define MODELFLAG_STUDIOHDR_BAKED_VERTEX_LIGHTING_IS_INDIRECT_ONLY	0x4000	// persisted from studiohdr
+
+
 
 struct worldbrushdata_t
 {
 	int			numsubmodels;
+	int			nWorldFaceCount;
 
 	int			numplanes;
 	cplane_t	*planes;
@@ -280,8 +287,8 @@ struct worldbrushdata_t
 	msurface2_t	*surfaces2;
 	msurfacelighting_t *surfacelighting;
 	msurfacenormal_t *surfacenormals;
-
-	bool		unloadedlightmaps;
+	unsigned short *m_pSurfaceBrushes;
+	dfacebrushlist_t *m_pSurfaceBrushList;
 
 	int			numvertindices;
 	unsigned short *vertindices;
@@ -290,6 +297,7 @@ struct worldbrushdata_t
 	SurfaceHandle_t *marksurfaces;
 
 	ColorRGBExp32		*lightdata;
+	int					m_nLightingDataSize;
 
 	int			numworldlights;
 	dworldlight_t *worldlights;
@@ -323,6 +331,15 @@ struct worldbrushdata_t
 
 	mleafambientindex_t		*m_pLeafAmbient;
 	mleafambientlighting_t	*m_pAmbientSamples;
+
+	// specific technique that discards all the lightmaps after load
+	// no lightstyles or dlights are possible with this technique
+	bool		m_bUnloadedAllLightmaps;
+
+	CMemoryStack	*m_pLightingDataStack;
+
+	int              m_nBSPFileSize;
+
 #if 0
 	int			numportals;
 	mportal_t	*portals;
@@ -337,11 +354,19 @@ struct worldbrushdata_t
 	unsigned short *clusterportals;
 #endif
 };
+
 // only models with type "mod_brush" have this data
 struct brushdata_t
 {
 	worldbrushdata_t	*pShared;
-	int			firstmodelsurface, nummodelsurfaces;
+	int				firstmodelsurface;
+	int				nummodelsurfaces;
+
+	// track the union of all lightstyles on this brush.  That way we can avoid
+	// searching all faces if the lightstyle hasn't changed since the last update
+	int				nLightstyleLastComputedFrame;
+	unsigned short	nLightstyleIndex;	// g_ModelLoader actually holds the allocated data here
+	unsigned short	nLightstyleCount;
 
 	unsigned short	renderHandle;
 	unsigned short	firstnode;
@@ -359,11 +384,10 @@ struct spritedata_t
 struct model_t
 {
 	FileNameHandle_t	fnHandle;
-	CUtlString			strName;
+	char				szPathName[MAX_OSPATH];
 
 	int					nLoadFlags;		// mark loaded/not loaded
 	int					nServerCount;	// marked at load
-	IMaterial			**ppMaterials;	// null-terminated runtime material cache; ((intptr_t*)(ppMaterials))[-1] == nMaterials
 
 	modtype_t			type;
 	int					flags;			// MODELFLAG_???
@@ -371,13 +395,14 @@ struct model_t
 	// volume occupied by the model graphics	
 	Vector				mins, maxs;
 	float				radius;
-
+	KeyValues			*m_pKeyValues;
 	union
 	{
 		brushdata_t		brush;
 		MDLHandle_t		studio;
 		spritedata_t	sprite;
 	};
+
 };
 
 
@@ -431,8 +456,12 @@ inline class IDispInfo *MLeaf_Disaplcement( mleaf_t *pLeaf, int index, worldbrus
 #define SURFDRAW_UNDERWATER		0x00020000
 #define SURFDRAW_ABOVEWATER		0x00040000
 #define SURFDRAW_HASDLIGHT		0x00080000	// Has some kind of dynamic light that must be checked
-#define SURFDRAW_DLIGHTPASS		0x00100000	// Must be drawn in the dlight pass
-#define SURFDRAW_UNUSED2		0x00200000	// unused
+
+// BEGIN HACK PORTAL2
+#define SURFDRAW_NOPAINT		0x00100000	// nopaint
+#define SURFDRAW_PAINTED		0x00200000	// painted surface
+// END HACK PORTAL2
+
 #define SURFDRAW_VERTCOUNT_MASK	0xFF000000	// 8 bits of vertex count
 #define SURFDRAW_SORTGROUP_MASK	0x00C00000	// 2 bits of sortgroup
 
@@ -453,7 +482,6 @@ struct msurface1_t
 	} prims;
 };
 
-#pragma pack(1)
 struct msurfacenormal_t
 {
 	unsigned int firstvertnormal;
@@ -461,7 +489,6 @@ struct msurfacenormal_t
 	// FIXME: Should I just point to the leaf here since it has this data?????????????
 //	short fogVolumeID;			// -1 if not in fog  
 };
-#pragma pack()
 
 // This is a single cache line (32 bytes)
 struct msurfacelighting_t
@@ -494,7 +521,6 @@ struct msurfacelighting_t
 const int WORLD_DECAL_HANDLE_INVALID = 0xFFFF;
 typedef unsigned short WorldDecalHandle_t;
 
-#pragma pack(1)
 // NOTE: 32-bytes.  Aligned/indexed often
 struct msurface2_t
 {
@@ -502,7 +528,11 @@ struct msurface2_t
 	// These are packed in to flags now
 	//unsigned char			vertCount;		// number of verts for this surface
 	//unsigned char			sortGroup;		// only uses 2 bits, subdivide?
-	cplane_t				*plane;			// pointer to shared plane	
+#ifdef _PS3
+	cplane_t				m_plane;			// pointer to shared plane
+#else
+	cplane_t*				plane;			// pointer to shared plane
+#endif
 	int						firstvertindex;	// look up in model->vertindices[] (only uses 17-18 bits?)
 	WorldDecalHandle_t		decals;
 	ShadowDecalHandle_t		m_ShadowDecals; // unsigned short
@@ -516,7 +546,6 @@ struct msurface2_t
 	IDispInfo				*pDispInfo;         // displacement map information
 	int						visframe;		// should be drawn when node is crossed
 };
-#pragma pack()
 
 inline unsigned short MSurf_AreDynamicShadowsEnabled( SurfaceHandle_t surfID )
 {
@@ -595,7 +624,11 @@ inline int& MSurf_DLightBits( SurfaceHandle_t surfID, worldbrushdata_t *pData = 
 
 inline cplane_t& MSurf_Plane( SurfaceHandle_t surfID )
 {
+#ifndef _PS3
 	return *surfID->plane;
+#else
+	return surfID->m_plane;
+#endif
 }
 
 inline int& MSurf_FirstVertIndex( SurfaceHandle_t surfID )

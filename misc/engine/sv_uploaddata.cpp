@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -18,7 +18,7 @@
 #include "host.h"
 #include "blockingudpsocket.h"
 #include "cserserverprotocol_engine.h"
-#include "KeyValues.h"
+#include "keyvalues.h"
 #include "bitbuf.h"
 #include "mathlib/IceKey.H"
 #include "net.h"
@@ -68,7 +68,7 @@ static void EncryptBuffer( IceKey& cipher, unsigned char *bufData, uint bufferSi
 static void BuildUploadDataMessage( bf_write& buf, char const *tablename, KeyValues *fields )
 {
 	bf_write	encrypted;
-	ALIGN4 byte		encrypted_data[ 2048 ] ALIGN4_POST;
+	byte		encrypted_data[ 2048 ];
 
 	buf.WriteByte( C2M_UPLOADDATA );
 	buf.WriteByte( '\n' );
@@ -129,9 +129,9 @@ static void BuildUploadDataMessage( bf_write& buf, char const *tablename, KeyVal
 //-----------------------------------------------------------------------------
 bool UploadData( char const *cserIP, char const *tablename, KeyValues *fields )
 {
-#ifndef _XBOX
+#ifndef _GAMECONSOLE
 	bf_write	buf;
-	ALIGN4 byte		data[ 2048 ] ALIGN4_POST;
+	byte		data[ 2048 ];
 		
 	buf.StartWriting( data, sizeof( data ) );
 

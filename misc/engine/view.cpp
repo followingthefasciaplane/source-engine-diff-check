@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright � 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -36,18 +36,17 @@
 #include "engine/view_sharedv1.h"
 #include "ispatialpartitioninternal.h"
 #include "toolframework/itoolframework.h"
-#include "icommandline.h"
-#include "VGuiMatSurface/IMatSystemSurface.h"
-#include "sourcevr/isourcevirtualreality.h"
-#include "materialsystem/itexture.h"
-#include "render.h"
-#include "iclientvirtualreality.h"
+#include "tier1/callqueue.h"
+#include "filesystem/IQueuedLoader.h"
+#include "r_decal.h"
 
-#if defined( REPLAY_ENABLED )
-#include "replay/iclientreplay.h"
-#include "replay_internal.h"
+#ifdef _PS3
+#include "tls_ps3.h"
 #endif
 
+#if defined( INCLUDE_SCALEFORM )
+#include "scaleformui/scaleformui.h"
+#endif
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
@@ -62,8 +61,7 @@ bool g_bIsRenderingVGuiOnly = false;
 colorVec R_LightPoint (Vector& p);
 void R_DrawLightmaps( IWorldRenderList *pList, int pageId );
 void R_DrawIdentityBrushModel( IWorldRenderList *pRenderList, model_t *model );
-
-static ConVar mat_color_projection( "mat_color_projection", "0", FCVAR_ARCHIVE );
+static ConVar r_brush_queue_mode( "r_brush_queue_mode", "0", FCVAR_CHEAT );
 
 /*
 
@@ -88,8 +86,6 @@ bool V_CheckGamma( void )
 {
 	if ( IsX360() )
 		return false;
-
-	tmZoneFiltered( TELEMETRY_LEVEL0, 50, TMZF_NONE, "%s", __FUNCTION__ );
 
 	static int lastLightmap = -1;
 	extern void GL_RebuildLightmaps( void );
@@ -121,40 +117,50 @@ void V_Shutdown( void )
 	// TODO, cleanup
 }
 
-
 //-----------------------------------------------------------------------------
 // Purpose: 
 // Input  :  - 
 //-----------------------------------------------------------------------------
 void V_RenderVGuiOnly_NoSwap()
 {
-	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
-
 	// Need to clear the screen in this case, cause we're not drawing
 	// the loading screen.
 	UpdateMaterialSystemConfig();
 
-	if( UseVR() && g_pClientVR )
-	{
-		g_pClientVR->DrawMainMenu();
-	}
-	else
-	{
-		CMatRenderContextPtr pRenderContext( materials );
+	CMatRenderContextPtr pRenderContext( materials );
+	
+	pRenderContext->AntiAliasingHint( AA_HINT_MENU ); // would be better to do "Disable MLAA" here
 		   
-		pRenderContext->ClearBuffers( true, true );
+	pRenderContext->ClearBuffers( true, true );
 
+#if defined( INCLUDE_SCALEFORM )
+	// Render scaleform before vgui
+	pRenderContext->AdvanceAndRenderScaleformSlot( SF_FULL_SCREEN_SLOT );
+#endif
 
-		EngineVGui()->Paint( (PaintMode_t)(PAINT_UIPANELS | PAINT_CURSOR ));
-	}
+	EngineVGui()->Paint( PAINT_UIPANELS );
+
+#if defined( INCLUDE_SCALEFORM )
+	// Render cursor after vgui
+	pRenderContext->AdvanceAndRenderScaleformCursor();
+#endif
 }
 
 //-----------------------------------------------------------------------------
 // Purpose: Renders only vgui (for loading progress) including buffer swapping and vgui simulation
 //-----------------------------------------------------------------------------
+
+bool s_bTriggeredHostError = false;
+
 void V_RenderVGuiOnly( void )
 {
 	materials->BeginFrame( host_frametime );
+
+	CMatRenderContextPtr pRenderContext;
+	pRenderContext.GetFrom( materials );
+	pRenderContext->RenderScaleformSlot(SF_RESERVED_BEGINFRAME_SLOT);
+	pRenderContext.SafeRelease();
+
 	EngineVGui()->Simulate();
 
 	g_EngineRenderer->FrameBegin();
@@ -166,44 +172,36 @@ void V_RenderVGuiOnly( void )
 	toolframework->RenderFrameEnd();
 
 	g_EngineRenderer->FrameEnd( );
+
+	pRenderContext.GetFrom( materials );
+	pRenderContext->RenderScaleformSlot(SF_RESERVED_ENDFRAME_SLOT);
+	pRenderContext.SafeRelease();
+
 	materials->EndFrame();
 
 	Shader_SwapBuffers();
+
+#ifdef _PS3
+	if ( GetTLSGlobals()->bNormalQuitRequested )
+	{
+		// hack to prevent PS/3 deadlock on queued loader render mutex when quitting during loading a map
+		uint nUnlockedQueuedRenderer = g_pQueuedLoader ? g_pQueuedLoader->UnlockProgressBarMutex() : 0;
+		
+		if ( !s_bTriggeredHostError )
+		{
+			Assert( ThreadInMainThread() );
+			s_bTriggeredHostError = true;
+			Host_Error( "SystemQuitRequest" );
+		}
+		// hack to prevent PS/3 deadlock on queued loader render mutex when quitting during loading a map
+		if( g_pQueuedLoader )
+		{
+			g_pQueuedLoader->LockProgressBarMutex( nUnlockedQueuedRenderer );
+		}
+	}
+#endif
 }
 
-
-void FullViewColorAdjustment( )
-{
-	if ( mat_color_projection.GetInt() == 0 )
-	{
-		return;
-	}
-
-	CMatRenderContextPtr pRenderContext( materials );
-
-	ITexture *pFullFrameFB1 = materials->FindTexture( "_rt_FullFrameFB1", TEXTURE_GROUP_RENDER_TARGET );
-
-	pRenderContext->CopyRenderTargetToTextureEx( pFullFrameFB1, 0, NULL, NULL );
-
-	IMaterial *color_correction = materials->FindMaterial( "dev/red_green_projection", TEXTURE_GROUP_OTHER, true );
-	if ( color_correction )
-	{
-		color_correction->IncrementReferenceCount();
-	}
-
-	int nViewportX, nViewportY, nViewportWidth, nViewportHeight;
-	pRenderContext->GetViewport( nViewportX, nViewportY, nViewportWidth, nViewportHeight );
-
-	pRenderContext->DrawScreenSpaceRectangle( color_correction, 0, 0, nViewportWidth, nViewportHeight,
-		nViewportX, nViewportY,
-		nViewportX + nViewportWidth - 1, nViewportY + nViewportHeight - 1,
-		nViewportWidth, nViewportHeight );
-
- 	if ( color_correction )
- 	{
- 		color_correction->DecrementReferenceCount();
- 	}
-}
 
 
 //-----------------------------------------------------------------------------
@@ -214,24 +212,26 @@ void V_RenderView( void )
 	VPROF( "V_RenderView" );
 	MDLCACHE_COARSE_LOCK_(g_pMDLCache);
 
-	bool bCanRenderWorld = ( host_state.worldmodel != NULL ) && cl.IsActive();
+	bool bCanRenderWorld = ( host_state.worldmodel != NULL ) && GetBaseLocalClient().IsActive();
 
-#if defined( REPLAY_ENABLED )
-	if ( g_pClientReplay && Replay_IsSupportedModAndPlatform() )
-	{
-		bCanRenderWorld = bCanRenderWorld && g_pClientReplay->ShouldRender();
-	}
-#endif
+	bCanRenderWorld = bCanRenderWorld && !EngineVGui()->IsPlayingFullScreenVideo();
 
 	bCanRenderWorld = bCanRenderWorld && toolframework->ShouldGameRenderView();
 
 	if ( IsPC() && bCanRenderWorld && g_bTextMode )
 	{	
-		tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "SysSleep()" );
-
 		// Sleep to let the other textmode clients get some cycles.
 		Sys_Sleep( 15 );
 		bCanRenderWorld = false;
+	}
+
+	// Update stereo layer
+	if ( !g_LostVideoMemory )
+	{
+		if ( materials && materials->IsStereoSupported() )
+		{
+			materials->NVStereoUpdate();
+		}
 	}
 
 	if ( !bCanRenderWorld )
@@ -245,13 +245,22 @@ void V_RenderView( void )
 		// since we know we're going to render the world, check for lightmap updates while it is easy
 		// to tear down and rebuild
 		R_CheckForLightingConfigChanges();
+		R_CheckForPaintmapChanges();
+
+		// Pass game time to shader api
+		{
+			CMatRenderContextPtr pRenderContext( g_pMaterialSystem );
+			pRenderContext->UpdateGameTime( g_ClientGlobalVariables.curtime );
+		}
+
 		// We can get into situations where some other material system app
 		// is trying to start up; in those cases, we shouldn't render...
 		vrect_t scr_vrect = videomode->GetClientViewRect();
 		g_ClientDLL->View_Render( &scr_vrect );
-	}
 
-	FullViewColorAdjustment();
+		// Cleanup all of the immediate cleanup decals here, after we've rendered the views.
+		R_DecalFlushDestroyList( true );
+	}
 }
 
 void Linefile_Draw( void );
@@ -291,6 +300,33 @@ public:
 		R_DrawBrushModel( baseentity, model, origin, angles, DEPTH_MODE_NORMAL, bDrawOpaque, bDrawTranslucent );
 	}
 
+	virtual void DrawBrushModelArray( IMatRenderContext* pRenderContext, int nCount, 
+		const BrushArrayInstanceData_t *pInstanceData, int nModelTypeFlags )
+	{
+#ifdef _DEBUG
+		for ( int i = 0; i < nCount; ++i )
+		{
+			Assert( pRenderContext->IsRenderData( pInstanceData[i].m_pBrushToWorld ) );
+		}
+#endif
+
+		ICallQueue *pCallQueue = pRenderContext->GetCallQueue();
+		if ( !pCallQueue || r_brush_queue_mode.GetInt() == 0 )
+		{
+			R_DrawBrushModelArray( pRenderContext, nCount, pInstanceData, nModelTypeFlags );
+		}
+		else
+		{
+			CMatRenderData< BrushArrayInstanceData_t > brushArrayData( pRenderContext );
+			if ( !pRenderContext->IsRenderData( pInstanceData ) )
+			{
+				pInstanceData = brushArrayData.Lock( nCount, pInstanceData );
+			}
+
+			pCallQueue->QueueCall( R_DrawBrushModelArray, nCount, pInstanceData, nModelTypeFlags );
+		}
+	}
+
 	// Draw brush model shadow
 	void DrawBrushModelShadow( IClientRenderable *pRenderable )
 	{
@@ -311,10 +347,10 @@ public:
 			g_pDemoUI->DrawDebuggingInfo();
 		}
 
-		if ( g_pDemoUI2 )
-		{
-			g_pDemoUI2->DrawDebuggingInfo();
-		}
+		//if ( g_pDemoUI2 )
+		//{
+		//	g_pDemoUI2->DrawDebuggingInfo();
+		//}
 
 		SpatialPartition()->DrawDebugOverlays();
 
@@ -362,9 +398,9 @@ public:
 		g_EngineRenderer->DrawSceneEnd();
 	}
 	 
-	void GetVisibleFogVolume( const Vector& vEyePoint, VisibleFogVolumeInfo_t *pInfo )
+	void GetVisibleFogVolume( const Vector& vEyePoint, const VisOverrideData_t *pVisOverrideData, VisibleFogVolumeInfo_t *pInfo )
 	{
-		R_GetVisibleFogVolume( vEyePoint, pInfo );
+		R_GetVisibleFogVolume( vEyePoint, pVisOverrideData, pInfo );
 	}
 	
 	IWorldRenderList * CreateWorldList()
@@ -372,14 +408,36 @@ public:
 		return g_EngineRenderer->CreateWorldList();
 	}
 
+#if defined(_PS3)
+	IWorldRenderList * CreateWorldList_PS3( int viewID )
+	{
+		return g_EngineRenderer->CreateWorldList_PS3( viewID );
+	}
+
+	void BuildWorldLists_PS3_Epilogue( IWorldRenderList *pList, WorldListInfo_t* pInfo, bool bShadowDepth )
+	{
+		g_EngineRenderer->BuildWorldLists_PS3_Epilogue( pList, pInfo, bShadowDepth );
+	}
+#else
+	void BuildWorldLists_Epilogue( IWorldRenderList *pList, WorldListInfo_t* pInfo, bool bShadowDepth )
+	{
+		g_EngineRenderer->BuildWorldLists_Epilogue( pList, pInfo, bShadowDepth );
+	}
+#endif
+
 	void BuildWorldLists( IWorldRenderList *pList, WorldListInfo_t* pInfo, int iForceFViewLeaf, const VisOverrideData_t* pVisData, bool bShadowDepth, float *pReflectionWaterHeight )
 	{
 		g_EngineRenderer->BuildWorldLists( pList, pInfo, iForceFViewLeaf, pVisData, bShadowDepth, pReflectionWaterHeight );
 	}
 
-	void DrawWorldLists( IWorldRenderList *pList, unsigned long flags, float waterZAdjust )
+	void DrawWorldLists( IMatRenderContext *pRenderContext, IWorldRenderList *pList, unsigned long flags, float waterZAdjust )
 	{
-		g_EngineRenderer->DrawWorldLists( pList, flags, waterZAdjust );
+		g_EngineRenderer->DrawWorldLists( pRenderContext, pList, flags, waterZAdjust );
+	}
+
+	void GetWorldListIndicesInfo( WorldListIndicesInfo_t * pIndicesInfoOut, IWorldRenderList *pList, unsigned long nFlags )
+	{
+		return R_GetWorldListIndicesInfo( pIndicesInfoOut, pList, nFlags );
 	}
 
 	// Optimization for top view
@@ -388,9 +446,24 @@ public:
 		R_DrawTopView( enable );
 	}
 
+	void TopViewNoBackfaceCulling( bool bDisable )
+	{
+		R_TopViewNoBackfaceCulling( bDisable );
+	}
+
+	void TopViewNoVisCheck( bool bDisable )
+	{
+		R_TopViewNoVisCheck( bDisable );
+	}
+
 	void TopViewBounds( Vector2D const& mins, Vector2D const& maxs )
 	{
 		R_TopViewBounds( mins, maxs );
+	}
+
+	void SetTopViewVolumeCuller( const CVolumeCuller *pVolumeCuller )
+	{
+		R_SetTopViewVolumeCuller( pVolumeCuller );
 	}
 
 	void DrawLights( void )
@@ -408,9 +481,9 @@ public:
 		// R_DrawMaskEntities()
 	}
 
-	void DrawTranslucentSurfaces( IWorldRenderList *pList, int sortIndex, unsigned long flags, bool bShadowDepth )
+	void DrawTranslucentSurfaces( IMatRenderContext *pRenderContext, IWorldRenderList *pList, int *pSortList, int sortCount, unsigned long flags )
 	{
-		Shader_DrawTranslucentSurfaces( pList, sortIndex, flags, bShadowDepth );
+		Shader_DrawTranslucentSurfaces( pRenderContext, pList, pSortList, sortCount, flags );
 	}
 
 	bool LeafContainsTranslucentSurfaces( IWorldRenderList *pList, int sortIndex, unsigned long flags )
@@ -454,10 +527,10 @@ public:
 		EngineVGui()->Paint( (PaintMode_t)mode );
 	}
 
-	void ViewDrawFade( byte *color, IMaterial* pFadeMaterial )
+	void ViewDrawFade( byte *color, IMaterial* pFadeMaterial, bool mapFullTextureToScreen )
 	{
 		VPROF_BUDGET( "ViewDrawFade", VPROF_BUDGETGROUP_WORLD_RENDERING );
-		g_EngineRenderer->ViewDrawFade( color, pFadeMaterial );
+		g_EngineRenderer->ViewDrawFade( color, pFadeMaterial, mapFullTextureToScreen );
 	}
 
 	void OLD_SetProjectionMatrix( float fov, float zNear, float zFar )
@@ -483,7 +556,17 @@ public:
 
 	int GetViewEntity( void )
 	{
-		return cl.m_nViewEntity;
+		return GetLocalClient().GetViewEntity();
+	}
+
+	bool IsViewEntity( int entindex )
+	{
+		FOR_EACH_VALID_SPLITSCREEN_PLAYER( i )
+		{
+			if ( GetLocalClient( i ).GetViewEntity() == entindex )
+				return true;
+		}
+		return false;
 	}
 
 	float GetFieldOfView( void )
@@ -493,17 +576,17 @@ public:
 
 	unsigned char **GetAreaBits( void )
 	{
-		return cl.GetAreaBits_BackwardCompatibility();
+		return GetBaseLocalClient().GetAreaBits_BackwardCompatibility();
 	}
 
 	virtual void SetAreaState( 
 			unsigned char chAreaBits[MAX_AREA_STATE_BYTES],
 			unsigned char chAreaPortalBits[MAX_AREA_PORTAL_STATE_BYTES] )
 	{
-		*cl.GetAreaBits_BackwardCompatibility() = 0; // Clear the b/w compatibiltiy thing.
-		memcpy( cl.m_chAreaBits, chAreaBits, MAX_AREA_STATE_BYTES );
-		memcpy( cl.m_chAreaPortalBits, chAreaPortalBits, MAX_AREA_PORTAL_STATE_BYTES );
-		cl.m_bAreaBitsValid = true;
+		*GetBaseLocalClient().GetAreaBits_BackwardCompatibility() = 0; // Clear the b/w compatibiltiy thing.
+		memcpy( GetBaseLocalClient().m_chAreaBits, chAreaBits, MAX_AREA_STATE_BYTES );
+		memcpy( GetBaseLocalClient().m_chAreaPortalBits, chAreaPortalBits, MAX_AREA_PORTAL_STATE_BYTES );
+		GetBaseLocalClient().m_bAreaBitsValid = true;
 	}
 
 	// World fog for world rendering
@@ -523,7 +606,7 @@ public:
 		int m_nLeafWaterDataID;
 	};
 	
-	bool EnumerateLeaf( int leaf, int context )
+	bool EnumerateLeaf( int leaf, intp context )
 	{
 		BoxIntersectWaterContext_t *pSearchContext = ( BoxIntersectWaterContext_t * )context;
 		mleaf_t *pLeaf = &host_state.worldmodel->brush.pShared->leafs[leaf];
@@ -541,24 +624,24 @@ public:
 		BoxIntersectWaterContext_t context;
 		context.m_bFoundWaterLeaf = false;
 		context.m_nLeafWaterDataID = leafWaterDataID;
-		g_pToolBSPTree->EnumerateLeavesInBox( mins, maxs, this, ( int )&context );
+		g_pToolBSPTree->EnumerateLeavesInBox( mins, maxs, this, ( intp )&context );
 		return context.m_bFoundWaterLeaf;
 	}
 
 	// Push, pop views
-	virtual void Push3DView( const CViewSetup &view, int nFlags, ITexture* pRenderTarget, Frustum frustumPlanes )
+	virtual void Push3DView( IMatRenderContext *pRenderContext, const CViewSetup &view, int nFlags, ITexture* pRenderTarget, Frustum frustumPlanes )
 	{
-		g_EngineRenderer->Push3DView( view, nFlags, pRenderTarget, frustumPlanes, NULL );
+		g_EngineRenderer->Push3DView( pRenderContext, view, nFlags, pRenderTarget, frustumPlanes, NULL );
 	}
 
-	virtual void Push2DView( const CViewSetup &view, int nFlags, ITexture* pRenderTarget, Frustum frustumPlanes )
+	virtual void Push2DView( IMatRenderContext *pRenderContext, const CViewSetup &view, int nFlags, ITexture* pRenderTarget, Frustum frustumPlanes )
 	{
-		g_EngineRenderer->Push2DView( view, nFlags, pRenderTarget, frustumPlanes );
+		g_EngineRenderer->Push2DView( pRenderContext, view, nFlags, pRenderTarget, frustumPlanes );
 	}
 
-	virtual void PopView( Frustum frustumPlanes )
+	virtual void PopView( IMatRenderContext *pRenderContext, Frustum frustumPlanes )
  	{
-		g_EngineRenderer->PopView( frustumPlanes );
+		g_EngineRenderer->PopView( pRenderContext, frustumPlanes );
 	}
 
 	virtual void SetMainView( const Vector &vecOrigin, const QAngle &angles )
@@ -576,9 +659,9 @@ public:
 		model_t *model, 
 		const Vector& origin, 
 		const QAngle& angles, 
-		ERenderDepthMode DepthMode )
+		ERenderDepthMode_t DepthMode )
 	{
-		R_DrawBrushModel( baseentity, model, origin, angles, DepthMode, true, true );
+		R_DrawBrushModel( baseentity, model, origin, angles, DEPTH_MODE_SHADOW, true, true );
 	}
 
 	void UpdateBrushModelLightmap( model_t *model, IClientRenderable *pRenderable )
@@ -591,20 +674,25 @@ public:
 		g_EngineRenderer->BeginUpdateLightmaps();
 	}
 
-	void EndUpdateLightmaps( void )
+	void EndUpdateLightmaps()
 	{
 		g_EngineRenderer->EndUpdateLightmaps();
 	}
 
-	virtual void Push3DView( const CViewSetup &view, int nFlags, ITexture* pRenderTarget, Frustum frustumPlanes, ITexture* pDepthTexture )
+	virtual void Push3DView( IMatRenderContext *pRenderContext, const CViewSetup &view, int nFlags, ITexture* pRenderTarget, Frustum frustumPlanes, ITexture* pDepthTexture )
 	{
-		g_EngineRenderer->Push3DView( view, nFlags, pRenderTarget, frustumPlanes, pDepthTexture );
+		g_EngineRenderer->Push3DView( pRenderContext, view, nFlags, pRenderTarget, frustumPlanes, pDepthTexture );
 	}
 
 	void GetMatricesForView( const CViewSetup &view, VMatrix *pWorldToView, VMatrix *pViewToProjection, VMatrix *pWorldToProjection, VMatrix *pWorldToPixels )
 	{
-		ComputeViewMatrices( pWorldToView, pViewToProjection, pWorldToProjection, view );
+		view.ComputeViewMatrices( pWorldToView, pViewToProjection, pWorldToProjection );
 		ComputeWorldToScreenMatrix( pWorldToPixels, *pWorldToProjection, view );
+	}
+
+	virtual bool DoesBrushModelNeedPowerOf2Framebuffer( const model_t *model )
+	{
+		return !!( model->flags & MODELFLAG_FRAMEBUFFER_TEXTURE );
 	}
 };
 

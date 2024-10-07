@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -15,10 +15,14 @@
 #include "vphysics/constraints.h"
 #include "vcollide_parse.h"
 #include "ndebugoverlay.h"
-#include "hl2_player.h"
+#include "player.h"
 #include "props.h"
 #include "vehicle_choreo_generic_shared.h"
 #include "ai_utils.h"
+
+#if defined ( PORTAL2 )
+#include "portal_player.h"
+#endif
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -83,17 +87,37 @@ private:
 //-----------------------------------------------------------------------------
 class CChoreoGenericServerVehicle : public CBaseServerVehicle
 {
+	DECLARE_SIMPLE_DATADESC();
 	typedef CBaseServerVehicle BaseClass;
 
 // IServerVehicle
 public:
 	void GetVehicleViewPosition( int nRole, Vector *pAbsOrigin, QAngle *pAbsAngles, float *pFOV = NULL );
 	virtual void ItemPostFrame( CBasePlayer *pPlayer );
+	virtual bool IsPassengerUsingStandardWeapons( int nRole = VEHICLE_ROLE_DRIVER ) { return m_bPlayerCanShoot; }
+
+	virtual void SetPlayerCanShoot( bool bCanShoot, int nRole = VEHICLE_ROLE_DRIVER );
 
 protected:
 
+	bool m_bPlayerCanShoot;
 	CPropVehicleChoreoGeneric *GetVehicle( void );
 };
+
+void CChoreoGenericServerVehicle::SetPlayerCanShoot( bool bCanShoot, int nRole /*= VEHICLE_ROLE_DRIVER*/ )
+{
+	if ( bCanShoot != m_bPlayerCanShoot )
+	{
+		SetPassengerWeapon( bCanShoot, GetPassenger( nRole ) );
+		m_bPlayerCanShoot = bCanShoot;
+	}
+}
+
+BEGIN_SIMPLE_DATADESC( CChoreoGenericServerVehicle )
+
+DEFINE_FIELD( m_bPlayerCanShoot, FIELD_BOOLEAN ),
+
+END_DATADESC()
 
 
 //-----------------------------------------------------------------------------
@@ -161,6 +185,12 @@ public:
 	void InputOpen( inputdata_t &inputdata );
 	void InputClose( inputdata_t &inputdata );
 	void InputViewlock( inputdata_t &inputdata );
+	void InputSetCanShoot( inputdata_t &inputdata );
+	void InputUseAttachmentEyes( inputdata_t &inputdata );
+	void InputSetMaxPitch( inputdata_t &inputdata );
+	void InputSetMinPitch( inputdata_t &inputdata );
+	void InputSetMaxYaw( inputdata_t &inputdata );
+	void InputSetMinYaw( inputdata_t &inputdata );
 
 	bool ShouldIgnoreParent( void ) { return m_bIgnoreMoveParent; }
 
@@ -217,6 +247,9 @@ private:
 	bool				m_bIgnoreMoveParent;
 	bool				m_bIgnorePlayerCollisions;
 
+	bool				m_bPlayerCanShoot;
+	CNetworkVar( bool, m_bForceEyesToAttachment );
+
 	// Vehicle script filename
 	string_t			m_vehicleScript;
 
@@ -239,6 +272,14 @@ BEGIN_DATADESC( CPropVehicleChoreoGeneric )
 	DEFINE_INPUTFUNC( FIELD_VOID, "Open", InputOpen ),
 	DEFINE_INPUTFUNC( FIELD_VOID, "Close", InputClose ),
 	DEFINE_INPUTFUNC( FIELD_BOOLEAN, "Viewlock", InputViewlock ),
+	DEFINE_INPUTFUNC( FIELD_BOOLEAN, "SetCanShoot", InputSetCanShoot ),
+	DEFINE_INPUTFUNC( FIELD_BOOLEAN, "UseAttachmentEyes", InputUseAttachmentEyes ),
+
+	DEFINE_INPUTFUNC( FIELD_BOOLEAN, "SetCanShoot", InputSetCanShoot ),
+	DEFINE_INPUTFUNC( FIELD_FLOAT, "SetMaxPitch", InputSetMaxPitch ),
+	DEFINE_INPUTFUNC( FIELD_FLOAT, "SetMinPitch", InputSetMinPitch ),
+	DEFINE_INPUTFUNC( FIELD_FLOAT, "SetMaxYaw", InputSetMaxYaw  ),
+	DEFINE_INPUTFUNC( FIELD_FLOAT, "SetMinYaw", InputSetMinYaw ),
 
 	// Keys
 	DEFINE_EMBEDDED( m_ServerVehicle ),
@@ -255,6 +296,8 @@ BEGIN_DATADESC( CPropVehicleChoreoGeneric )
 	DEFINE_KEYFIELD( m_bIgnoreMoveParent, FIELD_BOOLEAN, "ignoremoveparent" ),
 	DEFINE_KEYFIELD( m_bIgnorePlayerCollisions, FIELD_BOOLEAN, "ignoreplayer" ),
 	DEFINE_KEYFIELD( m_bForcePlayerEyePoint, FIELD_BOOLEAN, "useplayereyes" ),
+	DEFINE_KEYFIELD( m_bPlayerCanShoot, FIELD_BOOLEAN, "playercanshoot" ),
+	DEFINE_KEYFIELD( m_bForceEyesToAttachment , FIELD_BOOLEAN, "useattachmenteyes" ),
 
 	DEFINE_OUTPUT( m_playerOn, "PlayerOn" ),
 	DEFINE_OUTPUT( m_playerOff, "PlayerOff" ),
@@ -270,17 +313,18 @@ IMPLEMENT_SERVERCLASS_ST(CPropVehicleChoreoGeneric, DT_PropVehicleChoreoGeneric)
 	SendPropEHandle(SENDINFO(m_hPlayer)),
 	SendPropBool(SENDINFO(m_bEnterAnimOn)),
 	SendPropBool(SENDINFO(m_bExitAnimOn)),
+	SendPropBool(SENDINFO(m_bForceEyesToAttachment)),
 	SendPropVector(SENDINFO(m_vecEyeExitEndpoint), -1, SPROP_COORD),
-	SendPropBool( SENDINFO_STRUCTELEM( m_vehicleView.bClampEyeAngles ) ),
-	SendPropFloat( SENDINFO_STRUCTELEM( m_vehicleView.flPitchCurveZero ) ),
-	SendPropFloat( SENDINFO_STRUCTELEM( m_vehicleView.flPitchCurveLinear ) ),
-	SendPropFloat( SENDINFO_STRUCTELEM( m_vehicleView.flRollCurveZero ) ),
-	SendPropFloat( SENDINFO_STRUCTELEM( m_vehicleView.flRollCurveLinear ) ),
-	SendPropFloat( SENDINFO_STRUCTELEM( m_vehicleView.flFOV ) ),
-	SendPropFloat( SENDINFO_STRUCTELEM( m_vehicleView.flYawMin ) ),
-	SendPropFloat( SENDINFO_STRUCTELEM( m_vehicleView.flYawMax ) ),
-	SendPropFloat( SENDINFO_STRUCTELEM( m_vehicleView.flPitchMin ) ),
-	SendPropFloat( SENDINFO_STRUCTELEM( m_vehicleView.flPitchMax ) ),
+	SendPropBool( SENDINFO_STRUCTELEM( vehicleview_t, m_vehicleView, bClampEyeAngles ) ),
+	SendPropFloat( SENDINFO_STRUCTELEM( vehicleview_t, m_vehicleView, flPitchCurveZero ) ),
+	SendPropFloat( SENDINFO_STRUCTELEM( vehicleview_t, m_vehicleView, flPitchCurveLinear ) ),
+	SendPropFloat( SENDINFO_STRUCTELEM( vehicleview_t, m_vehicleView, flRollCurveZero ) ),
+	SendPropFloat( SENDINFO_STRUCTELEM( vehicleview_t, m_vehicleView, flRollCurveLinear ) ),
+	SendPropFloat( SENDINFO_STRUCTELEM( vehicleview_t, m_vehicleView, flFOV ) ),
+	SendPropFloat( SENDINFO_STRUCTELEM( vehicleview_t, m_vehicleView, flYawMin ) ),
+	SendPropFloat( SENDINFO_STRUCTELEM( vehicleview_t, m_vehicleView, flYawMax ) ),
+	SendPropFloat( SENDINFO_STRUCTELEM( vehicleview_t, m_vehicleView, flPitchMin ) ),
+	SendPropFloat( SENDINFO_STRUCTELEM( vehicleview_t, m_vehicleView, flPitchMax ) ),
 END_SEND_TABLE();
 
 
@@ -332,6 +376,8 @@ void CPropVehicleChoreoGeneric::Spawn( void )
 	{
 		BaseClass::Spawn();
 	}
+
+	m_ServerVehicle.SetPlayerCanShoot( m_bPlayerCanShoot );
 
 	m_takedamage = DAMAGE_EVENTS_ONLY;
 
@@ -419,6 +465,26 @@ void CPropVehicleChoreoGeneric::Think(void)
 		{
 			GetServerVehicle()->HandleEntryExitFinish( m_bExitAnimOn, true );
 		}
+
+#if defined ( PORTAL2 )
+		// Hack (possibily temp?) for finale... Make sure the player's body follows somewhat closely to the eye point animation
+		// so their shoot position doesn't come from across the world.
+		// This could be cleaned up and made an option on a keyvalue if we dont end up solving it a different way.. checking in dirty because we want to this very soon.
+		CBaseAnimating *pAnimating = dynamic_cast<CBaseAnimating *>(GetServerVehicle()->GetVehicleEnt());
+		if ( pAnimating )
+		{
+			Vector vSeatOrigin;
+			QAngle qSeatAngles;
+			if ( GetDriver() && pAnimating->GetAttachment( "vehicle_feet_passenger0", vSeatOrigin, qSeatAngles ) )
+			{
+				// Set us to that position
+				CBaseEntity* pDriver = GetDriver();
+				pDriver->SetAbsOrigin( vSeatOrigin );
+				pDriver->SetAbsAngles( qSeatAngles );
+			}
+
+		}
+#endif
 	}
 
 	StudioFrameAdvance();
@@ -523,12 +589,14 @@ void CPropVehicleChoreoGeneric::InputViewlock( inputdata_t &inputdata )
 //-----------------------------------------------------------------------------
 void CPropVehicleChoreoGeneric::HandleAnimEvent( animevent_t *pEvent )
 {
-	if ( pEvent->event == AE_CHOREO_VEHICLE_OPEN )
+	int nEvent = pEvent->Event();
+
+	if ( nEvent == AE_CHOREO_VEHICLE_OPEN )
 	{
 		m_OnOpen.FireOutput( this, this );
 		m_bLocked = false;
 	}
-	else if ( pEvent->event == AE_CHOREO_VEHICLE_CLOSE )
+	else if ( nEvent == AE_CHOREO_VEHICLE_CLOSE )
 	{
 		m_OnClose.FireOutput( this, this );
 		m_bLocked = true;
@@ -608,6 +676,14 @@ void CPropVehicleChoreoGeneric::EnterVehicle( CBaseCombatCharacter *pPassenger )
 
 		m_hPlayer = pPlayer;
 		m_playerOn.FireOutput( pPlayer, this, 0 );
+
+#if defined ( PORTAL2 )
+		CPortal_Player *pPortalPlayer = ToPortalPlayer( pPlayer );
+		if ( pPortalPlayer && pPortalPlayer->IsZoomed() )
+		{
+			pPortalPlayer->ZoomOut();
+		}
+#endif
 
 		m_ServerVehicle.SoundStart();
 	}
@@ -839,7 +915,6 @@ void CChoreoGenericServerVehicle::ItemPostFrame( CBasePlayer *player )
 	}
 }
 
-
 //-----------------------------------------------------------------------------
 // Purpose: 
 //-----------------------------------------------------------------------------
@@ -854,8 +929,8 @@ void CChoreoGenericServerVehicle::GetVehicleViewPosition( int nRole, Vector *pAb
 	if ( GetVehicle()->m_bForcePlayerEyePoint )
 	{
 		// Call to BaseClass because CBasePlayer::EyePosition calls this function.
-	  *pAbsOrigin = pPlayer->CBaseCombatCharacter::EyePosition();
-	  *pAbsAngles = pPlayer->CBaseCombatCharacter::EyeAngles();
+		*pAbsOrigin = pPlayer->CBasePlayer::BaseClass::EyePosition();
+		*pAbsAngles = pPlayer->CBasePlayer::BaseClass::EyeAngles();
 		return;
 	}
 
@@ -906,6 +981,36 @@ bool CPropVehicleChoreoGeneric::ShouldCollide( int collisionGroup, int contentsM
 	return BaseClass::ShouldCollide( collisionGroup, contentsMask );
 }
 
+void CPropVehicleChoreoGeneric::InputSetCanShoot( inputdata_t &inputdata )
+{
+	m_bPlayerCanShoot = inputdata.value.Bool();
+	m_ServerVehicle.SetPlayerCanShoot( m_bPlayerCanShoot );
+}
+
+void CPropVehicleChoreoGeneric::InputUseAttachmentEyes( inputdata_t &inputdata )
+{
+	m_bForceEyesToAttachment = inputdata.value.Bool();
+}
+
+void CPropVehicleChoreoGeneric::InputSetMaxPitch( inputdata_t &inputdata )
+{
+	m_vehicleView.flPitchMax = inputdata.value.Float();
+}
+
+void CPropVehicleChoreoGeneric::InputSetMinPitch( inputdata_t &inputdata )
+{
+	m_vehicleView.flPitchMin = inputdata.value.Float();
+}
+
+void CPropVehicleChoreoGeneric::InputSetMaxYaw( inputdata_t &inputdata )
+{
+	m_vehicleView.flYawMax = inputdata.value.Float();
+}
+
+void CPropVehicleChoreoGeneric::InputSetMinYaw( inputdata_t &inputdata )
+{
+	m_vehicleView.flYawMin = inputdata.value.Float();
+}
 
 CVehicleChoreoViewParser::CVehicleChoreoViewParser( void )
 {

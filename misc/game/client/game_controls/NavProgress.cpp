@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -12,7 +12,7 @@
 #include <vgui/ILocalize.h>
 #include <vgui/ISurface.h>
 #include <filesystem.h>
-#include <KeyValues.h>
+#include <keyvalues.h>
 #include <convar.h>
 
 #include <vgui_controls/Label.h>
@@ -25,7 +25,7 @@
 using namespace vgui;
 
 //--------------------------------------------------------------------------------------------------------------
-CNavProgress::CNavProgress( IViewPort *pViewPort ) : Frame( NULL, PANEL_NAV_PROGRESS )
+CNavProgress::CNavProgress( IViewPort *pViewPort ) : BaseClass( NULL, PANEL_NAV_PROGRESS )
 {
 	// initialize dialog
 	m_pViewPort = pViewPort;

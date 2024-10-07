@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -13,6 +13,7 @@
 
 #include "smartptr.h"
 
+DEFINE_LOGGING_CHANNEL_NO_TAGS( LOG_ModelLib, "ModelLib", 0, LS_ERROR );
 
 bool CMdlLib::CreateNewStripInfo( IMdlStripInfo **ppStripInfo )
 {
@@ -63,7 +64,7 @@ bool CMdlLib::StripModelBuffers( CUtlBuffer &mdlBuffer, CUtlBuffer &vvdBuffer, C
 	if ( ( mdlHdr->checksum != vvdHdr->checksum ) ||
 		 ( mdlHdr->checksum != vtxHdr->checkSum ) )
 	{
-		DLog( "mdllib", 1, "ERROR: [StripModelBuffers] checksum mismatch!\n" );
+		Log_Msg( LOG_ModelLib, "ERROR: [StripModelBuffers] checksum mismatch!\n" );
 		return false;
 	}
 
@@ -105,21 +106,21 @@ bool CMdlLib::StripModelBuffers( CUtlBuffer &mdlBuffer, CUtlBuffer &vvdBuffer, C
 
 	if ( !( mdlHdr->flags & STUDIOHDR_FLAGS_STATIC_PROP ) )
 	{
-		DLog( "mdllib", 2, "No special stripping - the model is not a static prop.\n" );
+		Log_Msg( LOG_ModelLib, "No special stripping - the model is not a static prop.\n" );
 		pMsi->m_eMode = CMdlStripInfo::MODE_NO_CHANGE;
 		return true;
 	}
 
 	if ( vvdHdr->numLODs <= 1 )
 	{
-		DLog( "mdllib", 2, "No special stripping - the model has only %d lod(s).\n", vvdHdr->numLODs );
+		Log_Msg( LOG_ModelLib, "No special stripping - the model has only %d lod(s).\n", vvdHdr->numLODs );
 		pMsi->m_eMode = CMdlStripInfo::MODE_NO_CHANGE;
 		return true;
 	}
 
 	if ( mdlHdr->numbones != 1 )
 	{
-		DLog( "mdllib", 2, "No special stripping - the model has %d bone(s).\n", mdlHdr->numbones );
+		Log_Msg( LOG_ModelLib, "No special stripping - the model has %d bone(s).\n", mdlHdr->numbones );
 		pMsi->m_eMode = CMdlStripInfo::MODE_NO_CHANGE;
 		return true;
 	}
@@ -143,8 +144,6 @@ bool CMdlLib::StripModelBuffers( CUtlBuffer &mdlBuffer, CUtlBuffer &vvdBuffer, C
 				ITERATE_CHILDREN( OptimizedModel::StripGroupHeader_t, vtxStripGroup, vtxMesh, pStripGroup, numStripGroups )
 					ITERATE_CHILDREN( OptimizedModel::StripHeader_t, vtxStrip, vtxStripGroup, pStrip, numStrips )
 					
-						if ( !( vtxStrip->flags & OptimizedModel::STRIP_IS_TRILIST ) )
-							continue;
 						for ( int i = 0; i < vtxStrip->numIndices; ++ i )
 						{
 							unsigned short *vtxIdx = CHILD_AT( vtxStripGroup, pIndex, vtxStrip->indexOffset + i );
@@ -190,8 +189,8 @@ bool CMdlLib::StripModelBuffers( CUtlBuffer &mdlBuffer, CUtlBuffer &vvdBuffer, C
 	ITERATE_CHILDREN( mstudiobodyparts_t, mdlBodyPart, mdlHdr, pBodypart, numbodyparts )
 		ITERATE_CHILDREN( mstudiomodel_t, mdlModel, mdlBodyPart, pModel, nummodels )
 			
-			DLog( "mdllib", 3, " Stripped %d lod(s).\n", vvdHdr->numLODs - 1 ),
-			DLog( "mdllib", 3, " Stripped %d vertexes (was: %d, now: %d).\n", mdlModel->numvertices - srcIndices.Count(), mdlModel->numvertices, srcIndices.Count() );
+			Log_Msg( LOG_ModelLib, " Stripped %d lod(s).\n", vvdHdr->numLODs - 1 );
+			Log_Msg( LOG_ModelLib, " Stripped %d vertexes (was: %d, now: %d).\n", mdlModel->numvertices - srcIndices.Count(), mdlModel->numvertices, srcIndices.Count() );
 
 			mdlNumVerticesOld = mdlModel->numvertices;
 			mdlModel->numvertices = srcIndices.Count();
@@ -223,11 +222,11 @@ bool CMdlLib::StripModelBuffers( CUtlBuffer &mdlBuffer, CUtlBuffer &vvdBuffer, C
 	//
 	// Update bones not to mention anything below LOD0
 	//
-	ITERATE_CHILDREN( mstudiobone_t, mdlBone, mdlHdr, pBone, numbones )
-		mdlBone->flags &= ( BONE_USED_BY_VERTEX_LOD0 | ~BONE_USED_BY_VERTEX_MASK );
+	ITERATE_CHILDREN( const mstudiobone_t, mdlBone, mdlHdr, pBone, numbones )
+		((mstudiobone_t *)mdlBone)->flags &= ( BONE_USED_BY_VERTEX_LOD0 | ~BONE_USED_BY_VERTEX_MASK );
 	ITERATE_END
 
-	DLog( "mdllib", 3, " Updated %d bone(s).\n", mdlHdr->numbones );
+	Log_Msg( LOG_ModelLib, " Updated %d bone(s).\n", mdlHdr->numbones );
 
 	
 	//
@@ -287,7 +286,7 @@ bool CMdlLib::StripModelBuffers( CUtlBuffer &mdlBuffer, CUtlBuffer &vvdBuffer, C
 
 		vvdLength += srcIndices.Count() * sizeof( Vector4D );
 	}
-	DLog( "mdllib", 3, " Stripped %d vvd bytes.\n", vvdLengthOld - vvdLength );
+	Log_Msg( LOG_ModelLib, " Stripped %d vvd bytes.\n", vvdLengthOld - vvdLength );
 
 	
 	//
@@ -298,35 +297,35 @@ bool CMdlLib::StripModelBuffers( CUtlBuffer &mdlBuffer, CUtlBuffer &vvdBuffer, C
 
 	size_t vtxOffIndexBuffer = ~size_t(0), vtxOffIndexBufferEnd = 0;
 	size_t vtxOffVertexBuffer = ~size_t(0), vtxOffVertexBufferEnd = 0;
-	CRemoveTracker vtxRemove;
+	CMemoryMovingTracker vtxRemove( CMemoryMovingTracker::MEMORY_REMOVE );
 	CUtlVector< size_t > vtxOffIndex;
 	CUtlVector< size_t > vtxOffVertex;
 
-	vtxRemove.RemoveElements( CHILD_AT( vtxHdr, pMaterialReplacementList, 1 ), vtxHdr->numLODs - 1 );
+	vtxRemove.RegisterElements( CHILD_AT( vtxHdr, pMaterialReplacementList, 1 ), vtxHdr->numLODs - 1 );
 	ITERATE_CHILDREN( OptimizedModel::MaterialReplacementListHeader_t, vtxMatList, vtxHdr, pMaterialReplacementList, numLODs )
 		if ( !vtxMatList_idx ) continue;
-		vtxRemove.RemoveElements( CHILD_AT( vtxMatList, pMaterialReplacement, 0 ), vtxMatList->numReplacements );
+		vtxRemove.RegisterElements( CHILD_AT( vtxMatList, pMaterialReplacement, 0 ), vtxMatList->numReplacements );
 		ITERATE_CHILDREN( OptimizedModel::MaterialReplacementHeader_t, vtxMat, vtxMatList, pMaterialReplacement, numReplacements )
 			char const *szName = vtxMat->pMaterialReplacementName();
-			vtxRemove.RemoveElements( szName, szName ? strlen( szName ) + 1 : 0 );
+			vtxRemove.RegisterElements( szName, szName ? strlen( szName ) + 1 : 0 );
 		ITERATE_END
 	ITERATE_END
 
 	ITERATE_CHILDREN( OptimizedModel::BodyPartHeader_t, vtxBodyPart, vtxHdr, pBodyPart, numBodyParts )
 		ITERATE_CHILDREN( OptimizedModel::ModelHeader_t, vtxModel, vtxBodyPart, pModel, numModels )
 		
-			vtxRemove.RemoveElements( CHILD_AT( vtxModel, pLOD, 1 ), vtxModel->numLODs - 1 );
+			vtxRemove.RegisterElements( CHILD_AT( vtxModel, pLOD, 1 ), vtxModel->numLODs - 1 );
 			ITERATE_CHILDREN( OptimizedModel::ModelLODHeader_t, vtxLod, vtxModel, pLOD, numLODs )
 				if ( !vtxLod_idx )	// Process only lod1-N
 					continue;
 				
-				vtxRemove.RemoveElements( CHILD_AT( vtxLod, pMesh, 0 ), vtxLod->numMeshes );
+				vtxRemove.RegisterElements( CHILD_AT( vtxLod, pMesh, 0 ), vtxLod->numMeshes );
 				ITERATE_CHILDREN( OptimizedModel::MeshHeader_t, vtxMesh, vtxLod, pMesh, numMeshes )
-					vtxRemove.RemoveElements( CHILD_AT( vtxMesh, pStripGroup, 0 ), vtxMesh->numStripGroups );
+					vtxRemove.RegisterElements( CHILD_AT( vtxMesh, pStripGroup, 0 ), vtxMesh->numStripGroups );
 					ITERATE_CHILDREN( OptimizedModel::StripGroupHeader_t, vtxStripGroup, vtxMesh, pStripGroup, numStripGroups )
-						vtxRemove.RemoveElements( CHILD_AT( vtxStripGroup, pStrip, 0 ), vtxStripGroup->numStrips );
+						vtxRemove.RegisterElements( CHILD_AT( vtxStripGroup, pStrip, 0 ), vtxStripGroup->numStrips );
 						ITERATE_CHILDREN( OptimizedModel::StripHeader_t, vtxStrip, vtxStripGroup, pStrip, numStrips )
-							vtxRemove.RemoveElements( CHILD_AT( vtxStrip, pBoneStateChange, 0 ), vtxStrip->numBoneStateChanges );
+							vtxRemove.RegisterElements( CHILD_AT( vtxStrip, pBoneStateChange, 0 ), vtxStrip->numBoneStateChanges );
 						ITERATE_END
 					ITERATE_END
 				ITERATE_END
@@ -389,7 +388,7 @@ bool CMdlLib::StripModelBuffers( CUtlBuffer &mdlBuffer, CUtlBuffer &vvdBuffer, C
 		if ( !bUsed )
 		{
 			// Index is not in use
-			vtxRemove.RemoveElements( vtxVertexElement );
+			vtxRemove.RegisterElements( vtxVertexElement );
 			vtxIndexDeltas.AddToTail( 0 );
 			vtxNumVertexRemoved ++;
 		}
@@ -427,7 +426,7 @@ bool CMdlLib::StripModelBuffers( CUtlBuffer &mdlBuffer, CUtlBuffer &vvdBuffer, C
 		if ( !bUsed )
 		{
 			// Index is not in use
-			vtxRemove.RemoveElements( vtxIndexElement );
+			vtxRemove.RegisterElements( vtxIndexElement );
 		}
 		else
 		{
@@ -438,7 +437,7 @@ bool CMdlLib::StripModelBuffers( CUtlBuffer &mdlBuffer, CUtlBuffer &vvdBuffer, C
 
 	// By now should have scheduled all removal information
 	vtxRemove.Finalize();
-	DLog( "mdllib", 3, " Stripped %d vtx bytes.\n", vtxRemove.GetNumBytesRemoved() );
+	Log_Msg( LOG_ModelLib, " Stripped %d vtx bytes.\n", vtxRemove.GetNumBytesRegistered() );
 
 	//
 	// Fixup all the offsets
@@ -496,9 +495,155 @@ bool CMdlLib::StripModelBuffers( CUtlBuffer &mdlBuffer, CUtlBuffer &vvdBuffer, C
 	vtxBuffer.SeekPut( CUtlBuffer::SEEK_CURRENT, vtxBuffer.TellGet() + vtxLength - vtxBuffer.TellPut() );
 
 
-	DLog( "mdllib", 2, " Reduced model buffers by %d bytes.\n", vtxRemove.GetNumBytesRemoved() + ( vvdLengthOld - vvdLength ) );
+	Log_Msg( LOG_ModelLib, " Reduced model buffers by %d bytes.\n", vtxRemove.GetNumBytesRegistered() + ( vvdLengthOld - vvdLength ) );
 
 	// Done
 	return true;
 }
+
+//
+// ParseMdlMesh
+//	The main function that parses the mesh buffers
+//		mdlBuffer			- mdl buffer
+//		vvdBuffer			- vvd buffer
+//		vtxBuffer			- vtx buffer
+//		mesh				- on return will be filled with the mesh info
+//
+bool CMdlLib::ParseMdlMesh( CUtlBuffer &mdlBuffer, CUtlBuffer &vvdBuffer, CUtlBuffer &vtxBuffer, MdlLib::MdlMesh &mesh )
+{
+	DECLARE_PTR( byte, mdl, BYTE_OFF_PTR( mdlBuffer.Base(), mdlBuffer.TellGet() ) );
+	DECLARE_PTR( byte, vvd, BYTE_OFF_PTR( vvdBuffer.Base(), vvdBuffer.TellGet() ) );
+	DECLARE_PTR( byte, vtx, BYTE_OFF_PTR( vtxBuffer.Base(), vtxBuffer.TellGet() ) );
+
+	int vvdLength = vvdBuffer.TellPut() - vvdBuffer.TellGet();
+	// int vtxLength = vtxBuffer.TellPut() - vtxBuffer.TellGet();
+
+	DECLARE_PTR( studiohdr_t, mdlHdr, mdl );
+	DECLARE_PTR( vertexFileHeader_t, vvdHdr, vvd );
+	DECLARE_PTR( OptimizedModel::FileHeader_t, vtxHdr, vtx );
+
+	// Don't do anything if the checksums don't match
+	if ( ( mdlHdr->checksum != vvdHdr->checksum ) ||
+		( mdlHdr->checksum != vtxHdr->checkSum ) )
+	{
+		Log_Msg( LOG_ModelLib, "ERROR: [ParseMdlMesh] checksum mismatch!\n" );
+		return false;
+	}
+
+	//
+	// Early outs
+	//
+
+	if ( vvdHdr->numLODs != 1 )
+	{
+		Log_Msg( LOG_ModelLib, "ERROR: [ParseMdlMesh] the model has %d lod(s).\n", vvdHdr->numLODs );
+		return false;
+	}
+
+	//
+	// ===================
+	// =================== Process MDL file
+	// ===================
+	//
+
+	mesh.checksum = mdlHdr->checksum;
+
+	int mdlNumVertices = 0;
+	
+	ITERATE_CHILDREN( mstudiobodyparts_t, mdlBodyPart, mdlHdr, pBodypart, numbodyparts )
+		ITERATE_CHILDREN( mstudiomodel_t, mdlModel, mdlBodyPart, pModel, nummodels )
+			
+			mdlNumVertices = mdlModel->numvertices;
+
+		ITERATE_END
+	ITERATE_END
+
+	//
+	// ===================
+	// =================== Build out table of indices
+	// ===================
+	//
+
+	mesh.ib.RemoveAll();
+
+	ITERATE_CHILDREN2( OptimizedModel::BodyPartHeader_t, mstudiobodyparts_t, vtxBodyPart, mdlBodyPart, vtxHdr, mdlHdr, pBodyPart, pBodypart, numBodyParts )
+		ITERATE_CHILDREN2( OptimizedModel::ModelHeader_t, mstudiomodel_t, vtxModel, mdlModel, vtxBodyPart, mdlBodyPart, pModel, pModel, numModels )
+		
+			OptimizedModel::ModelLODHeader_t *vtxLod = CHILD_AT( vtxModel, pLOD, 0 );
+			ITERATE_CHILDREN2( OptimizedModel::MeshHeader_t, mstudiomesh_t, vtxMesh, mdlMesh, vtxLod, mdlModel, pMesh, pMesh, numMeshes )
+				ITERATE_CHILDREN( OptimizedModel::StripGroupHeader_t, vtxStripGroup, vtxMesh, pStripGroup, numStripGroups )
+					ITERATE_CHILDREN( OptimizedModel::StripHeader_t, vtxStrip, vtxStripGroup, pStrip, numStrips )
+					
+						for ( int i = 0; i < vtxStrip->numIndices; ++ i )
+						{
+							unsigned short *vtxIdx = CHILD_AT( vtxStripGroup, pIndex, vtxStrip->indexOffset + i );
+							OptimizedModel::Vertex_t *vtxVertex = CHILD_AT( vtxStripGroup, pVertex, *vtxIdx );
+							
+							unsigned short usIdx = vtxVertex->origMeshVertID + mdlMesh->vertexoffset;
+							mesh.ib.AddToTail( usIdx );
+						}
+
+					ITERATE_END
+				ITERATE_END
+			ITERATE_END
+		
+		ITERATE_END
+	ITERATE_END
+
+	//
+	// ===================
+	// =================== Build out table of vertices
+	// ===================
+	//
+
+	mesh.vb.RemoveAll();
+
+	DECLARE_PTR( mstudiovertex_t, vvdVertexSrc, BYTE_OFF_PTR( vvdHdr, vvdHdr->vertexDataStart ) );
+	DECLARE_PTR( Vector4D, vvdTangentSrc, vvdHdr->tangentDataStart ? BYTE_OFF_PTR( vvdHdr, vvdHdr->tangentDataStart ) : NULL );
+
+	// Apply the fixups first of all
+	if ( vvdHdr->numFixups )
+	{
+		CArrayAutoPtr< byte > memTempVVD( new byte[ vvdLength ] );
+		DECLARE_PTR( mstudiovertex_t, vvdVertexNew, BYTE_OFF_PTR( memTempVVD.Get(), vvdHdr->vertexDataStart ) );
+		DECLARE_PTR( Vector4D, vvdTangentNew, BYTE_OFF_PTR( memTempVVD.Get(), vvdHdr->tangentDataStart ) );
+		DECLARE_PTR( vertexFileFixup_t, vvdFixup, BYTE_OFF_PTR( vvdHdr, vvdHdr->fixupTableStart ) );
+		for ( int k = 0; k < vvdHdr->numFixups; ++ k )
+		{
+			memcpy( vvdVertexNew, vvdVertexSrc + vvdFixup[ k ].sourceVertexID, vvdFixup[ k ].numVertexes * sizeof( *vvdVertexNew ) );
+			vvdVertexNew += vvdFixup[ k ].numVertexes;
+			if ( vvdTangentSrc )
+			{
+				memcpy( vvdTangentNew, vvdTangentSrc + vvdFixup[ k ].sourceVertexID, vvdFixup[ k ].numVertexes * sizeof( *vvdTangentNew ) );
+				vvdTangentNew += vvdFixup[ k ].numVertexes;
+			}
+		}
+
+		// Move back the memory after fixups were applied
+		vvdVertexSrc  ? memcpy( vvdVertexSrc, BYTE_OFF_PTR( memTempVVD.Get(), vvdHdr->vertexDataStart ), mdlNumVertices * sizeof( *vvdVertexSrc ) ) : 0;
+		vvdTangentSrc ? memcpy( vvdTangentSrc, BYTE_OFF_PTR( memTempVVD.Get(), vvdHdr->tangentDataStart ), mdlNumVertices * sizeof( *vvdTangentSrc ) ) : 0;
+	}
+
+	for ( mstudiovertex_t *pSrc = vvdVertexSrc, *pEnd = pSrc + mdlNumVertices;
+		  pSrc < pEnd; ++ pSrc )
+	{
+		MdlLib::MdlVertex vert = {0};
+		
+		vert.position[0] = pSrc->m_vecPosition.x;
+		vert.position[1] = pSrc->m_vecPosition.y;
+		vert.position[2] = pSrc->m_vecPosition.z;
+
+		vert.normal[0] = pSrc->m_vecNormal.x;
+		vert.normal[1] = pSrc->m_vecNormal.y;
+		vert.normal[2] = pSrc->m_vecNormal.z;
+
+		vert.texcoord[0] = pSrc->m_vecTexCoord.x;
+		vert.texcoord[1] = pSrc->m_vecTexCoord.y;
+		
+		mesh.vb.AddToTail( vert );
+	}
+
+	return true;
+}
+
 

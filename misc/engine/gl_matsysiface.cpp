@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright � 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -19,7 +19,7 @@
 #include "utlrbtree.h"
 #include "istudiorender.h"
 #include "tier0/dbg.h"
-#include "KeyValues.h"
+#include "keyvalues.h"
 #include "vstdlib/random.h"
 #include "lightcache.h"
 #include "sysexternal.h"
@@ -33,6 +33,7 @@
 #include "p4lib/ip4.h"
 #include "vgui/ISystem.h"
 #include <vgui_controls/Controls.h>
+#include "paint.h"
 
 
 extern ConVar developer;
@@ -43,14 +44,14 @@ extern ConVar developer;
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
-#ifndef SWDS
-extern IMaterialSystem *materials;
+#ifndef DEDICATED
 
 IMaterial*	g_materialWireframe;
 IMaterial*	g_materialTranslucentSingleColor;
 IMaterial*	g_materialTranslucentVertexColor;
 IMaterial*	g_materialWorldWireframe;
 IMaterial*	g_materialWorldWireframeZBuffer;
+IMaterial*	g_materialWorldWireframeGreen;
 IMaterial*	g_materialBrushWireframe;
 IMaterial*	g_materialDecalWireframe;
 IMaterial*	g_materialDebugLightmap;
@@ -69,7 +70,8 @@ IMaterial*  g_pMaterialWaterSecondPass;
 IMaterial*	g_pMaterialAmbientCube;
 IMaterial*	g_pMaterialDebugFlat;
 IMaterial*	g_pMaterialDepthWrite[2][2];
-IMaterial*	g_pMaterialSSAODepthWrite[2][2];
+IMaterial*	g_pMaterialSSAODepthWrite[ 2 ][ 2 ];
+
 
 #ifdef NEWMESH
 CUtlVector<IVertexBuffer *> g_WorldStaticMeshes;  // fixme - rename to g_WorldStaticVertexBuffers
@@ -117,7 +119,7 @@ CON_COMMAND_F( mat_edit, "Bring up the material under the crosshair in the edito
 
 			KeyValues *pKeyValues = new KeyValues( "EditMaterial" );
 			pKeyValues->SetString( "material", pMaterial->GetName() );
-			pToolSystem->PostMessage( 0, pKeyValues );
+			pToolSystem->PostToolMessage( 0, pKeyValues );
 			pKeyValues->deleteThis();
 		}
 	}
@@ -330,7 +332,7 @@ void MaterialSystem_RegisterLightmapSurfaces( void )
 	surfID = SURFACE_HANDLE_INVALID;
 	for (int i = surfaces.FirstInorder(); i != surfaces.InvalidIndex(); i = surfaces.NextInorder(i) )
 	{
-		surfID = surfaces[i];
+		SurfaceHandle_t surfID = surfaces[i];
 
 		bool hasLightmap = ( MSurf_Flags( surfID ) & SURFDRAW_NOLIGHT) == 0;
 		if ( hasLightmap )
@@ -506,7 +508,7 @@ void MaterialSystem_CreateSortinfo( void )
 	materials->GetSortInfo( materialSortInfoArray );
 
 	int i = 0;
-	sortmap_t *pMap = (sortmap_t *)_alloca( sizeof(sortmap_t) * nSortIDs );
+	sortmap_t *pMap = (sortmap_t *)stackalloc( sizeof(sortmap_t) * nSortIDs );
 	for ( i = 0; i < nSortIDs; i++ )
 	{
 		pMap[i].info = materialSortInfoArray[i];
@@ -518,7 +520,7 @@ void MaterialSystem_CreateSortinfo( void )
 
 	qsort( pMap, nSortIDs, sizeof( sortmap_t ), SortMapCompareFunc );
 
-	int *pSortIDRemap = (int *)_alloca( sizeof(int) * nSortIDs );
+	int *pSortIDRemap = (int *)stackalloc( sizeof(int) * nSortIDs );
 	for ( i = 0; i < nSortIDs; i++ )
 	{
 		materialSortInfoArray[i] = pMap[i].info;
@@ -532,11 +534,7 @@ void MaterialSystem_CreateSortinfo( void )
 		int sortID = MSurf_MaterialSortID( surfID );
 #if _DEBUG
 		IMaterial *pMaterial = MSurf_TexInfo( surfID )->material;
-
-		if ( !HushAsserts() )
-		{
-			Assert ( materialSortInfoArray[pSortIDRemap[sortID]].material == pMaterial );
-		}
+		Assert ( materialSortInfoArray[pSortIDRemap[sortID]].material == pMaterial );
 #endif
 		MSurf_MaterialSortID( surfID ) = pSortIDRemap[sortID];
 	}
@@ -599,6 +597,20 @@ bool SurfNeedsLightmap( SurfaceHandle_t surfID )
 }
 
 
+//-----------------------------------------------------------------------------
+// Purpose: This registers paint surfaces
+//-----------------------------------------------------------------------------
+void MaterialSystem_RegisterPaintSurfaces( void )
+{
+	IPaintmapDataManager *pPaintmapDataManager = NULL;
+	if ( g_PaintManager.m_bShouldRegister )
+	{
+		pPaintmapDataManager = &g_PaintManager;
+	}
+
+	materials->RegisterPaintmapDataManager( pPaintmapDataManager );
+}
+
 
 //-----------------------------------------------------------------------------
 // Purpose: This builds the surface info for a terrain face
@@ -627,7 +639,7 @@ void BuildMSurfaceVerts( const worldbrushdata_t *pBrushData, SurfaceHandle_t sur
 
 		if ( texCoords )
 		{
-			SurfComputeTextureCoordinate( ctx, surfID, vec, texCoords[i] );
+			SurfComputeTextureCoordinate( surfID, vec, texCoords[i].Base() );
 		}
 
 		//
@@ -720,7 +732,7 @@ void BuildBrushModelVertexArray(worldbrushdata_t *pBrushData, SurfaceHandle_t su
 		VectorCopy( vec, pVerts[i].m_Pos );
 
 		Vector2D uv;
-		SurfComputeTextureCoordinate( ctx, surfID, vec, pVerts[i].m_TexCoord );
+		SurfComputeTextureCoordinate( surfID, vec, pVerts[i].m_TexCoord.Base() );
 
 		// garymct: normalized (within space of surface) lightmap texture coordinates
 		SurfComputeLightmapCoordinate( ctx, surfID, vec, pVerts[i].m_LightmapCoord );
@@ -746,7 +758,7 @@ void BuildBrushModelVertexArray(worldbrushdata_t *pBrushData, SurfaceHandle_t su
 		}
 	}
 }
-#endif // SWDS
+#endif // DEDICATED
 
 void CMSurfaceSortList::Init( int maxSortIDs, int minMaterialLists )
 {
@@ -754,16 +766,29 @@ void CMSurfaceSortList::Init( int maxSortIDs, int minMaterialLists )
 	m_list.EnsureCapacity(minMaterialLists);
 	m_maxSortIDs = maxSortIDs;
 	int groupMax = maxSortIDs*MAX_MAT_SORT_GROUPS;
+
+#ifndef _PS3
 	m_groups.RemoveAll();
 	m_groups.EnsureCount(groupMax);
 	int groupBytes = (groupMax+7)>>3;
 	m_groupUsed.EnsureCount(groupBytes);
 	Q_memset(m_groupUsed.Base(), 0, groupBytes);
+#else
+	m_groupsShared.RemoveAll();
+	m_groupsShared.EnsureCapacity(maxSortIDs * 2);			// 7LTODO Tune this
+	m_groupIndices.RemoveAll();
+	m_groupIndices.EnsureCount(groupMax);
+	Q_memset(m_groupIndices.Base(), 0xFF, groupMax*2);
+#endif
 
 	for ( int i = 0; i < MAX_MAT_SORT_GROUPS; i++ )
 	{
 		m_sortGroupLists[i].RemoveAll();
+#if defined(_PS3)
+		int cap = (i==0) ? 256 : 64;
+#else
 		int cap = (i==0) ? 128 : 16;
+#endif
 		m_sortGroupLists[i].EnsureCapacity(cap);
 		groupOffset[i] = m_maxSortIDs * i;
 	}
@@ -791,7 +816,27 @@ void CMSurfaceSortList::Reset()
 	Init( m_maxSortIDs, m_list.NumAllocated() );
 }
 
+
+#if defined(_PS3)
+void CMSurfaceSortList::EnsureCapacityForSPU( int maxSortIDs, int minMaterialLists )
+{
+	m_list.EnsureCapacity(minMaterialLists);
+	m_groupsShared.EnsureCapacity(maxSortIDs * 2);			// 7LTODO Tune this
+	int groupMax = maxSortIDs*MAX_MAT_SORT_GROUPS;
+	m_groupIndices.EnsureCount(groupMax);
+
+	for ( int i = 0; i < MAX_MAT_SORT_GROUPS; i++ )
+	{
+		int cap = (i==0) ? 256 : 64;
+		m_sortGroupLists[i].EnsureCapacity(cap);
+		groupOffset[i] = m_maxSortIDs * i;
+	}
+	//	InitGroup(&m_emptyGroup);
+}
+#endif
+
 // this resizes the groups and groupUsed arrays
+#if !defined(_PS3)
 void CMSurfaceSortList::EnsureMaxSortIDs( int newMaxSortIDs )
 {
 	if ( newMaxSortIDs > m_maxSortIDs )
@@ -841,30 +886,47 @@ void CMSurfaceSortList::EnsureMaxSortIDs( int newMaxSortIDs )
 		m_maxSortIDs = newMaxSortIDs;
 	}
 }
-
+#endif
 
 void CMSurfaceSortList::AddSurfaceToTail( msurface2_t *pSurface, int sortGroup, int sortID )
 {
 	Assert(sortGroup<MAX_MAT_SORT_GROUPS);
 	int index = groupOffset[sortGroup] + sortID;
-	surfacesortgroup_t *pGroup = &m_groups[index];
+
+#ifndef _PS3
+	surfacesortgroup_t * RESTRICT pGroup = &m_groups[index];
 	if ( !IsGroupUsed(index) )
 	{
 		MarkGroupUsed(index);
 		InitGroup(pGroup);
 	}
+#else
+	surfacesortgroup_t * RESTRICT pGroup;
+	if ( !IsGroupUsed(index) )
+	{
+		MarkGroupUsed(index);
+		pGroup = &m_groupsShared[m_groupIndices[index]];
+		InitGroup(pGroup);
+	}
+	else
+	{
+		pGroup = &m_groupsShared[m_groupIndices[index]];
+	}
+#endif
+
 	materiallist_t *pList = NULL;
 	short prevIndex = -1;
 	int vertCount = MSurf_VertCount(pSurface);
 	int triangleCount = vertCount - 2;
-	pGroup->triangleCount += triangleCount;
-	pGroup->surfaceCount++;
 	pGroup->vertexCount += vertCount;
 	if (MSurf_Flags(pSurface) & SURFDRAW_NODE)
 	{
 		pGroup->vertexCountNoDetail += vertCount;
 		pGroup->indexCountNoDetail += triangleCount * 3;
 	}
+	pGroup->triangleCount += triangleCount;
+	pGroup->surfaceCount++;
+
 	if ( pGroup->listTail != m_list.InvalidIndex() )
 	{
 		// existing block
@@ -896,7 +958,7 @@ void CMSurfaceSortList::AddSurfaceToTail( msurface2_t *pSurface, int sortGroup, 
 		{
 			// UNDONE: This should really be sorted by sortID would help reduce state changes
 			// NOTE: Doesn't seem to help much in benchmarks to sort this vector
-			index = m_sortGroupLists[sortGroup].AddToTail(pGroup);
+			int index = m_sortGroupLists[sortGroup].AddToTail( (surfacesortgroup_t *) pGroup);
 			pGroup->groupListIndex = index;
 			pGroup->listHead = nextBlock;
 		}
@@ -924,9 +986,10 @@ void CMSurfaceSortList::GetSurfaceListForGroup( CUtlVector<msurface2_t *> &list,
 	MSL_FOREACH_SURFACE_IN_GROUP_END()
 }
 
-#ifndef SWDS
+#ifndef DEDICATED
 IMaterial *GetMaterialAtCrossHair( void )
 {
+#ifdef _WIN32
 	Vector endPoint;
 	Vector lightmapColor;
 
@@ -942,6 +1005,10 @@ IMaterial *GetMaterialAtCrossHair( void )
 	{
 		return NULL;
 	}
+#else
+	Assert( false );	// return value was not defined for this platform - returning NULL
+	return NULL;
+#endif
 }
 
 // hack
@@ -955,6 +1022,7 @@ static float lightmapCoords[2];
 
 void SaveSurfAtCrossHair()
 {
+#ifdef _WIN32
 	Vector endPoint;
 	Vector lightmapColor;
 
@@ -963,6 +1031,7 @@ void SaveSurfAtCrossHair()
 	
 	s_CrossHairSurfID = R_LightVec( MainViewOrigin(), endPoint, false, lightmapColor, 
 		&textureS, &textureT, &lightmapCoords[0], &lightmapCoords[1] );
+#endif
 }
 
 
@@ -1005,12 +1074,12 @@ void DebugDrawLightmapAtCrossHair()
 #endif
 }
 
-void ReleaseMaterialSystemObjects();
+void ReleaseMaterialSystemObjects( int nChangeFlags );
 void RestoreMaterialSystemObjects( int nChangeFlags );
 
 void ForceMatSysRestore()
 {
-	ReleaseMaterialSystemObjects();
+	ReleaseMaterialSystemObjects( 0 );
 	RestoreMaterialSystemObjects( 0 );
 }
 

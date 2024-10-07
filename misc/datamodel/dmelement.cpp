@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -17,6 +17,7 @@
 #include "datamodel/dmattributevar.h"
 #include "dmattributeinternal.h"
 #include "DmElementFramework.h"
+#include <ctype.h>
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -24,15 +25,21 @@
 //-----------------------------------------------------------------------------
 // helper class to allow CDmeHandle access to g_pDataModelImp
 //-----------------------------------------------------------------------------
-void CDmeElementRefHelper::Ref( DmElementHandle_t hElement, bool bStrong )
+void CDmeElementRefHelper::Ref( DmElementHandle_t hElement, HandleType_t handleType )
 {
-	g_pDataModelImp->OnElementReferenceAdded( hElement, bStrong );
+	g_pDataModelImp->OnElementReferenceAdded( hElement, handleType );
 }
 
-void CDmeElementRefHelper::Unref( DmElementHandle_t hElement, bool bStrong )
+void CDmeElementRefHelper::Unref( DmElementHandle_t hElement, HandleType_t handleType )
 {
-	g_pDataModelImp->OnElementReferenceRemoved( hElement, bStrong );
+	g_pDataModelImp->OnElementReferenceRemoved( hElement, handleType );
 }
+
+
+// turn memdbg off temporarily so we can get at placement new
+#include "tier0/memdbgoff.h"
+DEFINE_FIXEDSIZE_ALLOCATOR( DmAttributeList_t, 1024, CUtlMemoryPool::GROW_SLOW );
+#include "tier0/memdbgon.h"
 
 //-----------------------------------------------------------------------------
 // element reference struct - containing attribute referrers and handle refcount
@@ -82,6 +89,18 @@ void DmElementReference_t::RemoveAttribute( CDmAttribute *pAttribute )
 	Assert( 0 );
 }
 
+bool DmElementReference_t::FindAttribute( CDmAttribute *pAttribute )
+{
+	DmAttributeHandle_t hAttribute = pAttribute->GetHandle();
+	for ( DmAttributeList_t *pLink = &m_attributes; pLink; pLink = pLink->m_pNext )
+	{
+		if ( pLink->m_hAttribute == hAttribute )
+			return true;
+	}
+
+	return false;
+}
+
 
 //-----------------------------------------------------------------------------
 // Class factory 
@@ -92,7 +111,7 @@ IMPLEMENT_ELEMENT_FACTORY( DmElement, CDmElement );
 //-----------------------------------------------------------------------------
 // For backward compat: DmeElement -> creates a CDmElement class
 //-----------------------------------------------------------------------------
-CDmElementFactory< CDmElement > g_CDmeElement_Factory( "DmeElement" );
+CDmElementFactory< CDmElement > g_CDmeElement_Factory( "DmElement" );
 CDmElementFactoryHelper g_CDmeElement_Helper( "DmeElement", &g_CDmeElement_Factory, true );
 
 
@@ -101,11 +120,14 @@ CDmElementFactoryHelper g_CDmeElement_Helper( "DmeElement", &g_CDmeElement_Facto
 //-----------------------------------------------------------------------------
 CDmElement::CDmElement( DmElementHandle_t handle, const char *pElementType, const DmObjectId_t &id, const char *pElementName, DmFileId_t fileid ) : 
 	m_ref( handle ), m_Type( g_pDataModel->GetSymbol( pElementType ) ), m_fileId( fileid ),
-	m_pAttributes( NULL ), m_bDirty( false ), m_bBeingUnserialized( false ), m_bIsAcessible( true )
+	m_pAttributes( NULL ), m_bDirty( false ), m_bOnChangedCallbacksEnabled( false ), m_nParityBits( 0 ), m_bOnlyInUndo( false )
 {
 	MEM_ALLOC_CREDIT();
 	g_pDataModelImp->AddElementToFile( m_ref.m_hElement, m_fileId );
-	m_Name.InitAndSet( this, "name", pElementName, FATTRIB_TOPOLOGICAL | FATTRIB_STANDARD );
+	{
+		DMX_PROFILE_SCOPE( CDmElement_m_Name_InitAndSet );
+		m_Name.InitAndSet( this, "name", pElementName, FATTRIB_TOPOLOGICAL );
+	}
 	CopyUniqueId( id, &m_Id );
 }
 
@@ -159,12 +181,12 @@ void CDmElement::SetId( const DmObjectId_t &id )
 //-----------------------------------------------------------------------------
 // RTTI implementation
 //-----------------------------------------------------------------------------
-void CDmElement::SetTypeSymbol( CUtlSymbol sym )
+void CDmElement::SetTypeSymbol( CUtlSymbolLarge sym )
 {
 	m_classType = sym;
 }
 
-bool CDmElement::IsA( UtlSymId_t typeSymbol ) const 
+bool CDmElement::IsA( CUtlSymbolLarge typeSymbol ) const 
 {
 	// NOTE: This pattern here is used to avoid a zillion virtual function
 	// calls in the implementation of IsA. The IsA_Implementation is 
@@ -172,7 +194,7 @@ bool CDmElement::IsA( UtlSymId_t typeSymbol ) const
 	return IsA_Implementation( typeSymbol ); 
 }
 
-int	CDmElement::GetInheritanceDepth( UtlSymId_t typeSymbol ) const
+int	CDmElement::GetInheritanceDepth( CUtlSymbolLarge typeSymbol ) const
 {
 	// NOTE: This pattern here is used to avoid a zillion virtual function
 	// calls in the implementation of IsA. The IsA_Implementation is 
@@ -183,7 +205,7 @@ int	CDmElement::GetInheritanceDepth( UtlSymId_t typeSymbol ) const
 // Helper for GetInheritanceDepth
 int CDmElement::GetInheritanceDepth( const char *pTypeName ) const
 {
-	CUtlSymbol typeSymbol = g_pDataModel->GetSymbol( pTypeName );
+	CUtlSymbolLarge typeSymbol = g_pDataModel->GetSymbol( pTypeName );
 	return GetInheritanceDepth( typeSymbol ); 
 }
 
@@ -214,52 +236,52 @@ void CDmElement::MarkAttributesClean()
 	}
 }
 
-void CDmElement::MarkBeingUnserialized( bool beingUnserialized )
+void CDmElement::DisableOnChangedCallbacks()
 {
-	if ( m_bBeingUnserialized != beingUnserialized )
+	m_bOnChangedCallbacksEnabled = false;
+}
+
+void CDmElement::EnableOnChangedCallbacks()
+{
+	m_bOnChangedCallbacksEnabled = true;
+}
+
+bool CDmElement::AreOnChangedCallbacksEnabled()
+{
+	return m_bOnChangedCallbacksEnabled;	
+}
+
+void CDmElement::FinishUnserialization()
+{
+	for( CDmAttribute *pAttribute = m_pAttributes; pAttribute; pAttribute = pAttribute->NextAttribute() )
 	{
-		m_bBeingUnserialized = beingUnserialized;
+		pAttribute->OnUnserializationFinished();
+	}
 
-		// After we finish unserialization, call OnAttributeChanged; assume everything changed
-		if ( !beingUnserialized )
+	// loop referencing attributes, and call OnAttributeChanged on them as well
+	if ( m_ref.m_attributes.m_hAttribute != DMATTRIBUTE_HANDLE_INVALID )
+	{
+		for ( DmAttributeList_t *pAttrLink = &m_ref.m_attributes; pAttrLink; pAttrLink = pAttrLink->m_pNext )
 		{
-			for( CDmAttribute *pAttribute = m_pAttributes; pAttribute; pAttribute = pAttribute->NextAttribute() )
-			{
-				pAttribute->OnUnserializationFinished();
-			}
+			CDmAttribute *pAttr = g_pDataModel->GetAttribute( pAttrLink->m_hAttribute );
+			if ( !pAttr || pAttr->GetOwner()->GetFileId() == m_fileId )
+				continue; // attributes in this file will already have OnAttributeChanged called on them
 
-			// loop referencing attributes, and call OnAttributeChanged on them as well
-			if ( m_ref.m_attributes.m_hAttribute != DMATTRIBUTE_HANDLE_INVALID )
-			{
-				for ( DmAttributeList_t *pAttrLink = &m_ref.m_attributes; pAttrLink; pAttrLink = pAttrLink->m_pNext )
-				{
-					CDmAttribute *pAttr = g_pDataModel->GetAttribute( pAttrLink->m_hAttribute );
-					if ( !pAttr || pAttr->GetOwner()->GetFileId() == m_fileId )
-						continue; // attributes in this file will already have OnAttributeChanged called on them
-
-					pAttr->OnUnserializationFinished();
-				}
-			}
-
-			// Mostly used for backward compatibility reasons
-			CDmElement *pElement = g_pDataModel->GetElement( m_ref.m_hElement );
-			pElement->OnElementUnserialized();
-
-			// Force a resolve also, and set it up to remove it from the dirty list
-			// after unserialization is complete
-			pElement->Resolve();
-			MarkDirty( false );
-			MarkAttributesClean();
-			g_pDataModelImp->NotifyState( NOTIFY_CHANGE_TOPOLOGICAL );
+			pAttr->OnUnserializationFinished();
 		}
 	}
-}
 
-bool CDmElement::IsBeingUnserialized() const
-{
-	return m_bBeingUnserialized;
-}
+	// Mostly used for backward compatibility reasons
+	CDmElement *pElement = g_pDataModel->GetElement( m_ref.m_hElement );
+	pElement->OnElementUnserialized();
 
+	// Force a resolve also, and set it up to remove it from the dirty list
+	// after unserialization is complete
+	pElement->Resolve();
+	MarkDirty( false );
+	MarkAttributesClean();
+	g_pDataModelImp->NotifyState( NOTIFY_CHANGE_TOPOLOGICAL );
+}
 
 // Should only be called from datamodel, who will take care of changing the fileset entry as well
 void CDmElement::ChangeHandle( DmElementHandle_t handle )
@@ -289,7 +311,7 @@ int CDmElement::EstimateMemoryUsage( CUtlHash< DmElementHandle_t > &visited, Tra
 	int nDataModelUsage = g_pDataModelImp->EstimateMemoryOverhead( );
 	int nReferenceUsage = m_ref.EstimateMemoryOverhead();
 	CDmElement *pElement = g_pDataModel->GetElement( m_ref.m_hElement );
-	int nInternalUsage = sizeof( *this ) - sizeof( CUtlString );	// NOTE: The utlstring is the 'name' attribute var
+	int nInternalUsage = sizeof( *this ) - sizeof( CUtlSymbolLarge );	// NOTE: The utlSymbolLarge is the 'name' attribute var
 	int nOuterUsage = pElement->AllocatedSize() - nInternalUsage;
 	Assert( nOuterUsage >= 0 );
 
@@ -311,25 +333,24 @@ int CDmElement::EstimateMemoryUsage( CUtlHash< DmElementHandle_t > &visited, Tra
 }
 
 //-----------------------------------------------------------------------------
-// these functions are here for the mark and sweep algorithm for deleting orphaned subtrees
-// it's conservative, so it can return true for orphaned elements but false really means it isn't accessible
+// parity methods for marking elements during traversal
 //-----------------------------------------------------------------------------
-bool CDmElement::IsAccessible() const
+bool CDmElement::GetParity( int bit /*=0*/ ) const
 {
-	return m_bIsAcessible;
+	return ( m_nParityBits & ( 1 << bit ) ) != 0;
 }
 
-void CDmElement::MarkAccessible( bool bAccessible )
+void CDmElement::SetParity( bool bParity, int bit /*=0*/ )
 {
-	m_bIsAcessible = bAccessible;
+	m_nParityBits = bParity ? m_nParityBits | ( 1 << bit ) : m_nParityBits & ~( 1 << bit );
 }
 
-void CDmElement::MarkAccessible( TraversalDepth_t depth /* = TD_ALL */ )
+void CDmElement::SetParity( bool bParity, TraversalDepth_t depth, int bit /*=0*/ )
 {
-	if ( m_bIsAcessible )
+	if ( GetParity( bit ) == bParity )
 		return;
 
-	m_bIsAcessible = true;
+	SetParity( bParity, bit );
 
 	for ( const CDmAttribute *pAttr = FirstAttribute(); pAttr != NULL; pAttr = pAttr->NextAttribute() )
 	{
@@ -341,7 +362,7 @@ void CDmElement::MarkAccessible( TraversalDepth_t depth /* = TD_ALL */ )
 			CDmElement *pChild = pAttr->GetValueElement<CDmElement>();
 			if ( !pChild )
 				continue;
-			pChild->MarkAccessible( depth );
+			pChild->SetParity( bParity, depth, bit );
 		}
 		else if ( pAttr->GetType() == AT_ELEMENT_ARRAY )
 		{
@@ -352,11 +373,23 @@ void CDmElement::MarkAccessible( TraversalDepth_t depth /* = TD_ALL */ )
 				CDmElement *pChild = elementArrayAttr[ i ];
 				if ( !pChild )
 					continue;
-				pChild->MarkAccessible( depth );
+				pChild->SetParity( bParity, depth, bit );
 			}
 		}
 	}
 }
+
+
+bool CDmElement::IsOnlyInUndo() const
+{
+	return m_bOnlyInUndo;
+}
+
+void CDmElement::SetOnlyInUndo( bool bOnlyInUndo )
+{
+	m_bOnlyInUndo = bOnlyInUndo;
+}
+
 
 //-----------------------------------------------------------------------------
 // returns the first path to the element found traversing all element/element array attributes - not necessarily the shortest
@@ -871,49 +904,85 @@ bool CDmElement::HasAttribute( const char *pAttributeName, DmAttributeType_t typ
 
 //-----------------------------------------------------------------------------
 //
-// Implementation Undo for CDmAttributeTyped
+// Implementation of Undo for adding or removing an attribute to or from and 
+// element. 
 //
 //-----------------------------------------------------------------------------
-class CUndoAttributeRemove : public CUndoElement
+class CUndoAttributeAddRemove : public CUndoElement
 {
 	typedef CUndoElement BaseClass;
+
 public:
-	CUndoAttributeRemove( CDmElement *pElement, CDmAttribute *pOldAttribute, const char *attributeName, DmAttributeType_t type )
-		: BaseClass( "CUndoAttributeRemove" ),
-		m_pElement( pElement ),
-		m_pOldAttribute( pOldAttribute ),
-		m_symAttribute( attributeName ),
-		m_Type( type )
+	CUndoAttributeAddRemove( CDmElement *pElement, CDmAttribute *pAttribute, bool bRemove )
+		: BaseClass( "CUndoAttributeAddRemove" ),
+		m_bRemove( bRemove ),
+		m_bHoldingPtr( bRemove ), 
+		m_hElement( pElement->GetHandle() ),
+		m_pAttribute( pAttribute )
 	{
+		m_symAttribute = g_pDataModel->GetSymbol( pAttribute->GetName() );
 		Assert( pElement && pElement->GetFileId() != DMFILEID_INVALID );
 	}
 
-	~CUndoAttributeRemove()
+	~CUndoAttributeAddRemove()
 	{
-		// Kill old version...
-		CDmAttributeAccessor::DestroyAttribute( m_pOldAttribute );
+		if ( m_bHoldingPtr && m_pAttribute )
+		{
+			CDmAttributeAccessor::DestroyAttribute( m_pAttribute );
+		}
 	}
 
 	virtual void Undo()
 	{
-		// Add it back in w/o any data
-		CDmAttribute *pAtt = m_pElement->AddAttribute( m_symAttribute.String(), m_Type );
-		if ( pAtt )
-		{
-			// Copy data from old version
-			pAtt->SetValue( m_pOldAttribute );
-		}
+		// Remove the attribute if this is an add undo, or add the attribute if a remove undo.
+		AddOrRemoveAttributeFromElement( m_bRemove );
 	}
+
 	virtual void Redo()
+	{		
+		// Add the attribute if this an add undo, or remove the attribute if this a remove undo.
+		AddOrRemoveAttributeFromElement( !m_bRemove );
+	}
+
+	virtual const char	*GetDesc()
 	{
-		m_pElement->RemoveAttribute( m_symAttribute.String() );
+		static char buf[ 128 ];
+
+		const char *base = BaseClass::GetDesc();
+		Q_snprintf( buf, sizeof( buf ), "%s(%s)", base, m_symAttribute.String() );
+		return buf;
 	}
 
 private:
-	CDmElement				*m_pElement;
-	CUtlSymbol				m_symAttribute;
-	DmAttributeType_t		m_Type;
-	CDmAttribute			*m_pOldAttribute;
+
+	void AddOrRemoveAttributeFromElement( bool bAdd )
+	{
+		CDmElement *pElement = GetElement();
+		if ( pElement == NULL )
+			return;
+		
+		if ( bAdd )
+		{
+			CDmeElementAccessor::AddAttributeByPtr( pElement, m_pAttribute );
+			m_bHoldingPtr = false;
+		}
+		else
+		{
+			CDmeElementAccessor::RemoveAttributeByPtrNoDelete( pElement, m_pAttribute );
+			m_bHoldingPtr = true;
+		}
+	}
+
+	CDmElement *GetElement() const 
+	{
+		return g_pDataModel->GetElement( m_hElement );
+	}
+
+	const bool				m_bRemove;
+	bool					m_bHoldingPtr;
+	const DmElementHandle_t	m_hElement;
+	CUtlSymbolLarge			m_symAttribute;
+	CDmAttribute *const		m_pAttribute;
 };
 
 
@@ -950,6 +1019,11 @@ void CDmElement::RemoveAttribute( CDmAttribute **pAttrRef )
 	if( pAttrToDelete->IsFlagSet( FATTRIB_EXTERNAL ) )
 		return;
 
+	// This will cause element attributes to be properly removed from the attribute 
+	// reference list of the element they refer to, resolving issues where dead
+	// attributes would be encountered when walking the of referring elements.
+	pAttrToDelete->SetToDefaultValue();
+
 	MarkDirty();
 
 	// UNDO Hook
@@ -957,7 +1031,7 @@ void CDmElement::RemoveAttribute( CDmAttribute **pAttrRef )
 	if ( g_pDataModel->UndoEnabledForElement( this ) )
 	{
 		MEM_ALLOC_CREDIT_CLASS();
-		CUndoAttributeRemove *pUndo = new CUndoAttributeRemove( this, pAttrToDelete, pAttrToDelete->GetName(), pAttrToDelete->GetType() );
+		CUndoAttributeAddRemove *pUndo = new CUndoAttributeAddRemove( this, pAttrToDelete, true );
 		g_pDataModel->AddUndoElement( pUndo );
 		storedbyundo = true;
 	}
@@ -974,7 +1048,7 @@ void CDmElement::RemoveAttribute( CDmAttribute **pAttrRef )
 
 void CDmElement::RemoveAttribute( const char *pAttributeName )
 {
-	UtlSymId_t find = g_pDataModel->GetSymbol( pAttributeName );
+	CUtlSymbolLarge find = g_pDataModel->GetSymbol( pAttributeName );
 	for ( CDmAttribute **ppAttr = &m_pAttributes; *ppAttr; ppAttr = ( *ppAttr )->GetNextAttributeRef() )
 	{
 		if ( find == ( *ppAttr )->GetNameSymbol() )
@@ -1029,80 +1103,6 @@ const char *CDmElement::GetValueAsString( const char *pAttributeName, char *pBuf
 
 
 //-----------------------------------------------------------------------------
-//
-// Implementation Undo for CDmAttributeTyped
-//
-//-----------------------------------------------------------------------------
-class CUndoAttributeAdd : public CUndoElement
-{
-	typedef CUndoElement BaseClass;
-
-public:
-	CUndoAttributeAdd( CDmElement *pElement, const char *attributeName )
-		: BaseClass( "CUndoAttributeAdd" ),
-		m_hElement( pElement->GetHandle() ),
-		m_symAttribute( attributeName ),
-		m_pAttribute( NULL ),
-		m_bHoldingPtr( false )
-	{
-		Assert( pElement && pElement->GetFileId() != DMFILEID_INVALID );
-	}
-
-	~CUndoAttributeAdd()
-	{
-		if ( m_bHoldingPtr && m_pAttribute )
-		{
-			CDmAttributeAccessor::DestroyAttribute( m_pAttribute );
-			m_pAttribute = NULL;
-		}
-	}
-
-	void SetAttributePtr( CDmAttribute *pAttribute )
-	{
-		m_pAttribute = pAttribute;
-	}
-
-	virtual void Undo()
-	{
-		if ( GetElement() )
-		{
-			CDmeElementAccessor::RemoveAttributeByPtrNoDelete( GetElement(), m_pAttribute );
-			m_bHoldingPtr = true;
-		}
-	}
-
-	virtual void Redo()
-	{
-		if ( !GetElement() )
-			return;
-
-		CDmeElementAccessor::AddAttributeByPtr( GetElement(), m_pAttribute );
-		m_bHoldingPtr = false;
-	}
-
-	virtual const char	*GetDesc()
-	{
-		static char buf[ 128 ];
-
-		const char *base = BaseClass::GetDesc();
-		Q_snprintf( buf, sizeof( buf ), "%s(%s)", base, m_symAttribute.String() );
-		return buf;
-	}
-
-private:
-	CDmElement *GetElement()
-	{
-		return g_pDataModel->GetElement( m_hElement );
-	}
-
-	DmElementHandle_t		m_hElement;
-	CUtlSymbol				m_symAttribute;
-	CDmAttribute			*m_pAttribute;
-	bool					m_bHoldingPtr;
-};
-
-
-//-----------------------------------------------------------------------------
 // Adds, removes attributes
 //-----------------------------------------------------------------------------
 void CDmElement::AddAttributeByPtr( CDmAttribute *ptr )
@@ -1129,62 +1129,69 @@ CDmAttribute *CDmElement::CreateAttribute( const char *pAttributeName, DmAttribu
 	Assert( !HasAttribute( pAttributeName ) );
 	MarkDirty( );
 
-	// UNDO Hook
-	CUndoAttributeAdd *pUndo = NULL;
-	if ( g_pDataModel->UndoEnabledForElement( this ) )
-	{
-		MEM_ALLOC_CREDIT_CLASS();
-		pUndo = new CUndoAttributeAdd( this, pAttributeName );
-		g_pDataModel->AddUndoElement( pUndo );
-	}
-
 	CDmAttribute *pAttribute = NULL;
 	{
 		CDisableUndoScopeGuard guard;
 		pAttribute = CDmAttribute::CreateAttribute( this, type, pAttributeName );
 		*( pAttribute->GetNextAttributeRef() ) = m_pAttributes;
 		m_pAttributes = pAttribute;
-		if ( pUndo )
-		{
-			pUndo->SetAttributePtr( pAttribute );
-		}
-		g_pDataModelImp->NotifyState( NOTIFY_CHANGE_TOPOLOGICAL );
 	}
+
+	if ( g_pDataModel->UndoEnabledForElement( this ) )
+	{
+		MEM_ALLOC_CREDIT_CLASS();
+		CUndoAttributeAddRemove *pUndo = new CUndoAttributeAddRemove( this, pAttribute, false );			
+		g_pDataModel->AddUndoElement( pUndo );
+	}
+
+	g_pDataModelImp->NotifyState( NOTIFY_CHANGE_TOPOLOGICAL );
+	
 	return pAttribute;
 }
 
 CDmAttribute* CDmElement::AddExternalAttribute( const char *pAttributeName, DmAttributeType_t type, void *pMemory )
 {
-	MarkDirty( );
+	DMX_PROFILE_SCOPE( AddExternalAttribute );
 
-	// Add will only add the attribute doesn't already exist
-	if ( HasAttribute( pAttributeName ) )
 	{
-		Assert( 0 );
-		return NULL;
+		DMX_PROFILE_SCOPE( AddExternalAttribute_MarkDirty );
+		MarkDirty( );
 	}
 
-	// UNDO Hook
-	CUndoAttributeAdd *pUndo = NULL;
-	if ( g_pDataModel->UndoEnabledForElement( this ) )
+	// Add will only add the attribute doesn't already exist
 	{
-		MEM_ALLOC_CREDIT_CLASS();
-		pUndo = new CUndoAttributeAdd( this, pAttributeName );
-		g_pDataModel->AddUndoElement( pUndo );
+		DMX_PROFILE_SCOPE( AddExternalAttribute_HasAttribute );
+		if ( HasAttribute( pAttributeName ) )
+		{
+			Assert( 0 );
+			return NULL;
+		}
 	}
 
 	CDmAttribute *pAttribute = NULL;
 	{
 		CDisableUndoScopeGuard guard;
-		pAttribute = CDmAttribute::CreateExternalAttribute( this, type, pAttributeName, pMemory );
+		{
+			DMX_PROFILE_SCOPE( AddExternalAttribute_CreateExternalAttribute );
+			pAttribute = CDmAttribute::CreateExternalAttribute( this, type, pAttributeName, pMemory );
+		}
+
 		*( pAttribute->GetNextAttributeRef() ) = m_pAttributes;
 		m_pAttributes = pAttribute;
-		if ( pUndo )
-		{
-			pUndo->SetAttributePtr( pAttribute );
-		}
-		g_pDataModelImp->NotifyState( NOTIFY_CHANGE_TOPOLOGICAL );
 	}
+
+	{
+		DMX_PROFILE_SCOPE( AddExternalAttribute_CheckUndo );
+		if ( g_pDataModel->UndoEnabledForElement( this ) )
+		{
+			MEM_ALLOC_CREDIT_CLASS();
+			CUndoAttributeAddRemove *pUndo = new CUndoAttributeAddRemove( this, pAttribute, false );			
+			g_pDataModel->AddUndoElement( pUndo );
+		}
+	}
+
+	g_pDataModelImp->NotifyState( NOTIFY_CHANGE_TOPOLOGICAL );
+	
 	return pAttribute;
 }
 
@@ -1194,7 +1201,7 @@ CDmAttribute* CDmElement::AddExternalAttribute( const char *pAttributeName, DmAt
 //-----------------------------------------------------------------------------
 CDmAttribute *CDmElement::FindAttribute( const char *pAttributeName ) const
 {
-	UtlSymId_t find = g_pDataModel->GetSymbol( pAttributeName );
+	CUtlSymbolLarge find = g_pDataModel->GetSymbol( pAttributeName );
 
 	for ( CDmAttribute *pAttr = m_pAttributes; pAttr; pAttr = pAttr->NextAttribute() )
 	{
@@ -1253,11 +1260,15 @@ void DestroyElement( CDmElement *pElement, TraversalDepth_t depth )
 	if ( !pElement )
 		return;
 
+	DmElementHandle_t hElement = pElement->GetHandle();
+
 	CDmAttribute* pAttribute;
 	for ( pAttribute = pElement->FirstAttribute(); pAttribute; pAttribute = pAttribute->NextAttribute() )
 	{
 		if ( !ShouldTraverse( pAttribute, depth ) )
 			continue;
+
+		g_pDataModelImp->MarkHandleInvalid( hElement ); // prevents recursing through this element again
 
 		switch( pAttribute->GetType() )	
 		{
@@ -1280,44 +1291,91 @@ void DestroyElement( CDmElement *pElement, TraversalDepth_t depth )
 			}
 			break;
 		}
+
+		g_pDataModelImp->MarkHandleValid( hElement );
 	}
 
-	g_pDataModel->DestroyElement( pElement->GetHandle() );
+	g_pDataModel->DestroyElement( hElement );
 }
 
+
 //-----------------------------------------------------------------------------
-// copy groups of elements together so that references between them are maintained
+//
+// generic element tree traversal helper class
+//
 //-----------------------------------------------------------------------------
-void CopyElements( const CUtlVector< CDmElement* > &from, CUtlVector< CDmElement* > &to, TraversalDepth_t depth /* = TD_DEEP */ )
+
+CElementTreeTraversal::CElementTreeTraversal( CDmElement *pRoot, const char *pAttrName )
 {
-	CDisableUndoScopeGuard sg;
+	Reset( pRoot, pAttrName );
+}
 
-	CUtlMap< DmElementHandle_t, DmElementHandle_t, int > refmap( DefLessFunc( DmElementHandle_t ) );
+void CElementTreeTraversal::Reset( CDmElement *pRoot, const char *pAttrName )
+{
+	m_state.RemoveAll();
+	m_state.AddToTail( State_t( pRoot, NOT_VISITED ) );
+	m_pAttrName = pAttrName;
+}
 
-	int c = from.Count();
-	for ( int i = 0; i < c; ++i )
+CDmElement *CElementTreeTraversal::Next( bool bSkipChildren /*= false*/ )
+{
+	if ( m_state.Count() == 1 && m_state[ 0 ].nIndex == NOT_VISITED )
 	{
-		CDmElement *pFrom = from[ i ];
-		CDmElement *pCopy = GetElement< CDmElement >( g_pDataModel->CreateElement( pFrom->GetType(), pFrom->GetName(), pFrom->GetFileId() ) );
-		if ( pCopy )
+		m_state[ 0 ].nIndex = VISITING;
+		return m_state[ 0 ].pElement;
+	}
+
+	if ( bSkipChildren )
+	{
+		m_state.Remove( m_state.Count() - 1 );
+	}
+
+	while ( int nCount = m_state.Count() )
+	{
+		State_t &state = m_state[ nCount - 1 ];
+		Assert( state.pElement );
+		if ( !state.pElement )
+			return NULL;
+
+		CDmrElementArray<> children( state.pElement, m_pAttrName );
+		if ( children.IsValid() )
 		{
-			pFrom->CopyAttributesTo( pCopy, refmap, depth );
+			int nChildren = children.Count();
+			while ( ++state.nIndex < nChildren )
+			{
+				if ( CDmElement *pElement = children[ state.nIndex ] )
+				{
+					m_state.AddToTail( State_t( pElement, VISITING ) );
+					return pElement;
+				}
+			}
 		}
-		to.AddToTail( pCopy );
+
+		m_state.Remove( nCount - 1 );
 	}
 
-	CUtlHashFast< DmElementHandle_t > visited;
-	uint nPow2Size = 1;
-	while( nPow2Size < refmap.Count() )
-	{
-		nPow2Size <<= 1;
-	}
-	visited.Init( nPow2Size );
+	return NULL;
+}
 
-	for ( int i = 0; i < c; ++i )
-	{
-		to[ i ]->FixupReferences( visited, refmap, depth );
-	}
+CDmElement *CElementTreeTraversal::GetElement()
+{
+	int nCount = m_state.Count();
+	if ( nCount < 1 )
+		return NULL;
+
+	State_t &state = m_state[ nCount - 1 ];
+	Assert( state.nIndex == NOT_VISITED || state.nIndex == VISITING );
+	return state.nIndex == NOT_VISITED ? NULL : state.pElement;
+}
+
+CDmElement *CElementTreeTraversal::GetParent( int i = 0 )
+{
+	return i + 1 < m_state.Count() ? m_state[ m_state.Count() - i - 1 ].pElement : NULL;
+}
+
+int CElementTreeTraversal::GetChildIndex( int i )
+{
+	return i + 1 < m_state.Count() ? m_state[ m_state.Count() - i - 1 ].nIndex : NOT_VISITED;
 }
 
 
@@ -1327,64 +1385,51 @@ void CopyElements( const CUtlVector< CDmElement* > &from, CUtlVector< CDmElement
 //
 //-----------------------------------------------------------------------------
 
-struct ElementArrayNameAccessor
+// returns startindex if none found, 1 if only "prefix" found, and n+1 if "prefixn" found
+int GenerateUniqueNameIndex( const char *prefix, const CUtlVector< DmElementHandle_t > &array, int startindex /*= 0*/ )
 {
-	ElementArrayNameAccessor( const CUtlVector< DmElementHandle_t > &array ) : m_array( array ) {}
-	int Count() const
-	{
-		return m_array.Count();
-	}
-	const char *operator[]( int i ) const
-	{
-		CDmElement *pElement = GetElement< CDmElement >( m_array[ i ] );
-		return pElement ? pElement->GetName() : NULL;
-	}
-private:
-	const CUtlVector< DmElementHandle_t > &m_array;
-};
-
-// returns startindex if none found, 2 if only "prefix" found, and n+1 if "prefixn" found
-int GenerateUniqueNameIndex( const char *prefix, const CUtlVector< DmElementHandle_t > &array, int startindex )
-{
-	return V_GenerateUniqueNameIndex( prefix, ElementArrayNameAccessor( array ), startindex );
+	return V_GenerateUniqueNameIndex( prefix, ElementArrayNameAccessor< DmElementHandle_t >( array ), startindex );
 }
 
 bool GenerateUniqueName( char *name, int memsize, const char *prefix, const CUtlVector< DmElementHandle_t > &array )
 {
-	return V_GenerateUniqueName( name, memsize, prefix, ElementArrayNameAccessor( array ) );
+	return V_GenerateUniqueName( name, memsize, prefix, ElementArrayNameAccessor< DmElementHandle_t >( array ) );
 }
 
-void MakeElementNameUnique( CDmElement *pElement, const char *prefix, const CUtlVector< DmElementHandle_t > &array, bool forceIndex )
+int SplitStringIntoBaseAndIntegerSuffix( const char *pName, int len, char *pBaseName )
 {
-	if ( pElement == NULL || prefix == NULL )
+	int baselen = len;
+	while ( baselen > 0 && V_isdigit( pName[ baselen - 1 ] ) )
+	{
+		--baselen;
+	}
+	V_strncpy( pBaseName, pName, baselen + 1 );
+
+	return ( baselen < len ) ? V_atoi( pName + baselen ) : 0;
+}
+
+void MakeElementNameUnique( CDmElement *pElement, const CUtlVector< DmElementHandle_t > &array )
+{
+	if ( !pElement )
 		return;
 
-	int i = GenerateUniqueNameIndex( prefix, array );
+	const char *pName = pElement->GetName();
+	int len = V_strlen( pName );
+	char *pBaseName = ( char* )stackalloc( len + 1 );
+	int nStartingIndex = SplitStringIntoBaseAndIntegerSuffix( pName, len, pBaseName );
+
+	int i = GenerateUniqueNameIndex( pBaseName, array, nStartingIndex );
 	if ( i <= 0 )
 	{
-		if ( !forceIndex )
-		{
-			pElement->SetName( prefix );
-			return;
-		}
-		i = 1; // 1 means that no names of "prefix*" were found, but we want to generate a 1-based index
+		pElement->SetName( pBaseName );
+		return;
 	}
 
-	int prefixLength = Q_strlen( prefix );
-	int newlen = prefixLength + ( int )log10( ( float )i ) + 1;
-	if ( newlen < 256 )
-	{
-		char name[256];
-		Q_snprintf( name, sizeof( name ), "%s%d", prefix, i );
-		pElement->SetName( name );
-	}
-	else
-	{
-		char *name = new char[ newlen + 1 ];
-		Q_snprintf( name, sizeof( name ), "%s%d", prefix, i );
-		pElement->SetName( name );
-		delete[] name;
-	}
+	int newlen = len + 11; // reserve at least enough space for 10 digits and a terminating '\0'
+	char *pNewName = ( char* )stackalloc( newlen );
+	Q_snprintf( pNewName, newlen, "%s%d", pBaseName, i );
+
+	pElement->SetName( pNewName );
 }
 
 void RemoveElementFromRefereringAttributes( CDmElement *pElement, bool bPreserveOrder /*= true*/ )
@@ -1401,15 +1446,15 @@ void RemoveElementFromRefereringAttributes( CDmElement *pElement, bool bPreserve
 		if ( IsArrayType( pAttribute->GetType() ) )
 		{
 			CDmrElementArray<> array( pAttribute );
-			int iElem = array.Find( pElement );
-			Assert( iElem != array.InvalidIndex() );
+			int i = array.Find( pElement );
+			Assert( i != array.InvalidIndex() );
 			if ( bPreserveOrder )
 			{
-				array.Remove( iElem );
+				array.Remove( i );
 			}
 			else
 			{
-				array.FastRemove( iElem );
+				array.FastRemove( i );
 			}
 		}
 		else

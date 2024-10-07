@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========== Copyright © 2005, Valve Corporation, All rights reserved. ========
 //
 // Purpose:
 //
@@ -8,9 +8,15 @@
 
 #include "cmatnullrendercontext.h"
 
+#ifndef _PS3
 #define MATSYS_INTERNAL
+#endif
 #include "cmatrendercontext.h"
 #include "itextureinternal.h"
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
 
 class CMatNullRenderContext : public CMatRenderContextBase
 {
@@ -55,17 +61,27 @@ public:
 		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
 	}
 
-	void ReadPixels(int,int,int,int,unsigned char *,ImageFormat)
+	void ReadPixels(int,int,int,int,unsigned char *,ImageFormat, ITexture *)
 	{
 		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
 	}
 
-	void SetAmbientLight(float,float,float)
+	void ReadPixelsAsync(int,int,int,int,unsigned char *,ImageFormat, ITexture *, CThreadEvent *)
 	{
 		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
 	}
 
-	void SetLight(int,const LightDesc_t &)
+	void ReadPixelsAsyncGetResult(int,int,int,int,unsigned char *,ImageFormat,CThreadEvent *)
+	{
+		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
+	}
+
+	virtual void SetLightingState( const MaterialLightingState_t &state )
+	{
+		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
+	}
+
+	void SetLights( int nCount, const LightDesc_t *pDesc )
 	{
 		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
 	}
@@ -130,7 +146,28 @@ public:
 			height = element.m_nViewH;
 		}
 	}
+
+	void BeginGeneratingCSMs()
+	{
+		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
+	}
+
+	void EndGeneratingCSMs()
+	{
+		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
+	}
+
+	void PerpareForCascadeDraw( int cascade, float fShadowSlopeScaleDepthBias, float fShadowDepthBias )
+	{
+		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
+	}
+
 	void CullMode(MaterialCullMode_t)
+	{
+		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
+	}
+
+	void FlipCullMode( void )
 	{
 		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
 	}
@@ -197,7 +234,7 @@ public:
 		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
 	}
 
-	IMesh *CreateStaticMesh(VertexFormat_t,const char *,IMaterial *)
+	IMesh *CreateStaticMesh(VertexFormat_t,const char *,IMaterial *,VertexStreamSpec_t *)
 	{
 		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
 		return NULL;
@@ -261,17 +298,17 @@ public:
 		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
 	}
 
-	void OverrideDepthEnable(bool,bool)
-	{
-		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
-	}
-
-	void OverrideColorWriteEnable( bool, bool )
+	void OverrideDepthEnable( bool, bool, bool )
 	{
 		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
 	}
 
 	void OverrideAlphaWriteEnable( bool, bool )
+	{
+		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
+	}
+
+	void OverrideColorWriteEnable( bool, bool )
 	{
 		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
 	}
@@ -318,7 +355,7 @@ public:
 		return 1;
 	}
 
-	void SetFlashlightMode(bool)
+	virtual void SetFlashlightMode(bool)
 	{
 		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
 	}
@@ -328,12 +365,51 @@ public:
 		return false;
 	}
 
+	virtual bool IsCullingEnabledForSinglePassFlashlight( void ) const
+	{
+		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
+		return false;
+	}
+
+	virtual void EnableCullingForSinglePassFlashlight( bool )
+	{
+		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
+	}
+
+	virtual void SetRenderingPaint( bool bEnable )
+	{
+		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
+	}
+
 	void SetFlashlightState(const FlashlightState_t &,const VMatrix &)
 	{
 		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
 	}
 
-	void SetScissorRect( const int nLeft, const int nTop, const int nRight, const int nBottom, const bool bEnableScissor  )
+	virtual bool IsCascadedShadowMapping() const
+	{
+		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
+		return false;
+	}
+
+	virtual void SetCascadedShadowMapping( bool bEnable )
+	{
+		bEnable;
+		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
+	}
+
+	virtual void SetCascadedShadowMappingState( const CascadedShadowMappingState_t &state, ITexture *pDepthTextureAtlas )
+	{
+		state, pDepthTextureAtlas;
+		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
+	}
+
+	void PushScissorRect( const int nLeft, const int nTop, const int nRight, const int nBottom  )
+	{
+		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
+	}
+
+	void PopScissorRect()
 	{
 		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
 	}
@@ -427,47 +503,17 @@ public:
 		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
 	}
 
+	void SetTextureRenderingParameter( int, ITexture * )
+	{
+		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
+	}
+
 	void SetVectorRenderingParameter(int,const Vector &)
 	{
 		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
 	}
 
-	void SetStencilEnable(bool)
-	{
-		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
-	}
-
-	void SetStencilFailOperation(StencilOperation_t)
-	{
-		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
-	}
-
-	void SetStencilZFailOperation(StencilOperation_t)
-	{
-		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
-	}
-
-	void SetStencilPassOperation(StencilOperation_t)
-	{
-		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
-	}
-
-	void SetStencilCompareFunction(StencilComparisonFunction_t)
-	{
-		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
-	}
-
-	void SetStencilReferenceValue(int)
-	{
-		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
-	}
-
-	void SetStencilTestMask(uint32)
-	{
-		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
-	}
-
-	void SetStencilWriteMask(uint32)
+	virtual void SetStencilState( const ShaderStencilState_t & )
 	{
 		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
 	}
@@ -583,7 +629,7 @@ public:
 		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
 	}
 
-	void DrawBatch(int,int)
+	void DrawBatch(MaterialPrimitiveType_t, int,int)
 	{
 		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
 	}
@@ -605,6 +651,12 @@ public:
 	}
 
 	int GetIntRenderingParameter(int) const
+	{
+		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
+		return 0;
+	}
+
+	ITexture *GetTextureRenderingParameter(int) const
 	{
 		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
 		return 0;
@@ -632,9 +684,10 @@ public:
 		return true;
 	}
 
-	void BindStandardTexture(TextureStage_t,StandardTextureId_t)
+	bool IsRenderingPaint() const
 	{
 		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
+		return true;
 	}
 
 	void GetLightmapDimensions(int *,int *)
@@ -653,6 +706,13 @@ public:
 		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
 	}
 
+#ifdef _PS3
+	virtual void DrawReloadZcullQuad()
+	{
+		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
+	}
+#endif // _PS3
+
 	bool OnDrawMesh(IMesh *,CPrimList *,int)
 	{
 		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
@@ -660,6 +720,12 @@ public:
 	}
 
 	bool OnDrawMesh(IMesh *,int,int)
+	{
+		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
+		return true;
+	}
+
+	bool OnDrawMeshModulated(IMesh *, const Vector4D&, int,int)
 	{
 		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
 		return true;
@@ -683,12 +749,6 @@ public:
 		return true;
 	}
 
-	bool OnFlushBufferedPrimitives()
-	{
-		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
-		return true;
-	}
-
 	void ForceHardwareSync()
 	{
 		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
@@ -704,34 +764,19 @@ public:
 		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
 	}
 
-	void AsyncCreateTextureFromRenderTarget( ITexture* pSrcRt, const char* pDstName, ImageFormat dstFmt, bool bGenMips, int nAdditionalCreationFlags, IAsyncTextureOperationReceiver* pRecipient, void* pExtraArgs ) OVERRIDE
-	{
-		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
-	}
-
-	virtual void AsyncMap( ITextureInternal* pTexToMap, IAsyncTextureOperationReceiver* pRecipient, void* pExtraArgs ) OVERRIDE
-	{
-	
-	}
-
-	virtual void AsyncUnmap( ITextureInternal* pTexToUnmap ) OVERRIDE
-	{
-
-	}
-
-	virtual void AsyncCopyRenderTargetToStagingTexture( ITexture* pDst, ITexture* pSrc, IAsyncTextureOperationReceiver* pRecipient, void* pExtraArgs ) OVERRIDE
-	{
-
-	}
-
 	void SetShadowDepthBiasFactors( float fSlopeScaleDepthBias, float fDepthBias )
 	{
 		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
 	}
 	
-	void BindStandardTexture( Sampler_t, StandardTextureId_t )
+	void BindStandardTexture( Sampler_t, TextureBindFlags_t nBindFlags, StandardTextureId_t )
 	{
 		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
+	}
+
+	void EvictManagedResources()
+	{
+		AssertMsg( 0, "EvictManagedResources only provides base features, not a stub (right now)" );
 	}
 
 // ------------ New Vertex/Index Buffer interface ----------------------------
@@ -761,7 +806,7 @@ public:
 		Assert( 0 );
 		return NULL;
 	}
-	IIndexBuffer *GetDynamicIndexBuffer( MaterialIndexFormat_t fmt, bool bBufferedtrue )
+	IIndexBuffer *GetDynamicIndexBuffer( )
 	{
 		Assert( 0 );
 		return NULL;
@@ -796,9 +841,30 @@ public:
 		pTexCoord->Init();
 		return false;
 	}
+
+	virtual int GetSubDBufferWidth()
+	{
+		Assert(0);
+		return 0;
+	}
+	virtual float* LockSubDBuffer( int nNumRows )
+	{
+		Assert(0);
+		return NULL;
+	}
+	virtual void UnlockSubDBuffer()
+	{
+		Assert(0);
+	}
+
 	virtual void SetFlexWeights( int nFirstWeight, int nCount, const MorphWeight_t* pWeights ) {}
 
 	virtual void FogMaxDensity( float flMaxDensity )
+	{
+		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
+	}
+
+	virtual void DrawInstances( int nInstanceCount, const MeshInstanceData_t *pInstance )
 	{
 		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
 	}
@@ -814,10 +880,14 @@ public:
 	virtual void SetResetable( ColorCorrectionHandle_t handle, bool bResetable ) {}
 	virtual void SetFullScreenDepthTextureValidityFlag( bool bIsValid ) {}
 
+	virtual void SetNonInteractiveLogoTexture( ITexture *pTexture, float flNormalizedX, float flNormalizedY, float flNormalizedW, float flNormalizedH ) {}
 	virtual void SetNonInteractivePacifierTexture( ITexture *pTexture, float flNormalizedX, float flNormalizedY, float flNormalizedSize ) {}
 	virtual void SetNonInteractiveTempFullscreenBuffer( ITexture *pTexture, MaterialNonInteractiveMode_t mode ) {}
 	virtual void EnableNonInteractiveMode( MaterialNonInteractiveMode_t mode ) {}
 	virtual void RefreshFrontBufferNonInteractive() {}
+
+	virtual void FlipCulling( bool bFlipCulling ) {}
+
 
 #if defined( _X360 )
 	virtual void PushVertexShaderGPRAllocation( int iVertexShaderCount = 64 )
@@ -829,13 +899,80 @@ public:
 	{
 		Assert( 0 );
 	}
+
+	virtual void FlushHiStencil()
+	{
+		Assert( 0 );
+	}
 #endif
 
-#ifdef DX_TO_GL_ABSTRACTION
+#if defined( _GAMECONSOLE )
+	virtual void BeginConsoleZPass( const WorldListIndicesInfo_t &indicesInfo )
+	{
+		Assert( 0 );
+	}
+
+	virtual void BeginConsoleZPass2( int nSlack )
+	{
+		Assert( 0 );
+	}
+	
+	virtual void EndConsoleZPass()
+	{
+		Assert( 0 );
+	}
+#endif
+
+#if defined( _PS3 )
+	virtual void FlushTextureCache()
+	{
+		Assert( 0 );
+	}
+#endif
+	virtual void AntiAliasingHint(int )
+	{
+		Assert( 0 );
+	}
+	
+	virtual void EnableSinglePassFlashlightMode( bool bEnable )
+	{
+		Assert( 0 );
+	}
+
+	virtual bool SinglePassFlashlightModeEnabled( void ) const
+	{
+		Assert( 0 );
+		return false;
+	}
+
+	void UpdateGameTime( float )
+	{
+		AssertMsg( 0, "CMatNullRenderContext only provides base features, not a stub (right now)" );
+	}
+
+#if defined( INCLUDE_SCALEFORM )
+	virtual void SetScaleformSlotViewport( int slot, int x, int y, int w, int h ) { Assert (0); }
+	virtual void RenderScaleformSlot( int slot ) { Assert (0); }
+	virtual void ForkRenderScaleformSlot( int slot ) { Assert (0); }
+	virtual void JoinRenderScaleformSlot( int slot ) { Assert (0); }
+	virtual void SetScaleformCursorViewport( int x, int y, int w, int h ) { Assert (0); }
+	virtual void RenderScaleformCursor() { Assert (0); }
+	virtual void AdvanceAndRenderScaleformSlot( int slot ) { Assert (0); }
+	virtual void AdvanceAndRenderScaleformCursor() { Assert (0); }
+#endif
+
+	//--------------------------------------------------------
+	// debug logging - no-op in queued context
+	//--------------------------------------------------------
+	virtual void							Printf( char *fmt, ... ) {};
+	virtual void							PrintfVA( char *fmt, va_list vargs ){};
+	virtual float							Knob( char *knobname, float *setvalue=NULL ) { return 0.0f; };	
+
+#if defined( DX_TO_GL_ABSTRACTION ) && !defined( _GAMECONSOLE )
 	void									DoStartupShaderPreloading( void ) {};
 #endif
 
-	void									TextureManagerUpdate( void ) { }
+	virtual ColorCorrectionHandle_t FindLookup( const char *pName ) { return 0; }
 
 	int m_WidthBackBuffer, m_HeightBackBuffer;
 };

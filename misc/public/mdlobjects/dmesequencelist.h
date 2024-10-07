@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2008, Valve Corporation, All rights reserved. =====//
 //
 // A list of DmeSequences's
 //
@@ -16,12 +16,14 @@
 
 #include "datamodel/dmattributevar.h"
 #include "mdlobjects/dmemdllist.h"
+#include "tier1/utlvector.h"
 
 
 //-----------------------------------------------------------------------------
 // Forward Declarations
 //-----------------------------------------------------------------------------
-class CDmeSequence;
+class CDmeSequenceBase;
+class CDmeIkChain;
 
 
 //-----------------------------------------------------------------------------
@@ -34,8 +36,16 @@ class CDmeSequenceList : public CDmeMdlList
 public:
 	virtual CDmAttribute *GetListAttr() { return m_Sequences.GetAttribute(); }
 
-	CDmaElementArray< CDmeSequence > m_Sequences;
+	CDmaElementArray< CDmeSequenceBase> m_Sequences;
+	CDmaElementArray< CDmeIkChain > m_eIkChainList;
 
+	// Returns a sorted of the sequences in the m_Sequences attribute in order of priority
+	// Sequences that are referred to come before the sequences that refer to them
+	void GetSortedSequenceList( CUtlVector< CDmeSequenceBase * > &sortedSequenceList ) const;
+
+	// Sorts the sequences in the m_Sequences attribute in order of priority
+	// Sequences that are referred to come before the sequences that refer to them
+	void SortSequences();
 };
 
 

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -242,7 +242,7 @@ void CBaseEntityList::RemoveEntityAtSlot( int iSlot )
 
 	if ( pInfo->m_pEntity )
 	{
-		pInfo->m_pEntity->SetRefEHandle( INVALID_EHANDLE_INDEX );
+		pInfo->m_pEntity->SetRefEHandle( INVALID_EHANDLE );
 
 		// Notify the derived class that we're about to remove this entity.
 		OnRemoveEntity( pInfo->m_pEntity, CBaseHandle( iSlot, pInfo->m_SerialNumber ) );

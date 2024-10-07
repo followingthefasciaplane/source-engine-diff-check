@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -28,24 +28,6 @@ class CBaseSceneObject;
 
 
 //-----------------------------------------------------------------------------
-// Used to remap keyvalues names
-//-----------------------------------------------------------------------------
-struct AttributeRemap_t
-{
-	const char *m_pKeyValuesName;
-	const char *m_pDmeName;
-};
-
-static AttributeRemap_t s_pAttributeRemap[] = 
-{
-	{ "type", "_type" }, // FIXME - remove this once we've made type no longer be an attribute
-	{ "name", "_name" },
-	{ "id", "_id" }, // FIXME - remove this once we've made id no longer be an attribute
-	{ NULL, NULL }
-};
-
-
-//-----------------------------------------------------------------------------
 // Serialization class for Key Values
 //-----------------------------------------------------------------------------
 class CDmSerializerKeyValues : public IDmSerializer
@@ -57,10 +39,12 @@ public:
 	virtual bool StoresVersionInFile() const { return false; }
 	virtual bool IsBinaryFormat() const { return false; }
 	virtual int GetCurrentVersion() const { return 0; } // doesn't store a version
+ 	virtual int GetImportedVersion() const { return 1; }
 	virtual bool Serialize( CUtlBuffer &buf, CDmElement *pRoot );
 	virtual bool Unserialize( CUtlBuffer &buf, const char *pEncodingName, int nEncodingVersion,
 							  const char *pSourceFormatName, int nSourceFormatVersion,
 							  DmFileId_t fileid, DmConflictResolution_t idConflictResolution, CDmElement **ppRoot );
+	virtual const char *GetImportedFormat() const { return "dmx"; }
 
 private:
 	// Methods related to serialization
@@ -123,7 +107,7 @@ bool CDmSerializerKeyValues::SerializeAttributes( CUtlBuffer& buf, CDmElement *p
 	int nAttributes = 0;
 	for ( CDmAttribute *pAttribute = pElement->FirstAttribute(); pAttribute; pAttribute = pAttribute->NextAttribute() )
 	{
-		if ( pAttribute->IsFlagSet( FATTRIB_DONTSAVE | FATTRIB_STANDARD ) )
+		if ( pAttribute->IsStandard() || pAttribute->IsFlagSet( FATTRIB_DONTSAVE ) )
 			continue;
 
 		ppAttributes[ nAttributes++ ] = pAttribute;
@@ -137,14 +121,10 @@ bool CDmSerializerKeyValues::SerializeAttributes( CUtlBuffer& buf, CDmElement *p
 
 		const char *pName = pAttribute->GetName();
 
-		// Rename "_type", "_name", or "_id" fields, since they are special fields
-		for ( int iAttr = 0; s_pAttributeRemap[i].m_pKeyValuesName; ++i )
+		// Rename "_name" dme attribute back to "name" keyvalues field
+		if ( !Q_stricmp( pName, "_name" ) )
 		{
-			if ( !Q_stricmp( pName, s_pAttributeRemap[iAttr].m_pDmeName ) )
-			{
-				pName = s_pAttributeRemap[iAttr].m_pKeyValuesName;
-				break;
-			}
+			pName = "name";
 		}
 
   		DmAttributeType_t nAttrType = pAttribute->GetType();
@@ -236,7 +216,7 @@ DmElementHandle_t CDmSerializerKeyValues::CreateDmElement( const char *pElementT
 	m_ElementList.AddToTail( hElement );
 
 	CDmElement *pElement = g_pDataModel->GetElement( hElement );
-	CDmeElementAccessor::MarkBeingUnserialized( pElement, true );
+	CDmeElementAccessor::DisableOnChangedCallbacks( pElement );
 	return hElement;
 }
 
@@ -301,16 +281,12 @@ void CDmSerializerKeyValues::UnserializeAttribute( CDmElement *pElement, KeyValu
 
 	// Convert to lower case
 	CUtlString pLowerName = pAttributeName;
-	pLowerName.ToLower();
+	Q_strlower( pLowerName.Get() );
 
-	// Rename "type", "name", or "id" fields, since they are special fields
-	for ( int i = 0; s_pAttributeRemap[i].m_pKeyValuesName; ++i )
+	// Rename "name" keyvalues field to "_name" dme attribute to avoid name collision
+	if ( !Q_stricmp( pLowerName, "name" ) )
 	{
-		if ( !Q_stricmp( pLowerName, s_pAttributeRemap[i].m_pKeyValuesName ) )
-		{
-			pLowerName = s_pAttributeRemap[i].m_pDmeName;
-			break;
-		}
+		pLowerName = "_name";
 	}
 
 	// Element types are stored out by GUID, we need to hang onto the guid and 
@@ -321,14 +297,14 @@ void CDmSerializerKeyValues::UnserializeAttribute( CDmElement *pElement, KeyValu
 	if ( type == AT_UNKNOWN )
 	{
 		// Assume this is an empty attribute or attribute array element
-		Warning("Dm Unserialize: Attempted to read an attribute (\"%s\") of an inappropriate type!\n", pLowerName.Get() );
+		Warning("Dm Unserialize: Attempted to read an attribute (\"%s\") of an inappropriate type!\n", pLowerName.String() );
 		return;
 	}
 
 	CDmAttribute *pAttribute = pElement->AddAttribute( pLowerName, type );
 	if ( !pAttribute )
 	{
-		Warning("Dm Unserialize: Attempted to read an attribute (\"%s\") of an inappropriate type!\n", pLowerName.Get() );
+		Warning("Dm Unserialize: Attempted to read an attribute (\"%s\") of an inappropriate type!\n", pLowerName.String() );
 		return;
 	}
 
@@ -425,7 +401,8 @@ CDmElement* CDmSerializerKeyValues::UnserializeFromKeyValues( KeyValues *pKeyVal
 	for ( int i = 0; i < c; ++i )
 	{
 		CDmElement *pElement = g_pDataModel->GetElement( m_ElementList[i] );
-		CDmeElementAccessor::MarkBeingUnserialized( pElement, false );
+		CDmeElementAccessor::EnableOnChangedCallbacks( pElement );
+		CDmeElementAccessor::FinishUnserialization( pElement );
 	}
 
 	g_pDmElementFrameworkImp->RemoveCleanElementsFromDirtyList( );

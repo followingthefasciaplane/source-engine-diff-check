@@ -1,12 +1,24 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
 //===========================================================================//
 
+#if defined( _WIN32 ) && !defined( _X360 )
+#define WIN_32_LEAN_AND_MEAN
+#include <windows.h>
+#define VA_COMMIT_FLAGS MEM_COMMIT
+#define VA_RESERVE_FLAGS MEM_RESERVE
+#elif defined( _X360 )
+#undef Verify
+#define VA_COMMIT_FLAGS (MEM_COMMIT|MEM_NOZERO|MEM_LARGE_PAGES)
+#define VA_RESERVE_FLAGS (MEM_RESERVE|MEM_LARGE_PAGES)
+#endif
+
 #include "materialsystem/imaterialvar.h"
 #include "materialsystem/imaterialsystem.h"
 #include "materialsystem/itexture.h"
+#include "materialsystem/imaterialproxyfactory.h"
 #include <string.h>
 #include "materialsystem_global.h"
 #include <stdlib.h>
@@ -16,10 +28,15 @@
 #include "mempool.h"
 #include "itextureinternal.h"
 #include "tier0/dbg.h"
+#include "tier0/vprof.h"
 #include "tier1/callqueue.h"
 #include "mathlib/vmatrix.h"
 #include "tier1/strtools.h"
+#include "tier1/keyvalues.h"
+#include "tier1/mempool.h"
 #include "texturemanager.h"
+#include "cdll_int.h"
+#include "tier1/utlmap.h"
 
 #define MATERIALVAR_CHAR_BUF_SIZE 512
 
@@ -27,9 +44,285 @@
 #pragma pack (1)
 #endif
 
-ConVar mat_texture_tracking( "mat_texture_tracking", IsDebug() ? "1" : "0" );
-CUtlMap<ITexture*, CInterlockedInt> s_TextureRefList( DefLessFunc( ITexture* ) );
-CUtlMap<ITexture*, CInterlockedInt> *g_pTextureRefList = &s_TextureRefList;
+//-----------------------------------------------------------------------------
+// Material var custom allocator
+//-----------------------------------------------------------------------------
+#ifdef _X360
+#define USE_MV_POOL
+#endif
+
+#ifdef USE_MV_POOL
+
+#define SIZEOF_MATVAR 40
+#define MAX_MATVARS ( 256*1024 )
+#define MV_PAGE_SIZE (64*1024)
+#define MV_NUM_PER_PAGE ( (64*1024) / SIZEOF_MATVAR )
+#define MV_SIZE_BUFFER ((MAX_MATVARS/MV_NUM_PER_PAGE)*MV_PAGE_SIZE)
+#define MV_NUM_PAGES ( MV_SIZE_BUFFER/MV_PAGE_SIZE )
+#define MV_NOT_COMMITTED ( (MVFreeBlock_t *)~0 )
+
+byte *g_pMVData = (byte *)VirtualAlloc( NULL, MV_NUM_PAGES * MV_PAGE_SIZE, VA_RESERVE_FLAGS, PAGE_NOACCESS );
+CThreadFastMutex g_MVDataMutex; // we never normally alloc & free during levels, and there's not much contention, so a mutex is fine
+
+struct MVFreeBlock_t
+{
+	MVFreeBlock_t *pNext;
+	byte pad[SIZEOF_MATVAR - sizeof(MVFreeBlock_t *)];
+};
+
+struct MVFreeHeader_t
+{
+	MVFreeHeader_t() : pHead(MV_NOT_COMMITTED), nBlocks(MV_NUM_PER_PAGE) {}
+	MVFreeBlock_t *pHead;
+	int nBlocks;
+};
+
+MVFreeHeader_t g_MVFreeLists[MV_NUM_PAGES];
+int g_nMVAllocated;
+
+void DumpAllMaterialVars( void );
+
+void MVDumpHeap()
+{
+	AUTO_LOCK( g_MVDataMutex );
+
+	Msg( "MaterialVar heap:\n" );
+	int sum = 0, pages = 0;
+	for ( int i = 0; i < MV_NUM_PAGES; i++ )
+	{
+		sum += MV_NUM_PER_PAGE - g_MVFreeLists[i].nBlocks;
+		Msg( "    Page %3d: %d vars%s\n", i, MV_NUM_PER_PAGE - g_MVFreeLists[i].nBlocks, ( g_MVFreeLists[i].pHead == MV_NOT_COMMITTED ) ? " (decommitted)" : ""  );
+		if ( g_MVFreeLists[i].pHead != MV_NOT_COMMITTED )
+			pages++;
+	}
+	if ( sum != g_nMVAllocated )
+	{
+		Msg( "\n************************** MaterialVar heap inconsistency! **************************\n\n" );
+	}
+	Msg( "Total of %d materialvars (%d logical bytes, %d actual bytes\n", g_nMVAllocated, g_nMVAllocated * SIZEOF_MATVAR, pages * MV_PAGE_SIZE );
+
+	// Now dump individual materialvars, grouped by owning material:
+	DumpAllMaterialVars();
+}
+
+bool MVInternallyAllocated( void * p )
+{
+	return ( p >= g_pMVData && p < g_pMVData + MV_NUM_PAGES * MV_PAGE_SIZE );
+}
+
+MVFreeBlock_t *MVCommitAlloc( int iPage )
+{
+	MVFreeBlock_t *pCur, *pLimit;
+	MVFreeBlock_t *pBlock = (MVFreeBlock_t *)VirtualAlloc( g_pMVData + ( iPage * MV_PAGE_SIZE ), MV_PAGE_SIZE, VA_COMMIT_FLAGS, PAGE_READWRITE );
+	pCur = g_MVFreeLists[iPage].pHead = pBlock + 1;
+	pLimit = pBlock + ( MV_NUM_PER_PAGE - 1 );
+
+	while ( pCur < pLimit )
+	{
+		pCur->pNext = pCur + 1;
+		pCur++;
+	}
+
+	pLimit->pNext = NULL;
+	g_MVFreeLists[iPage].nBlocks = ( MV_NUM_PER_PAGE - 1 );
+	g_nMVAllocated++;
+	return pBlock;
+}
+
+int MVFindBestPage()
+{
+	AUTO_LOCK( g_MVDataMutex );
+	int i;
+	int iFirstUncommitted = -1;
+	int iBestPage = -1;
+#ifdef MV_MOST_FULL
+	// Most full page
+	int nInMostFull = INT_MAX;
+	for ( i = 0; i < MV_NUM_PAGES; i++ )
+	{
+		if ( g_MVFreeLists[i].pHead != MV_NOT_COMMITTED )
+		{
+			if ( g_MVFreeLists[i].nBlocks && g_MVFreeLists[i].nBlocks < nInMostFull )
+			{
+				iBestPage = i;
+				nInMostFull = g_MVFreeLists[i].nBlocks;
+			}
+		}
+		else if ( iFirstUncommitted == -1 )
+		{
+			iFirstUncommitted = i;
+		}
+	}
+#else
+	// Lowest page
+	for ( i = 0; i < MV_NUM_PAGES; i++ )
+	{
+		if ( g_MVFreeLists[i].pHead != MV_NOT_COMMITTED )
+		{
+			if ( g_MVFreeLists[i].nBlocks )
+			{
+				iBestPage = i;
+				break;
+			}
+		}
+		else if ( iFirstUncommitted == -1 )
+		{
+			iFirstUncommitted = i;
+		}
+	}
+#endif
+
+	if ( iBestPage != -1 )
+	{
+		return iBestPage;
+	}
+
+	return iFirstUncommitted;
+}
+
+void *MVAlloc()
+{
+	AUTO_LOCK( g_MVDataMutex );
+	int iBestPage = MVFindBestPage();
+
+	if ( iBestPage != -1 )
+	{
+		MVFreeBlock_t *pBlock = NULL;
+		if ( g_MVFreeLists[iBestPage].pHead != MV_NOT_COMMITTED )
+		{
+			pBlock = g_MVFreeLists[iBestPage].pHead;
+			g_MVFreeLists[iBestPage].pHead = pBlock->pNext;
+			g_MVFreeLists[iBestPage].nBlocks--;
+			g_nMVAllocated++;
+		}
+		else
+		{
+			pBlock = MVCommitAlloc( iBestPage );
+		}
+		return pBlock;
+	}
+	return malloc( SIZEOF_MATVAR );
+}
+
+void MVFree( void *p )
+{
+	if ( MVInternallyAllocated( p ) )
+	{
+		AUTO_LOCK( g_MVDataMutex );
+
+		MVFreeBlock_t *pBlock = (MVFreeBlock_t *)p;
+		int iPage = ( ( (byte *)pBlock - g_pMVData ) / MV_PAGE_SIZE );
+
+		pBlock->pNext = g_MVFreeLists[iPage].pHead;
+		g_MVFreeLists[iPage].pHead = pBlock;
+		g_MVFreeLists[iPage].nBlocks++;
+		g_nMVAllocated--;
+	}
+	else
+	{
+		free( p );
+	}
+}
+
+void *MVRelocate( void *p )
+{
+	AUTO_LOCK( g_MVDataMutex );
+
+	MVFreeBlock_t *pBlockOld = (MVFreeBlock_t *)p;
+	MVFreeBlock_t *pBlockNew = pBlockOld;
+	int iCurPage = ( ( (byte *)pBlockOld - g_pMVData ) / MV_PAGE_SIZE );
+
+#ifdef MV_MOST_FULL
+	if ( g_MVFreeLists[iCurPage].nBlocks == 0 )
+	{
+		return p;
+	}
+#else
+	if ( iCurPage <= g_nMVAllocated/MV_NUM_PER_PAGE )
+	{
+		return p;
+	}
+#endif
+
+	int iBestPage = MVFindBestPage();
+	bool bMove;
+#ifdef MV_MOST_FULL
+	bMove = ( iBestPage != iCurPage );
+#else
+	bMove = ( iBestPage <= iCurPage  );
+#endif
+	if ( bMove )
+	{
+		if ( g_MVFreeLists[iBestPage].pHead != MV_NOT_COMMITTED )
+		{
+			pBlockNew = g_MVFreeLists[iBestPage].pHead;
+			g_MVFreeLists[iBestPage].pHead = pBlockNew->pNext;
+			g_MVFreeLists[iBestPage].nBlocks--;
+			g_nMVAllocated++;
+		}
+		else
+		{
+			pBlockNew = MVCommitAlloc( iBestPage );
+		}
+	}
+
+	if ( pBlockNew != pBlockOld )
+	{
+		memcpy( pBlockNew, pBlockOld, SIZEOF_MATVAR );
+		MVFree( pBlockOld );
+	}
+
+	return pBlockNew;
+}
+
+void MVDecommitUnusedPages()
+{
+	AUTO_LOCK( g_MVDataMutex );
+
+	for ( int i = 0; i < MV_NUM_PAGES; i++ )
+	{
+		if ( g_MVFreeLists[i].pHead != MV_NOT_COMMITTED && g_MVFreeLists[i].nBlocks == MV_NUM_PER_PAGE )
+		{
+			VirtualFree( g_pMVData + ( i * MV_PAGE_SIZE ), MV_PAGE_SIZE, MEM_DECOMMIT );
+			g_MVFreeLists[i].pHead = MV_NOT_COMMITTED;
+		}
+	}
+}
+
+CON_COMMAND( mv_decommit, "" )
+{
+	MVDecommitUnusedPages();
+}
+
+CON_COMMAND( mv_status, "" )
+{
+	MVDumpHeap();
+}
+
+
+#else
+
+void *MVRelocate( void *p )
+{
+	return p;
+}
+
+void MVDecommitUnusedPages()
+{
+}
+
+bool MVInternallyAllocated( void * p )
+{
+	return false;
+}
+
+void MVDumpHeap()
+{
+}
+
+#endif
+
+//-----------------------------------------------------------------------------
 
 struct MaterialVarMatrix_t
 {
@@ -68,9 +361,8 @@ public:
 	// revisit: is this a good interface for textures?
 
 	virtual ITexture *			GetTextureValue( void );
+	virtual bool				IsTextureValueInternalEnvCubemap( void ) const;
 	virtual void				SetTextureValue( ITexture * );
-	void						SetTextureValueQueued( ITexture *texture );
-
 	virtual IMaterial *			GetMaterialValue( void );
 	virtual void				SetMaterialValue( IMaterial * );
 
@@ -80,7 +372,7 @@ public:
 
 	virtual void				CopyFrom( IMaterialVar *pMaterialVar );
 
-	FORCEINLINE void Init( void )
+	 void Init( void )
 	{
 		m_nNumVectorComps = 4;
 		m_VecVal.Init();
@@ -105,22 +397,29 @@ public:
 
 	virtual IMaterial *		GetOwningMaterial() { return m_pMaterial; }
 
+#ifdef USE_MV_POOL
+	// Fixed-size allocator
+	inline void* operator new( size_t size ) { return MVAlloc(); } 
+	inline void* operator new( size_t size, int nBlockUse, const char *pFileName, int nLine ) { return MVAlloc(); }
+	inline void  operator delete( void* p ) { MVFree(p); }
+	inline void  operator delete( void* p, int nBlockUse, const char *pFileName, int nLine ) { MVFree(p); }
+#else
+	DECLARE_FIXEDSIZE_ALLOCATOR( CMaterialVar );
+#endif
+
 private:
 	// Cleans up material var data
-	CMaterialVar *AllocThreadVar();
 	void CleanUpData();
 
 	// NOTE: Dummy vars have no backlink so we have to check the pointer here
-	void VarChanged() { if ( m_pMaterial ) m_pMaterial->ReportVarChanged(this); }
+	void VarChanged();
+#ifndef NO_TOOLFRAMEWORK
+	void RecordToolMessage();
+#endif
 
 	// class data
 	static char s_CharBuf[MATERIALVAR_CHAR_BUF_SIZE];
 	static ITextureInternal *m_dummyTexture;
-
-	// Fixed-size allocator
-#ifdef NO_SBH // not needed if tier0 small block heap enabled
-	DECLARE_FIXEDSIZE_ALLOCATOR( CMaterialVar );
-#endif
 
 	// Owning material....
 	IMaterialInternal* m_pMaterial;
@@ -148,7 +447,7 @@ private:
 
 typedef CMaterialVar *CMaterialVarPtr;
 
-#ifdef NO_SBH // not needed if tier0 small block heap enabled
+#ifndef USE_MV_POOL
 DEFINE_FIXEDSIZE_ALLOCATOR( CMaterialVar, 1024, true );
 #endif
 
@@ -165,7 +464,54 @@ static CMaterialVar s_pTempMaterialVar[254];
 static MaterialVarMatrix_t s_pTempMatrix[254];
 static bool s_bEnableThreadedAccess = false;
 static int s_nTempVarsUsed = 0;
-static int s_nOverflowTempVars = 0;
+
+
+//-----------------------------------------------------------------------------
+// Dump materialvars
+//-----------------------------------------------------------------------------
+#ifdef USE_MV_POOL
+bool MaterialVarLessFunc( IMaterial *const &a, IMaterial *const &b )
+{
+	if ( a == b ) return 0;
+	return ( V_stricmp( (a ? a->GetName() : "[UNKNOWN]"), (b ? b->GetName() : "[UNKNOWN]") ) < 0 );
+}
+void DumpAllMaterialVars( void )
+{
+	CUtlMap< IMaterial*, int > matcounts( MaterialVarLessFunc );
+	int numvars = 0;
+	for ( int page = 0; page < MV_NUM_PAGES; page++ )
+	{
+		if ( g_MVFreeLists[page].pHead == MV_NOT_COMMITTED )
+			continue;
+
+		MVFreeBlock_t *block = (MVFreeBlock_t *)(g_pMVData + ( page * MV_PAGE_SIZE ));
+		for ( int i = 0; i < MV_NUM_PER_PAGE; i++ )
+		{
+			if ( block->pNext && !MVInternallyAllocated( block->pNext ) )\
+			{
+				// not in the freelist
+				CMaterialVar *var = (CMaterialVar *)block;
+				IMaterial *mat = var->GetOwningMaterial();
+				//Msg( " -- %40s | %s\n", (mat?mat->GetName():"[UNKNOWN]"), var->GetName() );
+				int idx = matcounts.Find( mat );
+				if ( idx == matcounts.InvalidIndex() )
+					matcounts.Insert( mat, 1 );
+				else
+					matcounts.Element(idx)++;
+				numvars++;
+			}
+			block++;
+		}
+	}
+	//Msg("\n ==== Total %d materialvars:\n", numvars );
+	for ( int j = matcounts.FirstInorder(); j != matcounts.InvalidIndex(); j = matcounts.NextInorder(j) )
+	{
+		IMaterial *mat = matcounts.Key(j);
+		Msg( " -- %4d %s\n", matcounts.Element(j), (mat?mat->GetName():"[UNKNOWN]") );
+	}
+	Msg("\n ==== Total %d materialvars in %d materials\n", numvars, matcounts.Count() );
+}
+#endif // USE_MV_POOL
 
 
 //-----------------------------------------------------------------------------
@@ -180,7 +526,6 @@ void EnableThreadedMaterialVarAccess( bool bEnable, IMaterialVar **ppParams, int
 	if ( !s_bEnableThreadedAccess )
 	{
 		// Necessary to free up reference counts
-		Assert( s_nTempVarsUsed <= Q_ARRAYSIZE(s_pTempMaterialVar) );
 		for ( int i = 0; i < s_nTempVarsUsed; ++i )
 		{
 			s_pTempMaterialVar[i].SetUndefined();
@@ -190,34 +535,9 @@ void EnableThreadedMaterialVarAccess( bool bEnable, IMaterialVar **ppParams, int
 			ppParams[i]->SetTempIndex( 0xFF );
 		}
 		s_nTempVarsUsed = 0;
-		if ( s_nOverflowTempVars )
-		{
-			Warning("Overflowed %d temp material vars!\n", s_nOverflowTempVars );
-			s_nOverflowTempVars = 0;
-		}
 	}
 }
 
-
-CMaterialVar *CMaterialVar::AllocThreadVar()
-{
-	if ( s_bEnableThreadedAccess )
-	{
-		if ( m_nTempIndex == 0xFF )
-		{
-			if ( s_nTempVarsUsed >= Q_ARRAYSIZE(s_pTempMaterialVar) )
-			{
-				s_nOverflowTempVars++;
-				return NULL;
-			}
-			m_nTempIndex = s_nTempVarsUsed++;
-		}
-
-		return &s_pTempMaterialVar[m_nTempIndex];
-	}
-
-	return NULL;
-}
 
 //-----------------------------------------------------------------------------
 // Purpose: Static method
@@ -325,6 +645,15 @@ CMaterialVar::CMaterialVar()
 
 CMaterialVar::CMaterialVar( IMaterial* pMaterial, const char *pKey, VMatrix const& matrix )
 {
+#ifdef POOL_MATVARS
+	COMPILE_TIME_ASSERT( sizeof(CMaterialVar) == SIZEOF_MATVAR );
+
+	if ( sizeof(CMaterialVar) != SIZEOF_MATVAR )
+	{
+		Error( "( sizeof(CMaterialVar) != SIZEOF_MATVAR )\n" );
+	}
+#endif
+
 	Init();
 	Assert( pKey );
 
@@ -425,19 +754,17 @@ void CMaterialVar::CleanUpData()
 	{
 	case MATERIAL_VAR_TYPE_STRING:
 		delete [] m_pStringVal;
-		m_pStringVal = NULL;
 		break;
 
 	case MATERIAL_VAR_TYPE_TEXTURE:
 		// garymcthack
-		if( m_pTexture && !IsTextureInternalEnvCubemap( m_pTexture ) )
+		if( !IsTextureInternalEnvCubemap( m_pTexture ) )
 		{
 			m_pTexture->DecrementReferenceCount();
 			if ( g_bDeleteUnreferencedTexturesEnabled )
 			{
 				m_pTexture->DeleteIfUnreferenced();
 			}
-			m_pTexture = NULL;
 		}
 		break;
 
@@ -445,18 +772,15 @@ void CMaterialVar::CleanUpData()
 		if( m_pMaterialValue != NULL )
 		{
 			m_pMaterialValue->DecrementReferenceCount();
-			m_pMaterialValue = NULL;
 		}
 		break;
 
 	case MATERIAL_VAR_TYPE_MATRIX:
 		delete m_pMatrix;
-		m_pMatrix = NULL;
 		break;
 
 	case MATERIAL_VAR_TYPE_FOURCC:
 		delete m_pFourCC;
-		m_pFourCC = NULL;
 		break;
 
 	case MATERIAL_VAR_TYPE_VECTOR:
@@ -595,10 +919,13 @@ void CMaterialVar::SetFloatValue( float val )
 	CMatCallQueue *pCallQueue = MaterialSystem()->GetRenderCallQueue();
 	if ( !m_bFakeMaterialVar && pCallQueue )
 	{
-		CMaterialVar *pThreadVar = AllocThreadVar();
-		if ( pThreadVar )
+		if ( s_bEnableThreadedAccess )
 		{
-			pThreadVar->SetFloatValue( val );
+			if ( m_nTempIndex == 0xFF )
+			{
+				m_nTempIndex = s_nTempVarsUsed++;
+			}
+			s_pTempMaterialVar[m_nTempIndex].SetFloatValue( val );
 		}
 		pCallQueue->QueueCall( this, &CMaterialVar::SetFloatValue, val );
 		return;
@@ -606,11 +933,12 @@ void CMaterialVar::SetFloatValue( float val )
 
 	// Suppress all this if we're not actually changing anything
 	if ((m_Type == MATERIAL_VAR_TYPE_FLOAT) && (m_VecVal[0] == val))
+	{
+#ifndef NO_TOOLFRAMEWORK
+		RecordToolMessage();
+#endif
 		return;
-
-	// Gotta flush if we've changed state and this is the current material
-	if ( !m_bFakeMaterialVar && m_pMaterial && (m_pMaterial == ( IMaterialInternal* )MaterialSystem()->GetCurrentMaterial()))
-		g_pShaderAPI->FlushBufferedPrimitives();
+	}
 
 	CleanUpData();
 	m_VecVal[0] = m_VecVal[1] = m_VecVal[2] = m_VecVal[3] = val;
@@ -629,10 +957,13 @@ void CMaterialVar::SetIntValue( int val )
 	CMatCallQueue *pCallQueue = MaterialSystem()->GetRenderCallQueue();
 	if ( !m_bFakeMaterialVar && pCallQueue )
 	{
-		CMaterialVar *pThreadVar = AllocThreadVar();
-		if ( pThreadVar )
+		if ( s_bEnableThreadedAccess )
 		{
-			pThreadVar->SetIntValue( val );
+			if ( m_nTempIndex == 0xFF )
+			{
+				m_nTempIndex = s_nTempVarsUsed++;
+			}
+			s_pTempMaterialVar[m_nTempIndex].SetIntValue( val );
 		}
 		pCallQueue->QueueCall( this, &CMaterialVar::SetIntValue, val );
 		return;
@@ -640,11 +971,12 @@ void CMaterialVar::SetIntValue( int val )
 
 	// Suppress all this if we're not actually changing anything
 	if ((m_Type == MATERIAL_VAR_TYPE_INT) && (m_intVal == val))
+	{
+#ifndef NO_TOOLFRAMEWORK
+		RecordToolMessage();
+#endif
 		return;
-
-	// Gotta flush if we've changed state and this is the current material
-	if ( !m_bFakeMaterialVar && m_pMaterial && (m_pMaterial == ( IMaterialInternal* )MaterialSystem()->GetCurrentMaterial()))
-		g_pShaderAPI->FlushBufferedPrimitives();
+	}
 
 	CleanUpData();
 	m_intVal = val;
@@ -746,7 +1078,7 @@ const char *CMaterialVar::GetStringValue( void ) const
 			return s_CharBuf;
 		}
 	case MATERIAL_VAR_TYPE_MATERIAL:
-		Q_snprintf( s_CharBuf, sizeof( s_CharBuf ), "%s", ( m_pMaterialValue ? m_pMaterialValue->GetName() : "" ) );
+		Q_snprintf( s_CharBuf, sizeof( s_CharBuf ), "%s", m_pMaterialValue->GetName() );
 		return s_CharBuf;
 
 	case MATERIAL_VAR_TYPE_UNDEFINED:
@@ -764,18 +1096,17 @@ void CMaterialVar::SetStringValue( const char *val )
 	CMatCallQueue *pCallQueue = MaterialSystem()->GetRenderCallQueue();
 	if ( !m_bFakeMaterialVar && pCallQueue )
 	{
-		CMaterialVar *pThreadVar = AllocThreadVar();
-		if ( pThreadVar )
+		if ( s_bEnableThreadedAccess )
 		{
-			pThreadVar->SetStringValue( val );
+			if ( m_nTempIndex == 0xFF )
+			{
+				m_nTempIndex = s_nTempVarsUsed++;
+			}
+			s_pTempMaterialVar[m_nTempIndex].SetStringValue( val );
 		}
 		pCallQueue->QueueCall( this, &CMaterialVar::SetStringValue, CUtlEnvelope<const char *>(val) );
 		return;
 	}
-
-	// Gotta flush if we've changed state and this is the current material
-	if ( !m_bFakeMaterialVar && m_pMaterial && (m_pMaterial == ( IMaterialInternal* )MaterialSystem()->GetCurrentMaterial()))
-		g_pShaderAPI->FlushBufferedPrimitives();
 
 	CleanUpData();
 	int len = Q_strlen( val ) + 1;
@@ -793,10 +1124,13 @@ void CMaterialVar::SetFourCCValue( FourCC type, void *pData )
 	CMatCallQueue *pCallQueue = MaterialSystem()->GetRenderCallQueue();
 	if ( !m_bFakeMaterialVar && pCallQueue )
 	{
-		CMaterialVar *pThreadVar = AllocThreadVar();
-		if ( pThreadVar )
+		if ( s_bEnableThreadedAccess )
 		{
-			pThreadVar->SetFourCCValue( type, pData );
+			if ( m_nTempIndex == 0xFF )
+			{
+				m_nTempIndex = s_nTempVarsUsed++;
+			}
+			s_pTempMaterialVar[m_nTempIndex].SetFourCCValue( type, pData );
 		}
 		pCallQueue->QueueCall( this, &CMaterialVar::SetFourCCValue, type, pData );
 		return;
@@ -804,14 +1138,14 @@ void CMaterialVar::SetFourCCValue( FourCC type, void *pData )
 
 	// Suppress all this if we're not actually changing anything
 	if ((m_Type == MATERIAL_VAR_TYPE_FOURCC) && m_pFourCC->m_FourCC == type && m_pFourCC->m_pFourCCData == pData )
+	{
+#ifndef NO_TOOLFRAMEWORK
+		RecordToolMessage();
+#endif
 		return;
-
-	// Gotta flush if we've changed state and this is the current material
-	if ( !m_bFakeMaterialVar &&  m_pMaterial && (m_pMaterial == ( IMaterialInternal* )MaterialSystem()->GetCurrentMaterial()))
-		g_pShaderAPI->FlushBufferedPrimitives();
+	}
 
 	CleanUpData();
-
 	m_pFourCC = AllocFourCC();
 	m_pFourCC->m_FourCC = type;
 	m_pFourCC->m_pFourCCData = pData;
@@ -855,6 +1189,34 @@ void CMaterialVar::GetFourCCValue( FourCC *type, void **ppData )
 	}
 }
 
+bool CMaterialVar::IsTextureValueInternalEnvCubemap( void ) const
+{
+	CMatCallQueue *pCallQueue = MaterialSystem()->GetRenderCallQueue();
+	if ( pCallQueue && !m_bFakeMaterialVar )
+	{
+		if ( !s_bEnableThreadedAccess )
+		{
+			//DevMsg( 2, "Non-thread safe call to CMaterialVar %s!\n", GetName() );
+		}
+
+		if ( m_nTempIndex != 0xFF )
+			return s_pTempMaterialVar[m_nTempIndex].IsTextureValueInternalEnvCubemap( );
+	}
+	
+	if( m_pMaterial )
+	{
+		m_pMaterial->Precache();
+	}
+
+	if( m_Type == MATERIAL_VAR_TYPE_TEXTURE )
+	{
+		if ( IsTextureInternalEnvCubemap( m_pTexture ) )
+			return true;
+	}
+
+	return false;
+
+}
 
 //-----------------------------------------------------------------------------
 // texture
@@ -919,72 +1281,22 @@ ITexture *CMaterialVar::GetTextureValue( void )
 	return retVal;
 }
 
-
-void CMaterialVar::SetTextureValueQueued( ITexture *texture )
-{
-	SetTextureValue( texture );
-
-	// Matches IncrementReferenceCount in SetTextureValue
-	if ( texture )
-		texture->DecrementReferenceCount();
-
-	// Debug
-	if ( mat_texture_tracking.GetBool() )
-	{
-		int iIndex = g_pTextureRefList->Find( texture );
-		Assert( iIndex != g_pTextureRefList->InvalidIndex() );
-		g_pTextureRefList->Element( iIndex )--;
-	}
-}
-
-static bool s_bInitTextureRefList = false;
-
 void CMaterialVar::SetTextureValue( ITexture *texture )
 {
-	if ( !s_bInitTextureRefList )
-	{
-		g_pTextureRefList->SetLessFunc( DefLessFunc( ITexture* ) );
-		s_bInitTextureRefList = true;
-	}
-
-	// Avoid the garymcthack in CShaderSystem::LoadCubeMap by ensuring we're not using 
-	// the internal env cubemap.
-	if ( ThreadInMainThread() && !IsTextureInternalEnvCubemap( static_cast<ITextureInternal*>( texture ) ) )
-	{
-		ITextureInternal* pTexInternal = assert_cast<ITextureInternal *>( texture );
-		TextureManager()->RequestAllMipmaps( pTexInternal );
-	}
-
 	ASSERT_NOT_DUMMY_VAR();
 	CMatCallQueue *pCallQueue = MaterialSystem()->GetRenderCallQueue();
 	if ( !m_bFakeMaterialVar && pCallQueue )
 	{
 		// FIXME (toml): deal with reference count
-		CMaterialVar *pThreadVar = AllocThreadVar();
-		if ( pThreadVar )
+		if ( s_bEnableThreadedAccess )
 		{
-			pThreadVar->SetTextureValue( texture );
-		}
-
-		// Matches DecrementReferenceCount in SetTextureValueQueued
-		if ( texture )
-			texture->IncrementReferenceCount();
-
-		// Debug!
-		if ( mat_texture_tracking.GetBool() )
-		{
-			int iIndex = g_pTextureRefList->Find( texture );
-			if ( iIndex == g_pTextureRefList->InvalidIndex() )
+			if ( m_nTempIndex == 0xFF )
 			{
-				g_pTextureRefList->Insert( texture, 1 );
+				m_nTempIndex = s_nTempVarsUsed++;
 			}
-			else
-			{
-				g_pTextureRefList->Element( iIndex )++;
-			}
+			s_pTempMaterialVar[m_nTempIndex].SetTextureValue( texture );
 		}
-
-		pCallQueue->QueueCall( this, &CMaterialVar::SetTextureValueQueued, texture );
+		pCallQueue->QueueCall( this, &CMaterialVar::SetTextureValue, texture );
 		return;
 	}
 
@@ -992,13 +1304,14 @@ void CMaterialVar::SetTextureValue( ITexture *texture )
 
 	// Suppress all this if we're not actually changing anything
 	if ((m_Type == MATERIAL_VAR_TYPE_TEXTURE) && (m_pTexture == pTexImp))
+	{
+#ifndef NO_TOOLFRAMEWORK
+		RecordToolMessage();
+#endif
 		return;
+	}
 
-	// Gotta flush if we've changed state and this is the current material
-	if ( !m_bFakeMaterialVar && m_pMaterial && (m_pMaterial == MaterialSystem()->GetCurrentMaterial()))
-		g_pShaderAPI->FlushBufferedPrimitives();
-
-	if( pTexImp && !IsTextureInternalEnvCubemap( pTexImp ) )
+	if( !IsTextureInternalEnvCubemap( pTexImp ) )
 	{
 		pTexImp->IncrementReferenceCount();
 	}
@@ -1061,10 +1374,13 @@ void CMaterialVar::SetMaterialValue( IMaterial *pMaterial )
 	if ( !m_bFakeMaterialVar && pCallQueue )
 	{
 		// FIXME (toml): deal with reference count
-		CMaterialVar *pThreadVar = AllocThreadVar();
-		if ( pThreadVar )
+		if ( s_bEnableThreadedAccess )
 		{
-			pThreadVar->SetMaterialValue( pMaterial );
+			if ( m_nTempIndex == 0xFF )
+			{
+				m_nTempIndex = s_nTempVarsUsed++;
+			}
+			s_pTempMaterialVar[m_nTempIndex].SetMaterialValue( pMaterial );
 		}
 		pCallQueue->QueueCall( this, &CMaterialVar::SetMaterialValue, pMaterial );
 		return;
@@ -1078,12 +1394,11 @@ void CMaterialVar::SetMaterialValue( IMaterial *pMaterial )
 
 	// Suppress all this if we're not actually changing anything
 	if ((m_Type == MATERIAL_VAR_TYPE_MATERIAL) && (m_pMaterialValue == pMaterialImp))
-		return;
-
-	// Gotta flush if we've changed state and this is the current material
-	if ( !m_bFakeMaterialVar && m_pMaterial && (m_pMaterial == MaterialSystem()->GetCurrentMaterial()))
 	{
-		g_pShaderAPI->FlushBufferedPrimitives();
+#ifndef NO_TOOLFRAMEWORK
+		RecordToolMessage();
+#endif
+		return;
 	}
 
 	if( pMaterialImp != NULL )
@@ -1171,20 +1486,25 @@ void CMaterialVar::SetVecValueInternal( const Vector4D &vec, int nComps )
 	CMatCallQueue *pCallQueue = MaterialSystem()->GetRenderCallQueue();
 	if ( !m_bFakeMaterialVar && pCallQueue )
 	{
-		CMaterialVar *pThreadVar = AllocThreadVar();
-		if ( pThreadVar )
+		if ( s_bEnableThreadedAccess )
 		{
-			pThreadVar->SetVecValueInternal( vec, nComps );
+			if ( m_nTempIndex == 0xFF )
+			{
+				m_nTempIndex = s_nTempVarsUsed++;
+			}
+			s_pTempMaterialVar[m_nTempIndex].SetVecValueInternal( vec, nComps );
 		}
 		pCallQueue->QueueCall( this, &CMaterialVar::SetVecValueInternal, RefToVal( vec ), nComps );
 		return;
 	}
 	// Suppress all this if we're not actually changing anything
 	if ((m_Type == MATERIAL_VAR_TYPE_VECTOR ) && (m_VecVal == vec ) )
+	{
+#ifndef NO_TOOLFRAMEWORK
+		RecordToolMessage();
+#endif
 		return;
-	// Gotta flush if we've changed state and this is the current material
-	if ( !m_bFakeMaterialVar && m_pMaterial && (m_pMaterial == MaterialSystem()->GetCurrentMaterial()))
-		g_pShaderAPI->FlushBufferedPrimitives();
+	}
 
 	if ( m_Type != MATERIAL_VAR_TYPE_VECTOR )
 	{
@@ -1233,7 +1553,7 @@ void CMaterialVar::SetVecValue( float x, float y, float z, float w )
 void CMaterialVar::SetVecComponentValue( float fVal, int nComponent )
 {
 	ASSERT_NOT_DUMMY_VAR();
-
+	
 #ifndef _CERT
 	// DIAF
 	if ( nComponent < 0 || nComponent > 3 )
@@ -1248,16 +1568,12 @@ void CMaterialVar::SetVecComponentValue( float fVal, int nComponent )
 	{
 		if ( s_bEnableThreadedAccess )
 		{
-			bool bInit = ( m_nTempIndex == 0xFF ) ? true : false;
-			CMaterialVar *pThreadVar = AllocThreadVar();
-			if ( pThreadVar )
+			if ( m_nTempIndex == 0xFF )
 			{
-				if ( bInit )
-				{
-					pThreadVar->SetVecValue( m_VecVal.Base(), m_nNumVectorComps );
-				}
-				pThreadVar->SetVecComponentValue( fVal, nComponent );
+				m_nTempIndex = s_nTempVarsUsed++;
+				s_pTempMaterialVar[m_nTempIndex].SetVecValue( m_VecVal.Base(), m_nNumVectorComps );
 			}
+			s_pTempMaterialVar[m_nTempIndex].SetVecComponentValue( fVal, nComponent );
 		}
 		pCallQueue->QueueCall( this, &CMaterialVar::SetVecComponentValue, fVal, nComponent );
 		return;
@@ -1265,18 +1581,18 @@ void CMaterialVar::SetVecComponentValue( float fVal, int nComponent )
 
 	// Suppress all this if we're not actually changing anything
 	if ((m_Type == MATERIAL_VAR_TYPE_VECTOR ) && (m_VecVal[nComponent] == fVal ) )
+	{
+#ifndef NO_TOOLFRAMEWORK
+		RecordToolMessage();
+#endif
 		return;
-
-	// Gotta flush if we've changed state and this is the current material
-	if ( !m_bFakeMaterialVar && m_pMaterial && (m_pMaterial == MaterialSystem()->GetCurrentMaterial()))
-		g_pShaderAPI->FlushBufferedPrimitives();
+	}
 
 	if ( m_Type != MATERIAL_VAR_TYPE_VECTOR )
 	{
 		CleanUpData();
 		m_Type = MATERIAL_VAR_TYPE_VECTOR;
 	}
-	Assert( nComponent <= 3 );
 
 	if( m_nNumVectorComps < nComponent )
 	{
@@ -1327,18 +1643,17 @@ void CMaterialVar::SetMatrixValue( VMatrix const& matrix )
 	CMatCallQueue *pCallQueue = MaterialSystem()->GetRenderCallQueue();
 	if ( !m_bFakeMaterialVar && pCallQueue )
 	{
-		CMaterialVar *pThreadVar = AllocThreadVar();
-		if ( pThreadVar )
+		if ( s_bEnableThreadedAccess )
 		{
-			pThreadVar->SetMatrixValue( matrix );
+			if ( m_nTempIndex == 0xFF )
+			{
+				m_nTempIndex = s_nTempVarsUsed++;
+			}
+			s_pTempMaterialVar[m_nTempIndex].SetMatrixValue( matrix );
 		}
 		pCallQueue->QueueCall( this, &CMaterialVar::SetMatrixValue, RefToVal( matrix ) );
 		return;
 	}
-
-	// Gotta flush if we've changed state and this is the current material
-	if ( !m_bFakeMaterialVar && m_pMaterial && (m_pMaterial == MaterialSystem()->GetCurrentMaterial()))
-		g_pShaderAPI->FlushBufferedPrimitives();
 
 	CleanUpData();
 
@@ -1376,10 +1691,13 @@ void CMaterialVar::SetUndefined()
 	CMatCallQueue *pCallQueue = MaterialSystem()->GetRenderCallQueue();
 	if ( !m_bFakeMaterialVar && pCallQueue )
 	{
-		CMaterialVar *pThreadVar = AllocThreadVar();
-		if ( pThreadVar )
-		{
-			pThreadVar->SetUndefined( );
+		if ( s_bEnableThreadedAccess )
+		{		
+			if ( m_nTempIndex == 0xFF )
+			{
+				m_nTempIndex = s_nTempVarsUsed++;
+			}
+			s_pTempMaterialVar[m_nTempIndex].SetUndefined( );
 		}
 		pCallQueue->QueueCall( this, &CMaterialVar::SetUndefined );
 		return;
@@ -1387,10 +1705,6 @@ void CMaterialVar::SetUndefined()
 
 	if (m_Type == MATERIAL_VAR_TYPE_UNDEFINED)
 		return;
-
-	// Gotta flush if we've changed state and this is the current material
-	if ( !m_bFakeMaterialVar && m_pMaterial && (m_pMaterial == MaterialSystem()->GetCurrentMaterial()))
-		g_pShaderAPI->FlushBufferedPrimitives();
 
 	CleanUpData();
 	m_Type = MATERIAL_VAR_TYPE_UNDEFINED;
@@ -1406,10 +1720,13 @@ void CMaterialVar::CopyFrom( IMaterialVar *pMaterialVar )
 	CMatCallQueue *pCallQueue = MaterialSystem()->GetRenderCallQueue();
 	if ( !m_bFakeMaterialVar && pCallQueue )
 	{
-		CMaterialVar *pThreadVar = AllocThreadVar();
-		if ( pThreadVar )
+		if ( s_bEnableThreadedAccess )
 		{
-			pThreadVar->CopyFrom( pMaterialVar );
+			if ( m_nTempIndex == 0xFF )
+			{
+				m_nTempIndex = s_nTempVarsUsed++;
+			}
+			s_pTempMaterialVar[m_nTempIndex].CopyFrom( pMaterialVar );
 		}
 		pCallQueue->QueueCall( this, &CMaterialVar::CopyFrom, pMaterialVar );
 		return;
@@ -1461,6 +1778,121 @@ void CMaterialVar::CopyFrom( IMaterialVar *pMaterialVar )
 	default:
 		Assert(0);
 	}
+}
+
+#ifndef NO_TOOLFRAMEWORK
+
+// record tool message
+void CMaterialVar::RecordToolMessage()
+{
+	if ( !m_pMaterial )
+		return;
+
+	IClientMaterialSystem *pClientMaterialSystem = MaterialSystem()->GetClientMaterialSystemInterface();
+	if ( !pClientMaterialSystem )
+		return;
+
+	HTOOLHANDLE hEntity = pClientMaterialSystem->GetCurrentRecordingEntity();
+	if ( hEntity == HTOOLHANDLE_INVALID )
+		return;
+
+	KeyValues *msg = new KeyValues( "material_proxy_state" );
+	msg->SetString( "mtlName", m_pMaterial->GetName() );
+	msg->SetString( "groupName", m_pMaterial->GetTextureGroupName() );
+
+	switch ( GetType() )
+	{
+	case MATERIAL_VAR_TYPE_FLOAT:
+		msg->SetFloat( GetName(), GetFloatValue() );
+		break;
+
+	case MATERIAL_VAR_TYPE_INT:
+		msg->SetInt( GetName(), GetIntValue() );
+		break;
+
+	case MATERIAL_VAR_TYPE_STRING:
+		msg->SetString( GetName(), GetStringValue() );
+		break;
+
+	case MATERIAL_VAR_TYPE_VECTOR:
+		{
+			char str[ 256 ];
+			const float *pVal = GetVecValue();
+			int dim = VectorSize();
+			switch ( dim )
+			{
+			case 2:
+				V_snprintf( str, sizeof( str ), "vector2d: %f %f", pVal[ 0 ], pVal[ 1 ] );
+				break;
+			case 3:
+				V_snprintf( str, sizeof( str ), "vector3d: %f %f %f", pVal[ 0 ], pVal[ 1 ], pVal[ 2 ] );
+				break;
+			case 4:
+				V_snprintf( str, sizeof( str ), "vector4d: %f %f %f %f", pVal[ 0 ], pVal[ 1 ], pVal[ 2 ], pVal[ 3 ] );
+				break;
+			default:
+				Assert( 0 );
+				*str = 0;
+			}
+			msg->SetString( GetName(), str );
+		}
+		break;
+
+	case MATERIAL_VAR_TYPE_MATRIX:
+		{
+			char str[ 256 ];
+			const VMatrix &matrix = GetMatrixValue();
+			const float *pVal = matrix.Base();
+			V_snprintf( str, sizeof( str ),
+				"matrix: %f %f %f %f %f %f %f %f %f %f %f %f %f %f %f %f",
+				pVal[ 0 ],  pVal[ 1 ],  pVal[ 2 ],  pVal[ 3 ],
+				pVal[ 4 ],  pVal[ 5 ],  pVal[ 6 ],  pVal[ 7 ],
+				pVal[ 8 ],  pVal[ 9 ],  pVal[ 10 ], pVal[ 11 ],
+				pVal[ 12 ], pVal[ 13 ], pVal[ 14 ], pVal[ 15 ] );
+			msg->SetString( GetName(), str );
+		}
+		break;
+
+	case MATERIAL_VAR_TYPE_FOURCC:
+		Assert( 0 ); // JDTODO
+		// fall-through intentional (until this case is implemented)
+
+	case MATERIAL_VAR_TYPE_TEXTURE:
+		//			V_snprintf( str, sizeof( str ), "texture: %x", pVar->GetTextureValue() );
+		//			msg->SetString( pVarName, str );
+		// fall-through intentional (until this case is implemented)
+
+	case MATERIAL_VAR_TYPE_MATERIAL:
+		//			V_snprintf( str, sizeof( str ), "material: %x", pVar->GetMaterialValue() );
+		//			msg->SetString( pVarName, str );
+		// fall-through intentional (until this case is implemented)
+
+	case MATERIAL_VAR_TYPE_UNDEFINED:
+		//			Assert( 0 ); // these appear to be (mostly? all?) textures, although I don't know why they're not caught by the texture case above...
+		// fall-through intentional (until this case is implemented)
+
+	default:
+		Assert( 0 );
+		msg->deleteThis();
+		return;
+	}
+
+	pClientMaterialSystem->PostToolMessage( hEntity, msg );
+	msg->deleteThis();
+}
+
+#endif
+
+void CMaterialVar::VarChanged()
+{
+	if ( !m_pMaterial )
+		return;
+
+	m_pMaterial->ReportVarChanged( this );
+
+#ifndef NO_TOOLFRAMEWORK
+	RecordToolMessage();
+#endif
 }
 
 //-----------------------------------------------------------------------------
@@ -1600,6 +2032,31 @@ void CMaterialVar::SetValueAutodetectType( const char *val )
 	Vector2D scale, center;
 	float angle;
 	Vector2D translation;
+
+	//scan for pre-rotation scale and translation with assumed center syntax
+	count = sscanf( val, " scale %f %f translate %f %f rotate %f",
+		&scale.x, &scale.y, &translation.x, &translation.y, &angle );
+	if (count == 5)
+	{
+		VMatrix temp;
+
+		MatrixBuildTranslation( mat, translation.x - 0.5, translation.y - 0.5, 0.0f );
+		MatrixBuildScale( temp, scale.x, scale.y, 1.0f );
+		MatrixMultiply( mat, temp, mat );
+		MatrixBuildRotateZ( temp, angle );
+		MatrixMultiply( mat, temp, mat );
+
+		Vector2D vOffset;
+		vOffset.Init( 0.5f / ( scale.x != 0 ? scale.x : 1.0 ), 0.5f / ( scale.y != 0 ? scale.y : 1.0 ) );
+		Vector2DRotate( vOffset, -angle, vOffset );
+
+		MatrixBuildTranslation( temp, vOffset.x, vOffset.y, 0.0f );
+		MatrixMultiply( mat, temp, mat );
+
+		SetMatrixValue( mat );
+		return;
+	}
+
 	count = sscanf( val, " center %f %f scale %f %f rotate %f translate %f %f",
 		&center.x, &center.y, &scale.x, &scale.y, &angle, &translation.x, &translation.y );
 	if (count == 7)
@@ -1629,3 +2086,20 @@ void CMaterialVar::SetValueAutodetectType( const char *val )
 
 	SetStringValue( val );
 }
+
+void CompactMaterialVars( IMaterialVar **ppMaterialVars, int nVars )
+{
+	for ( int i = 0; i < nVars; i++ )
+	{
+		if ( MVInternallyAllocated( ppMaterialVars[i] ) )
+		{
+			ppMaterialVars[i] = (IMaterialVar *)MVRelocate( ppMaterialVars[i] );
+		}
+	}
+}
+
+void CompactMaterialVarHeap()
+{
+	MVDecommitUnusedPages();
+}
+

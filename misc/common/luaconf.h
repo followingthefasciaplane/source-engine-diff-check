@@ -1,4 +1,3 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
 /*
 ** $Id: luaconf.h,v 1.82 2006/04/10 18:27:23 roberto Exp $
 ** Configuration file for Lua

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright (c) 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -9,6 +9,7 @@
 #include "networkstringtabledefs.h"
 #include <checksum_md5.h>
 #include <iregistry.h>
+#include "userid.h"
 #include "pure_server.h"
 #include "netmessages.h"
 #include "cl_demo.h"
@@ -31,7 +32,6 @@
 #include "MapReslistGenerator.h"
 #include "DownloadListGenerator.h"
 #include "GameEventManager.h"
-#include "host_phonehome.h"
 #include "vgui_baseui_interface.h"
 #include "clockdriftmgr.h"
 #include "snd_audio_source.h"
@@ -44,40 +44,30 @@
 #include "materialsystem/materialsystem_config.h"
 #include "tier1/fmtstr.h"
 #include "cl_steamauth.h"
-#include "matchmaking.h"
-#include "server.h"
-#include "eiface.h"
-
+#include "matchmaking/imatchframework.h"
+#include "audio/private/snd_sfx.h"
 #include "tier0/platform.h"
 #include "tier0/systeminformation.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
-static ConVar cl_timeout( "cl_timeout", "30", FCVAR_ARCHIVE, "After this many seconds without receiving a packet from the server, the client will disconnect itself" );
-	   ConVar cl_logofile( "cl_logofile", "materials/decals/spraylogo.vtf", FCVAR_ARCHIVE, "Spraypoint logo decal." ); // TODO must be more generic
-static ConVar cl_soundfile( "cl_soundfile", "sound/player/jingle.wav", FCVAR_ARCHIVE, "Jingle sound file." );
-static ConVar cl_allowdownload ( "cl_allowdownload", "1", FCVAR_ARCHIVE, "Client downloads customization files" );
-static ConVar cl_downloadfilter( "cl_downloadfilter", "all", FCVAR_ARCHIVE, "Determines which files can be downloaded from the server (all, none, nosounds, mapsonly)" );
-
-#ifdef OSX
-	// OS X is barely making it due to virtual memory pressure on 32bit, our behavior of load new models -> unload
-	// unused is far too abusive for its estimated margin of maybe two or three bytes before crashing.
-	#define CONVAR_DEFAULT_ALWAYS_FLUSH_MODELS "1"
-#else
-	#define CONVAR_DEFAULT_ALWAYS_FLUSH_MODELS "0"
+ConVar cl_timeout( "cl_timeout", "30", FCVAR_ARCHIVE, "After this many seconds without receiving a packet from the server, the client will disconnect itself"
+#ifndef _DEBUG
+	, true, 4, true, 30
 #endif
-static ConVar cl_always_flush_models( "cl_always_flush_models", CONVAR_DEFAULT_ALWAYS_FLUSH_MODELS, FCVAR_INTERNAL_USE,
-                                      "If set, always flush models between map loads.  Useful on systems under memory pressure." );
+	);
+static ConVar cl_forcepreload( "cl_forcepreload", "0", FCVAR_ARCHIVE, "Whether we should force preloading.");
+static ConVar cl_downloadfilter( "cl_downloadfilter", "all", FCVAR_ARCHIVE, "Determines which files can be downloaded from the server (all, none, nosounds)" );
+static ConVar cl_download_demoplayer( "cl_download_demoplayer", "1", FCVAR_RELEASE, "Determines whether downloads of external resources are allowed during demo playback (0:no,1:workshop,2:all)" );
+
+ConVar cl_debug_ugc_downloads( "cl_debug_ugc_downloads", "0", FCVAR_RELEASE );
 
 extern ConVar sv_downloadurl;
+extern ConVar sv_consistency;
+extern ConVar cl_hideserverip;
 
-#if defined( _DEBUG ) || defined( STAGING_ONLY )
-static ConVar debug_clientstate_fake_hltv( "debug_clientstate_fake_hltv", "0", 0, "If set, spoof as HLTV for testing purposes." );
-#if defined( REPLAY_ENABLED )
-static ConVar debug_clientstate_fake_replay( "debug_clientstate_fake_replay", "0", 0, "If set, spoof as REPLAY for testing purposes." );
-#endif // defined( REPLAY_ENABLED )
-#endif // defined( _DEBUG ) || defined( STAGING_ONLY )
+extern bool g_bServerGameDLLGreaterThanV5;
 
 //////////////////////////////////////////////////////////////////////
 // Construction/Destruction
@@ -92,17 +82,58 @@ CClientState::CClientState()
 	m_pAreaBits = NULL;
 	m_hWaitForResourcesHandle = NULL;
 	m_bUpdateSteamResources = false;
-	m_bPrepareClientDLL = false;
 	m_bShownSteamResourceUpdateProgress = false;
 	m_pPureServerWhitelist = NULL;
-	m_pPendingPureFileReloads = NULL;
 	m_bCheckCRCsWithServer = false;
 	m_flLastCRCBatchTime = 0;
 	m_nFriendsID = 0;
-	m_FriendsName[0] = 0;
+	m_FriendsName[ 0 ] = 0;
+	m_flLastServerTickTime = -1.0f;
+	lastoutgoingcommand = 0;
+	chokedcommands = 0;
+	last_command_ack = 0;
+	last_server_tick = 0;
+	command_ack = 0;
+	m_nSoundSequence = 0;
+	serverCRC = 0;
+	serverClientSideDllCRC = 0;
+	viewangles.Init();
+	Q_memset( m_chAreaBits, 0, sizeof( m_chAreaBits ) );
+	Q_memset( m_chAreaPortalBits, 0, sizeof( m_chAreaPortalBits ) );
+	m_bAreaBitsValid = false;
+	addangletotal = 0.0f;
+	prevaddangletotal = 0.0f;
+	cdtrack = 0;
+	Q_memset( m_FriendsName, 0, sizeof( m_FriendsName ) );
+	m_pModelPrecacheTable = NULL;
+	m_pDynamicModelTable = NULL;
+	m_pGenericPrecacheTable = NULL;
+	m_pSoundPrecacheTable = NULL;
+	m_pDecalPrecacheTable = NULL;
+	m_pInstanceBaselineTable = NULL;
+	m_pLightStyleTable = NULL;
+	m_pUserInfoTable = NULL;
+	m_pServerStartupTable = NULL;
+	m_pDownloadableFileTable = NULL;
+	m_bDownloadResources = false;
+	m_bDownloadingUGCMap = false;
+	insimulation = false;
+	oldtickcount = 0;
+	ishltv = false;
 #if defined( REPLAY_ENABLED )
 	isreplay = false;
 #endif
+	ResetHltvReplayState();
+}
+
+void CClientState::ResetHltvReplayState()
+{
+	m_nHltvReplayDelay = 0;
+	m_nHltvReplayStopAt = 0;
+	m_nHltvReplayStartAt = 0;
+	m_nHltvReplaySlowdownBeginAt = 0;
+	m_nHltvReplaySlowdownEndAt = 0;
+	m_flHltvReplaySlowdownRate = 1.0f;
 }
 
 CClientState::~CClientState()
@@ -176,41 +207,43 @@ const char *CClientState::GetCDKeyHash( void )
 
 void CClientState::SendClientInfo( void )
 {
-	CLC_ClientInfo info;
-	
-	info.m_nSendTableCRC = SendTable_GetCRC();
-	info.m_nServerCount = m_nServerCount;
-	info.m_bIsHLTV = false;
+	CCLCMsg_ClientInfo_t info;
+
+	info.set_send_table_crc( SendTable_GetCRC() );
+	info.set_server_count( m_nServerCount );
+	info.set_is_hltv( false );
 #if defined( REPLAY_ENABLED )
-	info.m_bIsReplay = false;
+	info.set_is_replay( false );
 #endif
+
 #if !defined( NO_STEAM )
-	info.m_nFriendsID = Steam3Client().SteamUser() ? Steam3Client().SteamUser()->GetSteamID().GetAccountID() : 0;
+	info.set_friends_id( Steam3Client().SteamUser() ? Steam3Client().SteamUser()->GetSteamID().GetAccountID() : 0 );
 #else
-	info.m_nFriendsID = 0;
+	info.set_friends_id( 0 );
 #endif
-	Q_strncpy( info.m_FriendsName, m_FriendsName, sizeof(info.m_FriendsName) );
+	info.set_friends_name( m_FriendsName );
 
 	CheckOwnCustomFiles(); // load & verfiy custom player files
 
 	for ( int i=0; i< MAX_CUSTOM_FILES; i++ )
-		info.m_nCustomFiles[i] = m_nCustomFiles[i].crc;
+	{
+		info.add_custom_files( m_nCustomFiles[i].crc );
+	}
+	
+	m_NetChannel->SendNetMsg( info );
+}
 
-	// Testing to ensure we don't blow up servers by faking our client info
-#if defined( _DEBUG ) || defined( STAGING_ONLY )
-	if ( debug_clientstate_fake_hltv.GetBool() )
+void CClientState::SendLoadingProgress( int nProgress )
+{
+	if ( !m_NetChannel || nProgress <= m_nLastProgressPercent )
 	{
-		Msg( "!! Spoofing connect as HLTV in SendClientInfo\n" );
-		info.m_bIsHLTV = true;
+		return;
 	}
-#if defined( REPLAY_ENABLED )
-	if ( debug_clientstate_fake_replay.GetBool() )
-	{
-		Msg( "!! Spoofing connect as REPLAY in SendClientInfo\n" );
-		info.m_bIsReplay = true;
-	}
-#endif // defined( REPLAY_ENABLED )
-#endif // defined( _DEBUG ) || defined( STAGING_ONLY )
+
+	CCLCMsg_LoadingProgress_t info;
+	info.set_progress( nProgress );
+	m_nLastProgressPercent = nProgress;
+
 	m_NetChannel->SendNetMsg( info );
 }
 
@@ -218,14 +251,27 @@ void CClientState::SendServerCmdKeyValues( KeyValues *pKeyValues )
 {
 	if ( !pKeyValues )
 		return;
-	
-	CLC_CmdKeyValues clcCommand( pKeyValues );
 
+	// Ensure keyvalues are deleted per contract obligations
+	KeyValues::AutoDelete autodelete_pKeyValues( pKeyValues );
+	
 	if ( !m_NetChannel )
 		return;
 
-	m_NetChannel->SendNetMsg( clcCommand );
+	CCLCMsg_CmdKeyValues_t msg;
+	CmdKeyValuesHelper::CLCMsg_SetKeyValues( msg, pKeyValues );
+	
+	m_NetChannel->SendNetMsg( msg );
 }
+
+bool CClientState::SendNetMsg( INetMessage &msg, bool bForceReliable, bool bVoice )
+{
+	if ( m_NetChannel )
+		return m_NetChannel->SendNetMsg( msg, bForceReliable, bVoice );
+	else
+		return false;
+}
+
 
 extern IVEngineClient *engineClient;
 
@@ -233,9 +279,13 @@ extern IVEngineClient *engineClient;
 // Purpose: A svc_signonnum has been received, perform a client side setup
 // Output : void CL_SignonReply
 //-----------------------------------------------------------------------------
-bool CClientState::SetSignonState ( int state, int count )
+bool CClientState::SetSignonState ( int state, int count, const CNETMsg_SignonState *msg )
 {
-	if ( !CBaseClientState::SetSignonState( state, count ) )
+	int nOldSignonState = m_nSignonState;
+
+	ResetHltvReplayState();
+
+	if ( !CBaseClientState::SetSignonState( state, count, msg ) )
 	{
 		CL_Retry();
 		return false;
@@ -269,8 +319,8 @@ bool CClientState::SetSignonState ( int state, int count )
 				m_NetChannel->SetMaxBufferSize( true, NET_MAX_PAYLOAD );
 				
 				// set user settings (rate etc)
-				NET_SetConVar convars;
-				Host_BuildConVarUpdateMessage( &convars, FCVAR_USERINFO, false );
+				CNETMsg_SetConVar_t convars;
+				Host_BuildUserInfoUpdateMessage( m_nSplitScreenSlot, convars.mutable_convars(), false );
 				m_NetChannel->SendNetMsg( convars );
 			}
 			break;
@@ -279,8 +329,14 @@ bool CClientState::SetSignonState ( int state, int count )
 			{
 				EngineVGui()->UpdateProgressBar(PROGRESS_SIGNONNEW);
 
-				if ( IsPC() && !demoplayer->IsPlayingBack() )
+				if ( cl_download_demoplayer.GetBool() || !demoplayer->IsPlayingBack() )
 				{
+					// When playing back a demo we need to suspend packet reading here
+					if ( demoplayer->IsPlayingBack() )
+					{
+						demoplayer->SetPacketReadSuspended( true );
+					}
+
 					// start making sure we have all the specified resources
 					StartUpdatingSteamResources();
 				}
@@ -291,16 +347,19 @@ bool CClientState::SetSignonState ( int state, int count )
 				}
 
 				// don't tell the server yet that we've entered this state
+				COM_TimestampedLog( "CClientState::SetSignonState: end %i", state );
 				return true;
 			}
 			break;
 
 		case SIGNONSTATE_PRESPAWN	:
+			EngineVGui()->UpdateProgressBar(PROGRESS_SENDSIGNONDATA);
 			m_nSoundSequence = 1;	// reset sound sequence number after receiving signon sounds
 			break;
 		
 		case SIGNONSTATE_SPAWN :
 			{
+				extern float NET_GetFakeLag();
 				Assert( g_ClientDLL );
 
 				EngineVGui()->UpdateProgressBar(PROGRESS_SIGNONSPAWN);
@@ -309,11 +368,11 @@ bool CClientState::SetSignonState ( int state, int count )
 				char mapname[256];
 				CL_SetupMapName( modelloader->GetName( host_state.worldmodel ), mapname, sizeof( mapname ) );
 
-				COM_TimestampedLog( "LevelInitPreEntity: start %d", state );
+				COM_TimestampedLog( "LevelInitPreEntity: start %i", state );
+				// enable prediction if the server isn't local or the user is requesting fake lag
+				g_ClientGlobalVariables.m_bRemoteClient = !Host_IsLocalServer() || (NET_GetFakeLag() != 0.0f);
 				g_ClientDLL->LevelInitPreEntity(mapname);
-				COM_TimestampedLog( "LevelInitPreEntity: end %d", state );
-
-				phonehome->Message( IPhoneHome::PHONE_MSG_MAPSTART, mapname );
+				COM_TimestampedLog( "LevelInitPreEntity: end %i", state );
 
 				audiosourcecache->LevelInit( mapname );
 
@@ -325,29 +384,34 @@ bool CClientState::SetSignonState ( int state, int count )
 		case SIGNONSTATE_FULL:
 			{
 				CL_FullyConnected();
-				if ( m_NetChannel )
-				{
-					m_NetChannel->SetTimeout( cl_timeout.GetFloat() );
-					m_NetChannel->SetMaxBufferSize( true, NET_MAX_DATAGRAM_PAYLOAD );
-				}
+				if ( !m_NetChannel )
+					return false; // disconnected during connection
+				m_NetChannel->SetTimeout( cl_timeout.GetFloat() );
+				m_NetChannel->SetMaxBufferSize( true, NET_MAX_DATAGRAM_PAYLOAD );
 
 				HostState_OnClientConnected();
 				
-				if ( m_nMaxClients > 1 )
+				// If we came through a level transition with splitscreen guys, then we need to force their 
+				//  signon state to be SIGNONSTATE_FULL, too
+				FOR_EACH_VALID_SPLITSCREEN_PLAYER( hh )
 				{
-					g_pMatchmaking->AddLocalPlayersToTeams();
+					CBaseClientState &cl = GetLocalClient( hh );
+					if ( &cl == this )
+						continue;
+					cl.m_nSignonState = SIGNONSTATE_FULL;
 				}
 			}
 			break;
 
-		case SIGNONSTATE_CHANGELEVEL:	
+		case SIGNONSTATE_CHANGELEVEL:
 			m_NetChannel->SetTimeout( SIGNON_TIME_OUT );  // allow 5 minutes timeout
+			m_nLastProgressPercent = -1;
 			if ( m_nMaxClients > 1 )
 			{
 				// start progress bar immediately for multiplayer level transitions
 				EngineVGui()->EnabledProgressBarForNextLoad();
 			}
-			SCR_BeginLoadingPlaque();
+			SCR_BeginLoadingPlaque( msg->map_name().c_str() );
 			if ( m_nMaxClients > 1 )
 			{
 				EngineVGui()->UpdateProgressBar(PROGRESS_CHANGELEVEL);
@@ -357,10 +421,20 @@ bool CClientState::SetSignonState ( int state, int count )
 
 	COM_TimestampedLog( "CClientState::SetSignonState: end %i", state );
 
-	if ( state >= SIGNONSTATE_CONNECTED && m_NetChannel )
+	KeyValues *pEvent = new KeyValues( "OnEngineClientSignonStateChange" );
+	pEvent->SetInt( "slot", m_nSplitScreenSlot );
+	if ( m_bServerConnectionRedirect && nOldSignonState >= SIGNONSTATE_CONNECTED && state < SIGNONSTATE_CONNECTED )
+		nOldSignonState = state; // during server redirect attempt to keep the MMS session
+	pEvent->SetInt( "old", nOldSignonState );
+	pEvent->SetInt( "new", state );
+	pEvent->SetInt( "count", count );
+	g_pMatchFramework->GetEventsSubscription()->BroadcastEvent( pEvent );
+
+	if ( m_nSignonState >= SIGNONSTATE_CONNECTED )
 	{
 		// tell server that we entered now that state
-		m_NetChannel->SendNetMsg( NET_SignonState( state, count) );
+		CNETMsg_SignonState_t msgSignonState( m_nSignonState, count);
+		m_NetChannel->SendNetMsg( msgSignonState );
 	}
 
 	return true;
@@ -379,47 +453,26 @@ bool CClientState::HookClientStringTable( char const *tableName )
         return false;
 	}
 
-#if 0
-	// This was added into staging at some point and is not enabled in main or rel.
-	char szDownloadableFileTablename[255] = DOWNLOADABLE_FILE_TABLENAME;
-	char szModelPrecacheTablename[255] = MODEL_PRECACHE_TABLENAME;
-	char szGenericPrecacheTablename[255] = GENERIC_PRECACHE_TABLENAME;
-	char szSoundPrecacheTablename[255] = SOUND_PRECACHE_TABLENAME;
-	char szDecalPrecacheTablename[255] = DECAL_PRECACHE_TABLENAME;
-
-	Q_snprintf( szDownloadableFileTablename, 255, ":%s", DOWNLOADABLE_FILE_TABLENAME );
-	Q_snprintf( szModelPrecacheTablename, 255, ":%s", MODEL_PRECACHE_TABLENAME );
-	Q_snprintf( szGenericPrecacheTablename, 255, ":%s", GENERIC_PRECACHE_TABLENAME );
-	Q_snprintf( szSoundPrecacheTablename, 255, ":%s", SOUND_PRECACHE_TABLENAME );
-	Q_snprintf( szDecalPrecacheTablename, 255, ":%s", DECAL_PRECACHE_TABLENAME );		
-#else
-	const char *szDownloadableFileTablename = DOWNLOADABLE_FILE_TABLENAME;
-	const char *szModelPrecacheTablename = MODEL_PRECACHE_TABLENAME;
-	const char *szGenericPrecacheTablename = GENERIC_PRECACHE_TABLENAME;
-	const char *szSoundPrecacheTablename = SOUND_PRECACHE_TABLENAME;
-	const char *szDecalPrecacheTablename = DECAL_PRECACHE_TABLENAME;
-#endif
-
 	// Hook Model Precache table
-	if ( !Q_strcasecmp( tableName, szModelPrecacheTablename ) )
+	if ( !Q_strcasecmp( tableName, MODEL_PRECACHE_TABLENAME ) )
 	{
 		m_pModelPrecacheTable = table;
 		return true;
 	}
 
-	if ( !Q_strcasecmp( tableName, szGenericPrecacheTablename ) )
+	if ( !Q_strcasecmp( tableName, GENERIC_PRECACHE_TABLENAME ) )
 	{
 		m_pGenericPrecacheTable = table;
 		return true;
 	}
 
-	if ( !Q_strcasecmp( tableName, szSoundPrecacheTablename ) )
+	if ( !Q_strcasecmp( tableName, SOUND_PRECACHE_TABLENAME ) )
 	{
 		m_pSoundPrecacheTable = table;
 		return true;
 	}
 
-	if ( !Q_strcasecmp( tableName, szDecalPrecacheTablename ) )
+	if ( !Q_strcasecmp( tableName, DECAL_PRECACHE_TABLENAME ) )
 	{
 		// Cache the id
 		m_pDecalPrecacheTable = table;
@@ -454,16 +507,16 @@ bool CClientState::HookClientStringTable( char const *tableName )
 		return true;
 	}
 
-	if ( !Q_strcasecmp( tableName, szDownloadableFileTablename ) )
+	if ( !Q_strcasecmp( tableName, DOWNLOADABLE_FILE_TABLENAME ) )
 	{
 		// Cache the id
 		m_pDownloadableFileTable = table;
 		return true;
 	}
 
-	if ( !Q_strcasecmp( tableName, "DynamicModels" ) )
+	if ( !Q_strcasecmp( tableName, DYNAMIC_MODEL_TABLENAME ) )
 	{
-		m_pDynamicModelsTable = table;
+		m_pDynamicModelTable = table;
 		return true;
 	}
 
@@ -480,49 +533,28 @@ bool CClientState::InstallEngineStringTableCallback( char const *tableName )
 	if ( !table )
 		return false;
 
-#if 0
-	// This was added into staging at some point and is not enabled in main or rel.
-	char szDownloadableFileTablename[255] = DOWNLOADABLE_FILE_TABLENAME;
-	char szModelPrecacheTablename[255] = MODEL_PRECACHE_TABLENAME;
-	char szGenericPrecacheTablename[255] = GENERIC_PRECACHE_TABLENAME;
-	char szSoundPrecacheTablename[255] = SOUND_PRECACHE_TABLENAME;
-	char szDecalPrecacheTablename[255] = DECAL_PRECACHE_TABLENAME;
-
-	Q_snprintf( szDownloadableFileTablename, 255, ":%s", DOWNLOADABLE_FILE_TABLENAME );
-	Q_snprintf( szModelPrecacheTablename, 255, ":%s", MODEL_PRECACHE_TABLENAME );
-	Q_snprintf( szGenericPrecacheTablename, 255, ":%s", GENERIC_PRECACHE_TABLENAME );
-	Q_snprintf( szSoundPrecacheTablename, 255, ":%s", SOUND_PRECACHE_TABLENAME );
-	Q_snprintf( szDecalPrecacheTablename, 255, ":%s", DECAL_PRECACHE_TABLENAME );		
-#else
-	const char *szDownloadableFileTablename = DOWNLOADABLE_FILE_TABLENAME;
-	const char *szModelPrecacheTablename = MODEL_PRECACHE_TABLENAME;
-	const char *szGenericPrecacheTablename = GENERIC_PRECACHE_TABLENAME;
-	const char *szSoundPrecacheTablename = SOUND_PRECACHE_TABLENAME;
-	const char *szDecalPrecacheTablename = DECAL_PRECACHE_TABLENAME;
-#endif
-
 	// Hook Model Precache table
-	if ( !Q_strcasecmp( tableName, szModelPrecacheTablename ) )
+	if ( !Q_strcasecmp( tableName, MODEL_PRECACHE_TABLENAME ) )
 	{
 		table->SetStringChangedCallback( NULL, Callback_ModelChanged );
 		return true;
 	}
 
-	if ( !Q_strcasecmp( tableName, szGenericPrecacheTablename ) )
+	if ( !Q_strcasecmp( tableName, GENERIC_PRECACHE_TABLENAME ) )
 	{
 		// Install the callback
 		table->SetStringChangedCallback( NULL, Callback_GenericChanged );
 		return true;
 	}
 
-	if ( !Q_strcasecmp( tableName, szSoundPrecacheTablename ) )
+	if ( !Q_strcasecmp( tableName, SOUND_PRECACHE_TABLENAME ) )
 	{
 		// Install the callback
 		table->SetStringChangedCallback( NULL, Callback_SoundChanged );
 		return true;
 	}
 
-	if ( !Q_strcasecmp( tableName, szDecalPrecacheTablename ) )
+	if ( !Q_strcasecmp( tableName, DECAL_PRECACHE_TABLENAME ) )
 	{
 		// Install the callback
 		table->SetStringChangedCallback( NULL, Callback_DecalChanged );
@@ -553,15 +585,15 @@ bool CClientState::InstallEngineStringTableCallback( char const *tableName )
 		return true;
 	}
 
-	if ( !Q_strcasecmp( tableName, szDownloadableFileTablename ) )
+	if ( !Q_strcasecmp( tableName, DOWNLOADABLE_FILE_TABLENAME ) )
 	{
 		return true;
 	}
 
-	if ( !Q_strcasecmp( tableName, "DynamicModels" ) )
+	if ( !Q_strcasecmp( tableName, DYNAMIC_MODEL_TABLENAME ) )
 	{
-		table->SetStringChangedCallback( NULL, Callback_DynamicModelsChanged );
-		m_pDynamicModelsTable = table;
+		table->SetStringChangedCallback( NULL, Callback_DynamicModelChanged );
+		m_pDynamicModelTable = table;
 		return true;
 	}
 
@@ -591,14 +623,45 @@ float CClientState::GetTime() const
 {
 	int nTickCount = GetClientTickCount();
 	float flTickTime = nTickCount * host_state.interval_per_tick;
+	float flResult;
 	
 	// Timestamps are rounded to exact tick during simulation
 	if ( insimulation )
 	{
 		return flTickTime;
 	}
+	
+#if defined(_X360) || defined( _PS3 )
+	// This function is called enough under ComputeLightingState to make this little cache worthwhile [10/6/2010 tom]
+	static float lastResult;
+	static int lastTick;
+	if ( lastTick == nTickCount )
+	{
+		return lastResult;
+	}
+	lastTick = nTickCount;
+#endif
 
-	return flTickTime + m_tickRemainder;
+	// Tracker 77931:  If the game is paused, then lock the client clock at the previous tick boundary 
+	//  (otherwise we'll keep interpolating through the "remainder" time causing the paused characters
+	//  to twitch like they have the shakes)
+	// TODO:  Since this rounds down on the frame we paused, we could see a slight backsliding.  We could remember the last "remainder" before pause and re-use it and 
+	//  set insimulation == false to be more exact.  We'd still have to deal with the timing difference between
+	//  when pause/unpause happens on the server versus the client
+	if ( GetBaseLocalClient().IsPaused() )
+	{
+		// Go just before next tick
+		flResult = flTickTime + host_state.interval_per_tick - 0.00001f;
+	}
+	else
+	{
+		flResult = flTickTime + m_tickRemainder;
+	}
+
+#if defined(_X360) || defined( _PS3 )
+	lastResult = flResult;
+#endif
+	return flResult;
 }
 
 float CClientState::GetFrameTime() const
@@ -642,11 +705,11 @@ float CClientState::GetClientInterpAmount()
 	float flInterpRatio = s_cl_interp_ratio->GetFloat();
 	float flInterp = s_cl_interp->GetFloat();
 
-	const ConVar_ServerBounded *pBounded = static_cast<const ConVar_ServerBounded*>( s_cl_interp_ratio );
+	const ConVar_ServerBounded *pBounded = dynamic_cast<const ConVar_ServerBounded*>( s_cl_interp_ratio );
 	if ( pBounded )
 		flInterpRatio = pBounded->GetFloat();
 	//#define FIXME_INTERP_RATIO
-	return max( flInterpRatio / cl_updaterate->GetFloat(), flInterp );
+	return MAX( flInterpRatio / cl_updaterate->GetFloat(), flInterp );
 }
 
 //-----------------------------------------------------------------------------
@@ -657,6 +720,7 @@ void CClientState::Clear( void )
 	CBaseClientState::Clear();
 
 	m_pModelPrecacheTable = NULL;
+	m_pDynamicModelTable = NULL;
 	m_pGenericPrecacheTable = NULL;
 	m_pSoundPrecacheTable = NULL;
 	m_pDecalPrecacheTable = NULL;
@@ -664,16 +728,17 @@ void CClientState::Clear( void )
 	m_pLightStyleTable = NULL;
 	m_pUserInfoTable = NULL;
 	m_pServerStartupTable = NULL;
-	m_pDynamicModelsTable = NULL;
 	m_pAreaBits = NULL;
-
+	
 	// Clear all download vars.
 	m_pDownloadableFileTable = NULL;
 	m_hWaitForResourcesHandle = NULL;
 	m_bUpdateSteamResources = false;
 	m_bShownSteamResourceUpdateProgress = false;
 	m_bDownloadResources = false;
-	m_bPrepareClientDLL = false;
+	m_bDownloadingUGCMap = false;
+	m_modelIndexLoaded = -1;
+	m_lastModelPercent = -1;
 
 	DeleteClientFrames( -1 ); // clear all
 		
@@ -681,7 +746,6 @@ void CClientState::Clear( void )
 	m_flLastServerTickTime = 0.0f;
 	oldtickcount = 0;
 	insimulation = false;
-
 
 	addangle.RemoveAll();
 	addangletotal = 0.0f;
@@ -694,8 +758,10 @@ void CClientState::Clear( void )
 	isreplay = false;
 #endif
 	cdtrack = 0;
-	V_memset( serverMD5.bits, 0, MD5_DIGEST_LENGTH );
+	serverCRC = 0;
+	serverClientSideDllCRC = 0;
 	last_command_ack = 0;
+	last_server_tick = 0;
 	command_ack = 0;
 	m_nSoundSequence = 0;
 
@@ -723,9 +789,58 @@ bool CClientState::ProcessConnectionlessPacket( netpacket_t *packet )
 	return CBaseClientState::ProcessConnectionlessPacket( packet );
 }
 
-void CClientState::FullConnect( netadr_t &adr )
+void CClientState::ConnectionStart( INetChannel *chan )
 {
-	CBaseClientState::FullConnect( adr );
+	CBaseClientState::ConnectionStart( chan );
+	m_SVCMsgHltvReplay.Bind< CSVCMsg_HltvReplay_t >( chan, UtlMakeDelegate( this, &CClientState::SVCMsg_HltvReplay ) );
+}
+
+void CClientState::ConnectionStop(  )
+{
+	CBaseClientState::ConnectionStop( );
+	m_SVCMsgHltvReplay.Unbind();
+}
+
+
+
+float CClientState::GetHltvReplayTimeScale()const
+{
+	extern ConVar spec_replay_rate_base;
+	if ( m_nHltvReplayDelay )
+	{
+		int nCurrentTick = GetClientTickCount();
+		if ( nCurrentTick >= m_nHltvReplaySlowdownBeginAt && nCurrentTick < m_nHltvReplaySlowdownEndAt )
+			return spec_replay_rate_base.GetFloat() * m_flHltvReplaySlowdownRate;
+		else
+			return spec_replay_rate_base.GetFloat();
+	}
+	return 1.0f;
+}
+
+
+float CL_GetHltvReplayTimeScale()
+{
+	return GetBaseLocalClient().GetHltvReplayTimeScale();
+}
+
+void CClientState::StopHltvReplay()
+{
+	ForceFullUpdate( "Force StopHltvReplay on client" );
+	m_nHltvReplayDelay = 0;
+	m_nHltvReplayStopAt = 0;
+	m_nHltvReplayStartAt = 0;
+	if ( g_ClientDLL )
+	{
+		CSVCMsg_HltvReplay msg;
+		g_ClientDLL->OnHltvReplay( msg );
+	}
+}
+
+
+
+void CClientState::FullConnect( const ns_address &adr, int nEncryptionKey )
+{
+	CBaseClientState::FullConnect( adr, nEncryptionKey );
 	m_NetChannel->SetDemoRecorder( g_pClientDemoRecorder );
 	m_NetChannel->SetDataRate( cl_rate->GetFloat() );
 
@@ -739,9 +854,9 @@ void CClientState::FullConnect( netadr_t &adr )
 	chokedcommands = 0;
 	
 	// Report connection success.
-	if ( Q_stricmp("loopback", adr.ToString() ) )
+	if ( !adr.IsLoopback() )
 	{
-		ConMsg( "Connected to %s\n", adr.ToString() );
+		ConMsg( "Connected to %s\n", cl_hideserverip.GetInt()>0 ? "<ip hidden>" : ns_address_render( adr ).String() );
 	}
 }
 
@@ -775,14 +890,6 @@ model_t *CClientState::GetModel( int index )
 		return m;
 	}
 
-	// The world model has special handling and should not be lazy loaded here
-	if ( index == 1 )
-	{
-		Assert( false );
-		Warning( "Attempting to get world model before it was loaded\n" );
-		return NULL;
-	}
-
 	char const *name = m_pModelPrecacheTable->GetString( index );
 
 	if ( host_showcachemiss.GetBool() )
@@ -797,7 +904,7 @@ model_t *CClientState::GetModel( int index )
 		if ( data && ( data->flags & RES_FATALIFMISSING ) )
 		{
 			COM_ExplainDisconnection( true, "Cannot continue without model %s, disconnecting\n", name );
-			Host_Disconnect( true, "Missing model" );
+			Host_Disconnect(true);
 		}
 	}
 
@@ -838,30 +945,25 @@ void CClientState::SetModel( int tableIndex )
 		return;
 	}
 
-	char const *name = m_pModelPrecacheTable->GetString( tableIndex );
-
-	if ( tableIndex == 1 )
-	{
-		// The world model must match the LevelFileName -- it is the path we just checked the CRC for, and paths may differ
-		// from what the server is using based on what the gameDLL override does
-		name = m_szLevelFileName;
-	}
-
 	CPrecacheItem *p = &model_precache[ tableIndex ];
 	const CPrecacheUserData *data = CL_GetPrecacheUserData( m_pModelPrecacheTable, tableIndex );
 
-	bool bLoadNow = ( data && ( data->flags & RES_PRELOAD ) ) || IsX360();
+	bool bLoadNow = ( data && ( data->flags & RES_PRELOAD ) ) || IsGameConsole();
 	if ( CommandLine()->FindParm( "-nopreload" ) ||	CommandLine()->FindParm( "-nopreloadmodels" ))
 	{
 		bLoadNow = false;
 	}
-	else if ( CommandLine()->FindParm( "-preload" ) )
+	else if ( cl_forcepreload.GetInt() || CommandLine()->FindParm( "-preload" ) )
 	{
 		bLoadNow = true;
 	}
 
 	if ( bLoadNow )
 	{
+		char const *name = m_pModelPrecacheTable->GetString( tableIndex );
+		int lenModelName = V_strlen( name );
+		if ( demoplayer->IsPlayingBack() && ( lenModelName > 4 ) && !V_stricmp( name + lenModelName - 4, ".bsp" ) )
+			name = m_szLevelName;	// For demo playback we force the client bsp which may differ from precache table
 		p->SetModel( modelloader->GetModelForName( name, IModelLoader::FMODELLOADER_CLIENT ) );
 	}
 	else
@@ -869,10 +971,13 @@ void CClientState::SetModel( int tableIndex )
 		p->SetModel( NULL );
 	}
 
-	// log the file reference, if necssary
+	// log the file reference, if necessary
 	if (MapReslistGenerator().IsEnabled())
 	{
-		name = m_pModelPrecacheTable->GetString( tableIndex );
+		char const *name = m_pModelPrecacheTable->GetString( tableIndex );
+		int lenModelName = V_strlen( name );
+		if ( demoplayer->IsPlayingBack() && ( lenModelName > 4 ) && !V_stricmp( name + lenModelName - 4, ".bsp" ) )
+			name = m_szLevelName;	// For demo playback we force the client bsp which may differ from precache table
 		MapReslistGenerator().OnModelPrecached( name );
 	}
 }
@@ -1030,12 +1135,12 @@ void CClientState::SetSound( int tableIndex )
 	CPrecacheItem *p = &sound_precache[ tableIndex ];
 	const CPrecacheUserData *data = CL_GetPrecacheUserData( m_pSoundPrecacheTable, tableIndex );
 
-	bool bLoadNow = ( data && ( data->flags & RES_PRELOAD ) ) || IsX360();
+	bool bLoadNow = ( data && ( data->flags & RES_PRELOAD ) ) || IsGameConsole();
 	if ( CommandLine()->FindParm( "-nopreload" ) ||	CommandLine()->FindParm( "-nopreloadsounds" ))
 	{
 		bLoadNow = false;
 	}
-	else if ( CommandLine()->FindParm( "-preload" ) )
+	else if ( cl_forcepreload.GetInt() || CommandLine()->FindParm( "-preload" ) )
 	{
 		bLoadNow = true;
 	}
@@ -1043,7 +1148,12 @@ void CClientState::SetSound( int tableIndex )
 	if ( bLoadNow )
 	{
 		char const *name = m_pSoundPrecacheTable->GetString( tableIndex );
-		p->SetSound( S_PrecacheSound( name ) );
+		CSfxTable *pSfxTable = S_PrecacheSound( name );
+		if ( ( pSfxTable != NULL ) && pSfxTable->m_bIsLateLoad )
+		{
+			DevWarning( "    CClientState::SetSound() created the late loading.\n" );
+		}
+		p->SetSound( pSfxTable );
 	}
 	else
 	{
@@ -1120,16 +1230,17 @@ void CClientState::CheckOthersCustomFile( CRC32_t crcValue )
 	if ( crcValue == 0 )
 		return; // not a valid custom file
 
+	extern ConVar cl_allowdownload;
 	if ( !cl_allowdownload.GetBool() )
 		return; // client doesn't want to download anything
 
 	CCustomFilename filehex( crcValue );
 
-	if ( g_pFileSystem->FileExists( filehex.m_Filename, "game" ) )
+	if ( g_pFileSystem->FileExists( filehex.m_Filename ) )
 		return; // we already have this file (assuming the CRC is correct)
 
 	// we don't have it, request download from server
-	m_NetChannel->RequestFile( filehex.m_Filename );
+	m_NetChannel->RequestFile( filehex.m_Filename, false );
 }
 
 void CClientState::AddCustomFile( int slot, const char *resourceFile)
@@ -1167,13 +1278,12 @@ void CClientState::AddCustomFile( int slot, const char *resourceFile)
 	// transmit the file back to us.
 	bool bCopy = true;
 	CCustomFilename filehex( crcValue );
-	char szAbsFilename[ MAX_PATH ];
-	if ( g_pFileSystem->RelativePathToFullPath( filehex.m_Filename, "game", szAbsFilename, sizeof(szAbsFilename), FILTER_CULLPACK ) )
+	if ( g_pFileSystem->FileExists( filehex.m_Filename ) )
 	{
 		// check if existing file already has same CRC, 
 		// then we don't need to copy it anymore
 		CRC32_t test;
-		CRC_File( &test, szAbsFilename );
+		CRC_File( &test, filehex.m_Filename );
 		if ( test == crcValue )
 			bCopy = false;
 	}
@@ -1181,24 +1291,11 @@ void CClientState::AddCustomFile( int slot, const char *resourceFile)
 	if ( bCopy )
 	{
 		// Copy it over under the new name
+		COM_CopyFile( resourceFile, filehex.m_Filename );
 
-		// Load up the file
-		CUtlBuffer buf;
-		if ( !g_pFileSystem->ReadFile( resourceFile, "game", buf ) )
+		if ( !g_pFileSystem->FileExists( filehex.m_Filename ) )
 		{
-			Warning( "CacheCustomFiles: can't read '%s'.\n", resourceFile );
-			return;
-		}
-
-		// Make sure dest directory exists
-		char szParentDir[ MAX_PATH ];
-		V_ExtractFilePath( filehex.m_Filename, szParentDir, sizeof(szParentDir) );
-		g_pFileSystem->CreateDirHierarchy( szParentDir, "download" );
-
-		// Save it
-		if ( !g_pFileSystem->WriteFile( filehex.m_Filename, "download", buf ) )
-		{
-			Warning( "CacheCustomFiles: can't write '%s'.\n", filehex.m_Filename );
+			Warning( "CacheCustomFiles: can't copy '%s' to '%s'.\n", resourceFile, filehex.m_Filename );
 			return;
 		}
 	}
@@ -1223,15 +1320,6 @@ void CClientState::CheckOwnCustomFiles()
 {
 	// clear file CRCs
 	Q_memset( m_nCustomFiles, 0, sizeof(m_nCustomFiles) );
-	
-	if ( m_nMaxClients == 1 )
-		return;	// not in singleplayer
-
-	if ( IsPC() )
-	{
-		AddCustomFile( 0, cl_logofile.GetString() );
-		AddCustomFile( 1, cl_soundfile.GetString() );
-	}
 }
 
 //-----------------------------------------------------------------------------
@@ -1281,16 +1369,16 @@ void CClientState::DumpPrecacheStats( const char * name )
 
 	for ( int i = 0; i < count; i++ )
 	{
-		char const *pchName = table->GetString( i );
+		char const *name = table->GetString( i );
 		CPrecacheItem *slot = &items[ i ];
 		const CPrecacheUserData *p = CL_GetPrecacheUserData( table, i );
 
-		if ( !pchName || !slot || !p )
+		if ( !name || !slot || !p )
 			continue;
 
 		ConMsg( "%03i:  %s (%s):   ",
 			i,
-			pchName,
+			name, 
 			GetFlagString( p->flags ) );
 
 
@@ -1313,99 +1401,222 @@ void CClientState::DumpPrecacheStats( const char * name )
 void CClientState::ReadDeletions( CEntityReadInfo &u )
 {
 	VPROF( "ReadDeletions" );
-	while ( u.m_pBuf->ReadOneBit()!=0 )
+	int nBase = -1;
+	int nCount = u.m_pBuf->ReadUBitVar();
+	for ( int i = 0; i < nCount; ++i )
 	{
-		int idx = u.m_pBuf->ReadUBitLong( MAX_EDICT_BITS );	
-		
-		Assert( !u.m_pTo->transmit_entity.Get( idx ) );
+		int nDelta = u.m_pBuf->ReadUBitVar();
+		int nSlot = nBase + nDelta;
 
-		CL_DeleteDLLEntity( idx, "ReadDeletions" );
+		Assert( !u.m_pTo->transmit_entity.Get( nSlot ) );
+
+		CL_DeleteDLLEntity( nSlot, "ReadDeletions" );
+
+		nBase = nSlot;
 	}
 }
 
-void CClientState::ReadEnterPVS( CEntityReadInfo &u )
+inline static UpdateType DetermineUpdateType( CEntityReadInfo &u, int oldEntity )
 {
-	VPROF( "ReadEnterPVS" );
+	if ( !u.m_bIsEntity || ( u.m_nNewEntity > oldEntity ) )
+	{
+		// If we're at the last entity, preserve whatever entities followed it in the old packet.
+		// If newnum > oldnum, then the server skipped sending entities that it wants to leave the state alone for.
+		if ( !u.m_pFrom	 || ( oldEntity > u.m_pFrom->last_entity ) )
+		{
+			return Finished;
+		}
 
-	TRACE_PACKET(( "  CL Enter PVS (%d)\n", u.m_nNewEntity ));
+		// Preserve entities until we reach newnum (ie: the server didn't send certain entities because
+		// they haven't changed).
+	}
+	else
+	{
+		if( u.m_UpdateFlags & FHDR_ENTERPVS )
+		{
+			return EnterPVS;
+		}
+		else if( u.m_UpdateFlags & FHDR_LEAVEPVS )
+		{
+			return LeavePVS;
+		}
+		return DeltaEnt;
+	}
 
-	int iClass = u.m_pBuf->ReadUBitLong( m_nServerClassBits );
-
-	int iSerialNum = u.m_pBuf->ReadUBitLong( NUM_NETWORKED_EHANDLE_SERIAL_NUMBER_BITS );
-
-	CL_CopyNewEntity( u, iClass, iSerialNum );
-
-	if ( u.m_nNewEntity == u.m_nOldEntity ) // that was a recreate
-		u.NextOldEntity();
+	return PreserveEnt;
 }
 
-void CClientState::ReadLeavePVS( CEntityReadInfo &u )
+static inline void CL_ParseDeltaHeader( CEntityReadInfo &u )
 {
-	VPROF( "ReadLeavePVS" );
-	// Sanity check.
+	u.m_UpdateFlags = FHDR_ZERO;
+
+#ifdef DEBUG_NETWORKING
+	int startbit = u.m_pBuf->GetNumBitsRead();
+#endif
+	u.m_nNewEntity = u.m_nHeaderBase + 1 + u.m_pBuf->ReadUBitVar();
+
+
+	u.m_nHeaderBase = u.m_nNewEntity;
+
+	// leave pvs flag
+	if ( u.m_pBuf->ReadOneBit() == 0 )
+	{
+		// enter pvs flag
+		if ( u.m_pBuf->ReadOneBit() != 0 )
+		{
+			u.m_UpdateFlags |= FHDR_ENTERPVS;
+		}
+	}
+	else
+	{
+		u.m_UpdateFlags |= FHDR_LEAVEPVS;
+
+		// Force delete flag
+		if ( u.m_pBuf->ReadOneBit() != 0 )
+		{
+			u.m_UpdateFlags |= FHDR_DELETE;
+		}
+	}
+	// Output the bitstream...
+#ifdef DEBUG_NETWORKING
+	int lastbit = u.m_pBuf->GetNumBitsRead();
+	{
+		void	SpewBitStream( unsigned char* pMem, int bit, int lastbit );
+		SpewBitStream( (byte *)u.m_pBuf->m_pData, startbit, lastbit );
+	}
+#endif
+}
+
+void CClientState::ReadPacketEntities( CEntityReadInfo &u )
+{
+	// Loop until there are no more entities to read
+
+	bool bRecord = cl_entityreport.GetBool();
+
+	int oldEntity = u.m_nOldEntity;
+	oldEntity = u.GetNextOldEntity(u.m_nOldEntity);
+	UpdateType updateType = u.m_UpdateType;
+
+	while ( updateType < Finished )
+	{
+		u.m_nHeaderCount--;
+
+		u.m_bIsEntity = ( u.m_nHeaderCount >= 0 ) ? true : false;
+
+		if ( u.m_bIsEntity  )
+		{
+			CL_ParseDeltaHeader( u );
+		}
+
+		for ( updateType = PreserveEnt; updateType == PreserveEnt; )
+		{
+			// Figure out what kind of an update this is.
+			updateType = DetermineUpdateType(u, oldEntity);
+			switch( updateType )
+			{
+			case EnterPVS:	
+				{
+					int iClass = u.m_pBuf->ReadUBitLong( m_nServerClassBits );
+
+					int iSerialNum = u.m_pBuf->ReadUBitLong( NUM_NETWORKED_EHANDLE_SERIAL_NUMBER_BITS );
+					u.m_nOldEntity = oldEntity;
+					CL_CopyNewEntity( u, iClass, iSerialNum );
+
+					if ( u.m_nNewEntity == oldEntity ) // that was a recreate
+					{
+						oldEntity = u.GetNextOldEntity(oldEntity);
+					}
+				}
+				break;
+
+			case LeavePVS:
+				{
+					if ( !u.m_bAsDelta )
+					{
+						Assert(0); // GetBaseLocalClient().validsequence = 0;
+						ConMsg( "WARNING: LeavePVS on full update" );
+						updateType = Failed;	// break out
+					}
+					else
+					{
+						Assert( !u.m_pTo->transmit_entity.Get( oldEntity ) );
+
+						if ( u.m_UpdateFlags & FHDR_DELETE )
+						{
+							CL_DeleteDLLEntity( oldEntity, "ReadLeavePVS" );
+						}
+
+						oldEntity = u.GetNextOldEntity(oldEntity);
+					}
+				}
+				break;
+
+			case DeltaEnt:
+				{
+					u.m_nOldEntity = oldEntity;
+					CL_CopyExistingEntity( u );
+					oldEntity = u.GetNextOldEntity(oldEntity);
+				}
+				break;
+
+			case PreserveEnt:
+				{
+					if ( !u.m_bAsDelta )  // Should never happen on a full update.
+					{
+						updateType = Failed;	// break out
+					}
+					else
+					{
+						Assert( u.m_pFrom->transmit_entity.Get(oldEntity) );
+
+						// copy one of the old entities over to the new packet unchanged
+						if ( u.m_nNewEntity < 0 || u.m_nNewEntity >= MAX_EDICTS )
+						{
+							Host_Error ("CL_ReadPreserveEnt: u.m_nNewEntity == MAX_EDICTS");
+						}
+
+						u.m_pTo->last_entity = oldEntity;
+						u.m_pTo->transmit_entity.Set( oldEntity );
+
+						if ( bRecord )
+						{
+							CL_RecordEntityBits( oldEntity, 0 );
+						}
+
+						oldEntity = u.GetNextOldEntity(oldEntity);
+					}
+				}
+				break;
+
+			default:
+				break;
+			}
+		}
+	}
+	u.m_nOldEntity = oldEntity;
+	u.m_UpdateType = updateType;
+
+	// Now process explicit deletes 
+	if ( u.m_bAsDelta && u.m_UpdateType == Finished )
+	{
+		ReadDeletions( u );
+	}
+
+	// Something didn't parse...
+	if ( u.m_pBuf->IsOverflowed() )							
+	{	
+		Host_Error ( "CL_ParsePacketEntities:  buffer read overflow\n" );
+	}
+
+	// If we get an uncompressed packet, then the server is waiting for us to ack the validsequence
+	// that we got the uncompressed packet on. So we stop reading packets here and force ourselves to
+	// send the clc_move on the next frame.
+
 	if ( !u.m_bAsDelta )
 	{
-		Assert(0); // cl.validsequence = 0;
-		ConMsg( "WARNING: LeavePVS on full update" );
-		u.m_UpdateType = Failed;	// break out
-		return;
-	}
-
-	Assert( !u.m_pTo->transmit_entity.Get( u.m_nOldEntity ) );
-
-	if ( u.m_UpdateFlags & FHDR_DELETE )
-	{
-		CL_DeleteDLLEntity( u.m_nOldEntity, "ReadLeavePVS" );
-	}
-
-	u.NextOldEntity();
+		m_flNextCmdTime = 0.0; // answer ASAP to confirm full update tick
+	} 
 }
-
-void CClientState::ReadDeltaEnt( CEntityReadInfo &u )
-{
-	VPROF( "ReadDeltaEnt" );
-	CL_CopyExistingEntity( u );
-	
-	u.NextOldEntity();
-}
-
-void CClientState::ReadPreserveEnt( CEntityReadInfo &u )
-{
-	VPROF( "ReadPreserveEnt" );
-	if ( !u.m_bAsDelta )  // Should never happen on a full update.
-	{
-		Assert(0); // cl.validsequence = 0;
-		ConMsg( "WARNING: PreserveEnt on full update" );
-		u.m_UpdateType = Failed;	// break out
-		return;
-	}
-
-	Assert( u.m_pFrom->transmit_entity.Get(u.m_nOldEntity) );
-
-	// copy one of the old entities over to the new packet unchanged
-
-	// XXX(JohnS): This was historically checking for NewEntity overflow, though this path does not care (and new entity
-	//             may be -1).  The old entity bounds check here seems like what was intended, but since nNewEntity
-	//             should not be overflowed either, I've left that check in case it was guarding against a case I am
-	//             overlooking.
-	if ( u.m_nOldEntity >= MAX_EDICTS || u.m_nOldEntity < 0 || u.m_nNewEntity >= MAX_EDICTS )
-	{
-		Host_Error( "CL_ReadPreserveEnt: Entity out of bounds. Old: %i, New: %i",
-		            u.m_nOldEntity, u.m_nNewEntity );
-	}
-
-	u.m_pTo->last_entity = u.m_nOldEntity;
-	u.m_pTo->transmit_entity.Set( u.m_nOldEntity );
-
-	// Zero overhead
-	if ( cl_entityreport.GetBool() )
-		CL_RecordEntityBits( u.m_nOldEntity, 0 );
-
-	CL_PreserveExistingEntity( u.m_nOldEntity );
-
-	u.NextOldEntity();
-}
-
 
 //-----------------------------------------------------------------------------
 // Purpose: Starts checking that all the necessary files are local
@@ -1422,11 +1633,19 @@ void CClientState::StartUpdatingSteamResources()
 	Assert(m_nSignonState == SIGNONSTATE_NEW);
 
 	// make sure we have all the necessary resources locally before continuing
-	m_hWaitForResourcesHandle = g_pFileSystem->WaitForResources(m_szLevelBaseName);
-	m_bUpdateSteamResources = false;
+	m_hWaitForResourcesHandle = g_pFileSystem->WaitForResources(m_szLevelNameShort);
+	m_bUpdateSteamResources = true;
 	m_bShownSteamResourceUpdateProgress = false;
 	m_bDownloadResources = false;
-	m_bPrepareClientDLL = true;
+	m_bDownloadingUGCMap = false; 
+}
+
+// INFESTED_DLL
+bool g_bASW_Waiting_For_Map_Build = false;
+
+CON_COMMAND( asw_engine_finished_building_map, "Notify engine that we've finished building a map" )
+{
+	g_bASW_Waiting_For_Map_Build = false;
 }
 
 //-----------------------------------------------------------------------------
@@ -1441,41 +1660,6 @@ void CClientState::CheckUpdatingSteamResources()
 
 	VPROF_BUDGET( "CheckUpdatingSteamResources", VPROF_BUDGETGROUP_STEAM );
 
-	if ( m_bPrepareClientDLL )
-	{
-		float flPrepareProgress = 0.f;
-		char szMutableLevelName[ sizeof( m_szLevelBaseName ) ] = { 0 };
-		V_strncpy( szMutableLevelName, m_szLevelBaseName, sizeof( szMutableLevelName ) );
-
-		// if the game .dll doesn't support this call assume everything is prepared
-		IServerGameDLL::ePrepareLevelResourcesResult eResult = IServerGameDLL::ePrepareLevelResources_Prepared;
-		if ( g_iServerGameDLLVersion >= 10 )
-		{
-			eResult = serverGameDLL->AsyncPrepareLevelResources( szMutableLevelName, sizeof( szMutableLevelName ),
-				m_szLevelFileName, sizeof( m_szLevelFileName ), &flPrepareProgress );
-		}
-
-		switch ( eResult )
-		{
-		case IServerGameDLL::ePrepareLevelResources_InProgress:
-			if (!m_bShownSteamResourceUpdateProgress)
-			{
-				// make sure the loading dialog is up
-				EngineVGui()->StartCustomProgress();
-				EngineVGui()->ActivateGameUI();
-				m_bShownSteamResourceUpdateProgress = true;
-			}
-			EngineVGui()->UpdateCustomProgressBar( flPrepareProgress, g_pVGuiLocalize->Find("#Valve_UpdatingSteamResources") );
-			break;
-		default:
-		case IServerGameDLL::ePrepareLevelResources_Prepared:
-			flPrepareProgress = 100.f;
-			m_bPrepareClientDLL = false;
-			m_bUpdateSteamResources = true;
-			break;
-		}
-	}
-
 	if (m_bUpdateSteamResources)
 	{
 		bool bComplete = false;
@@ -1487,23 +1671,20 @@ void CClientState::CheckUpdatingSteamResources()
 			m_hWaitForResourcesHandle = NULL;
 			m_bUpdateSteamResources = false;
 			m_bDownloadResources = false;
+			m_bDownloadingUGCMap = false;
 
 			if ( m_pDownloadableFileTable )
 			{
 				bool allowDownloads = true;
 				bool allowSoundDownloads = true;
-				bool allowNonMaps = true;
+
 				if ( !Q_strcasecmp( cl_downloadfilter.GetString(), "none" ) )
 				{
-					allowDownloads = allowSoundDownloads = allowNonMaps = false;
+					allowDownloads = allowSoundDownloads = false;
 				}
 				else if ( !Q_strcasecmp( cl_downloadfilter.GetString(), "nosounds" ) )
 				{
 					allowSoundDownloads = false;
-				}
-				else if ( !Q_strcasecmp( cl_downloadfilter.GetString(), "mapsonly" ) )
-				{
-					allowNonMaps = false;
 				}
 
 				if ( allowDownloads )
@@ -1522,23 +1703,74 @@ void CClientState::CheckUpdatingSteamResources()
 							}
 						}
 
-						if ( !allowNonMaps )
-						{
-							// The user wants maps only.
-							Q_ExtractFileExtension( fname, extension, sizeof( extension ) );
+						// If this is a community map we're loading download from the workshop cdn instead of server.
+						char bufFileName[MAX_PATH];
+						V_FixupPathName( bufFileName, sizeof( bufFileName ), fname );
 
-							// If the extension is not bsp, skip it.
-							if ( Q_strcasecmp( extension, "bsp" ) )
+						EngineVGui()->UpdateProgressBar(PROGRESS_PROCESSSERVERINFO);
+
+						if ( m_unUGCMapFileID != 0 )
+						{
+							int lenBufFileName = V_strlen( bufFileName );
+							if ( !V_stricmp( bufFileName, m_szLevelName ) || // if UGC map file ID is set and the resource is the bsp then download the client level
+								( ( lenBufFileName > 4 ) && !V_stricmp( bufFileName + lenBufFileName - 4, ".bsp" ) ) )
 							{
+								g_ClientDLL->DownloadCommunityMapFile( m_unUGCMapFileID );
+								m_bDownloadingUGCMap = true;
+								if ( cl_debug_ugc_downloads.GetBool() )
+									Msg( "CheckUpdatingSteamResources: downloading UGC map file '%s' id %llu\n", m_szLevelName, m_unUGCMapFileID );
+
 								continue;
 							}
+							
+							if ( ( lenBufFileName > 4 ) && !V_stricmp( bufFileName + lenBufFileName - 4, ".nav" ) )
+								continue; // UGC maps always have nav embedded in the bsp
 						}
 
-						CL_QueueDownload( fname );
+						if ( demoplayer->IsPlayingBack() && ( cl_download_demoplayer.GetInt() < 2 ) )
+							continue; // demo playback doesn't need to download all the resources
+								
+						if ( cl_debug_ugc_downloads.GetBool() )
+							Msg( "CheckUpdatingSteamResources: downloading file '%s'\n", bufFileName );
+
+						// INFESTED_DLL
+						static char gamedir[MAX_OSPATH];
+						Q_FileBase( com_gamedir, gamedir, sizeof( gamedir ) );
+						if ( !Q_stricmp( gamedir, "infested" ) )
+						{							
+							// if we're trying to download a randomly generated map, instead request the map layout file
+							const char *pExt = V_GetFileExtension( fname );
+							if ( !Q_stricmp( pExt, "bsp" ) )
+							{
+								char mapLayoutFName[256];
+								Q_snprintf( mapLayoutFName, sizeof( mapLayoutFName ), "%s", fname );
+								int extPos = pExt - fname;
+								Q_snprintf( mapLayoutFName + extPos, sizeof( mapLayoutFName ) - extPos, "layout" );
+
+								if ( StringHasPrefix( fname + 5, "gridrandom" ) || StringHasPrefix( fname + 5, "output" ) ) 
+								{
+									CL_QueueDownload( mapLayoutFName );
+								}
+								else
+								{
+									// if we're downloading a non-random map, make sure we're not waiting for a map build
+									g_bASW_Waiting_For_Map_Build = false;
+									CL_QueueDownload( fname );
+								}
+							}
+							else
+							{
+								CL_QueueDownload( fname );
+							}
+						}
+						else
+						{
+							CL_QueueDownload( fname );
+						}
 					}
 				}
 
-				if ( CL_GetDownloadQueueSize() )
+				if ( CL_GetDownloadQueueSize() || g_bASW_Waiting_For_Map_Build || m_bDownloadingUGCMap )
 				{
 					// make sure the loading dialog is up
 					EngineVGui()->StartCustomProgress();
@@ -1567,19 +1799,39 @@ void CClientState::CheckUpdatingSteamResources()
 			}
 
 			// change it to be updating steam resources
-			EngineVGui()->UpdateCustomProgressBar( flProgress, g_pVGuiLocalize->Find("#Valve_UpdatingSteamResources") );
+			EngineVGui()->UpdateSecondaryProgressBar( flProgress, (flProgress < 1.0f) ? g_pVGuiLocalize->FindSafe("#Valve_UpdatingSteamResources") : L"" );
 		}
 	}
 
-	if ( m_bDownloadResources )
+	if ( m_bDownloadResources || m_bDownloadingUGCMap )
 	{
 		// Check on any HTTP downloads in progress
 		bool stillDownloading = CL_DownloadUpdate();
+		if ( m_bDownloadingUGCMap )
+		{
+			float progress = g_ClientDLL->GetUGCFileDownloadProgress( m_unUGCMapFileID );
+			if ( progress == 1.0f || progress < 0.0f )
+				m_bDownloadingUGCMap = false; // stop waiting if we're done, or on error.
 
-		if ( !stillDownloading )
+			if ( cl_debug_ugc_downloads.GetBool() )
+				Msg( "CheckUpdatingSteamResources: Downloading UGC Map.... %f%%\n", 100.0f*progress );
+
+			wchar_t wszPercent[ 10 ];
+			V_snwprintf( wszPercent, ARRAYSIZE( wszPercent ), L"%d%%",  (int)(100*progress) );
+			wchar_t wszWideBuff[ 128 ];
+			g_pVGuiLocalize->ConstructString( wszWideBuff, sizeof( wszWideBuff ), g_pVGuiLocalize->Find( "#SFUI_Loading_UGCMap_Progress" ), 1, wszPercent );
+
+			// change it to be updating steam resources
+			EngineVGui()->UpdateSecondaryProgressBar( progress, ( (progress > 0.0f) && (progress < 1.0f) ) ? wszWideBuff : L"" );
+		}
+
+		if ( !stillDownloading && !g_bASW_Waiting_For_Map_Build && !m_bDownloadingUGCMap )
 		{
 			m_bDownloadResources = false;
 			FinishSignonState_New();
+
+			// Setting to blank will clear it
+			EngineVGui()->UpdateSecondaryProgressBar( 1, L"" );
 		}
 	}
 }
@@ -1591,58 +1843,45 @@ void CClientState::CheckUpdatingSteamResources()
 //-----------------------------------------------------------------------------
 void CClientState::CheckFileCRCsWithServer()
 {
-//! !FIXME! Stubbed this.  Several reasons:
-//!
-//! 1.) Removed the CRC functionality (because it was broken when we switched to use MD5's for hashes of
-//!     loose files, but the server only has CRC's of some files in the VPK headers.).  Currently the only
-//!     supported pure server mode is "trusted source."
-//! 2.) Sending MD5's of VPK's is a bit too restrictive for most use cases.  For example, if a client
-//!     has an extra VPK for custom content, the server doesn't know what to do with it.  Or if we
-//!     release an optional update, the VPK's might legitimately differ.
-//!
-//! Rich has pointed out that we really need pure server client work to be something that the client
-//! cannot easily bypass.  Currently that is the case.  But I need to ship the SteamPipe conversion now.
-//! We can revisit pure server security after that has shipped.
-//
-//	VPROF_( "CheckFileCRCsWithServer", 1, VPROF_BUDGETGROUP_OTHER_NETWORKING, false, BUDGETFLAG_CLIENT );
-//	const float flBatchInterval = 1.0f / 5.0f;
-//	const int nBatchSize = 5;
-//
-//	// Don't do this yet..
-//	if ( !m_bCheckCRCsWithServer )
-//		return;
-//
-//	if ( m_nSignonState != SIGNONSTATE_FULL )
-//		return;
-//
-//	// Only send a batch every so often.
-//	float flCurTime = Plat_FloatTime();
-//	if ( (flCurTime - m_flLastCRCBatchTime) < flBatchInterval )
-//		return;
-//
-//	m_flLastCRCBatchTime = flCurTime;
-//
-//	CUnverifiedFileHash rgUnverifiedFiles[nBatchSize];
-//	int count = g_pFileSystem->GetUnverifiedFileHashes( rgUnverifiedFiles, ARRAYSIZE( rgUnverifiedFiles ) );
-//	if ( count == 0 )
-//		return;
-//
-//	// Send the messages to the server.
-//	for ( int i=0; i < count; i++ )
-//	{
-//		CLC_FileCRCCheck crcCheck;
-//		V_strncpy( crcCheck.m_szPathID, rgUnverifiedFiles[i].m_PathID, sizeof( crcCheck.m_szPathID ) );
-//		V_strncpy( crcCheck.m_szFilename, rgUnverifiedFiles[i].m_Filename, sizeof( crcCheck.m_szFilename ) );
-//		crcCheck.m_nFileFraction = rgUnverifiedFiles[i].m_nFileFraction;
-//		crcCheck.m_MD5 = rgUnverifiedFiles[i].m_FileHash.m_md5contents;
-//		crcCheck.m_CRCIOs = rgUnverifiedFiles[i].m_FileHash.m_crcIOSequence;
-//		crcCheck.m_eFileHashType = rgUnverifiedFiles[i].m_FileHash.m_eFileHashType;
-//		crcCheck.m_cbFileLen = rgUnverifiedFiles[i].m_FileHash.m_cbFileLen;
-//		crcCheck.m_nPackFileNumber = rgUnverifiedFiles[i].m_FileHash.m_nPackFileNumber;
-//		crcCheck.m_PackFileID = rgUnverifiedFiles[i].m_FileHash.m_PackFileID;
-//
-//		m_NetChannel->SendNetMsg( crcCheck );
-//	}
+	VPROF_( "CheckFileCRCsWithServer", 1, VPROF_BUDGETGROUP_OTHER_NETWORKING, false, BUDGETFLAG_CLIENT );
+	const float flBatchInterval = 1.0f / 5.0f;
+	const int nBatchSize = 5;
+
+	// Don't do this yet..
+	if ( !m_bCheckCRCsWithServer )
+		return;
+
+	if ( m_nSignonState != SIGNONSTATE_FULL )
+		return;
+
+	// Only send a batch every so often.
+	float flCurTime = Plat_FloatTime();
+	if ( (flCurTime - m_flLastCRCBatchTime) < flBatchInterval )
+		return;
+
+	m_flLastCRCBatchTime = flCurTime;
+
+	CUnverifiedFileHash rgUnverifiedFiles[nBatchSize];
+	int count = g_pFileSystem->GetUnverifiedFileHashes( rgUnverifiedFiles, ARRAYSIZE( rgUnverifiedFiles ) );
+	if ( count == 0 )
+		return;
+
+	// Send the messages to the server.
+	for ( int i=0; i < count; i++ )
+	{
+		CCLCMsg_FileCRCCheck_t crcCheck;
+		CCLCMsg_FileCRCCheck_t::SetPath( crcCheck, rgUnverifiedFiles[i].m_PathID );
+		CCLCMsg_FileCRCCheck_t::SetFileName( crcCheck, rgUnverifiedFiles[i].m_Filename );
+		crcCheck.set_file_fraction( rgUnverifiedFiles[i].m_nFileFraction );
+		crcCheck.set_md5( (void*)(rgUnverifiedFiles[i].m_FileHash.m_md5contents.bits), MD5_DIGEST_LENGTH );
+		crcCheck.set_crc ( CRC32_ConvertToUnsignedLong( &rgUnverifiedFiles[i].m_FileHash.m_crcIOSequence ) );
+		crcCheck.set_file_hash_type ( rgUnverifiedFiles[i].m_FileHash.m_eFileHashType );
+		crcCheck.set_file_len ( rgUnverifiedFiles[i].m_FileHash.m_cbFileLen );
+		crcCheck.set_pack_file_number( rgUnverifiedFiles[i].m_FileHash.m_nPackFileNumber );
+		crcCheck.set_pack_file_id( rgUnverifiedFiles[i].m_FileHash.m_PackFileID );
+
+		m_NetChannel->SendNetMsg( crcCheck );
+	}
 }
 
 
@@ -1658,8 +1897,11 @@ bool CheckSimpleMaterial( IMaterial *pMaterial )
 
 	const char *name = pMaterial->GetShaderName();
 	if ( Q_strncasecmp( name, "VertexLitGeneric", 16 ) &&
-		 Q_strncasecmp( name, "UnlitGeneric", 12 ) )
+		 Q_strncasecmp( name, "UnlitGeneric", 12 ) &&
+		 Q_strncasecmp( name, "Infected", 8 ) )
+	{
 		return false;
+	}
 
 	if ( pMaterial->GetMaterialVarFlag( MATERIAL_VAR_IGNOREZ ) )
 		return false;
@@ -1674,9 +1916,6 @@ bool CheckSimpleMaterial( IMaterial *pMaterial )
 		return false;
 
 	if ( pMaterial->GetMaterialVarFlag( MATERIAL_VAR_NOFOG ) )
-		return false;
-
-	if ( pMaterial->GetMaterialVarFlag( MATERIAL_VAR_HALFLAMBERT ) )
 		return false;
 
 	return true;
@@ -1776,6 +2015,14 @@ void CClientState::FinishSignonState_New()
 	if (m_nSignonState != SIGNONSTATE_NEW)
 		return;
 
+	if ( demoplayer->IsPlayingBack() )
+	{
+		demoplayer->SetPacketReadSuspended( false );
+	}
+
+	VPROF_BUDGET( "FinishSignonState_New", VPROF_BUDGETGROUP_STEAM );
+
+
 	if ( !m_bMarkedCRCsUnverified )
 	{
 		// Mark all file CRCs unverified once per server. We may have verified CRCs for certain files on
@@ -1784,64 +2031,68 @@ void CClientState::FinishSignonState_New()
 		g_pFileSystem->MarkAllCRCsUnverified();
 	}
 
-	// Verify the map and player .mdl crc's now that we've finished downloading missing resources (maps etc)
-	if ( !CL_CheckCRCs( m_szLevelFileName ) )
-	{
-		Host_Error( "Unable to verify map %s", ( m_szLevelFileName && m_szLevelFileName[0] ) ? m_szLevelFileName : "unknown" );
-		return;
-	}
-
-	// We're going to force-touch a lot of textures and resources below, we don't want the streaming system to try and
-	// pull these in as if they were being used for normal rendering.
-	materials->SuspendTextureStreaming();
-
-	// Only do this if our server is shut down and we're acting as a client. Otherwise the server handles this when it
-	// starts the load.
-	if ( sv.m_State < ss_loading )
-	{
-		// Reset the last used count on all models before beginning the new load -- The nServerCount value on models should
-		// always resolve as different from values from previous servers.
-		modelloader->ResetModelServerCounts();
-	}
-
-	if ( cl_always_flush_models.GetBool() )
-	{
-		modelloader->PurgeUnusedModels();
-	}
-
-	// Our load process is causing some very bad allocation & performance impact in drivers, due to the enormous amount
-	// of resources being used (and, in the case of EnableHDR(), released and re-uploaded) in a single frame.  Ensuring
-	// that we push a few frames through before and after the main model loading spree results in dramatically better
-	// results.  Without these calls, for instance, OS X on high texture quality cannot survive map load.
-	//
-	// This is pretty janky, but doesn't really have any cost (and even makes our one-frozen-frame load screen slightly
-	// less likely to trigger OS "not responding" warnings)
-	extern void V_RenderVGuiOnly();
-	V_RenderVGuiOnly();
-
-	// Before we do anything with the whitelist, make sure we have the proper map pack mounted
-	// this will load the .bsp by setting the world model the string list at the hardcoded index 1.
-	cl.SetModel( 1 );
-
-	V_RenderVGuiOnly();
-
 	// Check for a new whitelist. It's good to do it early in the connection process here because if we wait until later,
 	// the client may have loaded some files w/o the proper whitelist restrictions and we'd have to reload them.
 	m_bCheckCRCsWithServer = false;	// Don't check CRCs yet.. wait until we got a whitelist and cleaned out our files based on it to send CRCs.
+	CL_CheckForPureServerWhitelist();
+	
+	// Verify the map and player .mdl crc's now that we've finished downloading missing resources (maps etc)
+	if ( !CL_CheckCRCs( m_szLevelName ) )
+	{
+		Host_Error( "Unabled to verify map %s\n", ( m_szLevelName && m_szLevelName[0] ) ? m_szLevelName : "unknown" );
+		return;
+	}
 
-	// We check the new whitelist now so loads that happen between here and FullyConnected are checked against it, but
-	// don't trigger a reload of dirty files until after we flush unused resources from the last map in
-	// CL_FullyConnected. This fixes reloading materials that are unused, and trying to reload materials that are no
-	// longer pure, but would be unloaded in fully connected anyway.
-	CL_CheckForPureServerWhitelist( m_pPendingPureFileReloads );
+	// Don't load the client if we don't own the game
+	if ( NET_IsMultiplayer() && Steam3Client().SteamApps() && !Steam3Client().SteamApps()->BIsSubscribed() )
+	{
+		Host_Error( "Steam ownership check failed.\n" );
+		return;
+	} 
 
+	COM_TimestampedLog( "CL_InstallAndInvokeClientStringTableCallbacks" );
 	CL_InstallAndInvokeClientStringTableCallbacks();
+	
+#if 0
+
+	// HACK!!!!  For use only on PC not yet using a whitelist!
+	// install hooks
+	if ( IsPC() && 	( m_nMaxClients > 1 ) )
+	{
+		m_pModelPrecacheTable->SetStringChangedCallback( NULL, Callback_ModelChanged );
+
+		int nTableCount = m_StringTableContainer->GetNumTables();
+		for ( int iTable =0; iTable < nTableCount; ++iTable )
+		{
+			// iterate through server tables
+			CNetworkStringTable *pTable = (CNetworkStringTable*)m_StringTableContainer->GetTable( iTable );
+			if ( !pTable )
+				continue;
+
+			pfnStringChanged pCallbackFunction = pTable->GetCallback();
+			if ( pCallbackFunction )
+				for ( int iString = 0; iString < pTable->GetNumStrings(); ++iString )
+				{
+					int userDataSize;
+					const void *pUserData = pTable->GetStringUserData( iString, &userDataSize );
+					(*pCallbackFunction)( NULL, pTable, iString, pTable->GetString( iString ), pUserData );
+				}
+		}
+
+		materials->CacheUsedMaterials();
+	}
+
+#endif
+
+	COM_TimestampedLog( "materials->CacheUsedMaterials" );
 
 	materials->CacheUsedMaterials();
 
+	COM_TimestampedLog( "ConsistencyCheck" );
 	// force a consistency check
 	ConsistencyCheck( true );
-
+	
+	COM_TimestampedLog( "CL_RegisterResources" );
 	CL_RegisterResources();
 
 	// Done with all resources, issue prespawn command.
@@ -1850,19 +2101,17 @@ void CClientState::FinishSignonState_New()
 	// Tell rendering system we have a new set of models.
 	R_LevelInit();
 
-	// Balanced against SuspendTextureStreaming above
-	materials->ResumeTextureStreaming();
-
 	EngineVGui()->UpdateProgressBar(PROGRESS_SENDCLIENTINFO);
 	if ( !m_NetChannel )
 		return;
-
+	
 	SendClientInfo();
 
 	CL_SetSteamCrashComment();
 
 	// tell server that we entered now that state
-	m_NetChannel->SendNetMsg( NET_SignonState( m_nSignonState, m_nServerCount ) );
+	CNETMsg_SignonState_t msgSignonState( m_nSignonState, m_nServerCount );
+	m_NetChannel->SendNetMsg( msgSignonState );
 }
 
 
@@ -1871,6 +2120,8 @@ void CClientState::FinishSignonState_New()
 //-----------------------------------------------------------------------------
 void CClientState::ConsistencyCheck(bool bChanged )
 {
+	VPROF_BUDGET( "CClientState::ConsistencyCheck", VPROF_BUDGETGROUP_OTHER_FILESYSTEM );
+
 	// get the default config for the current card as a starting point.
 	// server must have sent us this table
 	if ( !m_pDownloadableFileTable )
@@ -1882,6 +2133,10 @@ void CClientState::ConsistencyCheck(bool bChanged )
 
 	// only if we are connected
 	if ( !IsConnected() )
+		return;
+
+	// only if enforce by server
+	if ( !sv_consistency.GetBool() )
 		return;
 
 	// check if material configuration changed
@@ -1898,20 +2153,7 @@ void CClientState::ConsistencyCheck(bool bChanged )
 	if ( !bChanged )
 		return;
 
-#if 0
-	// This check was removed as GetSteamUniverse() is very expensive and was getting
-	//	called every frame on Linux. I don't believe it should have been merged over from
-	//	l4d2 in the first place either...
-	// If we're not signed into the steam universe, then bail.
-	//  This should only happen when we're developing internally without Steam I hope?
-	if ( k_EUniverseInvalid == GetSteamUniverse() )
-	{
-		return;
-	}
-#endif
-
-	const char *errorMsg = NULL;
-	const char *errorFilename = NULL;
+	char errorFilenameBuf[MAX_PATH] = "";
 
 	// check CRCs and model sizes
 	Color red(  200,  20,  20, 255 );
@@ -1923,15 +2165,22 @@ void CClientState::ConsistencyCheck(bool bChanged )
 		userData = (unsigned char *)m_pDownloadableFileTable->GetStringUserData( i, &length );
 		const char *filename = m_pDownloadableFileTable->GetString( i );
 
+		// [FTrepte] Ignore the CRC check for Counter-Strike 15.
+		// $FIXME: Is this the right thing to do or should we fix endianness and content issues
+		// that may be causing this not to match between the PC server and Xbox client?
+
 		//
 		// CRC Check
 		//
 		if ( userData && userData[0] == CONSISTENCY_EXACT && length == sizeof( ExactFileUserData ) )
 		{
-			// Hm, this isn't supported anymore.  (Use sv_pure instead.)  Under ordinary
-			// circumstances, servers shouldn't be asking for it.
-			Assert( false );
-			continue;
+#if !defined( CSTRIKE15 )
+			if ( !CheckCRCs( userData, length, filename ) )
+			{
+				ConColorMsg( red, "Bad CRC for %s\n", filename );
+				V_strncpy( errorFilenameBuf, filename, sizeof( errorFilenameBuf ) );
+			}
+#endif
 		}
 
 		//
@@ -1948,11 +2197,36 @@ void CClientState::ConsistencyCheck(bool bChanged )
 			model_t *pModel = modelloader->GetModelForName( filename, IModelLoader::FMODELLOADER_CLIENT );
 			if ( !pModel )
 			{
-				errorMsg = "Cannot find required model";
-				errorFilename = filename;
+				ConColorMsg( red, "Can't find model for %s\n", filename );
+				V_strncpy( errorFilenameBuf, filename, sizeof( errorFilenameBuf ) );
 			}
 			else
 			{
+				// [FTrepte] It seems that the boundsData is endian-swapped when connecting to the PC server in CClientState::ConsistencyCheck.
+				if (IsX360())
+				{
+					CByteswap swap;
+					swap.ActivateByteSwapping( true );
+
+					float minx = boundsData->mins.x;
+					swap.SwapBufferToTargetEndian<float>(&boundsData->mins.x, &minx, 1);
+
+					float miny = boundsData->mins.y;
+					swap.SwapBufferToTargetEndian<float>(&boundsData->mins.y, &miny, 1);
+
+					float minz = boundsData->mins.z;
+					swap.SwapBufferToTargetEndian<float>(&boundsData->mins.z, &minz, 1);
+
+					float maxx = boundsData->maxs.x;
+					swap.SwapBufferToTargetEndian<float>(&boundsData->maxs.x, &maxx, 1);
+
+					float maxy = boundsData->maxs.y;
+					swap.SwapBufferToTargetEndian<float>(&boundsData->maxs.y, &maxy, 1);
+
+					float maxz = boundsData->maxs.z;
+					swap.SwapBufferToTargetEndian<float>(&boundsData->maxs.z, &maxz, 1);
+				}					
+
 				if ( pModel->mins.x < boundsData->mins.x ||
 					pModel->mins.y < boundsData->mins.y ||
 					pModel->mins.z < boundsData->mins.z )
@@ -1960,8 +2234,7 @@ void CClientState::ConsistencyCheck(bool bChanged )
 					ConColorMsg( red, "Model %s exceeds mins (%.1f %.1f %.1f vs. %.1f %.1f %.1f)\n", filename,
 						pModel->mins.x, pModel->mins.y, pModel->mins.z,
 						boundsData->mins.x, boundsData->mins.y, boundsData->mins.z);
-					errorMsg = "Server is enforcing model bounds";
-					errorFilename = filename;
+					V_strncpy( errorFilenameBuf, filename, sizeof( errorFilenameBuf ) );
 				}
 				if ( pModel->maxs.x > boundsData->maxs.x ||
 					pModel->maxs.y > boundsData->maxs.y ||
@@ -1970,34 +2243,37 @@ void CClientState::ConsistencyCheck(bool bChanged )
 					ConColorMsg( red, "Model %s exceeds maxs (%.1f %.1f %.1f vs. %.1f %.1f %.1f)\n", filename,
 						pModel->maxs.x, pModel->maxs.y, pModel->maxs.z,
 						boundsData->maxs.x, boundsData->maxs.y, boundsData->maxs.z);
-					errorMsg = "Server is enforcing model bounds";
-					errorFilename = filename;
+					V_strncpy( errorFilenameBuf, filename, sizeof( errorFilenameBuf ) );
 				}
 
 				// Check each texture
-				IMaterial *pMaterials[ 128 ];
-				int materialCount = Mod_GetModelMaterials( pModel, ARRAYSIZE( pMaterials ), pMaterials );
+				IMaterial *materials[ 128 ];
+				int materialCount = Mod_GetModelMaterials( pModel, ARRAYSIZE( materials ), materials );
 
 				for ( int j = 0; j<materialCount; ++j )
 				{
-					IMaterial *pMaterial = pMaterials[j];
+					IMaterial *pMaterial = materials[j];
 
 					if ( !CheckSimpleMaterial( pMaterial ) )
 					{
-						ConColorMsg( red, "Model %s has a bad texture %s\n", filename, pMaterial->GetName() );
-						errorMsg = "Server is enforcing simple material";
-						errorFilename = pMaterial->GetName();
-						break;
+						// Try reloading the material:
+						pMaterial->RecomputeStateSnapshots();
+						if ( !CheckSimpleMaterial( pMaterial ) )
+						{						
+							ConColorMsg( red, "Model %s has a bad texture %s\n", filename, pMaterial->GetName() );
+							V_strncpy( errorFilenameBuf, filename, sizeof( errorFilenameBuf ) );
+							break;
+						}
 					}
 				}
 			}
 		}
 	}
 
-	if ( errorFilename && *errorFilename )
+	if ( *errorFilenameBuf )
 	{
-		COM_ExplainDisconnection( true, "%s:\n%s\n", errorMsg, errorFilename );
-		Host_Error( "%s: %s\n", errorMsg, errorFilename );
+		COM_ExplainDisconnection( true, "Server is enforcing consistency for this file:\n%s\n", errorFilenameBuf );
+		Host_Error( "Server is enforcing file consistency for %s\n", errorFilenameBuf );
 	}
 }
 
@@ -2005,8 +2281,6 @@ void CClientState::UpdateAreaBits_BackwardsCompatible()
 {
 	if ( m_pAreaBits )
 	{
-		tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
-
 		memcpy( m_chAreaBits, m_pAreaBits, sizeof( m_chAreaBits ) );
 		
 		// The whole point of adding this array was that the client could react to closed portals.
@@ -2028,8 +2302,6 @@ unsigned char** CClientState::GetAreaBits_BackwardCompatibility()
 void CClientState::RunFrame()
 {
 	CBaseClientState::RunFrame();
-
-	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
 
 	// Since cl_rate is a virtualized cvar, make sure to pickup changes in it.
 	if ( m_NetChannel )
@@ -2060,16 +2332,16 @@ void CClientState::RunFrame()
 			s_bLowPagedPoolMemoryWarning = true;
 			s_flLastWarningTime = Plat_FloatTime();
 			Warning( "OS Paged Pool Memory Low!\n" );
-			Warning( "  Currently using %lu pages (%lu Kb) of total %lu pages (%lu Kb total)\n",
+			Warning( "  Currently using %d pages (%d Kb) of total %d pages (%d Kb total)\n",
 				ppi.numPagesUsed, ppi.numPagesUsed * Plat_GetMemPageSize(),
 				( ppi.numPagesFree + ppi.numPagesUsed ), ( ppi.numPagesFree + ppi.numPagesUsed ) * Plat_GetMemPageSize() );
-			Warning( "  Please see http://www.steampowered.com for more information.\n" );
+			Warning( "  Please see http://support.steampowered.com for more information.\n" );
 		}
 	}
 	else if ( s_bLowPagedPoolMemoryWarning )
 	{
 		s_bLowPagedPoolMemoryWarning = false;
-		Msg( "Info: OS Paged Pool Memory restored - currently %lu pages free (%lu Kb) of total %lu pages (%lu Kb total).\n",
+		Msg( "Info: OS Paged Pool Memory restored - currently %d pages free (%d Kb) of total %d pages (%d Kb total).\n",
 			ppi.numPagesFree, ppi.numPagesFree * Plat_GetMemPageSize(),
 			( ppi.numPagesFree + ppi.numPagesUsed ), ( ppi.numPagesFree + ppi.numPagesUsed ) * Plat_GetMemPageSize() );
 	}

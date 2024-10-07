@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright (c) 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -52,6 +52,14 @@ public:
 	// then the parts of the map that the player can see haven't changed.
 	byte	m_AreaFloodNums[MAX_MAP_AREAS];
 	int		m_nMapAreas;
+	void Reset()
+	{
+		m_nPVSSize = 0;
+		m_pTransmitEdict = NULL;
+		m_pTransmitAlways = NULL;
+		m_AreasNetworked = 0;
+		m_nMapAreas = 0;
+	}
 };
 
 //-----------------------------------------------------------------------------

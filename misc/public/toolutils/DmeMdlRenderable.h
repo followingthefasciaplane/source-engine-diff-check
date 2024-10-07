@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =====//
 //
 // Purpose: Decorator class to make a DME renderable as a MDL
 //													 
@@ -33,7 +33,7 @@ class CDmeMdlRenderable : public CDmeRenderable< T >
 public:
 	virtual int					GetBody();
 	virtual int					GetSkin();
-	virtual int					DrawModel( int flags );
+	virtual int					DrawModel( int flags, const RenderableInstance_t &instance );
 	virtual void				GetRenderBounds( Vector& mins, Vector& maxs );
 
 	void SetModelName( const char *pMDLName );
@@ -79,7 +79,7 @@ int	CDmeMdlRenderable<T>::GetSkin()
 }
 
 template < class T >
-int	CDmeMdlRenderable<T>::DrawModel( int flags )
+int	CDmeMdlRenderable<T>::DrawModel( int flags, const RenderableInstance_t &instance )
 {
 	matrix3x4_t mat;
 	AngleMatrix( GetRenderAngles(), GetRenderOrigin(), mat );
@@ -120,51 +120,12 @@ template < class T >
 void CDmeMdlRenderable<T>::SetUpLighting( const Vector &vecCenter )
 {
 	// Set up lighting conditions
-	Vector vecAmbient[6];
-	Vector4D vecAmbient4D[6];
-	LightDesc_t desc[2];
-	int nLightCount = enginetools->GetLightingConditions( vecCenter, vecAmbient, 2, desc );
-	int nMaxLights = g_pMaterialSystemHardwareConfig->MaxNumLights();
-	if( nLightCount > nMaxLights )
-	{
-		nLightCount = nMaxLights;
-	}
+	MaterialLightingState_t state;
+	state.m_vecLightingOrigin = vecCenter;
+	state.m_nLocalLightCount = enginetools->GetLightingConditions( vecCenter, state.m_vecAmbientCube, MATERIAL_MAX_LIGHT_COUNT, state.m_pLocalLightDesc );
 
-	int i;
-	for( i = 0; i < 6; i++ )
-	{
-		VectorCopy( vecAmbient[i], vecAmbient4D[i].AsVector3D() );
-		vecAmbient4D[i][3] = 1.0f;
-	}
 	CMatRenderContextPtr pRenderContext( g_pMaterialSystem );
-	pRenderContext->SetAmbientLightCube( vecAmbient4D );
-
-	for( i = 0; i < nLightCount; i++ )
-	{
-		LightDesc_t *pLight = &desc[i];
-		pLight->m_Flags = 0;
-		if( pLight->m_Attenuation0 != 0.0f )
-		{
-			pLight->m_Flags |= LIGHTTYPE_OPTIMIZATIONFLAGS_HAS_ATTENUATION0;
-		}
-		if( pLight->m_Attenuation1 != 0.0f )
-		{
-			pLight->m_Flags |= LIGHTTYPE_OPTIMIZATIONFLAGS_HAS_ATTENUATION1;
-		}
-		if( pLight->m_Attenuation2 != 0.0f )
-		{
-			pLight->m_Flags |= LIGHTTYPE_OPTIMIZATIONFLAGS_HAS_ATTENUATION2;
-		}
-
-		pRenderContext->SetLight( i, desc[i] );
-	}
-
-	for( ; i < nMaxLights; i++ )
-	{
-		LightDesc_t disableDesc;
-		disableDesc.m_Type = MATERIAL_LIGHT_DISABLE;
-		pRenderContext->SetLight( i, disableDesc );
-	}
+	pRenderContext->SetLightingState( state );
 }
 
 

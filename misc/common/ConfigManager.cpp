@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -9,7 +9,7 @@
 #include "tier0/icommandline.h"
 #include "filesystem_tools.h"
 #include "KeyValues.h"
-#include "tier1/utlbuffer.h"
+#include "UtlBuffer.h"
 #include <io.h>
 #include <fcntl.h>
 #include <sys/types.h> 
@@ -32,7 +32,8 @@ extern CSteamAPIContext *steamapicontext;
 //	1 - Versioning added, DoD configuration added
 //	2 - Ep1 added
 //	3 - Ep2, TF2, and Portal added
-//  4 - TF2 moved to its own engine
+//	4 - Portal 2 added
+//	5 - CSS 1.5
 
 #define SDK_LAUNCHER_VERSION 5
 
@@ -42,6 +43,7 @@ defaultConfigInfo_t HL2Info =
 	"Half-Life 2",
 	"hl2",
 	"halflife2.fgd",
+	"half-life 2",
 	"info_player_start",
 	"hl2.exe",
 	GetAppSteamAppId( k_App_HL2 )
@@ -53,9 +55,22 @@ defaultConfigInfo_t CStrikeInfo =
 	"Counter-Strike: Source",
 	"cstrike",
 	"cstrike.fgd",
+	"counter-strike source",
 	"info_player_terrorist",
 	"hl2.exe",
 	GetAppSteamAppId( k_App_CSS )
+};
+
+// Counter-Strike: Source
+defaultConfigInfo_t CStrike15Info =
+{
+	"Counter-Strike: Global Offensive",
+	"csgo",
+	"csgo.fgd",
+	"counter-strike global offensive",
+	"info_player_terrorist",
+	"csgo.exe",
+	GetAppSteamAppId( k_App_CSS15 )
 };
 
 //Half-Life 2: Deathmatch
@@ -64,6 +79,7 @@ defaultConfigInfo_t HL2DMInfo =
 	"Half-Life 2: Deathmatch",
 	"hl2mp",
 	"hl2mp.fgd",
+	"half-life 2 deathmatch",
 	"info_player_deathmatch",
 	"hl2.exe",
 	GetAppSteamAppId( k_App_HL2MP )
@@ -75,6 +91,7 @@ defaultConfigInfo_t DODInfo =
 	"Day of Defeat: Source",
 	"dod",
 	"dod.fgd",
+	"day of defeat source",
 	"info_player_allies",
 	"hl2.exe",
 	GetAppSteamAppId( k_App_DODS )
@@ -86,6 +103,7 @@ defaultConfigInfo_t Episode1Info =
 	"Half-Life 2: Episode One",
 	"episodic",
 	"halflife2.fgd",
+	"half-life 2 episode one",
 	"info_player_start",
 	"hl2.exe",
 	GetAppSteamAppId( k_App_HL2_EP1 ) 
@@ -97,6 +115,7 @@ defaultConfigInfo_t Episode2Info =
 	"Half-Life 2: Episode Two",
 	"ep2",
 	"halflife2.fgd",
+	"half-life 2 episode two",
 	"info_player_start",
 	"hl2.exe",
 	GetAppSteamAppId( k_App_HL2_EP2 ) 
@@ -108,6 +127,7 @@ defaultConfigInfo_t TF2Info =
 	"Team Fortress 2",
 	"tf",
 	"tf.fgd",
+	"team fortress 2",
 	"info_player_teamspawn",
 	"hl2.exe",
 	GetAppSteamAppId( k_App_TF2 )
@@ -119,20 +139,22 @@ defaultConfigInfo_t PortalInfo =
 	"Portal",
 	"portal",
 	"portal.fgd",
+	"portal",
 	"info_player_start",
 	"hl2.exe",
 	GetAppSteamAppId( k_App_PORTAL )
 };
 
-// Portal
-defaultConfigInfo_t SourceTestInfo =
+// Portal 2
+defaultConfigInfo_t Portal2Info =
 {
-	"SourceTest",
-	"sourcetest",
-	"halflife2.fgd",
+	"Portal 2",
+	"portal2",
+	"portal2.fgd",
+	"portal 2",
 	"info_player_start",
-	"hl2.exe",
-	243730
+	"portal2.exe",
+	GetAppSteamAppId( k_App_PORTAL2 )
 };
 
 
@@ -403,8 +425,9 @@ bool CGameConfigManager::IsConfigCurrent( void )
 //-----------------------------------------------------------------------------
 // Purpose: Get the base path for a default config's install (handling steam's paths)
 //-----------------------------------------------------------------------------
-void CGameConfigManager::GetRootGameDirectory( char *out, size_t outLen, const char *rootDir )
+void CGameConfigManager::GetRootGameDirectory( char *out, size_t outLen, const char *rootDir, const char *steamDir )
 {
+	// NOTE: This has since been depricated due to Steam filesystem changes -- jdw
 	Q_strncpy( out, rootDir, outLen );
 }
 
@@ -414,9 +437,9 @@ void CGameConfigManager::GetRootGameDirectory( char *out, size_t outLen, const c
 void CGameConfigManager::GetRootContentDirectory( char *out, size_t outLen, const char *rootDir )
 {
 	// Steam install is different
-	if ( g_pFullFileSystem )
+	if ( IsSDKDeployment() )
 	{
-		Q_snprintf( out, outLen, "%s\\sourcesdk_content", rootDir );
+		Q_snprintf( out, outLen, "%s\\sdk_content", rootDir );
 	}
 	else
 	{
@@ -457,6 +480,10 @@ bool CGameConfigManager::AddDefaultConfig( const defaultConfigInfo_t &info, KeyV
 {	
 	// NOTE: Freed by head keyvalue
 	KeyValues *newConfig = new KeyValues( info.gameName );
+	
+	// Set this up to autodelete until we know we're actually going to use it
+	KeyValues::AutoDelete autodelete_key( newConfig );
+
 	if ( newConfig->LoadFromBuffer( "defaultcfg.txt", szDefaultConfigText ) == false )
 		return false;
 
@@ -464,7 +491,7 @@ bool CGameConfigManager::AddDefaultConfig( const defaultConfigInfo_t &info, KeyV
 	
 	// Game's root directory (with special steam name handling)
 	char rootGameDir[MAX_PATH];
-	GetRootGameDirectory( rootGameDir, sizeof( rootGameDir ), rootDirectory );
+	GetRootGameDirectory( rootGameDir, sizeof( rootGameDir ), rootDirectory, info.steamPath );
 
 	// Game's content directory
 	char contentRootDir[MAX_PATH];
@@ -474,10 +501,6 @@ bool CGameConfigManager::AddDefaultConfig( const defaultConfigInfo_t &info, KeyV
 
 	// Game directory
 	Q_snprintf( szPath, sizeof( szPath ), "%s\\%s", rootGameDir, info.gameDir );
-
-	if ( !g_pFullFileSystem->IsDirectory( szPath ) )
-		return false;
-
 	newConfig->SetString( "GameDir", szPath );
 
 	// Create the Hammer portion of this block
@@ -493,7 +516,7 @@ bool CGameConfigManager::AddDefaultConfig( const defaultConfigInfo_t &info, KeyV
 
 	// Fill in the default VMF directory
 	char contentMapDir[MAX_PATH];
-	Q_snprintf( contentMapDir, sizeof( contentMapDir ), "%s\\%s\\mapsrc", contentRootDir, info.gameDir );
+	Q_snprintf( contentMapDir, sizeof( contentMapDir ), "%s\\maps", contentRootDir );
 	hammerBlock->SetString( "MapDir", contentMapDir );
 
 	Q_snprintf( szPath, sizeof( szPath ), "%s\\%s\\maps", rootGameDir, info.gameDir );
@@ -523,6 +546,8 @@ bool CGameConfigManager::AddDefaultConfig( const defaultConfigInfo_t &info, KeyV
 	// Get our insertion point
 	KeyValues *insertSpot = out->GetFirstTrueSubKey();
 	
+	// detach the autodelete pointer
+	autodelete_key.Assign(NULL);
 	// Set this as the sub key if there's nothing already there
 	if ( insertSpot == NULL )
 	{
@@ -552,10 +577,13 @@ bool CGameConfigManager::IsAppSubscribed( int nAppID )
 {
 	bool bIsSubscribed = false;
 
-	if ( steamapicontext && steamapicontext->SteamApps() )
+	if ( g_pFullFileSystem != NULL && g_pFullFileSystem->IsSteam() )
 	{
-		// See if specified app is installed
-		bIsSubscribed = steamapicontext->SteamApps()->BIsSubscribedApp( nAppID );
+		if ( steamapicontext->SteamApps() )
+		{
+			// See if specified app is installed
+			bIsSubscribed = steamapicontext->SteamApps()->BIsSubscribedApp( nAppID );
+		}
 	}
 	else
 	{
@@ -787,6 +815,16 @@ const char *CGameConfigManager::GetRootDirectory( void )
 		Q_strncpy( path, GetBaseDirectory(), sizeof( path ) );
 		Q_StripLastDir( path, sizeof( path ) );	// Get rid of the 'bin' directory
 		Q_StripTrailingSlash( path );
+
+		if ( g_pFullFileSystem && g_pFullFileSystem->IsSteam() )
+		{
+			Q_StripLastDir( path, sizeof( path ) );	// // Get rid of the 'orangebox' directory
+			Q_StripTrailingSlash( path );
+			Q_StripLastDir( path, sizeof( path ) );	// Get rid of the 'bin' directory
+			Q_StripTrailingSlash( path );
+			Q_StripLastDir( path, sizeof( path ) );	// Get rid of the 'sourcesdk' directory
+			Q_StripTrailingSlash( path );
+		}
 	}
 	return path;
 }
@@ -799,7 +837,7 @@ KeyValues *CGameConfigManager::GetGameBlock( void )
 	if ( !IsLoaded() )
 		return NULL;
 
-	return ( m_pData->FindKey( TOKEN_GAMES, true ) );
+	return ( m_pData->FindKey( TOKEN_GAMES ) );
 }
 
 //-----------------------------------------------------------------------------
@@ -889,17 +927,34 @@ bool CGameConfigManager::GetDefaultGameBlock( KeyValues *pIn )
 	CUtlVector<defaultConfigInfo_t> defaultConfigs;
 
 	// Add HL2 games to list
-	defaultConfigs.AddToTail( HL2DMInfo );
-	defaultConfigs.AddToTail( HL2Info );
-	defaultConfigs.AddToTail( Episode1Info );
-	defaultConfigs.AddToTail( Episode2Info );
-	defaultConfigs.AddToTail( PortalInfo );
-	defaultConfigs.AddToTail( SourceTestInfo );
+	if ( m_eSDKEpoch == SDK_EPOCH_HL2 || m_eSDKEpoch == SDK_EPOCH_EP1 )
+	{
+		defaultConfigs.AddToTail( HL2Info );
+		defaultConfigs.AddToTail( CStrikeInfo );
+		defaultConfigs.AddToTail( HL2DMInfo );
+	}
+	// Add EP1 game to list
+	if ( m_eSDKEpoch == SDK_EPOCH_EP1 )
+	{
+		defaultConfigs.AddToTail( Episode1Info );
+	}
 
-	// Add TF2 games to list
-	defaultConfigs.AddToTail( TF2Info );
-	defaultConfigs.AddToTail( DODInfo );
-	defaultConfigs.AddToTail( CStrikeInfo );
+	// Add EP2 games to list
+	if ( m_eSDKEpoch == SDK_EPOCH_EP2 )
+	{
+		defaultConfigs.AddToTail( Episode2Info );
+	}
+
+	if ( m_eSDKEpoch == SDK_EPOCH_PORTAL2 )
+	{
+		defaultConfigs.AddToTail( Portal2Info );
+	}
+
+	// CSS 1.5
+	if ( m_eSDKEpoch == SDK_EPOCH_CSS15 )
+	{
+		defaultConfigs.AddToTail( CStrike15Info );
+	}
 
 	if ( pIn == NULL )
 		return false;
@@ -913,7 +968,7 @@ bool CGameConfigManager::GetDefaultGameBlock( KeyValues *pIn )
 		// If it's installed, add it
 		if ( IsAppSubscribed( defaultConfigs[i].steamAppID ) )
 		{
-			GetRootGameDirectory( szPath, sizeof( szPath ), GetRootDirectory() );
+			GetRootGameDirectory( szPath, sizeof( szPath ), GetRootDirectory(), defaultConfigs[i].steamPath );
 			AddDefaultConfig( defaultConfigs[i], pIn, GetRootDirectory(), szPath );
 		}
 	}

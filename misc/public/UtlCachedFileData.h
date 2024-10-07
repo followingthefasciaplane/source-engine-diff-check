@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -15,7 +15,7 @@
 #include "filesystem.h" // FileNameHandle_t
 #include "utlrbtree.h"
 #include "utlbuffer.h"
-#include "UtlSortVector.h"
+#include "utlsortvector.h"
 #include "tier1/strtools.h"
 
 #include "tier0/memdbgon.h"
@@ -23,7 +23,7 @@
 // If you change to serialization protocols, this must be bumped...
 #define UTL_CACHE_SYSTEM_VERSION		2
 
-#define UTL_CACHED_FILE_DATA_UNDEFINED_DISKINFO	(long)-2
+#define UTL_CACHED_FILE_DATA_UNDEFINED_DISKINFO	(int)-2
 
 // Cacheable types must derive from this and implement the appropriate methods...
 abstract_class IBaseCacheInfo
@@ -69,7 +69,7 @@ public:
 		m_bReadOnly( readonly ),
 		m_bSaveManifest( savemanifest )
 	{
-		Assert( !m_sRepositoryFileName.IsEmpty() );
+		Assert( m_sRepositoryFileName.Length() > 0 );
 	}
 
 	virtual ~CUtlCachedFileData()
@@ -83,7 +83,6 @@ public:
 		m_Data.RemoveAll();
 	}
 
-	// If bExpectMissing is set, don't complain if this causes synchronous disk I/O to build the cache.
 	T* Get( char const *filename );
 	const T* Get( char const *filename ) const;
 
@@ -109,7 +108,7 @@ public:
 		return idx != m_Elements.InvalidIndex() ? true : false;
 	}
 
-	void SetElement( char const *name, long fileinfo, T* src )
+	void SetElement( char const *name, int fileinfo, T* src )
 	{
 		SetDirty( true );
 
@@ -155,14 +154,12 @@ public:
 
 	void	ForceRecheckDiskInfo();
 	// Iterates all entries and gets filesystem info and optionally causes rebuild on any existing items which are out of date
-	void	CheckDiskInfo( bool force_rebuild, long cacheFileTime = 0L );
+	void	CheckDiskInfo( bool force_rebuild, int cacheFileTime = 0L );
 
 	void	SaveManifest();
 	bool	ManifestExists();
 
-	const char *GetRepositoryFileName() const { return m_sRepositoryFileName; }
-
-	long	GetFileInfo( char const *filename )
+	int	GetFileInfo( char const *filename )
 	{
 		ElementType_t element;
 		element.handle = g_pFullFileSystem->FindOrAddFileName( filename );
@@ -172,6 +169,12 @@ public:
 			return 0L;
 		}
 
+		return m_Elements[ idx ].fileinfo;
+	}
+	int GetFileInfo( int idx )
+	{
+		if ( !m_Elements.IsValidIndex( idx ) )
+			return 0L;
 		return m_Elements[ idx ].fileinfo;
 	}
 
@@ -186,6 +189,10 @@ public:
 	}
 
 	T *RebuildItem( const char *filename );
+
+	void SetNeverCheckDisk( bool bNeverCheckDisk );
+
+	void RecheckItem( char const *filename );
 
 private:
 
@@ -229,8 +236,8 @@ private:
 		}
 
 		FileNameHandle_t	handle;
-		long				fileinfo;
-		long				diskfileinfo;
+		int				fileinfo;
+		int				diskfileinfo;
 		int					dataIndex;
 	};
 
@@ -267,7 +274,7 @@ T* CUtlCachedFileData<T>::Get( char const *filename )
 	{
 		e.fileinfo = 0;
 	}
-	long cachefileinfo = e.fileinfo;
+	int cachefileinfo = e.fileinfo;
 	// Set the disk fileinfo the first time we encounter the filename
 	if ( e.diskfileinfo == UTL_CACHED_FILE_DATA_UNDEFINED_DISKINFO )
 	{
@@ -349,7 +356,7 @@ bool CUtlCachedFileData<T>::IsUpToDate()
 	// Don't call Init/Shutdown if using this method!!!
 	Assert( !m_bInitialized );
 
-	if ( m_sRepositoryFileName.IsEmpty() )
+	if ( !m_sRepositoryFileName.Length() )
 	{
 		Error( "CUtlCachedFileData:  Can't IsUpToDate, no repository file specified." );
 		return false;
@@ -360,7 +367,7 @@ bool CUtlCachedFileData<T>::IsUpToDate()
 
 	FileHandle_t fh;
 
-	fh = g_pFullFileSystem->Open( m_sRepositoryFileName, "rb", "MOD" );
+	fh = g_pFullFileSystem->Open( m_sRepositoryFileName.String(), "rb", "MOD" );
 	if ( fh == FILESYSTEM_INVALID_HANDLE )
 	{
 		return false;
@@ -379,7 +386,7 @@ bool CUtlCachedFileData<T>::IsUpToDate()
 		Assert( !m_bReadOnly );
 		if ( !m_bReadOnly )
 		{
-			g_pFullFileSystem->RemoveFile( m_sRepositoryFileName, "MOD" );
+			g_pFullFileSystem->RemoveFile( m_sRepositoryFileName.String(), "MOD" );
 		}
 		return false;
 	}
@@ -392,24 +399,26 @@ bool CUtlCachedFileData<T>::IsUpToDate()
 		Assert( !m_bReadOnly );
 		if ( !m_bReadOnly )
 		{
-			g_pFullFileSystem->RemoveFile( m_sRepositoryFileName, "MOD" );
+			g_pFullFileSystem->RemoveFile( m_sRepositoryFileName.String(), "MOD" );
 		}
 		return false;
 	}
 
 	// This is a checksum based on any meta data files which the cache depends on (supplied by a passed in
 	//  meta data function
-	unsigned int cache_meta_checksum = (unsigned int)*( int *)&header[ 8 ];
-
-	if ( cache_meta_checksum != m_uCurrentMetaChecksum )
+	if ( m_pfnMetaChecksum )
 	{
-		DevMsg( "Discarding repository '%s' due to meta checksum change\n", m_sRepositoryFileName.String() );
-		Assert( !m_bReadOnly );
-		if ( !m_bReadOnly )
+		unsigned int cache_meta_checksum = *( unsigned int *)&header[ 8 ];
+		if ( cache_meta_checksum != m_uCurrentMetaChecksum )
 		{
-			g_pFullFileSystem->RemoveFile( m_sRepositoryFileName, "MOD" );
+			DevMsg( "Discarding repository '%s' due to meta checksum change\n", m_sRepositoryFileName.String() );
+			Assert( !m_bReadOnly );
+			if ( !m_bReadOnly )
+			{
+				g_pFullFileSystem->RemoveFile( m_sRepositoryFileName.String(), "MOD" );
+			}
+			return false;
 		}
-		return false;
 	}
 
 	// Looks valid
@@ -439,7 +448,8 @@ void CUtlCachedFileData<T>::InitSmallBuffer( FileHandle_t& fh, int fileSize, boo
 			//  meta data function
 			unsigned int cache_meta_checksum = loadBuf.GetInt();
 			
-			if ( cache_meta_checksum == m_uCurrentMetaChecksum )
+			if ( !m_pfnMetaChecksum ||
+				( cache_meta_checksum == m_uCurrentMetaChecksum ) )
 			{
 				int count = loadBuf.GetInt();
 				
@@ -462,7 +472,7 @@ void CUtlCachedFileData<T>::InitSmallBuffer( FileHandle_t& fh, int fileSize, boo
 
 					// Read the element name
 					char elementFileName[ 512 ];
-					buf.GetString( elementFileName );
+					buf.GetString( elementFileName, sizeof( elementFileName ) );
 
 					// Now read the element
 					int slot = GetIndex( elementFileName );
@@ -528,7 +538,8 @@ void CUtlCachedFileData<T>::InitLargeBuffer( FileHandle_t& fh, bool& deleteFile 
 			
 			g_pFullFileSystem->Read( &cache_meta_checksum, sizeof( cache_meta_checksum ), fh );
 
-			if ( cache_meta_checksum == m_uCurrentMetaChecksum )
+			if ( !m_pfnMetaChecksum ||
+				( cache_meta_checksum == m_uCurrentMetaChecksum ) )
 			{
 				int count = 0;
 				
@@ -562,7 +573,7 @@ void CUtlCachedFileData<T>::InitLargeBuffer( FileHandle_t& fh, bool& deleteFile 
 
 					// Read the element name
 					char elementFileName[ 512 ];
-					buf.GetString( elementFileName );
+					buf.GetString( elementFileName, sizeof( elementFileName ) );
 
 					// Now read the element
 					int slot = GetIndex( elementFileName );
@@ -618,7 +629,7 @@ bool CUtlCachedFileData<T>::Init()
 
 	m_bInitialized = true;
 
-	if ( m_sRepositoryFileName.IsEmpty() )
+	if ( !m_sRepositoryFileName.Length() )
 	{
 		Error( "CUtlCachedFileData:  Can't Init, no repository file specified." );
 		return false;
@@ -629,14 +640,17 @@ bool CUtlCachedFileData<T>::Init()
 
 	FileHandle_t fh;
 
-	fh = g_pFullFileSystem->Open( m_sRepositoryFileName, "rb", "MOD" );
+	fh = g_pFullFileSystem->Open( m_sRepositoryFileName.String(), "rb", "MOD" );
 	if ( fh == FILESYSTEM_INVALID_HANDLE )
 	{
 		// Nothing on disk, we'll recreate everything from scratch...
-		SetDirty( true );
+		if ( !m_bReadOnly )
+		{
+			SetDirty( true );
+		}
 		return true;
 	}
-	long fileTime = g_pFullFileSystem->GetFileTime( m_sRepositoryFileName, "MOD" );
+	int fileTime = g_pFullFileSystem->GetFileTime( m_sRepositoryFileName.String(), "MOD" );
 	int size = g_pFullFileSystem->Size( fh );
 
 	bool deletefile = false;
@@ -655,35 +669,51 @@ bool CUtlCachedFileData<T>::Init()
 		Assert( !m_bReadOnly );
 		if ( !m_bReadOnly )
 		{
-			g_pFullFileSystem->RemoveFile( m_sRepositoryFileName, "MOD" );
+			g_pFullFileSystem->RemoveFile( m_sRepositoryFileName.String(), "MOD" );
+			SetDirty( true );
 		}
-		SetDirty( true );
 	}
 	CheckDiskInfo( false, fileTime );
 	return true;
 }
 
+class CSortedCacheFile
+{
+public:
+	FileNameHandle_t	handle;
+	int					index;
+
+	bool Less( const CSortedCacheFile &file0, const CSortedCacheFile &file1, void * )
+	{
+		char name0[ 512 ];
+		char name1[ 512 ];
+		g_pFullFileSystem->String( file0.handle, name0, sizeof( name0 ) );
+		g_pFullFileSystem->String( file1.handle, name1, sizeof( name1 ) );
+		return Q_stricmp( name0, name1 ) < 0 ? true : false;
+	}
+};
+
 template <class T>
 void CUtlCachedFileData<T>::Save()
 {
 	char path[ 512 ];
-	Q_strncpy( path, m_sRepositoryFileName, sizeof( path ) );
+	Q_strncpy( path, m_sRepositoryFileName.String(), sizeof( path ) );
 	Q_StripFilename( path );
 
 	g_pFullFileSystem->CreateDirHierarchy( path, "MOD" );
 
-	if ( g_pFullFileSystem->FileExists( m_sRepositoryFileName, "MOD" ) && 
-		!g_pFullFileSystem->IsFileWritable( m_sRepositoryFileName, "MOD" ) )
+	if ( g_pFullFileSystem->FileExists( m_sRepositoryFileName.String(), "MOD" ) && 
+		!g_pFullFileSystem->IsFileWritable( m_sRepositoryFileName.String(), "MOD" ) )
 	{
-		g_pFullFileSystem->SetFileWritable( m_sRepositoryFileName, true, "MOD" );
+		g_pFullFileSystem->SetFileWritable( m_sRepositoryFileName.String(), true, "MOD" );
 	}
 
 	// Now write to file
 	FileHandle_t fh;
-	fh = g_pFullFileSystem->Open( m_sRepositoryFileName, "wb" );
+	fh = g_pFullFileSystem->Open( m_sRepositoryFileName.String(), "wb" );
 	if ( FILESYSTEM_INVALID_HANDLE == fh )
 	{
-		ExecuteNTimes( 25, Warning( "Unable to persist cache '%s', check file permissions\n", m_sRepositoryFileName.String() ) );
+		Warning( "Unable to persist cache '%s', check file permissions\n", m_sRepositoryFileName.String() );
 	}
 	else
 	{
@@ -704,15 +734,26 @@ void CUtlCachedFileData<T>::Save()
 		// Save repository back out to disk...
 		CUtlBuffer buf( 0, 0, 0 );
 
+		// Sort file alphabetically
+		CUtlSortVector<CSortedCacheFile, CSortedCacheFile> list;
 		for ( int i = m_Elements.FirstInorder(); i != m_Elements.InvalidIndex(); i = m_Elements.NextInorder( i ) )
 		{
-			buf.SeekPut( CUtlBuffer::SEEK_HEAD, 0 );
-
 			ElementType_t& element = m_Elements[ i ];
+			CSortedCacheFile insert;
+			insert.handle = element.handle;
+			insert.index = i;
+			list.InsertNoSort( insert );
+		}
+		list.RedoSort();
+
+		for ( int i = 0; i < list.Count(); ++i )
+		{
+			ElementType_t &element = m_Elements[ list[ i ].index ];
+
+			buf.SeekPut( CUtlBuffer::SEEK_HEAD, 0 );
 
 			char fn[ 512 ];
 			g_pFullFileSystem->String( element.handle, fn, sizeof( fn ) );
-
 			buf.PutString( fn );
 			buf.PutInt( element.fileinfo );
 
@@ -763,10 +804,8 @@ template <class T>
 bool CUtlCachedFileData<T>::ManifestExists()
 {
 	char manifest_name[ 512 ];
-	Q_strncpy( manifest_name, m_sRepositoryFileName, sizeof( manifest_name ) );
-
+	Q_strncpy( manifest_name, m_sRepositoryFileName.String(), sizeof( manifest_name ) );
 	Q_SetExtension( manifest_name, ".manifest", sizeof( manifest_name ) );
-
 	return g_pFullFileSystem->FileExists( manifest_name, "MOD" );
 }
 
@@ -776,9 +815,21 @@ void CUtlCachedFileData<T>::SaveManifest()
 	// Save manifest out to disk...
 	CUtlBuffer buf( 0, 0, CUtlBuffer::TEXT_BUFFER );
 
+	// Sort file alphabetically
+	CUtlSortVector<CSortedCacheFile, CSortedCacheFile> list;
 	for ( int i = m_Elements.FirstInorder(); i != m_Elements.InvalidIndex(); i = m_Elements.NextInorder( i ) )
 	{
 		ElementType_t& element = m_Elements[ i ];
+		CSortedCacheFile insert;
+		insert.handle = element.handle;
+		insert.index = i;
+		list.InsertNoSort( insert );
+	}
+	list.RedoSort();
+
+	for ( int i = 0; i < list.Count(); ++i )
+	{
+		ElementType_t &element = m_Elements[ list[ i ].index ];
 
 		char fn[ 512 ];
 		g_pFullFileSystem->String( element.handle, fn, sizeof( fn ) );
@@ -787,13 +838,13 @@ void CUtlCachedFileData<T>::SaveManifest()
 	}
 
 	char path[ 512 ];
-	Q_strncpy( path, m_sRepositoryFileName, sizeof( path ) );
+	Q_strncpy( path, m_sRepositoryFileName.String(), sizeof( path ) );
 	Q_StripFilename( path );
 
 	g_pFullFileSystem->CreateDirHierarchy( path, "MOD" );
 
 	char manifest_name[ 512 ];
-	Q_strncpy( manifest_name, m_sRepositoryFileName, sizeof( manifest_name ) );
+	Q_strncpy( manifest_name, m_sRepositoryFileName.String(), sizeof( manifest_name ) );
 
 	Q_SetExtension( manifest_name, ".manifest", sizeof( manifest_name ) );
 
@@ -820,14 +871,58 @@ void CUtlCachedFileData<T>::SaveManifest()
 }
 
 template <class T>
+void CUtlCachedFileData<T>::RecheckItem( char const *filename )
+{
+	int idx = GetIndex( filename );
+	ElementType_t& e = m_Elements[ idx ];
+
+	e.diskfileinfo = UTL_CACHED_FILE_DATA_UNDEFINED_DISKINFO;
+
+	int cachefileinfo = e.fileinfo;
+	// Set the disk fileinfo the first time we encounter the filename
+	if ( e.diskfileinfo == UTL_CACHED_FILE_DATA_UNDEFINED_DISKINFO )
+	{
+		if ( m_fileCheckType == UTL_CACHED_FILE_USE_FILESIZE ) 
+		{
+			e.diskfileinfo = g_pFullFileSystem->Size( filename, "GAME" );
+			// Missing files get a disk file size of 0
+			if ( e.diskfileinfo == -1 )
+			{
+				e.diskfileinfo = 0;
+			}
+		}
+		else
+		{
+			e.diskfileinfo = g_pFullFileSystem->GetFileTime( filename, "GAME" );
+		}
+	}
+
+	Assert( e.dataIndex != m_Data.InvalidIndex() );
+
+	T *data = m_Data[ e.dataIndex ];
+
+	Assert( data );
+
+	// Compare fileinfo to disk fileinfo and rebuild cache if out of date or not correct...
+	if ( cachefileinfo != e.diskfileinfo )
+	{
+		if ( !m_bReadOnly )
+		{
+			RebuildCache( filename, data );
+		}
+	}
+	e.fileinfo = e.diskfileinfo;
+}
+
+template <class T>
 T *CUtlCachedFileData<T>::RebuildItem( const char *filename )
 {
 	int idx = GetIndex( filename );
 	ElementType_t& e = m_Elements[ idx ];
 
-	ForceRecheckDiskInfo();
+	e.diskfileinfo = UTL_CACHED_FILE_DATA_UNDEFINED_DISKINFO;
 
-	long cachefileinfo = e.fileinfo;
+	int cachefileinfo = e.fileinfo;
 	// Set the disk fileinfo the first time we encounter the filename
 	if ( e.diskfileinfo == UTL_CACHED_FILE_DATA_UNDEFINED_DISKINFO )
 	{
@@ -890,25 +985,9 @@ void CUtlCachedFileData<T>::ForceRecheckDiskInfo()
 	}
 }
 
-class CSortedCacheFile
-{
-public:
-	FileNameHandle_t	handle;
-	int					index;
-
-	 bool Less( const CSortedCacheFile &file0, const CSortedCacheFile &file1, void * )
-	 {
-		 char name0[ 512 ];
-		 char name1[ 512 ];
-		 g_pFullFileSystem->String( file0.handle, name0, sizeof( name0 ) );
-		 g_pFullFileSystem->String( file1.handle, name1, sizeof( name1 ) );
-		 return Q_stricmp( name0, name1 ) < 0 ? true : false;
-	 }
-};
-
 // Iterates all entries and causes rebuild on any existing items which are out of date
 template <class T>
-void	CUtlCachedFileData<T>::CheckDiskInfo( bool forcerebuild, long cacheFileTime )
+void	CUtlCachedFileData<T>::CheckDiskInfo( bool forcerebuild, int cacheFileTime )
 {
 	char fn[ 512 ];
 	int i;
@@ -918,7 +997,7 @@ void	CUtlCachedFileData<T>::CheckDiskInfo( bool forcerebuild, long cacheFileTime
 		{
 			ElementType_t& element = m_Elements[ i ];
 			g_pFullFileSystem->String( element.handle, fn, sizeof( fn ) );
-			Get( fn );
+			Get(fn);
 		}
 		return;
 	}
@@ -931,11 +1010,20 @@ void	CUtlCachedFileData<T>::CheckDiskInfo( bool forcerebuild, long cacheFileTime
 		insert.handle = element.handle;
 		insert.index = i;
 		list.InsertNoSort( insert );
+		if ( m_bNeverCheckDisk && 
+			element.diskfileinfo == UTL_CACHED_FILE_DATA_UNDEFINED_DISKINFO )
+		{
+			element.diskfileinfo = element.fileinfo;
+		}
 	}
-	list.RedoSort();
 
-	if ( !list.Count() )
+	if ( !list.Count() || m_bNeverCheckDisk )
 		return;
+
+	// Actually sorting by filename here doesn't appear to be a win since FileNameHandle_t is basically sorted by Path anyway (path is stored in the high part of the DWORD)
+	// list.RedoSort();
+
+	bool bSteam = g_pFullFileSystem->IsSteam();
 
 	for ( int listStart = 0, listEnd = 0; listStart < list.Count(); listStart = listEnd+1 )
 	{
@@ -950,15 +1038,12 @@ void	CUtlCachedFileData<T>::CheckDiskInfo( bool forcerebuild, long cacheFileTime
 		}
 		g_pFullFileSystem->String( m_Elements[list[listStart].index].handle, fn, sizeof( fn ) );
 		Q_StripFilename( fn );
+
 		bool bCheck = true;
 		
-		if ( m_bNeverCheckDisk )
+		if ( !bSteam )
 		{
-			bCheck = false;
-		}
-		else 
-		{
-			long pathTime = g_pFullFileSystem->GetPathTime( fn, "GAME" );
+			int pathTime = g_pFullFileSystem->GetPathTime( fn, "GAME" );
 			bCheck = (pathTime > cacheFileTime) ? true : false;
 		}
 
@@ -993,6 +1078,12 @@ void	CUtlCachedFileData<T>::CheckDiskInfo( bool forcerebuild, long cacheFileTime
 			}
 		}
 	}
+}
+
+template <class T>
+void CUtlCachedFileData<T>::SetNeverCheckDisk( bool bNeverCheckDisk )
+{
+	m_bNeverCheckDisk = bNeverCheckDisk;
 }
 
 #include "tier0/memdbgoff.h"

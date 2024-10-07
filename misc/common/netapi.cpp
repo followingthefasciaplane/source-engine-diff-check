@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -196,11 +196,21 @@ bool CNetAPI::StringToAdr( const char *s, netadr_t *a )
 // Input  : socket - 
 //			*a - 
 //-----------------------------------------------------------------------------
+#ifdef _LINUX
+typedef socklen_t SOCKLEN;
+#else
+typedef int SOCKLEN;
+#endif
+
 void CNetAPI::GetSocketAddress( int socket, netadr_t *a )
 {
 	char	buff[512];
 	struct sockaddr_in	address;
-	int		namelen;
+#ifdef POSIX
+	socklen_t		namelen;
+#else
+	int namelen;
+#endif
 //	int     net_error = 0;
 
 	memset( a, 0, sizeof( *a ) );

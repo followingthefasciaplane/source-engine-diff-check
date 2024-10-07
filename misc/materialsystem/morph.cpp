@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -10,12 +10,12 @@
 #include "materialsystem/MaterialSystemUtil.h"
 #include "materialsystem/itexture.h"
 #include "materialsystem/imesh.h"
-#include "UtlSortVector.h"
+#include "utlsortvector.h"
 #include "materialsystem_global.h"
 #include "IHardwareConfigInternal.h"
 #include "pixelwriter.h"
 #include "itextureinternal.h"
-#include "tier1/KeyValues.h"
+#include "tier1/keyvalues.h"
 #include "texturemanager.h"
 #include "imaterialsysteminternal.h"
 #include "imatrendercontextinternal.h"
@@ -209,7 +209,7 @@ public:
 
 	// Inherited from IMorphInternal
 	virtual void Init( MorphFormat_t format, const char *pDebugName );
-	virtual void Bind( IMorphMgrRenderContext *pRenderContext );
+	virtual bool Bind( IMorphMgrRenderContext *pRenderContext );
 	virtual MorphFormat_t GetMorphFormat() const;
 
 	// Other public methods
@@ -361,7 +361,7 @@ private:
 class CMorphMgrRenderContext : public IMorphMgrRenderContext
 {
 public:
-	enum UnnamedEnumsAreNotLegal
+	enum
 	{
 		MAX_MODEL_MORPHS = 4,
 	};
@@ -527,12 +527,12 @@ MorphFormat_t CMorph::GetMorphFormat() const
 //-----------------------------------------------------------------------------
 // Binds morph accumulator, morph weights
 //-----------------------------------------------------------------------------
-void CMorph::Bind( IMorphMgrRenderContext *pIRenderContext )
+bool CMorph::Bind( IMorphMgrRenderContext *pIRenderContext )
 {
 	CMorphMgrRenderContext *pMorphRenderContext = static_cast< CMorphMgrRenderContext* >( pIRenderContext );
 	int nRenderId = pMorphRenderContext->GetRenderId( this );
 	if ( nRenderId < 0 )
-		return;
+		return false;
 
 	int nXOffset, nYOffset, nWidth, nHeight;
 	s_MorphMgr.ComputeAccumulatorSubrect( &nXOffset, &nYOffset, &nWidth, &nHeight, nRenderId );
@@ -542,6 +542,8 @@ void CMorph::Bind( IMorphMgrRenderContext *pIRenderContext )
 	g_pShaderAPI->SetIntRenderingParameter( INT_RENDERPARM_MORPH_ACCUMULATOR_Y_OFFSET, nYOffset );
 	g_pShaderAPI->SetIntRenderingParameter( INT_RENDERPARM_MORPH_ACCUMULATOR_SUBRECT_WIDTH, nWidth );
 	g_pShaderAPI->SetIntRenderingParameter( INT_RENDERPARM_MORPH_ACCUMULATOR_SUBRECT_HEIGHT, nHeight );
+
+	return true;
 }
 
 void CMorph::BindMorphWeight( int nRenderId )
@@ -797,7 +799,7 @@ void CMorph::DisplayMorphStats()
 	int nDestTextureHeight = pDest->GetActualHeight();
 
 #ifdef _DEBUG
-	Msg( "Morph %s:\n", m_pDebugName.Get() );
+	Msg( "Morph %s:\n", m_pDebugName.String() );
 #else
 	Msg( "Morph :\n" );
 #endif
@@ -1119,7 +1121,7 @@ void CMorph::BuildQuadList( const CUtlVector< MorphSegmentList_t > &morphSegment
 				int sy = nSrc - sx * m_nTextureHeight;
 
 				int nMaxCount = m_nTextureHeight - sy;
-				int nCount = min( nMaxCount, nTotalCount );
+				int nCount = MIN( nMaxCount, nTotalCount );
 				nTotalCount -= nCount;
 
 				int l = quadList.AddToTail();
@@ -1475,7 +1477,7 @@ void CMorph::RenderMorphQuads( IMatRenderContext *pRenderContext, int nRenderId,
 #endif
 
 #ifdef REPORT_MORPH_STATS
-			nTexelsRendered += n4TupleCount * quad.m_nCount;
+			nTexelsRendered += Get4TupleCount( m_Format ) * quad.m_nCount;
 #endif
 
 			int nBaseIndex = quad.m_nQuadIndex * 4;
@@ -1544,7 +1546,7 @@ bool CMorph::RenderMorphWeights( IMatRenderContext *pRenderContext, int nRenderI
 		return false;
 
 	// Cache off the weights, we need them when we accumulate the morphs later.
-	int nCountToCopy = min( nWeightCount, m_nMaxMorphTargetCount );
+	int nCountToCopy = MIN( nWeightCount, m_nMaxMorphTargetCount );
 	memcpy( m_pRenderMorphWeight, pWeights, nCountToCopy * sizeof(MorphWeight_t) );
 	int nCountToClear = m_nMaxMorphTargetCount - nWeightCount;
 	if ( nCountToClear > 0 )
@@ -1552,7 +1554,7 @@ bool CMorph::RenderMorphWeights( IMatRenderContext *pRenderContext, int nRenderI
 		memset( &m_pRenderMorphWeight[nCountToCopy], 0, nCountToClear * sizeof(MorphWeight_t) );
 	}
 
-	int *pWeightIndices = (int*)_alloca( nCountToCopy * sizeof(int) );
+	int *pWeightIndices = (int*)stackalloc( nCountToCopy * sizeof(int) );
 	int nIndexCount = BuildNonZeroMorphList( pWeightIndices, nCountToCopy, pWeights ); 
 	if ( nIndexCount == 0 )
 		return false;
@@ -1601,7 +1603,7 @@ void CMorph::AccumulateMorph( int nRenderId )
 	VPROF_BUDGET( "CMorph::AccumulateMorph", _T("HW Morphing") );
 
 	// Build a non-zero weight list and a total quad count
-	int *pTargets = (int*)_alloca( m_nMaxMorphTargetCount * sizeof(int) );
+	int *pTargets = (int*)stackalloc( m_nMaxMorphTargetCount * sizeof(int) );
 	int nTargetCount = BuildNonZeroMorphList( pTargets, m_nMaxMorphTargetCount, m_pRenderMorphWeight ); 
 
 	// Count the total number of quads to draw
@@ -1686,7 +1688,7 @@ CMorphMgr::CMorphMgr()
 //-----------------------------------------------------------------------------
 bool CMorphMgr::ShouldAllocateScratchTextures()
 {
-	return g_pMaterialSystemHardwareConfig->HasFastVertexTextures(); 
+	return g_pMaterialSystemHardwareConfig->ActualHasFastVertexTextures() && !IsOpenGL();
 }
 
 
@@ -1696,7 +1698,7 @@ bool CMorphMgr::ShouldAllocateScratchTextures()
 void CMorphMgr::AllocateScratchTextures()
 {
 	// Debug using 32323232F because we can read that back reasonably.
-#ifdef _DEBUG
+#if defined(_DEBUG)
 	ImageFormat fmt = IMAGE_FORMAT_RGBA32323232F;
 #else
 	ImageFormat fmt = IMAGE_FORMAT_RGBA16161616F;
@@ -1718,7 +1720,7 @@ void CMorphMgr::AllocateScratchTextures()
 		RT_SIZE_OFFSCREEN, fmt, RENDER_TARGET_NO_DEPTH, 
 		TEXTUREFLAGS_NOMIP | TEXTUREFLAGS_NOLOD | TEXTUREFLAGS_NODEBUGOVERRIDE |
 		TEXTUREFLAGS_CLAMPS | TEXTUREFLAGS_CLAMPT | TEXTUREFLAGS_POINTSAMPLE | TEXTUREFLAGS_VERTEXTEXTURE, 
-		0 );
+		0, false );
 	m_pMorphAccumTexture->IncrementReferenceCount();
 
 	int nDim = (int)sqrt( (float)MAXSTUDIOFLEXDESC );
@@ -1739,7 +1741,7 @@ void CMorphMgr::AllocateScratchTextures()
 			RT_SIZE_OFFSCREEN, fmt, RENDER_TARGET_NO_DEPTH, 
 			TEXTUREFLAGS_NOMIP | TEXTUREFLAGS_NOLOD | TEXTUREFLAGS_NODEBUGOVERRIDE |
 			TEXTUREFLAGS_CLAMPS | TEXTUREFLAGS_CLAMPT | TEXTUREFLAGS_POINTSAMPLE, 
-			0 );
+			0, false );
 		m_pMorphWeightTexture->IncrementReferenceCount();
 	}
 }
@@ -1954,7 +1956,8 @@ void CMorphMgr::Display32FTextureData( float *pBuf, int nTexelID, int *pSubRect,
 	Msg( "[%d] : ", nTexelID );
 	for ( int i = 0; i < n4TupleCount; ++i )
 	{
-		float *pBase = &pBuf[ (nRow * pTexture->GetActualWidth() + nColumn + i ) * 4 ];
+		float *pBase;
+		pBase = &pBuf[ (nRow * pTexture->GetActualWidth() + nColumn + i ) * 4 ];
 		Msg( "[ %.4f %.4f %.4f %.4f ] ", pBase[0], pBase[1], pBase[2], pBase[3] );
 	}
 	Msg( "\n" );

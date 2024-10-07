@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve LLC, All rights reserved. ============
 //
 // Purpose: 
 //
@@ -10,6 +10,10 @@
 #include "filmgrain_vs20.inc"
 #include "hsl_filmgrain_pass1_ps20.inc"
 #include "hsl_filmgrain_pass1_ps20b.inc"
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
 
 //
 // First pass converts from RGB to HSL and tweaks with noise similar to After Effects
@@ -35,12 +39,6 @@ BEGIN_VS_SHADER( hsl_filmgrain_pass1, "Help for Film Grain" )
 
 	SHADER_FALLBACK
 	{
-		// Requires DX9 + above
-		if (!g_pHardwareConfig->SupportsVertexAndPixelShaders())
-		{
-			Assert( 0 );
-			return "Wireframe";
-		}
 		return 0;
 	}
 
@@ -77,8 +75,8 @@ BEGIN_VS_SHADER( hsl_filmgrain_pass1, "Help for Film Grain" )
 
 		DYNAMIC_STATE
 		{
-			BindTexture( SHADER_SAMPLER0, INPUT, -1 );
-			BindTexture( SHADER_SAMPLER1, GRAIN, -1 );
+			BindTexture( SHADER_SAMPLER0, TEXTURE_BINDFLAGS_NONE, INPUT, -1 );
+			BindTexture( SHADER_SAMPLER1, TEXTURE_BINDFLAGS_NONE, GRAIN, -1 );
 
 			SetVertexShaderConstant( VERTEX_SHADER_SHADER_SPECIFIC_CONST_0, SCALEBIAS );
 

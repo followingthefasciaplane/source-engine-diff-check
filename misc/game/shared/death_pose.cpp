@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -7,9 +7,13 @@
 #include "cbase.h"
 #include "death_pose.h"
 
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
+
 #ifdef CLIENT_DLL
 
-void GetRagdollCurSequenceWithDeathPose( C_BaseAnimating *entity, matrix3x4_t *curBones, float flTime, int activity, int frame )
+void GetRagdollCurSequenceWithDeathPose( C_BaseAnimating *entity, matrix3x4a_t *curBones, float flTime, int activity, int frame )
 {
 	// blow the cached prev bones
 	entity->InvalidateBoneCache();
@@ -29,6 +33,8 @@ void GetRagdollCurSequenceWithDeathPose( C_BaseAnimating *entity, matrix3x4_t *c
 
 		int iTempSequence = entity->GetSequence();
 		float flTempCycle = entity->GetCycle();
+
+		entity->SetEffects( EF_NOINTERP );
 
 		entity->SetSequence( activity );
 
@@ -50,6 +56,8 @@ void GetRagdollCurSequenceWithDeathPose( C_BaseAnimating *entity, matrix3x4_t *c
 		entity->Interpolate( gpGlobals->curtime );
 
 		entity->SetupBones( NULL, -1, BONE_USED_BY_ANYTHING, gpGlobals->curtime );
+
+		entity->RemoveEffects( EF_NOINTERP );
 	}
 	else
 	{
@@ -69,6 +77,19 @@ Activity GetDeathPoseActivity( CBaseAnimating *entity, const CTakeDamageInfo &in
 	if ( !entity )
 	{
 		return ACT_INVALID;
+	}
+
+	// Get the entity's current activity.
+	Activity aCurrentActivity = entity->GetSequenceActivity( entity->GetSequence() );
+
+	// Determine if the enitiy is crouched or not
+	bool bCrouched = false;
+	switch ( aCurrentActivity )
+	{
+		case ACT_CROUCHIDLE:
+		case ACT_RUN_CROUCH:
+			bCrouched = true;
+			break;
 	}
 
 	Activity aActivity;
@@ -100,16 +121,36 @@ Activity GetDeathPoseActivity( CBaseAnimating *entity, const CTakeDamageInfo &in
 	if ( flDotRight > flDotForward )
 	{
 		if ( bNegativeRight == true )
-			aActivity = ACT_DIE_LEFTSIDE;
+		{
+			if ( bCrouched == true )
+				aActivity = ACT_DIE_CROUCH_LEFTSIDE;
+			else
+				aActivity = ACT_DIE_LEFTSIDE;
+		}
 		else 
-			aActivity = ACT_DIE_RIGHTSIDE;
+		{
+			if ( bCrouched == true )
+				aActivity = ACT_DIE_CROUCH_RIGHTSIDE;
+			else
+				aActivity = ACT_DIE_RIGHTSIDE;
+		}
 	}
 	else
 	{
 		if ( bNegativeForward == true )
-			aActivity = ACT_DIE_BACKSIDE;
+		{
+			if ( bCrouched == true )
+				aActivity = ACT_DIE_CROUCH_BACKSIDE;
+			else
+				aActivity = ACT_DIE_BACKSIDE;
+		}
 		else 
-			aActivity = ACT_DIE_FRONTSIDE;
+		{
+			if ( bCrouched == true )
+				aActivity = ACT_DIE_CROUCH_FRONTSIDE;
+			else
+				aActivity = ACT_DIE_FRONTSIDE;
+		}
 	}
 
 	return aActivity;

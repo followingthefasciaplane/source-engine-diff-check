@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -27,14 +27,12 @@ BEGIN_VS_SHADER_FLAGS( WriteStencil_DX9, "Help for WriteStencil", SHADER_NOT_EDI
 
 	SHADER_FALLBACK
 	{
-		if ( g_pHardwareConfig->GetDXSupportLevel() < 90 )
-			return "WriteStencil_DX8";
-
 		return 0;
 	}
 
 	SHADER_INIT
 	{
+		SET_FLAGS2( MATERIAL_VAR2_SUPPORTS_HW_SKINNING );
 	}
 
 	SHADER_DRAW
@@ -64,8 +62,8 @@ BEGIN_VS_SHADER_FLAGS( WriteStencil_DX9, "Help for WriteStencil", SHADER_NOT_EDI
 		DYNAMIC_STATE
 		{
 			DECLARE_DYNAMIC_VERTEX_SHADER( writez_vs20 );
-			SET_DYNAMIC_VERTEX_SHADER_COMBO( DOWATERFOG, pShaderAPI->GetSceneFogMode() == MATERIAL_FOG_LINEAR_BELOW_FOG_Z );
 			SET_DYNAMIC_VERTEX_SHADER_COMBO( COMPRESSED_VERTS, (int)vertexCompression );
+			SET_DYNAMIC_VERTEX_SHADER_COMBO( SKINNING, pShaderAPI->GetCurrentNumBones() > 0 );
 			SET_DYNAMIC_VERTEX_SHADER( writez_vs20 );
 
 			// No pixel shader on Direct3D, doubles fill rate

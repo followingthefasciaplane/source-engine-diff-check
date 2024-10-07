@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -19,6 +19,7 @@
 #include "engine/ICollideable.h"
 #include "iservernetworkable.h"
 #include "bitvec.h"
+#include "tier1/convar.h"
 
 struct edict_t;
 
@@ -48,6 +49,7 @@ public:
 	
 	// Current map
 	string_t		mapname;
+	string_t		mapGroupName;
 	int				mapversion;
 	string_t		startspot;
 	MapLoadType_t	eLoadType;		// How the current map was loaded
@@ -61,6 +63,7 @@ public:
 	int				maxEntities;
 
 	int				serverCount;
+	edict_t			*pEdicts;
 };
 
 inline CGlobalVars::CGlobalVars( bool bIsClient ) : 
@@ -191,8 +194,11 @@ public:
 
 	void				ClearTransmitState();
 	
+private:
 	void SetChangeInfo( unsigned short info );
 	void SetChangeInfoSerialNumber( unsigned short sn );
+
+public:
 	unsigned short	 GetChangeInfo() const;
 	unsigned short	 GetChangeInfoSerialNumber() const;
 
@@ -200,28 +206,10 @@ public:
 
 	// NOTE: this is in the edict instead of being accessed by a virtual because the engine needs fast access to it.
 	// NOTE: YOU CAN'T CHANGE THE LAYOUT OR SIZE OF CBASEEDICT AND REMAIN COMPATIBLE WITH HL2_VC6!!!!!
-#ifdef _XBOX
-	unsigned short m_fStateFlags;	
-#else
 	int	m_fStateFlags;	
-#endif	
 
 	// NOTE: this is in the edict instead of being accessed by a virtual because the engine needs fast access to it.
-	// int m_NetworkSerialNumber;
-
-	// NOTE: m_EdictIndex is an optimization since computing the edict index
-	// from a CBaseEdict* pointer otherwise requires divide-by-20. values for
-	// m_NetworkSerialNumber all fit within a 16-bit integer range, so we're
-	// repurposing the other 16 bits to cache off the index without changing
-	// the overall layout or size of this struct. existing mods compiled with
-	// a full 32-bit serial number field should still work. henryg 8/17/2011
-#if VALVE_LITTLE_ENDIAN
-	short m_NetworkSerialNumber;
-	short m_EdictIndex;
-#else
-	short m_EdictIndex;
-	short m_NetworkSerialNumber;
-#endif
+	int m_NetworkSerialNumber;	// Game DLL sets this when it gets a serial number for its EHANDLE.
 
 	// NOTE: this is in the edict instead of being accessed by a virtual because the engine needs fast access to it.
 	IServerNetworkable	*m_pNetworkable;
@@ -266,7 +254,7 @@ inline bool CBaseEdict::IsFree() const
 
 inline bool	CBaseEdict::HasStateChanged() const
 {
-	return (m_fStateFlags & FL_EDICT_CHANGED) != 0;
+	return (m_fStateFlags & ( FL_EDICT_CHANGED  | FL_FULL_EDICT_CHANGED ) ) != 0;
 }
 
 inline void	CBaseEdict::ClearStateChanged()
@@ -277,8 +265,8 @@ inline void	CBaseEdict::ClearStateChanged()
 
 inline void	CBaseEdict::StateChanged()
 {
-	// Note: this should only happen for properties in data tables that used some
-	// kind of pointer dereference. If the data is directly offsetable 
+	// Note: this should only happen for properties in data tables that used some kind of pointer
+	//   dereference. If the data is directly offsetable, then changes will automatically be detected
 	m_fStateFlags |= (FL_EDICT_CHANGED | FL_FULL_EDICT_CHANGED);
 	SetChangeInfoSerialNumber( 0 );
 }
@@ -291,8 +279,9 @@ inline void	CBaseEdict::StateChanged( unsigned short offset )
 	m_fStateFlags |= FL_EDICT_CHANGED;
 
 	IChangeInfoAccessor *accessor = GetChangeAccessor();
+	int nCurrSerialNumber = accessor->GetChangeInfoSerialNumber();
 	
-	if ( accessor->GetChangeInfoSerialNumber() == g_pSharedChangeInfo->m_iSerialNumber )
+	if ( nCurrSerialNumber == g_pSharedChangeInfo->m_iSerialNumber )
 	{
 		// Ok, I still own this one.
 		CEdictChangeInfo *p = &g_pSharedChangeInfo->m_ChangeInfos[accessor->GetChangeInfo()];
@@ -323,15 +312,25 @@ inline void	CBaseEdict::StateChanged( unsigned short offset )
 		}
 		else
 		{
-			// Get a new CEdictChangeInfo and fill it out.
-			accessor->SetChangeInfo( g_pSharedChangeInfo->m_nChangeInfos );
-			g_pSharedChangeInfo->m_nChangeInfos++;
+			//see if we previously had a change info allocated, but with a bad serial number. If so, we don't know which properties
+			//we had changed (we lost them, so be all dirty)
+			if( nCurrSerialNumber != 0 )
+			{
+				accessor->SetChangeInfoSerialNumber( 0 );
+				m_fStateFlags |= FL_FULL_EDICT_CHANGED;
+			}
+			else
+			{
+				// Get a new CEdictChangeInfo and fill it out.
+				accessor->SetChangeInfo( g_pSharedChangeInfo->m_nChangeInfos );
+				g_pSharedChangeInfo->m_nChangeInfos++;
 			
-			accessor->SetChangeInfoSerialNumber( g_pSharedChangeInfo->m_iSerialNumber );
+				accessor->SetChangeInfoSerialNumber( g_pSharedChangeInfo->m_iSerialNumber );
 			
-			CEdictChangeInfo *p = &g_pSharedChangeInfo->m_ChangeInfos[accessor->GetChangeInfo()];
-			p->m_ChangeOffsets[0] = offset;
-			p->m_nChangeOffsets = 1;
+				CEdictChangeInfo *p = &g_pSharedChangeInfo->m_ChangeInfos[accessor->GetChangeInfo()];
+				p->m_ChangeOffsets[0] = offset;
+				p->m_nChangeOffsets = 1;
+			}
 		}
 	}
 }
@@ -343,8 +342,6 @@ inline void CBaseEdict::SetFree()
 	m_fStateFlags |= FL_EDICT_FREE;
 }
 
-// WARNING: Make sure you don't really want to call ED_ClearFreeFlag which will also
-//  remove this edict from the g_FreeEdicts bitset.
 inline void CBaseEdict::ClearFree()
 {
 	m_fStateFlags &= ~FL_EDICT_FREE;
@@ -430,9 +427,6 @@ struct edict_t : public CBaseEdict
 {
 public:
 	ICollideable *GetCollideable();
-
-	// The server timestampe at which the edict was freed (so we can try to use other edicts before reallocating this one)
-	float		freetime;	
 };
 
 inline ICollideable *edict_t::GetCollideable()

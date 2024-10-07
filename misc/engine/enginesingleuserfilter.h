@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -38,7 +38,7 @@ public:
 	void			AddAllPlayers( void );
 	void			AddRecipientsByPVS( const Vector& origin );
 	void			AddRecipientsByPAS( const Vector& origin );
-	void			AddPlayersFromBitMask( CBitVec< ABSOLUTE_PLAYER_LIMIT >& playerbits );
+	void			AddPlayersFromBitMask( CPlayerBitVec& playerbits );
 	void			AddPlayersFromFilter( const IRecipientFilter *filter );
 	void			AddRecipient( int playerindex );
 	void			RemoveRecipient( int playerindex );

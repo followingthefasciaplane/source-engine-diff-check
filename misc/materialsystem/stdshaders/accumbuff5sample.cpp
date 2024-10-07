@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright (c) 1996-2005, Valve LLC, All rights reserved. ============
 //
 // Purpose: 
 //
@@ -11,6 +11,10 @@
 #include "accumbuff5sample_ps20.inc"
 #include "accumbuff5sample_ps20b.inc"
 #include "convar.h"
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
 
 BEGIN_VS_SHADER_FLAGS( accumbuff5sample, "Help for AccumBuff5Sample", SHADER_NOT_EDITABLE )
 	BEGIN_SHADER_PARAMS
@@ -38,12 +42,6 @@ BEGIN_VS_SHADER_FLAGS( accumbuff5sample, "Help for AccumBuff5Sample", SHADER_NOT
 	
 	SHADER_FALLBACK
 	{
-		// Requires DX9 + above
-		if (!g_pHardwareConfig->SupportsVertexAndPixelShaders())
-		{
-			Assert( 0 );
-			return "Wireframe";
-		}
 		return 0;
 	}
 
@@ -53,10 +51,9 @@ BEGIN_VS_SHADER_FLAGS( accumbuff5sample, "Help for AccumBuff5Sample", SHADER_NOT
 		{
 			pShaderShadow->EnableDepthWrites( false );
 			pShaderShadow->EnableDepthTest( false );
-			pShaderShadow->EnableAlphaWrites( false );
+			pShaderShadow->EnableAlphaWrites( true );
 			pShaderShadow->EnableBlending( false );
 			pShaderShadow->EnableCulling( false );
-//			pShaderShadow->PolyMode( SHADER_POLYMODEFACE_FRONT_AND_BACK, SHADER_POLYMODE_LINE );
 
 			pShaderShadow->EnableTexture( SHADER_SAMPLER0, true );
 			pShaderShadow->EnableTexture( SHADER_SAMPLER1, true );
@@ -83,11 +80,11 @@ BEGIN_VS_SHADER_FLAGS( accumbuff5sample, "Help for AccumBuff5Sample", SHADER_NOT
 
 		DYNAMIC_STATE
 		{
-			BindTexture( SHADER_SAMPLER0, TEXTURE0, -1 );
-			BindTexture( SHADER_SAMPLER1, TEXTURE1, -1 );
-			BindTexture( SHADER_SAMPLER2, TEXTURE2, -1 );
-			BindTexture( SHADER_SAMPLER3, TEXTURE3, -1 );
-			BindTexture( SHADER_SAMPLER4, TEXTURE4, -1 );
+			BindTexture( SHADER_SAMPLER0, TEXTURE_BINDFLAGS_NONE, TEXTURE0, -1 );
+			BindTexture( SHADER_SAMPLER1, TEXTURE_BINDFLAGS_NONE, TEXTURE1, -1 );
+			BindTexture( SHADER_SAMPLER2, TEXTURE_BINDFLAGS_NONE, TEXTURE2, -1 );
+			BindTexture( SHADER_SAMPLER3, TEXTURE_BINDFLAGS_NONE, TEXTURE3, -1 );
+			BindTexture( SHADER_SAMPLER4, TEXTURE_BINDFLAGS_NONE, TEXTURE4, -1 );
 
 			SetPixelShaderConstant( 0, WEIGHTS );
 

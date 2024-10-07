@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -54,16 +54,28 @@ public:
 	static const	WeaponProficiencyInfo_t *GetDefaultProficiencyValues();
 
 	virtual void	ItemHolsterFrame( void );
-
+	virtual void	ItemPostFrame( void );
 protected:
 
 	bool			m_bLowered;			// Whether the viewmodel is raised or lowered
 	float			m_flRaiseTime;		// If lowered, the time we should raise the viewmodel
 	float			m_flHolsterTime;	// When the weapon was holstered
 
+	float			m_flNextRepeatPrimaryAttack; 
+	float			m_flNextRepeatSecondaryAttack; 
 private:
 	
 	CBasePortalCombatWeapon( const CBasePortalCombatWeapon & );
+
+// throwing guns
+public:
+	float			GetThrowTime();
+	bool			EnoughTimeSinceThrown();
+	virtual void	Drop( const Vector &vecVelocity );
+	CBaseEntity*	GetLastOwner();
+private:
+	float			m_flThrowTime;
+	CBaseEntity*	m_pLastOwner;
 };
 
 #endif // WEAPON_BASEPORTALCOMBATWEAPON_SHARED_H

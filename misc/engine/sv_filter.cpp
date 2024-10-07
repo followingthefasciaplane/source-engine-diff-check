@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -7,15 +7,13 @@
 
 
 #include "server_pch.h"
-#include "vfilter.h" // Renamed to avoid conflict with Microsoft's filter.h
+#include "ipuserfilter.h"
 #include "sv_filter.h"
 #include "sv_steamauth.h"
 #include "GameEventManager.h"
 #include "proto_oob.h"
-#include "tier1/CommandBuffer.h"
-#ifndef DEDICATED
-#include "cl_steamauth.h"
-#endif
+#include "tier1/commandbuffer.h"
+#include "net.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -34,7 +32,7 @@ CUtlVector< userfilter_t > g_UserFilters;
 // Purpose: Sends a message to prospective clients letting them know they're banned
 // Input  : *adr - 
 //-----------------------------------------------------------------------------
-void Filter_SendBan( const netadr_t& adr )
+void Filter_SendBan( const ns_address& adr )
 {
 	NET_OutOfBandPrintf( NS_SERVER, adr, "%cBanned by server\n", A2A_PRINT );
 }
@@ -44,7 +42,7 @@ void Filter_SendBan( const netadr_t& adr )
 // Input  : *adr - 
 // Output : bool
 //-----------------------------------------------------------------------------
-bool Filter_ShouldDiscard( const netadr_t& adr )
+bool Filter_ShouldDiscard( const ns_address& adr )
 {
 	if ( sv_filterban.GetInt() == 0 )
 	{
@@ -53,7 +51,10 @@ bool Filter_ShouldDiscard( const netadr_t& adr )
 
 	bool bNegativeFilter = sv_filterban.GetInt() == 1;
 
-	unsigned in = *(unsigned *)&adr.ip[0];
+	if ( !adr.IsType<netadr_t>() )
+		return false;
+
+	unsigned in = adr.AsType<netadr_t>().GetIPNetworkByteOrder();
 
 	// Handle timeouts 
 	for ( int i = g_IPFilters.Count() - 1 ; i >= 0 ; i--)
@@ -240,7 +241,7 @@ static void Filter_Add_f( const CCommand& args )
 
 		event->SetString( "ip", args[2] );
 		event->SetString( "duration", szDuration );
-		event->SetString( "by", ( cmd_source == src_command ) ? "Console" : host_client->m_Name );
+		event->SetString( "by", ( args.Source() != kCommandSrcNetClient ) ? "Console" : host_client->m_Name );
 		event->SetBool( "kicked", bKick && bFound && client  );
 
 		g_GameEventManager.FireEvent( event );
@@ -298,7 +299,7 @@ CON_COMMAND( removeip, "Remove an IP address from the ban list." )
 			{
 				event->SetString( "networkid", "" );
 				event->SetString( "ip", szIP );
-				event->SetString( "by", ( cmd_source == src_command ) ? "Console" : host_client->m_Name );
+				event->SetString( "by", ( args.Source() != kCommandSrcNetClient ) ? "Console" : host_client->m_Name );
 
 				g_GameEventManager.FireEvent( event );
 			}
@@ -329,7 +330,7 @@ CON_COMMAND( removeip, "Remove an IP address from the ban list." )
 			{
 				event->SetString( "networkid", "" );
 				event->SetString( "ip", args[1] );
-				event->SetString( "by", ( cmd_source == src_command ) ? "Console" : host_client->m_Name );
+				event->SetString( "by", ( args.Source() != kCommandSrcNetClient ) ? "Console" : host_client->m_Name );
 				g_GameEventManager.FireEvent( event );
 			}
 
@@ -428,7 +429,6 @@ CON_COMMAND( writeip, "Save the ban list to " BANNED_IP_FILENAME "." )
 //-----------------------------------------------------------------------------
 bool Filter_IsUserBanned( const USERID_t& userid )
 {
-#ifndef _XBOX
 	if ( sv_filterban.GetInt() == 0 )
 		return false;
 
@@ -453,9 +453,6 @@ bool Filter_IsUserBanned( const USERID_t& userid )
 	}
 
 	return !bNegativeFilter;
-#else
-	return false;
-#endif
 }
 
 //-----------------------------------------------------------------------------
@@ -469,40 +466,37 @@ USERID_t *Filter_StringToUserID( const char *str )
 	if ( str && str[ 0 ] )
 	{
 		char szTemp[128];
-		if ( !Q_strnicmp( str, STEAM_PREFIX, strlen( STEAM_PREFIX ) ) )
+		if ( StringHasPrefix( str, STEAM_PREFIX ) )
 		{
 			Q_strncpy( szTemp, str + Q_strlen( STEAM_PREFIX ), sizeof( szTemp ) - 1 );
 			id.idtype = IDTYPE_STEAM;
+		} 
 
-			szTemp[ sizeof( szTemp ) - 1 ] = '\0';
+		szTemp[ sizeof( szTemp ) - 1 ] = '\0';
 
-			CCommand args;
-			args.Tokenize( szTemp );
-			if ( args.ArgC() >= 5 )
-			{
-				// allow settings from old style steam2 format
-				TSteamGlobalUserID steam2ID;
-
-				steam2ID.m_SteamInstanceID = (SteamInstanceID_t)atoi( args[ 0 ] );
-				steam2ID.m_SteamLocalUserID.Split.High32bits = (int)atoi( args[ 2 ] );
-				steam2ID.m_SteamLocalUserID.Split.Low32bits = (int)atoi( args[ 4 ] );
-				EUniverse eUniverse = k_EUniversePublic;
-				if ( Steam3Server().GetGSSteamID().IsValid() )
-					eUniverse = Steam3Server().GetGSSteamID().GetEUniverse();
-#ifndef DEDICATED
-				else if ( Steam3Client().SteamUser() )
-					eUniverse = Steam3Client().SteamUser()->GetSteamID().GetEUniverse();
-#endif
-				id.steamid.SetFromSteam2( &steam2ID, eUniverse );
-			}
-		}
-		else
+		CCommand args;
+		args.Tokenize( szTemp );
+		if ( args.ArgC() >= 5 )
 		{
-			id.steamid.SetFromString( str, k_EUniversePublic );
-			if ( id.steamid.IsValid() )
-				id.idtype = IDTYPE_STEAM;
+			id.uid.steamid.m_SteamInstanceID = ( SteamInstanceID_t )atoi( args[ 0 ] );
+			id.uid.steamid.m_SteamLocalUserID.Split.High32bits = (int)atoi( args[ 2 ] );
+			id.uid.steamid.m_SteamLocalUserID.Split.Low32bits = (int)atoi( args[ 4 ] );
 		}
+	}
+	return &id;
+}
+USERID_t *Filter_Steam64bitIdToUserID( uint64 uiAccountID )
+{
+	static USERID_t id;
+	Q_memset( &id, 0, sizeof( id ) );
 
+	if ( uiAccountID )
+	{
+		CSteamID steamID( uiAccountID );
+		steamID.ConvertToSteam2( &id.uid.steamid );
+		
+		id.idtype = IDTYPE_STEAM;
+		id.uid.steamid.m_SteamInstanceID = 1;
 	}
 	return &id;
 }
@@ -546,6 +540,17 @@ CON_COMMAND( writeid, "Writes a list of permanently-banned user IDs to " BANNED_
 
 
 //-----------------------------------------------------------------------------
+// Purpose: Removes all Steam ID bans from the ban list
+//-----------------------------------------------------------------------------
+CON_COMMAND( removeallids, "Remove all user IDs from the ban list." )
+{
+	int nCount = g_UserFilters.Count();
+	g_UserFilters.RemoveAll();
+	ConMsg( "removeallids:  filter removed for %u user IDs\n", nCount );
+}
+
+
+//-----------------------------------------------------------------------------
 // Purpose: Removes a Steam ID ban
 //-----------------------------------------------------------------------------
 CON_COMMAND( removeid, "Remove a user ID from the ban list." )
@@ -564,47 +569,25 @@ CON_COMMAND( removeid, "Remove a user ID from the ban list." )
 	pszArg1 = args[1];
 
 	// don't need the # if they're using it
-	if ( !Q_strncmp( pszArg1, "#", 1 ) )
+	if ( pszArg1[ 0 ] == '#' )
 	{
 		ConMsg( "Usage:  removeid < userid | uniqueid >\n" );
-		ConMsg( "No # necessary\n" );
+		ConMsg( "No # necessary\n");
 		return;
 	}
 
-	// if the first letter is a character then
+	// if the first letter is a charcter then
 	// we're searching for a uniqueid ( e.g. STEAM_ )
-	if ( *pszArg1 < '0' || *pszArg1 > '9' || V_atoi64( pszArg1 ) > ( (uint32)~0 ) )
+	if ( *pszArg1 < '0' || *pszArg1 > '9' )
 	{
-		bool bValid = false;
-
-		// SteamID ( need to reassemble it )
-		if ( !Q_strnicmp( pszArg1, STEAM_PREFIX, Q_strlen( STEAM_PREFIX ) ) && Q_strstr( args[2], ":" ) )
+		// SteamID (need to reassemble it)
+		if ( StringHasPrefix( pszArg1, STEAM_PREFIX ) && Q_strstr( args[2], ":" ) )
 		{
 			Q_snprintf( szSearchString, sizeof( szSearchString ), "%s:%s:%s", pszArg1, args[3], args[5] );
-			
-			USERID_t *id = Filter_StringToUserID( szSearchString );
-			if ( id )
-			{
-				bValid = id->steamid.IsValid();
-				if ( bValid )
-					V_sprintf_safe( szSearchString, "%s", id->steamid.Render() );
-			}
-		}
-		else
-		{
-			CSteamID cSteamIDCheck;
-			const char *pchUUID = args.ArgS();
-			if ( pchUUID )
-			{
-				cSteamIDCheck.SetFromString( pchUUID, k_EUniversePublic );
-				bValid = cSteamIDCheck.IsValid();
-				if ( bValid )
-					V_sprintf_safe( szSearchString, "%s", cSteamIDCheck.Render() );
-			}
 		}
 		// some other ID (e.g. "UNKNOWN", "STEAM_ID_PENDING", "STEAM_ID_LAN")
 		// NOTE: assumed to be one argument
-		if ( !bValid )
+		else
 		{
 			ConMsg( "removeid:  invalid ban ID \"%s\"\n", pszArg1 );
 			return;
@@ -625,7 +608,7 @@ CON_COMMAND( removeid, "Remove a user ID from the ban list." )
 			{
 				event->SetString( "networkid", szSearchString );
 				event->SetString( "ip", "" );
-				event->SetString( "by", ( cmd_source == src_command ) ? "Console" : host_client->m_Name );
+				event->SetString( "by", ( args.Source() != kCommandSrcNetClient ) ? "Console" : host_client->m_Name );
 				g_GameEventManager.FireEvent( event );
 			}
 
@@ -660,7 +643,7 @@ CON_COMMAND( removeid, "Remove a user ID from the ban list." )
 			{
 				event->SetString( "networkid", GetUserIDString( id ) );
 				event->SetString( "ip", "" );
-				event->SetString( "by", ( cmd_source == src_command ) ? "Console" : host_client->m_Name );
+				event->SetString( "by", ( args.Source() != kCommandSrcNetClient ) ? "Console" : host_client->m_Name );
 				g_GameEventManager.FireEvent( event );
 			}
 		}
@@ -714,13 +697,13 @@ CON_COMMAND( listid, "Lists banned users." )
 //-----------------------------------------------------------------------------
 CON_COMMAND( banid, "Add a user ID to the ban list." )
 {
-#ifndef _XBOX
 	int			i;
 	float		banTime;
 	USERID_t	localId;
 	USERID_t *	id = NULL;
 	int			iSearchIndex = -1;
 	char		szDuration[256];
+	uint64		uiSteam64bitID = 0;
 	char		szSearchString[64];
 	bool		bKick = false;
 	bool		bPlaying = false;
@@ -750,53 +733,39 @@ CON_COMMAND( banid, "Add a user ID to the ban list." )
 	pszArg2 = args[2];
 
 	// don't need the # if they're using it
-	if ( !Q_strncmp( pszArg2, "#", 1 ) )
+	if ( pszArg2[ 0 ] == '#' )
 	{
 		ConMsg( "Usage:  banid < minutes > < userid | uniqueid > { kick }\n" );
 		ConMsg( "No # necessary\n");
 		return;
 	}
 
-	bKick = ( args.ArgC() >= 3 && Q_strcasecmp( args[ args.ArgC() - 1 ], "kick" ) == 0 );
+	bKick = ( args.ArgC() >= 4 && Q_strcasecmp( args[ args.ArgC() - 1 ], "kick" ) == 0 );
 
-
-	// if the first letter is a character then
+	// if the first letter is a charcter then
 	// we're searching for a uniqueid ( e.g. STEAM_ )
-	if ( *pszArg2 < '0' || *pszArg2 > '9' || V_atoi64( pszArg2 ) > ((uint32)~0) )
+	if ( *pszArg2 < '0' || *pszArg2 > '9' )
 	{
-		bool bValid = false;
-		iSearchIndex = -1;
-
+		if ( char const *sz64bitID = StringAfterPrefix( pszArg2, "STEAM64BITID_" ) )
+		{
+			uiSteam64bitID = Q_atoui64( sz64bitID );
+		}
 		// SteamID (need to reassemble it)
-		if ( !Q_strnicmp( pszArg2, STEAM_PREFIX, strlen( STEAM_PREFIX ) ) && Q_strstr( args[3], ":" ) )
+		else if ( StringHasPrefix( pszArg2, STEAM_PREFIX ) && Q_strstr( args[3], ":" ) )
 		{
 			Q_snprintf( szSearchString, sizeof( szSearchString ), "%s:%s:%s", pszArg2, args[4], args[6] );
-			bValid = true;
-		}
-		else
-		{
-			CSteamID cSteamIDCheck;
-			const char *pchArgs = args.ArgS();
-			const char *pchUUID = strchr( pchArgs, ' ' );
-			if ( pchUUID )
-			{
-				cSteamIDCheck.SetFromString( pchUUID + 1, k_EUniversePublic );
-				bValid = cSteamIDCheck.IsValid();
-				if ( bValid )
-					V_sprintf_safe( szSearchString, "%s", cSteamIDCheck.Render() );
-			}
 		}
 		// some other ID (e.g. "UNKNOWN", "STEAM_ID_PENDING", "STEAM_ID_LAN")
 		// NOTE: assumed to be one argument
-		if ( !bValid )
+		else
 		{
 			ConMsg( "Can't ban users with ID \"%s\"\n", pszArg2 );
 			return;
 		}
 	}
+	// this is a userid
 	else
 	{
-		// see if it is a userid
 		iSearchIndex = Q_atoi( pszArg2 );
 	}
 
@@ -819,6 +788,17 @@ CON_COMMAND( banid, "Add a user ID to the ban list." )
 		if ( iSearchIndex != -1 )
 		{
 			if ( client->GetUserID() == iSearchIndex )
+			{
+				// found!
+				localId = client->GetNetworkID();
+				id = &localId;
+				bPlaying = true;
+				break;
+			}
+		}
+		else if ( uiSteam64bitID )
+		{
+			if ( client->m_SteamID.IsValid() && client->m_SteamID.BIndividualAccount() && ( client->m_SteamID.ConvertToUint64() == uiSteam64bitID ) )
 			{
 				// found!
 				localId = client->GetNetworkID();
@@ -850,12 +830,19 @@ CON_COMMAND( banid, "Add a user ID to the ban list." )
 
 	if ( !id )
 	{
-		// we're searching by SteamID and we haven't found them actively playing
-		id = Filter_StringToUserID( szSearchString );
+		if ( uiSteam64bitID )
+			id = Filter_Steam64bitIdToUserID( uiSteam64bitID );
+		else
+			// we're searching by SteamID and we haven't found them actively playing
+			id = Filter_StringToUserID( szSearchString );
 
 		if ( !id )
 		{
-			ConMsg( "banid:  Couldn't resolve uniqueid \"%s\".\n", szSearchString );
+			if ( uiSteam64bitID )
+				ConMsg( "banid:  Couldn't resolve 64bit id \"%llu\".\n", uiSteam64bitID );
+			else
+				ConMsg( "banid:  Couldn't resolve uniqueid \"%s\".\n", szSearchString );
+
 			ConMsg( "Usage:  banid < minutes > < userid | uniqueid > { kick }\n" );
 			ConMsg( "Use 0 minutes for permanent\n");
 			return;
@@ -926,7 +913,7 @@ CON_COMMAND( banid, "Add a user ID to the ban list." )
 
 		event->SetString( "ip", "" );
 		event->SetString( "duration", szDuration );
-		event->SetString( "by", ( cmd_source == src_command ) ? "Console" : host_client->m_Name );
+		event->SetString( "by", ( args.Source() != kCommandSrcNetClient ) ? "Console" : host_client->m_Name );
 		event->SetInt( "kicked", ( bKick && bPlaying && client ) ? 1 : 0 );
 
 		g_GameEventManager.FireEvent( event );
@@ -937,7 +924,6 @@ CON_COMMAND( banid, "Add a user ID to the ban list." )
 		client->ClientPrintf ( "You have been kicked and banned %s by the server.\n", szDuration );
 		client->Disconnect( "Kicked and banned" );
 	}
-#endif
 }
 
 

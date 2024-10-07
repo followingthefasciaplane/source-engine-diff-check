@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2004, Valve LLC, All rights reserved. ============
 //
 // Purpose: XBox win32 replacements - Mocks trivial windows flow
 //
@@ -6,6 +6,8 @@
 #pragma once
 
 typedef unsigned long REGSAM;
+
+#define D3DCREATE_MULTITHREADED 0
 
 #define DSBCAPS_LOCSOFTWARE		0
 
@@ -212,6 +214,20 @@ typedef struct _PROCESS_INFORMATION {
 } PROCESS_INFORMATION, *PPROCESS_INFORMATION, *LPPROCESS_INFORMATION;
 
 typedef DWORD HWAVEOUT, *LPHWAVEOUT;
+
+#if 0
+typedef struct adpcmcoef_tag {
+	short	iCoef1;
+	short	iCoef2;
+} ADPCMCOEFSET;
+
+typedef struct adpcmwaveformat_tag {
+	WAVEFORMATEX	wfx;
+	WORD			wSamplesPerBlock;
+	WORD			wNumCoef;
+	ADPCMCOEFSET	aCoef[1];
+} ADPCMWAVEFORMAT;
+#endif
 
 typedef struct { 
     LPSTR      lpData; 
@@ -1146,9 +1162,6 @@ struct  hostent
 #define VK_PA1					0xFD
 #define VK_OEM_CLEAR			0xFE
 
-// Error codes used in the Secure CRT functions 
-#define EINVAL          22
-
 
 #ifdef getenv
 	#undef getenv
@@ -1456,7 +1469,15 @@ FORCEINLINE BOOL TerminateProcess( HANDLE, UINT ) { return false; }
 
 FORCEINLINE DWORD MsgWaitForMultipleObjects( DWORD, CONST HANDLE*, BOOL, DWORD, DWORD ) { return 0; }
 
-FORCEINLINE int gethostname( char *dest, int len ) { strncpy( dest, "localhost", len ); return 0; }
+FORCEINLINE int gethostname( char *dest, int len ) 
+{
+#if defined( Q_strncpy )
+	Q_strncpy( dest, "localhost", len ); 
+#else
+	strncpy( dest, "localhost", len ); 
+#endif
+return 0; 
+}
 
 FORCEINLINE BOOL GetProcessTimes( HANDLE, LPFILETIME ft1, LPFILETIME ft2, LPFILETIME ft3, LPFILETIME ft4 ) { return false; }
 
@@ -1553,8 +1574,6 @@ FORCEINLINE ISteamUserStats				*SteamUserStats() { return NULL; }
 FORCEINLINE ISteamFriends				*SteamFriends() { return NULL; }
 FORCEINLINE int32						GetHSteamPipe()	{ return 0; }
 FORCEINLINE int32						GetHSteamUser()	{ return 0; }
-FORCEINLINE int32						SteamAPI_GetHSteamPipe()	{ return 0; }
-FORCEINLINE int32						SteamAPI_GetHSteamUser()	{ return 0; }
 FORCEINLINE ISteamMasterServerUpdater	*SteamMasterServerUpdater() { return NULL; }
 FORCEINLINE bool SteamGameServer_Init( uint32 unIP, uint16 usPort, uint16 usGamePort, uint16 usSpectatorPort, uint16 usQueryPort, EServerMode eServerMode, int nGameAppId, const char *pchGameDir, const char *pchVersionString ) { return false; }
 FORCEINLINE void SteamGameServer_Shutdown() {}
@@ -1579,6 +1598,7 @@ PLATFORM_INTERFACE int			GetSystemMetrics( int nIndex );
 PLATFORM_INTERFACE BOOL			ShowWindow( HWND hWnd, int nCmdShow );
 PLATFORM_INTERFACE LRESULT		SendMessage( HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam );
 PLATFORM_INTERFACE LRESULT		CallWindowProc( WNDPROC lpPrevWndFunc, HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam );
+PLATFORM_INTERFACE LRESULT		CallWindowProcW( WNDPROC lpPrevWndFunc, HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam );
 PLATFORM_INTERFACE BOOL			GetClientRect( HWND hwnd, LPRECT lpRect );
 PLATFORM_INTERFACE int			GetDeviceCaps( HDC hdc, int nIndex );
 PLATFORM_INTERFACE LRESULT		SendMessageTimeout( HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam, UINT fuFlags, UINT uTimeout, PDWORD_PTR lpdwResult );

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -19,7 +19,7 @@ class CSplashParticle : public CSimpleEmitter
 {
 public:
 	
-	CSplashParticle( const char *pDebugName ) : CSimpleEmitter( pDebugName ), m_bUseClipHeight( false ) {}
+	explicit CSplashParticle( const char *pDebugName ) : CSimpleEmitter( pDebugName ), m_bUseClipHeight( false ) {}
 	
 	// Create
 	static CSplashParticle *Create( const char *pDebugName )
@@ -51,7 +51,7 @@ private:
 class WaterDebrisEffect : public CSimpleEmitter
 {
 public:
-	WaterDebrisEffect( const char *pDebugName ) : CSimpleEmitter( pDebugName ) {}
+	explicit WaterDebrisEffect( const char *pDebugName ) : CSimpleEmitter( pDebugName ) {}
 
 	static WaterDebrisEffect* Create( const char *pDebugName );
 

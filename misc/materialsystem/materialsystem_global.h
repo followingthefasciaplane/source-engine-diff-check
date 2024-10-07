@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright  1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -18,6 +18,17 @@
 #include "tier0/dbg.h"
 #include "tier2/tier2.h"
 
+#if defined( _PS3 ) || defined( _OSX )
+#include "shaderapidx9/shaderapidx8.h"
+#include "shaderapidx9/shaderdevicedx8.h"
+#include "shaderapidx9/hardwareconfig.h"
+#include "shaderapidx9/shaderapidx8_global.h"
+#include "shaderapidx9/shadershadowdx8.h"
+#endif
+
+#if defined( INCLUDE_SCALEFORM )
+#include "scaleformui/scaleformui.h"
+#endif
 
 //-----------------------------------------------------------------------------
 // Forward declarations
@@ -33,6 +44,7 @@ class IShaderSystemInternal;
 class IMaterialInternal;
 class IColorCorrectionSystem;
 class IMaterialVar;
+class IClientMaterialSystem;
 
 
 //-----------------------------------------------------------------------------
@@ -59,10 +71,14 @@ extern uint32 g_nDebugVarsSignature;
 
 extern int				g_FrameNum;
 
+
+#ifndef SHADERAPI_GLOBAL_H
 extern IShaderAPI*	g_pShaderAPI;
 extern IShaderDeviceMgr* g_pShaderDeviceMgr;
 extern IShaderDevice*	g_pShaderDevice;
 extern IShaderShadow* g_pShaderShadow;
+#endif
+extern IClientMaterialSystem *g_pClientMaterialSystem;
 
 extern IMaterialInternal *g_pErrorMaterial;
 
@@ -73,11 +89,23 @@ inline IShaderSystemInternal* ShaderSystem()
 	return g_pShaderSystem;
 }
 
+#ifdef _PS3
+#include "shaderapidx9/hardwareconfig_ps3nonvirt.h"
+#elif !defined( _OSX )
 inline IHardwareConfigInternal *HardwareConfig()
 {
 	extern IHardwareConfigInternal* g_pHWConfig;
 	return g_pHWConfig;
 }
+#endif
+
+#if defined( INCLUDE_SCALEFORM )
+inline IScaleformUI* ScaleformUI()
+{
+	extern IScaleformUI* g_pScaleformUI;
+	return g_pScaleformUI;
+}
+#endif
 
 //-----------------------------------------------------------------------------
 // Accessor to get at the material system
@@ -88,11 +116,13 @@ inline IMaterialSystemInternal* MaterialSystem()
 	return g_pInternalMaterialSystem;
 }
 
+#ifndef SHADERAPI_GLOBAL_H
 inline IShaderUtil* ShaderUtil()
 {
 	extern IShaderUtil *g_pShaderUtil;
 	return g_pShaderUtil;
 }
+#endif
 
 extern IColorCorrectionSystem *g_pColorCorrectionSystem;
 inline IColorCorrectionSystem *ColorCorrectionSystem()

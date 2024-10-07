@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -20,9 +20,6 @@ CBaseBudgetPanel::CBaseBudgetPanel( vgui::Panel *pParent, const char *pElementNa
 	SetMouseInputEnabled( false );
 	SetVisible( true );
 
-	// set the scheme before any child control is created
-	vgui::HScheme scheme = vgui::scheme()->LoadSchemeFromFile("resource/SourceScheme.res", "Client");
-	SetScheme( scheme );
 
 	m_pBudgetHistoryPanel = NULL;
 	m_pBudgetBarGraphPanel = NULL;
@@ -281,7 +278,7 @@ void CBaseBudgetPanel::PerformLayout()
 	{
 		int labelWidth, labelHeight;
 		m_TimeLabels[i]->GetContentSize( labelWidth, labelHeight );
-		maxTimeLabelHeight = max( maxTimeLabelHeight, labelHeight );
+		maxTimeLabelHeight = MAX( maxTimeLabelHeight, labelHeight );
 	}
 
 	totalHeightMinusTimeLabels = totalHeight - maxTimeLabelHeight;
@@ -326,7 +323,7 @@ void CBaseBudgetPanel::PerformLayout()
 	{
 		int labelWidth, labelHeight;
 		m_TimeLabels[i]->GetContentSize( labelWidth, labelHeight );
-		x = maxLabelWidth + ( i * m_ConfigData.m_flTimeLabelInterval ) / fRange * ( totalWidth - maxLabelWidth );
+		int x = maxLabelWidth + ( i * m_ConfigData.m_flTimeLabelInterval ) / fRange * ( totalWidth - maxLabelWidth );
 		
 		m_TimeLabels[i]->SetPos( x - ( labelWidth * 0.5 ), totalHeight - labelHeight );
 		m_TimeLabels[i]->SetSize( labelWidth, labelHeight );
@@ -340,7 +337,7 @@ void CBaseBudgetPanel::PerformLayout()
 	{
 		int labelWidth, labelHeight;
 		m_HistoryLabels[i]->GetContentSize( labelWidth, labelHeight );
-		y = (fRange != 0) ? budgetHistoryHeight * m_ConfigData.m_HistoryLabelValues[i] / ( float )fRange : 0.0f;
+		float y = (fRange != 0) ? budgetHistoryHeight * m_ConfigData.m_HistoryLabelValues[i] / ( float )fRange : 0.0f;
 		int top = ( int )( budgetHistoryHeight - y - 1 - labelHeight * 0.5f );
 		m_HistoryLabels[i]->SetPos( totalWidth - maxFPSLabelWidth, top );
 		m_HistoryLabels[i]->SetSize( labelWidth, labelHeight );

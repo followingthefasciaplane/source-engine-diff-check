@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -11,10 +11,9 @@
 #include <winsock2.h> // INADDR_ANY defn
 #endif
 #include "cbenchmark.h"
-#include "tier0/vcrmode.h"
 #include "filesystem_engine.h"
 #include "sys.h"
-#include "KeyValues.h"
+#include "keyvalues.h"
 #include "sv_uploaddata.h"
 #include "FindSteamServers.h"
 #include "vstdlib/random.h"
@@ -125,7 +124,7 @@ void CBenchmarkResults::SetResultsFilename( const char *pFilename )
 //-----------------------------------------------------------------------------
 void CBenchmarkResults::Upload()
 {
-#ifndef SWDS
+#if !defined( DEDICATED )
 	if ( !m_szFilename[0] || !Steam3Client().SteamUtils() )
 		return;
 	uint32 cserIP = 0;

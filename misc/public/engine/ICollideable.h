@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -21,7 +21,7 @@ class QAngle;
 class CGameTrace;
 typedef CGameTrace trace_t;
 class IClientUnknown;
-
+class IPhysicsObject;
 
 abstract_class ICollideable
 {
@@ -32,10 +32,8 @@ public:
 	// These methods return the bounds of an OBB measured in "collision" space
 	// which can be retreived through the CollisionToWorldTransform or
 	// GetCollisionOrigin/GetCollisionAngles methods
-	virtual const Vector&	OBBMinsPreScaled() const = 0;
-	virtual const Vector&	OBBMaxsPreScaled() const = 0;
-	virtual const Vector&	OBBMins() const = 0;
-	virtual const Vector&	OBBMaxs() const = 0;
+	virtual const Vector&	OBBMins( ) const = 0;
+	virtual const Vector&	OBBMaxs( ) const = 0;
 
 	// Returns the bounds of a world-space box used when the collideable is being traced
 	// against as a trigger. It's only valid to call these methods if the solid flags
@@ -74,10 +72,11 @@ public:
 	// It may or may not be a tight-fitting box and its volume may suddenly change
 	virtual void			WorldSpaceSurroundingBounds( Vector *pVecMins, Vector *pVecMaxs ) = 0;
 
-	virtual bool			ShouldTouchTrigger( int triggerSolidFlags ) const = 0;
+	virtual uint			GetRequiredTriggerFlags() const = 0;
 
 	// returns NULL unless this collideable has specified FSOLID_ROOT_PARENT_ALIGNED
 	virtual const matrix3x4_t	*GetRootParentToWorldTransform() const = 0;
+	virtual IPhysicsObject	*GetVPhysicsObject() const = 0;
 };
 
 

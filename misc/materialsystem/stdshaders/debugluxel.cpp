@@ -6,7 +6,7 @@
 // $NoKeywords: $
 //===========================================================================//
 
-#include "shaderlib/CShader.h"
+#include "shaderlib/cshader.h"
 
 #include "debugluxel_ps20b.inc"
 #include "debugluxel_ps20.inc"
@@ -64,7 +64,7 @@ BEGIN_SHADER_FLAGS( DebugLuxels, "Help for DebugLuxels", SHADER_NOT_EDITABLE )
 		}
 		DYNAMIC_STATE
 		{
-			BindTexture( SHADER_SAMPLER0, BASETEXTURE, FRAME );
+			BindTexture( SHADER_SAMPLER0, TEXTURE_BINDFLAGS_NONE,  BASETEXTURE, FRAME );
 
 			int texCoordScaleX = 1, texCoordScaleY = 1;
 			if (!params[NOSCALE]->GetIntValue())

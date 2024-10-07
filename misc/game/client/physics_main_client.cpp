@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -269,7 +269,10 @@ void C_BaseEntity::SetCheckUntouch( bool check )
 	if ( check )
 	{
 		touchStamp++;
-		AddEFlags( EFL_CHECK_UNTOUCH );
+		if ( !IsEFlagSet( EFL_CHECK_UNTOUCH ) )
+		{
+			AddEFlags( EFL_CHECK_UNTOUCH );
+		}
 	}
 	else
 	{
@@ -296,7 +299,7 @@ extern ConVar think_limit;
 void C_BaseEntity::PhysicsDispatchThink( BASEPTR thinkFunc )
 {
 	float thinkLimit = think_limit.GetFloat();
-	float startTime = 0.0;
+	double startTime = 0.0;
 
 	/*
 	// This doesn't apply on the client, really
@@ -309,7 +312,7 @@ void C_BaseEntity::PhysicsDispatchThink( BASEPTR thinkFunc )
 
 	if ( thinkLimit )
 	{
-		startTime = engine->Time();
+		startTime = Plat_FloatTime();
 	}
 	
 	if ( thinkFunc )
@@ -320,7 +323,7 @@ void C_BaseEntity::PhysicsDispatchThink( BASEPTR thinkFunc )
 	if ( thinkLimit )
 	{
 		// calculate running time of the AI in milliseconds
-		float time = ( engine->Time() - startTime ) * 1000.0f;
+		float time = ( Plat_FloatTime() - startTime ) * 1000.0f;
 		if ( time > thinkLimit )
 		{
 #if 0

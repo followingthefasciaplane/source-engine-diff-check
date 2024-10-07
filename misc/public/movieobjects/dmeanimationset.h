@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -14,10 +14,39 @@
 #include "datamodel/dmattribute.h"
 #include "datamodel/dmattributevar.h"
 #include "movieobjects/dmephonememapping.h"
-#include "movieobjects/timeutils.h"
 #include "movieobjects/proceduralpresets.h"
+#include "movieobjects/dmecontrolgroup.h"
+#include "movieobjects/dmetransformcontrol.h"
+#include "tier1/utldict.h"
 
-class CDmeBookmark;
+class CDmeDag;
+class CDmeFilmClip;
+class CDmeTransform;
+class CDmeRig;
+
+
+// names of control value attributes and single-valued (non-animated) preset value attributes
+#define AS_VALUE_ATTR				"value"
+#define AS_VALUE_LEFT_ATTR			"leftValue"
+#define AS_VALUE_RIGHT_ATTR			"rightValue"
+#define AS_VALUE_POSITION_ATTR		"valuePosition"
+#define AS_VALUE_ORIENTATION_ATTR	"valueOrientation"
+
+// names of animated preset value attributes
+#define AS_VALUES_ATTR				"values"
+#define AS_VALUES_LEFT_ATTR			"leftValues"
+#define AS_VALUES_RIGHT_ATTR		"rightValues"
+#define AS_VALUES_POSITION_ATTR		"valuePositions"
+#define AS_VALUES_ORIENTATION_ATTR	"valueOrientations"
+
+// names of animated preset time attributes
+#define AS_TIMES_ATTR				"times"
+#define AS_TIMES_LEFT_ATTR			"leftTimes"
+#define AS_TIMES_RIGHT_ATTR			"rightTimes"
+#define AS_TIMES_POSITION_ATTR		"timePositions"
+#define AS_TIMES_ORIENTATION_ATTR	"timeOrientations"
+
+
 
 //-----------------------------------------------------------------------------
 // A preset is a list of values to be applied to named controls in the animation set
@@ -35,17 +64,12 @@ public:
 	void RemoveControlValue( const char *pControlName );
 	bool IsReadOnly();
 	void CopyControlValuesFrom( CDmePreset *pSource );
-
-	// See the enumeration above
-	void SetProceduralPresetType( int nType );
-	bool IsProcedural() const;
-	int GetProceduralPresetType() const;
+	bool IsAnimated();
 
 private:
 	int FindControlValueIndex( const char *pControlName );
 
 	CDmaElementArray< CDmElement > m_ControlValues;
-	CDmaVar< int > m_nProceduralType;
 };
 
 
@@ -54,39 +78,27 @@ class CDmeProceduralPresetSettings : public CDmElement
 	DEFINE_ELEMENT( CDmeProceduralPresetSettings, CDmElement );
 public:
 	
+	float	GetJitterScale( DmAttributeType_t attType ) const;
+	float	GetSmoothScale( DmAttributeType_t attType ) const;
+	float	GetSharpenScale( DmAttributeType_t attType ) const;
+	float	GetSoftenScale( DmAttributeType_t attType ) const;
+
 	CDmaVar< float > m_flJitterScale;
 	CDmaVar< float > m_flSmoothScale;
 	CDmaVar< float > m_flSharpenScale;
 	CDmaVar< float > m_flSoftenScale;
+
+	CDmaVar< float > m_flJitterScaleVector;
+	CDmaVar< float > m_flSmoothScaleVector;
+	CDmaVar< float > m_flSharpenScaleVector;
+	CDmaVar< float > m_flSoftenScaleVector;
 
 	CDmaVar< int > m_nJitterIterations;
 	CDmaVar< int > m_nSmoothIterations;
 	CDmaVar< int > m_nSharpenIterations;
 	CDmaVar< int > m_nSoftenIterations;
 
-	CDmaVar< int > m_nStaggerInterval;
-};
-
-//-----------------------------------------------------------------------------
-// A class used to copy preset values from one preset group to another
-//-----------------------------------------------------------------------------
-class CDmePresetRemap : public CDmElement
-{
-	DEFINE_ELEMENT( CDmePresetRemap, CDmElement );
-
-public:
-	CDmaString m_SourcePresetGroup;
-
-	const char *FindSourcePreset( const char *pDestPresetName );
-	int GetRemapCount();
-	const char *GetRemapSource( int i );
-	const char *GetRemapDest( int i );
-	void AddRemap( const char *pSourcePresetName, const char *pDestPresetName );
-	void RemoveAll();
-
-private:
-	CDmaStringArray m_SrcPresets;
-	CDmaStringArray m_DestPresets;
+	CDmaTime m_staggerInterval;
 };
 
 
@@ -104,13 +116,10 @@ public:
 	CDmaElementArray< CDmePreset > &GetPresets();			// raw access to the array
 	const CDmaElementArray< CDmePreset > &GetPresets() const;
 	CDmePreset *FindPreset( const char *pPresetName );
-	CDmePreset *FindOrAddPreset( const char *pPresetName, int nProceduralType = PROCEDURAL_PRESET_NOT );
+	CDmePreset *FindOrAddPreset( const char *pPresetName );
 	bool RemovePreset( CDmePreset *pPreset );
-	void MovePresetUp( CDmePreset *pPreset );
-	void MovePresetDown( CDmePreset *pPreset );
+	bool RemovePreset( const char *pPresetName );
 	void MovePresetInFrontOf( CDmePreset *pPreset, CDmePreset *pInFrontOf );
-	CDmePresetRemap *GetPresetRemap();
-	CDmePresetRemap *GetOrAddPresetRemap();
 
 	CDmaVar< bool > m_bIsVisible;
 	CDmaVar< bool > m_bIsReadOnly;
@@ -122,116 +131,209 @@ public:
 	bool ExportToVFE( const char *pFilename, CDmeAnimationSet *pAnimationSet = NULL, CDmeCombinationOperator *pComboOp = NULL ) const;
 
 private:
-	int FindPresetIndex( CDmePreset *pGroupName );
+	int FindPresetIndex( CDmePreset *pPreset );
+	int FindPresetIndex( const char *pPresetName );
 
 	CDmaElementArray< CDmePreset > m_Presets; // "presets"
 };
 
 
 //-----------------------------------------------------------------------------
-// The main controlbox for controlling animation 
+// The main controlbox for controlling animation for a single model
 //-----------------------------------------------------------------------------
 class CDmeAnimationSet : public CDmElement
 {
 	DEFINE_ELEMENT( CDmeAnimationSet, CDmElement );
 
 public:
-	CDmaElementArray< CDmElement > &GetControls();			// raw access to the array
-	CDmaElementArray< CDmElement > &GetSelectionGroups();	// raw access to the array
-	CDmaElementArray< CDmePresetGroup > &GetPresetGroups();	// raw access to the array
-	CDmaElementArray< CDmePhonemeMapping > &GetPhonemeMap();		// raw access to the array
-	CDmaElementArray< CDmeOperator > &GetOperators();		// raw access to the array
+	virtual void OnAttributeArrayElementAdded  ( CDmAttribute *pAttribute, int nFirstElem, int nLastElem );
+	virtual void OnAttributeArrayElementRemoved( CDmAttribute *pAttribute, int nFirstElem, int nLastElem );
+
+	CDmaElementArray< CDmElement > &GetControls();				// raw access to the array
+	CDmaElementArray< CDmePresetGroup > &GetPresetGroups();		// raw access to the array
+	CDmaElementArray< CDmePhonemeMapping > &GetPhonemeMap();	// raw access to the array
+	CDmaElementArray< CDmeOperator > &GetOperators();			// raw access to the array
 
 	void RestoreDefaultPhonemeMap();
-
 	CDmePhonemeMapping *FindMapping( const char *pRawPhoneme );
-	CDmElement *FindControl( const char *pControlName );
-	CDmElement *FindOrAddControl( const char *pControlName );
+
+	// Control methods
+	void		AddControl( CDmElement *pControl );
+	void		RemoveControl( CDmElement *pControl );
+	CDmElement *FindControl( const char *pControlName ) const;
+	CDmElement *FindOrAddControl( const char *pControlName, bool bTransformControl, bool bMustBeNew = false );
+	CDmElement *CreateNewControl( const char *pControlName, bool bTransformControl );
 
 	// Methods pertaining to preset groups
 	CDmePresetGroup *FindPresetGroup( const char *pGroupName );
 	CDmePresetGroup *FindOrAddPresetGroup( const char *pGroupName );
+	void AddPresetGroup( CDmePresetGroup *pPresetGroup );
 	bool RemovePresetGroup( CDmePresetGroup *pPresetGroup );
-	void MovePresetGroupUp( CDmePresetGroup *pPresetGroup );
-	void MovePresetGroupDown( CDmePresetGroup *pPresetGroup );
+	bool RemovePresetGroup( const char *pGroupName );
 	void MovePresetGroupInFrontOf( CDmePresetGroup *pPresetGroup, CDmePresetGroup *pInFrontOf );
 
-	CDmePreset *FindOrAddPreset( const char *pGroupName, const char *pPresetName, int nProceduralType = PROCEDURAL_PRESET_NOT );
+	CDmePreset *FindOrAddPreset( const char *pGroupName, const char *pPresetName );
 	bool RemovePreset( CDmePreset *pPreset );
+	bool RemovePreset( const char *pPresetName );
 
-	const CDmaElementArray< CDmeBookmark > &GetBookmarks() const;
-	CDmaElementArray< CDmeBookmark > &GetBookmarks();
 
-	CDmElement *FindSelectionGroup( const char *pSelectionGroupName );
-	CDmElement *FindOrAddSelectionGroup( const char *pSelectionGroupName );
+	// Get the root selection group
+	CDmeControlGroup *GetRootControlGroup() const;
+
+	// Find the control group with the specified name.
+	CDmeControlGroup *FindControlGroup( const char *pControlGroupName ) const;
+
+	// Find the control group with the specified name or add it if does not exist
+	CDmeControlGroup *FindOrAddControlGroup( CDmeControlGroup *pParentGroup, const char *pControlGroupName );
+
+	// Find the control with the specified name, remove it from the group it belongs to and destroy it
+	void RemoveControlFromGroups( char const *pchControlName, bool removeEmpty = false );
+
+	// Build a list of the root dag nodes of the animation set
+	void FindRootDagNodes( CUtlVector< CDmeDag* > &dagNodeList ) const;
+	
 
 	virtual void OnElementUnserialized();
 
+	void CollectDagNodes( CUtlVector< CDmeDag* > &dagNodeList ) const;
 	void CollectOperators( CUtlVector< DmElementHandle_t > &operators );
 	void AddOperator( CDmeOperator *pOperator );
 	void RemoveOperator( CDmeOperator *pOperator );
 
-	void EnsureProceduralPresets();
+	void UpdateTransformDefaults() const;
 
 private:
 	int FindPresetGroupIndex( CDmePresetGroup *pGroup );
 	int FindPresetGroupIndex( const char *pGroupName );
 
-	CDmaElementArray< CDmElement >			m_Controls;			// "controls"
-	CDmaElementArray< CDmElement >			m_SelectionGroups;	// "selectionGroups"
-	CDmaElementArray< CDmePresetGroup >		m_PresetGroups;		// "presetGroups"
-	CDmaElementArray< CDmePhonemeMapping >	m_PhonemeMap;		// "phonememap"
-	CDmaElementArray< CDmeOperator >		m_Operators;		// "operators"
-	CDmaElementArray< CDmeBookmark >		m_Bookmarks;		// "bookmarks"
+	CDmaElementArray< CDmElement >			m_Controls;				// "controls"
+	CDmaElementArray< CDmePresetGroup >		m_PresetGroups;			// "presetGroups"
+	CDmaElementArray< CDmePhonemeMapping >	m_PhonemeMap;			// "phonememap"
+	CDmaElementArray< CDmeOperator >		m_Operators;			// "operators"	
+	CDmaElement< CDmeControlGroup >			m_RootControlGroup;		// "rootControlGroup"
 
-	friend class CModelPresetGroupManager;
+	// Helper for searching for controls by name
+	CUtlDict< DmElementHandle_t, int >		m_ControlNameMap;
 };
+
+CDmeAnimationSet *FindAnimationSetForDag( CDmeDag *pDagNode );
+
+
+//-----------------------------------------------------------------------------
+// Utility class to migrate from traversing all animationsets within an animationsetgroup to a filmclip
+//-----------------------------------------------------------------------------
+class CAnimSetGroupAnimSetTraversal
+{
+public:
+	CAnimSetGroupAnimSetTraversal( CDmeFilmClip *pFilmClip ) : m_pFilmClip( pFilmClip ), m_nIndex( 0 ) {}
+	void Reset( CDmeFilmClip *pFilmClip ) { m_pFilmClip = pFilmClip; m_nIndex = 0; }
+
+	bool IsValid();
+	CDmeAnimationSet *Next();
+
+private:
+	CDmeFilmClip *m_pFilmClip;
+	int m_nIndex;
+};
+
+
+//-----------------------------------------------------------------------------
+// Utility class for finding the dependencies of a control with in the 
+// animation set.
+//-----------------------------------------------------------------------------
+class CAnimSetControlDependencyMap
+{
+	public:
+
+		// Add the controls of the specified animation set to the dependency map
+		void AddAnimationSet( const CDmeAnimationSet* pAnimSet );
+
+		// Get the list of controls which the specified control is dependent on.
+		const CUtlVector< const CDmElement * > *GetControlDepndencies( const CDmElement *pControl ) const;
+
+
+	private:
+
+
+		struct DependencyList_t
+		{
+			const CDmElement				*m_pElement;
+			CUtlVector< const CDmElement * > m_Dependencies;
+		};
+
+		DependencyList_t *FindDependencyList( const CDmElement* pElement );
+
+		CUtlVector< DependencyList_t >					m_DependencyData;
+
+};
+
+static const char DEFAULT_POSITION_ATTR[] = "defaultPosition";
+static const char DEFAULT_ORIENTATION_ATTR[] = "defaultOrientation";
+static const char DEFAULT_FLOAT_ATTR[] = "defaultValue";
+
+#define MULTI_CONTROL_FORMAT_STRING "multi_%s"
+
+typedef int ControlIndex_t;
+ControlIndex_t FindComboOpControlIndexForAnimSetControl( CDmeCombinationOperator *pComboOp, const char *pControlName, bool *pIsMulti = NULL );
+
+
+inline bool IsMonoControl( const CDmElement *pControl )
+{
+//	static CUtlSymbolLarge sym = g_pDataModel->GetSymbol( "value" );
+	return pControl->HasAttribute( "value" );
+}
+
+inline bool IsStereoControl( const CDmElement *pControl )
+{
+//	static CUtlSymbolLarge sym = g_pDataModel->GetSymbol( "rightValue" );
+	return pControl->HasAttribute( "rightValue" );
+}
+
+inline bool IsTransformControl( const CDmElement *pControl )
+{
+	return pControl->IsA( CDmeTransformControl::GetStaticTypeSymbol() );
+}
 
 
 //-----------------------------------------------------------------------------
 // Utility methods to convert between L/R and V/B
 //-----------------------------------------------------------------------------
-inline void ValueBalanceToLeftRight( float *pLeft, float *pRight, float flValue, float flBalance )
+inline void ValueBalanceToLeftRight( float *pLeft, float *pRight, float flValue, float flBalance, float flDefaultValue )
 {
-	*pLeft = ( flBalance <= 0.5f ) ? 1.0f : ( ( 1.0f - flBalance ) / 0.5f );
-	*pLeft *= flValue;
-	*pRight = ( flBalance >= 0.5f ) ? 1.0f : ( flBalance / 0.5f );
-	*pRight *= flValue;
-}
-
-inline void LeftRightToValueBalance( float *pValue, float *pBalance, float flLeft, float flRight, float flDefaultBalance = 0.5f )
-{
-	*pValue = max( flRight, flLeft );
-	if ( *pValue <= 1e-6 )
-	{
-		// Leave target balance at input value if target == 0 and on the dest side of blending
-		*pBalance = flDefaultBalance;
-		return;
-	}
-
-	if ( flRight < flLeft )
-	{
-		*pBalance = 0.5f * flRight / flLeft;
-	}
-	else
-	{
-		*pBalance = 1.0f - ( 0.5f * flLeft / flRight );
-	}
+	*pLeft  = ( flBalance <= 0.5f ) ? flValue : ( ( 1.0f - flBalance ) / 0.5f ) * ( flValue - flDefaultValue ) + flDefaultValue;
+	*pRight = ( flBalance >= 0.5f ) ? flValue : (          flBalance   / 0.5f ) * ( flValue - flDefaultValue ) + flDefaultValue;
 }
 
 
 //-----------------------------------------------------------------------------
-// A cache of preset groups to be associated with specific models
+// CDmePresetGroupInfo - container for shared preset groups
 //-----------------------------------------------------------------------------
-abstract_class IModelPresetGroupManager
+
+class CDmePresetGroupInfo : public CDmElement
 {
+	DEFINE_ELEMENT( CDmePresetGroupInfo, CDmElement );
+
 public:
-	virtual void AssociatePresetsWithFile( DmFileId_t fileId ) = 0;
-	virtual void ApplyModelPresets( const char *pModelName, CDmeAnimationSet *pAnimationSet ) = 0;
+	void LoadPresetGroups();
+
+	const char *GetFilenameBase() const { return m_filenameBase.Get(); }
+	void SetFilenameBase( const char *pFilenameBase ) { m_filenameBase = pFilenameBase; }
+
+	int GetPresetGroupCount() const { return m_presetGroups.Count(); }
+	CDmePresetGroup *GetPresetGroup( int i ) { return m_presetGroups[ i ]; }
+	int AddPresetGroup( CDmePresetGroup *pPresetGroup ) { return m_presetGroups.AddToTail( pPresetGroup ); }
+
+	static void FilenameBaseForModelName( const char *pModelName, char *pFileNameBase, int nFileNameBaseLen );
+	static CDmePresetGroupInfo *FindPresetGroupInfo( const char *pFilenameBase, CDmrElementArray< CDmePresetGroupInfo > &presetGroupInfos );
+	static CDmePresetGroupInfo *FindOrCreatePresetGroupInfo( const char *pFilenameBase, CDmrElementArray< CDmePresetGroupInfo > &presetGroupInfos );
+	static CDmePresetGroupInfo *CreatePresetGroupInfo( const char *pFilenameBase, DmFileId_t fileid );
+
+	static void LoadPresetGroups( const char *pFilenameBase, CDmaElementArray< CDmePresetGroup > &presetGroups );
+
+protected:
+	CDmaString m_filenameBase; // "filenameBase"
+	CDmaElementArray< CDmePresetGroup > m_presetGroups; // "presetGroups"
 };
-
-
-extern IModelPresetGroupManager *g_pModelPresetGroupMgr;
 
 
 #endif // DMEANIMATIONSET_H

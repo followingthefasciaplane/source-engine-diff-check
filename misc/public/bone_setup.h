@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -47,20 +47,6 @@ public:
 	}
 };
 
-class CBoneSetup;
-class IBoneSetup
-{
-public:
-	IBoneSetup( const CStudioHdr *pStudioHdr, int boneMask, const float poseParameter[], IPoseDebugger *pPoseDebugger = NULL );
-	~IBoneSetup( void );
-	void InitPose( Vector pos[], Quaternion[] );
-	void AccumulatePose( Vector pos[], Quaternion q[], int sequence, float cycle, float flWeight, float flTime, CIKContext *pIKContext );
-	void CalcAutoplaySequences(	Vector pos[], Quaternion q[], float flRealTime, CIKContext *pIKContext );
-	void CalcBoneAdj( Vector pos[], Quaternion q[], const float controllers[] );
-	CStudioHdr *GetStudioHdr();
-private:
-	CBoneSetup *m_pBoneSetup;
-};
 
 //-----------------------------------------------------------------------------
 // Purpose: blends together all the bones from two p:q lists
@@ -70,15 +56,33 @@ private:
 //-----------------------------------------------------------------------------
 void SlerpBones( 
 	const CStudioHdr *pStudioHdr,
-	Quaternion q1[MAXSTUDIOBONES], 
-	Vector pos1[MAXSTUDIOBONES], 
+	BoneQuaternion q1[MAXSTUDIOBONES], 
+	BoneVector pos1[MAXSTUDIOBONES], 
 	mstudioseqdesc_t &seqdesc, // source of q2 and pos2
 	int sequence, 
-	const Quaternion q2[MAXSTUDIOBONES], 
-	const Vector pos2[MAXSTUDIOBONES], 
+	const BoneQuaternionAligned q2[MAXSTUDIOBONES], 
+	const BoneVector pos2[MAXSTUDIOBONES], 
 	float s,
 	int boneMask
 	);
+
+
+class CBoneSetup;
+class IBoneSetup
+{
+public:
+	IBoneSetup( const CStudioHdr *pStudioHdr, int boneMask, const float poseParameter[], IPoseDebugger *pPoseDebugger = NULL );
+	~IBoneSetup( void );
+	void InitPose( BoneVector pos[], BoneQuaternionAligned q[] );
+	void AccumulatePose( BoneVector pos[], BoneQuaternion q[], int sequence, float cycle, float flWeight, float flTime, CIKContext *pIKContext );
+	void CalcAutoplaySequences(	BoneVector pos[], BoneQuaternion q[], float flRealTime, CIKContext *pIKContext );
+	void CalcBoneAdj( BoneVector pos[], BoneQuaternion q[], const float controllers[] );
+
+	CStudioHdr *GetStudioHdr();
+
+private:
+	CBoneSetup *m_pBoneSetup;
+};
 
 // Given two samples of a bone separated in time by dt, 
 // compute the velocity and angular velocity of that bone
@@ -99,19 +103,19 @@ void SetupSingleBoneMatrix(
 // Purpose: build boneToWorld transforms for a specific bone
 void BuildBoneChain(
 	const CStudioHdr *pStudioHdr,
-	const matrix3x4_t &rootxform,
-	const Vector pos[], 
-	const Quaternion q[], 
+	const matrix3x4a_t &rootxform,
+	const BoneVector pos[], 
+	const BoneQuaternion q[], 
 	int	iBone,
-	matrix3x4_t *pBoneToWorld );
+	matrix3x4a_t *pBoneToWorld );
 
 void BuildBoneChain(
 	const CStudioHdr *pStudioHdr,
-	const matrix3x4_t &rootxform,
-	const Vector pos[], 
-	const Quaternion q[], 
+	const matrix3x4a_t &rootxform,
+	const BoneVector pos[], 
+	const BoneQuaternion q[], 
 	int	iBone,
-	matrix3x4_t *pBoneToWorld,
+	matrix3x4a_t *pBoneToWorld,
 	CBoneBitList &boneComputed );
 
 
@@ -177,7 +181,7 @@ public:
 private:
 	// internally latched footset, position
 	struct x1 {
-		// matrix3x4_t		worldTarget;
+		// matrix3x4a_t		worldTarget;
 		bool		bNeedsLatch;
 		bool		bHasLatch;
 		float		influence;
@@ -228,6 +232,7 @@ struct ikcontextikrule_t
 	float		radius;
 	float		floor;
 	Vector		pos;
+	float		pad1;
 	Quaternion	q;
 
 	float		start;	// beginning of influence
@@ -247,7 +252,9 @@ struct ikcontextikrule_t
 	char		*szLabel;
 
 	Vector		kneeDir;
+	float		pad2;
 	Vector		kneePos;
+	float		pad3;
 
 	ikcontextikrule_t() {}
 
@@ -257,11 +264,11 @@ private:
 };
 
 
-void Studio_AlignIKMatrix( matrix3x4_t &mMat, const Vector &vAlignTo );
+void Studio_AlignIKMatrix( matrix3x4a_t &mMat, const Vector &vAlignTo );
 
-bool Studio_SolveIK( int iThigh, int iKnee, int iFoot, Vector &targetFoot, matrix3x4_t* pBoneToWorld );
+bool Studio_SolveIK( int iThigh, int iKnee, int iFoot, Vector &targetFoot, matrix3x4a_t* pBoneToWorld );
 
-bool Studio_SolveIK( int iThigh, int iKnee, int iFoot, Vector &targetFoot, Vector &targetKneePos, Vector &targetKneeDir, matrix3x4_t* pBoneToWorld );
+bool Studio_SolveIK( int iThigh, int iKnee, int iFoot, Vector &targetFoot, Vector &targetKneePos, Vector &targetKneeDir, matrix3x4a_t* pBoneToWorld );
 
 
 
@@ -272,35 +279,44 @@ public:
 	void Init( const CStudioHdr *pStudioHdr, const QAngle &angles, const Vector &pos, float flTime, int iFramecounter, int boneMask );
 	void AddDependencies(  mstudioseqdesc_t &seqdesc, int iSequence, float flCycle, const float poseParameters[], float flWeight = 1.0f );
 
+#if defined( _PS3 )
+	void AddAllDependencies_PS3( ikcontextikrule_t *ikRules, int numRules );
+#endif
+
 	void ClearTargets( void );
-	void UpdateTargets( Vector pos[], Quaternion q[], matrix3x4_t boneToWorld[], CBoneBitList &boneComputed );
+	void UpdateTargets( BoneVector pos[], BoneQuaternion q[], matrix3x4a_t boneToWorld[], CBoneBitList &boneComputed );
 	void AutoIKRelease( void );
-	void SolveDependencies( Vector pos[], Quaternion q[], matrix3x4_t boneToWorld[], CBoneBitList &boneComputed );
+	void SolveDependencies( BoneVector pos[], BoneQuaternion q[], matrix3x4a_t boneToWorld[], CBoneBitList &boneComputed );
 
-	void AddAutoplayLocks( Vector pos[], Quaternion q[] );
-	void SolveAutoplayLocks( Vector pos[], Quaternion q[] );
+	void AddAutoplayLocks( BoneVector pos[], BoneQuaternion q[] );
+	void SolveAutoplayLocks( BoneVector pos[], BoneQuaternion q[] );
 
-	void AddSequenceLocks( mstudioseqdesc_t &SeqDesc, Vector pos[], Quaternion q[] );
-	void SolveSequenceLocks( mstudioseqdesc_t &SeqDesc, Vector pos[], 	Quaternion q[] );
+	void AddSequenceLocks( mstudioseqdesc_t &SeqDesc, BoneVector pos[], BoneQuaternion q[] );
+	void SolveSequenceLocks( mstudioseqdesc_t &SeqDesc, BoneVector pos[], 	BoneQuaternion q[] );
 	
-	void AddAllLocks( Vector pos[], Quaternion q[] );
-	void SolveAllLocks( Vector pos[], Quaternion q[] );
+	void AddAllLocks( BoneVector pos[], BoneQuaternion q[] );
+	void SolveAllLocks( BoneVector pos[], BoneQuaternion q[] );
 
-	void SolveLock( const mstudioiklock_t *plock, int i, Vector pos[], Quaternion q[], matrix3x4_t boneToWorld[], CBoneBitList &boneComputed );
+	void SolveLock( const mstudioiklock_t *plock, int i, BoneVector pos[], BoneQuaternion q[], matrix3x4a_t boneToWorld[], CBoneBitList &boneComputed );
 
 	CUtlVectorFixed< CIKTarget, 12 >	m_target;
 
+	void CopyTo( CIKContext* pOther, const unsigned short * iRemapping );
+
+	void BuildBoneChain( const BoneVector pos[], const BoneQuaternion q[], int iBone, matrix3x4a_t *pBoneToWorld, CBoneBitList &boneComputed );
+
+	const int GetBoneMask( void ) { return m_boneMask; }
 private:
 
 	CStudioHdr const *m_pStudioHdr;
 
 	bool Estimate( int iSequence, float flCycle, int iTarget, const float poseParameter[], float flWeight = 1.0f ); 
-	void BuildBoneChain( const Vector pos[], const Quaternion q[], int iBone, matrix3x4_t *pBoneToWorld, CBoneBitList &boneComputed );
+	
 
 	// virtual IK rules, filtered and combined from each sequence
 	CUtlVector< CUtlVector< ikcontextikrule_t > > m_ikChainRule;
 	CUtlVector< ikcontextikrule_t > m_ikLock;
-	matrix3x4_t m_rootxform;
+	matrix3x4a_t m_rootxform;
 
 	int m_iFramecounter;
 	float m_flTime;
@@ -311,6 +327,7 @@ private:
 //-----------------------------------------------------------------------------
 // Purpose: 
 //-----------------------------------------------------------------------------
+
 
 // replaces the bonetoworld transforms for all bones that are procedural
 bool CalcProceduralBone(
@@ -323,11 +340,11 @@ void Studio_BuildMatrices(
 	const CStudioHdr *pStudioHdr,
 	const QAngle& angles, 
 	const Vector& origin, 
-	const Vector pos[],
-	const Quaternion q[],
+	const BoneVector pos[],
+	const BoneQuaternion q[],
 	int iBone,
 	float flScale,
-	matrix3x4_t bonetoworld[MAXSTUDIOBONES],
+	matrix3x4a_t bonetoworld[MAXSTUDIOBONES],
 	int boneMask
 	);
 
@@ -353,7 +370,7 @@ float Studio_GetPoseParameter( const CStudioHdr *pStudioHdr, int iParameter, flo
 float Studio_SetPoseParameter( const CStudioHdr *pStudioHdr, int iParameter, float flValue, float &ctlValue );
 
 // converts a global 0..1 pose parameter into the local sequences blending value
-void Studio_LocalPoseParameter( const CStudioHdr *pStudioHdr, const float poseParameter[], mstudioseqdesc_t &seqdesc, int iSequence, int iLocalIndex, float &flSetting, int &index );
+int Studio_LocalPoseParameter( const CStudioHdr *pStudioHdr, const float poseParameter[], mstudioseqdesc_t &seqdesc, int iSequence, int iLocalIndex, float &flSetting );
 
 void Studio_SeqAnims( const CStudioHdr *pStudioHdr, mstudioseqdesc_t &seqdesc, int iSequence, const float poseParameter[], mstudioanimdesc_t *panim[4], float *weight );
 int Studio_MaxFrame( const CStudioHdr *pStudioHdr, int iSequence, const float poseParameter[] );
@@ -361,6 +378,7 @@ float Studio_FPS( const CStudioHdr *pStudioHdr, int iSequence, const float poseP
 float Studio_CPS( const CStudioHdr *pStudioHdr, mstudioseqdesc_t &seqdesc, int iSequence, const float poseParameter[] );
 float Studio_Duration( const CStudioHdr *pStudioHdr, int iSequence, const float poseParameter[] );
 void Studio_MovementRate( const CStudioHdr *pStudioHdr, int iSequence, const float poseParameter[], Vector *pVec );
+float Studio_SeqMovementAndDuration( const CStudioHdr *pStudioHdr, int iSequence, float flCycleFrom, float flCycleTo, const float poseParameter[], Vector &deltaPos );
 
 // void Studio_Movement( const CStudioHdr *pStudioHdr, int iSequence, const float poseParameter[], Vector *pVec );
 
@@ -383,7 +401,7 @@ FORWARD_DECLARE_HANDLE( memhandle_t );
 struct bonecacheparams_t
 {
 	CStudioHdr		*pStudioHdr;
-	matrix3x4_t		*pBoneToWorld;
+	matrix3x4a_t	*pBoneToWorld;
 	float			curtime;
 	int				boneMask;
 };
@@ -408,9 +426,9 @@ public:
 	// was constructor, but placement new is messy wrt memdebug - so cast & init instead
 	void			Init( const bonecacheparams_t &params, unsigned int size, short *pStudioToCached, short *pCachedToStudio, int cachedBoneCount );
 	
-	void			UpdateBones( const matrix3x4_t *pBoneToWorld, int numbones, float curtime );
-	matrix3x4_t		*GetCachedBone( int studioIndex );
-	void			ReadCachedBones( matrix3x4_t *pBoneToWorld );
+	void			UpdateBones( const matrix3x4a_t *pBoneToWorld, int numbones, float curtime );
+	matrix3x4a_t	*GetCachedBone( int studioIndex );
+	void			ReadCachedBones( matrix3x4a_t *pBoneToWorld );
 	void			ReadCachedBonePointers( matrix3x4_t **bones, int numbones );
 
 	bool			IsValid( float curtime, float dt = 0.1f );
@@ -420,7 +438,7 @@ public:
 	int				m_boneMask;
 
 private:
-	matrix3x4_t		*BoneArray();
+	matrix3x4a_t	*BoneArray();
 	short			*StudioToCached();
 	short			*CachedToStudio();
 
@@ -431,13 +449,22 @@ private:
 	unsigned short	m_boneOutOffset;
 };
 
-CBoneCache *Studio_GetBoneCache( memhandle_t cacheHandle );
+void Studio_LockBoneCache();
+void Studio_UnlockBoneCache();
+
+CBoneCache *Studio_GetBoneCache( memhandle_t cacheHandle, bool bLock = false );
+void Studio_ReleaseBoneCache( memhandle_t cacheHandle );
 memhandle_t Studio_CreateBoneCache( bonecacheparams_t &params );
 void Studio_DestroyBoneCache( memhandle_t cacheHandle );
-void Studio_InvalidateBoneCache( memhandle_t cacheHandle );
+void Studio_InvalidateBoneCacheIfNotMatching( memhandle_t cacheHandle, float flTimeValid );
 
 // Given a ray, trace for an intersection with this studiomodel.  Get the array of bones from StudioSetupHitboxBones
 bool TraceToStudio( class IPhysicsSurfaceProps *pProps, const Ray_t& ray, CStudioHdr *pStudioHdr, mstudiohitboxset_t *set, matrix3x4_t **hitboxbones, int fContentsMask, const Vector &vecOrigin, float flScale, trace_t &trace );
+// Given a ray, trace for an intersection with this studiomodel, bullets will hit bodyparts that result in higher damage
+bool TraceToStudioCsgoHitgroupsPriority( class IPhysicsSurfaceProps *pProps, const Ray_t& ray, CStudioHdr *pStudioHdr, mstudiohitboxset_t *set, matrix3x4_t **hitboxbones, int fContentsMask, const Vector &vecOrigin, float flScale, trace_t &trace );
+// TERROR: TraceToStudio variant that prioritizes hitgroups, so bullets can pass through arms and chest to hit the head, for instance
+bool TraceToStudioGrouped( IPhysicsSurfaceProps *pProps, const Ray_t& ray, CStudioHdr *pStudioHdr, mstudiohitboxset_t *set, 
+						  matrix3x4_t **hitboxbones, int fContentsMask, trace_t &tr, const CUtlVector< int > &sortedHitgroups );
 
 void QuaternionSM( float s, const Quaternion &p, const Quaternion &q, Quaternion &qt );
 void QuaternionMA( const Quaternion &p, float s, const Quaternion &q, Quaternion &qt );
@@ -445,5 +472,20 @@ void QuaternionMA( const Quaternion &p, float s, const Quaternion &q, Quaternion
 bool Studio_PrefetchSequence( const CStudioHdr *pStudioHdr, int iSequence );
 
 void Studio_RunBoneFlexDrivers( float *pFlexController, const CStudioHdr *pStudioHdr, const Vector *pPositions, const matrix3x4_t *pBoneToWorld, const matrix3x4_t &mRootToWorld );
+
+//-----------------------------------------------------------------------------
+// Computes a number of twist bones given a parent/child pair
+// pqTwists, pflWeights, pqTwistBinds must all have at least nCount elements 
+//-----------------------------------------------------------------------------
+void ComputeTwistBones(
+	Quaternion *pqTwists,
+	int nCount,
+	bool bInverse,
+	const Vector &vUp,
+	const Quaternion &qParent,
+	const matrix3x4_t &mChild,
+	const Quaternion &qBaseInv,
+	const float *pflWeights,
+	const Quaternion *pqTwistBinds );
 
 #endif // BONE_SETUP_H

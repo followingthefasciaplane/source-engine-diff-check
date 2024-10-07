@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Contains entities for implementing/changing game rules dynamically within each BSP.
 //
@@ -12,34 +12,22 @@
 #include "entitylist.h"
 #include "ai_hull.h"
 #include "entityoutput.h"
+#if defined( CSTRIKE15 )
+#include "weapon_csbase.h"
+#include "cs_weapon_parse.h"
+#include "cs_shareddefs.h"
+#include "cs_gamerules.h"
+#include "cs_player.h"
+#endif
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
-
-class CRuleEntity : public CBaseEntity
-{
-public:
-	DECLARE_CLASS( CRuleEntity, CBaseEntity );
-
-	void	Spawn( void );
-
-	DECLARE_DATADESC();
-
-	void	SetMaster( string_t iszMaster ) { m_iszMaster = iszMaster; }
-
-protected:
-	bool	CanFireForActivator( CBaseEntity *pActivator );
-
-private:
-	string_t	m_iszMaster;
-};
 
 BEGIN_DATADESC( CRuleEntity )
 
 	DEFINE_KEYFIELD( m_iszMaster, FIELD_STRING, "master" ),
 
 END_DATADESC()
-
 
 
 void CRuleEntity::Spawn( void )
@@ -63,18 +51,7 @@ bool CRuleEntity::CanFireForActivator( CBaseEntity *pActivator )
 	return true;
 }
 
-// 
-// CRulePointEntity -- base class for all rule "point" entities (not brushes)
-//
-class CRulePointEntity : public CRuleEntity
-{
-public:
-	DECLARE_DATADESC();
-	DECLARE_CLASS( CRulePointEntity, CRuleEntity );
 
-	int		m_Score;
-	void		Spawn( void );
-};
 
 //---------------------------------------------------------
 // Save/Restore
@@ -139,6 +116,10 @@ public:
 	inline	void	SetPoints( int points ) { m_Score = points; }
 
 	void InputApplyScore( inputdata_t &inputdata );
+#if defined( CSTRIKE15 )
+	void InputAddScoreTerrorist( inputdata_t &inputdata );
+	void InputAddScoreCT( inputdata_t &inputdata );
+#endif
 
 private:
 };
@@ -148,6 +129,8 @@ LINK_ENTITY_TO_CLASS( game_score, CGameScore );
 BEGIN_DATADESC( CGameScore )
 	// Inputs
 	DEFINE_INPUTFUNC( FIELD_VOID, "ApplyScore", InputApplyScore ),
+	DEFINE_INPUTFUNC( FIELD_VOID, "AddScoreTerrorist", InputAddScoreTerrorist ),
+	DEFINE_INPUTFUNC( FIELD_VOID, "AddScoreCT", InputAddScoreCT ),
 END_DATADESC()
 
 void CGameScore::Spawn( void )
@@ -194,6 +177,27 @@ void CGameScore::InputApplyScore( inputdata_t &inputdata )
 	}
 }
 
+#if defined( CSTRIKE15 )
+void CGameScore::InputAddScoreTerrorist( inputdata_t &inputdata )
+{
+	CCSMatch* match = CSGameRules()->GetMatch();
+	if ( match )
+	{
+		match->AddTerroristScore( Points() );
+	}
+}
+
+void CGameScore::InputAddScoreCT( inputdata_t &inputdata )
+{
+	CCSMatch* match = CSGameRules()->GetMatch();
+	if ( match )
+	{
+		match->AddCTScore( Points() );
+	}
+}
+
+#endif
+
 void CGameScore::Use( CBaseEntity *pActivator, CBaseEntity *pCaller, USE_TYPE useType, float value )
 {
 	if ( !CanFireForActivator( pActivator ) )
@@ -213,6 +217,189 @@ void CGameScore::Use( CBaseEntity *pActivator, CBaseEntity *pCaller, USE_TYPE us
 	}
 }
 
+BEGIN_ENT_SCRIPTDESC( CGameCoopMissionManager, CBaseEntity, "game_coopmission_manager" )
+DEFINE_SCRIPTFUNC_NAMED( GetWaveNumber, "GetWaveNumber", "Get the number of waves the players have completed" )
+END_SCRIPTDESC()
+
+LINK_ENTITY_TO_CLASS( game_coopmission_manager, CGameCoopMissionManager );
+
+
+BEGIN_DATADESC( CGameCoopMissionManager )
+// inputs
+//DEFINE_INPUTFUNC( FIELD_FLOAT, "EndRound_Draw", InputEndRound_Draw ),
+DEFINE_OUTPUT( m_OnWaveCompleted, "OnWaveCompleted" ),
+DEFINE_OUTPUT( m_OnRoundReset, "OnRoundReset" ),
+DEFINE_OUTPUT( m_OnSpawnsReset, "OnSpawnsReset" ),
+DEFINE_OUTPUT( m_OnRoundLostKilled, "OnRoundLostKilled" ),
+DEFINE_OUTPUT( m_OnRoundLostTime, "OnRoundLostTime" ),
+DEFINE_OUTPUT( m_OnMissionCompleted, "OnMissionCompleted" ),
+END_DATADESC()
+
+void CGameCoopMissionManager::Spawn( void )
+{
+	BaseClass::Spawn();
+}
+
+
+bool CGameCoopMissionManager::KeyValue( const char *szKeyName, const char *szValue )
+{
+	return BaseClass::KeyValue( szKeyName, szValue );
+}
+
+int	CGameCoopMissionManager::GetWaveNumber( void )
+{
+	if ( !CSGameRules() )
+		return 0;
+
+	return CSGameRules()->GetCoopWaveNumber();
+}
+
+void CGameCoopMissionManager::SetWaveCompleted( void )
+{
+	// send output
+	m_OnWaveCompleted.FireOutput( NULL, NULL );
+}
+
+void CGameCoopMissionManager::SetRoundReset( void )
+{
+	// send output
+	m_OnRoundReset.FireOutput( NULL, NULL );
+}
+
+void CGameCoopMissionManager::SetSpawnsReset( void )
+{
+	// send output
+	m_OnSpawnsReset.FireOutput( NULL, NULL );
+}
+
+void CGameCoopMissionManager::SetRoundLostKilled( void )
+{
+	// send output
+	m_OnRoundLostKilled.FireOutput( NULL, NULL );
+}
+
+void CGameCoopMissionManager::SetRoundLostTime( void )
+{
+	// send output
+	m_OnRoundLostTime.FireOutput( NULL, NULL );
+}
+
+void CGameCoopMissionManager::SetMissionCompleted( void )
+{
+	// send output
+	m_OnMissionCompleted.FireOutput( NULL, NULL );
+}
+
+// void CGameCoopMissionManager::InputApplyScore( inputdata_t &inputdata )
+// {
+// 	CBaseEntity *pActivator = inputdata.pActivator;
+// 
+// 	if ( pActivator == NULL )
+// 		return;
+// 
+// 	if ( CanFireForActivator( pActivator ) == false )
+// 		return;
+// 
+// 	// Only players can use this
+// 	if ( pActivator->IsPlayer() )
+// 	{
+// 		if ( AwardToTeam() )
+// 		{
+// 			pActivator->AddPointsToTeam( Points(), AllowNegativeScore() );
+// 		}
+// 		else
+// 		{
+// 			pActivator->AddPoints( Points(), AllowNegativeScore() );
+// 		}
+// 	}
+// }
+
+
+#if defined( CSTRIKE15 )
+// CGameMoney / game_money	-- award money to player / team 
+
+class CGameMoney : public CRulePointEntity
+{
+public:
+	DECLARE_CLASS( CGameMoney, CRulePointEntity );
+	DECLARE_DATADESC();
+
+	void	Spawn( void );
+	inline	int		Money( void ) { return m_nMoney; }
+
+	void InputSetMoneyAmount( inputdata_t &inputdata );
+
+	void InputSetTeamMoneyTerrorist( inputdata_t &inputdata );
+	void InputSetTeamMoneyCT( inputdata_t &inputdata );
+
+	void InputAddTeamMoneyTerrorist( inputdata_t &inputdata );
+	void InputAddTeamMoneyCT( inputdata_t &inputdata );
+
+	void InputAddMoneyPlayer( inputdata_t &inputdata );
+
+private:
+	int m_nMoney;
+	string_t		m_strAwardText;
+};
+
+LINK_ENTITY_TO_CLASS( game_money, CGameMoney );
+
+BEGIN_DATADESC( CGameMoney )
+	DEFINE_KEYFIELD( m_nMoney, FIELD_INTEGER, "Money" ),
+	DEFINE_KEYFIELD( m_strAwardText, FIELD_STRING, "AwardText" ),
+	// Inputs
+	DEFINE_INPUTFUNC( FIELD_INTEGER, "SetMoneyAmount", InputSetMoneyAmount ),
+	DEFINE_INPUTFUNC( FIELD_VOID, "AddTeamMoneyTerrorist", InputAddTeamMoneyTerrorist ),
+	DEFINE_INPUTFUNC( FIELD_VOID, "AddTeamMoneyCT", InputAddTeamMoneyCT ),
+	DEFINE_INPUTFUNC( FIELD_VOID, "AddMoneyPlayer", InputAddMoneyPlayer ),
+END_DATADESC()
+
+void CGameMoney::Spawn( void )
+{
+	BaseClass::Spawn();
+}
+
+void CGameMoney::InputSetMoneyAmount( inputdata_t &inputdata )
+{
+	int nMoney = inputdata.value.Int();
+
+	m_nMoney = nMoney;
+}
+
+void CGameMoney::InputAddMoneyPlayer( inputdata_t &inputdata )
+{
+	CBaseEntity *pActivator = inputdata.pActivator;
+
+	if ( pActivator == NULL )
+		return;
+
+// 	if ( CanFireForActivator( pActivator ) == false )
+// 		return;
+
+	// Only players can use this
+	if ( pActivator->IsPlayer() )
+	{
+		int nMoney = clamp( m_nMoney, 0, CSGameRules()->GetMaxMoney() );
+		CCSPlayer *pPlayer = dynamic_cast<CCSPlayer*>( inputdata.pActivator );	
+		pPlayer->AddAccount( nMoney, true, false );
+	}
+}
+
+void CGameMoney::InputAddTeamMoneyTerrorist( inputdata_t &inputdata )
+{
+	int nMoney = clamp( m_nMoney, 0, CSGameRules()->GetMaxMoney() );
+
+	CSGameRules()->AddTeamAccount( TEAM_TERRORIST, TeamCashAward::CUSTOM_AWARD, nMoney, STRING(m_strAwardText) );
+}
+
+void CGameMoney::InputAddTeamMoneyCT( inputdata_t &inputdata )
+{
+	int nMoney = clamp( m_nMoney, 0, CSGameRules()->GetMaxMoney() );
+
+	CSGameRules()->AddTeamAccount( TEAM_CT, TeamCashAward::CUSTOM_AWARD, nMoney, STRING(m_strAwardText) );
+}
+
+#endif
 
 // CGameEnd / game_end	-- Ends the game in MP
 
@@ -251,6 +438,73 @@ void CGameEnd::Use( CBaseEntity *pActivator, CBaseEntity *pCaller, USE_TYPE useT
 	g_pGameRules->EndMultiplayerGame();
 }
 
+#if defined( CSTRIKE15 )
+// CGameEnd / game_round_end	-- Ends the round in MP
+
+class CGameRoundEnd : public CRulePointEntity , public CGameEventListener
+{
+	DECLARE_CLASS( CGameRoundEnd, CRulePointEntity );
+
+public:
+	DECLARE_DATADESC();
+
+	CGameRoundEnd();
+	virtual void FireGameEvent( IGameEvent *event );
+
+	void	InputEndRound_Draw( inputdata_t &inputdata );
+	void	InputEndRound_TerroristsWin( inputdata_t &inputdata );
+	void	InputEndRound_CounterTerroristsWin( inputdata_t &inputdata );
+private:
+	COutputEvent	m_OnRoundEnded;
+	//m_OnForcedInteractionFinished.FireOutput( this, this );
+};
+
+BEGIN_DATADESC( CGameRoundEnd )
+
+	// inputs
+	DEFINE_INPUTFUNC( FIELD_FLOAT, "EndRound_Draw", InputEndRound_Draw ),
+	DEFINE_INPUTFUNC( FIELD_FLOAT, "EndRound_TerroristsWin", InputEndRound_TerroristsWin ),
+	DEFINE_INPUTFUNC( FIELD_FLOAT, "EndRound_CounterTerroristsWin", InputEndRound_CounterTerroristsWin ),
+
+	DEFINE_OUTPUT( m_OnRoundEnded,	"OnRoundEnded" ),
+
+END_DATADESC()
+
+LINK_ENTITY_TO_CLASS( game_round_end, CGameRoundEnd );
+
+CGameRoundEnd::CGameRoundEnd()
+{
+	ListenForGameEvent( "round_end" );
+}
+
+void CGameRoundEnd::FireGameEvent( IGameEvent *event )
+{
+	const char *name = event->GetName();
+
+	if ( Q_strcmp( name, "round_end" ) == 0 )
+	{
+		m_OnRoundEnded.FireOutput( NULL, NULL );
+	}
+}
+
+void CGameRoundEnd::InputEndRound_Draw( inputdata_t &inputdata )
+{
+	float flDelay = inputdata.value.Float();
+	CSGameRules()->IncrementAndTerminateRound( flDelay, Round_Draw );
+}
+
+void CGameRoundEnd::InputEndRound_TerroristsWin( inputdata_t &inputdata )
+{
+	float flDelay = inputdata.value.Float();
+	CSGameRules()->IncrementAndTerminateRound( flDelay, Terrorists_Win );
+}
+
+void CGameRoundEnd::InputEndRound_CounterTerroristsWin( inputdata_t &inputdata )
+{
+	float flDelay = inputdata.value.Float();
+	CSGameRules()->IncrementAndTerminateRound( flDelay, CTs_Win );
+}
+#endif
 
 //
 // CGameText / game_text	-- NON-Localized HUD Message (use env_message to display a titles.txt message)
@@ -274,6 +528,16 @@ public:
 
 	void InputDisplay( inputdata_t &inputdata );
 	void Display( CBaseEntity *pActivator );
+	void InputSetText ( inputdata_t &inputdata );
+	void SetText( const char* pszStr );
+	void InputSetPosX( inputdata_t &inputdata );
+	void SetPosX( float flPosX );
+	void InputSetPosY( inputdata_t &inputdata );
+	void SetPosY( float flPosY );
+	void InputSetTextColor( inputdata_t &inputdata );
+	void SetTextColor( color32 color );
+	void InputSetTextColor2( inputdata_t &inputdata );
+	void SetTextColor2( color32 color );
 
 	void Use( CBaseEntity *pActivator, CBaseEntity *pCaller, USE_TYPE useType, float value )
 	{
@@ -307,6 +571,11 @@ BEGIN_DATADESC( CGameText )
 
 	// Inputs
 	DEFINE_INPUTFUNC( FIELD_VOID, "Display", InputDisplay ),
+	DEFINE_INPUTFUNC( FIELD_STRING, "SetText", InputSetText ),
+	DEFINE_INPUTFUNC( FIELD_FLOAT, "SetPosX", InputSetPosX ),
+	DEFINE_INPUTFUNC( FIELD_FLOAT, "SetPosY", InputSetPosY ),
+	DEFINE_INPUTFUNC( FIELD_COLOR32, "SetTextColor", InputSetTextColor ),
+	DEFINE_INPUTFUNC( FIELD_COLOR32, "SetTextColor2", InputSetTextColor2 ),
 
 END_DATADESC()
 
@@ -317,7 +586,7 @@ bool CGameText::KeyValue( const char *szKeyName, const char *szValue )
 	if (FStrEq(szKeyName, "color"))
 	{
 		int color[4];
-		UTIL_StringToIntArray( color, 4, szValue );
+		V_StringToIntArray( color, 4, szValue );
 		m_textParms.r1 = color[0];
 		m_textParms.g1 = color[1];
 		m_textParms.b1 = color[2];
@@ -326,7 +595,7 @@ bool CGameText::KeyValue( const char *szKeyName, const char *szValue )
 	else if (FStrEq(szKeyName, "color2"))
 	{
 		int color[4];
-		UTIL_StringToIntArray( color, 4, szValue );
+		V_StringToIntArray( color, 4, szValue );
 		m_textParms.r2 = color[0];
 		m_textParms.g2 = color[1];
 		m_textParms.b2 = color[2];
@@ -369,6 +638,61 @@ void CGameText::Display( CBaseEntity *pActivator )
 	}
 }
 
+void CGameText::InputSetText( inputdata_t &inputdata )
+{
+	SetText( inputdata.value.String() );
+}
+
+void CGameText::SetText( const char* pszStr )
+{
+	m_iszMessage = AllocPooledString( pszStr );
+}
+
+void CGameText::InputSetPosX( inputdata_t &inputdata )
+{
+	SetPosX( inputdata.value.Float() );
+}
+
+void CGameText::SetPosX( float flPosX )
+{
+	m_textParms.x = flPosX;
+}
+
+void CGameText::InputSetPosY( inputdata_t &inputdata )
+{
+	SetPosY( inputdata.value.Float() );
+}
+
+void CGameText::SetPosY( float flPosY )
+{
+	m_textParms.y = flPosY;
+}
+
+void CGameText::InputSetTextColor( inputdata_t &inputdata )
+{
+	SetTextColor( inputdata.value.Color32() );
+}
+
+void CGameText::SetTextColor( color32 color )
+{
+	m_textParms.r1 = color.r;
+	m_textParms.g1 = color.g;
+	m_textParms.b1 = color.b;
+	m_textParms.a1 = color.a;
+}
+
+void CGameText::InputSetTextColor2( inputdata_t &inputdata )
+{
+	SetTextColor2( inputdata.value.Color32() );
+}
+
+void CGameText::SetTextColor2( color32 color )
+{
+	m_textParms.r2 = color.r;
+	m_textParms.g2 = color.g;
+	m_textParms.b2 = color.b;
+	m_textParms.a2 = color.a;
+}
 
 /* TODO: Replace with an entity I/O version
 //
@@ -571,30 +895,6 @@ void CGamePlayerHurt::Use( CBaseEntity *pActivator, CBaseEntity *pCaller, USE_TY
 // CGamePlayerEquip / game_playerequip	-- Sets the default player equipment
 // Flag: USE Only
 
-#define SF_PLAYEREQUIP_USEONLY			0x0001
-#define MAX_EQUIP		32
-
-class CGamePlayerEquip : public CRulePointEntity
-{
-	DECLARE_DATADESC();
-
-public:
-	DECLARE_CLASS( CGamePlayerEquip, CRulePointEntity );
-
-	bool		KeyValue( const char *szKeyName, const char *szValue );
-	void		Touch( CBaseEntity *pOther );
-	void		Use( CBaseEntity *pActivator, CBaseEntity *pCaller, USE_TYPE useType, float value );
-
-	inline bool	UseOnly( void ) { return (m_spawnflags & SF_PLAYEREQUIP_USEONLY) ? true : false; }
-
-private:
-
-	void		EquipPlayer( CBaseEntity *pPlayer );
-
-	string_t	m_weaponNames[MAX_EQUIP];
-	int			m_weaponCount[MAX_EQUIP];
-};
-
 LINK_ENTITY_TO_CLASS( game_player_equip, CGamePlayerEquip );
 
 //---------------------------------------------------------
@@ -605,10 +905,24 @@ BEGIN_DATADESC( CGamePlayerEquip )
 	DEFINE_AUTO_ARRAY( m_weaponNames,		FIELD_STRING ),
 	DEFINE_AUTO_ARRAY( m_weaponCount,		FIELD_INTEGER ),
 
+	// Inputs
+	DEFINE_INPUTFUNC(FIELD_VOID, "TriggerForAllPlayers", InputTriggerForAllPlayers),
+	DEFINE_INPUTFUNC(FIELD_STRING, "TriggerForActivatedPlayer", InputTriggerForActivatedPlayer),
+
 END_DATADESC()
 
 
+void CGamePlayerEquip::InputTriggerForAllPlayers( inputdata_t &inputdata )
+{
+	TriggerForAllPlayers();
+}
 
+void CGamePlayerEquip::InputTriggerForActivatedPlayer( inputdata_t &inputdata )
+{
+	CBasePlayer *pPlayer = dynamic_cast<CBasePlayer*>( inputdata.pActivator );
+	if ( pPlayer )
+		TriggerForActivatedPlayer( pPlayer, inputdata.value.String() );
+}
 
 bool CGamePlayerEquip::KeyValue( const char *szKeyName, const char *szValue )
 {
@@ -619,11 +933,12 @@ bool CGamePlayerEquip::KeyValue( const char *szKeyName, const char *szValue )
 			if ( !m_weaponNames[i] )
 			{
 				char tmp[128];
-				UTIL_StripToken( szKeyName, tmp, Q_ARRAYSIZE( tmp ) );
+
+				UTIL_StripToken( szKeyName, tmp );
 
 				m_weaponNames[i] = AllocPooledString(tmp);
 				m_weaponCount[i] = atoi(szValue);
-				m_weaponCount[i] = MAX(1,m_weaponCount[i]);
+				m_weaponCount[i] = MAX(0,m_weaponCount[i]);
 				return true;
 			}
 		}
@@ -632,6 +947,31 @@ bool CGamePlayerEquip::KeyValue( const char *szKeyName, const char *szValue )
 	return false;
 }
 
+void CGamePlayerEquip::TriggerForAllPlayers( void )
+{
+	for( int i = 1; i <= gpGlobals->maxClients; ++i )
+	{
+		CBasePlayer *pToPlayer = UTIL_PlayerByIndex( i );
+		if ( pToPlayer )
+		{
+			if ( CanFireForActivator( pToPlayer ) )
+			{
+				EquipPlayer( pToPlayer );
+			}
+		}
+	}
+}
+
+void CGamePlayerEquip::TriggerForActivatedPlayer( CBasePlayer *pPlayer, const char *szWeapon )
+{
+	if ( pPlayer )
+	{
+		if ( CanFireForActivator( pPlayer ) )
+		{
+			EquipPlayer( pPlayer, szWeapon );
+		}
+	}
+}
 
 void CGamePlayerEquip::Touch( CBaseEntity *pOther )
 {
@@ -644,20 +984,99 @@ void CGamePlayerEquip::Touch( CBaseEntity *pOther )
 	EquipPlayer( pOther );
 }
 
-void CGamePlayerEquip::EquipPlayer( CBaseEntity *pEntity )
+void CGamePlayerEquip::EquipPlayer( CBaseEntity *pEntity, const char *szWeapon )
 {
-	CBasePlayer *pPlayer = ToBasePlayer(pEntity);
+	if ( !pEntity )
+		return;
+
+	CBasePlayer *pPlayer = NULL;
+
+	if ( pEntity->IsPlayer() )
+	{
+		pPlayer = (CBasePlayer *)pEntity;
+	}
 
 	if ( !pPlayer )
 		return;
 
+	if ( StripFirst() )
+	{
+		// remove all our weapons and armor
+		pPlayer->RemoveAllItems( true );
+	}
+
+	const char *weaponName = szWeapon;
+
+	int nMaxLoop = MAX_EQUIP;
+	if ( szWeapon != NULL )
+		nMaxLoop = 1;
+
 	for ( int i = 0; i < MAX_EQUIP; i++ )
 	{
-		if ( !m_weaponNames[i] )
+		if ( szWeapon == NULL && !m_weaponNames[i] )
 			break;
-		for ( int j = 0; j < m_weaponCount[i]; j++ )
+
+		if ( szWeapon == NULL )
+			weaponName = STRING( m_weaponNames[i] );
+
+		CSWeaponID weaponID = WeaponIdFromString( weaponName );
+
+		CCSPlayer *pCSPlayer = static_cast<CCSPlayer*>( pPlayer );	
+
+		// if it's a grenade and we don't have it, give it
+		// if we do have it, don't do anything because you can only carry one of each grenade
+		// TODO: if we change how many grenades you can carry, this code needs to cover that, this is poor code otherwise
+		if ( pCSPlayer && IsGrenadeWeapon( weaponID ) )
 		{
- 			pPlayer->GiveNamedItem( STRING(m_weaponNames[i]) );
+			if ( !pCSPlayer->Weapon_OwnsThisType( weaponName ) )
+			{
+				AcquireResult::Type acquireResult = pCSPlayer->CanAcquire( weaponID, AcquireMethod::PickUp, NULL );
+				if ( acquireResult == AcquireResult::Allowed )
+					pCSPlayer->GiveNamedItem( weaponName );
+			}
+		}
+		else
+		{
+			if ( OnlyStripSameWeaponType() )
+			{
+				if ( weaponID == WEAPON_NONE )
+				{
+					for ( int i = GGLIST_PISTOLS_START; i < ( GGLIST_SNIPERS_LAST ); i++ )
+					{
+						const char *item_name = weaponName;
+						if ( IsWeaponClassname( item_name ) )
+						{
+							item_name += WEAPON_CLASSNAME_PREFIX_LENGTH;
+						}
+
+						if ( V_strcmp( ggWeaponAliasNameList[i].aliasName, item_name ) == 0 )
+						{
+							weaponID = ggWeaponAliasNameList[i].id;
+							break;
+						}		
+					}
+				}
+
+				if ( IsPrimaryWeapon( weaponID ) )
+				{
+					CBaseCombatWeapon *pPrimary = pPlayer->Weapon_GetSlot( WEAPON_SLOT_RIFLE );
+					if ( pPrimary )
+						pPlayer->RemoveWeaponOnPlayer( pPrimary );
+				}
+				else if ( IsSecondaryWeapon( weaponID ) )
+				{
+					CBaseCombatWeapon *pSecondary = pPlayer->Weapon_GetSlot( WEAPON_SLOT_PISTOL );
+					if ( pSecondary )
+						pPlayer->RemoveWeaponOnPlayer( pSecondary );
+				}
+			}
+
+			pPlayer->GiveNamedItem( weaponName );
+			if ( const CCSWeaponInfo* pWeaponInfo = GetWeaponInfo( weaponID ) )
+			{
+				int nType = pWeaponInfo->GetPrimaryAmmoType();
+				pPlayer->GiveAmmo( m_weaponCount[ i ], nType );
+			}
 		}
 	}
 }
@@ -665,7 +1084,7 @@ void CGamePlayerEquip::EquipPlayer( CBaseEntity *pEntity )
 
 void CGamePlayerEquip::Use( CBaseEntity *pActivator, CBaseEntity *pCaller, USE_TYPE useType, float value )
 {
-	EquipPlayer( pActivator );
+	EquipPlayer( pActivator ); // note: pActivator may sometimes be NULL
 }
 
 

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose:
 //
@@ -51,8 +51,10 @@ enum AIMsgFlags
 	AIMF_IGNORE_SELECTED = 0x01
 };
 
+#ifndef DBGFLAG_STRINGS_STRIP
 void DevMsg( CAI_BaseNPC *pAI, unsigned flags, PRINTF_FORMAT_STRING const char *pszFormat, ... ) FMTFUNCTION( 3, 4 );
 void DevMsg( CAI_BaseNPC *pAI, PRINTF_FORMAT_STRING const char *pszFormat, ... ) FMTFUNCTION( 2, 3 );
+#endif
 
 
 //-----------------------------------------------------------------------------

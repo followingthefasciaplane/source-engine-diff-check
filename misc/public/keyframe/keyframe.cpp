@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -8,7 +8,6 @@
 //=============================================================================//
 
 #include <stdio.h>
-#include <memory.h>
 #include <math.h>
 #include <string.h>
 
@@ -72,7 +71,7 @@ typedef float (*TimeModifierFunc_t)(float);
 
 typedef struct 
 {
-	const char *szName;
+	char *szName;
 	TimeModifierFunc_t pFunc;
 
 } TimeModifier_t;
@@ -104,7 +103,7 @@ int Motion_GetNumberOfTimeModifiers( void )
 	return ARRAYSIZE(g_TimeModifiers);
 }
 
-bool Motion_GetTimeModifierDetails( int timeInterpNum, const char **outName )
+bool Motion_GetTimeModifierDetails( int timeInterpNum, char **outName )
 {
 	if ( timeInterpNum < 0 || timeInterpNum >= Motion_GetNumberOfTimeModifiers() )
 	{

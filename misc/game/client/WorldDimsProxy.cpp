@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -9,13 +9,10 @@
 #include "materialsystem/imaterial.h"
 #include "materialsystem/imaterialvar.h"
 #include "c_world.h"
-#include "toolframework_client.h"
 
+#include "imaterialproxydict.h"
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
-
-// forward declarations
-void ToolFramework_RecordMaterialParams( IMaterial *pMaterial );
 
 class CWorldDimsProxy : public IMaterialProxy
 {
@@ -61,11 +58,6 @@ void CWorldDimsProxy::OnBind( void *pC_BaseEntity )
 			m_pMaxsVar->SetVecValue( (const float*)&pWorld->m_WorldMaxs, 3 );
 		}
 	}
-
-	if ( ToolsEnabled() )
-	{
-		ToolFramework_RecordMaterialParams( GetMaterial() );
-	}
 }
 
 IMaterial *CWorldDimsProxy::GetMaterial()
@@ -73,6 +65,6 @@ IMaterial *CWorldDimsProxy::GetMaterial()
 	return m_pMinsVar->GetOwningMaterial();
 }
 
-EXPOSE_INTERFACE( CWorldDimsProxy, IMaterialProxy, "WorldDims" IMATERIAL_PROXY_INTERFACE_VERSION );
+EXPOSE_MATERIAL_PROXY( CWorldDimsProxy, WorldDims );
 
 

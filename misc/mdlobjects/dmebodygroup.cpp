@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =====//
 //
 // Dme version of a body group
 //
@@ -23,7 +23,7 @@ IMPLEMENT_ELEMENT_FACTORY( DmeBodyGroup, CDmeBodyGroup );
 //-----------------------------------------------------------------------------
 void CDmeBodyGroup::OnConstruction()
 {
-	m_BodyParts.Init( this, "bodyParts" );
+	m_BodyParts.Init( this, "bodyPartList" );
 }
 
 void CDmeBodyGroup::OnDestruction()

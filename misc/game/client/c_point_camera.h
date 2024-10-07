@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -40,7 +40,7 @@ public:
 
 	virtual void	GetToolRecordingState( KeyValues *msg );
 
-private:
+protected:
 	float m_FOV;
 	float m_Resolution;
 	bool m_bFogEnable;

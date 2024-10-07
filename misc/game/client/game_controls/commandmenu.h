@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2003, Valve LLC, All rights reserved. ============
 //
 // Purpose: 
 //
@@ -14,7 +14,7 @@
 #include <filesystem.h>
 #include "utlstack.h"
 #include "utlvector.h"
-#include <KeyValues.h>
+#include <keyvalues.h>
 
 using namespace vgui;
 

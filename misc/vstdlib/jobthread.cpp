@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========== Copyright 2005, Valve Corporation, All rights reserved. ========
 //
 // Purpose:
 //
@@ -8,19 +8,26 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #endif
+
 #include "tier0/dbg.h"
 #include "tier0/tslist.h"
 #include "tier0/icommandline.h"
+#include "tier0/threadtools.h"
 #include "vstdlib/jobthread.h"
 #include "vstdlib/random.h"
 #include "tier1/functors.h"
 #include "tier1/fmtstr.h"
 #include "tier1/utlvector.h"
 #include "tier1/generichash.h"
-#include "tier0/vprof.h"
+#include "tier0/fasttimer.h"
 
 #if defined( _X360 )
 #include "xbox/xbox_win32stubs.h"
+#endif
+
+#ifdef _PS3
+#include "tls_ps3.h"
+#include "ps3/ps3_win32stubs.h"
 #endif
 
 #include "tier0/memdbgon.h"
@@ -46,6 +53,8 @@ inline void ServiceJobAndRelease( CJob *pJob, int iThread = -1 )
 
 //-----------------------------------------------------------------------------
 
+#pragma pack(push)
+#pragma pack(8)
 class ALIGN16 CJobQueue
 {
 public:
@@ -53,18 +62,6 @@ public:
 		m_nItems( 0 ),
 		m_nMaxItems( INT_MAX )
 	{
-		for ( int i = 0; i < ARRAYSIZE( m_pQueues ); i++ )
-		{
-			m_pQueues[i] = new CTSQueue<CJob *>;
-		}
-	}
-
-	~CJobQueue()
-	{
-		for ( int i = 0; i < ARRAYSIZE( m_pQueues ); i++ )
-		{
-			delete m_pQueues[i];
-		}
 	}
 
 	int Count()
@@ -74,9 +71,18 @@ public:
 
 	int Count( JobPriority_t priority )
 	{
-		return m_pQueues[priority]->Count();
+		return m_queues[priority].Count();
 	}
 
+	static JobPriority_t GetMinPriority()
+	{
+		return (JobPriority_t)m_MinPriority;
+	}
+
+	static void SetMinPriority( JobPriority_t priority )
+	{
+		m_MinPriority = priority;
+	}
 
 	CJob *PrePush()
 	{
@@ -103,7 +109,7 @@ public:
 			nOverflow++;
 		}
 
-		m_pQueues[pJob->GetPriority()]->PushItem( pJob );
+		m_queues[pJob->GetPriority()].PushItem( pJob );
 
 		m_mutex.Lock();
 		if ( ++m_nItems == 1 )
@@ -130,16 +136,24 @@ public:
 		}
 		m_mutex.Unlock();
 
-		for ( int i = JP_HIGH; i >= 0; --i )
+		for ( int i = JP_NUM_PRIORITIES - 1; i >= m_MinPriority; --i )
 		{
-			if ( m_pQueues[i]->PopItem( ppJob ) )
+			if ( m_queues[i].PopItem( ppJob ) )
 			{
 				return true;
 			}
 		}
 
+		m_mutex.Lock();
+		AssertMsg( m_MinPriority != JP_LOW, "Expected at least one queue item" );
 
-		AssertMsg( 0, "Expected at least one queue item" );
+		if ( ++m_nItems == 1 )
+		{
+			m_JobAvailableEvent.Set();
+			ThreadSleep();
+		}
+		m_mutex.Unlock();
+
 		*ppJob = NULL;
 		return false;
 	}
@@ -155,10 +169,10 @@ public:
 		m_mutex.Lock();
 		m_nItems = 0;
 		m_JobAvailableEvent.Reset();
-		CJob *pJob;
-		for ( int i = JP_HIGH; i >= 0; --i )
+		CJob *pJob = NULL;
+		for ( int i = JP_NUM_PRIORITIES - 1; i >= 0; --i )
 		{
-			while ( m_pQueues[i]->PopItem( &pJob ) )
+			while ( m_queues[i].PopItem( &pJob ) )
 			{
 				pJob->Abort();
 				pJob->Release();
@@ -168,13 +182,19 @@ public:
 	}
 
 private:
-	CTSQueue<CJob *>	*m_pQueues[JP_HIGH + 1];
+	CTSQueue<CJob *>	m_queues[JP_NUM_PRIORITIES];
 	int					m_nItems;
 	int					m_nMaxItems;
-	CThreadMutex		m_mutex;
+	CThreadMutex	m_mutex;
 	CThreadManualEvent	m_JobAvailableEvent;
-
+	static int			m_MinPriority;
 } ALIGN16_POST;
+
+int	CJobQueue::m_MinPriority = JP_LOW;
+
+#pragma pack(pop)
+
+class CJobThread;
 
 //-----------------------------------------------------------------------------
 //
@@ -215,19 +235,14 @@ public:
 	virtual int YieldWait( CThreadEvent **pEvents, int nEvents, bool bWaitAll = true, unsigned timeout = TT_INFINITE );
 	virtual int YieldWait( CJob **, int nJobs, bool bWaitAll = true, unsigned timeout = TT_INFINITE );
 	void Yield( unsigned timeout );
+	virtual int YieldWaitPerFrameJobs( );
 
 	//-----------------------------------------------------
 	// Add a native job to the queue (master thread)
 	//-----------------------------------------------------
 	void AddJob( CJob * );
+	virtual void AddPerFrameJob( CJob * );
 	void InsertJobInQueue( CJob * );
-
-	//-----------------------------------------------------
-	// All threads execute pFunctor asap. Thread will either wake up
-	//  and execute or execute pFunctor right after completing current job and
-	//  before looking for another job.
-	//-----------------------------------------------------
-	void ExecuteHighPriorityFunctor( CFunctor *pFunctor );
 
 	//-----------------------------------------------------
 	// Add an function object to the queue (master thread)
@@ -244,10 +259,6 @@ public:
 	//-----------------------------------------------------
 	int ExecuteToPriority( JobPriority_t toPriority, JobFilter_t pfnFilter = NULL  );
 	int AbortAll();
-
-	virtual void Reserved1() {}
-
-	void WaitForIdle( bool bAll = true );
 
 private:
 	enum
@@ -273,9 +284,8 @@ private:
 	CJobQueue				m_SharedQueue;
 	CInterlockedInt			m_nIdleThreads;
 	CUtlVector<CJobThread *> m_Threads;
-	CUtlVector<CThreadEvent *>		m_IdleEvents;
 
-	CThreadMutex			m_SuspendMutex;
+	CThreadMutex		m_SuspendMutex;
 	int						m_nSuspend;
 	CInterlockedInt			m_nJobs;
 
@@ -283,18 +293,21 @@ private:
 	//	and the main thread coming in and "helping" with jobs breaks that pretty nicely. This flag states that
 	//	only the threadpool threads should execute these jobs.
 	bool					m_bExecOnThreadPoolThreadsOnly;
+
+	CThreadMutex		m_PerFrameJobListMutex;
+	CUtlVectorFixedGrowable< CJob *, 2048 >	m_PerFrameJobs;
 };
 
 //-----------------------------------------------------------------------------
 
-JOB_INTERFACE IThreadPool *CreateThreadPool()
+JOB_INTERFACE IThreadPool *CreateNewThreadPool()
 {
 	return new CThreadPool;
 }
 
 JOB_INTERFACE void DestroyThreadPool( IThreadPool *pPool )
 {
-	delete pPool;
+	delete static_cast<CThreadPool*>( pPool );
 }
 
 //-----------------------------------------------------------------------------
@@ -316,7 +329,7 @@ public:
 			// Cap the GlobPool threads at 4.
 			startParams.nThreadsMax = 4;
 		}
-		return CThreadPool::Start( startParams, "Glob" );
+		return CThreadPool::Start( startParams, "GlobPool" );
 	}
 
 	virtual bool OnFinalRelease()
@@ -352,73 +365,65 @@ private:
 	unsigned Wait()
 	{
 		unsigned waitResult;
-		tmZone( TELEMETRY_LEVEL0, TMZF_IDLE, "%s", __FUNCTION__ );
 #ifdef WIN32
 		enum Event_t
 		{
 			CALL_FROM_MASTER,
 			SHARED_QUEUE,
 			DIRECT_QUEUE,
-
+			
 			NUM_EVENTS
 		};
 
-		HANDLE	 waitHandles[NUM_EVENTS];
+		CThreadEvent *waitHandles[NUM_EVENTS];
 		
-		waitHandles[CALL_FROM_MASTER]	= GetCallHandle().GetHandle();
-		waitHandles[SHARED_QUEUE]		= m_SharedQueue.GetEventHandle().GetHandle();
-		waitHandles[DIRECT_QUEUE] 		= m_DirectQueue.GetEventHandle().GetHandle();
+		waitHandles[CALL_FROM_MASTER]	= &GetCallHandle();
+		waitHandles[SHARED_QUEUE]		= &m_SharedQueue.GetEventHandle();
+		waitHandles[DIRECT_QUEUE] 		= &m_DirectQueue.GetEventHandle();
 		
 #ifdef _DEBUG
-		while ( ( waitResult = WaitForMultipleObjects( ARRAYSIZE(waitHandles), waitHandles, FALSE, 10 ) ) == WAIT_TIMEOUT )
+		while ( ( waitResult = CThreadEvent::WaitForMultiple( ARRAYSIZE(waitHandles), waitHandles , FALSE, 10 ) ) == TW_TIMEOUT )
 		{
 			waitResult = waitResult; // break here
 		}
 #else
-		waitResult = WaitForMultipleObjects( ARRAYSIZE(waitHandles), waitHandles, FALSE, INFINITE );
+		waitResult = CThreadEvent::WaitForMultiple( ARRAYSIZE(waitHandles), waitHandles , FALSE, TT_INFINITE );
 #endif
 #else // !win32
 		bool bSet = false;
 		int nWaitTime = 100;
-
-		while( !bSet )
+		
+		while ( !bSet )
 		{
-			// Jobs are typically enqueued to the shared job queue so wait on it first.
+			// jobs are typically enqueued to the shared job queue so wait on it
 			bSet = m_SharedQueue.GetEventHandle().Wait( nWaitTime );
-			if( !bSet )
-				bSet = m_DirectQueue.GetEventHandle().Wait( 10 );
+			if ( !bSet )
+				bSet = m_DirectQueue.GetEventHandle().Wait( 0 );
 			if ( !bSet )
 				bSet = GetCallHandle().Wait( 0 );
 		}
-
+		
 		if ( !bSet )
 			waitResult = WAIT_TIMEOUT;
 		else
-			waitResult = WAIT_OBJECT_0;
+			waitResult = WAIT_OBJECT_0;		
 #endif
 		return waitResult;
 	}
 
 	int Run()
 	{
-
-
 		// Wait for either a call from the master thread, or an item in the queue...
 		unsigned waitResult;
 		bool	 bExit = false;
 
-		tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
-
 		m_pOwner->m_nIdleThreads++;
 		m_IdleEvent.Set();
-		while (!bExit && ( ( waitResult = Wait() ) != WAIT_FAILED ) )
+		while ( !bExit && ( waitResult = Wait() ) != TW_FAILED )
 		{
 			if ( PeekCall() )
 			{
-				CFunctor *pFunctor = NULL;
-				tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s PeekCall():%d", __FUNCTION__, GetCallParam() );
-
-				switch ( GetCallParam( &pFunctor ) )
+				switch ( GetCallParam() )
 				{
 				case TPM_EXIT:
 					Reply( true );
@@ -427,20 +432,7 @@ private:
 
 				case TPM_SUSPEND:
 					Reply( true );
-					SuspendCooperative();
-					break;
-
-				case TPM_RUNFUNCTOR:
-					if( pFunctor )
-					{
-						( *pFunctor )();
-						Reply( true );
-					}
-					else
-					{
-						Assert( pFunctor );
-						Reply( false );
-					}
+					Suspend();
 					break;
 
 				default:
@@ -451,8 +443,6 @@ private:
 			}
 			else
 			{
-				tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s !PeekCall()", __FUNCTION__ );
-
 				CJob *pJob;
 				bool bTookJob = false;
 				do
@@ -498,6 +488,7 @@ private:
 
 CGlobalThreadPool g_ThreadPool;
 IThreadPool *g_pThreadPool = &g_ThreadPool;
+IThreadPool *g_pAlternateThreadPool;
 
 //-----------------------------------------------------------------------------
 //
@@ -516,7 +507,6 @@ CThreadPool::CThreadPool() :
 
 CThreadPool::~CThreadPool()
 {
-	Stop();
 }
 
 //---------------------------------------------------------
@@ -535,20 +525,6 @@ int CThreadPool::NumIdleThreads()
 	return m_nIdleThreads;
 }
 
-void CThreadPool::ExecuteHighPriorityFunctor( CFunctor *pFunctor )
-{
-	int i;
-	for ( i = 0; i < m_Threads.Count(); i++ )
-	{
-		m_Threads[i]->CallWorker( TPM_RUNFUNCTOR, 0, false, pFunctor );
-	}
-
-	for ( i = 0; i < m_Threads.Count(); i++ )
-	{
-		m_Threads[i]->WaitForReply();
-	}
-}
-
 //---------------------------------------------------------
 // Pause/resume processing jobs
 //---------------------------------------------------------
@@ -559,7 +535,6 @@ int CThreadPool::SuspendExecution()
 	// If not already suspended
 	if ( m_nSuspend == 0 )
 	{
-		// Make sure state is correct
 		int i;
 		for ( i = 0; i < m_Threads.Count(); i++ )
 		{
@@ -575,7 +550,10 @@ int CThreadPool::SuspendExecution()
 		// here with the thread not actually suspended
 		for ( i = 0; i < m_Threads.Count(); i++ )
 		{
-			m_Threads[i]->BWaitForThreadSuspendCooperative();
+			while ( !m_Threads[i]->IsSuspended() )
+			{
+				ThreadSleep();
+			}   	
 		}
 	}
 
@@ -593,7 +571,7 @@ int CThreadPool::ResumeExecution()
 	{
 		for ( int i = 0; i < m_Threads.Count(); i++ )
 		{
-			m_Threads[i]->ResumeCooperative();
+			m_Threads[i]->Resume();
 		}
 	}
 	return result;
@@ -601,26 +579,16 @@ int CThreadPool::ResumeExecution()
 
 //---------------------------------------------------------
 
-void CThreadPool::WaitForIdle( bool bAll )
-{
-	ThreadWaitForEvents( m_IdleEvents.Count(), m_IdleEvents.Base(), bAll, 60000 );
-}
-
-//---------------------------------------------------------
-
 int CThreadPool::YieldWait( CThreadEvent **pEvents, int nEvents, bool bWaitAll, unsigned timeout )
 {
-	tmZone( TELEMETRY_LEVEL0, TMZF_IDLE, "%s(%d) SPINNING %t", __FUNCTION__, timeout, tmSendCallStack( TELEMETRY_LEVEL0, 0 ) );
-
 	Assert( timeout == TT_INFINITE ); // unimplemented
-
 	int result;
 	CJob *pJob;
 	// Always wait for zero milliseconds initially, to let us process jobs on this thread.
 	timeout = 0;
-	while ( ( result = ThreadWaitForEvents( nEvents, pEvents, bWaitAll, timeout ) ) == WAIT_TIMEOUT )
+	while ( ( result = CThreadEvent::WaitForMultiple( nEvents, pEvents, bWaitAll, timeout ) ) == TW_TIMEOUT )
 	{
-		if ( !m_bExecOnThreadPoolThreadsOnly && m_SharedQueue.Pop( &pJob ) )
+		if (!m_bExecOnThreadPoolThreadsOnly && m_SharedQueue.Pop( &pJob ) )
 		{
 			ServiceJobAndRelease( pJob );
 			m_nJobs--;
@@ -648,7 +616,7 @@ int CThreadPool::YieldWait( CThreadEvent **pEvents, int nEvents, bool bWaitAll, 
 
 int CThreadPool::YieldWait( CJob **ppJobs, int nJobs, bool bWaitAll, unsigned timeout )
 {
-	CUtlVectorFixed<CThreadEvent *, 64> handles;
+	CUtlVectorFixed<CThreadEvent*, 64> handles;
 	if ( nJobs > handles.NumAllocated() - 2 )
 	{
 		return TW_FAILED;
@@ -659,7 +627,7 @@ int CThreadPool::YieldWait( CJob **ppJobs, int nJobs, bool bWaitAll, unsigned ti
 		handles.AddToTail( ppJobs[i]->AccessEvent() );
 	}
 
-	return YieldWait( handles.Base(), handles.Count(), bWaitAll, timeout);
+	return YieldWait( (CThreadEvent **)handles.Base(), handles.Count(), bWaitAll, timeout);
 }
 
 //---------------------------------------------------------
@@ -676,10 +644,46 @@ void CThreadPool::Yield( unsigned timeout )
 	ThreadSleep( timeout );
 }
 
+
+//---------------------------------------------------------
+// Block until all per-frame jobs are done
+//---------------------------------------------------------
+int CThreadPool::YieldWaitPerFrameJobs( )
+{
+	// NOTE: Per-Frame jobs may spawn other per-frame jobs.
+	// Therefore we must copy the list off and block on that list
+	// because more jobs may be added while we're yielding
+	int nRetVal = 0;
+	while ( true )
+	{
+		m_PerFrameJobListMutex.Lock();
+		int nCount = m_PerFrameJobs.Count();
+		if ( nCount == 0 )
+		{
+			m_PerFrameJobListMutex.Unlock();
+			break;
+		}
+
+		size_t nSize = nCount * sizeof( CJob* );
+		CJob **ppJobs = ( CJob** )stackalloc( nSize );
+		memcpy( ppJobs, m_PerFrameJobs.Base(), nSize );
+		m_PerFrameJobs.RemoveAll();
+		m_PerFrameJobListMutex.Unlock();
+
+		nRetVal = YieldWait( ppJobs, nCount );
+
+		for ( int i = 0; i < nCount; ++i )
+		{
+			ppJobs[i]->Release();
+		}
+	}
+	return nRetVal;
+}
+
+
 //---------------------------------------------------------
 // Add a job to the queue
 //---------------------------------------------------------
-
 void CThreadPool::AddJob( CJob *pJob )
 {
 	if ( !pJob )
@@ -704,16 +708,15 @@ void CThreadPool::AddJob( CJob *pJob )
 
 	int flags = pJob->GetFlags();
 
-	if ( !m_bExecOnThreadPoolThreadsOnly && ( ( flags & ( JF_IO | JF_QUEUE ) ) == 0 ) /* @TBD && !m_queue.Count() */ )
+	if ( !m_bExecOnThreadPoolThreadsOnly && ( ( flags & ( JF_IO | JF_QUEUE ) )  == 0 ) /* @TBD && !m_queue.Count() */ )
 	{
 		if ( !NumIdleThreads() )
 		{
 			pJob->Execute();
 			return;
 		}
-		pJob->SetPriority( JP_HIGH );
+		pJob->SetPriority( (JobPriority_t)(JP_NUM_PRIORITIES - 1) );
 	}
-
 
 	if ( !pJob->CanExecute() )
 	{
@@ -724,14 +727,38 @@ void CThreadPool::AddJob( CJob *pJob )
 
 	pJob->m_pThreadPool = this;
 	pJob->m_status = JOB_STATUS_PENDING;
+#if defined( THREAD_PARENT_STACK_TRACE_ENABLED )
+	{
+		int iValidEntries = GetCallStack_Fast( pJob->m_ParentStackTrace, ARRAYSIZE( pJob->m_ParentStackTrace ), 0 );
+		for( int i = iValidEntries; i < ARRAYSIZE( pJob->m_ParentStackTrace ); ++i )
+		{
+			pJob->m_ParentStackTrace[i] = NULL;
+		}
+	}
+#endif
 	InsertJobInQueue( pJob );
 	++m_nJobs;
 }
 
+
+//-----------------------------------------------------
+// Add a native job to the queue (master thread)
+// Call YieldWaitPerFrameJobs() to wait only until all per-frame jobs are done
+//-----------------------------------------------------
+void CThreadPool::AddPerFrameJob( CJob *pJob )
+{
+	m_PerFrameJobListMutex.Lock();
+	pJob->AddRef();
+	m_PerFrameJobs.AddToTail( pJob );
+	m_PerFrameJobListMutex.Unlock();
+
+	AddJob( pJob );
+}
+
+
 //---------------------------------------------------------
 //
 //---------------------------------------------------------
-
 void CThreadPool::InsertJobInQueue( CJob *pJob )
 {
 	CJobQueue *pQueue;
@@ -752,6 +779,17 @@ void CThreadPool::InsertJobInQueue( CJob *pJob )
 	{
 		pQueue = &(m_Threads[0]->AccessDirectQueue());
 	}
+
+
+#ifdef SN_TARGET_PS3
+	// GSidhu
+	// Make sure render job goes on shared q rather than direct q.
+	// Direct q jobs get picked up only after jobs appear on shared q or
+	// wait times out on shared q.
+	// This is a fix for Eurogamer, look at this in more detail later
+
+	pQueue = &m_SharedQueue;
+#endif 
 
 	m_nJobs -= pQueue->Push( pJob );
 }
@@ -802,24 +840,52 @@ void CThreadPool::ChangePriority( CJob *pJob, JobPriority_t priority )
 // Execute to a specified priority
 //---------------------------------------------------------
 
+#define THREADED_EXECUTETOPRIORITY 0 //  Not ready for general consumption [8/4/2010 tom]
+
 int CThreadPool::ExecuteToPriority( JobPriority_t iToPriority, JobFilter_t pfnFilter )
 {
-	SuspendExecution();
-
-	CJob *pJob;
-	int nExecuted = 0;
-	int i;
-	int nJobsTotal = GetJobCount();
-	CUtlVector<CJob *> jobsToPutBack;
-
-	for ( int iCurPriority = JP_HIGH; iCurPriority >= iToPriority; --iCurPriority )
+	if ( !THREADED_EXECUTETOPRIORITY || pfnFilter )
 	{
-		for ( i = 0; i < m_Threads.Count(); i++ )
+		SuspendExecution();
+
+		CJob *pJob;
+		int i;
+		int nExecuted = 0;
+		int nJobsTotal = GetJobCount();
+		CUtlVector<CJob *> jobsToPutBack;
+
+		for ( int iCurPriority = JP_NUM_PRIORITIES - 1; iCurPriority >= iToPriority; --iCurPriority )
 		{
-			CJobQueue &queue = m_Threads[i]->AccessDirectQueue();
-			while ( queue.Count( (JobPriority_t)iCurPriority ) )
+			for ( i = 0; i < m_Threads.Count(); i++ )
 			{
-				queue.Pop( &pJob );
+				CJobQueue &queue = m_Threads[i]->AccessDirectQueue();
+				while ( queue.Count( (JobPriority_t)iCurPriority ) )
+				{
+					queue.Pop( &pJob );
+					if ( pfnFilter && !(*pfnFilter)( pJob ) )
+					{
+						if ( pJob->CanExecute() )
+						{
+							jobsToPutBack.EnsureCapacity( nJobsTotal );
+							jobsToPutBack.AddToTail( pJob );
+						}
+						else
+						{
+							m_nJobs--;
+							pJob->Release(); // an already serviced job in queue, may as well ditch it (as in, main thread probably force executed)
+						}
+						continue;
+					}
+					ServiceJobAndRelease( pJob );
+					m_nJobs--;
+					nExecuted++;
+				}
+
+			}
+
+			while ( m_SharedQueue.Count( (JobPriority_t)iCurPriority ) )
+			{
+				m_SharedQueue.Pop( &pJob );
 				if ( pfnFilter && !(*pfnFilter)( pJob ) )
 				{
 					if ( pJob->CanExecute() )
@@ -830,50 +896,55 @@ int CThreadPool::ExecuteToPriority( JobPriority_t iToPriority, JobFilter_t pfnFi
 					else
 					{
 						m_nJobs--;
-						pJob->Release(); // an already serviced job in queue, may as well ditch it (as in, main thread probably force executed)
+						pJob->Release(); // see above
 					}
 					continue;
 				}
+
 				ServiceJobAndRelease( pJob );
 				m_nJobs--;
 				nExecuted++;
 			}
-
 		}
 
-		while ( m_SharedQueue.Count( (JobPriority_t)iCurPriority ) )
+		for ( i = 0; i < jobsToPutBack.Count(); i++ )
 		{
-			m_SharedQueue.Pop( &pJob );
-			if ( pfnFilter && !(*pfnFilter)( pJob ) )
-			{
-				if ( pJob->CanExecute() )
-				{
-					jobsToPutBack.EnsureCapacity( nJobsTotal );
-					jobsToPutBack.AddToTail( pJob );
-				}
-				else
-				{
-					m_nJobs--;
-					pJob->Release(); // see above
-				}
-				continue;
-			}
-
-			ServiceJobAndRelease( pJob );
-			m_nJobs--;
-			nExecuted++;
+			InsertJobInQueue( jobsToPutBack[i] );
+			jobsToPutBack[i]->Release();
 		}
-	}
 
-	for ( i = 0; i < jobsToPutBack.Count(); i++ )
+		ResumeExecution();
+
+		return nExecuted;
+	}
+	else
 	{
-		InsertJobInQueue( jobsToPutBack[i] );
-		jobsToPutBack[i]->Release();
+		JobPriority_t prevPriority = CJobQueue::GetMinPriority();
+
+		CJobQueue::SetMinPriority( iToPriority );
+
+		CUtlVectorFixedGrowable<CThreadEvent*, 64> handles;
+
+		for ( int i = 0; i < m_Threads.Count(); i++ )
+		{
+			handles.AddToTail( &m_Threads[i]->GetIdleEvent() );
+		}
+
+		CJob *pJob = NULL;
+		do
+		{
+			YieldWait( (CThreadEvent **)handles.Base(), handles.Count(), true, TT_INFINITE );
+			if ( m_SharedQueue.Pop( &pJob ) )
+			{
+				ServiceJobAndRelease( pJob );
+				m_nJobs--;
+			}
+		} while ( pJob );
+
+		CJobQueue::SetMinPriority( prevPriority );
+
+		return 1;
 	}
-
-	ResumeExecution();
-
-	return nExecuted;
 }
 
 //---------------------------------------------------------
@@ -918,20 +989,27 @@ int CThreadPool::AbortAll()
 
 bool CThreadPool::Start( const ThreadPoolStartParams_t &startParams, const char *pszName )
 {
+#if defined( DEDICATED ) && IsPlatformLinux()
+	if ( !startParams.bEnableOnLinuxDedicatedServer )
+		return false;
+#endif
+
 	int nThreads = startParams.nThreads;
 
 	m_bExecOnThreadPoolThreadsOnly = startParams.bExecOnThreadPoolThreadsOnly;
 
+
 	if ( nThreads < 0 )
 	{
-		const CPUInformation &ci = *GetCPUInformation();
+		const CPUInformation &ci = GetCPUInformation();
 		if ( startParams.bIOThreads )
 		{
 			nThreads = ci.m_nLogicalProcessors;
 		}
 		else
 		{
-			nThreads = ( ci.m_nLogicalProcessors / (( ci.m_bHT ) ? 2 : 1) ) - 1; // One per
+			// One worker thread per logical processor minus main thread and graphic driver
+			nThreads = ci.m_nLogicalProcessors  - 2;
 			if ( IsPC() )
 			{
 				if ( nThreads > 3 )
@@ -973,12 +1051,20 @@ bool CThreadPool::Start( const ThreadPoolStartParams_t &startParams, const char 
 	{
 		if ( startParams.bIOThreads )
 		{
+#if defined( _WIN32 )
 			priority = THREAD_PRIORITY_HIGHEST;
+#endif
 		}
 		else
 		{
 			priority = ThreadGetPriority();
 		}
+	}
+
+	if ( IsPS3() && priority < ThreadGetPriority() )
+	{
+		// On PS3 all thread pools should be the same priority as creator or less demanding
+		priority = ThreadGetPriority();
 	}
 
 	bool bDistribute;
@@ -994,24 +1080,21 @@ bool CThreadPool::Start( const ThreadPoolStartParams_t &startParams, const char 
 	//--------------------------------------------------------
 
 	m_Threads.EnsureCapacity( nThreads );
-	m_IdleEvents.EnsureCapacity( nThreads );
-
+	
 	if ( !pszName )
 	{
-		pszName = ( startParams.bIOThreads ) ? "IOJobX" : "CmpJobX";
+		pszName = ( startParams.bIOThreads ) ? "IOJob" : "CmpJob";
 	}
 	while ( nThreads-- )
 	{
 		int iThread = m_Threads.AddToTail();
-		m_IdleEvents.AddToTail();
 		m_Threads[iThread] = new CJobThread( this, iThread );
-		m_IdleEvents[iThread] = &m_Threads[iThread]->GetIdleEvent();
-		m_Threads[iThread]->SetName( CFmtStr( "%s%d", pszName, iThread ) );
+		CFmtStr formattedName( "%s%d", pszName, iThread );
+		m_Threads[iThread]->SetName( formattedName );
 		m_Threads[iThread]->Start( nStackSize );
 		m_Threads[iThread]->GetIdleEvent().Wait();
-#ifdef WIN32
+		ThreadSetDebugName( m_Threads[iThread]->GetThreadHandle(), formattedName );
 		ThreadSetPriority( (ThreadHandle_t)m_Threads[iThread]->GetThreadHandle(), priority );
-#endif
 	}
 
 	Distribute( bDistribute, startParams.bUseAffinityTable ? (int *)startParams.iAffinityTable : NULL );
@@ -1025,7 +1108,7 @@ void CThreadPool::Distribute( bool bDistribute, int *pAffinityTable )
 {
 	if ( bDistribute )
 	{
-		const CPUInformation &ci = *GetCPUInformation();
+		const CPUInformation &ci = GetCPUInformation();
 		int nHwThreadsPer = (( ci.m_bHT ) ? 2 : 1);
 		if ( ci.m_nLogicalProcessors > 1 )
 		{
@@ -1073,9 +1156,7 @@ void CThreadPool::Distribute( bool bDistribute, int *pAffinityTable )
 							iProc = ( iProc + 1 ) % nHwThreadsPer;
 						}
 					}
-#ifdef WIN32
 					ThreadSetAffinity( (ThreadHandle_t)m_Threads[i]->GetThreadHandle(), 1 << iProc );
-#endif
 				}
 #endif
 			}
@@ -1084,16 +1165,14 @@ void CThreadPool::Distribute( bool bDistribute, int *pAffinityTable )
 				// distribution is from affinity table
 				for ( int i = 0; i < m_Threads.Count(); i++ )
 				{
-#ifdef WIN32
 					ThreadSetAffinity( (ThreadHandle_t)m_Threads[i]->GetThreadHandle(), pAffinityTable[i] );
-#endif
 				}
 			}
 		}
 	}
 	else
 	{
-#ifdef WIN32
+#if defined( _WIN32 )
 		DWORD_PTR dwProcessAffinity, dwSystemAffinity;
 		if ( GetProcessAffinityMask( GetCurrentProcess(), &dwProcessAffinity, &dwSystemAffinity ) )
 		{
@@ -1110,14 +1189,70 @@ void CThreadPool::Distribute( bool bDistribute, int *pAffinityTable )
 
 bool CThreadPool::Stop( int timeout )
 {
+#ifdef _PS3
+	if ( GetTLSGlobals()->bNormalQuitRequested )
+	{
+		// When PS3 system requests a quit we
+		// might leave some of our threads suspended
+		// we need to resume them so that they could
+		// receive TPM_EXIT command
+		AUTO_LOCK( m_SuspendMutex );
+		if ( m_nSuspend >= 1 )
+		{
+			m_nSuspend = 1;
+			ResumeExecution();
+		}
+	}
+#endif
+
+	CUtlVector< ThreadHandle_t > arrHandles;
+	arrHandles.SetCount( m_Threads.Count() );
 	for ( int i = 0; i < m_Threads.Count(); i++ )
 	{
+		arrHandles[i] = m_Threads[i]->GetThreadHandle();
+		#ifdef _WIN32
+		if( arrHandles[i] )
+		{
+			// due to weird legacy reasons, the worker thread keeps its handle ownership.
+			// it closes the handle BEFORE exiting, which renders that handle useless to join on Win32
+			// this leads to (a) invalid handle before the thread exits (b) potentially unmapping the code running worker thread before the thread exits
+			// The worker thread even has a hacky workaround: it sets an event before exiting! Obviously, that event is useless to fix this race condition
+			
+			// The right solution would be to have the worker NOT close its own handle, rendering that handle useful. And make ThreadJoin close that handle,
+			// mimicking pthreads semantics (joinable thread enters zombie state until it's properly joined). But it leads to another problem,
+			// namely handle leak in cases when we potentially stop the workers in other systems, and potentially incorrect joins on closed handles
+			// (because in Win32, it's valid to wait for thread handle twice, but it's not valid in pthreads to join the same thread twice).
+			// So for now, I'm just fixing it with local fix here.
+			// 
+			HANDLE hDup;
+			DuplicateHandle( GetCurrentProcess(), arrHandles[i], GetCurrentProcess(), &hDup, DUPLICATE_SAME_ACCESS, FALSE, 0 );
+			arrHandles[i] = (ThreadHandle_t)hDup;
+		}
+		#endif
+		
 		m_Threads[i]->CallWorker( TPM_EXIT );
 	}
 
 	for ( int i = 0; i < m_Threads.Count(); ++i )
 	{
+		if ( arrHandles[i] )
+		{
+			ThreadJoin( arrHandles[i] );
+
+#ifdef WIN32
+			Assert( !m_Threads[i]->GetThreadHandle() );
+			// because we duplicated the handle above, due to the historical reasons described above, we have to close this handle on Win32
+			CloseHandle( arrHandles[i] );
+#else
+			Assert( !m_Threads[i]->IsAlive() );
+#endif
+		}
+
+#ifdef WIN32
+		while( m_Threads[i]->GetThreadHandle() )
+#else
 		while( m_Threads[i]->IsAlive() )
+#endif
 		{
 			ThreadSleep( 0 );
 		}
@@ -1128,7 +1263,6 @@ bool CThreadPool::Stop( int timeout )
 	m_SharedQueue.Flush();
 	m_nIdleThreads = 0;
 	m_Threads.RemoveAll();
-	m_IdleEvents.RemoveAll();
 
 	return true;
 }
@@ -1153,8 +1287,6 @@ CJob *CThreadPool::GetDummyJob()
 	dummyJob.AddRef();
 	return &dummyJob;
 }
-
-//-----------------------------------------------------------------------------
 
 
 namespace ThreadPoolTest 
@@ -1199,13 +1331,15 @@ public:
 CInterlockedInt CCountJob::m_nCount;
 int g_nTotalAtFinish;
 
-void Test( bool bDistribute, bool bSleep = true, bool bFinishExecute = false, bool bDoWork = false )
+void Test( bool bDistribute, bool bSleep = true, bool bFinishExecute = false, bool bDoWork = false, bool bIncludeMain = false, bool bPrioritized = false )
 {
+	int nJobCount = 4000;
+	CCountJob *jobs = new CCountJob[4000];
 	for ( int bInterleavePushPop = 0; bInterleavePushPop < 2; bInterleavePushPop++ )
 	{
 		for ( g_iSleep = -10; g_iSleep <= 10; g_iSleep += 10 )
 		{
-			Msg( "ThreadPoolTest:         Testing! Sleep %d, interleave %d \n", g_iSleep, bInterleavePushPop );
+			Msg( "ThreadPoolTest:         Testing! Sleep %d, interleave %d, prioritized %d \n", g_iSleep, bInterleavePushPop, bPrioritized );
 			int nMaxThreads = ( IsX360() ) ? 6 : 8;
 			int nIncrement = ( IsX360() ) ? 1 : 2;
 			for ( int i = 1; i <= nMaxThreads; i += nIncrement )
@@ -1221,17 +1355,20 @@ void Test( bool bDistribute, bool bSleep = true, bool bFinishExecute = false, bo
 					g_pTestThreadPool->SuspendExecution();
 				}
 
-				CCountJob jobs[4000];
-				g_nTotalToComplete = ARRAYSIZE(jobs);
+				g_nTotalToComplete = nJobCount;
 
 				CFastTimer timer, suspendTimer;
 
 				suspendTimer.Start();
 				timer.Start();
-				for ( int j = 0; j < ARRAYSIZE(jobs); j++ )
+				for ( int j = 0; j < nJobCount; j++ )
 				{
 					jobs[j].SetFlags( JF_QUEUE );
 					jobs[j].bDoWork = bDoWork;
+					if ( bPrioritized )
+					{
+						jobs[j].SetPriority( (JobPriority_t)RandomInt( JP_LOW, JP_IMMEDIATE ) );
+					}
 					g_pTestThreadPool->AddJob( &jobs[j] );
 					if ( bSleep && j % 16 == 0 )
 					{
@@ -1244,7 +1381,19 @@ void Test( bool bDistribute, bool bSleep = true, bool bFinishExecute = false, bo
 				}
 				if ( bFinishExecute && g_iSleep <= 1 )
 				{
-					g_done.Wait();
+					if ( bDoWork && bIncludeMain )
+					{
+						while ( g_pTestThreadPool->GetJobCount() && g_pTestThreadPool->NumIdleThreads() == g_pTestThreadPool->NumIdleThreads() )
+						{
+
+						}
+						CThreadEvent *pEvent = &g_done;
+						g_pTestThreadPool->YieldWait( &pEvent, 1 );
+					}
+					else
+					{
+						g_done.Wait();
+					}
 				}
 				g_nTotalAtFinish = CCountJob::m_nCount;
 				timer.End();
@@ -1254,23 +1403,28 @@ void Test( bool bDistribute, bool bSleep = true, bool bFinishExecute = false, bo
 				g_pTestThreadPool->Stop();
 				g_done.Reset();
 
-				int counts[8] = { 0 };
-				for ( int j = 0; j < ARRAYSIZE(jobs); j++ )
+				int counts[9] = { 0 };
+				for ( int j = 0; j < nJobCount; j++ )
 				{
 					if ( jobs[j].GetServiceThread() != -1 )
 					{
-						counts[jobs[j].GetServiceThread()]++;
+						counts[jobs[j].GetServiceThread()+1]++;
 						jobs[j].ClearServiceThread();
+					}
+					else if ( jobs[j].GetStatus() == JOB_OK )
+					{
+						counts[0]++;
 					}
 				}
 
-				Msg( "ThreadPoolTest:         %d threads -- %d (%d) jobs processed in %fms, %fms to suspend (%f/%f) [%d, %d, %d, %d, %d, %d, %d, %d]\n", 
-					i, g_nTotalAtFinish, (int)CCountJob::m_nCount, timer.GetDuration().GetMillisecondsF(), suspendTimer.GetDuration().GetMillisecondsF() - timer.GetDuration().GetMillisecondsF(),
+				Msg( "ThreadPoolTest:         %d threads -- %d (%d) jobs processed in %fms, %fms to suspend (%f/%f) [ (main) %d, %d, %d, %d, %d, %d, %d, %d, %d]\n", 
+					i, (int)g_nTotalAtFinish, (int)CCountJob::m_nCount, timer.GetDuration().GetMillisecondsF(), suspendTimer.GetDuration().GetMillisecondsF() - timer.GetDuration().GetMillisecondsF(),
 					timer.GetDuration().GetMillisecondsF() / (float)CCountJob::m_nCount, (suspendTimer.GetDuration().GetMillisecondsF())/(float)g_nTotalAtFinish,
-					counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], counts[6], counts[7] );
+					counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], counts[6], counts[7], counts[8] );
 			}
 		}
 	}
+	delete[]jobs;
 }
 
 
@@ -1342,8 +1496,9 @@ void TestForcedExecute()
 			params.fDistribute = TRS_TRUE;
 			g_pTestThreadPool->Start( params, "Tst" );
 
-			static CExecuteTestJob jobs[4000];
-			for ( int j = 0; j < ARRAYSIZE(jobs); j++ )
+			int nJobCount = 4000;
+			CExecuteTestJob *jobs = new CExecuteTestJob[nJobCount];
+			for ( int j = 0; j < nJobCount; j++ )
 			{
 				g_ReadyToExecute = false;
 				for ( int k = 0; k < i; k++ )
@@ -1367,6 +1522,7 @@ void TestForcedExecute()
 				}
 			}
 			g_pTestThreadPool->Stop();
+			delete []jobs;
 		}
 	}
 	Msg( "TestForcedExecute DONE\n" );
@@ -1381,19 +1537,16 @@ void RunThreadPoolTests()
 	RunTSQueueTests(10000);
 	RunTSListTests(10000);
 
+	intp mask1=-1;
 #ifdef _WIN32
-	DWORD_PTR mask1 = 0;
-	--mask1;
-	DWORD_PTR mask2 = 0;
-	--mask2;
-	GetProcessAffinityMask( GetCurrentProcess(), &mask1, &mask2 );
-#else
-	int32 mask1=-1;
+	intp mask2 = -1;
+	GetProcessAffinityMask( GetCurrentProcess(), (DWORD_PTR *) &mask1, (DWORD_PTR *) &mask2 );
 #endif
 	Msg( "ThreadPoolTest: Job distribution speed\n" );
 	for ( int i = 0; i < 2; i++ )
 	{
 		bool bToCompletion = ( i % 2 != 0 );
+		Msg( bToCompletion ? "ThreadPoolTest:   To completion\n" : "ThreadPoolTest:   NOT to completion\n" );
 		if ( !IsX360() )
 		{
 			Msg( "ThreadPoolTest:     Non-distribute\n" );
@@ -1403,54 +1556,58 @@ void RunThreadPoolTests()
 		Msg( "ThreadPoolTest:     Distribute\n" );
 		ThreadPoolTest::Test( true, true, bToCompletion  );
 
-		Msg( "ThreadPoolTest:     One core\n" );
-		ThreadSetAffinity( 0, 1 );
-		ThreadPoolTest::Test( false, true, bToCompletion  );
-		ThreadSetAffinity( 0, mask1 );
+// 		Msg( "ThreadPoolTest:     One core\n" );
+// 		ThreadSetAffinity( 0, 1 );
+// 		ThreadPoolTest::Test( false, true, bToCompletion  );
+// 		ThreadSetAffinity( 0, mask1 );
 
 		Msg( "ThreadPoolTest:     NO Sleep\n" );
 		ThreadPoolTest::Test( false, false, bToCompletion  );
 
-		Msg( "ThreadPoolTest:     Distribute\n" );
+		Msg( "ThreadPoolTest:     Distribute NO Sleep\n" );
 		ThreadPoolTest::Test( true, false, bToCompletion  );
 
-		Msg( "ThreadPoolTest:     One core\n" );
-		ThreadSetAffinity( 0, 1 );
-		ThreadPoolTest::Test( false, false, bToCompletion  );
-		ThreadSetAffinity( 0, mask1 );
+//		Not plumbed correctly
+// 		Msg( "ThreadPoolTest:     One core\n" );
+// 		ThreadSetAffinity( 0, 1 );
+// 		ThreadPoolTest::Test( false, false, bToCompletion  );
+// 		ThreadSetAffinity( 0, mask1 );
 	}
 
-	Msg( "ThreadPoolTest: Jobs doing work\n" );
-	for ( int i = 0; i < 2; i++ )
+	for ( int bMain = 0; bMain < 2; bMain++ )
 	{
-		bool bToCompletion = true;// = ( i % 2 != 0 );
-		if ( !IsX360() )
+		Msg( "ThreadPoolTest: Jobs doing work, %s main thread\n", bMain ? "WITH" : "without" );
+		for ( int i = 0; i < 2; i++ )
 		{
-			Msg( "ThreadPoolTest:     Non-distribute\n" );
-			ThreadPoolTest::Test( false, true, bToCompletion, true );
+			bool bToCompletion = true;// = ( i % 2 != 0 );
+			if ( !IsX360() )
+			{
+				Msg( "ThreadPoolTest:     Non-distribute\n" );
+				ThreadPoolTest::Test( false, true, bToCompletion, true, !!bMain );
+			}
+
+			Msg( "ThreadPoolTest:     Distribute\n" );
+			ThreadPoolTest::Test( true, true, bToCompletion, true, !!bMain );
+
+// 			Msg( "ThreadPoolTest:     One core\n" );
+// 			ThreadSetAffinity( 0, 1 );
+// 			ThreadPoolTest::Test( false, true, bToCompletion, true, !!bMain );
+// 			ThreadSetAffinity( 0, mask1 );
+
+			Msg( "ThreadPoolTest:     NO Sleep\n" );
+			ThreadPoolTest::Test( false, false, bToCompletion, true, !!bMain );
+
+			Msg( "ThreadPoolTest:     Distribute NO Sleep\n" );
+			ThreadPoolTest::Test( true, false, bToCompletion, true, !!bMain );
+
+// 			Msg( "ThreadPoolTest:     One core\n" );
+// 			ThreadSetAffinity( 0, 1 );
+// 			ThreadPoolTest::Test( false, false, bToCompletion, true, !!bMain );
+// 			ThreadSetAffinity( 0, mask1 );
 		}
-
-		Msg( "ThreadPoolTest:     Distribute\n" );
-		ThreadPoolTest::Test( true, true, bToCompletion, true );
-
-		Msg( "ThreadPoolTest:     One core\n" );
-		ThreadSetAffinity( 0, 1 );
-		ThreadPoolTest::Test( false, true, bToCompletion, true  );
-		ThreadSetAffinity( 0, mask1 );
-
-		Msg( "ThreadPoolTest:     NO Sleep\n" );
-		ThreadPoolTest::Test( false, false, bToCompletion, true  );
-
-		Msg( "ThreadPoolTest:     Distribute\n" );
-		ThreadPoolTest::Test( true, false, bToCompletion, true  );
-
-		Msg( "ThreadPoolTest:     One core\n" );
-		ThreadSetAffinity( 0, 1 );
-		ThreadPoolTest::Test( false, false, bToCompletion, true  );
-		ThreadSetAffinity( 0, mask1 );
 	}
 #ifdef _WIN32
-	GetProcessAffinityMask( GetCurrentProcess(), &mask1, &mask2 );
+	GetProcessAffinityMask( GetCurrentProcess(), (DWORD_PTR *) &mask1, (DWORD_PTR *) &mask2 );
 #endif
 
 	ThreadPoolTest::TestForcedExecute();

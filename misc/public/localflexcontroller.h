@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2007, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -17,6 +17,9 @@
 
 enum LocalFlexController_t
 {
+	// We cast 0 & -1 into this enum, so we have to define them here to avoid SNC complaining
+	DUMMY_INVALID_FLEX_CONTROLLER = -1,
+	DUMMY_NULL_FLEX_CONTROLLER = 0,
 	// this isn't really an enum - its just a typed int. gcc will not accept it as a fwd decl, so we'll define one value
 	DUMMY_FLEX_CONTROLLER=0x7fffffff						// make take 32 bits
 };

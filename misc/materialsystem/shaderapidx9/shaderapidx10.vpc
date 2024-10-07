@@ -7,14 +7,14 @@
 $macro SRCDIR		"..\.."
 $Macro OUTBINDIR	"$SRCDIR\..\game\bin"
 
-$Include "$SRCDIR\vpc_scripts\source_dll_base.vpc"
+$Include "$SRCDIR\vpc_scripts\source_dll_win32_base.vpc"
 
 $Configuration	"Debug"
 {
 	$General
 	{
-		$OutputDirectory			".\Debug_dx10"
-		$IntermediateDirectory		".\Debug_dx10"
+		$OutputDirectory			".\Debug_dx10$PLATSUBDIR"
+		$IntermediateDirectory		".\Debug_dx10$PLATSUBDIR"
 	}
 }
 
@@ -22,8 +22,8 @@ $Configuration	"Release"
 {
 	$General
 	{
-		$OutputDirectory			".\Release_dx10"
-		$IntermediateDirectory		".\Release_dx10"
+		$OutputDirectory			".\Release_dx10$PLATSUBDIR"
+		$IntermediateDirectory		".\Release_dx10$PLATSUBDIR"
 	}
 }
 
@@ -34,7 +34,7 @@ $Configuration
 	{
 		$AdditionalIncludeDirectories	"$BASE;$SRCDIR\dx10sdk\include;..\"
 		$PreprocessorDefinitions		"$BASE;SHADERAPIDX10;SHADER_DLL_EXPORT;PROTECTED_THINGS_ENABLE;strncpy=use_Q_strncpy_instead;_snprintf=use_Q_snprintf_instead"
-		$PreprocessorDefinitions		"$BASE;USE_ACTUAL_DX" [$WIN32]
+		$PreprocessorDefinitions		"$BASE;USE_ACTUAL_DX" [$WINDOWS||$X360]
 
 //		$AdditionalOptions		"/FC"
 	}
@@ -61,7 +61,7 @@ $Project "shaderapidx10"
 			{
 				$Compiler
 				{
-					$PreprocessorDefinitions	"$BASE;DX10"
+					$PreprocessorDefinitions	"DX10"
 				}
 			}
 		}
@@ -81,6 +81,7 @@ $Project "shaderapidx10"
 		$File	"vertexdecl.cpp"
 		$File	"VertexShaderDX8.cpp"
 		$File	"wmi.cpp"
+		$File	"dx9asmtogl2.cpp"							[!$PS3]
 	}
 
 	$Folder	"DirectX Header Files"
@@ -126,6 +127,7 @@ $Project "shaderapidx10"
 		// DX9 related files		
 		$File	"TransitionTable.h"
 		$File	"vertexdecl.h"
+		$File	"CMaterialSystemStats.h"
 		$File	"ColorFormatDX8.h"
 		$File	"d3d_async.h"
 		$File	"dynamicib.h"
@@ -144,11 +146,12 @@ $Project "shaderapidx10"
 
 	$Folder	"Link Libraries"
 	{
-		$DynamicFile	"$SRCDIR\lib\public\tier2.lib"
-		$DynamicFile	"$SRCDIR\lib\public\bitmap.lib"
-		$DynamicFile	"$SRCDIR\lib\public\mathlib.lib"
-		$DynamicFile	"$SRCDIR\lib\common\vc7\bzip2.lib"
-		
+		$File	"$SRCDIR\lib\public\tier2.lib"
+		$File	"$SRCDIR\lib\public\bitmap.lib"
+		$File	"$SRCDIR\lib\public\mathlib.lib"
+		$File	"$SRCDIR\lib\common\vc7\bzip2.lib" [!$VS2015]
+		$File	"$SRCDIR\lib\common\vc14\bzip2.lib" [$VS2015]
+		$File	"$SRCDIR\lib\public\videocfg.lib"
 		$File	"$SRCDIR\dx10sdk\lib\x86\d3d9.lib" 
 		$File	"$SRCDIR\dx10sdk\lib\x86\d3d10.lib" 
 		$File	"$SRCDIR\dx10sdk\lib\x86\dxgi.lib" 

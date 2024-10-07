@@ -13,8 +13,9 @@
 
 //	DYNAMIC: "COMPRESSED_VERTS"		"0..1"
 //	DYNAMIC: "SKINNING"				"0..1"
-//	DYNAMIC: "DOWATERFOG"			"0..1"
-//  DYNAMIC: "MORPHING"				"0..1" [vs30]
+#include "common_fog_vs_fxc.h"
+
+// DYNAMIC: "MORPHING"				"0..0" [ = false ]
 
 #include "common_vs_fxc.h"
 
@@ -36,7 +37,7 @@ const float4 cIrisProjectionV	:  register( SHADER_SPECIFIC_CONST_9 );
 const float3 cMorphTargetTextureDim : register( SHADER_SPECIFIC_CONST_10 );
 const float4 cMorphSubrect		: register( SHADER_SPECIFIC_CONST_11 );
 
-sampler2D morphSampler			: register( D3DVERTEXTEXTURESAMPLER0, s0 );
+sampler2D morphSampler			: register( s0 );
 #endif
 
 struct VS_INPUT
@@ -48,17 +49,17 @@ struct VS_INPUT
 	float4 vTexCoord0			: TEXCOORD0;		// Base (sclera) texture coordinates
 
 	// Position and normal/tangent deltas
-	float3 vPosFlex					: POSITION1;
-	float3 vNormalFlex				: NORMAL1;
+	float3 vPosFlex				: POSITION1;
+	float3 vNormalFlex			: NORMAL1;
 #ifdef SHADER_MODEL_VS_3_0
-	float vVertexID					: POSITION2;
+	float vVertexID				: POSITION2;
 #endif
 };
 
 struct VS_OUTPUT
 {
     float4 projPos				: POSITION;			// Projection-space position
-#if !defined( _X360 )
+#if !defined( _X360 ) && !defined( SHADER_MODEL_VS_3_0 )
 	float  fog					: FOG;				// Fixed-function fog factor
 #endif
 	float4 spotTexCoord			: TEXCOORD0;		// Spotlight texture coordinates
@@ -104,12 +105,18 @@ VS_OUTPUT main( const VS_INPUT v )
 	// Transform into projection space
 	float4 projPos = mul( float4( worldPos, 1 ), cViewProj );
 	o.projPos    = projPos;
+	
+#ifdef _PS3
+	// Account for OpenGL's flipped y coordinate and expanded z range [-1,1] instead of [0,1]
+	o.projPos.y = -o.projPos.y;
+	o.projPos.z = 2.0f * o.projPos.z - o.projPos.w;
+#endif // _PS3
+
 	o.projPosXYZ = projPos.xyz;
 	o.worldPos   = worldPos.xyz;
 
-#if !defined( _X360 )
-	// Set fixed-function fog factor
-	o.fog = CalcFog( worldPos, o.projPos, g_FogType );
+#if !defined( _X360 ) && !defined( SHADER_MODEL_VS_3_0 )
+	o.fog = CalcFixedFunctionFog( worldPos, g_FogType );
 #endif
 
 	// Base texture coordinates

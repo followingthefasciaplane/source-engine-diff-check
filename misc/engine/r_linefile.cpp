@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -25,7 +25,7 @@ CUtlVector< Vector >	g_Points;
 void Linefile_Draw( void )
 {
 	Vector *points = g_Points.Base();
-	int pointCount = g_Points.Size();
+	int pointCount = g_Points.Count();
 
 	for ( int i = 0; i < pointCount-1; i++ )
 	{

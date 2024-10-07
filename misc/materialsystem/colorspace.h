@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -43,7 +43,13 @@ namespace ColorSpace
 		const float *linearBumpColor2, const float *linearBumpColor3,
 		unsigned char *ret, unsigned char *retBump1,
 		unsigned char *retBump2, unsigned char *retBump3 );
-	
+
+	// 
+	void LinearToBumpedLightmapAlpha( const float *linearAlpha, const float *linearBumpAlpha1,
+									  const float *linearBumpAlpha2, const float *linearBumpAlpha3,
+									  unsigned char *ret, unsigned char *retBump1,
+									  unsigned char *retBump2, unsigned char *retBump3 );
+
 	// converts 0..1 linear value to screen gamma (0..255)
 	int LinearToScreenGamma( float f );
 
@@ -89,7 +95,7 @@ namespace ColorSpace
 		// HACK!  Clean this up, and add some else statements
 #define CONDITION(a,b,c) do { if( maxs[a] >= maxs[b] && maxs[b] >= maxs[c] ) { order[0] = a; order[1] = b; order[2] = c; } } while( 0 )
 		
-		int order[3] = {};
+		int order[3];
 		CONDITION(0,1,2);
 		CONDITION(0,2,1);
 		CONDITION(1,0,2);
@@ -197,15 +203,64 @@ namespace ColorSpace
 		retBump3[2] = RoundFloatToByte( correctedBumpColor3[2] * 255.0f );
 	}
 
-	
+	// For use with CSM correct blending output in alpha channel from vrad
+	// we can go out of 0..1 range if we normalize the bumped alpha data
+	// so we 'squash' the range to compensate. 
+	// Note - We shouldn't be taking the simple average in the bump case when normalizing anyway
+	// (i.e. add together and multiply by 0.575 comments below). 
+	// Keeping the averaging as is for consistency with RGB's, etc
+	FORCEINLINE void LinearToBumpedLightmapAlpha( const float *linearAlpha, const float *linearBumpAlpha1,
+												  const float *linearBumpAlpha2, const float *linearBumpAlpha3,
+												  unsigned char *ret, unsigned char *retBump1,
+												  unsigned char *retBump2, unsigned char *retBump3 )
+	{
+		// divide by three to ensure we stay in a 0..1 range here, scale up result later (via scaling in CSM light color)
+		const float &linearUnbumped = *((const float *)linearAlpha) / 3.0f;
+		const float &linearBump1 = *((const float *)linearBumpAlpha1) / 3.0f;
+		const float &linearBump2 = *((const float *)linearBumpAlpha2) / 3.0f;
+		const float &linearBump3 = *((const float *)linearBumpAlpha3) / 3.0f;
+
+		float bumpAverage = linearBump1;
+		bumpAverage += linearBump2;
+		bumpAverage += linearBump3;
+		bumpAverage *= (1.0f / 3.0f);
+
+		float correctionScale;
+		if ( *(int *)&bumpAverage != 0 )
+		{
+			// fast path when we know that we don't have to worry about divide by zero.
+			correctionScale = linearUnbumped / bumpAverage;
+		}
+		else
+		{
+			correctionScale = 0.0f;
+			if ( bumpAverage != 0.0f )
+			{
+				correctionScale = linearUnbumped / bumpAverage;
+			}
+		}
+		float correctedBumpAlpha1;
+		float correctedBumpAlpha2;
+		float correctedBumpAlpha3;
+
+		correctedBumpAlpha1 = linearBump1 * correctionScale;
+		correctedBumpAlpha2 = linearBump2 * correctionScale;
+		correctedBumpAlpha3 = linearBump3 * correctionScale;
+
+		ret[0] = RoundFloatToByte( linearUnbumped * 255.0f );
+		retBump1[0] = RoundFloatToByte( correctedBumpAlpha1 * 255.0f );
+		retBump2[0] = RoundFloatToByte( correctedBumpAlpha2 * 255.0f );
+		retBump3[0] = RoundFloatToByte( correctedBumpAlpha3 * 255.0f );
+	}
+
 	uint16 LinearFloatToCorrectedShort( float in );
 
 	inline unsigned short LinearToUnsignedShort( float in, int nFractionalBits )
 	{
 		unsigned short out;
 		in = in * ( 1 << nFractionalBits );
-		in = min( in, 65535.f );
-		out = max( in, 0.0f );
+		in = MIN( in, 65535 );
+		out = ( unsigned short ) MAX( in, 0.0f );
 		return out;
 	}
 
@@ -216,6 +271,25 @@ namespace ColorSpace
 		out[0] = LinearFloatToCorrectedShort( in.x );
 		out[1] = LinearFloatToCorrectedShort( in.y );
 		out[2] = LinearFloatToCorrectedShort( in.z );
+	}
+
+	// divide by 3 to ensure we stay in the same range as bumped alpha data
+	// this is important for overlays, since a bumped overlay on a non-bumped 
+	// lightmap surface is still drawn with the bumped lightmap shader, with 3x the base lightmap
+	// and vice versa. If we're not consistent, we break the CSM blending
+	FORCEINLINE void LinearToLightmapAlpha( unsigned char *pDstA, const float srcA )
+	{
+		pDstA[0] = RoundFloatToByte( (srcA * 255.0f) / 3.0f );
+	}
+
+	FORCEINLINE void LinearToLightmapAlpha( int *pDstA, const float srcA )
+	{
+		pDstA[0] = LinearToUnsignedShort( srcA / 3.0f, 16 );
+	}
+
+	FORCEINLINE void LinearToLightmapAlpha( float *pA )
+	{
+		pA[0] = pA[0] / 3.0f;
 	}
 
 	FORCEINLINE void 
@@ -276,6 +350,55 @@ namespace ColorSpace
 		*((Vector *)retBump3) = linearBump3;
 	}
 
+	// For use with CSM correct blending output in alpha channel from vrad
+	// we can go out of 0..1 range if we normalize the bumped alpha data
+	// so we 'squash' the range to compensate. 
+	// Note - We shouldn't be taking the simple average in the bump case when normalizing anyway
+	// (i.e. add together and multiply by 0.575 comments below). 
+	// Keeping the averaging as is for consistency with RGB's, etc
+	FORCEINLINE void LinearToBumpedLightmapAlpha( const float *linearAlpha, const float *linearBumpAlpha1,
+												  const float *linearBumpAlpha2, const float *linearBumpAlpha3,
+												  float *ret, float *retBump1,
+												  float *retBump2, float *retBump3 )
+	{
+		// divide by three to ensure we stay in a 0..1 range here, scale up result later (via scaling in CSM light color)
+		const float &linearUnbumped = *((const float *)linearAlpha) / 3.0f;
+		const float &linearBump1 = *((const float *)linearBumpAlpha1) / 3.0f;
+		const float &linearBump2 = *((const float *)linearBumpAlpha2) / 3.0f;
+		const float &linearBump3 = *((const float *)linearBumpAlpha3) / 3.0f;
+
+		float bumpAverage = linearBump1;
+		bumpAverage += linearBump2;
+		bumpAverage += linearBump3;
+		bumpAverage *= (1.0f / 3.0f);
+
+		float correctionScale;
+		if ( *(int *)&bumpAverage != 0 )
+		{
+			// fast path when we know that we don't have to worry about divide by zero.
+			correctionScale = linearUnbumped / bumpAverage;
+		}
+		else
+		{
+			correctionScale = 0.0f;
+			if ( bumpAverage != 0.0f )
+			{
+				correctionScale = linearUnbumped / bumpAverage;
+			}
+		}
+		float correctedBumpAlpha1;
+		float correctedBumpAlpha2;
+		float correctedBumpAlpha3;
+
+		correctedBumpAlpha1 = linearBump1 * correctionScale;
+		correctedBumpAlpha2 = linearBump2 * correctionScale;
+		correctedBumpAlpha3 = linearBump3 * correctionScale;
+
+		ret[0] = linearUnbumped;
+		retBump1[0] = correctedBumpAlpha1;
+		retBump2[0] = correctedBumpAlpha2;
+		retBump3[0] = correctedBumpAlpha3;
+	}
 
 	// The domain of the inputs is floats [0 .. 16.0f]
 	// the output range is also floats [0 .. 16.0f] (eg, compression to short does not happen)
@@ -298,7 +421,7 @@ namespace ColorSpace
 		fltx4 bumpAverage = AddSIMD(AddSIMD(linearBumpColor1, linearBumpColor2), linearBumpColor3); // actually average * 3
 
 		// find the zero terms so that we can quash their channels in the output
-		fltx4 zeroTerms = CmpEqSIMD(bumpAverage, Four_Zeros);
+		bi32x4 zeroTerms = CmpEqSIMD(bumpAverage, Four_Zeros);
 		fltx4 correctionScale = ReciprocalEstSIMD(bumpAverage);  // each channel is now 1.0f / (average[x] * 3.0f)
 
 		// divide unbumped linear by the average to get the correction scale

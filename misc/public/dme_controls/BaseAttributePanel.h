@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======//
 //
 // Purpose: base class for all element attribute panels
 //    An attribute panel is a one line widget that can be used by a list
@@ -15,9 +15,16 @@
 #endif
 
 #include "datamodel/dmattribute.h"
+#include "datamodel/dmattributevar.h"
 #include "vgui_controls/Panel.h"
 #include "datamodel/dmehandle.h"
+#include "tier1/fmtstr.h"
 
+#define FirstColumnWidth 30
+#define TypeColumnWidth 75
+#define ColumnBorderWidth 2
+#define PickerWidth 25
+#define PickerHeight 13
 
 //-----------------------------------------------------------------------------
 // Forward declarations
@@ -70,10 +77,12 @@ public:
 	void SetAttributeValueElement( CDmElement *pElement );
 
 	void SetAttributeValueFromString( const char *pString );
-	const char *GetAttributeValueAsString( char *pBuf, int nLength );
+	bool GetAttributeValueAsString( char *pBuf, int nLength );
 
 	// Returns the attribute type to edit
 	DmAttributeType_t	GetAttributeType() const;
+
+	CDmAttribute *GetAttribute();
 
 	// Returns the editor info
 	CDmeEditorTypeDictionary *GetEditorTypeDictionary();
@@ -100,6 +109,7 @@ protected:
 	// Methods to get/set column size
 	int					GetSizeForColumn( Panel *panel );
 	void				SetColumnSize( Panel *panel, int width );
+	virtual void GetPickerBounds( int *x, int *y, int *w, int *h );
 
 	// Returns the element being edited by the panel
 	CDmElement			*GetPanelElement();
@@ -241,6 +251,7 @@ template<> inline void SetArrayAttributeValue<DmElementHandle_t>( CDmElement *pE
 template< class T >
 void CBaseAttributePanel::SetAttributeValue( const T& value )
 {
+	CUndoScopeGuard sg( CFmtStr( "Set %s", m_szAttributeName ) );
 	if ( !IsArrayEntry() )
 	{
 		GetPanelElement()->SetValue( m_szAttributeName, value );
@@ -253,23 +264,45 @@ void CBaseAttributePanel::SetAttributeValue( const T& value )
 
 inline void CBaseAttributePanel::SetAttributeValue( const char *pValue )
 {
+	CUndoScopeGuard sg( CFmtStr( "Set %s", m_szAttributeName ) );
 	if ( !IsArrayEntry() )
 	{
 		GetPanelElement()->SetValue( m_szAttributeName, pValue );
 	}
 	else
 	{
-		SetArrayAttributeValue<CUtlString>( GetPanelElement(), m_szAttributeName, m_nArrayIndex, pValue );
+		CUtlSymbolLarge symbol = g_pDataModel->GetSymbol( pValue );
+		SetArrayAttributeValue<CUtlSymbolLarge>( GetPanelElement(), m_szAttributeName, m_nArrayIndex, symbol );
 	}
 }
 
 template< class T >
 const T& CBaseAttributePanel::GetAttributeValue( )
 {
+	CDmElement *pPanelElement = GetPanelElement();
+	if ( !pPanelElement )
+	{
+		static T temp;
+		CDmAttributeInfo<T>::SetDefaultValue( temp );
+		return temp;
+	}
+
 	if ( !IsArrayEntry() )
-		return GetPanelElement()->GetValue<T>( m_szAttributeName );
-	return GetArrayAttributeValue<T>( GetPanelElement(), m_szAttributeName, m_nArrayIndex );
+		return pPanelElement->GetValue<T>( m_szAttributeName );
+	return GetArrayAttributeValue<T>( pPanelElement, m_szAttributeName, m_nArrayIndex );
 }
 
+//-----------------------------------------------------------------------------
+// Returns the panel element
+//-----------------------------------------------------------------------------
+inline CDmElement *CBaseAttributePanel::GetPanelElement()
+{
+	return m_hObject;
+}
+
+inline const CDmElement *CBaseAttributePanel::GetPanelElement() const
+{
+	return m_hObject;
+}
 
 #endif // BASEATTRIBUTEPANEL_H

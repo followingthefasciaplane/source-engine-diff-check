@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright (c) 1996-2006, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -23,10 +23,12 @@ class CGameEventListener : public IGameEventListener2
 public:
 	CGameEventListener() : m_bRegisteredForEvents(false)
 	{
+		m_nDebugID = EVENT_DEBUG_ID_INIT;
 	}
 
 	~CGameEventListener()
 	{
+		m_nDebugID = EVENT_DEBUG_ID_SHUTDOWN;
 		StopListeningForAllEvents();
 	}
 
@@ -39,13 +41,22 @@ public:
 #else
 		bool bServerSide = true;
 #endif
-		if ( gameeventmanager )
-		{
-			gameeventmanager->AddListener( this, name, bServerSide );
-		}
-		
-		AssertMsg1( gameeventmanager, "Failed to subscribe to event %s!", name );
+
+		gameeventmanager->AddListener( this, name, bServerSide );
 	}
+
+	void ListenForAllGameEvents()
+	{
+
+#ifdef CLIENT_DLL
+	bool bServerSide = false;
+#else
+	bool bServerSide = true;
+#endif
+
+		gameeventmanager->AddListenerGlobal( this, bServerSide );
+	}
+
 
 	void StopListeningForAllEvents()
 	{
@@ -54,12 +65,15 @@ public:
 		{
 			if ( gameeventmanager )
 				gameeventmanager->RemoveListener( this );
+
 			m_bRegisteredForEvents = false;
 		}
 	}
 
 	// Intentionally abstract
 	virtual void FireGameEvent( IGameEvent *event ) = 0;
+	int m_nDebugID;
+	virtual int GetEventDebugID( void )			{ return m_nDebugID; }
 
 private:
 

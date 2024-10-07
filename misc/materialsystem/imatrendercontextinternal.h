@@ -1,8 +1,8 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========== Copyright (c) 2005, Valve Corporation, All rights reserved. ========
 //
 // Purpose:
 //
-//=============================================================================
+//===============================================================================
 
 #ifndef IMATRENDERCONTEXTINTERNAL_H
 #define IMATRENDERCONTEXTINTERNAL_H
@@ -27,6 +27,7 @@ abstract_class IMatRenderContextInternal : public IMatRenderContext
 public:
 	virtual float GetFloatRenderingParameter(int parm_number) const = 0;
 	virtual int GetIntRenderingParameter(int parm_number) const = 0;
+	virtual ITexture *GetTextureRenderingParameter(int parm_number) const = 0;
 	virtual Vector GetVectorRenderingParameter(int parm_number) const = 0;
 
 	virtual void SwapBuffers() = 0;
@@ -37,18 +38,22 @@ public:
 	virtual void ForceDepthFuncEquals( bool) = 0;
 
 	virtual bool InFlashlightMode() const = 0;
-	virtual void BindStandardTexture( Sampler_t, StandardTextureId_t ) = 0;
+	virtual bool IsCascadedShadowMapping() const = 0;
+	virtual void BindStandardTexture( Sampler_t, TextureBindFlags_t nBindFlags, StandardTextureId_t ) = 0;
 	virtual void GetLightmapDimensions( int *, int *) = 0;
 	virtual MorphFormat_t GetBoundMorphFormat() = 0;
 	virtual ITexture *GetRenderTargetEx( int ) = 0;
 	virtual void DrawClearBufferQuad( unsigned char, unsigned char, unsigned char, unsigned char, bool, bool, bool ) = 0;
+#ifdef _PS3
+	virtual void DrawReloadZcullQuad() = 0;
+#endif // _PS3
 
 	virtual bool OnDrawMesh( IMesh *pMesh, int firstIndex, int numIndices ) = 0;
 	virtual bool OnDrawMesh( IMesh *pMesh, CPrimList *pLists, int nLists ) = 0;
+	virtual bool OnDrawMeshModulated( IMesh *pMesh, const Vector4D &diffuseModulation, int firstIndex, int numIndices ) = 0;
 	virtual bool OnSetFlexMesh( IMesh *pStaticMesh, IMesh *pMesh, int nVertexOffsetInBytes ) = 0;
 	virtual bool OnSetColorMesh( IMesh *pStaticMesh, IMesh *pMesh, int nVertexOffsetInBytes ) = 0;
 	virtual bool OnSetPrimitiveType( IMesh *pMesh, MaterialPrimitiveType_t type ) = 0;
-	virtual bool OnFlushBufferedPrimitives() = 0;
 
 	virtual void SyncMatrices() = 0;
 	virtual void SyncMatrix( MaterialMatrixMode_t ) = 0;
@@ -62,18 +67,15 @@ public:
 	virtual void MarkRenderDataUnused( bool bBeginFrame ) = 0;
 	virtual CMatCallQueue *GetCallQueueInternal() = 0;
 
-	// Map and unmap a texture. The pRecipient->OnAsyncMapComplete is called when complete. 
-	virtual void AsyncMap( ITextureInternal* pTexToMap, IAsyncTextureOperationReceiver* pRecipient, void* pExtraArgs ) = 0;
-	virtual void AsyncUnmap( ITextureInternal* pTexToUnmap ) = 0;
-	
-	// Copy from a render target to a staging texture, in order with other async commands.
-	virtual void AsyncCopyRenderTargetToStagingTexture( ITexture* pDst, ITexture* pSrc, IAsyncTextureOperationReceiver* pRecipient, void* pExtraArgs ) = 0;
+	virtual void EvictManagedResources() = 0;
 
-#ifdef DX_TO_GL_ABSTRACTION
+	virtual ShaderAPITextureHandle_t GetLightmapTexture( int nLightmapPage ) = 0;
+	virtual bool IsRenderingPaint() const = 0;
+	virtual ShaderAPITextureHandle_t GetPaintmapTexture( int nLightmapPage ) = 0;
+	
+#if defined( DX_TO_GL_ABSTRACTION ) && !defined( _GAMECONSOLE )
 	virtual void DoStartupShaderPreloading( void ) = 0;
 #endif
-
-	virtual void TextureManagerUpdate() = 0;
 };
 
 #endif // IMATRENDERCONTEXTINTERNAL_H

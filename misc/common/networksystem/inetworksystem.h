@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -11,8 +11,39 @@
 #endif
 
 #include "tier0/platform.h"
-#include "appframework/IAppSystem.h"
+#include "appframework/iappsystem.h"
 
+
+// This is the packet payload without any header bytes (which are attached for actual sending)
+#define	NET_MAX_PAYLOAD			( 262144 - 4)	// largest message we can send in bytes
+#define NET_MAX_PAYLOAD_BITS	18		// 2^NET_MAX_PAYLOAD_BITS > NET_MAX_PAYLOAD
+// This is just the client_t->netchan.datagram buffer size (shouldn't ever need to be huge)
+#define NET_MAX_DATAGRAM_PAYLOAD 4000	// = maximum unreliable playload size
+
+// UDP has 28 byte headers
+#define UDP_HEADER_SIZE				(20+8)	// IP = 20, UDP = 8
+
+#define MAX_ROUTABLE_PAYLOAD		1200	// x360 requires <= 1260, but now that listen servers can support "steam" mediated sockets, steam enforces 1200 byte limit
+
+#if (MAX_ROUTABLE_PAYLOAD & 3) != 0
+#error Bit buffers must be a multiple of 4 bytes
+#endif
+
+#define MIN_ROUTABLE_PAYLOAD		16		// minimum playload size
+
+#define NETMSG_TYPE_BITS	8	// must be 2^NETMSG_TYPE_BITS > SVC_LASTMSG
+
+// This is the payload plus any header info (excluding UDP header)
+
+#define HEADER_BYTES	9	// 2*4 bytes seqnr, 1 byte flags
+
+// Pad this to next higher 16 byte boundary
+// This is the largest packet that can come in/out over the wire, before processing the header
+//  bytes will be stripped by the networking channel layer
+#define	NET_MAX_MESSAGE	PAD_NUMBER( ( NET_MAX_PAYLOAD + HEADER_BYTES ), 16 )
+
+#define NET_HEADER_FLAG_SPLITPACKET				-2
+#define NET_HEADER_FLAG_COMPRESSEDPACKET		-3
 
 //-----------------------------------------------------------------------------
 // Forward declarations: 
@@ -54,28 +85,29 @@ enum ConnectionStatus_t
 //-----------------------------------------------------------------------------
 // This interface encompasses a one-way communication path between two machines
 //-----------------------------------------------------------------------------
-abstract_class INetChannel
-{
-public:
-//	virtual INetworkMessageHandler *GetMsgHandler( void ) const = 0;
-	virtual const netadr_t	&GetRemoteAddress( void ) const = 0;
-
-	// send a net message
-	// NOTE: There are special connect/disconnect messages?
-	virtual bool AddNetMsg( INetworkMessage *msg, bool bForceReliable = false ) = 0; 
-//	virtual bool RegisterMessage( INetworkMessage *msg ) = 0;
-
-	virtual ConnectionStatus_t GetConnectionState( ) = 0;
-
-/*
-	virtual ConnectTo( const netadr_t& to ) = 0;
-	virtual Disconnect() = 0;
-
-	virtual const netadr_t& GetLocalAddress() = 0;
-
-	virtual const netadr_t& GetRemoteAddress() = 0;
-*/
-};
+// 
+// abstract_class INetChannel
+// {
+// public:
+// //	virtual INetworkMessageHandler *GetMsgHandler( void ) const = 0;
+// 	virtual const netadr_t	&GetRemoteAddress( void ) const = 0;
+// 
+// 	// send a net message
+// 	// NOTE: There are special connect/disconnect messages?
+// 	virtual bool AddNetMsg( INetworkMessage *msg, bool bForceReliable = false ) = 0; 
+// //	virtual bool RegisterMessage( INetworkMessage *msg ) = 0;
+// 
+// 	virtual ConnectionStatus_t GetConnectionState( ) = 0;
+// 
+// /*
+// 	virtual ConnectTo( const netadr_t& to ) = 0;
+// 	virtual Disconnect() = 0;
+// 
+// 	virtual const netadr_t& GetLocalAddress() = 0;
+// 
+// 	virtual const netadr_t& GetRemoteAddress() = 0;
+// */
+// };
 
 
 //-----------------------------------------------------------------------------
@@ -113,7 +145,6 @@ struct NetworkMessageReceivedEvent_t : public NetworkEvent_t
 //-----------------------------------------------------------------------------
 // Main interface for low-level networking (packet sending). This is a low-level interface
 //-----------------------------------------------------------------------------
-#define NETWORKSYSTEM_INTERFACE_VERSION	"NetworkSystemVersion001"
 abstract_class INetworkSystem : public IAppSystem
 {
 public:

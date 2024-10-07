@@ -1,27 +1,43 @@
+// ALL SKIP STATEMENTS THAT AFFECT THIS SHADER!!!
+// ($DETAIL_BLEND_MODE == 7 ) && $BUMPMAP2
+// ($DETAIL_BLEND_MODE == 6 )
+// ($DETAIL_BLEND_MODE == 10 ) && ($BUMPMAP == 0 )
+// ($DETAIL_BLEND_MODE == 11 ) && ($BUMPMAP != 0 )
+// ($FANCY_BLENDING) && ($DETAIL_BLEND_MODE == 7 )
+// ($FANCY_BLENDING) && ($BASETEXTURE2 == 0 ) && ($BUMPMAP2 == 0 )
+// ( $FLASHLIGHT == 0 ) && ( $FLASHLIGHTSHADOWS == 1 )
+// ( $CUBEMAP == 2 ) && ( $BUMPMAP2 ) 
+// ( $CUBEMAP == 2 ) && ( $PIXELFOGTYPE == 1 ) && ( $SHADER_SRGB_READ == 1 ) 
+// ( $CASCADED_SHADOW_MAPPING == 0 ) && ( $CASCADE_SIZE != 0 ) 
+// ( $CASCADED_SHADOW_MAPPING != 0 ) && ( $SFM != 0 ) 
+// ( $CASCADED_SHADOW_MAPPING == 0 ) && ( $CSM_MODE != 0 ) 
+// $ENVMAPMASK && $BUMPMAP
+// $NORMALMAPALPHAENVMAPMASK && $BASEALPHAENVMAPMASK
+// $NORMALMAPALPHAENVMAPMASK && $ENVMAPMASK
+// $BASEALPHAENVMAPMASK && $ENVMAPMASK
+// $BASEALPHAENVMAPMASK && $SELFILLUM
+// !$FASTPATH && $FASTPATHENVMAPCONTRAST
+// !$FASTPATH && $FASTPATHENVMAPTINT
+// !$BUMPMAP && $BUMPMAP2
+// $ENVMAPMASK && $BUMPMAP2
+// $BASEALPHAENVMAPMASK && $BUMPMAP
+// $SEAMLESS && ( $DETAIL_BLEND_MODE != 12 )
+// $BUMPMASK && ( $SEAMLESS ||  ( $DETAILTEXTURE != 12 ) || $SELFILLUM || $BASETEXTURE2 )
+// $FASTPATH && $PIXELFOGTYPE && $BASETEXTURE2 && $CUBEMAP && ($DETAIL_BLEND_MODE == 10 ) 
+// $FANCY_BLENDING && $BUMPMAP && $DETAILTEXTURE
+// defined $PIXELFOGTYPE && defined $WRITEWATERFOGTODESTALPHA && ( $PIXELFOGTYPE != 1 ) && $WRITEWATERFOGTODESTALPHA
+// defined $LIGHTING_PREVIEW && defined $FASTPATHENVMAPTINT && $LIGHTING_PREVIEW && $FASTPATHENVMAPTINT
+// defined $LIGHTING_PREVIEW && defined $FASTPATHENVMAPCONTRAST && $LIGHTING_PREVIEW && $FASTPATHENVMAPCONTRAST
+// defined $LIGHTING_PREVIEW && defined $FASTPATH && $LIGHTING_PREVIEW && $FASTPATH
+// ($FLASHLIGHT || $FLASHLIGHTSHADOWS) && $LIGHTING_PREVIEW
+// defined $PIXELFOGTYPE && defined $WRITEWATERFOGTODESTALPHA && ( $PIXELFOGTYPE != 1 ) && $WRITEWATERFOGTODESTALPHA
+// defined $LIGHTING_PREVIEW && defined $FASTPATHENVMAPTINT && $LIGHTING_PREVIEW && $FASTPATHENVMAPTINT
+// defined $LIGHTING_PREVIEW && defined $FASTPATHENVMAPCONTRAST && $LIGHTING_PREVIEW && $FASTPATHENVMAPCONTRAST
+// defined $LIGHTING_PREVIEW && defined $FASTPATH && $LIGHTING_PREVIEW && $FASTPATH
+// ($FLASHLIGHT || $FLASHLIGHTSHADOWS) && $LIGHTING_PREVIEW
 #include "shaderlib/cshader.h"
 class lightmappedgeneric_ps20_Static_Index
 {
-private:
-	int m_nMASKEDBLENDING;
-#ifdef _DEBUG
-	bool m_bMASKEDBLENDING;
-#endif
-public:
-	void SetMASKEDBLENDING( int i )
-	{
-		Assert( i >= 0 && i <= 1 );
-		m_nMASKEDBLENDING = i;
-#ifdef _DEBUG
-		m_bMASKEDBLENDING = true;
-#endif
-	}
-	void SetMASKEDBLENDING( bool i )
-	{
-		m_nMASKEDBLENDING = i ? 1 : 0;
-#ifdef _DEBUG
-		m_bMASKEDBLENDING = true;
-#endif
-	}
 private:
 	int m_nBASETEXTURE2;
 #ifdef _DEBUG
@@ -38,30 +54,10 @@ public:
 	}
 	void SetBASETEXTURE2( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nBASETEXTURE2 = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bBASETEXTURE2 = true;
-#endif
-	}
-private:
-	int m_nDETAILTEXTURE;
-#ifdef _DEBUG
-	bool m_bDETAILTEXTURE;
-#endif
-public:
-	void SetDETAILTEXTURE( int i )
-	{
-		Assert( i >= 0 && i <= 1 );
-		m_nDETAILTEXTURE = i;
-#ifdef _DEBUG
-		m_bDETAILTEXTURE = true;
-#endif
-	}
-	void SetDETAILTEXTURE( bool i )
-	{
-		m_nDETAILTEXTURE = i ? 1 : 0;
-#ifdef _DEBUG
-		m_bDETAILTEXTURE = true;
 #endif
 	}
 private:
@@ -80,6 +76,7 @@ public:
 	}
 	void SetBUMPMAP( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 2 );
 		m_nBUMPMAP = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bBUMPMAP = true;
@@ -101,6 +98,7 @@ public:
 	}
 	void SetBUMPMAP2( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nBUMPMAP2 = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bBUMPMAP2 = true;
@@ -114,7 +112,7 @@ private:
 public:
 	void SetCUBEMAP( int i )
 	{
-		Assert( i >= 0 && i <= 1 );
+		Assert( i >= 0 && i <= 2 );
 		m_nCUBEMAP = i;
 #ifdef _DEBUG
 		m_bCUBEMAP = true;
@@ -122,6 +120,7 @@ public:
 	}
 	void SetCUBEMAP( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 2 );
 		m_nCUBEMAP = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bCUBEMAP = true;
@@ -143,6 +142,7 @@ public:
 	}
 	void SetENVMAPMASK( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nENVMAPMASK = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bENVMAPMASK = true;
@@ -164,6 +164,7 @@ public:
 	}
 	void SetBASEALPHAENVMAPMASK( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nBASEALPHAENVMAPMASK = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bBASEALPHAENVMAPMASK = true;
@@ -185,6 +186,7 @@ public:
 	}
 	void SetSELFILLUM( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nSELFILLUM = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bSELFILLUM = true;
@@ -206,93 +208,10 @@ public:
 	}
 	void SetNORMALMAPALPHAENVMAPMASK( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nNORMALMAPALPHAENVMAPMASK = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bNORMALMAPALPHAENVMAPMASK = true;
-#endif
-	}
-private:
-	int m_nDIFFUSEBUMPMAP;
-#ifdef _DEBUG
-	bool m_bDIFFUSEBUMPMAP;
-#endif
-public:
-	void SetDIFFUSEBUMPMAP( int i )
-	{
-		Assert( i >= 0 && i <= 1 );
-		m_nDIFFUSEBUMPMAP = i;
-#ifdef _DEBUG
-		m_bDIFFUSEBUMPMAP = true;
-#endif
-	}
-	void SetDIFFUSEBUMPMAP( bool i )
-	{
-		m_nDIFFUSEBUMPMAP = i ? 1 : 0;
-#ifdef _DEBUG
-		m_bDIFFUSEBUMPMAP = true;
-#endif
-	}
-private:
-	int m_nBASETEXTURENOENVMAP;
-#ifdef _DEBUG
-	bool m_bBASETEXTURENOENVMAP;
-#endif
-public:
-	void SetBASETEXTURENOENVMAP( int i )
-	{
-		Assert( i >= 0 && i <= 1 );
-		m_nBASETEXTURENOENVMAP = i;
-#ifdef _DEBUG
-		m_bBASETEXTURENOENVMAP = true;
-#endif
-	}
-	void SetBASETEXTURENOENVMAP( bool i )
-	{
-		m_nBASETEXTURENOENVMAP = i ? 1 : 0;
-#ifdef _DEBUG
-		m_bBASETEXTURENOENVMAP = true;
-#endif
-	}
-private:
-	int m_nBASETEXTURE2NOENVMAP;
-#ifdef _DEBUG
-	bool m_bBASETEXTURE2NOENVMAP;
-#endif
-public:
-	void SetBASETEXTURE2NOENVMAP( int i )
-	{
-		Assert( i >= 0 && i <= 1 );
-		m_nBASETEXTURE2NOENVMAP = i;
-#ifdef _DEBUG
-		m_bBASETEXTURE2NOENVMAP = true;
-#endif
-	}
-	void SetBASETEXTURE2NOENVMAP( bool i )
-	{
-		m_nBASETEXTURE2NOENVMAP = i ? 1 : 0;
-#ifdef _DEBUG
-		m_bBASETEXTURE2NOENVMAP = true;
-#endif
-	}
-private:
-	int m_nWARPLIGHTING;
-#ifdef _DEBUG
-	bool m_bWARPLIGHTING;
-#endif
-public:
-	void SetWARPLIGHTING( int i )
-	{
-		Assert( i >= 0 && i <= 1 );
-		m_nWARPLIGHTING = i;
-#ifdef _DEBUG
-		m_bWARPLIGHTING = true;
-#endif
-	}
-	void SetWARPLIGHTING( bool i )
-	{
-		m_nWARPLIGHTING = i ? 1 : 0;
-#ifdef _DEBUG
-		m_bWARPLIGHTING = true;
 #endif
 	}
 private:
@@ -311,6 +230,7 @@ public:
 	}
 	void SetFANCY_BLENDING( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nFANCY_BLENDING = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bFANCY_BLENDING = true;
@@ -332,51 +252,10 @@ public:
 	}
 	void SetSEAMLESS( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nSEAMLESS = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bSEAMLESS = true;
-#endif
-	}
-private:
-	int m_nOUTLINE;
-#ifdef _DEBUG
-	bool m_bOUTLINE;
-#endif
-public:
-	void SetOUTLINE( int i )
-	{
-		Assert( i >= 0 && i <= 1 );
-		m_nOUTLINE = i;
-#ifdef _DEBUG
-		m_bOUTLINE = true;
-#endif
-	}
-	void SetOUTLINE( bool i )
-	{
-		m_nOUTLINE = i ? 1 : 0;
-#ifdef _DEBUG
-		m_bOUTLINE = true;
-#endif
-	}
-private:
-	int m_nSOFTEDGES;
-#ifdef _DEBUG
-	bool m_bSOFTEDGES;
-#endif
-public:
-	void SetSOFTEDGES( int i )
-	{
-		Assert( i >= 0 && i <= 1 );
-		m_nSOFTEDGES = i;
-#ifdef _DEBUG
-		m_bSOFTEDGES = true;
-#endif
-	}
-	void SetSOFTEDGES( bool i )
-	{
-		m_nSOFTEDGES = i ? 1 : 0;
-#ifdef _DEBUG
-		m_bSOFTEDGES = true;
 #endif
 	}
 private:
@@ -387,7 +266,7 @@ private:
 public:
 	void SetBUMPMASK( int i )
 	{
-		Assert( i >= 0 && i <= 1 );
+		Assert( i >= 0 && i <= 0 );
 		m_nBUMPMASK = i;
 #ifdef _DEBUG
 		m_bBUMPMASK = true;
@@ -395,51 +274,10 @@ public:
 	}
 	void SetBUMPMASK( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 0 );
 		m_nBUMPMASK = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bBUMPMASK = true;
-#endif
-	}
-private:
-	int m_nNORMAL_DECODE_MODE;
-#ifdef _DEBUG
-	bool m_bNORMAL_DECODE_MODE;
-#endif
-public:
-	void SetNORMAL_DECODE_MODE( int i )
-	{
-		Assert( i >= 0 && i <= 0 );
-		m_nNORMAL_DECODE_MODE = i;
-#ifdef _DEBUG
-		m_bNORMAL_DECODE_MODE = true;
-#endif
-	}
-	void SetNORMAL_DECODE_MODE( bool i )
-	{
-		m_nNORMAL_DECODE_MODE = i ? 1 : 0;
-#ifdef _DEBUG
-		m_bNORMAL_DECODE_MODE = true;
-#endif
-	}
-private:
-	int m_nNORMALMASK_DECODE_MODE;
-#ifdef _DEBUG
-	bool m_bNORMALMASK_DECODE_MODE;
-#endif
-public:
-	void SetNORMALMASK_DECODE_MODE( int i )
-	{
-		Assert( i >= 0 && i <= 0 );
-		m_nNORMALMASK_DECODE_MODE = i;
-#ifdef _DEBUG
-		m_bNORMALMASK_DECODE_MODE = true;
-#endif
-	}
-	void SetNORMALMASK_DECODE_MODE( bool i )
-	{
-		m_nNORMALMASK_DECODE_MODE = i ? 1 : 0;
-#ifdef _DEBUG
-		m_bNORMALMASK_DECODE_MODE = true;
 #endif
 	}
 private:
@@ -450,7 +288,7 @@ private:
 public:
 	void SetDETAIL_BLEND_MODE( int i )
 	{
-		Assert( i >= 0 && i <= 11 );
+		Assert( i >= 0 && i <= 12 );
 		m_nDETAIL_BLEND_MODE = i;
 #ifdef _DEBUG
 		m_bDETAIL_BLEND_MODE = true;
@@ -458,26 +296,130 @@ public:
 	}
 	void SetDETAIL_BLEND_MODE( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 12 );
 		m_nDETAIL_BLEND_MODE = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bDETAIL_BLEND_MODE = true;
 #endif
 	}
-public:
-	lightmappedgeneric_ps20_Static_Index( )
-	{
+private:
+	int m_nSHADER_SRGB_READ;
 #ifdef _DEBUG
-		m_bMASKEDBLENDING = false;
-#endif // _DEBUG
-		m_nMASKEDBLENDING = 0;
+	bool m_bSHADER_SRGB_READ;
+#endif
+public:
+	void SetSHADER_SRGB_READ( int i )
+	{
+		Assert( i >= 0 && i <= 1 );
+		m_nSHADER_SRGB_READ = i;
+#ifdef _DEBUG
+		m_bSHADER_SRGB_READ = true;
+#endif
+	}
+	void SetSHADER_SRGB_READ( bool i )
+	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
+		m_nSHADER_SRGB_READ = i ? 1 : 0;
+#ifdef _DEBUG
+		m_bSHADER_SRGB_READ = true;
+#endif
+	}
+private:
+	int m_nLIGHTING_PREVIEW;
+#ifdef _DEBUG
+	bool m_bLIGHTING_PREVIEW;
+#endif
+public:
+	void SetLIGHTING_PREVIEW( int i )
+	{
+		Assert( i >= 0 && i <= 0 );
+		m_nLIGHTING_PREVIEW = i;
+#ifdef _DEBUG
+		m_bLIGHTING_PREVIEW = true;
+#endif
+	}
+	void SetLIGHTING_PREVIEW( bool i )
+	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 0 );
+		m_nLIGHTING_PREVIEW = i ? 1 : 0;
+#ifdef _DEBUG
+		m_bLIGHTING_PREVIEW = true;
+#endif
+	}
+private:
+	int m_nCASCADED_SHADOW_MAPPING;
+#ifdef _DEBUG
+	bool m_bCASCADED_SHADOW_MAPPING;
+#endif
+public:
+	void SetCASCADED_SHADOW_MAPPING( int i )
+	{
+		Assert( i >= 0 && i <= 1 );
+		m_nCASCADED_SHADOW_MAPPING = i;
+#ifdef _DEBUG
+		m_bCASCADED_SHADOW_MAPPING = true;
+#endif
+	}
+	void SetCASCADED_SHADOW_MAPPING( bool i )
+	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
+		m_nCASCADED_SHADOW_MAPPING = i ? 1 : 0;
+#ifdef _DEBUG
+		m_bCASCADED_SHADOW_MAPPING = true;
+#endif
+	}
+private:
+	int m_nCSM_MODE;
+#ifdef _DEBUG
+	bool m_bCSM_MODE;
+#endif
+public:
+	void SetCSM_MODE( int i )
+	{
+		Assert( i >= 0 && i <= 0 );
+		m_nCSM_MODE = i;
+#ifdef _DEBUG
+		m_bCSM_MODE = true;
+#endif
+	}
+	void SetCSM_MODE( bool i )
+	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 0 );
+		m_nCSM_MODE = i ? 1 : 0;
+#ifdef _DEBUG
+		m_bCSM_MODE = true;
+#endif
+	}
+private:
+	int m_nDOPIXELFOG;
+#ifdef _DEBUG
+	bool m_bDOPIXELFOG;
+#endif
+public:
+	void SetDOPIXELFOG( int i )
+	{
+		Assert( i >= 0 && i <= 0 );
+		m_nDOPIXELFOG = i;
+#ifdef _DEBUG
+		m_bDOPIXELFOG = true;
+#endif
+	}
+	void SetDOPIXELFOG( bool i )
+	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 0 );
+		m_nDOPIXELFOG = i ? 1 : 0;
+#ifdef _DEBUG
+		m_bDOPIXELFOG = true;
+#endif
+	}
+public:
+	// CONSTRUCTOR
+	lightmappedgeneric_ps20_Static_Index( IShaderShadow *pShaderShadow, IMaterialVar **params )
+	{
 #ifdef _DEBUG
 		m_bBASETEXTURE2 = false;
 #endif // _DEBUG
 		m_nBASETEXTURE2 = 0;
-#ifdef _DEBUG
-		m_bDETAILTEXTURE = false;
-#endif // _DEBUG
-		m_nDETAILTEXTURE = 0;
 #ifdef _DEBUG
 		m_bBUMPMAP = false;
 #endif // _DEBUG
@@ -507,22 +449,6 @@ public:
 #endif // _DEBUG
 		m_nNORMALMAPALPHAENVMAPMASK = 0;
 #ifdef _DEBUG
-		m_bDIFFUSEBUMPMAP = false;
-#endif // _DEBUG
-		m_nDIFFUSEBUMPMAP = 0;
-#ifdef _DEBUG
-		m_bBASETEXTURENOENVMAP = false;
-#endif // _DEBUG
-		m_nBASETEXTURENOENVMAP = 0;
-#ifdef _DEBUG
-		m_bBASETEXTURE2NOENVMAP = false;
-#endif // _DEBUG
-		m_nBASETEXTURE2NOENVMAP = 0;
-#ifdef _DEBUG
-		m_bWARPLIGHTING = false;
-#endif // _DEBUG
-		m_nWARPLIGHTING = 0;
-#ifdef _DEBUG
 		m_bFANCY_BLENDING = false;
 #endif // _DEBUG
 		m_nFANCY_BLENDING = 0;
@@ -531,42 +457,46 @@ public:
 #endif // _DEBUG
 		m_nSEAMLESS = 0;
 #ifdef _DEBUG
-		m_bOUTLINE = false;
-#endif // _DEBUG
-		m_nOUTLINE = 0;
-#ifdef _DEBUG
-		m_bSOFTEDGES = false;
-#endif // _DEBUG
-		m_nSOFTEDGES = 0;
-#ifdef _DEBUG
 		m_bBUMPMASK = false;
 #endif // _DEBUG
 		m_nBUMPMASK = 0;
 #ifdef _DEBUG
-		m_bNORMAL_DECODE_MODE = false;
-#endif // _DEBUG
-		m_nNORMAL_DECODE_MODE = 0;
-#ifdef _DEBUG
-		m_bNORMALMASK_DECODE_MODE = false;
-#endif // _DEBUG
-		m_nNORMALMASK_DECODE_MODE = 0;
-#ifdef _DEBUG
 		m_bDETAIL_BLEND_MODE = false;
 #endif // _DEBUG
 		m_nDETAIL_BLEND_MODE = 0;
+#ifdef _DEBUG
+		m_bSHADER_SRGB_READ = false;
+#endif // _DEBUG
+		m_nSHADER_SRGB_READ = 0;
+#ifdef _DEBUG
+		m_bLIGHTING_PREVIEW = false;
+#endif // _DEBUG
+		m_nLIGHTING_PREVIEW = 0;
+#ifdef _DEBUG
+		m_bCASCADED_SHADOW_MAPPING = true;
+#endif // _DEBUG
+		m_nCASCADED_SHADOW_MAPPING = g_pHardwareConfig->SupportsCascadedShadowMapping() ;
+#ifdef _DEBUG
+		m_bCSM_MODE = true;
+#endif // _DEBUG
+		m_nCSM_MODE = 0 ;
+#ifdef _DEBUG
+		m_bDOPIXELFOG = true;
+#endif // _DEBUG
+		m_nDOPIXELFOG = 0 ;
 	}
 	int GetIndex()
 	{
 		// Asserts to make sure that we aren't using any skipped combinations.
 		// Asserts to make sure that we are setting all of the combination vars.
 #ifdef _DEBUG
-		bool bAllStaticVarsDefined = m_bMASKEDBLENDING && m_bBASETEXTURE2 && m_bDETAILTEXTURE && m_bBUMPMAP && m_bBUMPMAP2 && m_bCUBEMAP && m_bENVMAPMASK && m_bBASEALPHAENVMAPMASK && m_bSELFILLUM && m_bNORMALMAPALPHAENVMAPMASK && m_bDIFFUSEBUMPMAP && m_bBASETEXTURENOENVMAP && m_bBASETEXTURE2NOENVMAP && m_bWARPLIGHTING && m_bFANCY_BLENDING && m_bSEAMLESS && m_bOUTLINE && m_bSOFTEDGES && m_bBUMPMASK && m_bNORMAL_DECODE_MODE && m_bNORMALMASK_DECODE_MODE && m_bDETAIL_BLEND_MODE;
+		bool bAllStaticVarsDefined = m_bBASETEXTURE2 && m_bBUMPMAP && m_bBUMPMAP2 && m_bCUBEMAP && m_bENVMAPMASK && m_bBASEALPHAENVMAPMASK && m_bSELFILLUM && m_bNORMALMAPALPHAENVMAPMASK && m_bFANCY_BLENDING && m_bSEAMLESS && m_bBUMPMASK && m_bDETAIL_BLEND_MODE && m_bSHADER_SRGB_READ && m_bLIGHTING_PREVIEW && m_bCASCADED_SHADOW_MAPPING && m_bCSM_MODE && m_bDOPIXELFOG;
 		Assert( bAllStaticVarsDefined );
 #endif // _DEBUG
-		return ( 16 * m_nMASKEDBLENDING ) + ( 32 * m_nBASETEXTURE2 ) + ( 64 * m_nDETAILTEXTURE ) + ( 128 * m_nBUMPMAP ) + ( 384 * m_nBUMPMAP2 ) + ( 768 * m_nCUBEMAP ) + ( 1536 * m_nENVMAPMASK ) + ( 3072 * m_nBASEALPHAENVMAPMASK ) + ( 6144 * m_nSELFILLUM ) + ( 12288 * m_nNORMALMAPALPHAENVMAPMASK ) + ( 24576 * m_nDIFFUSEBUMPMAP ) + ( 49152 * m_nBASETEXTURENOENVMAP ) + ( 98304 * m_nBASETEXTURE2NOENVMAP ) + ( 196608 * m_nWARPLIGHTING ) + ( 393216 * m_nFANCY_BLENDING ) + ( 786432 * m_nSEAMLESS ) + ( 1572864 * m_nOUTLINE ) + ( 3145728 * m_nSOFTEDGES ) + ( 6291456 * m_nBUMPMASK ) + ( 12582912 * m_nNORMAL_DECODE_MODE ) + ( 12582912 * m_nNORMALMASK_DECODE_MODE ) + ( 12582912 * m_nDETAIL_BLEND_MODE ) + 0;
+		return ( 32 * m_nBASETEXTURE2 ) + ( 64 * m_nBUMPMAP ) + ( 192 * m_nBUMPMAP2 ) + ( 384 * m_nCUBEMAP ) + ( 1152 * m_nENVMAPMASK ) + ( 2304 * m_nBASEALPHAENVMAPMASK ) + ( 4608 * m_nSELFILLUM ) + ( 9216 * m_nNORMALMAPALPHAENVMAPMASK ) + ( 18432 * m_nFANCY_BLENDING ) + ( 36864 * m_nSEAMLESS ) + ( 73728 * m_nBUMPMASK ) + ( 73728 * m_nDETAIL_BLEND_MODE ) + ( 958464 * m_nSHADER_SRGB_READ ) + ( 1916928 * m_nLIGHTING_PREVIEW ) + ( 1916928 * m_nCASCADED_SHADOW_MAPPING ) + ( 3833856 * m_nCSM_MODE ) + ( 3833856 * m_nDOPIXELFOG ) + 0;
 	}
 };
-#define shaderStaticTest_lightmappedgeneric_ps20 psh_forgot_to_set_static_MASKEDBLENDING + psh_forgot_to_set_static_BASETEXTURE2 + psh_forgot_to_set_static_DETAILTEXTURE + psh_forgot_to_set_static_BUMPMAP + psh_forgot_to_set_static_BUMPMAP2 + psh_forgot_to_set_static_CUBEMAP + psh_forgot_to_set_static_ENVMAPMASK + psh_forgot_to_set_static_BASEALPHAENVMAPMASK + psh_forgot_to_set_static_SELFILLUM + psh_forgot_to_set_static_NORMALMAPALPHAENVMAPMASK + psh_forgot_to_set_static_DIFFUSEBUMPMAP + psh_forgot_to_set_static_BASETEXTURENOENVMAP + psh_forgot_to_set_static_BASETEXTURE2NOENVMAP + psh_forgot_to_set_static_WARPLIGHTING + psh_forgot_to_set_static_FANCY_BLENDING + psh_forgot_to_set_static_SEAMLESS + psh_forgot_to_set_static_OUTLINE + psh_forgot_to_set_static_SOFTEDGES + psh_forgot_to_set_static_BUMPMASK + psh_forgot_to_set_static_NORMAL_DECODE_MODE + psh_forgot_to_set_static_NORMALMASK_DECODE_MODE + psh_forgot_to_set_static_DETAIL_BLEND_MODE + 0
+#define shaderStaticTest_lightmappedgeneric_ps20 psh_forgot_to_set_static_BASETEXTURE2 + psh_forgot_to_set_static_BUMPMAP + psh_forgot_to_set_static_BUMPMAP2 + psh_forgot_to_set_static_CUBEMAP + psh_forgot_to_set_static_ENVMAPMASK + psh_forgot_to_set_static_BASEALPHAENVMAPMASK + psh_forgot_to_set_static_SELFILLUM + psh_forgot_to_set_static_NORMALMAPALPHAENVMAPMASK + psh_forgot_to_set_static_FANCY_BLENDING + psh_forgot_to_set_static_SEAMLESS + psh_forgot_to_set_static_BUMPMASK + psh_forgot_to_set_static_DETAIL_BLEND_MODE + psh_forgot_to_set_static_SHADER_SRGB_READ + psh_forgot_to_set_static_LIGHTING_PREVIEW + 0
 class lightmappedgeneric_ps20_Dynamic_Index
 {
 private:
@@ -585,6 +515,7 @@ public:
 	}
 	void SetFASTPATHENVMAPCONTRAST( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nFASTPATHENVMAPCONTRAST = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bFASTPATHENVMAPCONTRAST = true;
@@ -606,6 +537,7 @@ public:
 	}
 	void SetFASTPATH( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nFASTPATH = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bFASTPATH = true;
@@ -627,9 +559,32 @@ public:
 	}
 	void SetWRITEWATERFOGTODESTALPHA( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nWRITEWATERFOGTODESTALPHA = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bWRITEWATERFOGTODESTALPHA = true;
+#endif
+	}
+private:
+	int m_nCASCADE_SIZE;
+#ifdef _DEBUG
+	bool m_bCASCADE_SIZE;
+#endif
+public:
+	void SetCASCADE_SIZE( int i )
+	{
+		Assert( i >= 0 && i <= 1 );
+		m_nCASCADE_SIZE = i;
+#ifdef _DEBUG
+		m_bCASCADE_SIZE = true;
+#endif
+	}
+	void SetCASCADE_SIZE( bool i )
+	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
+		m_nCASCADE_SIZE = i ? 1 : 0;
+#ifdef _DEBUG
+		m_bCASCADE_SIZE = true;
 #endif
 	}
 private:
@@ -648,34 +603,15 @@ public:
 	}
 	void SetPIXELFOGTYPE( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nPIXELFOGTYPE = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bPIXELFOGTYPE = true;
 #endif
 	}
-private:
-	int m_nLIGHTING_PREVIEW;
-#ifdef _DEBUG
-	bool m_bLIGHTING_PREVIEW;
-#endif
 public:
-	void SetLIGHTING_PREVIEW( int i )
-	{
-		Assert( i >= 0 && i <= 0 );
-		m_nLIGHTING_PREVIEW = i;
-#ifdef _DEBUG
-		m_bLIGHTING_PREVIEW = true;
-#endif
-	}
-	void SetLIGHTING_PREVIEW( bool i )
-	{
-		m_nLIGHTING_PREVIEW = i ? 1 : 0;
-#ifdef _DEBUG
-		m_bLIGHTING_PREVIEW = true;
-#endif
-	}
-public:
-	lightmappedgeneric_ps20_Dynamic_Index()
+	// CONSTRUCTOR
+	lightmappedgeneric_ps20_Dynamic_Index( IShaderDynamicAPI *pShaderAPI )
 	{
 #ifdef _DEBUG
 		m_bFASTPATHENVMAPCONTRAST = false;
@@ -690,23 +626,68 @@ public:
 #endif // _DEBUG
 		m_nWRITEWATERFOGTODESTALPHA = 0;
 #ifdef _DEBUG
-		m_bPIXELFOGTYPE = false;
+		m_bCASCADE_SIZE = true;
 #endif // _DEBUG
-		m_nPIXELFOGTYPE = 0;
+		m_nCASCADE_SIZE = ( pShaderAPI->IsCascadedShadowMapping() ) ? 1 : 0 ;
 #ifdef _DEBUG
-		m_bLIGHTING_PREVIEW = false;
+		m_bPIXELFOGTYPE = true;
 #endif // _DEBUG
-		m_nLIGHTING_PREVIEW = 0;
+		m_nPIXELFOGTYPE = ( pShaderAPI->GetSceneFogMode() == MATERIAL_FOG_LINEAR_BELOW_FOG_Z ) ;
 	}
 	int GetIndex()
 	{
 		// Asserts to make sure that we aren't using any skipped combinations.
 		// Asserts to make sure that we are setting all of the combination vars.
 #ifdef _DEBUG
-		bool bAllDynamicVarsDefined = m_bFASTPATHENVMAPCONTRAST && m_bFASTPATH && m_bWRITEWATERFOGTODESTALPHA && m_bPIXELFOGTYPE && m_bLIGHTING_PREVIEW;
+		bool bAllDynamicVarsDefined = m_bFASTPATHENVMAPCONTRAST && m_bFASTPATH && m_bWRITEWATERFOGTODESTALPHA && m_bCASCADE_SIZE && m_bPIXELFOGTYPE;
 		Assert( bAllDynamicVarsDefined );
 #endif // _DEBUG
-		return ( 1 * m_nFASTPATHENVMAPCONTRAST ) + ( 2 * m_nFASTPATH ) + ( 4 * m_nWRITEWATERFOGTODESTALPHA ) + ( 8 * m_nPIXELFOGTYPE ) + ( 16 * m_nLIGHTING_PREVIEW ) + 0;
+		return ( 1 * m_nFASTPATHENVMAPCONTRAST ) + ( 2 * m_nFASTPATH ) + ( 4 * m_nWRITEWATERFOGTODESTALPHA ) + ( 8 * m_nCASCADE_SIZE ) + ( 16 * m_nPIXELFOGTYPE ) + 0;
 	}
 };
-#define shaderDynamicTest_lightmappedgeneric_ps20 psh_forgot_to_set_dynamic_FASTPATHENVMAPCONTRAST + psh_forgot_to_set_dynamic_FASTPATH + psh_forgot_to_set_dynamic_WRITEWATERFOGTODESTALPHA + psh_forgot_to_set_dynamic_PIXELFOGTYPE + psh_forgot_to_set_dynamic_LIGHTING_PREVIEW + 0
+#define shaderDynamicTest_lightmappedgeneric_ps20 psh_forgot_to_set_dynamic_FASTPATHENVMAPCONTRAST + psh_forgot_to_set_dynamic_FASTPATH + psh_forgot_to_set_dynamic_WRITEWATERFOGTODESTALPHA + 0
+
+static const ShaderComboInformation_t s_DynamicComboArray_lightmappedgeneric_ps20[5] = 
+{
+	{ "FASTPATHENVMAPCONTRAST", 0, 1 },
+	{ "FASTPATH", 0, 1 },
+	{ "WRITEWATERFOGTODESTALPHA", 0, 1 },
+	{ "CASCADE_SIZE", 0, 1 },
+	{ "PIXELFOGTYPE", 0, 1 },
+};
+
+static const ShaderComboInformation_t s_StaticComboArray_lightmappedgeneric_ps20[17] = 
+{
+	{ "BASETEXTURE2", 0, 1 },
+	{ "BUMPMAP", 0, 2 },
+	{ "BUMPMAP2", 0, 1 },
+	{ "CUBEMAP", 0, 2 },
+	{ "ENVMAPMASK", 0, 1 },
+	{ "BASEALPHAENVMAPMASK", 0, 1 },
+	{ "SELFILLUM", 0, 1 },
+	{ "NORMALMAPALPHAENVMAPMASK", 0, 1 },
+	{ "FANCY_BLENDING", 0, 1 },
+	{ "SEAMLESS", 0, 1 },
+	{ "BUMPMASK", 0, 0 },
+	{ "DETAIL_BLEND_MODE", 0, 12 },
+	{ "SHADER_SRGB_READ", 0, 1 },
+	{ "LIGHTING_PREVIEW", 0, 0 },
+	{ "CASCADED_SHADOW_MAPPING", 0, 1 },
+	{ "CSM_MODE", 0, 0 },
+	{ "DOPIXELFOG", 0, 0 },
+};
+static const ShaderComboSemantics_t lightmappedgeneric_ps20_combos =
+{
+	"lightmappedgeneric_ps20", s_DynamicComboArray_lightmappedgeneric_ps20, 5, s_StaticComboArray_lightmappedgeneric_ps20, 17 
+};
+
+class ConstructMe_lightmappedgeneric_ps20
+{
+public:
+	ConstructMe_lightmappedgeneric_ps20()
+	{
+		GetShaderDLL()->AddShaderComboInformation( &lightmappedgeneric_ps20_combos );
+	}
+};
+
+static ConstructMe_lightmappedgeneric_ps20 s_ConstructMe_lightmappedgeneric_ps20;

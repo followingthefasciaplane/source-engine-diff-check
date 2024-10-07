@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -19,6 +19,10 @@
 #include "snd_audio_source.h"
 #include "soundchars.h"
 #include "tier0/vprof.h"
+#ifndef DEDICATED
+#include "vgui_baseui_interface.h"
+#endif
+#include "SoundEmitterSystem/isoundemittersystembase.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -38,22 +42,27 @@ public:
 	virtual bool PrecacheSound( const char *pSample, bool bPreload, bool bIsUISound );
 	virtual bool IsSoundPrecached( const char *pSample );
 	virtual void PrefetchSound( const char *pSample );
+	virtual bool IsLoopingSound( const char *pSample )
+	{
+		Warning( "Can't call IsLoopingSound from server\n" );
+		return false;
+	}
 
 	virtual float GetSoundDuration( const char *pSample );  
 
-	virtual void EmitSound( IRecipientFilter& filter, int iEntIndex, int iChannel, const char *pSample, 
-		float flVolume, float flAttenuation, int iFlags, int iPitch, int iSpecialDSP, 
+	virtual int EmitSound( IRecipientFilter& filter, int iEntIndex, int iChannel, const char *pSoundEntry, HSOUNDSCRIPTHASH iSoundEntryHash, const char *pSample, 
+		float flVolume, float flAttenuation, int nSeed, int iFlags, int iPitch, 
 		const Vector *pOrigin, const Vector *pDirection, CUtlVector< Vector >* pUtlVecOrigins, bool bUpdatePositions, float soundtime = 0.0f, int speakerentity = -1 );
 
-	virtual void EmitSound( IRecipientFilter& filter, int iEntIndex, int iChannel, const char *pSample, 
-		float flVolume, soundlevel_t iSoundLevel, int iFlags, int iPitch, int iSpecialDSP, 
+	virtual int EmitSound( IRecipientFilter& filter, int iEntIndex, int iChannel, const char *pSoundEntry, HSOUNDSCRIPTHASH iSoundEntryHash, const char *pSample, 
+		float flVolume, soundlevel_t iSoundLevel, int nSeed, int iFlags, int iPitch, 
 		const Vector *pOrigin, const Vector *pDirection, CUtlVector< Vector >* pUtlVecOrigins, bool bUpdatePositions, float soundtime = 0.0f, int speakerentity = -1 );
 
 	virtual void EmitSentenceByIndex( IRecipientFilter& filter, int iEntIndex, int iChannel, int iSentenceIndex, 
-		float flVolume, soundlevel_t iSoundLevel, int iFlags, int iPitch, int iSpecialDSP, 
+		float flVolume, soundlevel_t iSoundLevel, int nSeed, int iFlags, int iPitch,
 		const Vector *pOrigin, const Vector *pDirection, CUtlVector< Vector >* pUtlVecOrigins, bool bUpdatePositions, float soundtime = 0.0f, int speakerentity = -1 );
 
-	virtual void StopSound( int iEntIndex, int iChannel, const char *pSample );
+	virtual void StopSound( int iEntIndex, int iChannel, const char *pSample, HSOUNDSCRIPTHASH nSoundEntryHash = SOUNDEMITTER_INVALID_HASH );
 
 	virtual void StopAllSounds( bool bClearBuffers );
 
@@ -63,7 +72,7 @@ public:
 
 	// emit an "ambient" sound that isn't spatialized - specify left/right volume
 	// only available on the client, assert on server
-	virtual void EmitAmbientSound( const char *pSample, float flVolume, int iPitch, int flags, float soundtime = 0.0f );
+	virtual int EmitAmbientSound( const char *pSample, float flVolume, int iPitch, int flags, float soundtime = 0.0f );
 
 	virtual float GetDistGainFromSoundLevel( soundlevel_t soundlevel, float dist );
 
@@ -78,7 +87,7 @@ public:
 		Warning( "Can't call IsSoundStillPlaying from server\n" );
 		return false; 
 	}
-	virtual void	StopSoundByGuid( int guid )	
+	virtual void	StopSoundByGuid( int guid, bool bForce )	
 	{ 
 		Warning( "Can't call StopSoundByGuid from server\n" );
 		return; 
@@ -97,6 +106,12 @@ public:
 		Warning( "Can't call SetVolumeByGuid from server\n" );
 		return; 
 	}
+	// return's sound's current elapsed time
+	virtual float GetElapsedTimeByGuid( int guid)
+	{
+		Warning( "Can't call GetElapsedTimeByGuid from server\n" );
+		return 0.0; 
+	}
 	virtual void	PrecacheSentenceGroup( const char *pGroupName )
 	{
 		VOX_PrecacheSentenceGroup( this, pGroupName );
@@ -111,10 +126,41 @@ public:
 		AssertMsg( 0, "Not supported" );
 	}
 
+	virtual bool	IsMoviePlaying()
+	{
+		AssertMsg( 0, "Not supported" );
+		return false;
+	}
+
+	virtual bool	GetSoundChannelVolume( const char* sound, float &flVolumeLeft, float &flVolumeRight )
+	{
+		Warning( "Can't call GetSoundChannelVolume from server\n" );
+		return false;
+	}
+
+	virtual bool GetPreventSound( )
+	{
+		AssertMsg( 0, "Not supported" );
+		return false;
+	}
+
+
+	virtual void SetReplaySoundFade( float flReplayVolume ) { Assert( !"Client-only service" ); }
+	virtual float GetReplaySoundFade()const { Assert( !"Client-only service" );  return 0.0f; }
+
+	virtual void SetReplayMusicGain( float flReplayMusicGain ) { Assert( !"Client-only service" ); }
+	virtual float GetReplayMusicGain()const { Assert( !"Client-only service" );  return 0.0f; }
+
+#if defined( _GAMECONSOLE )
+	virtual void UnloadSound( const char *pSample )
+	{
+		AssertMsg( 0, "Not supported" );
+	}
+#endif
 
 private:
-	void EmitSoundInternal( IRecipientFilter& filter, int iEntIndex, int iChannel, const char *pSample, 
-		float flVolume, soundlevel_t iSoundLevel, int iFlags, int iPitch, int iSpecialDSP, 
+	void EmitSoundInternal( IRecipientFilter& filter, int iEntIndex, int iChannel, const char *pSoundEntry, HSOUNDSCRIPTHASH iSoundEntryHash, const char *pSample, 
+		float flVolume, soundlevel_t iSoundLevel, int nSeed, int iFlags, int iPitch, 
 		const Vector *pOrigin, const Vector *pDirection, CUtlVector< Vector >* pUtlVecOrigins, bool bUpdatePositions, float soundtime = 0.0f, int speakerentity = -1 );
 };
 
@@ -150,6 +196,9 @@ CEngineSoundServer::~CEngineSoundServer()
 //-----------------------------------------------------------------------------
 bool CEngineSoundServer::PrecacheSound( const char *pSample, bool bPreload, bool bIsUISound )
 {
+#ifndef DEDICATED
+	EngineVGui()->UpdateProgressBar( PROGRESS_DEFAULT ); 
+#endif
 	int		i;
 
 	if ( pSample && TestSoundChar( pSample, CHAR_SENTENCE ) )
@@ -207,9 +256,8 @@ void CEngineSoundServer::PrefetchSound( const char *pSample )
 	}
 
 	// Tell clients to prefetch the sound
-	SVC_Prefetch msg;
-	msg.m_fType = SVC_Prefetch::SOUND;
-	msg.m_nSoundIndex = idx;
+	CSVCMsg_Prefetch_t msg;
+	msg.set_sound_index( idx );
 
 	sv.BroadcastMessage( msg, true, false );
 }
@@ -217,8 +265,8 @@ void CEngineSoundServer::PrefetchSound( const char *pSample )
 //-----------------------------------------------------------------------------
 // Stops a sound
 //-----------------------------------------------------------------------------
-void CEngineSoundServer::EmitSoundInternal( IRecipientFilter& filter, int iEntIndex, int iChannel, const char *pSample, 
-	float flVolume, soundlevel_t iSoundLevel, int iFlags, int iPitch, int iSpecialDSP, 
+void CEngineSoundServer::EmitSoundInternal( IRecipientFilter& filter, int iEntIndex, int iChannel, const char *pSoundEntry, HSOUNDSCRIPTHASH iSoundEntryHash, const char *pSample, 
+	float flVolume, soundlevel_t iSoundLevel, int nSeed, int iFlags, int iPitch, 
 	const Vector *pOrigin, const Vector *pDirection, CUtlVector< Vector >* pUtlVecOrigins, bool bUpdatePositions, float soundtime /*= 0.0f*/, int speakerentity /*=-1*/ )
 {
 	AssertMsg( pDirection == NULL, "Direction specification not currently supported on server sounds" );
@@ -226,25 +274,25 @@ void CEngineSoundServer::EmitSoundInternal( IRecipientFilter& filter, int iEntIn
 
 	if (flVolume < 0 || flVolume > 1)
 	{
-		Warning ("EmitSound: volume out of bounds = %f\n", flVolume);
+		Warning ("EmitSound: %s volume out of bounds = %f\n", pSample, flVolume);
 		return;
 	}
 
-	if ( ( iSoundLevel < soundlevel_t(MIN_SNDLVL_VALUE) ) || ( iSoundLevel > soundlevel_t(MAX_SNDLVL_VALUE) ) )
+	if (iSoundLevel < MIN_SNDLVL_VALUE || iSoundLevel > MAX_SNDLVL_VALUE)
 	{
-		Warning ("EmitSound: soundlevel out of bounds = %d\n", iSoundLevel);
+		Warning ("EmitSound: %s soundlevel out of bounds = %d\n", pSample, iSoundLevel);
 		return;
 	}
 
 	if (iPitch < 0 || iPitch > 255)
 	{
-		Warning ("EmitSound: pitch out of bounds = %i\n", iPitch);
+		Warning ("EmitSound: %s pitch out of bounds = %i\n", pSample, iPitch);
 		return;
 	}
 
 	edict_t *pEdict = (iEntIndex >= 0) ? &sv.edicts[iEntIndex] : NULL; 
-	SV_StartSound( filter, pEdict, iChannel, pSample, flVolume, iSoundLevel, 
-		iFlags, iPitch, iSpecialDSP, pOrigin, soundtime, speakerentity, pUtlVecOrigins );
+	SV_StartSound( filter, pEdict, iChannel, pSoundEntry, iSoundEntryHash, pSample, flVolume, iSoundLevel,
+		iFlags, iPitch, pOrigin, soundtime, speakerentity, pUtlVecOrigins, nSeed );
 }
 
 
@@ -252,15 +300,15 @@ void CEngineSoundServer::EmitSoundInternal( IRecipientFilter& filter, int iEntIn
 // Plays a sentence
 //-----------------------------------------------------------------------------
 void CEngineSoundServer::EmitSentenceByIndex( IRecipientFilter& filter, int iEntIndex, int iChannel, 
-	int iSentenceIndex, float flVolume, soundlevel_t iSoundLevel, int iFlags, int iPitch, int iSpecialDSP, 
+	int iSentenceIndex, float flVolume, soundlevel_t iSoundLevel, int nSeed, int iFlags, int iPitch,
 	const Vector *pOrigin, const Vector *pDirection, CUtlVector< Vector >* pUtlVecOrigins, bool bUpdatePositions, float soundtime /*= 0.0f*/, int speakerentity /*= -1*/ )
 {
 	if ( iSentenceIndex >= 0 )
 	{
 		char pName[8];
 		Q_snprintf( pName, sizeof(pName), "!%d", iSentenceIndex );
-		EmitSoundInternal( filter, iEntIndex, iChannel, pName, flVolume, iSoundLevel, 
-			iFlags, iPitch, iSpecialDSP, pOrigin, pDirection, pUtlVecOrigins, bUpdatePositions, soundtime, speakerentity );
+		EmitSoundInternal( filter, iEntIndex, iChannel, NULL, SOUNDEMITTER_INVALID_HASH, pName, flVolume, iSoundLevel, nSeed,
+			iFlags, iPitch, pOrigin, pDirection, pUtlVecOrigins, bUpdatePositions, soundtime, speakerentity );
 	}
 }
 
@@ -268,18 +316,18 @@ void CEngineSoundServer::EmitSentenceByIndex( IRecipientFilter& filter, int iEnt
 //-----------------------------------------------------------------------------
 // Emits a sound
 //-----------------------------------------------------------------------------
-void CEngineSoundServer::EmitSound( IRecipientFilter& filter, int iEntIndex, int iChannel, const char *pSample, 
-	float flVolume, float flAttenuation, int iFlags, int iPitch, int iSpecialDSP,
+int CEngineSoundServer::EmitSound( IRecipientFilter& filter, int iEntIndex, int iChannel, const char *pSoundEntry, HSOUNDSCRIPTHASH iSoundEntryHash, const char *pSample, 
+	float flVolume, float flAttenuation, int nSeed, int iFlags, int iPitch, 
 	const Vector *pOrigin, const Vector *pDirection, CUtlVector< Vector >* pUtlVecOrigins, bool bUpdatePositions, float soundtime /*= 0.0f*/, int speakerentity /*= -1*/ )
 {
 	VPROF( "CEngineSoundServer::EmitSound" );
-	EmitSound( filter, iEntIndex, iChannel, pSample, flVolume, ATTN_TO_SNDLVL( flAttenuation ), iFlags, 
-		iPitch, iSpecialDSP, pOrigin, pDirection, pUtlVecOrigins, bUpdatePositions, soundtime, speakerentity );
+	EmitSound( filter, iEntIndex, iChannel, pSoundEntry, iSoundEntryHash, pSample, flVolume, ATTN_TO_SNDLVL( flAttenuation ), nSeed, iFlags, 
+		iPitch, pOrigin, pDirection, pUtlVecOrigins, bUpdatePositions, soundtime, speakerentity );
+	return -1;	// Negative for unsupported feature.
 }
-	
-	
-void CEngineSoundServer::EmitSound( IRecipientFilter& filter, int iEntIndex, int iChannel, const char *pSample, 
-	float flVolume, soundlevel_t iSoundLevel, int iFlags, int iPitch, int iSpecialDSP,
+
+int CEngineSoundServer::EmitSound( IRecipientFilter& filter, int iEntIndex, int iChannel, const char *pSoundEntry, HSOUNDSCRIPTHASH iSoundEntryHash, const char *pSample, 
+	float flVolume, soundlevel_t iSoundLevel, int nSeed, int iFlags, int iPitch, 
 	const Vector *pOrigin, const Vector *pDirection, CUtlVector< Vector >* pUtlVecOrigins, bool bUpdatePositions, float soundtime /*= 0.0f*/, int speakerentity /*= -1*/ )
 {
 	VPROF( "CEngineSoundServer::EmitSound" );
@@ -290,7 +338,7 @@ void CEngineSoundServer::EmitSound( IRecipientFilter& filter, int iEntIndex, int
 		if (iSentenceIndex >= 0)
 		{
 			EmitSentenceByIndex( filter, iEntIndex, iChannel, iSentenceIndex, flVolume,
-				iSoundLevel, iFlags, iPitch, iSpecialDSP, pOrigin, pDirection, pUtlVecOrigins, bUpdatePositions, soundtime, speakerentity );
+				iSoundLevel, nSeed, iFlags, iPitch, pOrigin, pDirection, pUtlVecOrigins, bUpdatePositions, soundtime, speakerentity );
 		}
 		else
 		{
@@ -299,9 +347,10 @@ void CEngineSoundServer::EmitSound( IRecipientFilter& filter, int iEntIndex, int
 	}
 	else
 	{
-		EmitSoundInternal( filter, iEntIndex, iChannel, pSample, flVolume, iSoundLevel,
-			iFlags, iPitch, iSpecialDSP, pOrigin, pDirection, pUtlVecOrigins, bUpdatePositions, soundtime, speakerentity );
+		EmitSoundInternal( filter, iEntIndex, iChannel, pSoundEntry, iSoundEntryHash, pSample, flVolume, iSoundLevel, nSeed,
+			iFlags, iPitch, pOrigin, pDirection, pUtlVecOrigins, bUpdatePositions, soundtime, speakerentity );
 	}
+	return -1;	// Negative for unsupported feature.
 }
 
 void BuildRecipientList( CUtlVector< edict_t * >& list, const IRecipientFilter& filter )
@@ -361,6 +410,10 @@ void CEngineSoundServer::SetPlayerDSP( IRecipientFilter& filter, int dspType, bo
 	for ( int i = 0 ; i < players.Count(); i++ )
 	{
 		g_pVEngineServer->ClientCommand( players[ i ], "dsp_player %i\n", dspType );
+
+		KeyValues *kvClientCmd = new KeyValues( "dsp_player" );
+		kvClientCmd->SetInt( NULL, dspType );
+		g_pVEngineServer->ClientCommandKeyValues( players[ i ], kvClientCmd );
 	}
 }
 
@@ -368,31 +421,40 @@ void CEngineSoundServer::StopAllSounds(bool bClearBuffers)
 {
 	AssertMsg( 0, "Not supported" );
 }
+// bool CEngineSoundServer::GetPreventSound( void )
+// {
+// 	AssertMsg( 0, "Not supported" );
+// }
 
-void CEngineSoundServer::EmitAmbientSound( const char *pSample, float flVolume, int iPitch, int flags, float soundtime /*= 0.0f*/ )
+int CEngineSoundServer::EmitAmbientSound( const char *pSample, float flVolume, int iPitch, int flags, float soundtime /*= 0.0f*/ )
 {
 	AssertMsg( 0, "Not supported" );
+	return 0;
 }
 
 //-----------------------------------------------------------------------------
 // Stops a sound
 //-----------------------------------------------------------------------------
-void CEngineSoundServer::StopSound( int iEntIndex, int iChannel, const char *pSample )
+void CEngineSoundServer::StopSound( int iEntIndex, int iChannel, const char *pSample, HSOUNDSCRIPTHASH nSoundEntryHash )
 {
 	CEngineRecipientFilter filter;
 	filter.AddAllPlayers();
 	filter.MakeReliable();
 
-	EmitSound( filter, iEntIndex, iChannel, pSample, 0, SNDLVL_NONE, SND_STOP, PITCH_NORM, 0, 
-		NULL, NULL, NULL, true );
+	int nFlags = SND_STOP | ( nSoundEntryHash != SOUNDEMITTER_INVALID_HASH ? SND_IS_SCRIPTHANDLE : 0 );
+
+	EmitSound( filter, iEntIndex, iChannel, pSample, nSoundEntryHash, pSample, 0, SNDLVL_NONE, 0, nFlags, PITCH_NORM,
+				NULL, NULL, NULL, true );
 }
+
+
 
 float SV_GetSoundDuration( const char *pSample )
 {
-#ifdef SWDS
+#ifdef DEDICATED
 	return 0; // TODO: make this return a real value (i.e implement an OS independent version of the sound code)
 #else
-	return AudioSource_GetSoundDuration( PSkipSoundChars( pSample ) );
+	return AudioSource_GetSoundDuration( pSample );
 #endif
 }
 
@@ -423,7 +485,7 @@ void Host_RestartAmbientSounds()
 	}
 	
 	
-#ifndef SWDS
+#ifndef DEDICATED
 	const int 	NUM_INFOS = 64;
 	SoundInfo_t soundInfo[NUM_INFOS];
 

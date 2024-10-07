@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose:
 //
@@ -8,6 +8,7 @@
 #define SND_CHANNELS_H
 
 #include "mathlib/vector.h"
+#include "phonon/phonon_3d.h"
 
 #if defined( _WIN32 )
 #pragma once
@@ -15,6 +16,7 @@
 
 class CSfxTable;
 class CAudioMixer;
+class CSosOperatorStackList;
 typedef int SoundSource;
 
 // DO NOT REORDER: indices to fvolume arrays in channel_t 
@@ -35,6 +37,22 @@ typedef int SoundSource;
 
 #define CCHANVOLUMES	12
 
+struct gain_t
+{
+	float		ob_gain;		// gain drop if sound source obscured from listener
+	float		ob_gain_target;	// target gain while crossfading between ob_gain & ob_gain_target
+	float		ob_gain_inc;	// crossfade increment
+};
+
+struct hrtf_info_t
+{
+	Vector		vec;	// Sound source relative to the listener, updated every frame for channels using HRTF.
+	float		lerp;	// 1.0 = use phonon fully, 0.0 = don't use phonon at all.
+	bool		follow_entity;   // If true, we update the position of the entity every frame, otherwise we use the position of the sound.
+	bool		bilinear_filtering;  // If true, we use more expensive bilinear filtering for this sound.
+	bool		debug_lock_position;   // If true, the vec will not be modified after the sound starts.
+};
+
 //-----------------------------------------------------------------------------
 // Purpose: Each currently playing wave is stored in a channel
 //-----------------------------------------------------------------------------
@@ -45,16 +63,21 @@ struct channel_t
 	int			guid;			// incremented each time a channel is allocated (to match with channel free in tools, etc.)
 	int			userdata;		// user specified data for syncing to tools
 
+	hrtf_info_t hrtf;
+
 	CSfxTable	*sfx;			// the actual sound
 	CAudioMixer	*pMixer;		// The sound's instance data for this channel
+
+	CSosOperatorStackList *m_pStackList; // The operator stack for this channel
+	HSOUNDSCRIPTHASH m_nSoundScriptHash;
+
 	
 	// speaker channel volumes, indexed using IFRONT_LEFT to IFRONT_CENTER.
 	// NOTE: never access these fvolume[] elements directly! Use channel helpers in snd_dma.cpp.
 
 	float		fvolume[CCHANVOLUMES];			// 0.0-255.0 current output volumes
 	float		fvolume_target[CCHANVOLUMES];	// 0.0-255.0 target output volumes
-	float		fvolume_inc[CCHANVOLUMES];		// volume increment, per frame, moves volume[i] to vol_target[i] (per spatialization)		
-	uint		nFreeChannelAtSampleTime;
+	float		fvolume_inc[CCHANVOLUMES];		// volume increment, per frame, moves volume[i] to vol_target[i] (per spatialization)
 
 	SoundSource	soundsource;	// see iclientsound.h for description.
 	int			entchannel;		// sound channel (CHAN_STREAM, CHAN_VOICE, etc.)
@@ -71,8 +94,13 @@ struct channel_t
 	Vector		direction;		// direction of the sound
 	float		dist_mult;		// distance multiplier (attenuation/clipK)
 
+	float		m_flSoundLevel; // storing actual spl to avoid switching back and forth from dist_mult
+
 
 	float		dspmix;			// 0 - 1.0 proportion of dsp to mix with original sound, based on distance
+								// NOTE: this gets multiplied by g_dsp_volume in snd_mix.cpp, which is a culum of
+								//       other dsp setttings!
+
 	float		dspface;		// -1.0 - 1.0 (1.0 = facing listener)
 	float		distmix;		// 0 - 1.0 proportion based on distance from listner (1.0 - 100% wav right - far)
 	float		dsp_mix_min;	// for dspmix calculation - set by current preset in SND_GetDspMix
@@ -80,9 +108,7 @@ struct channel_t
 
 	float		radius;			// Radius of this sound effect (spatialization is different within the radius)
 
-	float		ob_gain;		// gain drop if sound source obscured from listener
-	float		ob_gain_target;	// target gain while crossfading between ob_gain & ob_gain_target
-	float		ob_gain_inc;	// crossfade increment
+	gain_t		gain[ MAX_SPLITSCREEN_CLIENTS ];
 
 	short		activeIndex;
 	char		wavtype;		// 0 default, CHAR_DOPPLER, CHAR_DIRECTIONAL, CHAR_DISTVARIANT
@@ -91,33 +117,38 @@ struct channel_t
 	char		sample_prev[8];	// last sample(s) in previous input data buffer - space for 2, 16 bit, stereo samples
 
 	int			initialStreamPosition;
-
-	int			special_dsp;
+	int			skipInitialSamples;
 
 	union
 	{
 		unsigned int flagsword;
 		struct
 		{
-			bool		bUpdatePositions : 1; // if true, assume sound source can move and update according to entity
-			bool		isSentence : 1;		// true if playing linked sentence
-			bool		bdry : 1;			// if true, bypass all dsp processing for this sound (ie: music)	
-			bool		bSpeaker : 1;		// true if sound is playing through in-game speaker entity.
-			bool		bstereowav : 1;		// if true, a stereo .wav file is the sample data source
+			bool		bUpdatePositions : 1;				// if true, assume sound source can move and update according to entity
+			bool		isSentence : 1;						// true if playing linked sentence
+			bool		bdry : 1;							// if true, bypass all dsp processing for this sound (ie: music)	
+			bool		bSpeaker : 1;						// true if sound is playing through in-game speaker entity.
+			bool		bstereowav : 1;						// if true, a stereo .wav file is the sample data source
 
-			bool		delayed_start : 1;  // If true, sound had a delay and so same sound on same channel won't channel steal from it
-			bool		fromserver : 1;		// for snd_show, networked sounds get colored differently than local sounds
+			bool		delayed_start : 1;					// If true, sound had a delay and so same sound on same channel won't channel steal from it
+			bool		fromserver : 1;						// for snd_show, networked sounds get colored differently than local sounds
 
-			bool		bfirstpass : 1;		// true if this is first time sound is spatialized
-			bool		bTraced : 1;		// true if channel was already checked this frame for obscuring
-			bool		bfast_pitch : 1;	// true if using low quality pitch (fast, but no interpolation)
+			bool		bfirstpass : 1;						// true if this is first time sound is spatialized
+			bool		bTraced : 1;						// true if channel was already checked this frame for obscuring
+			bool		bfast_pitch : 1;					// true if using low quality pitch (fast, but no interpolation)
 			
-			bool		m_bIsFreeingChannel : 1;	// true when inside S_FreeChannel - prevents reentrance
+			bool		m_bIsFreeingChannel : 1;			// true when inside S_FreeChannel - prevents reentrance
 			bool		m_bCompatibilityAttenuation : 1;	// True when we want to use goldsrc compatibility mode for the attenuation
 															// In that case, dist_mul is set to a relatively meaningful value in StartDynamic/StartStaticSound,
 															// but we interpret it totally differently in SND_GetGain.
-			bool		m_bShouldPause : 1;	// if true, sound should pause when the game is paused
-			bool		m_bIgnorePhonemes : 1;	// if true, we don't want to drive animation w/ phoneme data
+			bool		m_bShouldPause : 1;					// if true, sound should pause when the game is paused
+			bool		m_bIgnorePhonemes : 1;				// if true, we don't want to drive animation w/ phoneme data
+			bool		m_bHasMouth : 1;					// needs to output mouth records
+			bool		m_bMouthEnvelope : 1;				// needs mouth wave envelope follower
+			bool		m_bShouldSaveRestore : 1;			// Should be saved and restored
+			bool		m_bUpdateDelayForChoreo : 1;		// Should update snd_delay_for_choreo with IO latency.
+			bool		m_bInEyeSound : 1;					// This sound is playing from the viewpoint of the camera.
+
 		} flags;
 	};
 };
@@ -127,7 +158,7 @@ struct channel_t
 //-----------------------------------------------------------------------------
 
 #define	MAX_CHANNELS			128
-#define	MAX_DYNAMIC_CHANNELS	64
+#define	MAX_DYNAMIC_CHANNELS	32
 
 //-----------------------------------------------------------------------------
 //-----------------------------------------------------------------------------
@@ -150,9 +181,6 @@ public:
 	int		m_count;
 	short	m_list[MAX_CHANNELS];
 	bool	m_quashed[MAX_CHANNELS]; // if true, the channel should be advanced, but not mixed, because it's been heuristically suppressed
-
-	CUtlVector< int >	m_nSpecialDSPs;
-
 	bool	m_hasSpeakerChannels : 1;
 	bool	m_hasDryChannels : 1;
 	bool	m_has11kChannels : 1;
@@ -191,13 +219,23 @@ inline void CChannelList::RemoveChannelFromList( int listIndex )
 	}
 }
 
+struct activethreadsound_t
+{
+	int m_nGuid;
+	float m_flElapsedTime;
+};
+
 class CActiveChannels
 {
 public:
 	void Add( channel_t *pChannel );
 	void Remove( channel_t *pChannel );
 
-	void GetActiveChannels( CChannelList &list );
+	void GetActiveChannels( CChannelList &list ) const;
+	void CopyActiveSounds( CUtlVector<activethreadsound_t> &list ) const;
+	channel_t * FindActiveChannelByGuid( int guid ) const;
+
+	void DumpChannelInfo( CUtlBuffer &buf );
 
 	void Init();
 	int	 GetActiveCount() { return m_count; }

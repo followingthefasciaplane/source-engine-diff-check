@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========== Copyright (c) 2005, Valve Corporation, All rights reserved. ========
 //
 // Purpose:
 //
@@ -26,6 +26,7 @@
 
 class CMaterialSystem;
 class CMatQueuedMesh;
+class CMatQueuedIndexBuffer;
 class CPrimList;
 
 //-----------------------------------------------------------------------------
@@ -110,9 +111,10 @@ public:
 		memset( &m_FogColor, 0, sizeof(m_FogColor) );
 	}
 
-	bool									Init( CMaterialSystem *pMaterialSystem, CMatRenderContextBase *pHardwareContext );
+	void									CycleDynamicBuffers( ); // For use in mat_queue_mode 1 only
+
+	void									Init( CMaterialSystem *pMaterialSystem, CMatRenderContextBase *pHardwareContext );
 	void									Shutdown();
-	void									Free();
 
 	void									CompactMemory();
 
@@ -130,12 +132,14 @@ public:
 	ICallQueue *							GetCallQueue();
 	CMatCallQueue *							GetCallQueueInternal() { return &m_queue; }
 
+	DEFINE_QUEUED_CALL_0(					EvictManagedResources, IShaderAPI, g_pShaderAPI );
+
 	bool									OnDrawMesh( IMesh *pMesh, int firstIndex, int numIndices );
 	bool									OnDrawMesh( IMesh *pMesh, CPrimList *pLists, int nLists );
+	bool									OnDrawMeshModulated( IMesh *pMesh, const Vector4D &diffuseModulation, int firstIndex, int numIndices );
 	bool									OnSetFlexMesh( IMesh *pStaticMesh, IMesh *pMesh, int nVertexOffsetInBytes );
 	bool									OnSetColorMesh( IMesh *pStaticMesh, IMesh *pMesh, int nVertexOffsetInBytes );
 	bool									OnSetPrimitiveType( IMesh *pMesh, MaterialPrimitiveType_t type );
-	bool									OnFlushBufferedPrimitives();
 
 
 	DEFINE_QUEUED_CALL_1(					Flush, bool, IMatRenderContext, m_pHardwareContext );
@@ -152,11 +156,12 @@ public:
 	DEFINE_QUEUED_CALL_2(					DepthRange, float, float, IMatRenderContext, m_pHardwareContext );
 	DEFINE_QUEUED_CALL_3(					ClearBuffers, bool, bool, bool, IMatRenderContext, m_pHardwareContext );
 
-	void									ReadPixels( int x, int y, int width, int height, unsigned char *data, ImageFormat dstFormat );
+	void									ReadPixels( int x, int y, int width, int height, unsigned char *data, ImageFormat dstFormat, ITexture *pRenderTargetTexture = NULL );
+	void									ReadPixelsAsync( int x, int y, int width, int height, unsigned char *data, ImageFormat dstFormat, ITexture *pRenderTargetTexture = NULL, CThreadEvent *pPixelsReadEvent = NULL );
+	void									ReadPixelsAsyncGetResult( int x, int y, int width, int height, unsigned char *data, ImageFormat dstFormat, CThreadEvent *pGetResultEvent = NULL );
 
-	DEFINE_QUEUED_CALL_3(					SetAmbientLight, float, float, float, IMatRenderContext, m_pHardwareContext );
-
-	void									SetLight( int i, const LightDesc_t &desc );
+	void									SetLightingState( const MaterialLightingState_t &desc );
+	void									SetLights( int nCount, const LightDesc_t *pLights );
 
 	void									SetLightingOrigin( Vector vLightingOrigin );
 
@@ -188,6 +193,11 @@ public:
 	void									Viewport( int x, int y, int width, int height );
 
 	DEFINE_QUEUED_CALL_1(					CullMode, MaterialCullMode_t, IMatRenderContext, m_pHardwareContext );
+	DEFINE_QUEUED_CALL_0(					FlipCullMode, IMatRenderContext, m_pHardwareContext );
+
+	DEFINE_QUEUED_CALL_0(					BeginGeneratingCSMs, IMatRenderContext, m_pHardwareContext );
+	DEFINE_QUEUED_CALL_0(					EndGeneratingCSMs, IMatRenderContext, m_pHardwareContext );
+	DEFINE_QUEUED_CALL_3(					PerpareForCascadeDraw, int, float, float, IMatRenderContext, m_pHardwareContext );
 
 	void									FogMode( MaterialFogMode_t fogMode );
 	void									FogStart( float fStart );
@@ -207,7 +217,7 @@ public:
 	int	GetCurrentNumBones( ) const;
 	void SetNumBoneWeights( int nBoneCount );
 
-	DELEGATE_TO_OBJECT_3( IMesh *,			CreateStaticMesh, VertexFormat_t, const char *, IMaterial *, m_pHardwareContext );
+	DELEGATE_TO_OBJECT_4( IMesh *,			CreateStaticMesh, VertexFormat_t, const char *, IMaterial *, VertexStreamSpec_t *, m_pHardwareContext );
 	DEFINE_QUEUED_CALL_1(					DestroyStaticMesh, IMesh *, IMatRenderContext, m_pHardwareContext );
 
 	IMesh *									GetDynamicMesh(bool, IMesh *, IMesh *, IMaterial * );
@@ -219,7 +229,7 @@ public:
 	DELEGATE_TO_OBJECT_1V(					DestroyVertexBuffer, IVertexBuffer *, m_pHardwareContext );
 	DELEGATE_TO_OBJECT_1V(					DestroyIndexBuffer, IIndexBuffer *, m_pHardwareContext );
 	DELEGATE_TO_OBJECT_3( IVertexBuffer *, 	GetDynamicVertexBuffer, int, VertexFormat_t, bool, m_pHardwareContext );
-	DELEGATE_TO_OBJECT_2( IIndexBuffer *, 	GetDynamicIndexBuffer, MaterialIndexFormat_t, bool, m_pHardwareContext );
+	IIndexBuffer * 							GetDynamicIndexBuffer( );
 	DELEGATE_TO_OBJECT_7V(					BindVertexBuffer, int, IVertexBuffer *, int, int, int, VertexFormat_t, int, m_pHardwareContext );
 	DELEGATE_TO_OBJECT_2V(					BindIndexBuffer, IIndexBuffer *, int, m_pHardwareContext );
 	DELEGATE_TO_OBJECT_3V(					Draw, MaterialPrimitiveType_t, int, int, m_pHardwareContext );
@@ -242,7 +252,7 @@ public:
 	DEFINE_QUEUED_CALL_0(					PopSelectionName, IMatRenderContext, m_pHardwareContext );
 	DEFINE_QUEUED_CALL_3(					ClearColor3ub, unsigned char, unsigned char, unsigned char, IMatRenderContext, m_pHardwareContext );
 	DEFINE_QUEUED_CALL_4(					ClearColor4ub, unsigned char, unsigned char, unsigned char, unsigned char, IMatRenderContext, m_pHardwareContext );
-	DEFINE_QUEUED_CALL_2(					OverrideDepthEnable, bool, bool, IMatRenderContext, m_pHardwareContext );
+	DEFINE_QUEUED_CALL_3(					OverrideDepthEnable, bool, bool, bool, IMatRenderContext, m_pHardwareContext );
 	DEFINE_QUEUED_CALL_2(					OverrideAlphaWriteEnable, bool, bool, IMatRenderContext, m_pHardwareContext );
 	DEFINE_QUEUED_CALL_2(					OverrideColorWriteEnable, bool, bool, IMatRenderContext, m_pHardwareContext );
 	DEFINE_QUEUED_CALL_1(					DrawScreenSpaceQuad, IMaterial *, IMatRenderContext, m_pHardwareContext );
@@ -307,6 +317,7 @@ public:
 
 	DEFINE_QUEUED_CALL_2(					SetFloatRenderingParameter, int, float, IMatRenderContext, m_pHardwareContext );
 	DEFINE_QUEUED_CALL_2(					SetIntRenderingParameter, int, int, IMatRenderContext, m_pHardwareContext );
+	DEFINE_QUEUED_CALL_2(					SetTextureRenderingParameter, int, ITexture *, IMatRenderContext, m_pHardwareContext );
 
 	void SetVectorRenderingParameter( int i, const Vector &v )
 	{
@@ -325,38 +336,37 @@ public:
 		return 0;
 	}
 
+	ITexture *GetTextureRenderingParameter(int parm_number) const
+	{
+		CannotSupport();
+		return 0;
+	}
+
 	Vector GetVectorRenderingParameter(int parm_number) const
 	{
 		CannotSupport();
 		return Vector(0,0,0);
 	}
 
-	DEFINE_QUEUED_CALL_1(					SetStencilEnable, bool, IMatRenderContext, m_pHardwareContext );
-	DEFINE_QUEUED_CALL_1(					SetStencilFailOperation, StencilOperation_t, IMatRenderContext, m_pHardwareContext );
-	DEFINE_QUEUED_CALL_1(					SetStencilZFailOperation, StencilOperation_t, IMatRenderContext, m_pHardwareContext );
-	DEFINE_QUEUED_CALL_1(					SetStencilPassOperation, StencilOperation_t, IMatRenderContext, m_pHardwareContext );
-	DEFINE_QUEUED_CALL_1(					SetStencilCompareFunction, StencilComparisonFunction_t, IMatRenderContext, m_pHardwareContext );
-	DEFINE_QUEUED_CALL_1(					SetStencilReferenceValue, int, IMatRenderContext, m_pHardwareContext );
-	DEFINE_QUEUED_CALL_1(					SetStencilTestMask, uint32, IMatRenderContext, m_pHardwareContext );
-	DEFINE_QUEUED_CALL_1(					SetStencilWriteMask, uint32, IMatRenderContext, m_pHardwareContext );
+	virtual void SetStencilState( const ShaderStencilState_t &state )
+	{
+		m_queue.QueueCall( m_pHardwareContext, &IMatRenderContext::SetStencilState, RefToVal( state ) );
+	}
+
 	DEFINE_QUEUED_CALL_5(					ClearStencilBufferRectangle, int, int, int, int, int, IMatRenderContext, m_pHardwareContext );
 
 	DEFINE_QUEUED_CALL_2(					SetShadowDepthBiasFactors, float, float, IMatRenderContext, m_pHardwareContext );
 
 	void PushCustomClipPlane( const float *p )
 	{
-
-		m_queue.QueueCall( m_pHardwareContext, &IMatRenderContext::PushCustomClipPlane, CUtlEnvelope<float>( p, 4 ) );
+		m_queue.QueueCall( m_pHardwareContext, &IMatRenderContext::PushCustomClipPlane, m_queue.CopyArray( p, 4 ) );
 	}
 
 	DEFINE_QUEUED_CALL_0(					PopCustomClipPlane, IMatRenderContext, m_pHardwareContext );
 
 	virtual void GetMaxToRender( IMesh *pMesh, bool bMaxUntilFlush, int *pMaxVerts, int *pMaxIndices );
 	virtual int GetMaxVerticesToRender( IMaterial *pMaterial );
-	virtual int GetMaxIndicesToRender( )
-	{
-		return INDEX_BUFFER_SIZE;
-	}
+	virtual int GetMaxIndicesToRender( );
 
 	DEFINE_QUEUED_CALL_0(					DisableAllLocalLights, IMatRenderContext, m_pHardwareContext );
 
@@ -373,10 +383,17 @@ public:
 		m_queue.QueueCall( m_pHardwareContext, &IMatRenderContext::SetFlashlightStateEx, RefToVal( s ), RefToVal( m ), p );
 	}
 
-	void SetScissorRect( const int nLeft, const int nTop, const int nRight, const int nBottom, const bool bEnableScissor )
+	void PushScissorRect( const int nLeft, const int nTop, const int nRight, const int nBottom )
 	{
-		m_queue.QueueCall( m_pHardwareContext, &IMatRenderContext::SetScissorRect, nLeft, nTop, nRight, nBottom, bEnableScissor );
+		m_queue.QueueCall( m_pHardwareContext, &IMatRenderContext::PushScissorRect, nLeft, nTop, nRight, nBottom );
 	}
+
+	void PopScissorRect( )
+	{
+		m_queue.QueueCall( m_pHardwareContext, &IMatRenderContext::PopScissorRect );
+	}
+
+	virtual void DrawInstances( int nInstanceCount, const MeshInstanceData_t *pInstance );
 
 	virtual void PushDeformation( const DeformationBase_t *pDef )
 	{
@@ -401,37 +418,8 @@ public:
 	DEFINE_QUEUED_CALL_2(					ClearBuffersObeyStencil, bool, bool, IMatRenderContext, m_pHardwareContext );
 	DEFINE_QUEUED_CALL_3(					ClearBuffersObeyStencilEx, bool, bool, bool, IMatRenderContext, m_pHardwareContext );
 	DEFINE_QUEUED_CALL_0(					PerformFullScreenStencilOperation, IMatRenderContext, m_pHardwareContext );
+	DEFINE_QUEUED_CALL_1(					SetRenderingPaint, bool, IMatRenderContext, m_pHardwareContext );
 
-	virtual void AsyncCreateTextureFromRenderTarget( ITexture* pSrcRt, const char* pDstName, ImageFormat dstFmt, bool bGenMips, int nAdditionalCreationFlags, IAsyncTextureOperationReceiver* pRecipient, void* pExtraArgs ) OVERRIDE
-	{
-		OnAsyncCreateTextureFromRenderTarget( pSrcRt, &pDstName, pRecipient );
-
-		m_queue.QueueCall( m_pHardwareContext, &IMatRenderContext::AsyncCreateTextureFromRenderTarget, pSrcRt, pDstName, dstFmt, bGenMips, nAdditionalCreationFlags, pRecipient, pExtraArgs );
-	}
-
-	virtual void							AsyncMap( ITextureInternal* pTexToMap, IAsyncTextureOperationReceiver* pRecipient, void* pExtraArgs ) OVERRIDE
-	{
-		OnAsyncMap( pTexToMap, pRecipient, pExtraArgs );
-
-		m_queue.QueueCall( m_pHardwareContext, &IMatRenderContextInternal::AsyncMap, pTexToMap, pRecipient, pExtraArgs );
-	}
-
-	virtual void							AsyncUnmap( ITextureInternal* pTexToUnmap ) OVERRIDE
-	{
-		OnAsyncUnmap( pTexToUnmap );
-
-		m_queue.QueueCall( m_pHardwareContext, &IMatRenderContextInternal::AsyncUnmap, pTexToUnmap );	
-	}
-
-	virtual void AsyncCopyRenderTargetToStagingTexture( ITexture* pDst, ITexture* pSrc, IAsyncTextureOperationReceiver* pRecipient, void* pExtraArgs ) OVERRIDE
-	{
-		OnAsyncCopyRenderTargetToStagingTexture( pDst, pSrc, pRecipient );
-
-		m_queue.QueueCall( m_pHardwareContext, &IMatRenderContextInternal::AsyncCopyRenderTargetToStagingTexture, pDst, pSrc, pRecipient, pExtraArgs );
-	}
-
-	DEFINE_QUEUED_CALL_0(					TextureManagerUpdate, IMatRenderContextInternal, m_pHardwareContext );
-	
 	bool GetUserClipTransform( VMatrix &worldToView )
 	{
 		CannotSupport();
@@ -439,6 +427,12 @@ public:
 	}
 
 	bool InFlashlightMode( void ) const
+	{
+		CannotSupport();
+		return false;
+	}
+
+	bool IsRenderingPaint() const
 	{
 		CannotSupport();
 		return false;
@@ -452,27 +446,69 @@ public:
 
 	virtual bool GetFlashlightMode( void ) const { return m_bFlashlightEnable; }
 
-	void BeginPIXEvent( unsigned long color, const char *pszName )
-	{
-		m_queue.QueueCall( m_pHardwareContext, &IMatRenderContext::BeginPIXEvent, color, CUtlEnvelope<const char *>( pszName ) );
+	virtual bool IsCullingEnabledForSinglePassFlashlight( void ) const { return m_bCullingEnabledForSinglePassFlashlight; }
+
+	virtual void EnableCullingForSinglePassFlashlight( bool bEnable ) 
+	{ 
+		m_bCullingEnabledForSinglePassFlashlight = bEnable; 
+		m_queue.QueueCall( m_pHardwareContext, &IMatRenderContext::EnableCullingForSinglePassFlashlight, bEnable );
 	}
 
-	DEFINE_QUEUED_CALL_0(					EndPIXEvent, IMatRenderContext, m_pHardwareContext );
+	virtual bool IsCascadedShadowMapping() const
+	{
+		CannotSupport();
+		return false;
+	}
+
+	virtual void SetCascadedShadowMapping( bool bEnable )
+	{
+		m_bCascadedShadowMappingEnabled = bEnable;
+		m_queue.QueueCall( m_pHardwareContext, &IMatRenderContext::SetCascadedShadowMapping, bEnable );
+	}
+
+	virtual void SetCascadedShadowMappingState( const CascadedShadowMappingState_t &state, ITexture *pDepthTextureAtlas )
+	{
+		state, pDepthTextureAtlas;
+		
+		m_queue.QueueCall( m_pHardwareContext, &IMatRenderContext::SetCascadedShadowMappingState, RefToVal( state ), pDepthTextureAtlas );
+	}
+	
+	void BeginPIXEvent( unsigned long color, const char *pszName )
+	{
+#ifdef PROFILE
+		if ( IsX360() )
+		{
+			m_pHardwareContext->BeginPIXEvent( color, pszName );
+		}
+#endif
+		m_queue.QueueCall( m_pHardwareContext, &IMatRenderContext::BeginPIXEvent, color, m_queue.Copy( pszName ) );
+	}
+
+	void EndPIXEvent( )
+	{
+#ifdef PROFILE
+		if ( IsX360() )
+		{
+			m_pHardwareContext->EndPIXEvent( );
+		}
+#endif
+		m_queue.QueueCall( m_pHardwareContext, &IMatRenderContext::EndPIXEvent );
+	}
 
 	void SetPIXMarker( unsigned long color, const char *pszName )
 	{
-		m_queue.QueueCall( m_pHardwareContext, &IMatRenderContext::SetPIXMarker, color, CUtlEnvelope<const char *>( pszName ) );
+#ifdef PROFILE
+		if ( IsX360() )
+		{
+			m_pHardwareContext->SetPIXMarker( color, pszName );
+		}
+#endif
+		m_queue.QueueCall( m_pHardwareContext, &IMatRenderContext::SetPIXMarker, color, m_queue.Copy( pszName ) );
 	}
 
 	DEFINE_QUEUED_CALL_0(					ForceHardwareSync, IMatRenderContextInternal, m_pHardwareContext );
 	DEFINE_QUEUED_CALL_0(					BeginFrame, IMatRenderContextInternal, m_pHardwareContext );
 	DEFINE_QUEUED_CALL_0(					EndFrame, IMatRenderContextInternal, m_pHardwareContext );
-
-	void									SetFrameTime( float frameTime )
-	{ 
-		m_queue.QueueCall( m_pHardwareContext, &IMatRenderContextInternal::SetFrameTime, frameTime );
-		m_FrameTime = frameTime;
-	}
 
 	DEFINE_QUEUED_CALL_0(					BeginMorphAccumulation, IMatRenderContextInternal, m_pHardwareContext );
 	DEFINE_QUEUED_CALL_0(					EndMorphAccumulation, IMatRenderContextInternal, m_pHardwareContext );
@@ -495,6 +531,27 @@ public:
 		Assert(0);
 	}
 
+	// Subdivision surface interface
+	virtual int GetSubDBufferWidth()
+	{
+		Assert( 0 );
+		return 0;
+	}
+
+	virtual float* LockSubDBuffer( int nNumRows )
+	{
+		Assert( 0 );
+		return NULL;
+	}
+
+	virtual void UnlockSubDBuffer()
+	{
+		Assert( 0 );
+	}
+
+	DEFINE_QUEUED_CALL_1( UpdateGameTime, float, IMatRenderContext, m_pHardwareContext );
+
+
 	//-------------------------------------------------------------------------
 
 	DEFINE_QUEUED_CALL_AFTER_BASE_1(		SetCurrentMaterialInternal, IMaterialInternal *, IMatRenderContextInternal, m_pHardwareContext );
@@ -511,7 +568,7 @@ public:
 		CannotSupport();
 	}
 
-	void BindStandardTexture( Sampler_t, StandardTextureId_t )
+	void BindStandardTexture( Sampler_t, TextureBindFlags_t nBindFlags, StandardTextureId_t )
 	{
 		CannotSupport();
 	}
@@ -532,9 +589,16 @@ public:
 		CannotSupport();
 	}
 
+#ifdef _PS3
+	void DrawReloadZcullQuad()
+	{
+		CannotSupport();
+	}
+#endif // _PS3
+
 	void BeginBatch( IMesh* pIndices );
 	void BindBatch( IMesh* pVertices, IMaterial *pAutoBind = NULL );
-	void DrawBatch(int firstIndex, int numIndices );
+	void DrawBatch( MaterialPrimitiveType_t primType, int firstIndex, int numIndices );
 	void EndBatch();
 
 	// Color correction related methods..
@@ -555,57 +619,165 @@ public:
 
 	void SetToneMappingScaleLinear( const Vector &scale )
 	{
+		m_LastSetToneMapScale = scale;
 		m_queue.QueueCall( m_pHardwareContext, &IMatRenderContext::SetToneMappingScaleLinear, RefToVal( scale ) );
-		m_LastSetToneMapScale = Vector( scale );
 	}
 
+	Vector GetToneMappingScaleLinear( void )
+	{
+		return m_LastSetToneMapScale;
+	}
+	
+#if defined( _GAMECONSOLE )
+	void BeginConsoleZPass( const WorldListIndicesInfo_t &indicesInfo )
+	{
+		uint nSpaceLeft = Indices().GetSize() - Indices().GetUsed();
+		if( nSpaceLeft >= indicesInfo.m_nTotalIndices )
+		{
+			// there's enough indices in the primary (non-spillover) index buffer that's resident in memory for 3 frames, 
+			// and that's not a ring buffer. We don't need to worry about these indices being overwritten by anything due 
+			// to ring buffer ending and restarting: there's another (spillover) ring buffer that does that
+			BeginConsoleZPass2( 0 );
+		}
+		else
+		{
+			// there's some spillover from the main dynamic index buffer; thus, we need to compute the spillover and defer the decision
+			// about whether we have enough space in spillover buffer to start z prepass for later
+			// in the very worst case, we'll waste ( indicesInfo.m_nMaxBatchIndices - 1 ) indices 
+			// in the end of the main dynamic IB
+			BeginConsoleZPass2( indicesInfo.m_nTotalIndices - nSpaceLeft + indicesInfo.m_nMaxBatchIndices - 1 );
+		}
+	}
+#endif
 
-	void DeferredBeginBatch( uint16 *pIndexData, int nIndices );
+	void DeferredBeginBatch( );
 	void DeferredDrawPrimList( IMesh *pMesh, CPrimList *pLists, int nLists );
 	void DeferredSetFlexMesh( IMesh *pStaticMesh, int nVertexOffsetInBytes );
 
 #if defined( _X360 )
 	DEFINE_QUEUED_CALL_1(					PushVertexShaderGPRAllocation, int, IMatRenderContext, m_pHardwareContext );
 	DEFINE_QUEUED_CALL_0(					PopVertexShaderGPRAllocation, IMatRenderContext, m_pHardwareContext );
+	DEFINE_QUEUED_CALL_0(					FlushHiStencil, IMatRenderContext, m_pHardwareContext );
 #endif
 
+#if defined( _GAMECONSOLE )
+	DEFINE_QUEUED_CALL_1(					BeginConsoleZPass2, int, IMatRenderContext, m_pHardwareContext );
+	DEFINE_QUEUED_CALL_0(					EndConsoleZPass, IMatRenderContext, m_pHardwareContext );
+#endif
+
+#if defined( _PS3 )
+	DEFINE_QUEUED_CALL_0(					FlushTextureCache, IMatRenderContext, m_pHardwareContext );
+#endif
+	DEFINE_QUEUED_CALL_1(					AntiAliasingHint, int, IMatRenderContext, m_pHardwareContext );
+
 	// A special path used to tick the front buffer while loading on the 360
+	DEFINE_QUEUED_CALL_5(					SetNonInteractiveLogoTexture, ITexture *, float, float, float, float, IMatRenderContext, m_pHardwareContext );
 	DEFINE_QUEUED_CALL_4(					SetNonInteractivePacifierTexture, ITexture *, float, float, float, IMatRenderContext, m_pHardwareContext );
 	DEFINE_QUEUED_CALL_2(					SetNonInteractiveTempFullscreenBuffer, ITexture *, MaterialNonInteractiveMode_t, IMatRenderContext, m_pHardwareContext );
 	DEFINE_QUEUED_CALL_1(					EnableNonInteractiveMode, MaterialNonInteractiveMode_t, IMatRenderContext, m_pHardwareContext );
 	DEFINE_QUEUED_CALL_0(					RefreshFrontBufferNonInteractive, IMatRenderContext, m_pHardwareContext );
 
+	DELEGATE_TO_OBJECT_1V(					FlipCulling, bool, g_pShaderAPI );
+
+//	DEFINE_QUEUED_CALL_1(					EnableSinglePassFlashlightMode, bool, IMatRenderContext, m_pHardwareContext );
+
+	virtual void EnableSinglePassFlashlightMode( bool bEnable ) 
+	{ 
+		m_bSinglePassFlashlightMode = bEnable;
+		m_queue.QueueCall( m_pHardwareContext, &IMatRenderContext::EnableSinglePassFlashlightMode, bEnable );
+	}
+
+	virtual bool SinglePassFlashlightModeEnabled( void ) const { return m_bSinglePassFlashlightMode; }
+
 	//--------------------------------------------------------
 	// Memory allocation calls for queued mesh, et. al.
 	//--------------------------------------------------------
-	byte *AllocVertices( int nVerts, int nVertexSize );
-	uint16 *AllocIndices( int nIndices );
-	CPrimList *AllocPrimLists( int nPrimLists );
-	byte *ReallocVertices( byte *pVerts, int nVertsOld, int nVertsNew, int nVertexSize );
-	uint16 *ReallocIndices( uint16 *pIndices, int nIndicesOld, int nIndicesNew );
+	byte *AllocVertices( int nVerts, int nVertexSize, bool *pUsingExternalMemory );
+	byte *AllocIndices( int nIndices, int nIndexSize, bool *pUsingExternalMemory );
+	byte *ReallocVertices( byte *pVerts, int nVertsOld, int nVertsNew, int nVertexSize, bool bExternalMemory );
+	byte *ReallocIndices( byte *pIndices, int nIndicesOld, int nIndicesNew, int nIndexSize, bool bExternalMemory );
 	void FreeVertices( byte *pVerts, int nVerts, int nVertexSize );
-	void FreeIndices( uint16 *pIndices, int nIndices );
-	void FreePrimLists( CPrimList * );
+	void FreeIndices( byte *pIndices, int nIndices, int nIndexSize );
 
 	//--------------------------------------------------------
 	// debug logging - no-op in queued context
 	//--------------------------------------------------------
-	virtual void							Printf( PRINTF_FORMAT_STRING const char *fmt, ... ) {};
+	virtual void							Printf( char *fmt, ... ) {};
 	virtual void							PrintfVA( char *fmt, va_list vargs ){};
-	virtual float							Knob( char *knobname, float *setvalue=NULL ) { return 0.0f; };
-	
-#ifdef DX_TO_GL_ABSTRACTION
-	void									DoStartupShaderPreloading( void ) {};
+	virtual float							Knob( char *knobname, float *setvalue=NULL ) { return 0.0f; };	
+
+#if defined( DX_TO_GL_ABSTRACTION ) && !defined( _GAMECONSOLE )
+	void									DoStartupShaderPreloading( void ) {}
 #endif
+
+
+#if defined( INCLUDE_SCALEFORM )
+	//--------------------------------------------------------
+	// scaleform calls
+	//
+	// *** NOTE - THREAD SAFETY ***
+	// SFUI is not mutexed. If you add functions to this list check it is safe
+	// to call them in parallel with the main thread
+	//--------------------------------------------------------
+	DEFINE_QUEUED_CALL_5(					SetScaleformSlotViewport, int, int, int, int, int, IMatRenderContext, m_pHardwareContext );
+	DEFINE_QUEUED_CALL_1(					RenderScaleformSlot, int, IMatRenderContext, m_pHardwareContext );
+	DEFINE_QUEUED_CALL_4(					SetScaleformCursorViewport, int, int, int, int, IMatRenderContext, m_pHardwareContext );
+	DEFINE_QUEUED_CALL_0(					RenderScaleformCursor, IMatRenderContext, m_pHardwareContext );
+
+	// Unused on PC
+	DEFINE_QUEUED_CALL_1(					ForkRenderScaleformSlot, int, IMatRenderContext, m_pHardwareContext );
+	DEFINE_QUEUED_CALL_1(					JoinRenderScaleformSlot, int, IMatRenderContext, m_pHardwareContext );
+
+	void									AdvanceAndRenderScaleformSlot( int slot )
+	{
+		// always run advance slot on the main thread
+		ScaleformUI()->AdvanceSlot( slot );
+		// renderSlot can be queued
+		RenderScaleformSlot( slot );
+	}
+
+	void									AdvanceAndRenderScaleformCursor()
+	{
+		// always run advance slot on the main thread
+		ScaleformUI()->AdvanceCursor();
+		// renderSlot can be queued
+		RenderScaleformCursor();
+	}
+#endif // INCLUDE_SCALEFORM
+
+	virtual ColorCorrectionHandle_t			FindLookup( const char *pName );
 
 private:
 	void QueueMatrixSync();
+	void DeferredDrawInstances( int nInstanceCount, const MeshInstanceData_t *pInstances );
+
+#ifndef MS_NO_DYNAMIC_BUFFER_COPY
+	FORCEINLINE CMemoryStack &Vertices()
+	{
+		return m_Vertices;
+	}
+	FORCEINLINE CMemoryStack &Indices()
+	{
+		return m_Indices;
+	}
+#else
+	FORCEINLINE CMemoryStack &Vertices()
+	{
+		return *m_pVertices;
+	}
+	FORCEINLINE CMemoryStack &Indices()
+	{
+		return *m_pIndices;
+	}
+#endif
 
 	//friend class CMatQueuedMesh;
 	friend class CCallQueueExternal;
 
 	CMatCallQueue m_queue;
 	CMatQueuedMesh *m_pQueuedMesh;
+	CMatQueuedMesh *m_pQueuedFlexMesh;
+	CMatQueuedIndexBuffer *m_pQueuedIndexBuffer;
 
 	CMatRenderContextBase *m_pHardwareContext;
 
@@ -622,6 +794,18 @@ private:
 	CMemoryStack m_Vertices;
 	CMemoryStack m_Indices;
 
+#ifdef MS_NO_DYNAMIC_BUFFER_COPY
+	#define RENDER_CONTEXT_STACKS 3
+
+	static CMemoryStack s_Vertices[RENDER_CONTEXT_STACKS];
+	static CMemoryStack s_Indices[RENDER_CONTEXT_STACKS];
+	static int s_nCurStack;
+	static bool s_bInitializedStacks;
+private:
+	CMemoryStack *m_pVertices;
+	CMemoryStack *m_pIndices;
+#endif
+	
 	class CCallQueueExternal : public ICallQueue
 	{
 		void QueueFunctorInternal( CFunctor *pFunctor )

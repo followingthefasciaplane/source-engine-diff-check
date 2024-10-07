@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -19,6 +19,6 @@ class IWaveData;
 // xma hardware needs be have stable clocking
 #define XMA_POLL_RATE			15
 
-CAudioMixer *CreateXMAMixer( IWaveData *data, int initialStreamPosition );
+CAudioMixer *CreateXMAMixer( IWaveData *data, int initialStreamPosition, int skipInitialSamples, bool bUpdateDelayForChoreo );
 
 #endif // SND_WAVE_MIXER_XMA_H

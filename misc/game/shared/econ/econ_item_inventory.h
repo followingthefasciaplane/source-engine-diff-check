@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: Container that allows client & server access to data in player inventories & loadouts
 //
@@ -12,11 +12,8 @@
 
 #include "igamesystem.h"
 #include "econ_entity.h"
-#include "gamestringpool.h"
 #include "econ_item_view.h"
-#include "UtlSortVector.h"
-#include "econ_gcmessages.h"
-#include "gc_clientsystem.h"
+#include "utlsortvector.h"
 
 #if !defined(NO_STEAM)
 #include "steam/steam_api.h"
@@ -27,17 +24,14 @@
 class CPlayerInventory;
 class CEconItem;
 struct baseitemcriteria_t;
-class CEconItemViewHandle;
-#ifdef CLIENT_DLL
-class ITexture;
-#endif
+
 
 // Inventory Less function.
 // Used to sort the inventory items into their positions.
 class CInventoryListLess
 {
 public:
-	bool Less( const CEconItemView &src1, const CEconItemView &src2, void *pCtx );
+	bool Less( CEconItemView* const &src1, CEconItemView *const &src2, void *pCtx );
 };
 
 // A class that wants notifications when an inventory is updated
@@ -45,14 +39,11 @@ class IInventoryUpdateListener : public GCSDK::ISharedObjectListener
 {
 public:
 	virtual void InventoryUpdated( CPlayerInventory *pInventory ) = 0;
-
-	virtual void SOCreated( const CSteamID & steamIDOwner, const GCSDK::CSharedObject *pObject, GCSDK::ESOCacheEvent eEvent ) OVERRIDE { InventoryUpdated( NULL ); }
-	virtual void PreSOUpdate( const CSteamID & steamIDOwner, GCSDK::ESOCacheEvent eEvent ) OVERRIDE { /* do nothing */ }
-	virtual void SOUpdated( const CSteamID & steamIDOwner, const GCSDK::CSharedObject *pObject, GCSDK::ESOCacheEvent eEvent ) OVERRIDE { /* do nothing */ }
-	virtual void PostSOUpdate( const CSteamID & steamIDOwner, GCSDK::ESOCacheEvent eEvent ) OVERRIDE { InventoryUpdated( NULL ); }
-	virtual void SODestroyed( const CSteamID & steamIDOwner, const GCSDK::CSharedObject *pObject, GCSDK::ESOCacheEvent eEvent ) OVERRIDE { InventoryUpdated( NULL ); }
-	virtual void SOCacheSubscribed( const CSteamID & steamIDOwner, GCSDK::ESOCacheEvent eEvent ) OVERRIDE { InventoryUpdated( NULL ); }
-	virtual void SOCacheUnsubscribed( const CSteamID & steamIDOwner, GCSDK::ESOCacheEvent eEvent ) OVERRIDE { InventoryUpdated( NULL ); }
+	virtual void SOCreated( GCSDK::SOID_t owner, const GCSDK::CSharedObject *pObject, GCSDK::ESOCacheEvent eEvent ) OVERRIDE { InventoryUpdated( NULL ); }
+	virtual void SOUpdated( GCSDK::SOID_t owner, const GCSDK::CSharedObject *pObject, GCSDK::ESOCacheEvent eEvent ) OVERRIDE { InventoryUpdated( NULL ); }
+	virtual void SODestroyed( GCSDK::SOID_t owner, const GCSDK::CSharedObject *pObject, GCSDK::ESOCacheEvent eEvent ) OVERRIDE { InventoryUpdated( NULL ); }
+	virtual void SOCacheSubscribed( GCSDK::SOID_t owner, GCSDK::ESOCacheEvent eEvent ) OVERRIDE { InventoryUpdated( NULL ); }
+	virtual void SOCacheUnsubscribed( GCSDK::SOID_t owner, GCSDK::ESOCacheEvent eEvent ) OVERRIDE { InventoryUpdated( NULL ); }
 };
 
 //-----------------------------------------------------------------------------
@@ -67,39 +58,43 @@ public:
 	CPlayerInventory();
 	virtual ~CPlayerInventory();
 
-	void				Clear();
+	void Shutdown( void );
 
 	// Returns true if this inventory has been filled out by Steam.
-	bool				RetrievedInventoryFromSteam( void ) { return m_bGotItemsFromSteam; }
-	bool				IsWaitingForSteam( void ) { return (m_iPendingRequests > 0); }
+	bool	InventoryRetrievedFromSteamAtLeastOnce( void ) const { return m_bGotItemsFromSteamAtLeastOnce; }
+	bool	InventorySubscribedToSteamCurrently( void ) const { return m_bCurrentlySubscribedToSteam; }
 
 	// Inventory access
-	CSteamID			&GetOwner( void ) { return m_OwnerID; }
-	int					GetItemCount( void ) const { return m_aInventoryItems.Count(); }
+	GCSDK::SOID_t				GetOwner( void ) { return m_OwnerID; }
+	void						SetOwner( GCSDK::SOID_t& ownerID ) { m_OwnerID = ownerID; }
+	int					GetItemCount( void ) const { return m_Items.GetItemVector().Count(); }
+	int					GetDefaultEquippedDefinitionItemsCount( void ) const { return m_aDefaultEquippedDefinitionItems.Count(); }
 	virtual bool		CanPurchaseItems( int iItemCount ) const { return GetMaxItemCount() - GetItemCount() >= iItemCount; }
 	virtual int			GetMaxItemCount( void ) const { return DEFAULT_NUM_BACKPACK_SLOTS; }
-	CEconItemView		*GetItem( int i ) { return &m_aInventoryItems[i]; }
+	CEconItemView		*GetItem( int i ) { return m_Items.GetItemVector()[i]; }
+	CEconItemView		*GetDefaultEquippedDefinitionItem( int i ) { return m_aDefaultEquippedDefinitionItems[ i ]; }
+	CEconItemView		*FindDefaultEquippedDefinitionItemBySlot( int iClass, int iSlot ) const;
+	bool				GetDefaultEquippedDefinitionItemSlotByDefinitionIndex( item_definition_index_t nDefIndex, int nClass, int &nSlot );
+	void				SetDefaultEquippedDefinitionItemBySlot( int iClass, int iSlot, item_definition_index_t iDefIndex );
 
-	virtual CEconItemView	*GetItemInLoadout( int iClass, int iSlot ) { AssertMsg( 0, "Implement me!" ); return NULL; }
+	void FindItemsByType( EItemType eType, CUtlVector< CEconItemView* >& outVec );
+
+	virtual CEconItemView	*GetItemInLoadout( int iClass, int iSlot ) const { AssertMsg( 0, "Implement me!" ); return NULL; }
+
 	
 	// Get the item object cache data for the specified item
 	CEconItem			*GetSOCDataForItem( itemid_t iItemID );
+	const CEconItem		*GetSOCDataForItem( itemid_t iItemID ) const;
 	GCSDK::CGCClientSharedObjectCache	*GetSOC( void ) { return m_pSOCache; }
 
 	// tells the GC systems to forget about this listener
 	void				RemoveListener( GCSDK::ISharedObjectListener *pListener );
 
 	// Finds the item in our inventory that matches the specified global index
-	CEconItemView		*GetInventoryItemByItemID( itemid_t iIndex, int *pIndex = NULL );
-
-	// Finds the item in our inventory that matches the specified global original id
-	CEconItemView		*GetInventoryItemByOriginalID( itemid_t iOriginalID, int *pIndex = NULL );
+	CEconItemView		*GetInventoryItemByItemID( itemid_t iIndex ) const;
 
 	// Finds the item in our inventory in the specified position
 	CEconItemView		*GetItemByPosition( int iPosition, int *pIndex = NULL );
-
-	// Finds the first item in our backpack with match itemdef
-	CEconItemView		*FindFirstItembyItemDef( item_definition_index_t iItemDef );
 
 	// Used to reject items on the backend for inclusion into this inventory.
 	// Mostly used for division of bags into different in-game inventories.
@@ -114,8 +109,32 @@ public:
 
 	// Recipe access
 	int									 GetRecipeCount( void ) const;
-	const CEconCraftingRecipeDefinition *GetRecipeDef( int iIndex );
-	const CEconCraftingRecipeDefinition *GetRecipeDefByDefIndex( uint16 iDefIndex );
+	const CEconCraftingRecipeDefinition *GetRecipeDef( int iIndex ) const;
+	const CEconCraftingRecipeDefinition *GetRecipeDefByDefIndex( uint16 iDefIndex ) const;
+
+	int GetMaxCraftIngredientsNeeded( const CUtlVector< itemid_t >& vecCraftEconItems ) const;
+
+	void GetMarketCraftCompletionLink( const CUtlVector< itemid_t >& vecCraftItems, char *pchLink, int nNumChars ) const;
+
+	int GetPossibleCraftResultsCount( const CUtlVector< itemid_t >& vecCraftItems ) const;
+	int GetPossibleCraftResultsCount( const CUtlVector< CEconItem* >& vecCraftEconItems ) const;
+	const CEconCraftingRecipeDefinition *GetPossibleCraftResult( const CUtlVector< itemid_t >& vecCraftItems, int nIndex ) const;
+	int GetPossibleCraftResultID( const CUtlVector< itemid_t >& vecCraftItems, int nIndex ) const;
+	const wchar_t* GetPossibleCraftResultName( const CUtlVector< itemid_t >& vecCraftItems, int nIndex ) const;
+	const wchar_t* GetPossibleCraftResultDescription( const CUtlVector< itemid_t >& vecCraftItems, int nIndex ) const;
+	bool CanAddToCraftTarget( const CUtlVector< itemid_t >& vecCraftItems, itemid_t nNewItem ) const;
+	bool IsCraftReady( const CUtlVector< itemid_t >& vecCraftItems, int16 &nRecipe ) const;
+	void CraftIngredients( const CUtlVector< itemid_t >& vecCraftItems ) const;
+	void SetTargetCraftRecipe( int nRecipe ) { m_nTargetRecipe = nRecipe; }
+	int16 GetTargetCraftRecipe( void ) const { return m_nTargetRecipe; }
+
+	// Finds the item in our inventory that matches the specified global index
+	void ClearItemCustomName( itemid_t iIndex );
+
+	void WearItemSticker( itemid_t iIndex, int nSlot, float flStickerWearCurrent );
+
+	// Item access
+	uint32				GetItemCount( uint32 unItemDef );
 
 	// Item previews
 	virtual int			GetPreviewItemDef( void ) const { return 0; };
@@ -125,61 +144,87 @@ public:
 
 	virtual void		NotifyHasNewItems() {}
 
-	void				AddItemHandle( CEconItemViewHandle* pHandle );
-	void				RemoveItemHandle( CEconItemViewHandle* pHandle );
+	bool				AddEconItem( CEconItem * pItem, bool bUpdateAckFile, bool bWriteAckFile, bool bCheckForNewItems );
 
-#ifdef CLIENT_DLL
-	virtual ITexture	*GetWeaponSkinBaseLowRes( itemid_t nItemId, int iTeam ) const { return NULL; }
-#endif
+	enum EInventoryItemEvent
+	{
+		k_EInventoryItemCreated,
+		k_EInventoryItemUpdated,
+		k_EInventoryItemDestroyed,
+	};
 
+	// Made public for an inventory helper func
+	int					m_nTargetRecipe;
 
 protected:
 	// Inventory updating, called by the Inventory Manager only. If you want an inventory updated,
 	// use the SteamRequestX functions in CInventoryManager.
-	void				RequestInventory( CSteamID pSteamID );
+	void				RequestInventory( GCSDK::SOID_t ID );
 	void				AddListener( GCSDK::ISharedObjectListener *pListener );
-	virtual bool		AddEconItem( CEconItem * pItem, bool bUpdateAckFile, bool bWriteAckFile, bool bCheckForNewItems );
 	virtual void		RemoveItem( itemid_t iItemID );
+	bool				AddEconDefaultEquippedDefinition( CEconDefaultEquippedDefinitionInstanceClient *pDefaultEquippedDefinition );
 	bool				FilloutItemFromEconItem( CEconItemView *pScriptItem, CEconItem *pEconItem );
-	void				SendInventoryUpdateEvent();
+	virtual void		SendInventoryUpdateEvent();
 	virtual void		OnHasNewItems() {}
 	virtual void		OnItemChangedPosition( CEconItemView *pItem, uint32 iOldPos ) { return; }
 
-	virtual void		SOCreated( const CSteamID & steamIDOwner, const GCSDK::CSharedObject *pObject, GCSDK::ESOCacheEvent eEvent ) OVERRIDE;
-	virtual void		PreSOUpdate( const CSteamID & steamIDOwner, GCSDK::ESOCacheEvent eEvent ) OVERRIDE { /* do nothing */ }
-	virtual void		SOUpdated( const CSteamID & steamIDOwner, const GCSDK::CSharedObject *pObject, GCSDK::ESOCacheEvent eEvent ) OVERRIDE;
-	virtual void		PostSOUpdate( const CSteamID & steamIDOwner, GCSDK::ESOCacheEvent eEvent ) OVERRIDE { /* do nothing */ }
-	virtual void		SODestroyed( const CSteamID & steamIDOwner, const GCSDK::CSharedObject *pObject, GCSDK::ESOCacheEvent eEvent ) OVERRIDE;
-	virtual void		SOCacheSubscribed( const CSteamID & steamIDOwner, GCSDK::ESOCacheEvent eEvent ) OVERRIDE;
-	virtual void		SOCacheUnsubscribed( const CSteamID & steamIDOwner, GCSDK::ESOCacheEvent eEvent ) OVERRIDE;
+	virtual void		SOCreated( GCSDK::SOID_t owner, const GCSDK::CSharedObject *pObject, GCSDK::ESOCacheEvent eEvent ) OVERRIDE;
+	virtual void		SOUpdated( GCSDK::SOID_t owner, const GCSDK::CSharedObject *pObject, GCSDK::ESOCacheEvent eEvent ) OVERRIDE;
+	virtual void		SODestroyed( GCSDK::SOID_t owner, const GCSDK::CSharedObject *pObject, GCSDK::ESOCacheEvent eEvent ) OVERRIDE;
+	virtual void		SOCacheSubscribed( GCSDK::SOID_t owner, GCSDK::ESOCacheEvent eEvent ) OVERRIDE;
+	virtual void		SOCacheUnsubscribed( GCSDK::SOID_t owner, GCSDK::ESOCacheEvent eEvent ) OVERRIDE;
 
-	void				ResortInventory( void ) { m_aInventoryItems.RedoSort( true ); }
 	virtual void		ValidateInventoryPositions( void );
 
-	// Derived inventory hooks
-	virtual void		ItemHasBeenUpdated( CEconItemView *pItem, bool bUpdateAckFile, bool bWriteAckFile );
+
+
+
+	// Derivable Inventory hooks
+	virtual void		ItemHasBeenUpdated( CEconItemView *pItem, bool bUpdateAckFile, bool bWriteAckFile, EInventoryItemEvent eEventType );
 	virtual void		ItemIsBeingRemoved( CEconItemView *pItem ) { return; }
+	virtual void		DefaultEquippedDefinitionHasBeenUpdated( CEconDefaultEquippedDefinitionInstanceClient *pDefaultEquippedDefinition );
+	virtual void		MarkSetItemDescriptionsDirty( int nItemSetIndex );
 
 	// Get the index for the item in our inventory utlvector
 	int					GetIndexForItem( CEconItemView *pItem );
 
-	void				DirtyItemHandles();
+
 
 protected:
-	// The Steam Id of the player who owns this inventory
-	CSteamID	m_OwnerID;
+	// The SharedObject Id of the player who owns this inventory
+	GCSDK::SOID_t m_OwnerID;
 
-	// The items the player has in his inventory, received from steam.
-	CUtlSortVector<CEconItemView,CInventoryListLess>		m_aInventoryItems;
+	CUtlVector< CEconItemView*> m_aDefaultEquippedDefinitionItems;
+
+	typedef CUtlMap< itemid_t, CEconItemView*, int, CDefLess< itemid_t > > ItemIdToItemMap_t;
+	// Wrap different container types so they all stay in sync with inventory state
+	class CItemContainers
+	{
+	public:
+		void Add( CEconItemView* pItem );
+		void Remove( itemid_t ullItemID );
+		void Purge();
+		bool DbgValidate() const; // Walk all containers and confirm content matches
+
+		const CUtlVector< CEconItemView*>& GetItemVector( void ) const { return m_vecInventoryItems; }
+		const ItemIdToItemMap_t& GetItemMap( void ) const { return m_mapItemIDToItemView; }
+
+	private:
+		// The items the player has in his inventory, received from steam.
+		CUtlVector< CEconItemView*> m_vecInventoryItems;
+
+		// Copies of pointers in vector for faster lookups
+		ItemIdToItemMap_t m_mapItemIDToItemView;
+	};
+
+	CItemContainers	m_Items;
 
 	int			m_iPendingRequests;
-	bool		m_bGotItemsFromSteam;
+	bool		m_bGotItemsFromSteamAtLeastOnce, m_bCurrentlySubscribedToSteam;
 
 	GCSDK::CGCClientSharedObjectCache	  *m_pSOCache;
 
 	CUtlVector<GCSDK::ISharedObjectListener *> m_vecListeners;
-
-	CUtlVector< CEconItemViewHandle* > m_vecItemHandles;
 
 	friend class CInventoryManager;
 };
@@ -187,22 +232,24 @@ protected:
 //-----------------------------------------------------------------------------
 // Purpose: 
 //-----------------------------------------------------------------------------
-class CInventoryManager : public CAutoGameSystemPerFrame
+class CInventoryManager : public CAutoGameSystem
 {
 	DECLARE_CLASS_GAMEROOT( CInventoryManager, CAutoGameSystem );
 public:
 	CInventoryManager( void );
+	virtual ~CInventoryManager() {}
 
 	// Adds the inventory to the list of inventories that should be maintained.
 	// This causes the game to load the items for the SteamID into this inventory.
 	// NOTE: This fires off a request to Steam. The data will not be filled out immediately.
 	void SteamRequestInventory( CPlayerInventory *pInventory, CSteamID pSteamID, IInventoryUpdateListener *pListener = NULL );
+	void RegisterPlayerInventory( CPlayerInventory *pInventory, IInventoryUpdateListener *pListener = NULL, CSteamID* pSteamID = NULL );
 
 	void PreInitGC();
 	void PostInitGC();
 
 #ifdef CLIENT_DLL
-	void	DropItem( itemid_t iItemID );
+	void	DeleteItem( itemid_t iItemID, bool bRecycle=false );
 	int		DeleteUnknowns( CPlayerInventory *pInventory );
 #endif
 
@@ -210,15 +257,14 @@ public:
 	//-----------------------------------------------------------------------
 	// IAutoServerSystem
 	//-----------------------------------------------------------------------
-	virtual bool Init( void ) OVERRIDE;
-	virtual void PostInit( void ) OVERRIDE;
-	virtual void Shutdown() OVERRIDE;
-	virtual void LevelInitPreEntity( void ) OVERRIDE;
-	virtual void LevelShutdownPostEntity( void ) OVERRIDE;
-
-#ifdef CLIENT_DLL
-	// Gets called each frame
-	virtual void Update( float frametime ) OVERRIDE;
+	virtual bool Init( void );
+	virtual void PostInit( void );
+	virtual void Shutdown();
+	virtual void LevelInitPreEntity( void );
+	virtual void LevelShutdownPostEntity( void );
+#if defined(CSTRIKE15) && defined(CLIENT_DLL)
+	virtual void InsertMaterialGenerationJob( CEconItemView *pItemView );
+	virtual void OnDestroyEconItemView( CEconItemView *pItemView );
 #endif
 
 	void GameServerSteamAPIActivated();
@@ -230,20 +276,10 @@ public:
 
 #ifdef CLIENT_DLL
 	// Must be implemented by derived class
-	virtual bool		EquipItemInLoadout( int iClass, int iSlot, itemid_t iItemID ) = 0;
+	virtual bool		EquipItemInLoadout( int iClass, int iSlot, itemid_t iItemID, bool bSwap = false ) = 0;
 
 	virtual CPlayerInventory *GeneratePlayerInventoryObject() const { return new CPlayerInventory; }
-
-	//-----------------------------------------------------------------------
-	// ITEM PRESETS
-	//-----------------------------------------------------------------------
-
-	// Is the given preset index valid?
-	bool				IsPresetIndexValid( equipped_preset_t unPreset );
-
-	// Equip all items for the given class and preset (all the work is done on the GC -- this just
-	// sends the message up)
-	bool				LoadPreset( equipped_class_t unClass, equipped_preset_t unPreset );
+	void DestroyPlayerInventoryObject( CPlayerInventory *pPlayerInventory ) const;
 
 	//-----------------------------------------------------------------------
 	// LOCAL INVENTORY
@@ -259,10 +295,6 @@ public:
 	// make a decision about inventory space right after sending a delete request,
 	// so we predict the request will work.
 	void				OnItemDeleted( CPlayerInventory *pInventory ) { if ( pInventory == GetLocalInventory() ) m_iPredictedDiscards--; }
-
-	virtual void		PersonaName_Precache( uint32 unAccountID );
-	virtual const char *PersonaName_Get( uint32 unAccountID );
-	virtual void		PersonaName_Store( uint32 unAccountID, const char *pPersonaName );
 
 	static void			SendGCConnectedEvent( void );
 
@@ -281,13 +313,15 @@ public:
 	void				SortBackpackFinished( void );
 	bool				IsInBackpackSort( void ) { return m_bInBackpackSort; }
 
-	void				PredictedBackpackPosFilled( int iBackpackPos ) { m_PredictedFilledSlots.FindAndRemove( iBackpackPos ); }
+	void				PredictedBackpackPosFilled( int iBackpackPos );
 
 	// Tell the backend to move an item to a specified backend position
 	virtual void		UpdateInventoryPosition( CPlayerInventory *pInventory, uint64 ulItemID, uint32 unNewInventoryPos );
 
-	virtual void		UpdateInventoryEquippedState( CPlayerInventory *pInventory, uint64 ulItemID, equipped_class_t unClass, equipped_slot_t unSlot );
+	virtual void		UpdateInventoryEquippedState( CPlayerInventory *pInventory, uint64 ulItemID, equipped_class_t unClass, equipped_slot_t unSlot, bool bSwap = false );
 
+	void				BeginBackpackPositionTransaction();
+	void				EndBackpackPositionTransaction();
 
 	//-----------------------------------------------------------------------
 	// CLIENT PICKUP UI HANDLING
@@ -315,38 +349,34 @@ public:
 	// update tells us the item has moved out of the unack'd position, we remove it from our file.
 	//-----------------------------------------------------------------------
 
-	virtual void		AcknowledgeItem ( CEconItemView *pItem, bool bMoveToBackpack = true );		// Client Acknowledges an item and moves it in to the backpack
 	bool				HasBeenAckedByClient( CEconItemView *pItem );		// Returns true if it's in our client file
 	void				SetAckedByClient( CEconItemView *pItem );			// Adds it to our client file
 	void				SetAckedByGC( CEconItemView *pItem, bool bSave );	// Removes it from our client file
-	KeyValues			*GetAckKeyForItem( CEconItemView *pItem );
-	void				CleanAckFile( void );
-	void				SaveAckFile( void );
 
 private:
-	void				VerifyAckFileLoaded( void );
-	KeyValues			*m_pkvItemClientAckFile;
-	bool				m_bClientAckDirty;
+	CUtlRBTree< itemid_t, int32, CDefLess< itemid_t > > m_rbItemIdsClientAck;
 
-private:
 	// As we move items around in batches (on pickups usually) we need to know what slots will be filled
 	// by items we've moved, and haven't received a response from Steam.
-	CUtlVector<int>				m_PredictedFilledSlots;
-#endif
+	typedef CUtlMap< uint32, uint64, int > tPredictedSlots;
+	tPredictedSlots			m_mapPredictedFilledSlots;
+
+public:
+	// TODO: Does this belong here?
+	bool BGetPlayerQuestIdPointsRemaining( uint16 unQuestID, uint32 &numPointsRemaining, uint32 &numPointsUncommitted );
+
+public:
+	CEconItemView *CreateReferenceEconItem( item_definition_index_t iDefIndex, int iPaintIndex, uint8 ub1 = 0 );
+	void RemoveReferenceEconItem( item_definition_index_t iDefIndex, int iPaintIndex, uint8 ub1 );
+	CEconItemView *FindReferenceEconItem( item_definition_index_t iDefIndex, int iPaintIndex, uint8 ub1 );
+	CEconItemView *FindOrCreateReferenceEconItem( item_definition_index_t iDefIndex, int iPaintIndex, uint8 ub1 = 0 );
+	CEconItemView *FindOrCreateReferenceEconItem( itemid_t ullFauxItemId );
+
+	CUtlVector< CEconItemView* >	m_pTempReferenceItems;		// A collection of econitemviews that are created temporarily just to pull inventory data from.
+#endif //CLIENT_DLL
 	
 public:
 	virtual int			GetBackpackPositionFromBackend( uint32 iBackendPosition ) { return ExtractBackpackPositionFromBackend(iBackendPosition); }
-
-private:
-	//-----------------------------------------------------------------------
-	// Pending inventory requests
-	struct pendingreq_t
-	{
-		CPlayerInventory *pInventory;
-		CSteamID		 pID;
-	};
-	CUtlVector<pendingreq_t>	m_hPendingInventoryRequests;
-	void		RemovePendingRequest( CSteamID *pSteamID );
 
 protected:
 	//-----------------------------------------------------------------------
@@ -362,6 +392,7 @@ protected:
 	friend class CPlayerInventory;
 
 	inline bool			IsValidPlayerClass( equipped_class_t unClass );
+	inline bool			IsValidSlot( equipped_slot_t unSlot );
 
 #ifdef CLIENT_DLL
 	// Keep track of the number of items we've tried to discard, but haven't recieved responses on
@@ -372,101 +403,88 @@ protected:
 
 	bool		m_bInBackpackSort;
 
-	float		m_flNextLoadPresetChange;
+	// Allows transaction item updating when moving many items
+	CMsgSetItemPositions m_itemPositions;
+	bool m_bIsBatchingPositions;
 
-	CMsgSetItemPositions m_msgPendingSetItemPositions;
-	CMsgLookupMultipleAccountNames m_msgPendingLookupAccountNames;
+private:
+	CON_COMMAND_MEMBER_F( CInventoryManager, "econ_clear_inventory_images", ClearLocalInventoryImages, "clear the local inventory images (they will regenerate)", FCVAR_CLIENTDLL );
 
-	void OnPersonaStateChanged( PersonaStateChange_t *info );
-	CCallback< CInventoryManager, PersonaStateChange_t, false > m_sPersonaStateChangedCallback;
-	CUtlMap< uint64, bool > m_personaNameRequests;
-
-#endif
+#endif //CLIENT_DLL
 };
 
 //=================================================================================
 // Implement these functions in your game code to create custom derived versions
 CInventoryManager *InventoryManager( void );
 
-CBasePlayer *GetPlayerBySteamID( const CSteamID &steamID );
+#ifdef CLIENT_DLL
 
-//-----------------------------------------------------------------------------
-// Purpose: Maintains a handle to an CEconItemView within an inventory.  When
-//			the inventory gets updated and shuffles CEconItemViews around, this
-//			handle automatically updates its pointer to point to the new
-//			CEconItemView that has the same item_id
-//-----------------------------------------------------------------------------
-class CEconItemViewHandle
+// Inventory Less function.
+// Used to sort the inventory items into their positions.
+class CManagedItemViewsLess
 {
 public:
-	CEconItemViewHandle()
-		: m_pItem( NULL )
-		, m_pInv( NULL )
-		, m_bPointerDirty( false )
-	{}
-
-	CEconItemViewHandle( CEconItemView* pItem )
-		: m_pItem( pItem )
-		, m_pInv( NULL )
-		, m_bPointerDirty( false )
+	bool Less( CEconItemView * const & src1, CEconItemView * const & src2, void *pCtx )
 	{
-		SetItem( pItem );
-	}
+		uint64 unIndex1 = src1->GetItemID();
+		uint64 unIndex2 = src2->GetItemID();
 
-	virtual ~CEconItemViewHandle()
-	{
-		// Unregister us
-		if ( m_pInv )
+		if ( unIndex1 == unIndex2 )
 		{
-			m_pInv->RemoveItemHandle( this );
+			return EconRarity_CombinedItemAndPaintRarity( src1->GetStaticData()->GetRarity(), src1->GetCustomPaintKitIndex() ) >
+				EconRarity_CombinedItemAndPaintRarity( src2->GetStaticData()->GetRarity(), src2->GetCustomPaintKitIndex() );
 		}
+
+		return unIndex1 == 0ull || ( unIndex1 < unIndex2 );
 	}
+};
 
-	void SetItem( CEconItemView* pItem );
+class CInventoryItemUpdateManager: public CAutoGameSystemPerFrame
+{
+public:
 
-	operator CEconItemView *( void ) const
-	{ 
-		return Get();
-	}
-
-	CEconItemView* operator->( void ) const
+	virtual void Update( float frametime );
+	
+	void AddItemView( CEconItemView *pItemView )
 	{
-		return Get();
-	}
-
-	void ItemIsBeingDeleted( const CEconItemView* pItem )
-	{
-		m_bPointerDirty = true;
-
-		// Inventory told us the item is going away
-		if ( m_pItem == pItem )
+		FOR_EACH_VEC( m_ManagedItems, i )
 		{
-			m_pItem = NULL;
+			if ( m_ManagedItems[i] == pItemView )
+				return;
 		}
+
+		m_ManagedItems.Insert( pItemView );
 	}
 
-	void InventoryIsBeingDeleted()
+	void RemoveItemView( CEconItemView *pItemView )
 	{
-		m_pInv = NULL;
-		m_pItem = NULL;
-		m_bPointerDirty = false;	// So we dont keep trying to look up the item
+		m_ManagedItems.FindAndRemove( pItemView );
 	}
 
-	void MarkDirty()
+	void AddItemViewToFixupList( CEconItemView *pItemView )
 	{
-		m_bPointerDirty = true;
+		m_fixupListMutex.Lock();
+		m_fixupList.AddToHead( pItemView );
+		m_fixupListMutex.Unlock();
+	}
+
+	void RemoveItemViewFromFixupList( CEconItemView *pItemView )
+	{
+		m_fixupListMutex.Lock();
+		m_fixupList.FindAndRemove( pItemView );
+		m_fixupListMutex.Unlock();
 	}
 
 private:
 
-	CEconItemView* Get() const;
+	CUtlSortVector< CEconItemView*, CManagedItemViewsLess > m_ManagedItems;
 
-	mutable bool m_bPointerDirty;		// Used to mark when m_pItem is no longer valid 
-	CPlayerInventory *m_pInv;			// Inventory the item belongs to.  Used to look up new CEconItemView 
-	mutable CEconItemView* m_pItem;		// The item. 
-	uint64 m_nItemID;					// ID of the item
-	CSteamID m_OwnerSteamID;			// Steam ID of the item owner
+	CUtlVector< CEconItemView* > m_fixupList;
+	CThreadFastMutex			 m_fixupListMutex;
 };
 
+extern CInventoryItemUpdateManager g_InventoryItemUpdateManager;
+
+#endif
 
 #endif // ITEM_INVENTORY_H

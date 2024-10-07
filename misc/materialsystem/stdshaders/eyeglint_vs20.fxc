@@ -1,4 +1,4 @@
-//===== Copyright © 1996-2007, Valve Corporation, All rights reserved. ======//
+//========== Copyright (c) Valve Corporation, All rights reserved. ==========//
 //
 // Vertex shader to pass through texcoords needed to run the
 // procedural glint generation inner loop in the pixel shader
@@ -29,6 +29,13 @@ VS_OUTPUT main( const VS_INPUT v )
 {
 	VS_OUTPUT o = ( VS_OUTPUT )0;
 	o.projPos = float4( v.vPos, 1.0f );
+	
+#ifdef _PS3
+	// Account for OpenGL's flipped y coordinate and expanded z range [-1,1] instead of [0,1]
+	o.projPos.y = -o.projPos.y;
+	o.projPos.z = 2.0f * o.projPos.z - o.projPos.w;
+#endif // _PS3
+
 	o.tc = v.tc;
 	o.glintCenter = v.glintCenter;
 	o.glintColor = v.glintColor;

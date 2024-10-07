@@ -192,10 +192,18 @@ typedef unsigned int JDIMENSION;
 /* a function used only in its module: */
 #define LOCAL(type)		static type
 /* a function referenced thru EXTERNs: */
+#if defined(GNUC) && !defined(__clang__)
+#define GLOBAL(type)		extern "C" __attribute__ ((visibility("default"))) type
+#else
 #define GLOBAL(type)		type
-/* a reference to a GLOBAL function: */
-#define EXTERN(type)		extern type
+#endif
 
+/* a reference to a GLOBAL function: */
+#if defined(GNUC) && !defined(__clang__)
+#define EXTERN(type)		extern "C" type
+#else
+#define EXTERN(type)		extern type
+#endif
 
 /* This macro is used to declare a "method", that is, a function pointer.
  * We want to supply prototype parameters if the compiler can cope.

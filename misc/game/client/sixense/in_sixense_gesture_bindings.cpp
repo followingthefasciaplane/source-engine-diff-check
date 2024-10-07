@@ -1,4 +1,3 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
 #include "cbase.h"
 
 #ifdef SIXENSE
@@ -441,7 +440,7 @@ void SixenseGestureBindings::CreateDefaultBindings()
 	AddBinding( "left", "button_press", "2", "changeteam", "" );
 	AddBinding( "left", "button_press", "4", "lastdisguise", "" );
 	AddBinding( "left", "button_press", "joystick", "voicemenu 0 0", "" );
-	AddBinding( "right", "joystick_move", "up", "+context_action", "" );
+	AddBinding( "right", "joystick_move", "up", "use_action_slot_item", "" );
 	AddBinding( "right", "joystick_move", "left", "invprev", "" );
 	AddBinding( "right", "joystick_move", "right", "invnext", "" );
 	AddBinding( "right", "joystick_move", "down", "lastinv", "" );
@@ -879,6 +878,10 @@ bool SixenseGestureBindings::ActionTokenToStr( sixenseUtils::IButtonStates::Acti
 	{
 		Q_snprintf( buf, buflen, "tilt_gesture" );
 	}
+	else if( action == sixenseUtils::IButtonStates::ACTION_BUTTON_PRESS ) 
+	{
+		Q_snprintf( buf, buflen, "button_press" );
+	} 
 	else if( action == sixenseUtils::IButtonStates::ACTION_TRIGGER_PRESS ) 
 	{
 		Q_snprintf( buf, buflen, "trigger_press" );

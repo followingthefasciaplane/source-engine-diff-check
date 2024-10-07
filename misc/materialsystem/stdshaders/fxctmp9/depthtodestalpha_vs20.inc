@@ -1,8 +1,11 @@
+// ALL SKIP STATEMENTS THAT AFFECT THIS SHADER!!!
+// defined $LIGHTING_PREVIEW && defined $FASTPATH && $LIGHTING_PREVIEW && $FASTPATH
 #include "shaderlib/cshader.h"
 class depthtodestalpha_vs20_Static_Index
 {
 public:
-	depthtodestalpha_vs20_Static_Index( )
+	// CONSTRUCTOR
+	depthtodestalpha_vs20_Static_Index( IShaderShadow *pShaderShadow, IMaterialVar **params )
 	{
 	}
 	int GetIndex()
@@ -18,7 +21,8 @@ public:
 class depthtodestalpha_vs20_Dynamic_Index
 {
 public:
-	depthtodestalpha_vs20_Dynamic_Index()
+	// CONSTRUCTOR
+	depthtodestalpha_vs20_Dynamic_Index( IShaderDynamicAPI *pShaderAPI )
 	{
 	}
 	int GetIndex()
@@ -31,3 +35,18 @@ public:
 	}
 };
 #define shaderDynamicTest_depthtodestalpha_vs20 0
+static const ShaderComboSemantics_t depthtodestalpha_vs20_combos =
+{
+	"depthtodestalpha_vs20", NULL, 0, NULL, 0 
+};
+
+class ConstructMe_depthtodestalpha_vs20
+{
+public:
+	ConstructMe_depthtodestalpha_vs20()
+	{
+		GetShaderDLL()->AddShaderComboInformation( &depthtodestalpha_vs20_combos );
+	}
+};
+
+static ConstructMe_depthtodestalpha_vs20 s_ConstructMe_depthtodestalpha_vs20;

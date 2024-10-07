@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -87,7 +87,7 @@ BEGIN_VS_SHADER( Water_DuDv, "Help for Water_DuDv" )
 			vec.Init( 1.0f, 0.0f, 0.0f, 0.0f );
 			pShaderAPI->SetPixelShaderConstant( 3, vec.Base() );	
 
-			BindTexture( SHADER_TEXTURE_STAGE0, BUMPMAP, BUMPFRAME );
+			BindTexture( SHADER_TEXTURE_STAGE0, false, BUMPMAP, BUMPFRAME );
 		}
 		Draw();
 	}

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -8,7 +8,13 @@
 #if !defined( _X360 )
 #include <windows.h>
 #endif
-#elif defined(POSIX)
+#elif defined( _PS3 )
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include "basetypes.h"
+#include "ps3/ps3_core.h"
+#include "ps3/ps3_win32stubs.h"
+#elif defined( POSIX )
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <pwd.h>
@@ -25,7 +31,6 @@
 #include "cserserverprotocol_engine.h"
 #include "host_phonehome.h"
 #include "mathlib/IceKey.H"
-#include "tier0/vcrmode.h"
 #include "blockingudpsocket.h"
 
 #if defined( _X360 )
@@ -84,7 +89,7 @@ public:
 		}
 
 		if ( Q_strlen( build_identifier ) >= 1 &&
-			Q_strnicmp( build_identifier, "VLV_INTERNAL", Q_strlen( "VLV_INTERNAL" ) ) )
+			 !StringHasPrefix( build_identifier, "VLV_INTERNAL" ) )
 		{
 			// Strip trailing spaces from identifer
 			char *identifer = &build_identifier[ Q_strlen( build_identifier ) - 1 ];
@@ -203,7 +208,7 @@ private:
 	{
 	
 		bf_write	encrypted;
-		ALIGN4 byte		encrypted_data[ 2048 ] ALIGN4_POST;
+		byte		encrypted_data[ 2048 ];
 
 		buf.WriteByte( C2M_PHONEHOME );
 		buf.WriteByte( '\n' );
@@ -254,6 +259,8 @@ private:
 			{
 				Q_strncpy( username, "???", sizeof( username )  );
 			}
+#elif defined( _PS3 )
+			Q_strncpy( username, "PS3", sizeof( username )  );
 #else
 			struct passwd *pass = getpwuid( getuid() );
 			if ( pass )
@@ -307,7 +314,7 @@ private:
 			return;
 
 		bf_write	buf;
-		ALIGN4 byte		data[ 2048 ] ALIGN4_POST;
+		byte		data[ 2048 ];
 		
 		buf.StartWriting( data, sizeof( data ) );
 
@@ -357,7 +364,7 @@ private:
 		id = 0u;
 
 		bf_write	buf;
-		ALIGN4 byte		data[ 2048 ] ALIGN4_POST;
+		byte		data[ 2048 ];
 		
 		buf.StartWriting( data, sizeof( data ) );
 

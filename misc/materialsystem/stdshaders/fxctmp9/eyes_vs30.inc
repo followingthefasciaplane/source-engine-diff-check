@@ -1,27 +1,10 @@
+// ALL SKIP STATEMENTS THAT AFFECT THIS SHADER!!!
+// ( $DOWATERFOG == 0 ) && ( $DOPIXELFOG && $HARDWAREFOGBLEND )
+// ( $DOWATERFOG == 0 ) && ( $HARDWAREFOGBLEND == 0 ) && ( $DOPIXELFOG == 0 )
+// defined $LIGHTING_PREVIEW && defined $FASTPATH && $LIGHTING_PREVIEW && $FASTPATH
 #include "shaderlib/cshader.h"
 class eyes_vs30_Static_Index
 {
-private:
-	int m_nINTRO;
-#ifdef _DEBUG
-	bool m_bINTRO;
-#endif
-public:
-	void SetINTRO( int i )
-	{
-		Assert( i >= 0 && i <= 1 );
-		m_nINTRO = i;
-#ifdef _DEBUG
-		m_bINTRO = true;
-#endif
-	}
-	void SetINTRO( bool i )
-	{
-		m_nINTRO = i ? 1 : 0;
-#ifdef _DEBUG
-		m_bINTRO = true;
-#endif
-	}
 private:
 	int m_nHALFLAMBERT;
 #ifdef _DEBUG
@@ -38,35 +21,85 @@ public:
 	}
 	void SetHALFLAMBERT( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nHALFLAMBERT = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bHALFLAMBERT = true;
 #endif
 	}
-public:
-	eyes_vs30_Static_Index( )
-	{
+private:
+	int m_nDOPIXELFOG;
 #ifdef _DEBUG
-		m_bINTRO = false;
-#endif // _DEBUG
-		m_nINTRO = 0;
+	bool m_bDOPIXELFOG;
+#endif
+public:
+	void SetDOPIXELFOG( int i )
+	{
+		Assert( i >= 0 && i <= 1 );
+		m_nDOPIXELFOG = i;
+#ifdef _DEBUG
+		m_bDOPIXELFOG = true;
+#endif
+	}
+	void SetDOPIXELFOG( bool i )
+	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
+		m_nDOPIXELFOG = i ? 1 : 0;
+#ifdef _DEBUG
+		m_bDOPIXELFOG = true;
+#endif
+	}
+private:
+	int m_nHARDWAREFOGBLEND;
+#ifdef _DEBUG
+	bool m_bHARDWAREFOGBLEND;
+#endif
+public:
+	void SetHARDWAREFOGBLEND( int i )
+	{
+		Assert( i >= 0 && i <= 0 );
+		m_nHARDWAREFOGBLEND = i;
+#ifdef _DEBUG
+		m_bHARDWAREFOGBLEND = true;
+#endif
+	}
+	void SetHARDWAREFOGBLEND( bool i )
+	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 0 );
+		m_nHARDWAREFOGBLEND = i ? 1 : 0;
+#ifdef _DEBUG
+		m_bHARDWAREFOGBLEND = true;
+#endif
+	}
+public:
+	// CONSTRUCTOR
+	eyes_vs30_Static_Index( IShaderShadow *pShaderShadow, IMaterialVar **params )
+	{
 #ifdef _DEBUG
 		m_bHALFLAMBERT = false;
 #endif // _DEBUG
 		m_nHALFLAMBERT = 0;
+#ifdef _DEBUG
+		m_bDOPIXELFOG = true;
+#endif // _DEBUG
+		m_nDOPIXELFOG = g_pHardwareConfig->SupportsPixelShaders_2_b() ;
+#ifdef _DEBUG
+		m_bHARDWAREFOGBLEND = true;
+#endif // _DEBUG
+		m_nHARDWAREFOGBLEND = 0 ;
 	}
 	int GetIndex()
 	{
 		// Asserts to make sure that we aren't using any skipped combinations.
 		// Asserts to make sure that we are setting all of the combination vars.
 #ifdef _DEBUG
-		bool bAllStaticVarsDefined = m_bINTRO && m_bHALFLAMBERT;
+		bool bAllStaticVarsDefined = m_bHALFLAMBERT && m_bDOPIXELFOG && m_bHARDWAREFOGBLEND;
 		Assert( bAllStaticVarsDefined );
 #endif // _DEBUG
-		return ( 64 * m_nINTRO ) + ( 128 * m_nHALFLAMBERT ) + 0;
+		return ( 32 * m_nHALFLAMBERT ) + ( 64 * m_nDOPIXELFOG ) + ( 128 * m_nHARDWAREFOGBLEND ) + 0;
 	}
 };
-#define shaderStaticTest_eyes_vs30 vsh_forgot_to_set_static_INTRO + vsh_forgot_to_set_static_HALFLAMBERT + 0
+#define shaderStaticTest_eyes_vs30 vsh_forgot_to_set_static_HALFLAMBERT + 0
 class eyes_vs30_Dynamic_Index
 {
 private:
@@ -85,6 +118,7 @@ public:
 	}
 	void SetCOMPRESSED_VERTS( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nCOMPRESSED_VERTS = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bCOMPRESSED_VERTS = true;
@@ -106,6 +140,7 @@ public:
 	}
 	void SetSKINNING( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nSKINNING = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bSKINNING = true;
@@ -127,6 +162,7 @@ public:
 	}
 	void SetDOWATERFOG( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nDOWATERFOG = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bDOWATERFOG = true;
@@ -148,6 +184,7 @@ public:
 	}
 	void SetDYNAMIC_LIGHT( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nDYNAMIC_LIGHT = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bDYNAMIC_LIGHT = true;
@@ -169,6 +206,7 @@ public:
 	}
 	void SetSTATIC_LIGHT( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nSTATIC_LIGHT = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bSTATIC_LIGHT = true;
@@ -182,7 +220,7 @@ private:
 public:
 	void SetMORPHING( int i )
 	{
-		Assert( i >= 0 && i <= 1 );
+		Assert( i >= 0 && i <= 0 );
 		m_nMORPHING = i;
 #ifdef _DEBUG
 		m_bMORPHING = true;
@@ -190,13 +228,15 @@ public:
 	}
 	void SetMORPHING( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 0 );
 		m_nMORPHING = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bMORPHING = true;
 #endif
 	}
 public:
-	eyes_vs30_Dynamic_Index()
+	// CONSTRUCTOR
+	eyes_vs30_Dynamic_Index( IShaderDynamicAPI *pShaderAPI )
 	{
 #ifdef _DEBUG
 		m_bCOMPRESSED_VERTS = false;
@@ -207,9 +247,9 @@ public:
 #endif // _DEBUG
 		m_nSKINNING = 0;
 #ifdef _DEBUG
-		m_bDOWATERFOG = false;
+		m_bDOWATERFOG = true;
 #endif // _DEBUG
-		m_nDOWATERFOG = 0;
+		m_nDOWATERFOG = ( pShaderAPI->GetSceneFogMode() == MATERIAL_FOG_LINEAR_BELOW_FOG_Z ) ;
 #ifdef _DEBUG
 		m_bDYNAMIC_LIGHT = false;
 #endif // _DEBUG
@@ -219,9 +259,9 @@ public:
 #endif // _DEBUG
 		m_nSTATIC_LIGHT = 0;
 #ifdef _DEBUG
-		m_bMORPHING = false;
+		m_bMORPHING = true;
 #endif // _DEBUG
-		m_nMORPHING = 0;
+		m_nMORPHING = false ;
 	}
 	int GetIndex()
 	{
@@ -234,4 +274,36 @@ public:
 		return ( 1 * m_nCOMPRESSED_VERTS ) + ( 2 * m_nSKINNING ) + ( 4 * m_nDOWATERFOG ) + ( 8 * m_nDYNAMIC_LIGHT ) + ( 16 * m_nSTATIC_LIGHT ) + ( 32 * m_nMORPHING ) + 0;
 	}
 };
-#define shaderDynamicTest_eyes_vs30 vsh_forgot_to_set_dynamic_COMPRESSED_VERTS + vsh_forgot_to_set_dynamic_SKINNING + vsh_forgot_to_set_dynamic_DOWATERFOG + vsh_forgot_to_set_dynamic_DYNAMIC_LIGHT + vsh_forgot_to_set_dynamic_STATIC_LIGHT + vsh_forgot_to_set_dynamic_MORPHING + 0
+#define shaderDynamicTest_eyes_vs30 vsh_forgot_to_set_dynamic_COMPRESSED_VERTS + vsh_forgot_to_set_dynamic_SKINNING + vsh_forgot_to_set_dynamic_DYNAMIC_LIGHT + vsh_forgot_to_set_dynamic_STATIC_LIGHT + 0
+
+static const ShaderComboInformation_t s_DynamicComboArray_Eyes_vs30[6] = 
+{
+	{ "COMPRESSED_VERTS", 0, 1 },
+	{ "SKINNING", 0, 1 },
+	{ "DOWATERFOG", 0, 1 },
+	{ "DYNAMIC_LIGHT", 0, 1 },
+	{ "STATIC_LIGHT", 0, 1 },
+	{ "MORPHING", 0, 0 },
+};
+
+static const ShaderComboInformation_t s_StaticComboArray_Eyes_vs30[3] = 
+{
+	{ "HALFLAMBERT", 0, 1 },
+	{ "DOPIXELFOG", 0, 1 },
+	{ "HARDWAREFOGBLEND", 0, 0 },
+};
+static const ShaderComboSemantics_t Eyes_vs30_combos =
+{
+	"Eyes_vs30", s_DynamicComboArray_Eyes_vs30, 6, s_StaticComboArray_Eyes_vs30, 3 
+};
+
+class ConstructMe_Eyes_vs30
+{
+public:
+	ConstructMe_Eyes_vs30()
+	{
+		GetShaderDLL()->AddShaderComboInformation( &Eyes_vs30_combos );
+	}
+};
+
+static ConstructMe_Eyes_vs30 s_ConstructMe_Eyes_vs30;

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Swap a compiled caption file.
 //
@@ -40,7 +40,7 @@ bool SwapClosecaptionFile( void *pData )
 
 	CompiledCaptionHeader_t *pHdr = (CompiledCaptionHeader_t*)pData;
 
-	if ( IsX360() )
+	if ( !IsPC() )
 	{
 		// pre-swap file header
 		swap.SwapFieldsToTargetEndian( pHdr );
@@ -69,7 +69,7 @@ bool SwapClosecaptionFile( void *pData )
 	return true;
 }
 
-#if defined( CLIENT_DLL )
+#if defined( CLIENT_DLL ) || defined( GAME_DLL )
 //-----------------------------------------------------------------------------
 // Callback for UpdateOrCreate - generates .360 file
 //-----------------------------------------------------------------------------

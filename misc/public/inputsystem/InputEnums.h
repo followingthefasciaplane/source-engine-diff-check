@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -9,6 +9,8 @@
 #ifdef _WIN32
 #pragma once
 #endif
+
+#include "tier0/basetypes.h"
 
 // Standard maximum +/- value of a joystick axis
 #define MAX_BUTTONSAMPLE			32768
@@ -25,24 +27,15 @@
 
 enum
 {
-	MAX_JOYSTICKS = 1,
+#ifdef _PS3
+	MAX_JOYSTICKS = 7,
+#else
+	MAX_JOYSTICKS = 4,
+#endif
 	MOUSE_BUTTON_COUNT = 5,
 	MAX_NOVINT_DEVICES = 2,
 };
 
-#if defined( LINUX )
-// Linux has a slightly different mapping order on the joystick axes
-enum JoystickAxis_t
-{
-	JOY_AXIS_X = 0,
- 	JOY_AXIS_Y,
-	JOY_AXIS_Z,
-	JOY_AXIS_U,
-	JOY_AXIS_R,
-	JOY_AXIS_V,
-	MAX_JOYSTICK_AXES,
-};
-#else
 enum JoystickAxis_t
 {
 	JOY_AXIS_X = 0,
@@ -53,7 +46,13 @@ enum JoystickAxis_t
 	JOY_AXIS_V,
 	MAX_JOYSTICK_AXES,
 };
-#endif
+
+enum JoystickDeadzoneMode_t
+{
+	JOYSTICK_DEADZONE_CROSS = 0,
+	JOYSTICK_DEADZONE_SQUARE = 1,
+};
+
 
 //-----------------------------------------------------------------------------
 // Extra mouse codes
@@ -81,6 +80,26 @@ enum InputEventType_t
 	IE_Quit = IE_FirstSystemEvent,
 	IE_ControllerInserted,	// m_nData contains the controller ID
 	IE_ControllerUnplugged,	// m_nData contains the controller ID
+	IE_Close,
+	IE_WindowSizeChanged,	// m_nData contains width, m_nData2 contains height, m_nData3 = 0 if not minimized, 1 if minimized
+	IE_PS_CameraUnplugged,  // m_nData contains code for type of disconnect.  
+	IE_PS_Move_OutOfView,   // m_nData contains bool (0, 1) for whether the move is now out of view (1) or in view (0)
+
+	IE_FirstUIEvent = 200,
+	IE_LocateMouseClick = IE_FirstUIEvent,
+	IE_SetCursor,
+	IE_KeyTyped,
+	IE_KeyCodeTyped,
+	IE_InputLanguageChanged,
+	IE_IMESetWindow,
+	IE_IMEStartComposition,
+	IE_IMEComposition,
+	IE_IMEEndComposition,
+	IE_IMEShowCandidates,
+	IE_IMEChangeCandidates,
+	IE_IMECloseCandidates,
+	IE_IMERecomputeModes,
+	IE_OverlayEvent,
 
 	IE_FirstVguiEvent = 1000,	// Assign ranges for other systems that post user events here
 	IE_FirstAppEvent = 2000,
@@ -99,7 +118,9 @@ struct InputEvent_t
 // Steam Controller Enums
 //-----------------------------------------------------------------------------
 
-#define MAX_STEAM_CONTROLLERS 8
+#ifndef MAX_STEAM_CONTROLLERS
+#define MAX_STEAM_CONTROLLERS 16
+#endif
 
 typedef enum
 {
@@ -126,26 +147,14 @@ typedef enum
 	SK_BUTTON_LPAD_RIGHT,
 	SK_BUTTON_LPAD_DOWN,
 	SK_BUTTON_LPAD_LEFT,
-	SK_BUTTON_RPAD_UP,
-	SK_BUTTON_RPAD_RIGHT,
-	SK_BUTTON_RPAD_DOWN,
-	SK_BUTTON_RPAD_LEFT,
-	SK_BUTTON_SELECT,
-	SK_BUTTON_START,
-	SK_BUTTON_STEAM,
-	SK_BUTTON_INACTIVE_START,
-	SK_VBUTTON_F1,						// These are "virtual" buttons. Useful if you want to have flow that maps an action to button code to be interpreted by some UI that accepts keystrokes, but you
-	SK_VBUTTON_F2,						// don't want to map to real button (perhaps because it would be interpreted by UI in a way you don't like). 																																										
-	SK_VBUTTON_F3,
-	SK_VBUTTON_F4,
-	SK_VBUTTON_F5,
-	SK_VBUTTON_F6,
-	SK_VBUTTON_F7,
-	SK_VBUTTON_F8,
-	SK_VBUTTON_F9,
-	SK_VBUTTON_F10,
-	SK_VBUTTON_F11,
-	SK_VBUTTON_F12,
+	SK_BUTTON_RPAD_UP, 
+	SK_BUTTON_RPAD_RIGHT, 
+	SK_BUTTON_RPAD_DOWN, 
+	SK_BUTTON_RPAD_LEFT, 
+	SK_BUTTON_SELECT, 
+	SK_BUTTON_START, 
+	SK_BUTTON_STEAM, 
+	SK_BUTTON_INACTIVE_START, 
 	SK_MAX_KEYS
 } sKey_t;
 
@@ -168,28 +177,6 @@ enum
 	LASTINPUT_KBMOUSE = 0,
 	LASTINPUT_CONTROLLER = 1,
 	LASTINPUT_STEAMCONTROLLER = 2
-};
-
-enum GameActionSet_t
-{
-	GAME_ACTION_SET_NONE = -1,
-	GAME_ACTION_SET_MENUCONTROLS = 0,
-	GAME_ACTION_SET_FPSCONTROLS,
-	GAME_ACTION_SET_IN_GAME_HUD,
-	GAME_ACTION_SET_SPECTATOR,
-};
-
-enum GameActionSetFlags_t
-{
-	GAME_ACTION_SET_FLAGS_NONE = 0,
-	GAME_ACTION_SET_FLAGS_TAUNTING = (1<<0),
-};
-
-enum JoystickType_t
-{
-	INPUT_TYPE_GENERIC_JOYSTICK = 0,
-	INPUT_TYPE_X360,
-	INPUT_TYPE_STEAMCONTROLLER,
 };
 
 #endif // INPUTENUMS_H

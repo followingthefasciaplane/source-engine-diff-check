@@ -1,16 +1,8 @@
-//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =======
-//
-// Purpose: 
-//
-//=============================================================================
+//========== Copyright (c) Valve Corporation, All rights reserved. ==========//
 
-// STATIC: "CONVERT_TO_SRGB"				"0..1"	[ps20b][= g_pHardwareConfig->NeedsShaderSRGBConversion()] [PC]
-// STATIC: "CONVERT_TO_SRGB"				"0..1"	[ps30][= g_pHardwareConfig->NeedsShaderSRGBConversion()] [PC]
-// STATIC: "CONVERT_TO_SRGB"				"0..0"	[= 0] [XBOX]
-
-// DYNAMIC: "PIXELFOGTYPE"					"0..1"
+#include "common_fog_ps_fxc.h"
 // DYNAMIC: "WRITE_DEPTH_TO_DESTALPHA"		"0..1"	[ps20b] [PC]
-// DYNAMIC: "WRITE_DEPTH_TO_DESTALPHA"		"0..0"	[ps20b] [XBOX]
+// DYNAMIC: "WRITE_DEPTH_TO_DESTALPHA"		"0..0"	[ps20b] [CONSOLE]
 // DYNAMIC: "WRITE_DEPTH_TO_DESTALPHA"		"0..1"	[ps30]
 
 
@@ -34,7 +26,7 @@ struct PS_INPUT
 	float4 worldPos_projPosZ		: TEXCOORD7;		// Necessary for pixel fog
 };
 
-float4 main( PS_INPUT i ) : COLOR
+float4_color_return_type main( PS_INPUT i ) : COLOR
 {
 	float4 baseSample = tex2D( BaseTextureSampler, i.baseTexCoord );
 	
@@ -43,6 +35,6 @@ float4 main( PS_INPUT i ) : COLOR
 	result.a = baseSample.a;
 	
 	
-	float fogFactor = CalcPixelFogFactor( PIXELFOGTYPE, g_FogParams, g_EyePos_SpecExponent.z, i.worldPos_projPosZ.z, i.worldPos_projPosZ.w );
+	float fogFactor = CalcPixelFogFactor( PIXELFOGTYPE, g_FogParams, g_EyePos_SpecExponent.xyz, i.worldPos_projPosZ.xyz, i.worldPos_projPosZ.w );
 	return FinalOutput( result, fogFactor, PIXELFOGTYPE, TONEMAP_SCALE_LINEAR, (WRITE_DEPTH_TO_DESTALPHA != 0), i.worldPos_projPosZ.w );
 }

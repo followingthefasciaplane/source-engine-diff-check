@@ -1,4 +1,3 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
 
 #include "cbase.h"
 #include "convar.h"

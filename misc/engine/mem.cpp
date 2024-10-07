@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -7,9 +7,14 @@
 //=============================================================================//
 // mem.c
 #include <stdlib.h>
+#ifndef _PS3
 #include <memory.h>
+#endif
 #include <string.h>
 #include "mem.h"
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
 
 
 void *Mem_Malloc( size_t size )

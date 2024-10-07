@@ -1,7 +1,7 @@
 // NextBotPlayer.h
 // A CBasePlayer bot based on the NextBot technology
 // Author: Michael Booth, November 2005
-//========= Copyright Valve Corporation, All rights reserved. ============//
+// Copyright (c) 2007 Turtle Rock Studios, Inc. - All Rights Reserved
 
 #ifndef _NEXT_BOT_PLAYER_H_
 #define _NEXT_BOT_PLAYER_H_
@@ -33,7 +33,7 @@ extern ConVar NextBotPlayerMove;
  *
  */
 template < typename T > 
-T * NextBotCreatePlayerBot( const char *name, bool bReportFakeClient = true )
+T * NextBotCreatePlayerBot( const char *name )
 {
 	/*
 	if ( UTIL_ClientsInGame() >= gpGlobals->maxClients )
@@ -48,7 +48,7 @@ T * NextBotCreatePlayerBot( const char *name, bool bReportFakeClient = true )
 	ClientPutInServerOverride( T::AllocatePlayerEntity );
 
 	// create the bot and spawn it into the environment
-	edict_t *botEdict = engine->CreateFakeClientEx( name, bReportFakeClient );
+	edict_t *botEdict = engine->CreateFakeClient( name );
 
 	// close the "back door"
 	ClientPutInServerOverride( NULL );
@@ -69,6 +69,10 @@ T * NextBotCreatePlayerBot( const char *name, bool bReportFakeClient = true )
 		return NULL;
 	}
 
+	// set the fakeclient's name
+// 	char trimmedName[ MAX_PLAYER_NAME_LENGTH ];
+// 	Q_strncpy( trimmedName, name, sizeof( trimmedName ) );
+// 	bot->PlayerData()->netname = AllocPooledString( trimmedName );
 	bot->SetPlayerName( name );
 
 	// flag this as a fakeclient (bot)
@@ -96,9 +100,6 @@ public:
 
 	virtual void PressMeleeButton( float duration = -1.0f ) = 0;
 	virtual void ReleaseMeleeButton( void ) = 0;
-
-	virtual void PressSpecialFireButton( float duration = -1.0f ) = 0;
-	virtual void ReleaseSpecialFireButton( void ) = 0;
 
 	virtual void PressUseButton( float duration = -1.0f ) = 0;
 	virtual void ReleaseUseButton( void ) = 0;
@@ -145,10 +146,6 @@ public:
 	virtual ~NextBotPlayer();
 
 	virtual void Spawn( void );
-
-	virtual void SetSpawnPoint( CBaseEntity *spawnPoint );						// define place in environment where bot will (re)spawn
-	virtual CBaseEntity		*EntSelectSpawnPoint( void );
-
 	virtual void PhysicsSimulate( void );
 
 	virtual bool IsNetClient( void ) const { return false; }					// Bots should return FALSE for this, they can't receive NET messages
@@ -186,9 +183,6 @@ public:
 
 	virtual void PressMeleeButton( float duration = -1.0f );
 	virtual void ReleaseMeleeButton( void );
-
-	virtual void PressSpecialFireButton( float duration = -1.0f );
-	virtual void ReleaseSpecialFireButton( void );
 
 	virtual void PressUseButton( float duration = -1.0f );
 	virtual void ReleaseUseButton( void );
@@ -235,8 +229,6 @@ public:
 
 	bool IsAbleToAutoCenterOnLadders( void ) const;
 
-	virtual void AvoidPlayers( CUserCmd *pCmd ) { }								// some game types allow players to pass through each other, this method pushes them apart
-
 public:
 	// begin INextBot ------------------------------------------------------------------------------------------------------------------
 	virtual void Update( void );												// (EXTEND) update internal state
@@ -246,7 +238,6 @@ protected:
 	int m_prevInputButtons;
 	CountdownTimer m_fireButtonTimer;
 	CountdownTimer m_meleeButtonTimer;
-	CountdownTimer m_specialFireButtonTimer;
 	CountdownTimer m_useButtonTimer;
 	CountdownTimer m_reloadButtonTimer;
 	CountdownTimer m_forwardButtonTimer;
@@ -260,24 +251,8 @@ protected:
 	IntervalTimer m_burningTimer;		// how long since we were last burning
 	float m_forwardScale;
 	float m_rightScale;
-	CHandle< CBaseEntity > m_spawnPointEntity;
 };
 
-
-template < typename PlayerType >
-inline void NextBotPlayer< PlayerType >::SetSpawnPoint( CBaseEntity *spawnPoint )
-{
-	m_spawnPointEntity = spawnPoint;
-}
-
-template < typename PlayerType >
-inline CBaseEntity *NextBotPlayer< PlayerType >::EntSelectSpawnPoint( void )
-{
-	if ( m_spawnPointEntity != NULL )
-		return m_spawnPointEntity;
-
-	return BaseClass::EntSelectSpawnPoint();
-}
 
 template < typename PlayerType >
 inline float NextBotPlayer< PlayerType >::GetDistanceBetween( CBaseEntity *other ) const
@@ -353,20 +328,6 @@ inline void NextBotPlayer< PlayerType >::ReleaseMeleeButton( void )
 {
 	m_inputButtons &= ~IN_ATTACK2;
 	m_meleeButtonTimer.Invalidate();
-}
-
-template < typename PlayerType >
-inline void NextBotPlayer< PlayerType >::PressSpecialFireButton( float duration )
-{
-	m_inputButtons |= IN_ATTACK3;
-	m_specialFireButtonTimer.Start( duration );
-}
-
-template < typename PlayerType >
-inline void NextBotPlayer< PlayerType >::ReleaseSpecialFireButton( void )
-{
-	m_inputButtons &= ~IN_ATTACK3;
-	m_specialFireButtonTimer.Invalidate();
 }
 
 template < typename PlayerType >
@@ -512,7 +473,6 @@ inline NextBotPlayer< PlayerType >::NextBotPlayer( void )
 	m_prevInputButtons = 0;
 	m_inputButtons = 0;
 	m_burningTimer.Invalidate();
-	m_spawnPointEntity = NULL;
 }
 
 
@@ -532,7 +492,6 @@ inline void NextBotPlayer< PlayerType >::Spawn( void )
 	m_prevInputButtons = m_inputButtons = 0;
 	m_fireButtonTimer.Invalidate();
 	m_meleeButtonTimer.Invalidate();
-	m_specialFireButtonTimer.Invalidate();
 	m_useButtonTimer.Invalidate();
 	m_reloadButtonTimer.Invalidate();
 	m_forwardButtonTimer.Invalidate();
@@ -578,12 +537,6 @@ inline void NextBotPlayer< PlayerType >::PhysicsSimulate( void )
 {
 	VPROF( "NextBotPlayer::PhysicsSimulate" );
 
-	// Make sure not to simulate this guy twice per frame
-	if ( PlayerType::m_nSimulationTick == gpGlobals->tickcount )
-	{
-		return;
-	}
-
 	if ( engine->IsPaused() )
 	{
 		// We're paused - don't add new commands
@@ -612,9 +565,6 @@ inline void NextBotPlayer< PlayerType >::PhysicsSimulate( void )
 
 		if ( !m_meleeButtonTimer.IsElapsed() )
 			m_inputButtons |= IN_ATTACK2;
-
-		if ( !m_specialFireButtonTimer.IsElapsed() )
-			m_inputButtons |= IN_ATTACK3;
 
 		if ( !m_useButtonTimer.IsElapsed() )
 			m_inputButtons |= IN_USE;
@@ -736,7 +686,9 @@ inline void NextBotPlayer< PlayerType >::PhysicsSimulate( void )
 	CUserCmd userCmd;
 	_NextBot_BuildUserCommand( &userCmd, angles, forwardSpeed, strafeSpeed, verticalSpeed, inputButtons, 0 );
 
+#ifdef TERROR
 	AvoidPlayers( &userCmd );
+#endif
 
 	// allocate a new command and add it to the player's list of command to process
 	this->ProcessUsercmds( &userCmd, 1, 1, 0, false );

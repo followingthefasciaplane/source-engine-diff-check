@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright (c) 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -9,6 +9,8 @@
 #ifdef _WIN32
 #pragma once
 #endif
+
+#include "tier0/platform.h"
 
 #include <mempool.h>
 #include <utllinkedlist.h>
@@ -21,7 +23,12 @@ class ServerClass;
 class CEventInfo;
 
 #define INVALID_PACKED_ENTITY_HANDLE (0)
-typedef intptr_t PackedEntityHandle_t;
+typedef intp PackedEntityHandle_t;
+
+#ifdef _DEBUG
+// You can also enable snapshot references debugging in release mode
+#define DEBUG_SNAPSHOT_REFERENCES
+#endif
 
 //-----------------------------------------------------------------------------
 // Purpose: Individual entity data, did the entity exist and what was it's serial number
@@ -33,6 +40,8 @@ public:
 	int						m_nSerialNumber;
 	// Keeps track of the fullpack info for this frame for all entities in any pvs:
 	PackedEntityHandle_t	m_pPackedData;
+
+	size_t GetMemSize() const;
 };
 
 // HLTV needs some more data per entity 
@@ -56,7 +65,7 @@ typedef struct
 	PackedEntity	*pEntity;	// original packed entity
 	int				counter;	// increaseing counter to find LRU entries
 	int				bits;		// uncompressed data length in bits
-	char			data[MAX_PACKEDENTITY_DATA]; // uncompressed data cache
+	ALIGN4 char		data[MAX_PACKEDENTITY_DATA] ALIGN4_POST; // uncompressed data cache
 } UnpackedDataCache_t;
 
 
@@ -71,20 +80,12 @@ class CFrameSnapshot
 	DECLARE_FIXEDSIZE_ALLOCATOR( CFrameSnapshot );
 
 public:
-
-							CFrameSnapshot();
-							~CFrameSnapshot();
-
 	// Reference-counting.
 	void					AddReference();
 	void					ReleaseReference();
 
-	CFrameSnapshot*			NextSnapshot() const;						
-
-
+	size_t					GetMemSize()const;
 public:
-	CInterlockedInt			m_ListIndex;	// Index info CFrameSnapshotManager::m_FrameSnapshots.
-
 	// Associated frame. 
 	int						m_nTickCount; // = sv.tickcount
 	
@@ -107,14 +108,43 @@ public:
 
 private:
 
+	//don't allow for creation/destruction outside of frame snapshot manager and reference counting
+	friend class CFrameSnapshotManager;
+	CFrameSnapshot();
+	~CFrameSnapshot();
+
+	// Index info CFrameSnapshotManager::m_FrameSnapshots.
+	CInterlockedInt			m_ListIndex;	
+
+	//the set that this snapshot belongs to
+	uint32					m_nSnapshotSet;
+
 	// Snapshots auto-delete themselves when their refcount goes to zero.
 	CInterlockedInt			m_nReferences;
+
+#ifdef DEBUG_SNAPSHOT_REFERENCES
+	char					m_chDebugSnapshotName[128];
+#endif
+};
+
+class CReferencedSnapshotList
+{
+public:
+	~CReferencedSnapshotList()
+	{
+		for ( int i = 0; i < m_vecSnapshots.Count(); ++i )
+		{
+			m_vecSnapshots[ i ]->ReleaseReference();
+		}
+		m_vecSnapshots.RemoveAll();
+	}
+
+	CUtlVector< CFrameSnapshot * > m_vecSnapshots;
 };
 
 //-----------------------------------------------------------------------------
 // Purpose: snapshot manager class
 //-----------------------------------------------------------------------------
-
 class CFrameSnapshotManager
 {
 	friend class CFrameSnapshot;
@@ -126,21 +156,34 @@ public:
 	// IFrameSnapshot implementation.
 public:
 
+	//the default identifier to use for snapshots that are created
+	static const uint32 knDefaultSnapshotSet = 0;
+
 	// Called when a level change happens
 	virtual void			LevelChanged();
 
 	// Called once per frame after simulation to store off all entities.
-	// Note: the returned snapshot has a recount of 1 so you MUST call ReleaseReference on it.
-	CFrameSnapshot*	CreateEmptySnapshot( int ticknumber, int maxEntities );
-	CFrameSnapshot*	TakeTickSnapshot( int ticknumber );
-
-	CFrameSnapshot*	NextSnapshot( const CFrameSnapshot *pSnapshot );
+	// Note: the returned snapshot has a recount of 1 so you MUST call ReleaseReference on it. Snapshots are created into different sets,
+	// so when enumerating snapshots, you only collect those in the desired set
+	CFrameSnapshot*	CreateEmptySnapshot(
+#ifdef DEBUG_SNAPSHOT_REFERENCES
+		char const *szDebugName,
+#endif
+		int ticknumber, int maxEntities, uint32 nSnapshotSet = knDefaultSnapshotSet );
+	CFrameSnapshot*	TakeTickSnapshot(
+#ifdef DEBUG_SNAPSHOT_REFERENCES
+		char const *szDebugName,
+#endif
+		int ticknumber, uint32 nSnapshotSet = knDefaultSnapshotSet );
 
 	// Creates pack data for a particular entity for a particular snapshot
 	PackedEntity*	CreatePackedEntity( CFrameSnapshot* pSnapshot, int entity );
+	//this is similar to the above, but the packed entity is created locally so that it doesn't interfere with the global last sent packet information
+	PackedEntity*	CreateLocalPackedEntity( CFrameSnapshot* pSnapshot, int entity );
 
 	// Returns the pack data for a particular entity for a particular snapshot
-	PackedEntity*	GetPackedEntity( CFrameSnapshot* pSnapshot, int entity );
+	inline PackedEntity*	GetPackedEntity( CFrameSnapshot& Snapshot, int entity );
+	PackedEntity*			GetPackedEntity( PackedEntityHandle_t handle  )					{ return m_PackedEntities[ handle ]; }
 
 	// if we are copying a Packed Entity, we have to increase the reference counter 
 	void			AddEntityReference( PackedEntityHandle_t handle );
@@ -158,28 +201,45 @@ public:
 	// Return the entity sitting in iEntity's slot if iSerialNumber matches its number.
 	UnpackedDataCache_t *GetCachedUncompressedEntity( PackedEntity *pPackedEntity );
 
-	CThreadFastMutex	&GetMutex();
-
 	// List of entities to explicitly delete
 	void			AddExplicitDelete( int iSlot );
 
-private:
-	void	DeleteFrameSnapshot( CFrameSnapshot* pSnapshot );
+	void			BuildSnapshotList( CFrameSnapshot *pCurrentSnapshot, CFrameSnapshot *pLastSnapshot, uint32 nSnapshotSet, CReferencedSnapshotList &list );
 
+private:
+	void					DeleteFrameSnapshot( CFrameSnapshot* pSnapshot );
+	// Non-threadsafe call, used with BuildSnapshotList which acquires the mutex
+	CFrameSnapshot			*NextSnapshot( CFrameSnapshot *pSnapshot );
+
+	// Mutex for m_FrameSnapshots array
+	CThreadFastMutex									m_FrameSnapshotsWriteMutex;
 	CUtlLinkedList<CFrameSnapshot*, unsigned short>		m_FrameSnapshots;
+
 	CClassMemoryPool< PackedEntity >					m_PackedEntitiesPool;
+	CUtlFixedLinkedList<PackedEntity *>					m_PackedEntities; 
 
 	int								m_nPackedEntityCacheCounter;  // increase with every cache access
 	CUtlVector<UnpackedDataCache_t>	m_PackedEntityCache;	// cache for uncompressed packed entities
 
 	// The most recently sent packets for each entity
-	PackedEntityHandle_t	m_pPackedData[ MAX_EDICTS ];
+	PackedEntityHandle_t	m_pLastPackedData[ MAX_EDICTS ];
 	int						m_pSerialNumber[ MAX_EDICTS ];
 
 	CThreadFastMutex		m_WriteMutex;
 
 	CUtlVector<int>			m_iExplicitDeleteSlots;
 };
+
+PackedEntity* CFrameSnapshotManager::GetPackedEntity( CFrameSnapshot& Snapshot, int entity )
+{
+	Assert( entity < Snapshot.m_nNumEntities );
+	PackedEntityHandle_t index = Snapshot.m_pEntities[entity].m_pPackedData;
+	if ( index == INVALID_PACKED_ENTITY_HANDLE )
+		return NULL;
+
+	Assert( m_PackedEntities[index]->m_nEntityIndex == entity );
+	return m_PackedEntities[index];
+}
 
 extern CFrameSnapshotManager *framesnapshotmanager;
 

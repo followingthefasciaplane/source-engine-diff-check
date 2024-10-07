@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2008, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -11,11 +11,16 @@
 #include "shaderapi/ishaderutil.h"
 #include "materialsystem/idebugtextureinfo.h"
 #include "materialsystem/materialsystem_config.h"
+#include "materialsystem/ITexture.h"
 #include "meshdx10.h"
 #include "shadershadowdx10.h"
 #include "shaderdevicedx10.h"
 #include "shaderapidx10_global.h"
 #include "imaterialinternal.h"
+#include "shaderapi/gpumemorystats.h"
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
 
 
 //-----------------------------------------------------------------------------
@@ -409,7 +414,51 @@ void CShaderAPIDx10::GetBackBufferDimensions( int& nWidth, int& nHeight ) const
 	g_pShaderDeviceDx10->GetBackBufferDimensions( nWidth, nHeight );
 } 
 
+
+// Get the dimensions of the current render target
+void CShaderAPIDx10::GetCurrentRenderTargetDimensions( int& nWidth, int& nHeight ) const
+{
+	ITexture *pTexture = GetRenderTargetEx( 0 );
+	if ( pTexture == NULL )
+	{
+		GetBackBufferDimensions( nWidth, nHeight );
+	}
+	else
+	{
+		nWidth  = pTexture->GetActualWidth();
+		nHeight = pTexture->GetActualHeight();
+	}
+}
+
+
+// Get the current viewport
+void CShaderAPIDx10::GetCurrentViewport( int& nX, int& nY, int& nWidth, int& nHeight ) const
+{
+	ShaderViewport_t viewport;
+	GetViewports( &viewport, 1 );
+	nX = viewport.m_nTopLeftX;
+	nY = viewport.m_nTopLeftY;
+	nWidth = viewport.m_nWidth;
+	nHeight = viewport.m_nHeight;
+}
+
 	
+inline void CShaderAPIDx10::SetScreenSizeForVPOS( int pshReg /* = 32 */)
+{
+}
+
+
+inline void CShaderAPIDx10::SetVSNearAndFarZ( int vshReg )
+{
+}
+
+
+inline float CShaderAPIDx10::GetFarZ( void )
+{
+	return 1000.0f; // dummy default value
+}
+
+
 //-----------------------------------------------------------------------------
 // Viewport-related methods
 //-----------------------------------------------------------------------------
@@ -788,45 +837,15 @@ void CShaderAPIDx10::UseSnapshot( StateSnapshot_t snapshot )
 {
 }
 
-// Sets the color to modulate by
-void CShaderAPIDx10::Color3f( float r, float g, float b )
-{
-}
-
-void CShaderAPIDx10::Color3fv( float const* pColor )
-{
-}
-
-void CShaderAPIDx10::Color4f( float r, float g, float b, float a )
-{
-}
-
-void CShaderAPIDx10::Color4fv( float const* pColor )
-{
-}
-
-// Faster versions of color
-void CShaderAPIDx10::Color3ub( unsigned char r, unsigned char g, unsigned char b )
-{
-}
-
-void CShaderAPIDx10::Color3ubv( unsigned char const* rgb )
-{
-}
-
-void CShaderAPIDx10::Color4ub( unsigned char r, unsigned char g, unsigned char b, unsigned char a )
-{
-}
-
-void CShaderAPIDx10::Color4ubv( unsigned char const* rgba )
-{
-}
-
 void CShaderAPIDx10::GetStandardTextureDimensions( int *pWidth, int *pHeight, StandardTextureId_t id )
 {
 	ShaderUtil()->GetStandardTextureDimensions( pWidth, pHeight, id );
 }
 
+float CShaderAPIDx10::GetSubDHeight()
+{
+	return ShaderUtil()->GetSubDHeight();
+}
 
 // The shade mode
 void CShaderAPIDx10::ShadeMode( ShaderShadeMode_t mode )
@@ -840,6 +859,10 @@ void CShaderAPIDx10::Bind( IMaterial* pMaterial )
 
 // Cull mode
 void CShaderAPIDx10::CullMode( MaterialCullMode_t cullMode )
+{
+}
+
+void CShaderAPIDx10::FlipCullMode( void )
 {
 }
 
@@ -872,61 +895,15 @@ void CShaderAPIDx10::SetHeightClipMode( enum MaterialHeightClipMode_t heightClip
 
 
 // Sets the lights
-void CShaderAPIDx10::SetLight( int lightNum, const LightDesc_t& desc )
+void CShaderAPIDx10::SetLights( int lightNum, const LightDesc_t* pDesc )
 {
 }
 
-void CShaderAPIDx10::SetAmbientLight( float r, float g, float b )
+void CShaderAPIDx10::SetLightingState( const MaterialLightingState_t &state )
 {
 }
 
 void CShaderAPIDx10::SetAmbientLightCube( Vector4D cube[6] )
-{
-}
-
-// Get lights
-int CShaderAPIDx10::GetMaxLights( void ) const
-{
-	return 0;
-}
-
-const LightDesc_t& CShaderAPIDx10::GetLight( int lightNum ) const
-{
-	static LightDesc_t blah;
-	return blah;
-}
-
-// Render state for the ambient light cube (vertex shaders)
-void CShaderAPIDx10::SetVertexShaderStateAmbientLightCube()
-{
-}
-
-void CShaderAPIDx10::SetSkinningMatrices()
-{
-}
-
-// Lightmap texture binding
-void CShaderAPIDx10::BindLightmap( TextureStage_t stage )
-{
-}
-
-void CShaderAPIDx10::BindBumpLightmap( TextureStage_t stage )
-{
-}
-
-void CShaderAPIDx10::BindFullbrightLightmap( TextureStage_t stage )
-{
-}
-
-void CShaderAPIDx10::BindWhite( TextureStage_t stage )
-{
-}
-
-void CShaderAPIDx10::BindBlack( TextureStage_t stage )
-{
-}
-
-void CShaderAPIDx10::BindGrey( TextureStage_t stage )
 {
 }
 
@@ -936,22 +913,6 @@ void CShaderAPIDx10::GetLightmapDimensions( int *w, int *h )
 	g_pShaderUtil->GetLightmapDimensions( w, h );
 }
 
-// Special system flat normal map binding.
-void CShaderAPIDx10::BindFlatNormalMap( TextureStage_t stage )
-{
-}
-
-void CShaderAPIDx10::BindNormalizationCubeMap( TextureStage_t stage )
-{
-}
-
-void CShaderAPIDx10::BindSignedNormalizationCubeMap( TextureStage_t stage )
-{
-}
-
-void CShaderAPIDx10::BindFBTexture( TextureStage_t stage, int textureIndex )
-{
-}
 
 // Flushes any primitives that are buffered
 void CShaderAPIDx10::FlushBufferedPrimitives()
@@ -959,7 +920,7 @@ void CShaderAPIDx10::FlushBufferedPrimitives()
 }
 
 // Creates/destroys Mesh
-IMesh* CShaderAPIDx10::CreateStaticMesh( VertexFormat_t fmt, const char *pTextureBudgetGroup, IMaterial * pMaterial )
+IMesh* CShaderAPIDx10::CreateStaticMesh( VertexFormat_t fmt, const char *pTextureBudgetGroup, IMaterial * pMaterial, VertexStreamSpec_t *pStreamSpec )
 {
 	return &m_Mesh;
 }
@@ -996,7 +957,7 @@ void CShaderAPIDx10::BeginPass( StateSnapshot_t snapshot  )
 }
 
 // Renders a single pass of a material
-void CShaderAPIDx10::RenderPass( int nPass, int nPassCount )
+void CShaderAPIDx10::RenderPass( const unsigned char *pInstanceCommandBuffer, int nPass, int nPassCount )
 {
 }
 
@@ -1116,6 +1077,7 @@ MaterialFogMode_t CShaderAPIDx10::GetSceneFogMode( )
 
 int CShaderAPIDx10::GetPixelFogCombo( )
 {
+	Assert( 0 ); // deprecated
 	return 0; //FIXME
 }
 
@@ -1187,6 +1149,11 @@ void CShaderAPIDx10::BindTexture( Sampler_t stage, ShaderAPITextureHandle_t text
 {
 }
 
+// Sets the texture state
+void CShaderAPIDx10::BindVertexTexture( VertexTextureSampler_t vtSampler, ShaderAPITextureHandle_t textureHandle )
+{
+}
+
 // Indicates we're going to be modifying this texture
 // TexImage2D, TexSubImage2D, TexWrap, TexMinFilter, and TexMagFilter
 // all use the texture specified by this function.
@@ -1205,10 +1172,6 @@ void CShaderAPIDx10::TexSubImage2D( int level, int cubeFace, int xOffset, int yO
 {
 }
 
-void CShaderAPIDx10::TexImageFromVTF( IVTFTexture *pVTF, int iVTFFrame )
-{
-}
-
 bool CShaderAPIDx10::TexLock( int level, int cubeFaceID, int xOffset, int yOffset, 
 							  int width, int height, CPixelWriter& writer )
 {
@@ -1219,6 +1182,18 @@ void CShaderAPIDx10::TexUnlock( )
 {
 }
 
+void CShaderAPIDx10::UpdateTexture( int xOffset, int yOffset, int w, int h, ShaderAPITextureHandle_t hDstTexture, ShaderAPITextureHandle_t hSrcTexture )
+{
+}
+
+void *CShaderAPIDx10::LockTex( ShaderAPITextureHandle_t hTexture )
+{
+	return NULL;
+}
+
+void CShaderAPIDx10::UnlockTex( ShaderAPITextureHandle_t hTexture )
+{
+}
 
 // These are bound to the texture, not the texture environment
 void CShaderAPIDx10::TexMinFilter( ShaderTexFilterMode_t texFilterMode )
@@ -1348,12 +1323,6 @@ void CShaderAPIDx10::PopSelectionName()
 }
 
 
-// Use this to get the mesh builder that allows us to modify vertex data
-CMeshBuilder* CShaderAPIDx10::GetVertexModifyBuilder()
-{
-	return 0;
-}
-
 // Board-independent calls, here to unify how shaders set state
 // Implementations should chain back to IShaderUtil->BindTexture(), etc.
 
@@ -1373,7 +1342,12 @@ double CShaderAPIDx10::CurrentTime() const
 }
 
 // Get the current camera position in world space.
-void CShaderAPIDx10::GetWorldSpaceCameraPosition( float * pPos ) const
+void CShaderAPIDx10::GetWorldSpaceCameraPosition( float* pPos ) const
+{
+}
+
+// Get the current camera position in world space.
+void CShaderAPIDx10::GetWorldSpaceCameraDirection( float* pDir ) const
 {
 }
 
@@ -1408,6 +1382,11 @@ bool CShaderAPIDx10::IsHWMorphingEnabled( ) const
 	return false;
 }
 
+TessellationMode_t CShaderAPIDx10::GetTessellationMode( ) const
+{
+	return TESSELLATION_MODE_DISABLED;
+}
+
 int CShaderAPIDx10::GetCurrentLightCombo( void ) const
 {
 	return 0;
@@ -1420,6 +1399,7 @@ int CShaderAPIDx10::MapLightComboToPSLightCombo( int nLightCombo ) const
 
 MaterialFogMode_t CShaderAPIDx10::GetCurrentFogType( void ) const
 {
+	Assert( 0 ); // deprecated
 	return MATERIAL_FOG_NONE;
 }
 
@@ -1440,7 +1420,13 @@ void CShaderAPIDx10::EvictManagedResources()
 {
 }
 
-void CShaderAPIDx10::ReleaseShaderObjects()
+void CShaderAPIDx10::GetGPUMemoryStats( GPUMemoryStats &stats )
+{
+	// stub (let's face it, DX10 ain't happenin)
+	memset( &stats, 0, sizeof( stats ) );
+}
+
+void CShaderAPIDx10::ReleaseShaderObjects( bool bReleaseManagedResources /*= true*/ )
 {
 }
 
@@ -1448,14 +1434,12 @@ void CShaderAPIDx10::RestoreShaderObjects()
 {
 }
 
-void CShaderAPIDx10::SetTextureTransformDimension( TextureStage_t textureStage, int dimension, bool projected )
-{
-}
-
-void CShaderAPIDx10::SetBumpEnvMatrix( TextureStage_t textureStage, float m00, float m01, float m10, float m11 )
-{
-}
-
 void CShaderAPIDx10::SyncToken( const char *pToken )
 {
+}
+
+void CShaderAPIDx10::OnPresent( void )
+{
+	// not implemented
+	Assert( 0 );
 }

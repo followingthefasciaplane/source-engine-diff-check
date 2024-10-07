@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // The copyright to the contents herein is the property of Valve, L.L.C.
 // The contents may be used and/or copied only with the written permission of
@@ -14,7 +14,7 @@
 #pragma once
 #endif
 
-#include "appframework/IAppSystem.h"
+#include "appframework/iappsystem.h"
 
 //-----------------------------------------------------------------------------
 // Forward declarations
@@ -83,8 +83,6 @@ enum
 //-----------------------------------------------------------------------------
 // Main AVI interface
 //-----------------------------------------------------------------------------
-#define AVI_INTERFACE_VERSION "VAvi001"
-
 class IAvi : public IAppSystem
 {
 public:
@@ -123,12 +121,8 @@ public:
 
 	// Sets the frame for an AVI material (use instead of SetTime)
 	virtual void SetFrame( AVIMaterial_t hMaterial, float flFrame ) = 0;
-
-	// Plays a given AVI/WMV file until it completes or the user presses ESC, SPACE, or ENTER
-	virtual void PlayWindowsMediaVideo( const char *filename, void *mainWindow, int width, int height, float forcedMinTime ) = 0;
-
 };
 
-
+extern IAvi *g_pAVI;
 
 #endif // IAVI_H

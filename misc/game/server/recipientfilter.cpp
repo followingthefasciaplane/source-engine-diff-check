@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -70,7 +70,7 @@ bool CRecipientFilter::IsReliable( void ) const
 
 int CRecipientFilter::GetRecipientCount( void ) const
 {
-	return m_Recipients.Size();
+	return m_Recipients.Count();
 }
 
 int	CRecipientFilter::GetRecipientIndex( int slot ) const
@@ -98,7 +98,7 @@ void CRecipientFilter::AddAllPlayers( void )
 	}
 }
 
-void CRecipientFilter::AddRecipient( const CBasePlayer *player )
+void CRecipientFilter::AddRecipient( CBasePlayer *player )
 {
 	Assert( player );
 
@@ -144,7 +144,7 @@ void CRecipientFilter::RemoveRecipient( CBasePlayer *player )
 
 void CRecipientFilter::RemoveRecipientByPlayerIndex( int playerindex )
 {
-	Assert( playerindex >= 1 && playerindex <= ABSOLUTE_PLAYER_LIMIT );
+	Assert( playerindex >= 1 && playerindex <= MAX_PLAYERS );
 
 	m_Recipients.FindAndRemove( playerindex );
 }
@@ -199,7 +199,7 @@ void CRecipientFilter::RemoveRecipientsNotOnTeam( CTeam *team )
 	}
 }
 
-void CRecipientFilter::AddPlayersFromBitMask( CBitVec< ABSOLUTE_PLAYER_LIMIT >& playerbits )
+void CRecipientFilter::AddPlayersFromBitMask( CPlayerBitVec& playerbits )
 {
 	int index = playerbits.FindNextSetBit( 0 );
 
@@ -215,7 +215,7 @@ void CRecipientFilter::AddPlayersFromBitMask( CBitVec< ABSOLUTE_PLAYER_LIMIT >& 
 	}
 }
 
-void CRecipientFilter::RemovePlayersFromBitMask( CBitVec< ABSOLUTE_PLAYER_LIMIT >& playerbits )
+void CRecipientFilter::RemovePlayersFromBitMask( CPlayerBitVec& playerbits )
 {
 	int index = playerbits.FindNextSetBit( 0 );
 
@@ -239,7 +239,7 @@ void CRecipientFilter::AddRecipientsByPVS( const Vector& origin )
 	}
 	else
 	{
-		CBitVec< ABSOLUTE_PLAYER_LIMIT > playerbits;
+		CPlayerBitVec playerbits;
 		engine->Message_DetermineMulticastRecipients( false, origin, playerbits );
 		AddPlayersFromBitMask( playerbits );
 	}
@@ -253,7 +253,7 @@ void CRecipientFilter::RemoveRecipientsByPVS( const Vector& origin )
 	}
 	else
 	{
-		CBitVec< ABSOLUTE_PLAYER_LIMIT > playerbits;
+		CPlayerBitVec playerbits;
 		engine->Message_DetermineMulticastRecipients( false, origin, playerbits );
 		RemovePlayersFromBitMask( playerbits );
 	}
@@ -269,7 +269,7 @@ void CRecipientFilter::AddRecipientsByPAS( const Vector& origin )
 	}
 	else
 	{
-		CBitVec< ABSOLUTE_PLAYER_LIMIT > playerbits;
+		CPlayerBitVec playerbits;
 		engine->Message_DetermineMulticastRecipients( true, origin, playerbits );
 		AddPlayersFromBitMask( playerbits );
 	}
@@ -301,6 +301,78 @@ void CRecipientFilter::UsePredictionRules( void )
 	if ( pPlayer)
 	{
 		RemoveRecipient( pPlayer );
+
+		if ( pPlayer->IsSplitScreenPlayer() )
+		{
+			RemoveRecipient( pPlayer->GetSplitScreenPlayerOwner() );
+		}
+		else
+		{
+			CUtlVector< CHandle< CBasePlayer > > &players = pPlayer->GetSplitScreenAndPictureInPicturePlayers();
+			for ( int i = 0; i < players.Count(); ++i )
+			{
+				CBasePlayer *pl = players[i];
+				if ( !pl )
+				{
+					continue;
+				}
+				RemoveRecipient( pl );
+			}
+		}
+	}
+}
+
+void CRecipientFilter::RemoveSplitScreenPlayers()
+{
+	for ( int i = GetRecipientCount() - 1; i >= 0; --i )
+	{
+		int idx = m_Recipients[ i ];
+		CBasePlayer *pPlayer = UTIL_PlayerByIndex( idx );
+		if ( !pPlayer || !pPlayer->IsSplitScreenPlayer() )
+			continue;
+
+		m_Recipients.Remove( i );
+	}
+}
+
+// THIS FUNCTION IS SUFFICIENT FOR PORTAL2 SPECIFIC CIRCUMSTANCES
+// AND MAY OR MAY NOT FUNCTION AS EXPECTED WHEN USED WITH MULTIPLE
+// SPLITSCREEN CLIENTS NETWORKED TOGETHER, ETC.
+void CRecipientFilter::ReplaceSplitScreenPlayersWithOwners()
+{
+	// coop
+	if( gpGlobals->maxClients >= 2 ) 
+	{
+		int count = m_Recipients.Count();
+		CUtlVectorFixedGrowable<int, 4> playerOwners;
+		for( int i = 0; i < count; ++i )
+		{
+			// If this is a split screen player
+			CBasePlayer* pPlayer = UTIL_PlayerByIndex( m_Recipients[i] );
+			if( pPlayer && pPlayer->IsSplitScreenPlayer() )
+			{
+				// Add its owner to the recipients. If it doesn't exist, abort.
+				const CBasePlayer* pOwnerPlayer = pPlayer->GetSplitScreenPlayerOwner();
+				if( pOwnerPlayer )
+					playerOwners.AddToTail( pOwnerPlayer->entindex() );
+				else
+					return;
+			}
+		}
+
+		if( playerOwners.Count() > 0 )
+		{
+			// Remove all split screen players
+			RemoveSplitScreenPlayers();
+
+			// Add all owner players
+			count = m_Recipients.Count();
+			m_Recipients.EnsureCount( count + playerOwners.Count() );
+			V_memcpy( m_Recipients.Base() + count, playerOwners.Base(), playerOwners.Count() * sizeof( int ) );
+
+			// Remove duplicates
+			RemoveDuplicateRecipients();
+		}
 	}
 }
 
@@ -338,10 +410,15 @@ CTeamRecipientFilter::CTeamRecipientFilter( int team, bool isReliable )
 			continue;
 		}
 
-		if ( pPlayer->GetTeamNumber() != team )
+		if ( team == TEAM_SPECTATOR )
+		{
+			if ( pPlayer->GetTeamNumber() != TEAM_SPECTATOR && !pPlayer->IsHLTV() )
+				continue;
+		}
+		else if ( pPlayer->GetTeamNumber() != team )
 		{
 			//If we're in the spectator team then we should be getting whatever messages the person I'm spectating gets.
-			if ( pPlayer->GetTeamNumber() == TEAM_SPECTATOR && (pPlayer->GetObserverMode() == OBS_MODE_IN_EYE || pPlayer->GetObserverMode() == OBS_MODE_CHASE || pPlayer->GetObserverMode() == OBS_MODE_POI) )
+			if ( ( pPlayer->IsHLTV() || pPlayer->GetTeamNumber() == TEAM_SPECTATOR ) && (pPlayer->GetObserverMode() == OBS_MODE_IN_EYE || pPlayer->GetObserverMode() == OBS_MODE_CHASE) )
 			{
 				if ( pPlayer->GetObserverTarget() )
 				{
@@ -372,11 +449,13 @@ void CPASAttenuationFilter::Filter( const Vector& origin, float attenuation /*= 
 
 	// CPASFilter adds them by pure PVS in constructor
 	if ( attenuation <= 0 )
+	{
+		AddAllPlayers();
 		return;
+	}
 
 	// Now remove recipients that are outside sound radius
-	float distance, maxAudible;
-	Vector vecRelative;
+	float maxAudible = ( 2 * SOUND_NORMAL_CLIP_DIST ) / attenuation;
 
 	int c = GetRecipientCount();
 	
@@ -398,18 +477,68 @@ void CPASAttenuationFilter::Filter( const Vector& origin, float attenuation /*= 
 			continue;
 		}
 
-#ifndef _XBOX
 		// never remove the HLTV or Replay bot
 		if ( player->IsHLTV() || player->IsReplay() )
 			continue;
-#endif
 
-		VectorSubtract( player->EarPosition(), origin, vecRelative );
-		distance = VectorLength( vecRelative );
-		maxAudible = ( 2 * SOUND_NORMAL_CLIP_DIST ) / attenuation;
-		if ( distance <= maxAudible )
+		if ( player->EarPosition().DistTo(origin) <= maxAudible )
 			continue;
-
+		if ( player->GetSplitScreenAndPictureInPicturePlayers().Count() )
+		{
+			CUtlVector< CHandle< CBasePlayer > > &list = player->GetSplitScreenAndPictureInPicturePlayers();
+			bool bSend = false;
+			for ( int k = 0; k < list.Count(); k++ )
+			{
+				CBasePlayer *pl = list[k];
+				if ( !pl )
+				{
+					continue;
+				}
+				if ( pl->EarPosition().DistTo(origin) <= maxAudible )
+				{
+					bSend = true;
+					break;
+				}
+			}
+			if ( bSend )
+				continue;
+		}
 		RemoveRecipient( player );
+	}
+}
+
+void CRecipientFilter::RemoveDuplicateRecipients()
+{
+	for( int i = 0; i < m_Recipients.Count(); ++i )
+	{
+		int currentElem = m_Recipients[i];
+		for( int j = m_Recipients.Count() - 1; j > i ; --j )
+		{
+			if( m_Recipients[j] == currentElem )
+				m_Recipients.FastRemove( j );
+		}
+	}
+}
+
+CSingleUserAndReplayRecipientFilter::CSingleUserAndReplayRecipientFilter( CBasePlayer *pAddPlayer )
+{
+	for ( int i = 1; i <= gpGlobals->maxClients; i++ )
+	{
+		CBasePlayer *pPlayer = UTIL_PlayerByIndex( i );
+
+		if ( !pPlayer )
+		{
+			continue;
+		}
+		Assert( pPlayer->entindex() == i );
+
+		if ( pPlayer == pAddPlayer || pPlayer->IsHLTV() || pPlayer->IsReplay() )
+		{
+			// If we're predicting and this is not the first time we've predicted this sound
+			//  then don't send it to the local player again.
+			Assert( !IsUsingPredictionRules ());
+
+			m_Recipients.AddToTail( i );
+		}
 	}
 }

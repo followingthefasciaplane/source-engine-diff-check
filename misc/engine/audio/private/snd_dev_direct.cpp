@@ -1,25 +1,27 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
 //=====================================================================================//
 
 #include "audio_pch.h"
+
+#if USE_AUDIO_DEVICE_V1
+
 #include <dsound.h>
 #pragma warning(disable : 4201)		// nameless struct/union
 #include <ks.h>
-// Fix for VS 2010 build errors copied from Dota
-#if !defined( NEW_DXSDK ) && ( _MSC_VER >= 1600 )
-#undef KSDATAFORMAT_SUBTYPE_WAVEFORMATEX
-#undef KSDATAFORMAT_SUBTYPE_PCM
-#undef KSDATAFORMAT_SUBTYPE_IEEE_FLOAT
-#endif
 #include <ksmedia.h>
 #include "iprediction.h"
-#include "eax.h"
 #include "tier0/icommandline.h"
-#include "video//ivideoservices.h"
+#include "avi/ibik.h"
 #include "../../sys_dll.h"
+
+#if defined( PLATFORM_WINDOWS )
+#include "vaudio/ivaudio.h"
+extern void VAudioInit();
+extern IVAudio * vaudio;
+#endif
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -42,32 +44,32 @@ typedef enum {SIS_SUCCESS, SIS_FAILURE, SIS_NOTAVAIL} sndinitstat;
 #define SECONDARY_BUFFER_SIZE			0x10000		// output buffer size in bytes
 #define SECONDARY_BUFFER_SIZE_SURROUND	0x04000		// output buffer size in bytes, one per channel
 
-#if !defined( NEW_DXSDK )
 // hack - need to include latest dsound.h
-#undef DSSPEAKER_5POINT1
-#undef DSSPEAKER_7POINT1
-#define DSSPEAKER_5POINT1		6
-#define DSSPEAKER_7POINT1		7
+COMPILE_TIME_ASSERT( DSSPEAKER_5POINT1 == 6 );
+COMPILE_TIME_ASSERT( DSSPEAKER_7POINT1 == 7 );
 #define DSSPEAKER_7POINT1_SURROUND 8
 #define DSSPEAKER_5POINT1_SURROUND 9
-#endif
 
 HRESULT (WINAPI *pDirectSoundCreate)(GUID FAR *lpGUID, LPDIRECTSOUND FAR *lplpDS, IUnknown FAR *pUnkOuter);
 
 extern void ReleaseSurround(void);
-extern bool MIX_ScaleChannelVolume( paintbuffer_t *ppaint, channel_t *pChannel, int volume[CCHANVOLUMES], int mixchans );
+extern bool MIX_ScaleChannelVolume( paintbuffer_t *ppaint, channel_t *pChannel, float volume[CCHANVOLUMES], int mixchans );
 void OnSndSurroundCvarChanged( IConVar *var, const char *pOldString, float flOldValue );
 void OnSndSurroundLegacyChanged( IConVar *var, const char *pOldString, float flOldValue );
 void OnSndVarChanged( IConVar *var, const char *pOldString, float flOldValue );
 
-static LPDIRECTSOUND pDS = NULL;
-static LPDIRECTSOUNDBUFFER pDSBuf = NULL, pDSPBuf = NULL;
+static LPDIRECTSOUND pDS;
+static LPDIRECTSOUNDBUFFER pDSBuf, pDSPBuf;
 
 static GUID IID_IDirectSound3DBufferDef = {0x279AFA86, 0x4981, 0x11CE, {0xA5, 0x21, 0x00, 0x20, 0xAF, 0x0B, 0xE5, 0x60}};
-static ConVar windows_speaker_config("windows_speaker_config", "-1", FCVAR_ARCHIVE);
+static ConVar windows_speaker_config("windows_speaker_config", "-1", FCVAR_RELEASE|FCVAR_ARCHIVE);
 static DWORD g_ForcedSpeakerConfig = 0;
 
+#if !defined( DX_TO_GL_ABSTRACTION )
+ConVar snd_mute_losefocus( "snd_mute_losefocus", "1", FCVAR_ARCHIVE );
+#else
 extern ConVar snd_mute_losefocus;
+#endif
 
 //-----------------------------------------------------------------------------
 // Purpose: Implementation of direct sound
@@ -75,37 +77,41 @@ extern ConVar snd_mute_losefocus;
 class CAudioDirectSound : public CAudioDeviceBase
 {
 public:
-	~CAudioDirectSound( void );
+
+	CAudioDirectSound()
+	{
+		m_pName = "Windows DirectSound";
+		m_nChannels = 2;
+		m_nSampleBits = 16;
+		m_nSampleRate = 44100;
+		m_bIsActive = true;
+	}
+
+	virtual ~CAudioDirectSound( void );
+
 	bool		IsActive( void ) { return true; }
 	bool		Init( void );
 	void		Shutdown( void );
 	void		Pause( void );
 	void		UnPause( void );
-	float		MixDryVolume( void );
-	bool		Should3DMix( void );
-	void		StopAllSounds( void );
 
-	int			PaintBegin( float mixAheadTime, int soundtime, int paintedtime );
+	int64		PaintBegin( float mixAheadTime, int64 soundtime, int64 paintedtime );
 	void		PaintEnd( void );
 
 	int			GetOutputPosition( void );
 	void		ClearBuffer( void );
-	void		UpdateListener( const Vector& position, const Vector& forward, const Vector& right, const Vector& up );
 
-	void		ChannelReset( int entnum, int channelIndex, float distanceMod );
 	void		TransferSamples( int end );
 
-	const char *DeviceName( void );
-	int			DeviceChannels( void )		{ return m_deviceChannels; }
-	int			DeviceSampleBits( void )	{ return m_deviceSampleBits; }
-	int			DeviceSampleBytes( void )	{ return m_deviceSampleBits/8; }
-	int			DeviceDmaSpeed( void )		{ return m_deviceDmaSpeed; }
 	int			DeviceSampleCount( void )	{ return m_deviceSampleCount; }
 
 	bool		IsInterleaved() { return m_isInterleaved; }
 
 	// Singleton object
 	static		CAudioDirectSound *m_pSingleton;
+
+	 bool IsSurround() { return m_bSurround; }
+	 bool IsSurroundCenter() { return m_bSurroundCenter; }
 
 private:
 	void		DetectWindowsSpeakerSetup();
@@ -115,19 +121,19 @@ private:
 	sndinitstat SNDDMA_InitDirect( void );
 	bool		SNDDMA_InitInterleaved( LPDIRECTSOUND lpDS, WAVEFORMATEX* lpFormat, int channelCount );
 	bool		SNDDMA_InitSurround(LPDIRECTSOUND lpDS, WAVEFORMATEX* lpFormat, DSBCAPS* lpdsbc, int cchan);
-	void		S_TransferSurround16( portable_samplepair_t *pfront, portable_samplepair_t *prear, portable_samplepair_t *pcenter, int lpaintedtime, int endtime, int cchan);
-	void		S_TransferSurround16Interleaved( const portable_samplepair_t *pfront, const portable_samplepair_t *prear, const portable_samplepair_t *pcenter, int lpaintedtime, int endtime);
-	void		S_TransferSurround16Interleaved_FullLock( const portable_samplepair_t *pfront, const portable_samplepair_t *prear, const portable_samplepair_t *pcenter, int lpaintedtime, int endtime);
+	void		S_TransferSurround16( portable_samplepair_t *pfront, portable_samplepair_t *prear, portable_samplepair_t *pcenter, int64 lpaintedtime, int64 endtime, int cchan);
+	void		S_TransferSurround16Interleaved( const portable_samplepair_t *pfront, const portable_samplepair_t *prear, const portable_samplepair_t *pcenter, int64 lpaintedtime, int64 endtime);
+	void		S_TransferSurround16Interleaved_FullLock( const portable_samplepair_t *pfront, const portable_samplepair_t *prear, const portable_samplepair_t *pcenter, int64 lpaintedtime, int64 endtime);
 
-	int			m_deviceChannels;					// channels per hardware output buffer (1 for quad/5.1, 2 for stereo)
-	int			m_deviceSampleBits;					// bits per sample (16)
 	int			m_deviceSampleCount;				// count of mono samples in output buffer
-	int			m_deviceDmaSpeed;					// samples per second per output buffer
 	int			m_bufferSizeBytes;					// size of a single hardware output buffer, in bytes
 	
 	DWORD		m_outputBufferStartOffset;						// output buffer playback starting byte offset
 	HINSTANCE	m_hInstDS;
 	bool		m_isInterleaved;
+
+	bool m_bSurround;
+	bool m_bSurroundCenter;
 };
 
 CAudioDirectSound *CAudioDirectSound::m_pSingleton = NULL;
@@ -168,11 +174,33 @@ bool CAudioDirectSound::Init( void )
 
 	if ( SNDDMA_InitDirect() == SIS_SUCCESS)
 	{
-		if ( g_pVideo != NULL )
+  #if defined ( BINK_VIDEO )
+		if ( g_pBIK != NULL )
 		{
-			g_pVideo->SoundDeviceCommand( VideoSoundDeviceOperation::SET_DIRECT_SOUND_DEVICE, pDS );
-		}
+			ConVarRef windows_speaker_config("windows_speaker_config");
 
+			if ( windows_speaker_config.IsValid() && windows_speaker_config.GetInt() >= 5 )
+			{
+				// For 5.1, we need to use Miles otherwise the movies will play in stereo
+				VAudioInit();
+				void * pMilesEngine = vaudio ? vaudio->CreateMilesAudioEngine() : NULL;
+				if ( g_pBIK->SetMilesSoundDevice( pMilesEngine ) == 0 )
+				{
+					Assert( false );
+					return false;
+				}
+			}
+			else
+			{
+				if ( g_pBIK->SetDirectSoundDevice( pDS ) == 0 )
+				{
+					Assert( false );
+					return false;
+				}
+			}
+		}
+  #endif 
+		
 		return true;
 	}
 
@@ -265,7 +293,7 @@ int	CAudioDirectSound::GetOutputPosition( void )
 		samp16 = ((size_bytes - start) + current) >> SAMPLE_16BIT_SHIFT;
 	}
 
-	int outputPosition = samp16 / DeviceChannels();
+	int outputPosition = samp16 / ChannelCount();
 
 	return outputPosition;
 }
@@ -298,20 +326,6 @@ void CAudioDirectSound::UnPause( void )
 }
 
 
-float CAudioDirectSound::MixDryVolume( void )
-{
-	return 0;
-}
-
-
-bool CAudioDirectSound::Should3DMix( void )
-{
-	if ( m_bSurround )
-		return true;
-	return false;
-}
-
-
 IAudioDevice *Audio_CreateDirectSoundDevice( void )
 {
 	if ( !CAudioDirectSound::m_pSingleton )
@@ -333,38 +347,29 @@ IAudioDevice *Audio_CreateDirectSoundDevice( void )
 	return NULL;
 }
 
-int CAudioDirectSound::PaintBegin( float mixAheadTime, int soundtime, int lpaintedtime )
+int64 CAudioDirectSound::PaintBegin( float mixAheadTime, int64 soundtime, int64 lpaintedtime )
 {
 	//  soundtime - total full samples that have been played out to hardware at dmaspeed
 	//  paintedtime - total full samples that have been mixed at speed
 	//  endtime - target for full samples in mixahead buffer at speed
 	//  samps - size of output buffer in full samples
 	
-	int mixaheadtime = mixAheadTime * DeviceDmaSpeed();
-	int endtime = soundtime + mixaheadtime;
+	int mixaheadtime = mixAheadTime * SampleRate();
+	int64 endtime = soundtime + mixaheadtime;
 
 	if ( endtime <= lpaintedtime )
 		return endtime;
 
-	uint nSamples = endtime - lpaintedtime;
-	if ( nSamples & 0x3 )
+	int fullsamps = DeviceSampleCount() / ChannelCount();
+
+	if ((endtime - soundtime) > fullsamps)
+		endtime = soundtime + fullsamps;
+	
+	if ((endtime - lpaintedtime) & 0x3)
 	{
 		// The difference between endtime and painted time should align on 
 		// boundaries of 4 samples.  This is important when upsampling from 11khz -> 44khz.
-		nSamples += (4 - (nSamples & 3));
-	}
-	// clamp to min 512 samples per mix
-	if ( nSamples > 0 && nSamples < 512 )
-	{
-		nSamples = 512;
-	}
-	endtime = lpaintedtime + nSamples;
-
-	int fullsamps = DeviceSampleCount() / DeviceChannels();
-	if ( (endtime - soundtime) > fullsamps)
-	{
-		endtime = soundtime + fullsamps;
-		endtime += (4 - (endtime & 3));
+		endtime -= (endtime - lpaintedtime) & 0x3;
 	}
 
 	DWORD	dwStatus;
@@ -435,11 +440,9 @@ int CAudioDirectSound::PaintBegin( float mixAheadTime, int soundtime, int lpaint
 	return endtime;
 }
 
-
-void CAudioDirectSound::PaintEnd( void )
+void CAudioDirectSound::PaintEnd()
 {
 }
-
 
 void CAudioDirectSound::ClearBuffer( void )
 {
@@ -574,7 +577,7 @@ void CAudioDirectSound::ClearBuffer( void )
 	if ( !pDSBuf )
 		return;
 
-	if ( DeviceSampleBits() == 8 )
+	if ( BitsPerSample() == 8 )
 		clear = 0x80;
 	else
 		clear = 0;
@@ -608,10 +611,6 @@ void CAudioDirectSound::ClearBuffer( void )
 
 		pDSBuf->Unlock(pData, dwSize, NULL, 0);
 	}
-}
-
-void CAudioDirectSound::StopAllSounds( void )
-{
 }
 
 bool CAudioDirectSound::SNDDMA_InitInterleaved( LPDIRECTSOUND lpDS, WAVEFORMATEX* lpFormat, int channelCount )
@@ -649,16 +648,22 @@ bool CAudioDirectSound::SNDDMA_InitInterleaved( LPDIRECTSOUND lpDS, WAVEFORMATEX
     wfx.Format.cbSize                 = 22; // size from after this to end of extensible struct. sizeof(WORD + DWORD + GUID)
     wfx.Samples.wValidBitsPerSample   = lpFormat->wBitsPerSample;
   //wfx.dwChannelMask                 = SET ABOVE BASED ON COMMAND LINE PARAMETERS
-    wfx.SubFormat                     = KSDATAFORMAT_SUBTYPE_PCM;
+
+  // This bit of ugliness is for the benefit of Source licensees who install their own version of Direct X
+#if defined( KSDATAFORMAT_SUBTYPE_PCM_STRUCT )
+    wfx.SubFormat                     = __uuidof(KSDATAFORMAT_SUBTYPE_PCM);
+#else
+	wfx.SubFormat                     = KSDATAFORMAT_SUBTYPE_PCM;
+#endif
 
     // setup the DirectSound
     DSBUFFERDESC            dsbdesc = { 0 };  // DirectSoundBuffer descriptor	
     dsbdesc.dwSize = sizeof(DSBUFFERDESC);
 	dsbdesc.dwFlags = 0;
 
-    dsbdesc.dwBufferBytes = SECONDARY_BUFFER_SIZE_SURROUND * channelCount;
- 
-    dsbdesc.lpwfxFormat = (WAVEFORMATEX*)&wfx;
+	dsbdesc.dwBufferBytes = SECONDARY_BUFFER_SIZE_SURROUND * channelCount;
+
+	dsbdesc.lpwfxFormat = (WAVEFORMATEX*)&wfx;
 	bool bSuccess = false;
 	for ( int i = 0; i < 3; i++ )
 	{
@@ -693,9 +698,9 @@ bool CAudioDirectSound::SNDDMA_InitInterleaved( LPDIRECTSOUND lpDS, WAVEFORMATEX
 	if ( !LockDSBuffer( pDSBuf, &pBuffer, &dwSize, "DS_INTERLEAVED", DSBLOCK_ENTIREBUFFER ) )
 		return false;
 
-	m_deviceChannels = wfx.Format.nChannels;
-	m_deviceSampleBits = wfx.Format.wBitsPerSample;
-	m_deviceDmaSpeed = wfx.Format.nSamplesPerSec;
+	m_nChannels = wfx.Format.nChannels;
+	m_nSampleBits = wfx.Format.wBitsPerSample;
+	m_nSampleRate = wfx.Format.nSamplesPerSec;
 	m_bufferSizeBytes = dsbdesc.dwBufferBytes;
 	m_isInterleaved = true;
 
@@ -766,13 +771,13 @@ sndinitstat CAudioDirectSound::SNDDMA_InitDirect( void )
 
 	m_bSurround = false;
 	m_bSurroundCenter = false;
-	m_bHeadphone = false;
+	m_bIsHeadphone = false;
 	m_isInterleaved = false;
 
 	switch ( snd_surround.GetInt() )
 	{
 	case 0:
-		m_bHeadphone = true;	// stereo headphone
+		m_bIsHeadphone = true;	// stereo headphone
 		pri_channels = 2;		// primary buffer mixes stereo input data
 		break;
 	default:
@@ -791,15 +796,15 @@ sndinitstat CAudioDirectSound::SNDDMA_InitDirect( void )
 		break;
 	}
 
-	m_deviceChannels   = pri_channels;		// secondary buffers should have same # channels as primary
-	m_deviceSampleBits = 16;				// hardware bits per sample
-	m_deviceDmaSpeed   = SOUND_DMA_SPEED;	// hardware playback rate
+	m_nChannels   = pri_channels;		// secondary buffers should have same # channels as primary
+	m_nSampleBits = 16;				// hardware bits per sample
+	m_nSampleRate   = SOUND_DMA_SPEED;	// hardware playback rate
 
 	Q_memset( &format, 0, sizeof(format) );
 	format.wFormatTag		= WAVE_FORMAT_PCM;
     format.nChannels		= pri_channels;			
-    format.wBitsPerSample	= m_deviceSampleBits;
-    format.nSamplesPerSec	= m_deviceDmaSpeed;
+    format.wBitsPerSample	= m_nSampleBits;
+    format.nSamplesPerSec	= m_nSampleRate;
     format.nBlockAlign		= format.nChannels * format.wBitsPerSample / 8;
     format.cbSize			= 0;
     format.nAvgBytesPerSec	= format.nSamplesPerSec * format.nBlockAlign; 
@@ -861,6 +866,7 @@ sndinitstat CAudioDirectSound::SNDDMA_InitDirect( void )
 			}
 		}
 	}
+	m_pName = "Windows DirectSound";
 
 	if ( m_bSurround )
 	{
@@ -872,12 +878,21 @@ sndinitstat CAudioDirectSound::SNDDMA_InitDirect( void )
 			{
 				// attempt to init 4 channel surround
 				m_bSurround = SNDDMA_InitSurround(pDS, &format, &dsbcaps, 4);
+
+				if ( m_bSurround )
+				{
+					m_pName = "4 Channel Surround";
+				}
 			}
 			else if (snd_surround.GetInt() == 5 || snd_surround.GetInt() == 7) 
 			{
 				// attempt to init 5 channel surround
 				m_bSurroundCenter = SNDDMA_InitSurround(pDS, &format, &dsbcaps, 5);
 				m_bSurround = m_bSurroundCenter;
+				if ( m_bSurroundCenter )
+				{
+					m_pName = "6 Channel Surround";
+				}
 			}
 		}
 		if ( !m_bSurround )
@@ -889,6 +904,10 @@ sndinitstat CAudioDirectSound::SNDDMA_InitDirect( void )
 			}
 	
 			m_bSurround = SNDDMA_InitInterleaved( pDS, &format, pri_channels );
+			if ( m_bSurround )
+			{
+				m_pName = "Interleaved surround";
+			}
 		}
 	}
 
@@ -915,9 +934,9 @@ sndinitstat CAudioDirectSound::SNDDMA_InitDirect( void )
 				return SIS_FAILURE;
 			}
 
-			m_deviceChannels   = format.nChannels;
-			m_deviceSampleBits = format.wBitsPerSample;
-			m_deviceDmaSpeed   = format.nSamplesPerSec;
+			m_nChannels   = format.nChannels;
+			m_nSampleBits = format.wBitsPerSample;
+			m_nSampleRate   = format.nSamplesPerSec;
 
 			Q_memset(&dsbcaps, 0, sizeof(dsbcaps));
 			dsbcaps.dwSize = sizeof(dsbcaps);
@@ -958,7 +977,7 @@ sndinitstat CAudioDirectSound::SNDDMA_InitDirect( void )
 			DevMsg("   %d channel(s)\n"
 						   "   %d bits/sample\n"
 						   "   %d samples/sec\n",
-						   DeviceChannels(), DeviceSampleBits(), DeviceDmaSpeed());
+						   ChannelCount(), BitsPerSample(), SampleRate());
 		}
 
 		// initialize the buffer
@@ -1048,15 +1067,17 @@ static DWORD GetSpeakerConfigForSurroundMode( int surroundMode, const char **pCo
 static DWORD GetWindowsSpeakerConfig()
 {
 	DWORD speaker_config = windows_speaker_config.GetInt();
-	if ( windows_speaker_config.GetInt() < 0 )
+	if ( speaker_config < 0 )
 	{
 		speaker_config = DSSPEAKER_STEREO;
 		if (DS_OK == pDS->GetSpeakerConfig( &speaker_config ))
 		{
 			// split out settings
 			speaker_config = DSSPEAKER_CONFIG(speaker_config);
+			if (speaker_config == DSSPEAKER_STEREO)
+				speaker_config = DSSPEAKER_HEADPHONE;
 			if ( speaker_config == DSSPEAKER_7POINT1_SURROUND )
-				speaker_config = DSSPEAKER_7POINT1;
+				speaker_config = DSSPEAKER_5POINT1;
 			if ( speaker_config == DSSPEAKER_5POINT1_SURROUND)
 				speaker_config = DSSPEAKER_5POINT1;
 		}
@@ -1164,9 +1185,13 @@ void OnSndSurroundCvarChanged( IConVar *pVar, const char *pOldString, float flOl
 
 void OnSndSurroundLegacyChanged( IConVar *pVar, const char *pOldString, float flOldValue )
 {
+	ConVarRef var( pVar );
+
+	if( var.GetFloat() == flOldValue )
+		return;
+
 	if ( pDS && CAudioDirectSound::m_pSingleton )
 	{
-		ConVarRef var( pVar );
 		// should either be interleaved or have legacy surround set, not both
 		if ( CAudioDirectSound::m_pSingleton->IsInterleaved() == var.GetBool() )
 		{
@@ -1250,7 +1275,7 @@ void ReleaseSurround(void)
 void DEBUG_DS_FillSquare( void *lpData, DWORD dwSize )
 {
 	short *lpshort = (short *)lpData;
-	DWORD j = min((DWORD)10000, dwSize/2);
+	DWORD j = MIN(10000, dwSize/2);
  
 	for (DWORD i = 0; i < j; i++)
 		lpshort[i] = 8000;
@@ -1259,7 +1284,7 @@ void DEBUG_DS_FillSquare( void *lpData, DWORD dwSize )
 void DEBUG_DS_FillSquare2( void *lpData, DWORD dwSize )
 {
 	short *lpshort = (short *)lpData;
-	DWORD j = min((DWORD)1000, dwSize/2);
+	DWORD j = MIN(1000, dwSize/2);
  
 	for (DWORD i = 0; i < j; i++)
 		lpshort[i] = 16000;
@@ -1472,9 +1497,9 @@ bool CAudioDirectSound::SNDDMA_InitSurround(LPDIRECTSOUND lpDS, WAVEFORMATEX* lp
 
 	hr = plistener->CommitDeferredSettings();
 
-	m_deviceChannels = 1;				// 1 mono 3d output buffer
-	m_deviceSampleBits = lpFormat->wBitsPerSample;
-	m_deviceDmaSpeed = lpFormat->nSamplesPerSec;
+	m_nChannels = 1;				// 1 mono 3d output buffer
+	m_nSampleBits = lpFormat->wBitsPerSample;
+	m_nSampleRate = lpFormat->nSamplesPerSec;
 
 	memset(lpdsbc, 0, sizeof(DSBCAPS));
 	lpdsbc->dwSize = sizeof(DSBCAPS);
@@ -1498,7 +1523,7 @@ bool CAudioDirectSound::SNDDMA_InitSurround(LPDIRECTSOUND lpDS, WAVEFORMATEX* lp
 		DevMsg("   %d channel(s)\n"
 					"   %d bits/sample\n"
 					"   %d samples/sec\n",
-					cchan, DeviceSampleBits(), DeviceDmaSpeed());
+					cchan, BitsPerSample(), SampleRate());
 
 	m_bufferSizeBytes = lpdsbc->dwBufferBytes;
 
@@ -1643,25 +1668,6 @@ bool CAudioDirectSound::SNDDMA_InitSurround(LPDIRECTSOUND lpDS, WAVEFORMATEX* lp
 	return TRUE;
 }
 
-void CAudioDirectSound::UpdateListener( const Vector& position, const Vector& forward, const Vector& right, const Vector& up )
-{
-}
-
-void CAudioDirectSound::ChannelReset( int entnum, int channelIndex, float distanceMod )
-{
-}
-
-const char *CAudioDirectSound::DeviceName( void )
-{ 
-	if ( m_bSurroundCenter )
-		return "5 Channel Surround";
-
-	if ( m_bSurround )
-		return "4 Channel Surround";
-
-	return "Direct Sound"; 
-}
-
 // use the partial buffer locking code in stereo as well - not available when recording a movie
 ConVar snd_lockpartial("snd_lockpartial","1");
 
@@ -1672,8 +1678,8 @@ ConVar snd_lockpartial("snd_lockpartial","1");
 
 void CAudioDirectSound::TransferSamples( int end )
 {
-	int		lpaintedtime = g_paintedtime;
-	int		endtime = end;
+	int64	lpaintedtime = g_paintedtime;
+	int64	endtime = end;
 	
 	// When Surround is enabled, divert to 4 or 5 chan xfer scheme.
 	if ( m_bSurround )
@@ -1690,7 +1696,7 @@ void CAudioDirectSound::TransferSamples( int end )
 		}
 		return;
 	}
-	else if ( snd_lockpartial.GetBool() && DeviceChannels() == 2 && DeviceSampleBits() == 16 && !SND_IsRecording() )
+	else if ( snd_lockpartial.GetBool() && ChannelCount() == 2 && BitsPerSample() == 16 && !SND_IsRecording() )
 	{
 		S_TransferSurround16Interleaved( PAINTBUFFER, NULL, NULL, lpaintedtime, endtime );
 	}
@@ -1706,15 +1712,7 @@ void CAudioDirectSound::TransferSamples( int end )
 		}
 		if ( pBuffer )
 		{
-			if ( DeviceChannels() == 2 && DeviceSampleBits() == 16 )
-			{
-				S_TransferStereo16( pBuffer, PAINTBUFFER, lpaintedtime, endtime );
-			}
-			else
-			{
-				// UNDONE: obsolete - no 8 bit mono output supported
-				S_TransferPaintBuffer( pBuffer, PAINTBUFFER, lpaintedtime, endtime );
-			}
+			S_TransferStereo16( pBuffer, PAINTBUFFER, lpaintedtime, endtime );
 			pDSBuf->Unlock( pBuffer, dwSize, NULL, 0 );
 		}
 	}
@@ -1751,7 +1749,7 @@ bool CAudioDirectSound::LockDSBuffer( LPDIRECTSOUNDBUFFER pBuffer, DWORD **pdwWr
 
 //////////////////////////////////////////////////////////////////////////////////////////////////
 // Given front, rear and center stereo paintbuffers, split samples into 4 or 5 mono directsound buffers (FL, FC, FR, RL, RR)
-void CAudioDirectSound::S_TransferSurround16( portable_samplepair_t *pfront, portable_samplepair_t *prear, portable_samplepair_t *pcenter, int lpaintedtime, int endtime, int cchan)
+void CAudioDirectSound::S_TransferSurround16( portable_samplepair_t *pfront, portable_samplepair_t *prear, portable_samplepair_t *pcenter, int64 lpaintedtime, int64 endtime, int cchan)
 {
 	int		lpos;
 	DWORD *pdwWriteFL=NULL, *pdwWriteFR=NULL, *pdwWriteRL=NULL, *pdwWriteRR=NULL, *pdwWriteFC=NULL;
@@ -1856,7 +1854,7 @@ void CAudioDirectSound::S_TransferSurround16( portable_samplepair_t *pfront, por
 
 struct surround_transfer_t
 {
-	int paintedtime;
+	int64 paintedtime;
 	int	linearCount;
 	int sampleMask;
 	int channelCount;
@@ -1937,7 +1935,7 @@ static void TransferSamplesToSurroundBuffer( int outputCount, surround_transfer_
 
 }
 
-void CAudioDirectSound::S_TransferSurround16Interleaved_FullLock( const portable_samplepair_t *pfront, const portable_samplepair_t *prear, const portable_samplepair_t *pcenter, int lpaintedtime, int endtime )
+void CAudioDirectSound::S_TransferSurround16Interleaved_FullLock( const portable_samplepair_t *pfront, const portable_samplepair_t *prear, const portable_samplepair_t *pcenter, int64 lpaintedtime, int64 endtime )
 {
 	int		lpos;
 	DWORD *pdwWrite = NULL;
@@ -1946,7 +1944,7 @@ void CAudioDirectSound::S_TransferSurround16Interleaved_FullLock( const portable
 
 	volumeFactor = S_GetMasterVolume() * 256;
 	int channelCount = m_bSurroundCenter ? 5 : 4;
-	if ( DeviceChannels() == 2 )
+	if ( ChannelCount() == 2 )
 	{
 		channelCount = 2;
 	}
@@ -1967,7 +1965,7 @@ void CAudioDirectSound::S_TransferSurround16Interleaved_FullLock( const portable
 	snd_p = (int *)pfront;
 
 	int linearCount;							 // space in output buffer for linearCount mono samples
-	int sampleMonoCount = m_bufferSizeBytes/(DeviceSampleBytes()*DeviceChannels());	 // number of mono samples per output buffer (was;(DeviceSampleCount()>>1))
+	int sampleMonoCount = m_bufferSizeBytes/(DeviceSampleBytes()*ChannelCount());	 // number of mono samples per output buffer (was;(DeviceSampleCount()>>1))
 	int sampleMask = sampleMonoCount - 1;
 
 	// paintedtime - number of full samples that have played since start
@@ -2029,7 +2027,7 @@ void CAudioDirectSound::S_TransferSurround16Interleaved_FullLock( const portable
 	pDSBuf->Unlock(pdwWrite, dwSize, NULL, 0);
 }
 
-void CAudioDirectSound::S_TransferSurround16Interleaved( const portable_samplepair_t *pfront, const portable_samplepair_t *prear, const portable_samplepair_t *pcenter, int lpaintedtime, int endtime )
+void CAudioDirectSound::S_TransferSurround16Interleaved( const portable_samplepair_t *pfront, const portable_samplepair_t *prear, const portable_samplepair_t *pcenter, int64 lpaintedtime, int64 endtime )
 {
 	if ( !pDSBuf )
 		return;
@@ -2046,7 +2044,7 @@ void CAudioDirectSound::S_TransferSurround16Interleaved( const portable_samplepa
 	transfer.snd_cp = (int *)pcenter;
 	transfer.snd_p = (int *)pfront;
 	
-	int sampleMonoCount = DeviceSampleCount()/DeviceChannels();	 // number of full samples per output buffer
+	int sampleMonoCount = DeviceSampleCount()/ChannelCount();	 // number of full samples per output buffer
 	Assert(IsPowerOfTwo(sampleMonoCount));
 	transfer.sampleMask = sampleMonoCount - 1;
 	transfer.paintedtime = lpaintedtime;
@@ -2054,7 +2052,7 @@ void CAudioDirectSound::S_TransferSurround16Interleaved( const portable_samplepa
 	// paintedtime - number of full samples that have played since start
 	// endtime - number of full samples to play to - endtime is g_soundtime + mixahead samples
 	int channelCount = m_bSurroundCenter ? 6 : 4;
-	if ( DeviceChannels() == 2 )
+	if ( ChannelCount() == 2 )
 	{
 		channelCount = 2;
 	}
@@ -2092,3 +2090,4 @@ void CAudioDirectSound::S_TransferSurround16Interleaved( const portable_samplepa
 	pDSBuf->Unlock(pBuffer0, size0, pBuffer1, size1);
 }
 
+#endif

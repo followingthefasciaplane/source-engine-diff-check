@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -22,11 +22,12 @@ extern IVModelInfo* modelinfo;
 #if defined( CLIENT_DLL )
 
 	#include "vgui/ISurface.h"
-	#include "vgui_controls/Controls.h"
+	#include "vgui_controls/controls.h"
 	#include "c_portal_player.h"
 	#include "hud_crosshair.h"
-	#include "PortalRender.h"
-
+	#include "portalrender.h"
+	#include "vgui_int.h"
+	#include "model_types.h"
 #else
 
 	#include "portal_player.h"
@@ -79,7 +80,7 @@ END_NETWORK_TABLE()
 BEGIN_PREDICTION_DATA( CWeaponPortalBase ) 
 END_PREDICTION_DATA()
 
-LINK_ENTITY_TO_CLASS( weapon_portal_base, CWeaponPortalBase );
+LINK_ENTITY_TO_CLASS_ALIASED( weapon_portal_base, WeaponPortalBase );
 
 
 #ifdef GAME_DLL
@@ -104,7 +105,7 @@ CWeaponPortalBase::CWeaponPortalBase()
 
 bool CWeaponPortalBase::IsPredicted() const
 { 
-	return false;
+	return g_pGameRules->IsMultiplayer();
 }
 
 void CWeaponPortalBase::WeaponSound( WeaponSound_t sound_type, float soundtime /* = 0.0f */ )
@@ -147,13 +148,45 @@ void CWeaponPortalBase::OnDataChanged( DataUpdateType_t type )
 		ShutdownPredictable();
 }
 
-int CWeaponPortalBase::DrawModel( int flags )
+// opt out of the model fast path for now.  Since this model is "drawn" when in first person
+// and not looking through a portal and drawing is aborted in DrawModel() the fast path can
+// skip this and cause an extra copy of this entity to be visible
+IClientModelRenderable*	CWeaponPortalBase::GetClientModelRenderable()	
+{ 
+	// NOTE: This should work but doesn't.  It makes the object invisible in the portal pass
+	// I suspect the IsRenderingPortal() test isn't getting re-entered while building the list for the frame
+	// but I haven't tracked it down.  For now I'll just have weapons opt out of the fast path and render
+	// correctly at lower performance.
+#if 0
+	C_BasePlayer *pOwner = ToBasePlayer( GetOwner() );
+
+	if ( pOwner && C_BasePlayer::IsLocalPlayer( pOwner ) )
+	{
+		ACTIVE_SPLITSCREEN_PLAYER_GUARD_ENT( pOwner );
+		if  ( !g_pPortalRender->IsRenderingPortal() && !pOwner->ShouldDrawLocalPlayer() )
+			return 0;
+	}
+
+	return this; 
+#else
+	return NULL;
+#endif
+}
+
+
+int CWeaponPortalBase::DrawModel( int flags, const RenderableInstance_t &instance )
 {
 	if ( !m_bReadyToDraw )
 		return 0;
 
-	if ( GetOwner() && (GetOwner() == C_BasePlayer::GetLocalPlayer()) && !g_pPortalRender->IsRenderingPortal() && !C_BasePlayer::ShouldDrawLocalPlayer() )
-		return 0;
+	C_BasePlayer *pOwner = ToBasePlayer( GetOwner() );
+
+	if ( pOwner && C_BasePlayer::IsLocalPlayer( pOwner ) )
+	{
+		ACTIVE_SPLITSCREEN_PLAYER_GUARD_ENT( pOwner );
+		if ( !g_pPortalRender->IsRenderingPortal() && !pOwner->ShouldDrawLocalPlayer() && !VGui_IsSplitScreen() )
+			return 0;
+	}
 
 	//Sometimes the return value of ShouldDrawLocalPlayer() fluctuates too often to draw the correct model all the time, so this is a quick fix if it's changed too fast
 	int iOriginalIndex = GetModelIndex();
@@ -166,7 +199,7 @@ int CWeaponPortalBase::DrawModel( int flags )
 		bChangeModelBack = true;
 	}
 
-	int iRetVal = BaseClass::DrawModel( flags );
+	int iRetVal = BaseClass::DrawModel( flags, instance );
 
 	if( bChangeModelBack )
 		SetModelIndex( iOriginalIndex );
@@ -174,23 +207,9 @@ int CWeaponPortalBase::DrawModel( int flags )
 	return iRetVal;
 }
 
-bool CWeaponPortalBase::ShouldDraw( void )
-{
-	if ( !GetOwner() || GetOwner() != C_BasePlayer::GetLocalPlayer() )
-		return true;
-
-	if ( !IsActiveByLocalPlayer() )
-		return false;
-
-	//if ( GetOwner() && GetOwner() == C_BasePlayer::GetLocalPlayer() && materials->GetRenderTarget() == 0 )
-	//	return false;
-
-	return true;
-}
-
 bool CWeaponPortalBase::ShouldPredict()
 {
-	if ( GetOwner() && GetOwner() == C_BasePlayer::GetLocalPlayer() )
+	if ( C_BasePlayer::IsLocalPlayer( GetOwner() ) )
 		return true;
 
 	return BaseClass::ShouldPredict();
@@ -205,7 +224,7 @@ void CWeaponPortalBase::DrawCrosshair()
 	if ( !player )
 		return;
 
-	Color clr = gHUD.m_clrNormal;
+	Color clr = GetHud().m_clrNormal;
 
 	CHudCrosshair *crosshair = GET_HUDELEMENT( CHudCrosshair );
 	if ( !crosshair )
@@ -214,14 +233,14 @@ void CWeaponPortalBase::DrawCrosshair()
 	// Check to see if the player is in VGUI mode...
 	if (player->IsInVGuiInputMode())
 	{
-		CHudTexture *pArrow	= gHUD.GetIcon( "arrow" );
+		CHudTexture *pArrow	= HudIcons().GetIcon( "arrow" );
 
-		crosshair->SetCrosshair( pArrow, gHUD.m_clrNormal );
+		crosshair->SetCrosshair( pArrow, GetHud().m_clrNormal );
 		return;
 	}
 
 	// Find out if this weapon's auto-aimed onto a target
-	bool bOnTarget = ( m_iState == WEAPON_IS_ONTARGET );
+	bool bOnTarget = ( m_iState == WEAPON_IS_ACTIVE ) && player->m_fOnTarget;
 
 	if ( player->GetFOV() >= 90 )
 	{ 
@@ -399,7 +418,7 @@ void CWeaponPortalBase::FireBullets( const FireBulletsInfo_t &info )
 {
 	FireBulletsInfo_t modinfo = info;
 
-	modinfo.m_iPlayerDamage = GetPortalWpnData().m_iPlayerDamage;
+	modinfo.m_flPlayerDamage = GetPortalWpnData().m_iPlayerDamage;
 
 	BaseClass::FireBullets( modinfo );
 }

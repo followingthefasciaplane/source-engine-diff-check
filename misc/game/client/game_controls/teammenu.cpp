@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -15,7 +15,7 @@
 #include <vgui/ISurface.h>
 #include <KeyValues.h>
 #include <vgui_controls/ImageList.h>
-#include <filesystem.h>
+#include <FileSystem.h>
 
 #include <vgui_controls/RichText.h>
 #include <vgui_controls/Label.h>
@@ -85,17 +85,28 @@ CTeamMenu::CTeamMenu(IViewPort *pViewPort) : Frame(NULL, PANEL_TEAM )
 	SetTitleBarVisible( false );
 	SetProportional(true);
 
+#if !defined(CSTRIKE15)
 	// info window about this map
 	m_pMapInfo = new RichText( this, "MapInfo" );
 
 #if defined( ENABLE_HTML_WINDOW )
 	m_pMapInfoHTML = new HTML( this, "MapInfoHTML");
 #endif
+#endif
 
 	LoadControlSettings("Resource/UI/TeamMenu.res");
 	InvalidateLayout();
 
 	m_szMapName[0] = 0;
+
+	//=============================================================================
+	// HPE_BEGIN:
+	// [Forrest] 
+	//=============================================================================
+	ListenForGameEvent( "cs_match_end_restart" );
+	//=============================================================================
+	// HPE_END
+	//=============================================================================
 }
 
 //-----------------------------------------------------------------------------
@@ -111,12 +122,15 @@ CTeamMenu::~CTeamMenu()
 void CTeamMenu::ApplySchemeSettings(IScheme *pScheme)
 {
 	BaseClass::ApplySchemeSettings(pScheme);
-	m_pMapInfo->SetFgColor( pScheme->GetColor("MapDescriptionText", Color(255, 255, 255, 0)) );
+
+#if !defined(CSTRIKE15)
+    m_pMapInfo->SetFgColor( pScheme->GetColor("MapDescriptionText", Color(255, 255, 255, 0)) );
 
 	if ( *m_szMapName )
 	{
 		LoadMapPage( m_szMapName ); // reload the map description to pick up the color
 	}
+#endif
 }
 
 //-----------------------------------------------------------------------------
@@ -164,19 +178,41 @@ void CTeamMenu::ShowPanel(bool bShow)
 	m_pViewPort->ShowBackGround( bShow );
 }
 
+//=============================================================================
+// HPE_BEGIN:
+// [Forrest] 
+//=============================================================================
+//-----------------------------------------------------------------------------
+// Purpose: respond to game events
+//-----------------------------------------------------------------------------
+void CTeamMenu::FireGameEvent( IGameEvent *event )
+{
+	const char *type = event->GetName();
+
+	if( 0 == Q_strcmp( type, "cs_match_end_restart" ) )
+	{
+		// Reselect teams when restarting a new match.
+		ShowPanel( true );
+	}
+}
+//=============================================================================
+// HPE_END
+//=============================================================================
 
 //-----------------------------------------------------------------------------
 // Purpose: updates the UI with a new map name and map html page, and sets up the team buttons
 //-----------------------------------------------------------------------------
 void CTeamMenu::Update()
 {
+#if !defined(CSTRIKE15)
 	char mapname[MAX_MAP_NAME];
 
 	Q_FileBase( engine->GetLevelName(), mapname, sizeof(mapname) );
 
 	SetLabelText( "mapname", mapname );
 
-	LoadMapPage( mapname );
+	// DWenger - Pulled out for now - LoadMapPage( mapname );
+#endif
 }
 
 //-----------------------------------------------------------------------------
@@ -184,13 +220,13 @@ void CTeamMenu::Update()
 //-----------------------------------------------------------------------------
 void CTeamMenu::LoadMapPage( const char *mapName )
 {
+#if !defined(CSTRIKE15)
 	// Save off the map name so we can re-load the page in ApplySchemeSettings().
 	Q_strncpy( m_szMapName, mapName, strlen( mapName ) + 1 );
 	
 	char mapRES[ MAX_PATH ];
 
 	char uilanguage[ 64 ];
-	uilanguage[0] = 0;
 	engine->GetUILanguage( uilanguage, sizeof( uilanguage ) );
 
 	Q_snprintf( mapRES, sizeof( mapRES ), "resource/maphtml/%s_%s.html", mapName, uilanguage );
@@ -224,7 +260,7 @@ void CTeamMenu::LoadMapPage( const char *mapName )
 
 #if defined( ENABLE_HTML_WINDOW )
 		m_pMapInfoHTML->SetVisible( true );
-		m_pMapInfoHTML->OpenURL( localURL, NULL );
+		m_pMapInfoHTML->OpenURL( localURL );
 #endif
 		InvalidateLayout();
 		Repaint();		
@@ -275,20 +311,9 @@ void CTeamMenu::LoadMapPage( const char *mapName )
 		data[ bytesRead+1 ] = 0;
 	}
 
-#ifndef WIN32
-	if ( ((ucs2 *)memBlock)[0] == 0xFEFF )
-	{
-		// convert the win32 ucs2 data to wchar_t
-		dataSize*=2;// need to *2 to account for ucs2 to wchar_t (4byte) growth
-		wchar_t *memBlockConverted = (wchar_t *)malloc(dataSize);	
-		V_UCS2ToUnicode( (ucs2 *)memBlock, memBlockConverted, dataSize );
-		free(memBlock);
-		memBlock = memBlockConverted;
-	}
-#else
 	// null-terminate the stream (redundant, since we memset & then trimmed the transformed buffer already)
 	memBlock[dataSize / sizeof(wchar_t) - 1] = 0x0000;
-#endif
+
 	// ensure little-endian unicode reads correctly on all platforms
 	CByteswap byteSwap;
 	byteSwap.SetTargetBigEndian( false );
@@ -312,6 +337,7 @@ void CTeamMenu::LoadMapPage( const char *mapName )
 
 	InvalidateLayout();
 	Repaint();
+#endif
 }
 
 /*
@@ -395,51 +421,36 @@ void CTeamMenu::SetLabelText(const char *textEntryName, const char *text)
 
 void CTeamMenu::OnKeyCodePressed(KeyCode code)
 {
-	int nDir = 0;
-
-	switch ( code )
-	{
-	case KEY_XBUTTON_UP:
-	case KEY_XSTICK1_UP:
-	case KEY_XSTICK2_UP:
-	case KEY_UP:
-	case KEY_XBUTTON_LEFT:
-	case KEY_XSTICK1_LEFT:
-	case KEY_XSTICK2_LEFT:
-	case KEY_LEFT:
-	case STEAMCONTROLLER_DPAD_LEFT:
-		nDir = -1;
-		break;
-
-	case KEY_XBUTTON_DOWN:
-	case KEY_XSTICK1_DOWN:
-	case KEY_XSTICK2_DOWN:
-	case KEY_DOWN:
-	case KEY_XBUTTON_RIGHT:
-	case KEY_XSTICK1_RIGHT:
-	case KEY_XSTICK2_RIGHT:
-	case KEY_RIGHT:
-	case STEAMCONTROLLER_DPAD_RIGHT:
-		nDir = 1;
-		break;
-	}
-
 	if ( m_iScoreBoardKey != BUTTON_CODE_INVALID && m_iScoreBoardKey == code )
 	{
-		gViewPortInterface->ShowPanel( PANEL_SCOREBOARD, true );
-		gViewPortInterface->PostMessageToPanel( PANEL_SCOREBOARD, new KeyValues( "PollHideCode", "code", code ) );
+		GetViewPortInterface()->ShowPanel( PANEL_SCOREBOARD, true );
+		GetViewPortInterface()->PostMessageToPanel( PANEL_SCOREBOARD, new KeyValues( "PollHideCode", "code", code ) );
 	}
-	else if ( nDir != 0 )
+	//=============================================================================
+	// HPE_BEGIN
+	// mjohnson
+	// Remove the jump auto-assign code on the xbox.  The jump code is the gamepad's
+	// A button which is generally expected to select the currently focused item.
+	// Add in the code for processing the stick movement up/down to modify selection.
+	//=============================================================================
+#if !defined(CSTRIKE15)
+	else if( m_iJumpKey != BUTTON_CODE_INVALID && m_iJumpKey == code )
 	{
-		CUtlSortVector< SortedPanel_t, CSortedPanelYLess > vecSortedButtons;
-		VguiPanelGetSortedChildButtonList( this, (void*)&vecSortedButtons, "&", 0 );
-
-		if ( VguiPanelNavigateSortedChildButtonList( (void*)&vecSortedButtons, nDir ) != -1 )
-		{
-			// Handled!
-			return;
-		}
+		AutoAssign();
 	}
+#else
+	else if (KEY_XSTICK1_UP == code || KEY_XBUTTON_UP == code)
+	{
+		RequestFocusPrev(GetFocusNavGroup().GetCurrentFocus()->GetVPanel());
+	}
+	else if (KEY_XSTICK1_DOWN == code || KEY_XBUTTON_DOWN == code)
+	{
+		RequestFocusNext(GetFocusNavGroup().GetCurrentFocus()->GetVPanel());
+	}
+#endif
+	//=============================================================================
+	// HPE_END
+	//=============================================================================
 	else
 	{
 		BaseClass::OnKeyCodePressed( code );

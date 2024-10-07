@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: Export functions from l_studio.cpp
 //
@@ -22,8 +22,6 @@
 struct LightDesc_t;
 class IStudioRender;
 struct vcollide_t;
-
-extern IStudioRender *g_pStudioRender;
 
 void UpdateStudioRenderConfig( void );
 void InitStudioRender( void );

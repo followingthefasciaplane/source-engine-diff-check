@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -12,7 +12,7 @@
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
-void SV_DetermineMulticastRecipients( bool usepas, const Vector& origin, CBitVec< ABSOLUTE_PLAYER_LIMIT >& playerbits );
+void SV_DetermineMulticastRecipients( bool usepas, const Vector& origin, CPlayerBitVec& playerbits );
 
 //-----------------------------------------------------------------------------
 // Purpose: 
@@ -45,7 +45,7 @@ void CEngineRecipientFilter::MakeInitMessage( void )
 
 int CEngineRecipientFilter::GetRecipientCount( void ) const
 {
-	return m_Recipients.Size();
+	return m_Recipients.Count();
 }
 
 int	CEngineRecipientFilter::GetRecipientIndex( int slot ) const
@@ -87,7 +87,7 @@ void CEngineRecipientFilter::RemoveRecipient( int index )
 	m_Recipients.FindAndRemove( index );
 }
 
-void CEngineRecipientFilter::AddPlayersFromBitMask( CBitVec< ABSOLUTE_PLAYER_LIMIT >& playerbits )
+void CEngineRecipientFilter::AddPlayersFromBitMask( CPlayerBitVec& playerbits )
 {
 	for( int i = 0; i < sv.GetClientCount(); i++ )
 	{
@@ -129,7 +129,7 @@ void CEngineRecipientFilter::AddRecipientsByPVS( const Vector& origin )
 	}
 	else
 	{
-		CBitVec< ABSOLUTE_PLAYER_LIMIT > playerbits;
+		CPlayerBitVec playerbits;
 		SV_DetermineMulticastRecipients( false, origin, playerbits );
 		AddPlayersFromBitMask( playerbits );
 	}
@@ -143,7 +143,7 @@ void CEngineRecipientFilter::AddRecipientsByPAS( const Vector& origin )
 	}
 	else
 	{
-		CBitVec< ABSOLUTE_PLAYER_LIMIT > playerbits;
+		CPlayerBitVec playerbits;
 		SV_DetermineMulticastRecipients( true, origin, playerbits );
 		AddPlayersFromBitMask( playerbits );
 	}

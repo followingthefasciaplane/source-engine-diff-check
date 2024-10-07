@@ -1,9 +1,9 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: Public interfaces to vphysics DLL
 //
 // $NoKeywords: $
-//=============================================================================//
+//===========================================================================//
 
 #ifndef VPHYSICS_INTERFACE_H
 #define VPHYSICS_INTERFACE_H
@@ -13,11 +13,12 @@
 
 
 #include "tier1/interface.h"
-#include "appframework/IAppSystem.h"
+#include "appframework/iappsystem.h"
 #include "mathlib/vector.h"
 #include "mathlib/vector4d.h"
 #include "vcollide.h"
-
+#include "tier3/tier3.h"
+#include "SoundEmitterSystem/isoundemittersystembase.h"
 
 // ------------------------------------------------------------------------------------
 // UNITS:
@@ -174,8 +175,6 @@ struct truncatedcone_t
 };
 
 
-#define VPHYSICS_COLLISION_INTERFACE_VERSION	"VPhysicsCollision007"
-
 abstract_class IPhysicsCollision
 {
 public:
@@ -269,6 +268,7 @@ public:
 	// begins parsing a vcollide.  NOTE: This keeps pointers to the text
 	// If you free the text and call members of IVPhysicsKeyParser, it will crash
 	virtual IVPhysicsKeyParser	*VPhysicsKeyParserCreate( const char *pKeyData ) = 0;
+	virtual IVPhysicsKeyParser *VPhysicsKeyParserCreate( vcollide_t *pVCollide ) = 0;
 	// Free the parser created by VPhysicsKeyParserCreate
 	virtual void			VPhysicsKeyParserDestroy( IVPhysicsKeyParser *pParser ) = 0;
 
@@ -298,7 +298,17 @@ public:
 	// dumps info about the collide to Msg()
 	virtual void			OutputDebugInfo( const CPhysCollide *pCollide ) = 0;
 	virtual unsigned int	ReadStat( int statID ) = 0;
+
+	// Get an AABB for an oriented collision model
+	virtual float			CollideGetRadius( const CPhysCollide *pCollide ) = 0;
+
+	virtual void			*VCollideAllocUserData( vcollide_t *pVCollide, size_t userDataSize ) = 0;
+	virtual void			VCollideFreeUserData( vcollide_t *pVCollide ) = 0;
+	virtual void			VCollideCheck( vcollide_t *pVCollide, const char *pName ) = 0;
+	virtual bool			TraceBoxAA( const Ray_t &ray, const CPhysCollide *pCollide, trace_t *ptr ) = 0;
 };
+
+
 
 // this can be used to post-process a collision model
 abstract_class ICollisionQuery
@@ -657,6 +667,23 @@ public:
 
 	virtual void EnableConstraintNotify( bool bEnable ) = 0;
 	virtual void DebugCheckContacts(void) = 0;
+
+	virtual void			SetAlternateGravity( const Vector &gravityVector ) = 0;
+	virtual void			GetAlternateGravity( Vector *pGravityVector ) const = 0;
+
+	virtual float			GetDeltaFrameTime( int maxTicks ) const = 0;
+	virtual void			ForceObjectsToSleep( IPhysicsObject **pList, int listCount ) = 0;
+	
+	//Network prediction related functions
+	virtual void			SetPredicted( bool bPredicted ) = 0; //Interaction with this system and it's objects may not always march forward, sometimes it will get/set data in the past.
+	virtual bool			IsPredicted( void ) = 0;
+	virtual void			SetPredictionCommandNum( int iCommandNum ) = 0; //what command the client is working on right now
+	virtual int				GetPredictionCommandNum( void ) = 0;
+	virtual void			DoneReferencingPreviousCommands( int iCommandNum ) = 0; //won't need data from commands before this one any more
+	virtual void			RestorePredictedSimulation( void ) = 0; //called to restore results from a previous simulation with the same predicted timestamp set
+
+	// destroy a CPhysCollide used in CreatePolyObject()/CreatePolyObjectStatic() when any owning IPhysicsObject is flushed from the queued deletion list.
+	virtual void DestroyCollideOnDeadObjectFlush( CPhysCollide * ) = 0; //should only be used after calling DestroyObject() on all IPhysicsObjects created with it.
 };
 
 enum callbackflags
@@ -679,6 +706,14 @@ enum callbackflags
 	CALLBACK_CHECK_COLLISION_DISABLE = 0x4000,
 	CALLBACK_MARKED_FOR_TEST	= 0x8000,	// debug -- marked object is being debugged
 };
+
+enum collisionhints
+{
+	COLLISION_HINT_DEBRIS		= 0x0001,
+	COLLISION_HINT_STATICSOLID	= 0x0002,
+};
+
+class IPredictedPhysicsObject;
 
 abstract_class IPhysicsObject
 {
@@ -732,7 +767,7 @@ public:
 	virtual void			RecheckCollisionFilter() = 0;
 	// NOTE: Contact points aren't updated when collision rules change, call this to force an update
 	// UNDONE: Force this in RecheckCollisionFilter() ?
-	virtual void			RecheckContactPoints() = 0;
+	virtual void			RecheckContactPoints( bool bSearchForNewContacts = false ) = 0;
 
 	// mass accessors
 	virtual void			SetMass( float mass ) = 0;
@@ -760,6 +795,8 @@ public:
 
 	// Get the radius if this is a sphere object (zero if this is a polygonal mesh)
 	virtual float			GetSphereRadius() const = 0;
+	// Set the radius on a sphere. May need to force recalculation of contact points
+	virtual void			SetSphereRadius(float radius) = 0;
 	virtual float			GetEnergy() const = 0;
 	virtual Vector			GetMassCenterLocalSpace() const = 0;
 
@@ -854,6 +891,30 @@ public:
 	// dumps info about the object to Msg()
 	virtual void			OutputDebugInfo() const = 0;
 
+#if OBJECT_WELDING
+	virtual void			WeldToObject( IPhysicsObject *pParent ) = 0;
+	virtual void			RemoveWeld( IPhysicsObject *pOther ) = 0;
+	virtual void			RemoveAllWelds( void ) = 0;
+#endif
+
+	// EnableGravity still determines whether to apply gravity
+	// This flag determines which gravity constant to use for an alternate gravity effect
+	virtual void			SetUseAlternateGravity( bool bSet ) = 0;
+	virtual void			SetCollisionHints( uint32 collisionHints ) = 0;
+	virtual uint32			GetCollisionHints() const = 0;
+
+	inline bool				IsPredicted( void ) const { return GetPredictedInterface() != NULL; } //true if class has an IPredictedPhysicsObject interface
+	virtual IPredictedPhysicsObject *GetPredictedInterface( void ) const = 0;
+	virtual void			SyncWith( IPhysicsObject *pOther ) = 0;
+};
+
+abstract_class IPredictedPhysicsObject : public IPhysicsObject
+{
+public:
+	virtual ~IPredictedPhysicsObject( void ) {}
+
+	virtual void SetErrorDelta_Position( const Vector &vPosition ) = 0;
+	virtual void SetErrorDelta_Velocity( const Vector &vVelocity ) = 0;
 };
 
 
@@ -904,8 +965,10 @@ struct surfaceaudioparams_t
 
 struct surfacesoundnames_t
 {
-	unsigned short	stepleft;
-	unsigned short	stepright;
+	unsigned short	walkStepLeft;
+	unsigned short	walkStepRight;
+	unsigned short	runStepLeft;
+	unsigned short	runStepRight;
 
 	unsigned short	impactSoft;
 	unsigned short	impactHard;
@@ -922,20 +985,22 @@ struct surfacesoundnames_t
 
 struct surfacesoundhandles_t
 {
-	short	stepleft;
-	short	stepright;
+	HSOUNDSCRIPTHASH	walkStepLeft;
+	HSOUNDSCRIPTHASH	walkStepRight;
+	HSOUNDSCRIPTHASH	runStepLeft;
+	HSOUNDSCRIPTHASH	runStepRight;
 
-	short	impactSoft;
-	short	impactHard;
+	HSOUNDSCRIPTHASH	impactSoft;
+	HSOUNDSCRIPTHASH	impactHard;
 
-	short	scrapeSmooth;
-	short	scrapeRough;
+	HSOUNDSCRIPTHASH	scrapeSmooth;
+	HSOUNDSCRIPTHASH	scrapeRough;
 
-	short	bulletImpact;
-	short	rolling;
+	HSOUNDSCRIPTHASH	bulletImpact;
+	HSOUNDSCRIPTHASH	rolling;
 
-	short	breakSound;
-	short	strainSound;
+	HSOUNDSCRIPTHASH	breakSound;
+	HSOUNDSCRIPTHASH	strainSound;
 };
 
 struct surfacegameprops_t
@@ -944,6 +1009,8 @@ struct surfacegameprops_t
 	float			maxSpeedFactor;			// Modulates player max speed when walking on this surface
 	float			jumpFactor;				// Indicates how much higher the player should jump when on the surface
 // Game-specific data
+	float			penetrationModifier;
+	float			damageModifier;
 	unsigned short	material;
 	// Indicates whether or not the player is on a ladder.
 	unsigned char	climbable;
@@ -962,6 +1029,8 @@ struct surfacedata_t
 
 	surfacesoundhandles_t		soundhandles;
 };
+
+class ISaveRestoreOps;
 
 #define VPHYSICS_SURFACEPROPS_INTERFACE_VERSION	"VPhysicsSurfaceProps001"
 abstract_class IPhysicsSurfaceProps
@@ -989,6 +1058,8 @@ public:
 
 	// NOTE: Same as GetPhysicsProperties, but maybe more convenient
 	virtual void	GetPhysicsParameters( int surfaceDataIndex, surfacephysicsparams_t *pParamsOut ) const = 0;
+
+	virtual ISaveRestoreOps* GetMaterialIndexDataOps() const = 0;
 };
 
 abstract_class IPhysicsFluidController
@@ -1076,6 +1147,9 @@ struct convertconvexparams_t
 	bool		buildOuterConvexHull;
 	bool		buildDragAxisAreas;
 	bool		buildOptimizedTraceTables;
+	bool		checkOptimalTracing;
+	bool		bUseFastApproximateInertiaTensor;
+	bool		bBuildAABBTree;
 	float		dragAreaEpsilon;
 	CPhysConvex *pForcedOuterHull;
 
@@ -1085,6 +1159,9 @@ struct convertconvexparams_t
 		buildOuterConvexHull = false;
 		buildDragAxisAreas = false;
 		buildOptimizedTraceTables = false;
+		checkOptimalTracing = false;
+		bUseFastApproximateInertiaTensor = false;
+		bBuildAABBTree = false;
 		pForcedOuterHull = NULL;
 	}
 };

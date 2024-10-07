@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -76,9 +76,9 @@ BEGIN_VS_SHADER_FLAGS( Overlay_Fit, "Help for TerrainTest2", SHADER_NOT_EDITABLE
 		}
 		DYNAMIC_STATE
 		{
-			BindTexture( SHADER_SAMPLER0, BASETEXTURE, FRAME );
-			pShaderAPI->BindStandardTexture( SHADER_SAMPLER1, TEXTURE_LIGHTMAP );
-			BindTexture( SHADER_SAMPLER2, BASETEXTURE, FRAME );
+			BindTexture( SHADER_SAMPLER0, false, BASETEXTURE, FRAME );
+			pShaderAPI->BindStandardTexture( SHADER_SAMPLER1, false, TEXTURE_LIGHTMAP );
+			BindTexture( SHADER_SAMPLER2, false, BASETEXTURE, FRAME );
 
 			overlay_fit_vs11_Dynamic_Index vshIndex;
 			vshIndex.SetDOWATERFOG( pShaderAPI->GetSceneFogMode() == MATERIAL_FOG_LINEAR_BELOW_FOG_Z );

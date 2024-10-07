@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright (c) 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Portable code to mix sounds for snd_dma.cpp.
 //
@@ -11,13 +11,10 @@
 #include "icliententitylist.h"
 #include "icliententity.h"
 #include "../../sys_dll.h"
-#include "video/ivideoservices.h"
-#include "engine/IEngineSound.h"
+#include "avi/iavi.h"
+#include "snd_op_sys/sos_system.h"
+#include "tier0/cache_hints.h"
 
-#if defined( REPLAY_ENABLED )
-#include "demo.h"
-#include "replay_internal.h"
-#endif
 #ifdef GNUC
 // we don't suport the ASM in this file right now under GCC, fallback to C libs
 #undef id386
@@ -25,10 +22,6 @@
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
-
-#if defined( REPLAY_ENABLED )
-extern IReplayMovieManager *g_pReplayMovieManager;
-#endif
 
 #if defined(_WIN32) && id386
 // warning C4731: frame pointer register 'ebp' modified by inline assembly code
@@ -44,19 +37,41 @@ extern IReplayMovieManager *g_pReplayMovieManager;
 #define SND_SCALE_SHIFT16	(8-SND_SCALE_BITS16)
 #define SND_SCALE_LEVELS16	(1<<SND_SCALE_BITS16)
 
+// In debug, we are going to compare the old code and the new code and make sure we get the exact same output
+#if _DEBUG
+
+# define CHECK_VALUES_AFTER_REFACTORING	1
+# define CULLED_VOLUME					0		// If we check value, we can't cull the volume (otherwise will create false-positive asserts)
+portable_samplepair_t * DuplicateSamplePairs(portable_samplepair_t * pInputBuffer, int nSampleCount);
+void FreeDuplicatedSamplePairs( portable_samplepair_t * pInputBuffer, int nSampleCount );
+
+#else
+
+# define CHECK_VALUES_AFTER_REFACTORING	0
+# define CULLED_VOLUME					1		// Volume of 1 or less will be culled
+
+#endif
+
+ConVar snd_mix_optimization( "snd_mix_optimization", "0", FCVAR_NONE, "Turns optimization on for mixing if set to 1 (default). 0 to turn the optimization off." );
+ConVar snd_mix_soundchar_enabled( "snd_mix_soundchar_enabled", "1", FCVAR_NONE, "Turns sound char on for mixing if set to 1 (default). 0 to turn the sound char off and use default behavior (spatial instead of doppler, directional, etc...)." );
+ConVar snd_hrtf_volume("snd_hrtf_volume", "0.8", FCVAR_CHEAT, "Controls volume of HRTF sounds");
+
+#define SKIP_MIXING_IF_TOTAL_VOLUME_LESS_OR_EQUAL_THAN	0
+
 void Snd_WriteLinearBlastStereo16(void);
 void SND_PaintChannelFrom8( portable_samplepair_t *pOutput, int *volume, byte *pData8, int count );
 bool Con_IsVisible( void );
 void SND_RecordBuffer( void );
 bool DSP_RoomDSPIsOff( void );
-bool BChannelLowVolume( channel_t *pch, int vol_min );
-void ChannelCopyVolumes( channel_t *pch, int *pvolume_dest, int ivol_start, int cvol );
+bool BChannelLowVolume( channel_t *pch, float vol_min );
+void ChannelCopyVolumes( channel_t *pch, float *pvolume_dest, int ivol_start, int cvol );
 float ChannelLoudestCurVolume( const channel_t * RESTRICT pch );
 
-extern int g_soundtime;
+extern int64 g_soundtime;
 extern float host_frametime;
 extern float host_frametime_unbounded;
 
+extern CScratchPad g_scratchpad;
 
 #if !defined( NO_VOICE )
 extern int g_SND_VoiceOverdriveInt;
@@ -81,10 +96,16 @@ portable_samplepair_t *g_paintbuffer;
 // will decrease the maximum pitch level (current 4.0)!
 portable_samplepair_t *g_temppaintbuffer = NULL;
 
-CUtlVector< paintbuffer_t > g_paintBuffers;
+paintbuffer_t *g_paintBuffers = NULL;
 
+#define IPAINTBUFFER			0
+#define IROOMBUFFER				1
+#define IFACINGBUFFER			2
+#define IFACINGAWAYBUFFER		3
+#define IDRYBUFFER				4
+#define ISPEAKERBUFFER			5
 
-// pointer to current paintbuffer (front and reare), used by all mixing, upsampling and dsp routines
+// pointer to current paintbuffer (front and rear), used by all mixing, upsampling and dsp routines
 portable_samplepair_t *g_curpaintbuffer = NULL;
 portable_samplepair_t *g_currearpaintbuffer = NULL;	
 portable_samplepair_t *g_curcenterpaintbuffer = NULL;
@@ -110,21 +131,21 @@ int	g_snd_profile_type = 0;		// type 1 dsp, type 2 mixer, type 3 load sound, typ
 portable_samplepair_t cubicfilter1[3] = {{0,0},{0,0},{0,0}};
 portable_samplepair_t cubicfilter2[3] = {{0,0},{0,0},{0,0}};
 
-portable_samplepair_t linearfilter1[1] = {{0,0}};
-portable_samplepair_t linearfilter2[1] = {{0,0}};
-portable_samplepair_t linearfilter3[1] = {{0,0}};
-portable_samplepair_t linearfilter4[1] = {{0,0}};
-portable_samplepair_t linearfilter5[1] = {{0,0}};
-portable_samplepair_t linearfilter6[1] = {{0,0}};
-portable_samplepair_t linearfilter7[1] = {{0,0}};
-portable_samplepair_t linearfilter8[1] = {{0,0}};
+portable_samplepair_t linearfilter1[1] = {0,0};
+portable_samplepair_t linearfilter2[1] = {0,0};
+portable_samplepair_t linearfilter3[1] = {0,0};
+portable_samplepair_t linearfilter4[1] = {0,0};
+portable_samplepair_t linearfilter5[1] = {0,0};
+portable_samplepair_t linearfilter6[1] = {0,0};
+portable_samplepair_t linearfilter7[1] = {0,0};
+portable_samplepair_t linearfilter8[1] = {0,0};
 
 int		snd_scaletable[SND_SCALE_LEVELS][256];	// 32k*4 = 128K
 
 int 	*snd_p, snd_linear_count, snd_vol;
 short	*snd_out;
 
-extern int DSP_Alloc( int ipset, float xfade, int cchan );
+extern CThreadFastMutex g_SoundMapMutex; // From snd_dma.cpp
 
 bool DSP_CheckDspAutoEnabled( void );
 int Get_idsp_room ( void );
@@ -132,23 +153,32 @@ int dsp_room_GetInt ( void );
 void DSP_SetDspAuto( int dsp_preset );
 bool DSP_CheckDspAutoEnabled( void );
 
-void MIX_ScalePaintBuffer( int bufferIndex, int count, float fgain );
-
-bool IsReplayRendering()
+// Get a pointer to a buffer that summarizes the state of the audio system, for
+// ETW or crash dump purposes. It is char* instead of const char* so that we
+// can optionally convert line-feeds to tabs in-place for better ETW compatibility.
+char* Status_UpdateAudioBuffer()
 {
-#if defined( REPLAY_ENABLED )
-	return g_pReplayMovieManager && g_pReplayMovieManager->IsRendering();
-#else
-	return false;
-#endif
+	static char buffer[4094];
+
+	buffer[0] = 0;
+	CUtlBuffer buf( buffer, sizeof(buffer),  CUtlBuffer::TEXT_BUFFER );
+
+	buf.Printf( "Audio: total_channels=%d, Active Channels=%d, g_bdirectionalfx=%d, g_bDspOff=%d\n", total_channels, g_ActiveChannels.GetActiveCount(), g_bdirectionalfx, g_bDspOff );
+
+	g_ActiveChannels.DumpChannelInfo( buf );
+	
+
+	return buffer;
 }
+
+void MIX_ScalePaintBuffer( int bufferIndex, int count, float fgain );
 
 //-----------------------------------------------------------------------------
 // Free allocated memory buffers
 //-----------------------------------------------------------------------------
 void MIX_FreeAllPaintbuffers(void)
 {		
-	if ( g_paintBuffers.Count() )
+	if ( g_paintBuffers )
 	{
 		if ( g_temppaintbuffer )
 		{
@@ -156,7 +186,7 @@ void MIX_FreeAllPaintbuffers(void)
 			g_temppaintbuffer = NULL;
 		}
 
-		for ( int i = 0; i < g_paintBuffers.Count(); i++ )
+		for ( int i = 0; i < CPAINTBUFFERS; i++ )
 		{
 			if ( g_paintBuffers[i].pbuf )
 			{
@@ -172,80 +202,77 @@ void MIX_FreeAllPaintbuffers(void)
 			}
 		}
 
-		g_paintBuffers.RemoveAll();
-	}
-}
-
-void MIX_InitializePaintbuffer( paintbuffer_t *pPaintBuffer, bool bSurround, bool bSurroundCenter )
-{
-	V_memset( pPaintBuffer, 0, sizeof( *pPaintBuffer ) );
-
-	pPaintBuffer->pbuf = (portable_samplepair_t *)_aligned_malloc( PAINTBUFFER_MEM_SIZE*sizeof(portable_samplepair_t), 16 );
-	V_memset( pPaintBuffer->pbuf, 0, PAINTBUFFER_MEM_SIZE*sizeof(portable_samplepair_t) );
-
-	if ( bSurround )
-	{
-		pPaintBuffer->pbufrear = (portable_samplepair_t *)_aligned_malloc( PAINTBUFFER_MEM_SIZE*sizeof(portable_samplepair_t), 16 );
-		V_memset( pPaintBuffer->pbufrear, 0, PAINTBUFFER_MEM_SIZE*sizeof(portable_samplepair_t) );
-	}
-	if ( bSurroundCenter )
-	{
-		pPaintBuffer->pbufcenter = (portable_samplepair_t *)_aligned_malloc( PAINTBUFFER_MEM_SIZE*sizeof(portable_samplepair_t), 16 );
-		V_memset( pPaintBuffer->pbufcenter, 0, PAINTBUFFER_MEM_SIZE*sizeof(portable_samplepair_t) );
+		free( g_paintBuffers );
+		g_paintBuffers = NULL;
 	}
 }
 
 //-----------------------------------------------------------------------------
 // Allocate memory buffers
-// Initialize paintbuffers array, set current paint buffer to main output buffer SOUND_BUFFER_PAINT
+// Initialize paintbuffers array, set current paint buffer to main output buffer IPAINTBUFFER
 //-----------------------------------------------------------------------------
 bool MIX_InitAllPaintbuffers(void)
 {
 	bool	bSurround;
 	bool	bSurroundCenter;
+	int		i;
 
 	bSurroundCenter = g_AudioDevice->IsSurroundCenter();
 	bSurround = g_AudioDevice->IsSurround() || bSurroundCenter;
 
+	g_paintBuffers = (paintbuffer_t *)malloc( CPAINTBUFFERS*sizeof( paintbuffer_t ) );
+	V_memset( g_paintBuffers, 0, CPAINTBUFFERS*sizeof( paintbuffer_t ) );
+
 	g_temppaintbuffer = (portable_samplepair_t*)_aligned_malloc( TEMP_COPY_BUFFER_SIZE*sizeof(portable_samplepair_t), 16 );
 	V_memset( g_temppaintbuffer, 0, TEMP_COPY_BUFFER_SIZE*sizeof(portable_samplepair_t) );
 
-	while ( g_paintBuffers.Count() < SOUND_BUFFER_BASETOTAL )
+	for ( i=0; i<CPAINTBUFFERS; i++ )
 	{
-		int nIndex = g_paintBuffers.AddToTail();
-		MIX_InitializePaintbuffer( &(g_paintBuffers[ nIndex ]), bSurround, bSurroundCenter );
+		g_paintBuffers[i].pbuf = (portable_samplepair_t *)_aligned_malloc( PAINTBUFFER_MEM_SIZE*sizeof(portable_samplepair_t), 16 );
+		V_memset( g_paintBuffers[i].pbuf, 0, PAINTBUFFER_MEM_SIZE*sizeof(portable_samplepair_t) );
+
+		if ( bSurround )
+		{
+			g_paintBuffers[i].pbufrear = (portable_samplepair_t *)_aligned_malloc( PAINTBUFFER_MEM_SIZE*sizeof(portable_samplepair_t), 16 );
+			V_memset( g_paintBuffers[i].pbufrear, 0, PAINTBUFFER_MEM_SIZE*sizeof(portable_samplepair_t) );
+		}
+		if ( bSurroundCenter )
+		{
+			g_paintBuffers[i].pbufcenter = (portable_samplepair_t *)_aligned_malloc( PAINTBUFFER_MEM_SIZE*sizeof(portable_samplepair_t), 16 );
+			V_memset( g_paintBuffers[i].pbufcenter, 0, PAINTBUFFER_MEM_SIZE*sizeof(portable_samplepair_t) );
+		}
 	}
 
-	g_paintbuffer = g_paintBuffers[SOUND_BUFFER_PAINT].pbuf;
+	g_paintbuffer = g_paintBuffers[IPAINTBUFFER].pbuf;
 
 	// buffer flags
-	g_paintBuffers[SOUND_BUFFER_ROOM].flags = SOUND_BUSS_ROOM;
-	g_paintBuffers[SOUND_BUFFER_FACING].flags = SOUND_BUSS_FACING;
-	g_paintBuffers[SOUND_BUFFER_FACINGAWAY].flags = SOUND_BUSS_FACINGAWAY;
-	g_paintBuffers[SOUND_BUFFER_SPEAKER].flags = SOUND_BUSS_SPEAKER;
-	g_paintBuffers[SOUND_BUFFER_DRY].flags = SOUND_BUSS_DRY;
+	g_paintBuffers[IROOMBUFFER].flags = SOUND_BUSS_ROOM;
+	g_paintBuffers[IFACINGBUFFER].flags = SOUND_BUSS_FACING;
+	g_paintBuffers[IFACINGAWAYBUFFER].flags = SOUND_BUSS_FACINGAWAY;
+	g_paintBuffers[ISPEAKERBUFFER].flags = SOUND_BUSS_SPEAKER;
+	g_paintBuffers[IDRYBUFFER].flags = SOUND_BUSS_DRY;
 
 	// buffer surround sound flag
-	g_paintBuffers[SOUND_BUFFER_PAINT].fsurround = bSurround;
-	g_paintBuffers[SOUND_BUFFER_FACING].fsurround = bSurround;
-	g_paintBuffers[SOUND_BUFFER_FACINGAWAY].fsurround	= bSurround;
-	g_paintBuffers[SOUND_BUFFER_DRY].fsurround = bSurround;
+	g_paintBuffers[IPAINTBUFFER].fsurround = bSurround;
+	g_paintBuffers[IFACINGBUFFER].fsurround = bSurround;
+	g_paintBuffers[IFACINGAWAYBUFFER].fsurround	= bSurround;
+	g_paintBuffers[IDRYBUFFER].fsurround = bSurround;
 
 	// buffer 5 channel surround sound flag
-	g_paintBuffers[SOUND_BUFFER_PAINT].fsurround_center = bSurroundCenter;
-	g_paintBuffers[SOUND_BUFFER_FACING].fsurround_center = bSurroundCenter;
-	g_paintBuffers[SOUND_BUFFER_FACINGAWAY].fsurround_center = bSurroundCenter;
-	g_paintBuffers[SOUND_BUFFER_DRY].fsurround_center = bSurroundCenter;
+	g_paintBuffers[IPAINTBUFFER].fsurround_center = bSurroundCenter;
+	g_paintBuffers[IFACINGBUFFER].fsurround_center = bSurroundCenter;
+	g_paintBuffers[IFACINGAWAYBUFFER].fsurround_center = bSurroundCenter;
+	g_paintBuffers[IDRYBUFFER].fsurround_center = bSurroundCenter;
 	
 	// room buffer mixes down to mono or stereo, never to 4 or 5 ch
-	g_paintBuffers[SOUND_BUFFER_ROOM].fsurround = false;
-	g_paintBuffers[SOUND_BUFFER_ROOM].fsurround_center = false;
+	g_paintBuffers[IROOMBUFFER].fsurround = false;
+	g_paintBuffers[IROOMBUFFER].fsurround_center = false;
 
 	// speaker buffer mixes to mono
-	g_paintBuffers[SOUND_BUFFER_SPEAKER].fsurround = false;
-	g_paintBuffers[SOUND_BUFFER_SPEAKER].fsurround_center	= false;	
+	g_paintBuffers[ISPEAKERBUFFER].fsurround = false;
+	g_paintBuffers[ISPEAKERBUFFER].fsurround_center	= false;
 
-	MIX_SetCurrentPaintbuffer( SOUND_BUFFER_PAINT );
+	MIX_SetCurrentPaintbuffer( IPAINTBUFFER );
 
 	return true;
 }
@@ -281,7 +308,8 @@ double MIX_GetMaxRate( double rate, int sampleCount )
 // pfront - pointer to stereo paintbuffer - 32 bit samples, interleaved stereo
 // lpaintedtime - total number of 32 bit stereo samples previously output to hardware
 // endtime - total number of 32 bit stereo samples currently mixed in paintbuffer
-void S_TransferStereo16( void *pOutput, const portable_samplepair_t *pfront, int lpaintedtime, int endtime )
+#if USE_AUDIO_DEVICE_V1
+void S_TransferStereo16( void *pOutput, const portable_samplepair_t *pfront, int64 lpaintedtime, int64 endtime )
 {
 	int		lpos;
 	
@@ -301,7 +329,7 @@ void S_TransferStereo16( void *pOutput, const portable_samplepair_t *pfront, int
 	int samplePairCount = g_AudioDevice->DeviceSampleCount() >> 1;
 	int sampleMask = samplePairCount  - 1;
 
-	bool bShouldPlaySound = !cl_movieinfo.IsRecording() && !IsReplayRendering();
+	bool bShouldPlaySound = !cl_movieinfo.IsRecording();
 
 	while ( lpaintedtime < endtime )
 	{														
@@ -344,68 +372,7 @@ void S_TransferStereo16( void *pOutput, const portable_samplepair_t *pfront, int
 	}
 }
 
-// Transfer contents of main paintbuffer pfront out to 
-// device.  Perform volume multiply on each sample.
-void S_TransferPaintBuffer(void *pOutput, const portable_samplepair_t *pfront, int lpaintedtime, int endtime)
-{
-	int 		out_idx;		// mono sample index
-	int 		count;			// number of mono samples to output
-	int 		out_mask;
-	int 		step;
-	int			val;
-	int			nSoundVol;
-	const int 	*p;
- 
-	if ( IsX360() )
-	{
-		// not the right path for 360
-		Assert( 0 );
-		return;
-	}
-
-	Assert( pOutput );
-
-	p = (const int *) pfront;
-
-	count = ((endtime - lpaintedtime) * g_AudioDevice->DeviceChannels()); 
-	
-	out_mask = g_AudioDevice->DeviceSampleCount() - 1; 
-
-	// 44k: remove old 22k sound support << HISPEED_DMA
-	// out_idx = ((paintedtime << HISPEED_DMA) * g_AudioDevice->DeviceChannels()) & out_mask;
-
-	out_idx = (lpaintedtime * g_AudioDevice->DeviceChannels()) & out_mask;
-	
-	step = 3 - g_AudioDevice->DeviceChannels();	// mono output buffer - step 2, stereo - step 1
-	nSoundVol = S_GetMasterVolume()*256;
-
-	if (g_AudioDevice->DeviceSampleBits() == 16)
-	{
-		short *out = (short *) pOutput;
-		while (count--)
-		{
-			val = (*p * nSoundVol) >> 8;
-			p+= step;
-			val = CLIP(val);
-			
-			out[out_idx] = val;
-			out_idx = (out_idx + 1) & out_mask;
-		}
-	}
-	else if (g_AudioDevice->DeviceSampleBits() == 8)
-	{
-		unsigned char *out = (unsigned char *) pOutput;
-		while (count--)
-		{
-			val = (*p * nSoundVol) >> 8;
-			p+= step;
-			val = CLIP(val);
-			
-			out[out_idx] = (val>>8) + 128;
-			out_idx = (out_idx + 1) & out_mask;
-		}
-	}
-}
+#endif
 
 /*
 ===============================================================================
@@ -421,6 +388,9 @@ CHANNEL MIXING
 // word in a sentence, release the sentence.
 // Works for static, dynamic, sentence and stream sounds
 
+extern ConVar snd_find_channel;
+void PrintChannel( const char *pText1, const char *pFileName, channel_t * pChannel, const char *pText2 = NULL );
+
 void S_FreeChannel(channel_t *ch)
 {
 	// Don't reenter in here (can happen inside voice code).
@@ -428,9 +398,26 @@ void S_FreeChannel(channel_t *ch)
 		return;
 	ch->flags.m_bIsFreeingChannel = true;
 
+	if ( (*snd_find_channel.GetString()) != '\0' )
+	{
+		if ( ch->sfx != NULL )
+		{
+			char sndname[MAX_PATH];
+			ch->sfx->GetFileName( sndname, sizeof( sndname ) );
+			if ( Q_stristr( sndname, snd_find_channel.GetString() ) != 0 )
+			{
+				PrintChannel( "FreeChannel", sndname, ch, "from ConVar snd_find_channel." );
+			}
+		}
+	}
+
 	SND_CloseMouth(ch);
 
-	g_pSoundServices->OnSoundStopped( ch->guid, ch->soundsource, ch->entchannel, ch->sfx->getname() );
+	if ( !IsGameConsole() )
+	{
+		char nameBuf[MAX_PATH];
+		g_pSoundServices->OnSoundStopped( ch->guid, ch->soundsource, ch->entchannel, ch->sfx->getname(nameBuf, sizeof(nameBuf)) );
+	}
 
 	ch->flags.isSentence = false;
 //	Msg("End sound %s\n", ch->sfx->getname() );
@@ -439,11 +426,23 @@ void S_FreeChannel(channel_t *ch)
 	ch->pMixer = NULL;
 	ch->sfx = NULL;
 
+	ch->m_nSoundScriptHash = SOUNDEMITTER_INVALID_HASH;
+
+	if( ch->m_pStackList )
+	{
+		delete ch->m_pStackList;
+		ch->m_pStackList = NULL;
+
+	}
+
 	// zero all data in channel
 	g_ActiveChannels.Remove( ch );
 	Q_memset(ch, 0, sizeof(channel_t));
 }
 
+extern ConVar host_timescale;
+
+ConVar snd_pause_all( "snd_pause_all", "1", FCVAR_CHEAT, "Specifies to pause all sounds and not just voice" );
 
 // Mix all channels into active paintbuffers until paintbuffer is full or 'endtime' is reached.
 // endtime: time in 44khz samples to mix
@@ -454,13 +453,11 @@ void S_FreeChannel(channel_t *ch)
 //		 this routine will fill the paintbuffer to endtime.  Otherwise, fewer samples are mixed.
 //		 if (endtime - paintedtime) is not aligned on boundaries of 4, 
 //		 we'll miss data if outputRate < SOUND_DMA_SPEED!
-void MIX_MixChannelsToPaintbuffer( CChannelList &list, int endtime, int flags, int rate, int outputRate )
+void MIX_MixChannelsToPaintbuffer( CChannelList &list, int64 endtime, int flags, int rate, int outputRate )
 {
 	VPROF( "MixChannelsToPaintbuffer" );
 	int		i;
 	int		sampleCount;
-
-	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s c:%d %d/%d", __FUNCTION__, list.Count(), rate, outputRate );
 
 	// mix each channel into paintbuffer
 	// validate parameters
@@ -472,24 +469,21 @@ void MIX_MixChannelsToPaintbuffer( CChannelList &list, int endtime, int flags, i
 	if ( sampleCount <= 0 )
 		return;
 
-	// Apply a global pitch shift if we're playing back a time-scaled replay
-	float flGlobalPitchScale = 1.0f;
+	// Apply host_timescale as a global pitch shift
+	float flGlobalPitchScale = host_timescale.GetFloat();
 
-#if defined( REPLAY_ENABLED )
-	extern IDemoPlayer *g_pReplayDemoPlayer;
-	if ( demoplayer->IsPlayingBack() && demoplayer == g_pReplayDemoPlayer )
+	extern IVEngineClient *engineClient;
+	if ( engineClient )
 	{
-		// adjust time scale if playing back demo
-		flGlobalPitchScale = demoplayer->GetPlaybackTimeScale();
+		flGlobalPitchScale = engineClient->GetTimescale();
 	}
-#endif
 
 	for ( i = list.Count(); --i >= 0; )
 	{
 		channel_t *ch = list.GetChannel( i );
 		Assert( ch->sfx );
 		// must never have a 'dry' and 'speaker' set - causes double mixing & double data reading
-		Assert ( !( ( ch->flags.bdry && ch->flags.bSpeaker ) || ( ch->flags.bdry && ch->special_dsp != 0 ) ) );	
+		Assert ( !( ch->flags.bdry && ch->flags.bSpeaker ) );	
 
 		// if mixing with SOUND_MIX_DRY flag, ignore (don't even load) all channels not flagged as 'dry'
 		if ( flags == SOUND_MIX_DRY )
@@ -501,7 +495,7 @@ void MIX_MixChannelsToPaintbuffer( CChannelList &list, int endtime, int flags, i
 		// if mixing with SOUND_MIX_WET flag, ignore (don't even load) all channels flagged as 'dry' or 'speaker'
 		if ( flags == SOUND_MIX_WET )
 		{
-			if ( ch->flags.bdry || ch->flags.bSpeaker || ch->special_dsp != 0 )
+			if ( ch->flags.bdry || ch->flags.bSpeaker )
 				continue;
 		}
 
@@ -509,13 +503,6 @@ void MIX_MixChannelsToPaintbuffer( CChannelList &list, int endtime, int flags, i
 		if ( flags == SOUND_MIX_SPEAKER )
 		{
 			if ( !ch->flags.bSpeaker )
-				continue;
-		}
-
-		// if mixing with SOUND_MIX_SPEAKER flag, ignore (don't even load) all channels not flagged as 'speaker'
-		if ( flags == SOUND_MIX_SPECIAL_DSP )
-		{
-			if ( ch->special_dsp == 0 )
 				continue;
 		}
 
@@ -536,23 +523,22 @@ void MIX_MixChannelsToPaintbuffer( CChannelList &list, int endtime, int flags, i
 		// Tracker 20771, if breen is speaking through the monitor, the client doesn't have an entity
 		//  for the "soundsource" but we still need the lipsync to pause if the game is paused.  Therefore
 		//  I changed SND_IsMouth to look for any .wav on any channels which has sentence data
-		bool bIsMouth = SND_IsMouth(ch);
-		bool bShouldPause = IsX360() ? !ch->sfx->m_bIsUISound : bIsMouth; 
+		bool bIsMouth = ch->flags.m_bHasMouth;
+		bool bShouldPause = IsGameConsole() ? !ch->sfx->m_bIsUISound : bIsMouth; 
 
+		if( snd_pause_all.GetInt() )
+		{
+			bShouldPause = !ch->sfx->m_bIsUISound;
+		}
 		// Tracker 14637:  Pausing the game pauses voice sounds, but not other sounds...
 		if ( bShouldPause && g_pSoundServices->IsGamePaused() )
 		{
 			continue;
 		}
 
-		if ( bIsMouth )
+		if ( bIsMouth && ch->flags.m_bHasMouth )
 		{
-			if ( ( ch->soundsource == SOUND_FROM_UI_PANEL ) || entitylist->GetClientEntity(ch->soundsource) || 
-				( ch->flags.bSpeaker && entitylist->GetClientEntity( ch->speakerentity ) ) )
-			{
-				// UNDONE: recode this as a member function of CAudioMixer
-				SND_MoveMouth8(ch, ch->sfx->pSource, sampleCount);
-			}
+			SND_MoveMouth8(ch, ch->sfx->pSource, sampleCount);
 		}
 
 		// mix channel to all active paintbuffers:
@@ -571,20 +557,21 @@ void MIX_MixChannelsToPaintbuffer( CChannelList &list, int endtime, int flags, i
 		}
 		else
 		{
-			tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "MixDataToDevice" );
-			ch->pMixer->MixDataToDevice( g_AudioDevice, ch, sampleCount, outputRate, 0 );
+			ch->pMixer->MixDataToDevice( ch, sampleCount, outputRate, 0 );
 		}
 
 		// restore to original pitch settings
 		ch->pitch = flPitch;
 
+
 		if ( !ch->pMixer->ShouldContinueMixing() )
 		{
-			S_FreeChannel( ch );
-			list.RemoveChannelFromList(i);
-		}
-		if ( (ch->nFreeChannelAtSampleTime > 0 && (int)ch->nFreeChannelAtSampleTime <= endtime) )
-		{
+			// stopping due to file elapsing
+			if( ch->m_pStackList )
+			{
+				ch->m_pStackList->Execute( CSosOperatorStack::SOS_STOP, ch, &g_scratchpad );
+			}
+
 			S_FreeChannel( ch );
 			list.RemoveChannelFromList(i);
 		}
@@ -759,6 +746,7 @@ void S_Interpolate2xLinear_2( int count, portable_samplepair_t *pbuffer, portabl
 	pread--;
 
 	// PERFORMANCE: Unroll the loop 8 times.  This improves speed quite a bit
+	// Looking at this code, there is a potential to make it SIMD friendly, the logic is simple, don't know if that would save though.
 	for ( ;sample >= 8; sample -= 8 )
 	{
 		pwrite[0] = last;
@@ -818,7 +806,101 @@ void S_Interpolate2xLinear_2( int count, portable_samplepair_t *pbuffer, portabl
 	pbuffer[0].right = (pfiltermem->right + last.right) >> 1;
 	*pfiltermem = pbuffer[end];
 }
- 
+
+FORCEINLINE
+void WriteLeftRight( portable_samplepair_t *pWriteBuffer, int nLeft, int nRight )
+{
+	// This should be replaced by one instruction by the compiler on X360 and PS3.
+	// Unfortunately it does not on X360, 4 instructions on top of the store. So do 2 stores instead like on PC.
+	//int64 nValue = ( (int64)nLeft << 32L ) | ( (int64)nRight & 0xffffffff );
+	//*(int64 *)pWriteBuffer = nValue;
+	pWriteBuffer->left = nLeft;
+	pWriteBuffer->right = nRight;
+}
+
+// Version with reduced LHS for console. (Optimized version ended up being much much slower than the "slow" version).
+// This should be as fast or faster on PC too.
+// TODO: Add code to compare before and after.
+void S_Interpolate2xLinear_3( int count, portable_samplepair_t *pbuffer, portable_samplepair_t *pfiltermem, int cfltmem )
+{
+	Assert (cfltmem >= 1);
+
+	int sample = count-1;
+	int end = (count*2)-1;
+	portable_samplepair_t *pwrite = &pbuffer[end];
+	portable_samplepair_t *pread = &pbuffer[sample];
+	int nLastLeft, nLastRight;
+	nLastLeft = pread[0].left;
+	nLastRight = pread[0].right;
+	pread--;
+
+	// PERFORMANCE: Unroll the loop 8 times.  This improves speed quite a bit
+	// Looking at this code, there is a potential to make it SIMD friendly, the logic is simple, don't know if that would save though.
+	for ( ;sample >= 8; sample -= 8 )
+	{
+		WriteLeftRight( pwrite - 0, nLastLeft, nLastRight );
+
+		// We also alternate between nLeft0|nRight0 and nLeft1|nRight1 to avoid storing temp values back and forth.
+		int nLeft0, nRight0, nLeft1, nRight1;
+
+		nLeft0 = pread[0].left;
+		nRight0 = pread[0].right;
+		WriteLeftRight( pwrite - 1, (nLeft0 + nLastLeft) >> 1, (nRight0 + nLastRight) >> 1 );
+
+		WriteLeftRight( pwrite - 2, nLeft0, nRight0 );
+		nLeft1 = pread[-1].left;
+		nRight1 = pread[-1].right;
+		WriteLeftRight( pwrite - 3, (nLeft1 + nLeft0) >> 1, (nRight1 + nRight0) >> 1 );
+
+		WriteLeftRight( pwrite - 4, nLeft1, nRight1 );
+		nLeft0 = pread[-2].left;
+		nRight0 = pread[-2].right;
+		WriteLeftRight( pwrite - 5, ( nLeft0 + nLeft1 ) >> 1, ( nRight0 + nRight1 ) >> 1 );
+
+		WriteLeftRight( pwrite - 6, nLeft0, nRight0 );
+		nLeft1 = pread[-3].left;
+		nRight1 = pread[-3].right;
+		WriteLeftRight( pwrite - 7, ( nLeft1 + nLeft0 ) >> 1, ( nRight1 + nRight0 ) >> 1 );
+
+		WriteLeftRight( pwrite - 8, nLeft1, nRight1 );
+		nLeft0 = pread[-4].left;
+		nRight0 = pread[-4].right;
+		WriteLeftRight( pwrite - 9, ( nLeft0 + nLeft1 ) >> 1, ( nRight0 + nRight1 ) >> 1 );
+
+		WriteLeftRight( pwrite - 10, nLeft0, nRight0 );
+		nLeft1 = pread[-5].left;
+		nRight1 = pread[-5].right;
+		WriteLeftRight( pwrite - 11, ( nLeft1 + nLeft0 ) >> 1, ( nRight1 + nRight0 ) >> 1 );
+
+		WriteLeftRight( pwrite - 12, nLeft1, nRight1 );
+		nLeft0 = pread[-6].left;
+		nRight0 = pread[-6].right;
+		WriteLeftRight( pwrite - 13, (nLeft0 + nLeft1 ) >> 1, (nRight0 + nRight1 ) >> 1 );
+
+		WriteLeftRight( pwrite - 14, nLeft0, nRight0 );
+		// Use nLastLeft and nLastRight for next iteration or final loop.
+		nLastLeft = pread[-7].left;
+		nLastRight = pread[-7].right;
+		WriteLeftRight( pwrite - 15, (nLastLeft + nLeft0 ) >> 1, ( nLastRight + nRight0 ) >> 1 );
+
+		pread -= 8;
+		pwrite -= 16;
+	}
+	while ( pread >= pbuffer )
+	{
+		WriteLeftRight( pwrite - 0, nLastLeft, nLastRight );
+		int nLeft = pread[0].left;
+		int nRight = pread[0].right;
+		WriteLeftRight( pwrite - 1, ( nLeft + nLastLeft ) >> 1, ( nRight + nLastRight ) >> 1 );
+		nLastLeft = nLeft;
+		nLastRight = nRight;
+		pread--;
+		pwrite-=2;
+	}
+	WriteLeftRight( pbuffer + 1, nLastLeft, nLastRight );
+	WriteLeftRight( pbuffer + 0, (pfiltermem->left + nLastLeft) >> 1, (pfiltermem->right + nLastRight) >> 1);
+	*pfiltermem = pbuffer[end];
+}
 
 // upsample by 2x, optionally using interpolation
 // count: how many samples to upsample. will become count*2 samples in buffer, in place.
@@ -833,7 +915,29 @@ void S_MixBufferUpsample2x( int count, portable_samplepair_t *pbuffer, portable_
 	// NOTE: Has been proven equivalent by comparing output.
 	if ( filtertype == FILTERTYPE_LINEAR )
 	{
-		S_Interpolate2xLinear_2( count, pbuffer, pfiltermem, cfltmem );
+#if CHECK_VALUES_AFTER_REFACTORING
+		portable_samplepair_t *pTempBuffer = (portable_samplepair_t *)alloca( 2 * count * sizeof(portable_samplepair_t) );
+		memcpy( pTempBuffer, pbuffer, count * sizeof(portable_samplepair_t) );		// Copy the source data
+		portable_samplepair_t oldFiltermem = *pfiltermem;
+		// Run the older implementation on the temp buffer
+		S_Interpolate2xLinear_2( count, pTempBuffer, &oldFiltermem, cfltmem );
+#endif
+		// Run the faster implementation
+		if ( snd_mix_optimization.GetBool() )
+		{
+			S_Interpolate2xLinear_3( count, pbuffer, pfiltermem, cfltmem );
+		}
+		else
+		{
+			S_Interpolate2xLinear_2( count, pbuffer, pfiltermem, cfltmem );
+		}
+
+#if CHECK_VALUES_AFTER_REFACTORING
+		bool bIsSame = ( memcmp( pbuffer, pTempBuffer, 2 * count * sizeof(portable_samplepair_t) ) == 0 );
+		Assert( bIsSame );
+		Assert( oldFiltermem.left == pfiltermem->left );
+		Assert( oldFiltermem.right == pfiltermem->right );
+#endif
 		return;
 	}
 	int i, j, upCount = count<<1;
@@ -875,7 +979,7 @@ void MIX_SetCurrentPaintbuffer(int ipaintbuffer)
 {
 	// set front and rear paintbuffer
 
-	Assert(ipaintbuffer < g_paintBuffers.Count());
+	Assert(ipaintbuffer < CPAINTBUFFERS);
 	
 	g_curpaintbuffer = g_paintBuffers[ipaintbuffer].pbuf;
 
@@ -903,7 +1007,7 @@ int MIX_GetCurrentPaintbufferIndex( void )
 {
 	int i;
 
-	for ( i = 0; i < g_paintBuffers.Count(); i++ )
+	for (i = 0; i < CPAINTBUFFERS; i++)
 	{
 		if (g_curpaintbuffer == g_paintBuffers[i].pbuf)
 			return i;
@@ -919,7 +1023,7 @@ paintbuffer_t *MIX_GetCurrentPaintbufferPtr( void )
 {
 	int ipaint = MIX_GetCurrentPaintbufferIndex();
 	
-	Assert( ipaint < g_paintBuffers.Count() );
+	Assert(ipaint < CPAINTBUFFERS);
 
 	return &g_paintBuffers[ipaint];
 }
@@ -932,11 +1036,11 @@ inline portable_samplepair_t *MIX_GetPFrontFromIPaint(int ipaintbuffer)
 	return g_paintBuffers[ipaintbuffer].pbuf;
 }
 
-paintbuffer_t *MIX_GetPPaintFromIPaint( int ipaintbuffer )
+inline paintbuffer_t *MIX_GetPPaintFromIPaint( int ipaint )
 {	
-	Assert( ipaintbuffer < g_paintBuffers.Count() );
+	Assert(ipaint < CPAINTBUFFERS);
 
-	return &g_paintBuffers[ipaintbuffer];
+	return &g_paintBuffers[ipaint];
 }
 
 
@@ -968,9 +1072,9 @@ inline int MIX_GetIPaintFromPFront( portable_samplepair_t *pbuf )
 {
 	int i;
 
-	for ( i = 0; i < g_paintBuffers.Count(); i++ )
+	for (i = 0; i < CPAINTBUFFERS; i++)
 	{
-		if ( pbuf == g_paintBuffers[i].pbuf )
+		if (pbuf == g_paintBuffers[i].pbuf)
 			return i;
 	}
 
@@ -1021,7 +1125,7 @@ inline void MIX_ConvertBufferToSurround( int ipaintbuffer )
 
 inline void MIX_ActivatePaintbuffer(int ipaintbuffer)
 {
-	Assert( ipaintbuffer < g_paintBuffers.Count() );
+	Assert(ipaintbuffer < CPAINTBUFFERS);
 	g_paintBuffers[ipaintbuffer].factive = true;
 }
 
@@ -1029,7 +1133,7 @@ inline void MIX_ActivatePaintbuffer(int ipaintbuffer)
 
 inline void MIX_DeactivatePaintbuffer(int ipaintbuffer)
 {
-	Assert( ipaintbuffer < g_paintBuffers.Count() );
+	Assert(ipaintbuffer < CPAINTBUFFERS);
 	g_paintBuffers[ipaintbuffer].factive = false;
 }
 
@@ -1038,7 +1142,7 @@ inline void MIX_DeactivatePaintbuffer(int ipaintbuffer)
 inline void MIX_DeactivateAllPaintbuffers(void)
 {
 	int i;
-	for ( i = 0; i < g_paintBuffers.Count(); i++ )
+	for (i = 0; i < CPAINTBUFFERS; i++)
 		g_paintBuffers[i].factive = false;
 }
 
@@ -1048,13 +1152,13 @@ inline void MIX_ResetPaintbufferFilterCounters( void )
 
 {
 	int i;
-	for ( i = 0; i < g_paintBuffers.Count(); i++ )
+	for (i = 0; i < CPAINTBUFFERS; i++)
 		g_paintBuffers[i].ifilter = 0;
 }
 
 inline void MIX_ResetPaintbufferFilterCounter( int ipaintbuffer )
 {
-	Assert ( ipaintbuffer < g_paintBuffers.Count() );
+	Assert (ipaintbuffer < CPAINTBUFFERS);
 	g_paintBuffers[ipaintbuffer].ifilter = 0;
 }
 
@@ -1062,36 +1166,100 @@ inline void MIX_ResetPaintbufferFilterCounter( int ipaintbuffer )
 
 inline void MIX_SetPaintbufferFlags(int ipaintbuffer, int flags)
 {
-	Assert( ipaintbuffer < g_paintBuffers.Count() );
+	Assert(ipaintbuffer < CPAINTBUFFERS);
 	g_paintBuffers[ipaintbuffer].flags = flags;
 }
 
 
 // zero out all paintbuffers
 
-void MIX_ClearAllPaintBuffers( int SampleCount, bool clearFilters )
+void ZeroBuffer( void * pBuffer, int nSize )
 {
-	// g_paintBuffers can be NULL with -nosound
-	if ( g_paintBuffers.Count() <= 0 )
+#if IsGameConsole() || IsDebug()
+	// On console we are going to use prefetch and pre-zero as much as we can...
+	// We do it on PC debug as well, for debugging purpose.
+	if ( nSize < 2 * CACHE_LINE_SIZE )
 	{
+		// If less than a few cache lines, don't use the complex version. Just use the simple one.
+		PREFETCH_128( pBuffer, 0 * CACHE_LINE_SIZE );
+		PREFETCH_128( pBuffer, 1 * CACHE_LINE_SIZE );
+		PREFETCH_128( pBuffer, 2 * CACHE_LINE_SIZE );		// In some cases, this prefetch could actually prefetch after the buffer we are trying to fill
+											// TODO: Improve this
+		Q_memset(pBuffer, 0, nSize );
 		return;
 	}
 
+	// We have 3 zones. Prefetch the first cache line (then memset it).
+	// Pre-zero the cache lines in the middle. Then prefetch the last cache line (and memset it).
+
+	char * pBufferStartFirstCacheLine = (char *)pBuffer;
+	char * pBufferEndFirstCacheLine = (char *)ALIGN_VALUE( (intp)pBuffer, CACHE_LINE_SIZE );
+	int nSizeFirstCacheLine = pBufferEndFirstCacheLine - pBufferStartFirstCacheLine;
+	if ( nSizeFirstCacheLine != 0 )
+	{
+		// It means that the beginning is not aligned, so we have to prefetch / then memset the cache line before
+		PREFETCH_128( pBufferStartFirstCacheLine, 0 );
+	}
+
+	char * pBufferEndLastCacheLine = (char *)pBuffer + nSize;
+	char * pBufferStartLastCacheLine = (char *)( (intp)pBufferEndLastCacheLine & ~( CACHE_LINE_SIZE - 1 ) );
+	int nSizeLastCacheLine = pBufferEndLastCacheLine - pBufferStartLastCacheLine;
+	if ( nSizeLastCacheLine != 0 )
+	{
+		// It means that the end is not aligned, so we have to prefetch / then memset the cache line before
+		PREFETCH_128( pBufferStartLastCacheLine, 0 );
+	}
+
+	// And then we have to fill everything 
+	int nSizeToZero = pBufferStartLastCacheLine - pBufferEndFirstCacheLine;
+	Assert( (nSizeToZero % CACHE_LINE_SIZE) == 0 );		// This should be multiple of cache line size
+	int nNumberOfCacheLinesToZero = nSizeToZero / CACHE_LINE_SIZE;
+	char * pCurrentCacheLineToZero = pBufferEndFirstCacheLine;
+	while ( nNumberOfCacheLinesToZero > 0 )
+	{
+		PREZERO_128( pCurrentCacheLineToZero, 0 );
+		pCurrentCacheLineToZero += CACHE_LINE_SIZE;
+		--nNumberOfCacheLinesToZero;
+	}
+
+	// At that point the initial pre-fetches should be over, we can clear them normally now
+	// The if tests should be unnecessary - Q_memset() should be a mo-op, still keep them to have more correct profile usage.
+	if ( nSizeFirstCacheLine != 0)
+	{
+		Q_memset( pBufferStartFirstCacheLine, 0, nSizeFirstCacheLine );
+	}
+	if ( nSizeLastCacheLine != 0)
+	{
+		Q_memset( pBufferStartLastCacheLine, 0, nSizeLastCacheLine );
+	}
+#else
+	// Slow version here
+	Q_memset(pBuffer, 0, nSize );
+#endif
+}
+
+void MIX_ClearAllPaintBuffers( int SampleCount, bool clearFilters )
+{
+	// g_paintBuffers can be NULL with -nosound
+	if( !g_paintBuffers )
+	{
+		return;
+	}
 	int i;
-	int count = min(SampleCount, PAINTBUFFER_SIZE);
+	int count = MIN(SampleCount, PAINTBUFFER_SIZE);
 
 	// zero out all paintbuffer data (ignore sampleCount)
 
-	for ( i = 0; i < g_paintBuffers.Count(); i++ )
+	for (i = 0; i < CPAINTBUFFERS; i++)
 	{
 		if (g_paintBuffers[i].pbuf != NULL)
-			Q_memset(g_paintBuffers[i].pbuf, 0, (count+1) * sizeof(portable_samplepair_t));
+			ZeroBuffer(g_paintBuffers[i].pbuf, (count+1) * sizeof(portable_samplepair_t));
 
 		if (g_paintBuffers[i].pbufrear != NULL)
-			Q_memset(g_paintBuffers[i].pbufrear, 0, (count+1) * sizeof(portable_samplepair_t));
+			ZeroBuffer(g_paintBuffers[i].pbufrear, (count+1) * sizeof(portable_samplepair_t));
 
 		if (g_paintBuffers[i].pbufcenter != NULL)
-			Q_memset(g_paintBuffers[i].pbufcenter, 0, (count+1) * sizeof(portable_samplepair_t));
+			ZeroBuffer(g_paintBuffers[i].pbufcenter, (count+1) * sizeof(portable_samplepair_t));
 
 		if ( clearFilters )
 		{
@@ -1115,35 +1283,25 @@ void MIX_ClearAllPaintBuffers( int SampleCount, bool clearFilters )
 // Currently just averages, but could actually remove
 // the center signal from the l/r channels...
 
-inline void MIX_CenterFromLeftRight( int *pl, int *pr, int *pc )
+inline int MIX_CenterFromLeftRight( int l, int r )
 {
-	int l = *pl;
-	int r = *pr;
-	int c = 0;
-	
+	int sum = l + r;
+	return sum / 2;
+}
 
-	c = (l + r) / 2;
-
-/*
-	l = l - c/2;
-	r = r - c/2;
-	
-	if (l < 0)
-	{
-		l = 0;
-		r += (-l);
-		c += (-l);
-	}
-	else if (r < 0)
-	{
-		r = 0;
-		l += (-r);
-		c += (-r);
-	}
-*/
-	*pc = c;
-//	*pl = l;
-//	*pr = r;
+inline int MIX_CenterFromLeftRightRounded( int l, int r )
+{
+	int sum = l + r;
+#if IsGameConsole()
+	// To match VMX operation (and avoid asserts due to minor differences), we do the rounding.
+	// If sum is positive, we add 1. Not for negative sum though. (the X360 documentation only states +1 in all cases but that's incorrect).
+	int nSign = sum >> 31;			// 0 if sum was positive, 0xffffffff if negative
+	sum += nSign + 1;
+#else
+	int nSign = sum >> 31;			// 0 if sum was positive, 0xffffffff if negative
+	sum += nSign;
+#endif
+	return sum / 2;
 }
 
 // mixes pbuf1 + pbuf2 into pbuf3, count samples
@@ -1169,6 +1327,356 @@ inline void MIX_CenterFromLeftRight( int *pl, int *pr, int *pc )
 // NOTE: for performance, conversion and mixing are done in a single pass instead of 
 // a two pass channel convert + mix scheme.
 
+class CMixData
+{
+public:
+	CMixData()
+	{
+		memset( this, 0, sizeof(*this) );
+	}
+
+	int count;
+	portable_samplepair_t *pbuf1, *pbuf2, *pbuf3;
+	portable_samplepair_t *pbufrear1, *pbufrear2, *pbufrear3;
+	portable_samplepair_t *pbufcenter1, *pbufcenter2, *pbufcenter3;
+};
+
+// Move these intrinsics to ssemath.h (once they are in a better shape).
+// Have some trouble with intx4, define own type and will handle this better at a later point during the refactoring of ssemath.
+
+#if IsPlatformX360()
+typedef __vector4 samplex4;
+#elif IsPlatformPS3_PPU()
+typedef vector signed int samplex4;
+#else
+// Assume that's intel / SSE
+typedef __m128i samplex4;
+#endif
+
+FORCEINLINE
+samplex4 AddSignedSIMD( const samplex4 & first, const samplex4 & second )
+{
+#if IsPlatformX360()
+	return __vaddsws( first, second );
+#elif IsPlatformPS3_PPU()
+	return vec_vaddsws( first, second );
+#else
+	// Assume that's intel / SSE
+	return _mm_add_epi32( first, second );
+#endif
+}
+
+FORCEINLINE
+samplex4 AverageSIMD( const samplex4 & first, const samplex4 & second )
+{
+#if IsPlatformX360()
+	return __vavgsw( first, second );
+#elif IsPlatformPS3_PPU()
+	return vec_vavgsw( first, second );
+#else
+	// There is no SSE2 average for 32 bits, do it with 2 operations (the code was not rounding).
+	samplex4 sum = _mm_add_epi32( first, second );
+	return _mm_srai_epi32( sum, 1 );
+#endif
+}
+
+FORCEINLINE
+samplex4 AverageLeftAndRightSIMD( const samplex4 & first )
+{
+#if IsPlatformX360()
+	// Swap left and right of each sample pair
+	samplex4 second = __vpermwi( first, (1 << 6) | (0 << 4) | (3 << 2) | (2 << 0) );
+#elif IsPlatformPS3_PPU()
+	samplex4 second = vec_perm( first, first, _VEC_SWIZZLE_YXWZ );
+#else
+	// SSE is not as good as VMX in term of converting similar types to one another
+	const __m128 & first128 = (const __m128 &)first;
+	__m128 result = _mm_shuffle_ps( first128, first128, MM_SHUFFLE_REV( 1, 0, 3, 2 ) );
+	samplex4 second = (samplex4&)result;
+#endif
+	// Then average them (both pairs should be the same).
+	return AverageSIMD( first, second );
+}
+
+// In these Mix methods, the input buffers and ouput buffer may alias, so we can't really use restrict.
+
+void Mix255_SIMD( CMixData & data )
+{
+#if CHECK_VALUES_AFTER_REFACTORING
+	CMixData backupData( data );
+	// Because the values are replaced in place (the first buffer is also the destination buffer, we need to backup first).
+	backupData.pbuf1 = DuplicateSamplePairs( data.pbuf1, data.count );
+	backupData.pbufrear1 = DuplicateSamplePairs( data.pbufrear1, data.count );
+	backupData.pbufcenter1 = DuplicateSamplePairs( data.pbufcenter1, data.count );
+#endif
+
+	int nCount = data.count;
+	samplex4 * pDst = ( samplex4 * )data.pbuf3;
+	samplex4 * pSrc1 = ( samplex4 * )data.pbuf1;
+	samplex4 * pSrc2 = ( samplex4 * )data.pbuf2;
+	samplex4 * pRearDst = ( samplex4 * )data.pbufrear3;
+	samplex4 * pRearSrc2 = ( samplex4 * )data.pbufrear2;
+	samplex4 * pCenterDst = ( samplex4 * )data.pbufcenter3;		// Although for center, we only care about left, we are going to do the full calculation anyway
+	samplex4 * pCenterSrc2 = ( samplex4 * )data.pbufcenter2;	// We can still do 2 lefts at a time
+
+	intp nAddresses = (intp)pDst | (intp)pSrc1 | (intp)pSrc2;
+	nAddresses |= (intp)pRearDst | (intp)pRearSrc2;
+	nAddresses |= (intp)pCenterDst | (intp)pCenterSrc2;
+	if ( ( nAddresses & 0xf ) == 0 )
+	{
+		// Addresses are 16 bytes aligned, we can VMX it
+		// One intx4 vector has LRLR (so 2 samples). Thus we need to do 4 loads / stores per iteration.
+		while ( nCount >= 8 )
+		{
+			samplex4 buf1_0 = pSrc1[0];
+			samplex4 buf1_1 = pSrc1[1];
+			samplex4 buf1_2 = pSrc1[2];
+			samplex4 buf1_3 = pSrc1[3];
+
+			// Use temporary variables so the compiler pipelines better.
+			// Otherwise the compiler will do load / add / store / load / add / store (thus creating some stalls)
+			// as we can't use restrict due to potential aliasing.
+			samplex4 temp0 = AddSignedSIMD( buf1_0, pSrc2[0] );
+			samplex4 temp1 = AddSignedSIMD( buf1_1, pSrc2[1] );
+			samplex4 temp2 = AddSignedSIMD( buf1_2, pSrc2[2] );
+			samplex4 temp3 = AddSignedSIMD( buf1_3, pSrc2[3] );
+			pDst[0] = temp0;
+			pDst[1] = temp1;
+			pDst[2] = temp2;
+			pDst[3] = temp3;
+
+			temp0 = AddSignedSIMD( buf1_0, pRearSrc2[0] );
+			temp1 = AddSignedSIMD( buf1_1, pRearSrc2[1] );
+			temp2 = AddSignedSIMD( buf1_2, pRearSrc2[2] );
+			temp3 = AddSignedSIMD( buf1_3, pRearSrc2[3] );
+
+			pRearDst[0] = temp0;
+			pRearDst[1] = temp1;
+			pRearDst[2] = temp2;
+			pRearDst[3] = temp3;
+
+			samplex4 center1_0 = AverageLeftAndRightSIMD( buf1_0 );
+			samplex4 center1_1 = AverageLeftAndRightSIMD( buf1_1 );
+			samplex4 center1_2 = AverageLeftAndRightSIMD( buf1_2 );
+			samplex4 center1_3 = AverageLeftAndRightSIMD( buf1_3 );
+			temp0 = AddSignedSIMD( center1_0, pCenterSrc2[0] );
+			temp1 = AddSignedSIMD( center1_1, pCenterSrc2[1] );
+			temp2 = AddSignedSIMD( center1_2, pCenterSrc2[2] );
+			temp3 = AddSignedSIMD( center1_3, pCenterSrc2[3] );
+			pCenterDst[0] = temp0;
+			pCenterDst[1] = temp1;
+			pCenterDst[2] = temp2;
+			pCenterDst[3] = temp3;
+
+			pDst += 4;
+			pSrc1 += 4;
+			pSrc2 += 4;
+			pRearDst += 4;
+			pRearSrc2 += 4;
+			pCenterDst += 4;
+			pCenterSrc2 += 4;
+			nCount -= 8;
+		}
+	}
+
+	portable_samplepair_t * pDstSample = (portable_samplepair_t *)pDst;
+	portable_samplepair_t * pSrc1Sample = (portable_samplepair_t *)pSrc1;
+	portable_samplepair_t * pSrc2Sample = (portable_samplepair_t *)pSrc2;
+	portable_samplepair_t * pRearDstSample = (portable_samplepair_t *)pRearDst;
+	portable_samplepair_t * pRearSrc2Sample = (portable_samplepair_t *)pRearSrc2;
+	portable_samplepair_t * pCenterDstSample = (portable_samplepair_t *)pCenterDst;
+	portable_samplepair_t * pCenterSrc2Sample = (portable_samplepair_t *)pCenterSrc2;
+	while ( nCount > 0 )
+	{
+		int l = pSrc1Sample->left;
+		int r = pSrc1Sample->right;
+		pDstSample->left = l + pSrc2Sample->left;
+		pDstSample->right = r + pSrc2Sample->right;
+		pRearDstSample->left = l + pRearSrc2Sample->left;
+		pRearDstSample->right = r + pRearSrc2Sample->right;
+		int c = MIX_CenterFromLeftRightRounded( l, r );
+		pCenterDstSample->left = c + pCenterSrc2Sample->left;
+		++pDstSample;
+		++pSrc1Sample;
+		++pSrc2Sample;
+		++pRearDstSample;
+		++pRearSrc2Sample;
+		++pCenterDstSample;
+		++pCenterSrc2Sample;
+		--nCount;
+	}
+
+#if CHECK_VALUES_AFTER_REFACTORING
+	// Verify that we would get the same result with the old code
+	for ( int i = 0; i < data.count ; ++i )
+	{
+		int l = backupData.pbuf1[i].left;
+		int r = backupData.pbuf1[i].right;
+
+		int c = MIX_CenterFromLeftRightRounded( l, r );
+
+		Assert( data.pbuf3[i].left == l + backupData.pbuf2[i].left );
+		Assert( data.pbuf3[i].right == r + backupData.pbuf2[i].right );
+
+		Assert( data.pbufrear3[i].left == l + backupData.pbufrear2[i].left );
+		Assert( data.pbufrear3[i].right == r + backupData.pbufrear2[i].right );
+
+		Assert( data.pbufcenter3[i].left == c + backupData.pbufcenter2[i].left );
+	}
+	FreeDuplicatedSamplePairs( backupData.pbuf1, data.count );
+	FreeDuplicatedSamplePairs( backupData.pbufrear1, data.count );
+	FreeDuplicatedSamplePairs( backupData.pbufcenter1, data.count );
+#endif
+}
+
+void Mix255( CMixData & data )
+{
+	for ( int i = 0; i < data.count; ++i )
+	{
+		int l = data.pbuf1[i].left;
+		int r = data.pbuf1[i].right;
+
+		int c = MIX_CenterFromLeftRight( l, r );
+
+		data.pbuf3[i].left  = l + data.pbuf2[i].left;
+		data.pbuf3[i].right = r + data.pbuf2[i].right;
+
+		data.pbufrear3[i].left  = l + data.pbufrear2[i].left;
+		data.pbufrear3[i].right = r + data.pbufrear2[i].right;
+
+		data.pbufcenter3[i].left = c + data.pbufcenter2[i].left;
+	}
+}
+
+void Mix555_SIMD( CMixData & data )
+{
+#if CHECK_VALUES_AFTER_REFACTORING
+	CMixData backupData( data );
+	// Because the values are replaced in place (the first buffer is also the destination buffer, we need to backup first).
+	backupData.pbuf1 = DuplicateSamplePairs( data.pbuf1, data.count );
+	backupData.pbufrear1 = DuplicateSamplePairs( data.pbufrear1, data.count );
+	backupData.pbufcenter1 = DuplicateSamplePairs( data.pbufcenter1, data.count );
+#endif
+
+	int nCount = data.count;
+	samplex4 * pDst = ( samplex4 * )data.pbuf3;
+	samplex4 * pSrc1 = ( samplex4 * )data.pbuf1;
+	samplex4 * pSrc2 = ( samplex4 * )data.pbuf2;
+	samplex4 * pRearDst = ( samplex4 * )data.pbufrear3;
+	samplex4 * pRearSrc1 = ( samplex4 * )data.pbufrear1;
+	samplex4 * pRearSrc2 = ( samplex4 * )data.pbufrear2;
+	samplex4 * pCenterDst = ( samplex4 * )data.pbufcenter3;		// Although for center, we only care about left, we are going to do the full calculation anyway
+	samplex4 * pCenterSrc1 = ( samplex4 * )data.pbufcenter1;		// We can still do 2 lefts at a time
+	samplex4 * pCenterSrc2 = ( samplex4 * )data.pbufcenter2;
+
+	intp nAddresses = (intp)pDst | (intp)pSrc1 | (intp)pSrc2;
+	nAddresses |= (intp)pRearDst | (intp)pRearSrc1 | (intp)pRearSrc2;
+	nAddresses |= (intp)pCenterDst | (intp)pCenterSrc1 | (intp)pCenterSrc2;
+	if ( ( nAddresses & 0xf ) == 0 )
+	{
+		// Addresses are 16 bytes aligned, we can VMX it
+		// One intx4 vector has LRLR (so 2 samples). Thus we need to do 4 loads / stores per iteration.
+		while ( nCount >= 8 )
+		{
+			// Use temporary variables so the compiler pipelines better.
+			// Otherwise the compiler will do load / add / store / load / add / store (thus creating some stalls)
+			// as we can't use restrict due to potential aliasing.
+			samplex4 temp0 = AddSignedSIMD( pSrc1[0], pSrc2[0] );
+			samplex4 temp1 = AddSignedSIMD( pSrc1[1], pSrc2[1] );
+			samplex4 temp2 = AddSignedSIMD( pSrc1[2], pSrc2[2] );
+			samplex4 temp3 = AddSignedSIMD( pSrc1[3], pSrc2[3] );
+			pDst[0] = temp0;
+			pDst[1] = temp1;
+			pDst[2] = temp2;
+			pDst[3] = temp3;
+
+			temp0 = AddSignedSIMD( pRearSrc1[0], pRearSrc2[0] );
+			temp1 = AddSignedSIMD( pRearSrc1[1], pRearSrc2[1] );
+			temp2 = AddSignedSIMD( pRearSrc1[2], pRearSrc2[2] );
+			temp3 = AddSignedSIMD( pRearSrc1[3], pRearSrc2[3] );
+			pRearDst[0] = temp0;
+			pRearDst[1] = temp1;
+			pRearDst[2] = temp2;
+			pRearDst[3] = temp3;
+
+			temp0 = AddSignedSIMD( pCenterSrc1[0], pCenterSrc2[0] );
+			temp1 = AddSignedSIMD( pCenterSrc1[1], pCenterSrc2[1] );
+			temp2 = AddSignedSIMD( pCenterSrc1[2], pCenterSrc2[2] );
+			temp3 = AddSignedSIMD( pCenterSrc1[3], pCenterSrc2[3] );
+			pCenterDst[0] = temp0;
+			pCenterDst[1] = temp1;
+			pCenterDst[2] = temp2;
+			pCenterDst[3] = temp3;
+
+			pDst += 4;
+			pSrc1 += 4;
+			pSrc2 += 4;
+			pRearDst += 4;
+			pRearSrc1 += 4;
+			pRearSrc2 += 4;
+			pCenterDst += 4;
+			pCenterSrc1 += 4;
+			pCenterSrc2 += 4;
+			nCount -= 8;
+		}
+	}
+
+	portable_samplepair_t * pDstSample = (portable_samplepair_t *)pDst;
+	portable_samplepair_t * pSrc1Sample = (portable_samplepair_t *)pSrc1;
+	portable_samplepair_t * pSrc2Sample = (portable_samplepair_t *)pSrc2;
+	portable_samplepair_t * pRearDstSample = (portable_samplepair_t *)pRearDst;
+	portable_samplepair_t * pRearSrc1Sample = (portable_samplepair_t *)pRearSrc1;
+	portable_samplepair_t * pRearSrc2Sample = (portable_samplepair_t *)pRearSrc2;
+	portable_samplepair_t * pCenterDstSample = (portable_samplepair_t *)pCenterDst;
+	portable_samplepair_t * pCenterSrc1Sample = (portable_samplepair_t *)pCenterSrc1;
+	portable_samplepair_t * pCenterSrc2Sample = (portable_samplepair_t *)pCenterSrc2;
+	while ( nCount > 0 )
+	{
+		pDstSample->left = pSrc1Sample->left + pSrc2Sample->left;
+		pDstSample->right = pSrc1Sample->right + pSrc2Sample->right;
+		pRearDstSample->left = pRearSrc1Sample->left + pRearSrc2Sample->left;
+		pRearDstSample->right = pRearSrc1Sample->right + pRearSrc2Sample->right;
+		pCenterDstSample->left = pCenterSrc1Sample->left + pCenterSrc2Sample->left;
+		++pDstSample;
+		++pSrc1Sample;
+		++pSrc2Sample;
+		++pRearDstSample;
+		++pRearSrc1Sample;
+		++pRearSrc2Sample;
+		++pCenterDstSample;
+		++pCenterSrc1Sample;
+		++pCenterSrc2Sample;
+		--nCount;
+	}
+
+#if CHECK_VALUES_AFTER_REFACTORING
+	// Verify that we would get the same result with the old code
+	for ( int i = 0; i < data.count; ++i )
+	{
+		Assert( data.pbuf3[i].left == backupData.pbuf1[i].left  + backupData.pbuf2[i].left );
+		Assert( data.pbuf3[i].right == backupData.pbuf1[i].right + backupData.pbuf2[i].right );
+		Assert( data.pbufrear3[i].left == backupData.pbufrear1[i].left  + backupData.pbufrear2[i].left );
+		Assert( data.pbufrear3[i].right == backupData.pbufrear1[i].right + backupData.pbufrear2[i].right );
+		Assert( data.pbufcenter3[i].left == backupData.pbufcenter1[i].left + backupData.pbufcenter2[i].left );
+	}
+	FreeDuplicatedSamplePairs( backupData.pbuf1, data.count );
+	FreeDuplicatedSamplePairs( backupData.pbufrear1, data.count );
+	FreeDuplicatedSamplePairs( backupData.pbufcenter1, data.count );
+#endif
+}
+
+void Mix555( CMixData & data )
+{
+	for ( int i = 0; i < data.count; ++i )
+	{
+		data.pbuf3[i].left  = data.pbuf1[i].left  + data.pbuf2[i].left;
+		data.pbuf3[i].right = data.pbuf1[i].right + data.pbuf2[i].right;
+		data.pbufrear3[i].left  = data.pbufrear1[i].left  + data.pbufrear2[i].left;
+		data.pbufrear3[i].right = data.pbufrear1[i].right + data.pbufrear2[i].right;
+		data.pbufcenter3[i].left = data.pbufcenter1[i].left + data.pbufcenter2[i].left;
+	}
+}
+
 void MIX_MixPaintbuffers(int ibuf1, int ibuf2, int ibuf3, int count, float fgain_out)
 {
 	VPROF("Mixpaintbuffers");
@@ -1184,9 +1692,9 @@ void MIX_MixPaintbuffers(int ibuf1, int ibuf2, int ibuf3, int count, float fgain
 	gain_out = 256 * fgain_out;
 	
 	Assert (count <= PAINTBUFFER_SIZE);
-	Assert (ibuf1 < g_paintBuffers.Count());
-	Assert (ibuf2 < g_paintBuffers.Count());
-	Assert (ibuf3 < g_paintBuffers.Count());
+	Assert (ibuf1 < CPAINTBUFFERS);
+	Assert (ibuf2 < CPAINTBUFFERS);
+	Assert (ibuf3 < CPAINTBUFFERS);
 
 	pbuf1 = g_paintBuffers[ibuf1].pbuf;
 	pbuf2 = g_paintBuffers[ibuf2].pbuf;
@@ -1215,6 +1723,17 @@ void MIX_MixPaintbuffers(int ibuf1, int ibuf2, int ibuf3, int count, float fgain
 		SWAP( pbufcenter1, pbufcenter2, pbufcentert);
 	}
 
+	CMixData data;
+	data.count = count;
+	data.pbuf1 = pbuf1;
+	data.pbuf2 = pbuf2;
+	data.pbuf3 = pbuf3;
+	data.pbufcenter1 = pbufcenter1;
+	data.pbufcenter2 = pbufcenter2;
+	data.pbufcenter3 = pbufcenter3;
+	data.pbufrear1 = pbufrear1;
+	data.pbufrear2 = pbufrear2;
+	data.pbufrear3 = pbufrear3;
 
 	// UNDONE: implement fast mixing routines for each of the following sections
 
@@ -1443,12 +1962,12 @@ void MIX_MixPaintbuffers(int ibuf1, int ibuf2, int ibuf3, int count, float fgain
 				l = pbuf1[i].left;
 				r = pbuf1[i].right;
 
-				MIX_CenterFromLeftRight(&l, &r, &c);
+				c = MIX_CenterFromLeftRight( l, r );
 
 				l2 = pbuf2[i].left;
 				r2 = pbuf2[i].right;
 
-				MIX_CenterFromLeftRight(&l2, &r2, &c2);
+				c2 = MIX_CenterFromLeftRight( l2, r2 );
 
 				pbuf3[i].left  = l + l2;
 				pbuf3[i].right = r + r2;
@@ -1468,12 +1987,12 @@ void MIX_MixPaintbuffers(int ibuf1, int ibuf2, int ibuf3, int count, float fgain
 				l = pbuf1[i].left;
 				r = pbuf1[i].right;
 
-				MIX_CenterFromLeftRight(&l, &r, &c);
+				c = MIX_CenterFromLeftRight( l, r );
 
 				l2 = pbuf2[i].left;
 				r2 = pbuf2[i].right;
 
-				MIX_CenterFromLeftRight(&l2, &r2, &c2);
+				c2 = MIX_CenterFromLeftRight( l2, r2 );
 
 				pbuf3[i].left  = l + l2;
 				pbuf3[i].right = r + r2;
@@ -1488,20 +2007,13 @@ void MIX_MixPaintbuffers(int ibuf1, int ibuf2, int ibuf3, int count, float fgain
 
 		if (cchan1 == 2 && cchan2 == 5)
 		{
-			for (i = 0; i < count; i++)
+			if ( snd_mix_optimization.GetBool() )
 			{
-				l = pbuf1[i].left;
-				r = pbuf1[i].right;
-
-				MIX_CenterFromLeftRight(&l, &r, &c);
-
-				pbuf3[i].left  = l + pbuf2[i].left;
-				pbuf3[i].right = r + pbuf2[i].right;
-
-				pbufrear3[i].left  = pbuf1[i].left + pbufrear2[i].left;
-				pbufrear3[i].right = pbuf1[i].right + pbufrear2[i].right;
-
-				pbufcenter3[i].left = c + pbufcenter2[i].left;
+				Mix255_SIMD( data );
+			}
+			else
+			{
+				Mix255( data );
 			}
 			goto gain5ch;
 		}
@@ -1513,12 +2025,12 @@ void MIX_MixPaintbuffers(int ibuf1, int ibuf2, int ibuf3, int count, float fgain
 				l = pbuf1[i].left;
 				r = pbuf1[i].right;
 
-				MIX_CenterFromLeftRight(&l, &r, &c);
+				c = MIX_CenterFromLeftRight( l, r );
 
 				l2 = pbuf2[i].left;
 				r2 = pbuf2[i].right;
 
-				MIX_CenterFromLeftRight(&l2, &r2, &c2);
+				c2 = MIX_CenterFromLeftRight( l2, r2 );
 
 				pbuf3[i].left  = l + l2;
 				pbuf3[i].right = r + r2;
@@ -1539,7 +2051,7 @@ void MIX_MixPaintbuffers(int ibuf1, int ibuf2, int ibuf3, int count, float fgain
 				l = pbuf1[i].left;
 				r = pbuf1[i].right;
 
-				MIX_CenterFromLeftRight(&l, &r, &c);
+				c = MIX_CenterFromLeftRight( l, r );
 
 				pbuf3[i].left  = l + pbuf2[i].left;
 				pbuf3[i].right = r + pbuf2[i].right;
@@ -1554,13 +2066,13 @@ void MIX_MixPaintbuffers(int ibuf1, int ibuf2, int ibuf3, int count, float fgain
 
 		if ( cchan2 == 5 && cchan1 == 5 )
 		{
-			for (i = 0; i < count; i++)
+			if ( snd_mix_optimization.GetBool() )
 			{
-				pbuf3[i].left  = pbuf1[i].left  + pbuf2[i].left;
-				pbuf3[i].right = pbuf1[i].right + pbuf2[i].right;
-				pbufrear3[i].left  = pbufrear1[i].left  + pbufrear2[i].left;
-				pbufrear3[i].right = pbufrear1[i].right + pbufrear2[i].right;
-				pbufcenter3[i].left = pbufcenter1[i].left + pbufcenter2[i].left;
+				Mix555_SIMD( data );
+			}
+			else
+			{
+				Mix555( data );
 			}
 			goto gain5ch;
 		}
@@ -1714,13 +2226,61 @@ void SDEBUG_ShowAvgValue()
 #endif // DEBUG
 }
 
+void ClipStereo( portable_samplepair_t * pBuffer, int nCount )
+{
+	while ( nCount >= 4 )
+	{
+		pBuffer[0].left = iclip( pBuffer[0].left );
+		pBuffer[0].right = iclip( pBuffer[0].right );
+		pBuffer[1].left = iclip( pBuffer[1].left );
+		pBuffer[1].right = iclip( pBuffer[1].right );
+		pBuffer[2].left = iclip( pBuffer[2].left );
+		pBuffer[2].right = iclip( pBuffer[2].right );
+		pBuffer[3].left = iclip( pBuffer[3].left );
+		pBuffer[3].right = iclip( pBuffer[3].right );
+
+		nCount -= 4;
+		pBuffer += 4;
+	}
+	while ( nCount > 0 )
+	{
+		pBuffer->left = iclip( pBuffer->left );
+		pBuffer->right = iclip(pBuffer->right );
+		--nCount;
+		++pBuffer;
+	}
+}
+
+void ClipLeft( portable_samplepair_t * pBuffer, int nCount )
+{
+	while ( nCount >= 8 )
+	{
+		pBuffer[0].left = iclip( pBuffer[0].left );
+		pBuffer[1].left = iclip( pBuffer[1].left );
+		pBuffer[2].left = iclip( pBuffer[2].left );
+		pBuffer[3].left = iclip( pBuffer[3].left );
+		pBuffer[4].left = iclip( pBuffer[4].left );
+		pBuffer[5].left = iclip( pBuffer[5].left );
+		pBuffer[6].left = iclip( pBuffer[6].left );
+		pBuffer[7].left = iclip( pBuffer[7].left );
+
+		nCount -= 8;
+		pBuffer += 8;
+	}
+	while ( nCount > 0 )
+	{
+		pBuffer->left = iclip( pBuffer->left );
+		--nCount;
+		++pBuffer;
+	}
+}
+
 // clip all values in paintbuffer to 16bit.
 // if fsurround is set for paintbuffer, also process rear buffer samples
 
 void MIX_CompressPaintbuffer(int ipaint, int count)
 {
 	VPROF("CompressPaintbuffer");
-	int i;
 	paintbuffer_t *ppaint = MIX_GetPPaintFromIPaint(ipaint);
 	portable_samplepair_t *pbf;
 	portable_samplepair_t *pbr;
@@ -1730,35 +2290,19 @@ void MIX_CompressPaintbuffer(int ipaint, int count)
 	pbr = ppaint->pbufrear;
 	pbc = ppaint->pbufcenter;
 
-	for (i = 0; i < count; i++)
-	{
-		pbf->left = CLIP(pbf->left);
-		pbf->right = CLIP(pbf->right);
-		pbf++;
-	}
+	ClipStereo( pbf, count );
 	
 	if ( ppaint->fsurround )
 	{
 		Assert (pbr);
-
-		for (i = 0; i < count; i++)
-		{
-			pbr->left = CLIP(pbr->left);
-			pbr->right = CLIP(pbr->right);
-			pbr++;
-		}
+		ClipStereo( pbr, count );
 	}
 
 	if ( ppaint->fsurround_center )
 	{
 		Assert (pbc);
-
-		for (i = 0; i < count; i++)
-		{
-			pbc->left = CLIP(pbc->left);
-			//pbc->right = CLIP(pbc->right); mono center channel
-			pbc++;
-		}
+		// mono - left channel
+		ClipLeft( pbc, count );
 	}
 }
 
@@ -1772,7 +2316,7 @@ void MIX_CompressPaintbuffer(int ipaint, int count)
 // will advance any internal pointers on mixed channels; subsequent calls will be at 
 // incorrect offset.
 
-void MIX_MixUpsampleBuffer( CChannelList &list, int ipaintbuffer, int end, int count, int flags )
+void MIX_MixUpsampleBuffer( CChannelList &list, int ipaintbuffer, int64 end, int count, int flags )
 {
 	VPROF("MixUpsampleBuffer");
 	int ipaintcur = MIX_GetCurrentPaintbufferIndex(); // save current paintbuffer
@@ -1792,7 +2336,7 @@ void MIX_MixUpsampleBuffer( CChannelList &list, int ipaintbuffer, int end, int c
 		MIX_MixChannelsToPaintbuffer( list, end, flags, SOUND_11k, SOUND_11k );
 
 		// upsample 11khz buffer by 2x
-		g_AudioDevice->MixUpsample( count / (SOUND_DMA_SPEED / SOUND_11k), FILTERTYPE_LINEAR ); 
+		Device_MixUpsample( count / (SOUND_DMA_SPEED / SOUND_11k), FILTERTYPE_LINEAR ); 
 	}
 
 	if ( list.m_has22kChannels || list.m_has11kChannels )
@@ -1802,7 +2346,7 @@ void MIX_MixUpsampleBuffer( CChannelList &list, int ipaintbuffer, int end, int c
 
 #if (SOUND_DMA_SPEED > SOUND_22k)
 		// upsample 22khz buffer by 2x
-		g_AudioDevice->MixUpsample( count / (SOUND_DMA_SPEED / SOUND_22k), FILTERTYPE_LINEAR );
+		Device_MixUpsample( count / (SOUND_DMA_SPEED / SOUND_22k), FILTERTYPE_LINEAR );
 #endif
 	}
 
@@ -1816,40 +2360,25 @@ void MIX_MixUpsampleBuffer( CChannelList &list, int ipaintbuffer, int end, int c
 }
 
 // upsample and mix sounds into final 44khz versions of the following paintbuffers:
-// SOUND_BUFFER_ROOM, SOUND_BUFFER_FACING, IFACINGAWAY, SOUND_BUFFER_DRY, SOUND_BUFFER_SPEAKER, SOUND_BUFFER_SPECIALs
+// IROOMBUFFER, IFACINGBUFFER, IFACINGAWAY, IDRYBUFFER, ISPEAKERBUFFER
 // dsp fx are then applied to these buffers by the caller.
-// caller also remixes all into final SOUND_BUFFER_PAINT output.
+// caller also remixes all into final IPAINTBUFFER output.
 
-void MIX_UpsampleAllPaintbuffers( CChannelList &list, int end, int count )
+void MIX_UpsampleAllPaintbuffers( CChannelList &list, int64 end, int count )
 {
 	VPROF( "MixUpsampleAll" );
 
 	// 'dry' and 'speaker' channel sounds mix 100% into their corresponding buffers
 
-	// mix and upsample all 'dry' sounds (channels) to 44khz SOUND_BUFFER_DRY paintbuffer
+	// mix and upsample all 'dry' sounds (channels) to 44khz IDRYBUFFER paintbuffer
 
 	if ( list.m_hasDryChannels )
-		MIX_MixUpsampleBuffer( list, SOUND_BUFFER_DRY, end, count, SOUND_MIX_DRY );
+		MIX_MixUpsampleBuffer( list, IDRYBUFFER, end, count, SOUND_MIX_DRY );
 
-	// mix and upsample all 'speaker' sounds (channels) to 44khz SOUND_BUFFER_SPEAKER paintbuffer
+	// mix and upsample all 'speaker' sounds (channels) to 44khz ISPEAKERBUFFER paintbuffer
 	
 	if ( list.m_hasSpeakerChannels )
-		MIX_MixUpsampleBuffer( list, SOUND_BUFFER_SPEAKER, end, count, SOUND_MIX_SPEAKER );
-
-	// mix and upsample all 'special dsp' sounds (channels) to 44khz SOUND_BUFFER_SPECIALs paintbuffer
-
-	for ( int iDSP = 0; iDSP < list.m_nSpecialDSPs.Count(); ++iDSP )
-	{
-		for ( int i = SOUND_BUFFER_SPECIAL_START; i < g_paintBuffers.Count(); ++i )
-		{
-			paintbuffer_t *pSpecialBuffer = MIX_GetPPaintFromIPaint( i );
-			if ( pSpecialBuffer->nSpecialDSP == list.m_nSpecialDSPs[ iDSP ] && pSpecialBuffer->idsp_specialdsp != -1 )
-			{
-				MIX_MixUpsampleBuffer( list, i, end, count, SOUND_MIX_SPECIAL_DSP );
-				break;
-			}
-		}
-	}
+		MIX_MixUpsampleBuffer( list, ISPEAKERBUFFER, end, count, SOUND_MIX_SPEAKER );
 
 	// 'room', 'facing' 'facingaway' sounds are mixed into up to 3 buffers:
 
@@ -1869,16 +2398,16 @@ void MIX_UpsampleAllPaintbuffers( CChannelList &list, int end, int count )
 	if ( !g_bDspOff )		
 	{
 		// only mix to roombuffer if dsp fx are on KDB: perf
-		MIX_ActivatePaintbuffer(SOUND_BUFFER_ROOM);					// operates on MIX_MixChannelsToPaintbuffer
+		MIX_ActivatePaintbuffer(IROOMBUFFER);					// operates on MIX_MixChannelsToPaintbuffer
 	}
 
-	MIX_ActivatePaintbuffer(SOUND_BUFFER_FACING);					
+	MIX_ActivatePaintbuffer(IFACINGBUFFER);					
 
 	if ( g_bdirectionalfx )
 	{
 		// mix to facing away buffer only if directional presets are set
 
-		MIX_ActivatePaintbuffer(SOUND_BUFFER_FACINGAWAY);		
+		MIX_ActivatePaintbuffer(IFACINGAWAYBUFFER);		
 	}
 	
 	// mix 11khz sounds: 
@@ -1890,17 +2419,17 @@ void MIX_UpsampleAllPaintbuffers( CChannelList &list, int end, int count )
 	if ( !g_bDspOff )
 	{
 		// only upsample roombuffer if dsp fx are on KDB: perf
-		MIX_SetCurrentPaintbuffer(SOUND_BUFFER_ROOM);			// operates on MixUpSample
-		g_AudioDevice->MixUpsample( count / (SOUND_DMA_SPEED / SOUND_11k), FILTERTYPE_LINEAR ); 
+		MIX_SetCurrentPaintbuffer(IROOMBUFFER);			// operates on MixUpSample
+		Device_MixUpsample( count / (SOUND_DMA_SPEED / SOUND_11k), FILTERTYPE_LINEAR ); 
 	}
 
-	MIX_SetCurrentPaintbuffer(SOUND_BUFFER_FACING);			
-	g_AudioDevice->MixUpsample( count / (SOUND_DMA_SPEED / SOUND_11k), FILTERTYPE_LINEAR ); 
+	MIX_SetCurrentPaintbuffer(IFACINGBUFFER);			
+	Device_MixUpsample( count / (SOUND_DMA_SPEED / SOUND_11k), FILTERTYPE_LINEAR ); 
 
 	if ( g_bdirectionalfx )
 	{
-		MIX_SetCurrentPaintbuffer(SOUND_BUFFER_FACINGAWAY);	
-		g_AudioDevice->MixUpsample( count / (SOUND_DMA_SPEED / SOUND_11k), FILTERTYPE_LINEAR ); 
+		MIX_SetCurrentPaintbuffer(IFACINGAWAYBUFFER);	
+		Device_MixUpsample( count / (SOUND_DMA_SPEED / SOUND_11k), FILTERTYPE_LINEAR ); 
 	}
 
 	// mix 22khz sounds: 
@@ -1913,17 +2442,17 @@ void MIX_UpsampleAllPaintbuffers( CChannelList &list, int end, int count )
 	{
 		// only upsample roombuffer if dsp fx are on KDB: perf
 
-		MIX_SetCurrentPaintbuffer(SOUND_BUFFER_ROOM);
-		g_AudioDevice->MixUpsample( count / (SOUND_DMA_SPEED / SOUND_22k), FILTERTYPE_LINEAR );
+		MIX_SetCurrentPaintbuffer(IROOMBUFFER);
+		Device_MixUpsample( count / (SOUND_DMA_SPEED / SOUND_22k), FILTERTYPE_LINEAR );
 	}
 
-	MIX_SetCurrentPaintbuffer(SOUND_BUFFER_FACING);
-	g_AudioDevice->MixUpsample( count / (SOUND_DMA_SPEED / SOUND_22k), FILTERTYPE_LINEAR );
+	MIX_SetCurrentPaintbuffer(IFACINGBUFFER);
+	Device_MixUpsample( count / (SOUND_DMA_SPEED / SOUND_22k), FILTERTYPE_LINEAR );
 
 	if ( g_bdirectionalfx )
 	{
-		MIX_SetCurrentPaintbuffer(SOUND_BUFFER_FACINGAWAY);
-		g_AudioDevice->MixUpsample( count / (SOUND_DMA_SPEED / SOUND_22k), FILTERTYPE_LINEAR );
+		MIX_SetCurrentPaintbuffer(IFACINGAWAYBUFFER);
+		Device_MixUpsample( count / (SOUND_DMA_SPEED / SOUND_22k), FILTERTYPE_LINEAR );
 	}
 #endif
 
@@ -1932,10 +2461,10 @@ void MIX_UpsampleAllPaintbuffers( CChannelList &list, int end, int count )
 
 	MIX_DeactivateAllPaintbuffers();
 
-	MIX_SetCurrentPaintbuffer(SOUND_BUFFER_PAINT);
+	MIX_SetCurrentPaintbuffer(IPAINTBUFFER);
 }
 
-ConVar snd_cull_duplicates("snd_cull_duplicates","0",FCVAR_ALLOWED_IN_COMPETITIVE,"If nonzero, aggressively cull duplicate sounds during mixing. The number specifies the number of duplicates allowed to be played.");
+ConVar snd_cull_duplicates("snd_cull_duplicates","0",FCVAR_NONE,"If nonzero, aggressively cull duplicate sounds during mixing. The number specifies the number of duplicates allowed to be played.");
 
 
 // Helper class for determining whether a given channel number should be culled from
@@ -1962,7 +2491,7 @@ public:
 	{
 		int m_channelNum;
 		int m_vol; // max volume of sound. -1 means "do not cull, ever, do not even do the math"
-		unsigned int m_nameHash; // a unique id for a sound file
+		uintp m_nameHash; // a unique id for a sound file
 	};
 protected:
 	sChannelVolData m_channelInfo[MAX_CHANNELS];
@@ -1994,12 +2523,12 @@ void CChannelCullList::Initialize( CChannelList &list )
 		{
 			m_channelInfo[i].m_vol = ChannelLoudestCurVolume(ch);
 			AssertMsg(m_channelInfo[i].m_vol >= 0, "Sound channel has a negative volume?");
-			m_channelInfo[i].m_nameHash = (unsigned int) ch->sfx;
+			m_channelInfo[i].m_nameHash = (uintp) ch->sfx;
 		}
 		else
 		{
 			m_channelInfo[i].m_vol = -1;
-			m_channelInfo[i].m_nameHash = NULL; // doesn't matter
+			m_channelInfo[i].m_nameHash = (uintp) 0; // doesn't matter
 		}
 	}
 
@@ -2029,7 +2558,7 @@ void CChannelCullList::Initialize( CChannelList &list )
 			 ++j )
 		{
 			// j steps through the sorted list until we find ourselves:
-			if (m_channelInfo[j].m_nameHash == (unsigned int)(ch->sfx))
+			if (m_channelInfo[j].m_nameHash == (uintp)(ch->sfx))
 			{
 				// that's another channel playing this sound but louder than me
 				++howManyLouder;
@@ -2048,7 +2577,7 @@ void CChannelCullList::Initialize( CChannelList &list )
 	}
 }
 
-ConVar snd_mute_losefocus("snd_mute_losefocus", "1", FCVAR_ARCHIVE);
+
 
 // build a list of channels that will actually do mixing in this update
 // remove all active channels that won't mix for some reason
@@ -2056,7 +2585,6 @@ void MIX_BuildChannelList( CChannelList &list )
 {
 	VPROF("MIX_BuildChannelList");
 	g_ActiveChannels.GetActiveChannels( list );
-	list.m_nSpecialDSPs.RemoveAll();
 	list.m_hasDryChannels = false;
 	list.m_hasSpeakerChannels = false;
 	list.m_has11kChannels = false;
@@ -2065,16 +2593,14 @@ void MIX_BuildChannelList( CChannelList &list )
 	bool delayStartServer = false;
 	bool delayStartClient = false;
 	bool bPaused = g_pSoundServices->IsGamePaused();
-#ifdef POSIX
-	bool bActive = g_pSoundServices->IsGameActive();
-	bool bStopOnFocusLoss = !bActive && snd_mute_losefocus.GetBool();
-#endif
 
 	CChannelCullList cullList;
 	if (snd_cull_duplicates.GetInt() > 0)
 	{
 		cullList.Initialize(list);
 	}
+
+	AUTO_LOCK( g_SoundMapMutex );
 
 	// int numQuashed = 0;
 	for ( int i = list.Count(); --i >= 0; )
@@ -2086,7 +2612,8 @@ void MIX_BuildChannelList( CChannelList &list )
 		CAudioSource *pSource = NULL;
 		if ( ch->pMixer->IsReadyToMix() )
 		{
-			pSource = S_LoadSound( ch->sfx, ch );
+			SoundError soundError;
+			pSource = S_LoadSound( ch->sfx, ch, soundError );
 
 			// Don't mix sound data for sounds with 'zero' volume. If it's a non-looping sound, 
 			// just remove the sound when its volume goes to zero. If it's a 'dry' channel sound (ie: music)
@@ -2094,7 +2621,7 @@ void MIX_BuildChannelList( CChannelList &list )
 
 			// To be 'zero' volume, all target volume and current volume values must all be less than 5
 
-			bool bZeroVolume = BChannelLowVolume( ch, 1 );
+			bool bZeroVolume = BChannelLowVolume( ch, 0 );
 
 			if ( !pSource || ( bZeroVolume && !pSource->IsLooped() && !ch->flags.bdry ) )
 			{
@@ -2108,28 +2635,13 @@ void MIX_BuildChannelList( CChannelList &list )
 			}
 			else if ( bZeroVolume )
 			{
-				bRemove = true;
+				list.m_quashed[i] = true;
 			}
 			// If the sound wants to stop when the game pauses, do so
 			if ( bPaused && SND_ShouldPause(ch) )
 			{
 				bRemove = true;
 			}
-#ifdef POSIX
-			// If we aren't the active app and the option for background audio isn't on, mute the audio
-			// Windows has it's own system for background muting
-			if ( !bRemove && bStopOnFocusLoss )
-			{
-				bRemove = true;
-
-				// Free up the sound channels otherwise they start filling up
-				if ( pSource && ( !pSource->IsLooped() && !pSource->IsStreaming() ) )
-				{
-					S_FreeChannel( ch );
-				}
-
-			}
-#endif
 			// On lowend, aggressively cull duplicate sounds.
 			if ( !bRemove && snd_cull_duplicates.GetInt() > 0 )
 			{
@@ -2151,6 +2663,10 @@ void MIX_BuildChannelList( CChannelList &list )
 		}
 		else
 		{
+			if ( ch->pMixer->GetSource()->GetCacheStatus() == CAudioSource::AUDIO_ERROR_LOADING )
+			{
+				S_FreeChannel( ch );
+			}
 			bRemove = true;
 		}
 
@@ -2162,13 +2678,6 @@ void MIX_BuildChannelList( CChannelList &list )
 		if ( ch->flags.bSpeaker )
 		{
 			list.m_hasSpeakerChannels = true;
-		}
-		if ( ch->special_dsp != 0 )
-		{
-			if ( list.m_nSpecialDSPs.Find( ch->special_dsp ) == -1 )
-			{
-				list.m_nSpecialDSPs.AddToTail( ch->special_dsp );
-			}
 		}
 		if ( ch->flags.bdry )
 		{
@@ -2187,7 +2696,7 @@ void MIX_BuildChannelList( CChannelList &list )
 		{
 			list.m_has44kChannels = true;
 		}
-		if ( ch->flags.delayed_start && !SND_IsMouth(ch) )
+		if ( ch->flags.delayed_start && !ch->flags.m_bHasMouth )
 		{
 			if ( ch->flags.fromserver )
 			{
@@ -2228,25 +2737,23 @@ void MIX_BuildChannelList( CChannelList &list )
 // All channels are mixed in a paintbuffer and then sent to 
 // hardware.
 
-// A mix pass is performed, resulting in mixed sounds in SOUND_BUFFER_ROOM, SOUND_BUFFER_FACING, SOUND_BUFFER_FACINGAWAY, SOUND_BUFFER_DRY, SOUND_BUFFER_SPEAKER, SOUND_BUFFER_SPECIALs
+// A mix pass is performed, resulting in mixed sounds in IROOMBUFFER, IFACINGBUFFER, IFACINGAWAYBUFFER, IDRYBUFFER, ISPEAKERBUFFER:
                                   
-	// directional sounds are panned and mixed between SOUND_BUFFER_FACING and SOUND_BUFFER_FACINGAWAY
-	// omnidirectional sounds are panned 100% into SOUND_BUFFER_FACING
+	// directional sounds are panned and mixed between IFACINGBUFFER and IFACINGAWAYBUFFER
+	// omnidirectional sounds are panned 100% into IFACINGBUFFER
 	// sound sources far from player (ie: near back of room ) are mixed in proportion to this distance
-	// into SOUND_BUFFER_ROOM
-	// sounds with ch->bSpeaker set are mixed in mono into SOUND_BUFFER_SPEAKER
-	// sounds with ch->bSpecialDSP set are mixed in mono into SOUND_BUFFER_SPECIALs
+	// into IROOMBUFFER
+	// sounds with ch->bSpeaker set are mixed in mono into ISPEAKERBUFFER
 
-// dsp_facingaway fx (2 or 4ch filtering) are then applied to the SOUND_BUFFER_FACINGAWAY
-// dsp_speaker fx (1ch) are then applied to the SOUND_BUFFER_SPEAKER
-// dsp_specialdsp fx (1ch) are then applied to the SOUND_BUFFER_SPECIALs
-// dsp_room fx (1ch reverb) are then applied to the SOUND_BUFFER_ROOM
+// dsp_facingaway fx (2 or 4ch filtering) are then applied to the IFACINGAWAYBUFFER
+// dsp_speaker fx (1ch) are then applied to the ISPEAKERBUFFER
+// dsp_room fx (1ch reverb) are then applied to the IROOMBUFFER
 
-// All buffers are recombined into the SOUND_BUFFER_PAINT
+// All buffers are recombined into the IPAINTBUFFER
 
-// The dsp_water and dsp_player fx are applied in series to the SOUND_BUFFER_PAINT
+// The dsp_water and dsp_player fx are applied in series to the IPAINTBUFFER
 
-// Finally, the SOUND_BUFFER_DRY buffer is mixed into the SOUND_BUFFER_PAINT
+// Finally, the IDRYBUFFER buffer is mixed into the IPAINTBUFFER
 
 extern ConVar dsp_off;
 extern ConVar snd_profile;
@@ -2261,18 +2768,34 @@ extern ConVar dsp_vol_2ch;
 
 extern void MXR_SetCurrentSoundMixer( const char *szsoundmixer );
 extern ConVar snd_soundmixer;
+ConVar snd_mix_dry_volume("snd_mix_dry_volume", "1.0", FCVAR_NONE );
+ConVar snd_mix_test1( "snd_mix_test1", "1.0", FCVAR_NONE );
+ConVar snd_mix_test2( "snd_mix_test2", "1.0", FCVAR_NONE );
 
-void MIX_PaintChannels( int endtime, bool bIsUnderwater )
+void MIX_PaintChannels( int64 endtime, bool bIsUnderwater )
 {
 	VPROF("MIX_PaintChannels");
-	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
 
-	int 	end;
+#if !defined( USE_AUDIO_DEVICE_V1 ) && defined( USE_SDL )
+	//Our path for make snd_mute_losefocus work on Linux/Mac.
+	extern IVEngineClient *engineClient;
+	if ( engineClient && g_AudioDevice )
+	{
+		g_AudioDevice->UpdateFocus( engineClient->IsActiveApp() );
+	}
+#endif
+
+	int64 	end;
 	int		count;
-	bool	b_spatial_delays = dsp_enhance_stereo.GetInt() != 0 ? true : false;
+#ifdef CSTRIKE15
+	bool	b_spatial_delays = false;
+#else
+	bool	b_spatial_delays = dsp_enhance_stereo.GetBool();
+#endif
+
 	bool room_fsurround_sav;
 	bool room_fsurround_center_sav;
-	paintbuffer_t	*proom = MIX_GetPPaintFromIPaint(SOUND_BUFFER_ROOM);
+	paintbuffer_t	*proom = MIX_GetPPaintFromIPaint(IROOMBUFFER);
 
 	CheckNewDspPresets();
 
@@ -2314,9 +2837,6 @@ void MIX_PaintChannels( int endtime, bool bIsUnderwater )
 	
 	// get dsp preset gain values, update gain crossfaders, used when mixing dsp processed buffers into paintbuffer
 	SDEBUG_ShowAvgValue();
-	
-	// the cache needs to hold the audio in memory during mixing, so tell it that mixing is starting
-	wavedatacache->OnMixBegin();
 
 	while ( g_paintedtime < endtime )
 	{
@@ -2334,90 +2854,37 @@ void MIX_PaintChannels( int endtime, bool bIsUnderwater )
 		count = end - g_paintedtime;
 
 		// clear all mix buffers
-		g_AudioDevice->MixBegin( count );
+		MIX_ClearAllPaintBuffers( count, false );
 		
 		// upsample all mix buffers.
 		// results in 44khz versions of:
-		// SOUND_BUFFER_ROOM, SOUND_BUFFER_FACING, SOUND_BUFFER_FACINGAWAY, SOUND_BUFFER_DRY, SOUND_BUFFER_SPEAKER, SOUND_BUFFER_SPECIALs
+		// IROOMBUFFER, IFACINGBUFFER, IFACINGAWAYBUFFER, IDRYBUFFER, ISPEAKERBUFFER
 		MIX_UpsampleAllPaintbuffers( list, end, count );
 
 		// apply appropriate dsp fx to each buffer, remix buffers into single quad output buffer
 		// apply 2 or 4ch filtering to IFACINGAWAY buffer
 		if ( g_bdirectionalfx )
 		{
-			g_AudioDevice->ApplyDSPEffects( idsp_facingaway, MIX_GetPFrontFromIPaint(SOUND_BUFFER_FACINGAWAY), MIX_GetPRearFromIPaint(SOUND_BUFFER_FACINGAWAY), MIX_GetPCenterFromIPaint(SOUND_BUFFER_FACINGAWAY), count );
+			Device_ApplyDSPEffects( idsp_facingaway, MIX_GetPFrontFromIPaint(IFACINGAWAYBUFFER), MIX_GetPRearFromIPaint(IFACINGAWAYBUFFER), MIX_GetPCenterFromIPaint(IFACINGAWAYBUFFER), count );
 		}
 
 		if ( !g_bDspOff && list.m_hasSpeakerChannels )
 		{
-			// apply 1ch filtering to SOUND_BUFFER_SPEAKER
-			g_AudioDevice->ApplyDSPEffects( idsp_speaker, MIX_GetPFrontFromIPaint(SOUND_BUFFER_SPEAKER), MIX_GetPRearFromIPaint(SOUND_BUFFER_SPEAKER), MIX_GetPCenterFromIPaint(SOUND_BUFFER_SPEAKER), count );
+			// apply 1ch filtering to ISPEAKERBUFFER
+			Device_ApplyDSPEffects( idsp_speaker, MIX_GetPFrontFromIPaint(ISPEAKERBUFFER), MIX_GetPRearFromIPaint(ISPEAKERBUFFER), MIX_GetPCenterFromIPaint(ISPEAKERBUFFER), count );
 			
-			// mix SOUND_BUFFER_SPEAKER with SOUND_BUFFER_ROOM and SOUND_BUFFER_FACING
-			MIX_ScalePaintBuffer( SOUND_BUFFER_SPEAKER, count, 0.7 );
+			// mix ISPEAKERBUFFER with IROOMBUFFER and IFACINGBUFFER
+			MIX_ScalePaintBuffer( ISPEAKERBUFFER, count, 0.7 );
 
-			MIX_MixPaintbuffers( SOUND_BUFFER_SPEAKER, SOUND_BUFFER_FACING, SOUND_BUFFER_FACING, count, 1.0 );	// +70% dry speaker
+			MIX_MixPaintbuffers( ISPEAKERBUFFER, IFACINGBUFFER, IFACINGBUFFER, count, 1.0 );	// +70% dry speaker
 
-			MIX_ScalePaintBuffer( SOUND_BUFFER_SPEAKER, count, 0.43 );
+			MIX_ScalePaintBuffer( ISPEAKERBUFFER, count, 0.43 );
 
-			MIX_MixPaintbuffers( SOUND_BUFFER_SPEAKER, SOUND_BUFFER_ROOM, SOUND_BUFFER_ROOM, count, 1.0 );		// +30% wet speaker
-		}
-
-		if ( !g_bDspOff )
-		{
-			// apply 1ch filtering to SOUND_BUFFER_SPECIALs
-			for ( int iDSP = 0; iDSP < list.m_nSpecialDSPs.Count(); ++iDSP )
-			{
-				bool bFoundMixer = false;
-				
-				for ( int i = SOUND_BUFFER_SPECIAL_START; i < g_paintBuffers.Count(); ++i )
-				{
-					paintbuffer_t *pSpecialBuffer = MIX_GetPPaintFromIPaint( i );
-					if ( pSpecialBuffer->nSpecialDSP == list.m_nSpecialDSPs[ iDSP ] && pSpecialBuffer->idsp_specialdsp != -1 )
-					{
-						g_AudioDevice->ApplyDSPEffects( pSpecialBuffer->idsp_specialdsp, MIX_GetPFrontFromIPaint( i ), MIX_GetPRearFromIPaint( i ), MIX_GetPCenterFromIPaint( i ), count );
-
-						// mix SOUND_BUFFER_SPECIALs with SOUND_BUFFER_ROOM and SOUND_BUFFER_FACING
-						MIX_ScalePaintBuffer( i, count, 0.7 );
-
-						MIX_MixPaintbuffers( i, SOUND_BUFFER_FACING, SOUND_BUFFER_FACING, count, 1.0 );	// +70% dry speaker
-
-						MIX_ScalePaintBuffer( i, count, 0.43 );
-
-						MIX_MixPaintbuffers( i, SOUND_BUFFER_ROOM, SOUND_BUFFER_ROOM, count, 1.0 );		// +30% wet speaker
-						
-						bFoundMixer = true;
-
-						break;
-					}
-				}
-
-				// Couldn't find a mixer with the correct DSP, so make a new one!
-				if ( !bFoundMixer )
-				{
-					bool bSurroundCenter = g_AudioDevice->IsSurroundCenter();
-					bool bSurround = g_AudioDevice->IsSurround() || bSurroundCenter;
-
-					int nIndex = g_paintBuffers.AddToTail();
-					MIX_InitializePaintbuffer( &(g_paintBuffers[ nIndex ]), bSurround, bSurroundCenter );
-
-					g_paintBuffers[ nIndex ].flags = SOUND_BUSS_SPECIAL_DSP;
-
-					// special dsp buffer mixes to mono
-					g_paintBuffers[ nIndex ].fsurround = false;
-					g_paintBuffers[ nIndex ].fsurround_center = false;
-
-					g_paintBuffers[ nIndex ].idsp_specialdsp = -1;
-					g_paintBuffers[ nIndex ].nSpecialDSP = list.m_nSpecialDSPs[ iDSP ];
-
-					g_paintBuffers[ nIndex ].nPrevSpecialDSP = g_paintBuffers[ nIndex ].nSpecialDSP;
-					g_paintBuffers[ nIndex ].idsp_specialdsp = DSP_Alloc( g_paintBuffers[ nIndex ].nSpecialDSP, 300, 1 );
-				}
-			}
+			MIX_MixPaintbuffers( ISPEAKERBUFFER, IROOMBUFFER, IROOMBUFFER, count, 1.0 );		// +30% wet speaker
 		}
 
 		// apply dsp_room effects to room buffer
-		g_AudioDevice->ApplyDSPEffects( Get_idsp_room(), MIX_GetPFrontFromIPaint(SOUND_BUFFER_ROOM), MIX_GetPRearFromIPaint(SOUND_BUFFER_ROOM), MIX_GetPCenterFromIPaint(SOUND_BUFFER_ROOM), count );
+		Device_ApplyDSPEffects( Get_idsp_room(), MIX_GetPFrontFromIPaint(IROOMBUFFER), MIX_GetPRearFromIPaint(IROOMBUFFER), MIX_GetPCenterFromIPaint(IROOMBUFFER), count );
 		
 		// save room buffer surround status, in case we upconvert it
 		room_fsurround_sav = proom->fsurround;
@@ -2427,25 +2894,33 @@ void MIX_PaintChannels( int endtime, bool bIsUnderwater )
 		if ( b_spatial_delays && !g_bDspOff && !DSP_RoomDSPIsOff() )
 		{
 			// upgrade mono room buffer to surround status so we can apply spatial delays to all channels
-			MIX_ConvertBufferToSurround( SOUND_BUFFER_ROOM );
-			g_AudioDevice->ApplyDSPEffects( idsp_spatial, MIX_GetPFrontFromIPaint(SOUND_BUFFER_ROOM),  MIX_GetPRearFromIPaint(SOUND_BUFFER_ROOM), MIX_GetPCenterFromIPaint(SOUND_BUFFER_ROOM), count );
+			MIX_ConvertBufferToSurround( IROOMBUFFER );
+			Device_ApplyDSPEffects( idsp_spatial, MIX_GetPFrontFromIPaint(IROOMBUFFER),  MIX_GetPRearFromIPaint(IROOMBUFFER), MIX_GetPCenterFromIPaint(IROOMBUFFER), count );
 		}
 
 		if ( g_bdirectionalfx )		// KDB: perf
 		{
-			// Recombine IFACING and IFACINGAWAY buffers into SOUND_BUFFER_PAINT
-			MIX_MixPaintbuffers( SOUND_BUFFER_FACING, SOUND_BUFFER_FACINGAWAY, SOUND_BUFFER_PAINT, count, DSP_NOROOM_MIX );
+			// Recombine IFACING and IFACINGAWAY buffers into IPAINTBUFFER
+			MIX_MixPaintbuffers( IFACINGBUFFER, IFACINGAWAYBUFFER, IPAINTBUFFER, count, DSP_NOROOM_MIX );
 			
 			// Add in dsp room fx to paintbuffer, mix at 75%
-			MIX_MixPaintbuffers( SOUND_BUFFER_ROOM, SOUND_BUFFER_PAINT, SOUND_BUFFER_PAINT, count, DSP_ROOM_MIX );
+			MIX_MixPaintbuffers( IROOMBUFFER, IPAINTBUFFER, IPAINTBUFFER, count, DSP_ROOM_MIX );
 		} 
 		else
 		{
-			// Mix IFACING buffer with SOUND_BUFFER_ROOM
-			// (SOUND_BUFFER_FACINGAWAY contains no data, IFACINGBBUFFER has full dry mix based on distance from listener)
+			// Mix IFACING buffer with IROOMBUFFER
+			// (IFACINGAWAYBUFFER contains no data, IFACINGBBUFFER has full dry mix based on distance from listener)
 			// if dsp disabled, mix 100% facingbuffer, otherwise, mix 75% facingbuffer + roombuffer
+
+			/*MIX_ScalePaintBuffer( IROOMBUFFER, count, snd_mix_test1.GetFloat() );*/
+			float flDryVolume = snd_mix_dry_volume.GetFloat();
+			if( flDryVolume < 1.0 )
+			{
+				MIX_ScalePaintBuffer( IFACINGBUFFER, count, flDryVolume );
+			}
+
 			float mix = g_bDspOff ? 1.0 : DSP_ROOM_MIX;
-			MIX_MixPaintbuffers( SOUND_BUFFER_ROOM, SOUND_BUFFER_FACING, SOUND_BUFFER_PAINT, count, mix );	
+			MIX_MixPaintbuffers( IROOMBUFFER, IFACINGBUFFER, IPAINTBUFFER, count, mix );	
 		}
 
 		// restore room buffer surround status, in case we upconverted it 
@@ -2456,42 +2931,39 @@ void MIX_PaintChannels( int endtime, bool bIsUnderwater )
 		if ( bIsUnderwater )
 		{
 			// BUG: if out of water, previous delays will be heard. must clear dly buffers.
-			g_AudioDevice->ApplyDSPEffects( idsp_water, MIX_GetPFrontFromIPaint(SOUND_BUFFER_PAINT), MIX_GetPRearFromIPaint(SOUND_BUFFER_PAINT), MIX_GetPCenterFromIPaint(SOUND_BUFFER_PAINT), count );
+			Device_ApplyDSPEffects( idsp_water, MIX_GetPFrontFromIPaint(IPAINTBUFFER), MIX_GetPRearFromIPaint(IPAINTBUFFER), MIX_GetPCenterFromIPaint(IPAINTBUFFER), count );
 		}
 
 		// find dsp gain
-		SDEBUG_GetAvgIn(SOUND_BUFFER_PAINT, count);
+		SDEBUG_GetAvgIn(IPAINTBUFFER, count);
 
 		// Apply player fx dsp_player (serial in-line) - does nothing if dsp fx are disabled
-		g_AudioDevice->ApplyDSPEffects( idsp_player, MIX_GetPFrontFromIPaint(SOUND_BUFFER_PAINT),  MIX_GetPRearFromIPaint(SOUND_BUFFER_PAINT), MIX_GetPCenterFromIPaint(SOUND_BUFFER_PAINT), count );
+		Device_ApplyDSPEffects( idsp_player, MIX_GetPFrontFromIPaint(IPAINTBUFFER),  MIX_GetPRearFromIPaint(IPAINTBUFFER), MIX_GetPCenterFromIPaint(IPAINTBUFFER), count );
 
 		// display dsp gain
-		SDEBUG_GetAvgOut(SOUND_BUFFER_PAINT, count);
+		SDEBUG_GetAvgOut(IPAINTBUFFER, count);
 
 /*
 		// apply left/center/right/lrear/rrear spatial delays to paint buffer
 
 		if ( b_spatial_delays )
-			g_AudioDevice->ApplyDSPEffects( idsp_spatial, MIX_GetPFrontFromIPaint(SOUND_BUFFER_PAINT),  MIX_GetPRearFromIPaint(SOUND_BUFFER_PAINT), MIX_GetPCenterFromIPaint(SOUND_BUFFER_PAINT), count );
+			Device_ApplyDSPEffects( idsp_spatial, MIX_GetPFrontFromIPaint(IPAINTBUFFER),  MIX_GetPRearFromIPaint(IPAINTBUFFER), MIX_GetPCenterFromIPaint(IPAINTBUFFER), count );
 */
 		// Add dry buffer, set output gain to water * player dsp gain (both 1.0 if not active)
 
-		MIX_MixPaintbuffers( SOUND_BUFFER_PAINT, SOUND_BUFFER_DRY, SOUND_BUFFER_PAINT, count, 1.0);
+		MIX_MixPaintbuffers( IPAINTBUFFER, IDRYBUFFER, IPAINTBUFFER, count, 1.0);
 
 		// clip all values > 16 bit down to 16 bit
 		// NOTE: This is required - the hardware buffer transfer routines no longer perform clipping.
-		MIX_CompressPaintbuffer( SOUND_BUFFER_PAINT, count );
+		MIX_CompressPaintbuffer( IPAINTBUFFER, count );
 
-		// transfer SOUND_BUFFER_PAINT paintbuffer out to DMA buffer
-		MIX_SetCurrentPaintbuffer( SOUND_BUFFER_PAINT );
+		// transfer IPAINTBUFFER paintbuffer out to DMA buffer
+		MIX_SetCurrentPaintbuffer( IPAINTBUFFER );
 
 		g_AudioDevice->TransferSamples( end );
 
 		g_paintedtime = end;
 	}
-
-	// the cache needs to hold the audio in memory during mixing, so tell it that mixing is complete
-	wavedatacache->OnMixEnd();
 }
 
 // Applies volume scaling (evenly) to all fl,fr,rl,rr volumes
@@ -2500,13 +2972,13 @@ void MIX_PaintChannels( int endtime, bool bIsUnderwater )
 
 // Called just before mixing wav data to current paintbuffer.
 // a) if another player in a multiplayer game is speaking, scale all volumes down.
-// b) if mixing to SOUND_BUFFER_ROOM, scale all volumes by ch.dspmix and dsp_room gain
-// c) if mixing to SOUND_BUFFER_FACINGAWAY, scale all volumes by ch.dspface and dsp_facingaway gain
+// b) if mixing to IROOMBUFFER, scale all volumes by ch.dspmix and dsp_room gain
+// c) if mixing to IFACINGAWAYBUFFER, scale all volumes by ch.dspface and dsp_facingaway gain
 // d) If SURROUND_ON, but buffer is not surround, recombined front/rear volumes
 
 // returns false if channel is to be entirely skipped. 
 
-bool MIX_ScaleChannelVolume( paintbuffer_t *ppaint, channel_t *pChannel, int volume[CCHANVOLUMES], int mixchans )
+bool MIX_ScaleChannelVolume( paintbuffer_t *ppaint, channel_t *pChannel, float volume[CCHANVOLUMES], int mixchans )
 {
 	int i;
 	int	mixflag = ppaint->flags;
@@ -2519,7 +2991,9 @@ bool MIX_ScaleChannelVolume( paintbuffer_t *ppaint, channel_t *pChannel, int vol
 	ChannelCopyVolumes( pChannel, volume, 0, CCHANVOLUMES );
 
 	dspmix = pChannel->dspmix;
-	
+	dspmix *= 256.0;						// Pre-multiply the dspmix by 256 so we can do integer arithmetic
+											// It will reduce LHS on game console.
+
 	// if dsp is off, or room dsp is off, mix 0% to mono room buffer, 100% to facing buffer
 
 	if ( g_bDspOff || DSP_RoomDSPIsOff() )
@@ -2527,9 +3001,9 @@ bool MIX_ScaleChannelVolume( paintbuffer_t *ppaint, channel_t *pChannel, int vol
 	
 	// duck all sound volumes except speaker's voice
 #if !defined( NO_VOICE )
-	int duckScale = min((int)(g_DuckScale * 256), g_SND_VoiceOverdriveInt);
+	int duckScale = MIN(g_DuckScaleInt256, g_SND_VoiceOverdriveInt);		// g_SND_VoiceOverdriveInt is already multipled by 256
 #else
-	int duckScale = (int)(g_DuckScale * 256);
+	int duckScale = g_DuckScaleInt256;
 #endif
 	if( duckScale < 256 )
 	{
@@ -2540,7 +3014,7 @@ bool MIX_ScaleChannelVolume( paintbuffer_t *ppaint, channel_t *pChannel, int vol
 			{
 				// Apply voice overdrive..
 				for (i = 0; i < CCHANVOLUMES; i++)
-					volume[i] = (volume[i] * duckScale) >> 8;
+					volume[i] = (volume[i] * duckScale) / 256.0;
 			}
 		}
 	}
@@ -2551,13 +3025,13 @@ bool MIX_ScaleChannelVolume( paintbuffer_t *ppaint, channel_t *pChannel, int vol
 	if ( mixflag & SOUND_BUSS_ROOM )
 	{
 		// set dsp mix volume, scaled by global dsp_volume
+		// Values are pre-multiplied by 256 
+		int dspmixvol = imin( (int)(dspmix * g_dsp_volume), 256 );		// LHS
 
-		float dspmixvol = fpmin(dspmix * g_dsp_volume, 1.0f);
-
-		// if dspmix is 1.0, 100% of sound goes to SOUND_BUFFER_ROOM and 0% to SOUND_BUFFER_FACING
+		// if dspmix is 1.0, 100% of sound goes to IROOMBUFFER and 0% to IFACINGBUFFER
 
 		for (i = 0; i < CCHANVOLUMES; i++)
-			volume[i] = (int)((float)(volume[i]) * dspmixvol);
+			volume[i] = ( volume[i] * dspmixvol ) / 256.0f;
 	}
 
 	// If global dsp volume is less than 1, reduce dspmix (ie: increase dry volume)
@@ -2602,18 +3076,24 @@ bool MIX_ScaleChannelVolume( paintbuffer_t *ppaint, channel_t *pChannel, int vol
 	if ( mixflag & SOUND_BUSS_FACING )
 	{
 		// facing player
-		// if dspface is 1.0, 100% of sound goes to SOUND_BUFFER_FACING
+		// if dspface is 1.0, 100% of sound goes to IFACINGBUFFER
+
+		float fMultiplier = scale * ( 256.0f - dspmix );				// dspmix is pre-multiplied by 256
+		int nMultiplier = (int)fMultiplier;								// LHS
 
 		for (i = 0; i < CCHANVOLUMES; i++)
-			volume[i] = (int)((float)(volume[i]) * scale * (1.0 - dspmix));
+			volume[i] = ( volume[i] * nMultiplier ) / 256.0f;
 	}
 	else if ( mixflag & SOUND_BUSS_FACINGAWAY )
 	{
 		// facing away from player
-		// if dspface is 0.0, 100% of sound goes to SOUND_BUFFER_FACINGAWAY
+		// if dspface is 0.0, 100% of sound goes to IFACINGAWAYBUFFER
+
+		float fMultiplier = ( 1.0f - scale ) * ( 256.0f - dspmix );		// dspmix is pre-multiplied by 256
+		int nMultiplier = (int)fMultiplier;								// LHS
 
 		for (i = 0; i < CCHANVOLUMES; i++)
-			volume[i] = (int)((float)(volume[i]) * (1.0 - scale) * (1.0 - dspmix));
+			volume[i] = ( volume[i] * nMultiplier ) / 256.0f;
 	}
 
 	// NOTE: this must occur last in this routine: 
@@ -2623,22 +3103,33 @@ bool MIX_ScaleChannelVolume( paintbuffer_t *ppaint, channel_t *pChannel, int vol
 		// if 4ch or 5ch spatialization on, but current mix buffer is 2ch, 
 		// recombine front + rear volumes (revert to 2ch spatialization)
 
-		volume[IFRONT_RIGHT] += volume[IREAR_RIGHT];
-		volume[IFRONT_LEFT]  += volume[IREAR_LEFT];
+		// Use temp variables to reduce LHS
+		int nFrontRight = volume[IFRONT_RIGHT];
+		int nFrontLeft = volume[IFRONT_LEFT];
+		int nFrontRightD = volume[IFRONT_RIGHTD];
+		int nFrontLeftD = volume[IFRONT_LEFTD];
 
-		volume[IFRONT_RIGHTD] += volume[IREAR_RIGHTD];
-		volume[IFRONT_LEFTD]  += volume[IREAR_LEFTD];
+		nFrontRight += volume[IREAR_RIGHT];
+		nFrontLeft += volume[IREAR_LEFT];
+
+		nFrontRightD += volume[IREAR_RIGHTD];
+		nFrontLeftD += volume[IREAR_LEFTD];
 
 		// if 5 ch, recombine center channel vol
 
 		if ( g_AudioDevice->IsSurroundCenter() )
 		{
-			volume[IFRONT_RIGHT] += volume[IFRONT_CENTER] / 2;
-			volume[IFRONT_LEFT]  += volume[IFRONT_CENTER] / 2;
+			nFrontRight += volume[IFRONT_CENTER] / 2;
+			nFrontLeft  += volume[IFRONT_CENTER] / 2;
 
-			volume[IFRONT_RIGHTD] += volume[IFRONT_CENTERD] / 2;
-			volume[IFRONT_LEFTD]  += volume[IFRONT_CENTERD] / 2;
+			nFrontRightD += volume[IFRONT_CENTERD] / 2;
+			nFrontLeftD += volume[IFRONT_CENTERD] / 2;
 		}
+
+		volume[IFRONT_RIGHT] = nFrontRight;
+		volume[IFRONT_LEFT] = nFrontLeft;
+		volume[IFRONT_RIGHTD] = nFrontRightD;
+		volume[IFRONT_LEFTD] = nFrontLeftD;
 
 		// clear rear & center volumes
 
@@ -2650,13 +3141,14 @@ bool MIX_ScaleChannelVolume( paintbuffer_t *ppaint, channel_t *pChannel, int vol
 		volume[IREAR_LEFTD] = 0;
 		volume[IFRONT_CENTERD] = 0;
 
+		// Note that we pay another set of LHS with iclamp below, we could embed the iclamp above (and have a simpler fzerovolume test).
 	}
 
 	bool fzerovolume = true;
 
 	for (i = 0; i < CCHANVOLUMES; i++)
 	{
-		volume[i] = clamp(volume[i], 0, 255);
+		volume[i] = iclamp(volume[i], 0, 255);
 
 		if (volume[i])
 			fzerovolume = false;
@@ -2766,15 +3258,15 @@ void SND_InitScaletable (void)
 			snd_scaletable[i][j] = ((signed char)j) * i * (1<<SND_SCALE_SHIFT);
 }
 
-void SND_PaintChannelFrom8(portable_samplepair_t *pOutput, int *volume, byte *pData8, int count)
+void SND_PaintChannelFrom8(portable_samplepair_t *pOutput, float *volume, byte *pData8, int count)
 {
-#if	!id386
+#if	1
 	int 	data;
 	int		*lscale, *rscale;
 	int		i;
 
-	lscale = snd_scaletable[volume[0] >> SND_SCALE_SHIFT];
-	rscale = snd_scaletable[volume[1] >> SND_SCALE_SHIFT];
+	lscale = snd_scaletable[int(volume[0]) >> SND_SCALE_SHIFT];
+	rscale = snd_scaletable[int(volume[1]) >> SND_SCALE_SHIFT];
 
 	for (i=0 ; i<count ; i++)
 	{
@@ -2885,14 +3377,14 @@ PCF8_Done:
 
 // grab samples from left source channel only and mix as if mono. 
 // volume array contains appropriate spatialization volumes for doppler left (incoming sound)
-void SW_Mix8StereoDopplerLeft( portable_samplepair_t *pOutput, int *volume, byte *pData, int inputOffset, fixedint rateScaleFix, int outCount ) 
+void SW_Mix8StereoDopplerLeft( portable_samplepair_t *pOutput, float *volume, byte *pData, int inputOffset, fixedint rateScaleFix, int outCount ) 
 {
 	int sampleIndex = 0;
 	fixedint sampleFrac = inputOffset;
 	int		*lscale, *rscale;
 
-	lscale = snd_scaletable[volume[0] >> SND_SCALE_SHIFT];
-	rscale = snd_scaletable[volume[1] >> SND_SCALE_SHIFT];
+	lscale = snd_scaletable[int(volume[0]) >> SND_SCALE_SHIFT];
+	rscale = snd_scaletable[int(volume[1]) >> SND_SCALE_SHIFT];
 
 	for ( int i = 0; i < outCount; i++ )
 	{
@@ -2906,14 +3398,14 @@ void SW_Mix8StereoDopplerLeft( portable_samplepair_t *pOutput, int *volume, byte
 
 // grab samples from right source channel only and mix as if mono.
 // volume array contains appropriate spatialization volumes for doppler right (outgoing sound)
-void SW_Mix8StereoDopplerRight( portable_samplepair_t *pOutput, int *volume, byte *pData, int inputOffset, fixedint rateScaleFix, int outCount ) 
+void SW_Mix8StereoDopplerRight( portable_samplepair_t *pOutput, float *volume, byte *pData, int inputOffset, fixedint rateScaleFix, int outCount ) 
 {
 	int sampleIndex = 0;
 	fixedint sampleFrac = inputOffset;
 	int		*lscale, *rscale;
 
-	lscale = snd_scaletable[volume[0] >> SND_SCALE_SHIFT];
-	rscale = snd_scaletable[volume[1] >> SND_SCALE_SHIFT];
+	lscale = snd_scaletable[int(volume[0]) >> SND_SCALE_SHIFT];
+	rscale = snd_scaletable[int(volume[1]) >> SND_SCALE_SHIFT];
 
 	for ( int i = 0; i < outCount; i++ )
 	{
@@ -2923,22 +3415,20 @@ void SW_Mix8StereoDopplerRight( portable_samplepair_t *pOutput, int *volume, byt
 		sampleIndex += FIX_INTPART(sampleFrac)<<1;
 		sampleFrac = FIX_FRACPART(sampleFrac);
 	}
-
 }
-
 
 // grab samples from left source channel only and mix as if mono. 
 // volume array contains appropriate spatialization volumes for doppler left (incoming sound)
 
-void SW_Mix16StereoDopplerLeft( portable_samplepair_t *pOutput, int *volume, short *pData, int inputOffset, fixedint rateScaleFix, int outCount ) 
+void SW_Mix16StereoDopplerLeft( portable_samplepair_t *pOutput, float *volume, short *pData, int inputOffset, fixedint rateScaleFix, int outCount ) 
 {
 	int sampleIndex = 0;
 	fixedint sampleFrac = inputOffset;
 
 	for ( int i = 0; i < outCount; i++ )
 	{
-		pOutput[i].left += (volume[0] * (int)(pData[sampleIndex]))>>8;
-		pOutput[i].right += (volume[1] * (int)(pData[sampleIndex]))>>8;
+		pOutput[i].left += int((volume[0] * (int)(pData[sampleIndex]))/256.0f);
+		pOutput[i].right += int((volume[1] * (int)(pData[sampleIndex]))/256.0f);
 
 		sampleFrac += rateScaleFix;
 		sampleIndex += FIX_INTPART(sampleFrac)<<1;
@@ -2946,19 +3436,40 @@ void SW_Mix16StereoDopplerLeft( portable_samplepair_t *pOutput, int *volume, sho
 	}
 }
 
+void SW_Mix16StereoDopplerLeft_Interp( portable_samplepair_t *pOutput, float *volume, short *pData, int inputOffset, fixedint rateScaleFix, int outCount ) 
+{
+	int sampleIndex = 0;
+	fixedint rateScaleFix14 = FIX_28TO14(rateScaleFix);		// convert 28 bit fixed point to 14 bit fixed point
+	fixedint sampleFrac14   = FIX_28TO14(inputOffset);
+
+	for ( int i = 0; i < outCount; i++ )
+	{
+		int first   = (int)(pData[sampleIndex]);
+		int second  = (int)(pData[sampleIndex + 2]);	
+
+		int interpl = first + (((second - first) * (int)sampleFrac14) >> 14);
+
+		pOutput[i].left += int((volume[0] * interpl) / 256.0f);
+		pOutput[i].right += int((volume[1] * interpl) / 256.0f);
+
+		sampleFrac14 += rateScaleFix14;
+		sampleIndex += FIX_INTPART14(sampleFrac14) << 1;
+		sampleFrac14 = FIX_FRACPART14(sampleFrac14);
+	}
+}
 
 // grab samples from right source channel only and mix as if mono.
 // volume array contains appropriate spatialization volumes for doppler right (outgoing sound)
 
-void SW_Mix16StereoDopplerRight( portable_samplepair_t *pOutput, int *volume, short *pData, int inputOffset, fixedint rateScaleFix, int outCount ) 
+void SW_Mix16StereoDopplerRight( portable_samplepair_t *pOutput, float *volume, short *pData, int inputOffset, fixedint rateScaleFix, int outCount ) 
 {
 	int sampleIndex = 0;
 	fixedint sampleFrac = inputOffset;
 	
 	for ( int i = 0; i < outCount; i++ )
 	{
-		pOutput[i].left += (volume[0] * (int)(pData[sampleIndex+1]))>>8;
-		pOutput[i].right += (volume[1] * (int)(pData[sampleIndex+1]))>>8;
+		pOutput[i].left += int((volume[0] * (int)(pData[sampleIndex+1])) / 256.0f);
+		pOutput[i].right += int((volume[1] * (int)(pData[sampleIndex+1])) / 256.0f);
 
 		sampleFrac += rateScaleFix;
 		sampleIndex += FIX_INTPART(sampleFrac)<<1;
@@ -2966,8 +3477,13 @@ void SW_Mix16StereoDopplerRight( portable_samplepair_t *pOutput, int *volume, sh
 	}
 }
 
+void SW_Mix16StereoDopplerRight_Interp( portable_samplepair_t *pOutput, float *volume, short *pData, int inputOffset, fixedint rateScaleFix, int outCount ) 
+{
+	SW_Mix16StereoDopplerLeft_Interp( pOutput, volume, pData + 1, inputOffset, rateScaleFix, outCount );
+}
+
 // mix left wav (front facing) with right wav (rear facing) based on soundfacing direction
-void SW_Mix8StereoDirectional( float soundfacing, portable_samplepair_t *pOutput, int *volume, byte *pData, int inputOffset, fixedint rateScaleFix, int outCount ) 
+void SW_Mix8StereoDirectional( float soundfacing, portable_samplepair_t *pOutput, float *volume, byte *pData, int inputOffset, fixedint rateScaleFix, int outCount ) 
 {
 	int sampleIndex = 0;
 	fixedint sampleFrac = inputOffset;
@@ -2976,8 +3492,8 @@ void SW_Mix8StereoDirectional( float soundfacing, portable_samplepair_t *pOutput
 	signed char lb,rb;
 	int	*lscale, *rscale;
 
-	lscale = snd_scaletable[volume[0] >> SND_SCALE_SHIFT];
-	rscale = snd_scaletable[volume[1] >> SND_SCALE_SHIFT];
+	lscale = snd_scaletable[int(volume[0]) >> SND_SCALE_SHIFT];
+	rscale = snd_scaletable[int(volume[1]) >> SND_SCALE_SHIFT];
 	
 	// if soundfacing -1.0, sound source is facing away from player
 	// if soundfacing 0.0, sound source is perpendicular to player
@@ -3008,7 +3524,7 @@ void SW_Mix8StereoDirectional( float soundfacing, portable_samplepair_t *pOutput
 // mix left wav (front facing) with right wav (rear facing) based on soundfacing direction
 // interpolating pitch shifter - sample(s) from preceding buffer are preloaded in
 // pData buffer, ensuring we can always provide 'outCount' samples.
-void SW_Mix8StereoDirectional_Interp( float soundfacing, portable_samplepair_t *pOutput, int *volume, byte *pData, int inputOffset, fixedint rateScaleFix, int outCount ) 
+void SW_Mix8StereoDirectional_Interp( float soundfacing, portable_samplepair_t *pOutput, float *volume, byte *pData, int inputOffset, fixedint rateScaleFix, int outCount ) 
 {
 	fixedint sampleIndex = 0;
 	fixedint rateScaleFix14 = FIX_28TO14(rateScaleFix);		// convert 28 bit fixed point to 14 bit fixed point
@@ -3017,8 +3533,8 @@ void SW_Mix8StereoDirectional_Interp( float soundfacing, portable_samplepair_t *
 	int first, second, interpl, interpr;
 	int	*lscale, *rscale;
 
-	lscale = snd_scaletable[volume[0] >> SND_SCALE_SHIFT];
-	rscale = snd_scaletable[volume[1] >> SND_SCALE_SHIFT];
+	lscale = snd_scaletable[int(volume[0]) >> SND_SCALE_SHIFT];
+	rscale = snd_scaletable[int(volume[1]) >> SND_SCALE_SHIFT];
 
 	int	x;
 	
@@ -3058,7 +3574,7 @@ void SW_Mix8StereoDirectional_Interp( float soundfacing, portable_samplepair_t *
 
 // mix left wav (front facing) with right wav (rear facing) based on soundfacing direction
 
-void SW_Mix16StereoDirectional( float soundfacing, portable_samplepair_t *pOutput, int *volume, short *pData, int inputOffset, fixedint rateScaleFix, int outCount ) 
+void SW_Mix16StereoDirectional( float soundfacing, portable_samplepair_t *pOutput, float *volume, short *pData, int inputOffset, fixedint rateScaleFix, int outCount ) 
 {
 	fixedint sampleIndex = 0;
 	fixedint sampleFrac  = inputOffset;
@@ -3083,8 +3599,8 @@ void SW_Mix16StereoDirectional( float soundfacing, portable_samplepair_t *pOutpu
 
 		x = ( r + ((( l - r ) * frontmix) >> 8) );
 
-		pOutput[i].left  += (volume[0] * x) >> 8;
-		pOutput[i].right += (volume[1] * x) >> 8;
+		pOutput[i].left  += int((volume[0] * x) / 256.0f);
+		pOutput[i].right += int((volume[1] * x) / 256.0f);
 
 		sampleFrac += rateScaleFix;
 		sampleIndex += FIX_INTPART(sampleFrac)<<1;
@@ -3096,7 +3612,7 @@ void SW_Mix16StereoDirectional( float soundfacing, portable_samplepair_t *pOutpu
 // interpolating pitch shifter - sample(s) from preceding buffer are preloaded in
 // pData buffer, ensuring we can always provide 'outCount' samples.
 
-void SW_Mix16StereoDirectional_Interp( float soundfacing, portable_samplepair_t *pOutput, int *volume, short *pData, int inputOffset, fixedint rateScaleFix, int outCount ) 
+void SW_Mix16StereoDirectional_Interp( float soundfacing, portable_samplepair_t *pOutput, float *volume, short *pData, int inputOffset, fixedint rateScaleFix, int outCount ) 
 {
 	fixedint sampleIndex = 0;
 	fixedint rateScaleFix14 = FIX_28TO14(rateScaleFix);		// convert 28 bit fixed point to 14 bit fixed point
@@ -3129,8 +3645,8 @@ void SW_Mix16StereoDirectional_Interp( float soundfacing, portable_samplepair_t 
 
 		x = ( interpr + ((( interpl - interpr ) * frontmix) >> 8) );
 
-		pOutput[i].left  += (volume[0] * x) >> 8;
-		pOutput[i].right += (volume[1] * x) >> 8;
+		pOutput[i].left  += int((volume[0] * x) / 256.0f);
+		pOutput[i].right += int((volume[1] * x) / 256.0f);
 
 		sampleFrac14 += rateScaleFix14;
 		sampleIndex += FIX_INTPART14(sampleFrac14)<<1;
@@ -3140,7 +3656,7 @@ void SW_Mix16StereoDirectional_Interp( float soundfacing, portable_samplepair_t 
 
 
 // distance variant wav (left is close, right is far)
-void SW_Mix8StereoDistVar( float distmix, portable_samplepair_t *pOutput, int *volume, byte *pData, int inputOffset, fixedint rateScaleFix, int outCount ) 
+void SW_Mix8StereoDistVar( float distmix, portable_samplepair_t *pOutput, float *volume, byte *pData, int inputOffset, fixedint rateScaleFix, int outCount ) 
 {
 	int sampleIndex = 0;
 	fixedint sampleFrac = inputOffset;
@@ -3149,8 +3665,8 @@ void SW_Mix8StereoDistVar( float distmix, portable_samplepair_t *pOutput, int *v
 	signed char lb, rb;
 	int		*lscale, *rscale;
 
-	lscale = snd_scaletable[volume[0] >> SND_SCALE_SHIFT];
-	rscale = snd_scaletable[volume[1] >> SND_SCALE_SHIFT];
+	lscale = snd_scaletable[int(volume[0]) >> SND_SCALE_SHIFT];
+	rscale = snd_scaletable[int(volume[1]) >> SND_SCALE_SHIFT];
 
 	// distmix 0 - sound is near player (100% wav left)
 	// distmix 1.0 - sound is far from player (100% wav right)
@@ -3221,7 +3737,7 @@ void SW_Mix8StereoDistVar( float distmix, portable_samplepair_t *pOutput, int *v
 // distance variant wav (left is close, right is far)
 // interpolating pitch shifter - sample(s) from preceding buffer are preloaded in
 // pData buffer, ensuring we can always provide 'outCount' samples.
-void SW_Mix8StereoDistVar_Interp( float distmix, portable_samplepair_t *pOutput, int *volume, byte *pData, int inputOffset, fixedint rateScaleFix, int outCount ) 
+void SW_Mix8StereoDistVar_Interp( float distmix, portable_samplepair_t *pOutput, float *volume, byte *pData, int inputOffset, fixedint rateScaleFix, int outCount ) 
 {
 	int	x;
 
@@ -3238,8 +3754,8 @@ void SW_Mix8StereoDistVar_Interp( float distmix, portable_samplepair_t *pOutput,
 	int first, second, interpl, interpr;
 	int		*lscale, *rscale;
 
-	lscale = snd_scaletable[volume[0] >> SND_SCALE_SHIFT];
-	rscale = snd_scaletable[volume[1] >> SND_SCALE_SHIFT];
+	lscale = snd_scaletable[int(volume[0]) >> SND_SCALE_SHIFT];
+	rscale = snd_scaletable[int(volume[1]) >> SND_SCALE_SHIFT];
 
 	// if mixing at max or min range, skip crossfade (KDB: perf)
 
@@ -3314,7 +3830,7 @@ void SW_Mix8StereoDistVar_Interp( float distmix, portable_samplepair_t *pOutput,
 
 // distance variant wav (left is close, right is far)
 
-void SW_Mix16StereoDistVar( float distmix, portable_samplepair_t *pOutput, int *volume, short *pData, int inputOffset, fixedint rateScaleFix, int outCount ) 
+void SW_Mix16StereoDistVar( float distmix, portable_samplepair_t *pOutput, float *volume, short *pData, int inputOffset, fixedint rateScaleFix, int outCount ) 
 {
 	int sampleIndex = 0;
 	fixedint sampleFrac = inputOffset; 
@@ -3335,8 +3851,8 @@ void SW_Mix16StereoDistVar( float distmix, portable_samplepair_t *pOutput, int *
 		{
 			x = pData[sampleIndex+1];	// right sample
 
-			pOutput[i].left  += (volume[0] * x)>>8;
-			pOutput[i].right += (volume[1] * x)>>8;
+			pOutput[i].left += int((volume[0] * x) / 256.0f);
+			pOutput[i].right += int((volume[1] * x) / 256.0f);
 
 			sampleFrac += rateScaleFix;
 			sampleIndex += FIX_INTPART(sampleFrac)<<1;
@@ -3351,8 +3867,8 @@ void SW_Mix16StereoDistVar( float distmix, portable_samplepair_t *pOutput, int *
 		{
 			x = pData[sampleIndex];		// left sample
 		
-			pOutput[i].left  += (volume[0] * x)>>8;
-			pOutput[i].right += (volume[1] * x)>>8;
+			pOutput[i].left  += int((volume[0] * x)/256.0f);
+			pOutput[i].right += int((volume[1] * x)/256.0f);
 
 			sampleFrac += rateScaleFix;
 			sampleIndex += FIX_INTPART(sampleFrac)<<1;
@@ -3370,8 +3886,8 @@ void SW_Mix16StereoDistVar( float distmix, portable_samplepair_t *pOutput, int *
 
 		x = ( l + (((r - l) * farmix) >> 8) );
 
-		pOutput[i].left  += (volume[0] * x)>>8;
-		pOutput[i].right += (volume[1] * x)>>8;
+		pOutput[i].left  += int((volume[0] * x)/256.0f);
+		pOutput[i].right += int((volume[1] * x)/256.0f);
 
 		sampleFrac += rateScaleFix;
 		sampleIndex += FIX_INTPART(sampleFrac)<<1;
@@ -3383,7 +3899,7 @@ void SW_Mix16StereoDistVar( float distmix, portable_samplepair_t *pOutput, int *
 // interpolating pitch shifter - sample(s) from preceding buffer are preloaded in
 // pData buffer, ensuring we can always provide 'outCount' samples.
 
-void SW_Mix16StereoDistVar_Interp( float distmix, portable_samplepair_t *pOutput, int *volume, short *pData, int inputOffset, fixedint rateScaleFix, int outCount ) 
+void SW_Mix16StereoDistVar_Interp( float distmix, portable_samplepair_t *pOutput, float *volume, short *pData, int inputOffset, fixedint rateScaleFix, int outCount ) 
 {
 	int	x;
 
@@ -3410,8 +3926,8 @@ void SW_Mix16StereoDistVar_Interp( float distmix, portable_samplepair_t *pOutput
 			second  = (int)(pData[sampleIndex+3]);	
 			interpr = first + (((second - first) * (int)sampleFrac14) >> 14);
 
-			pOutput[i].left += (volume[0] * interpr)>>8;
-			pOutput[i].right += (volume[1] * interpr)>>8;
+			pOutput[i].left += int((volume[0] * interpr)/256.0f);
+			pOutput[i].right += int((volume[1] * interpr)/256.0f);
 
 			sampleFrac14 += rateScaleFix14;
 			sampleIndex += FIX_INTPART14(sampleFrac14)<<1;
@@ -3428,8 +3944,8 @@ void SW_Mix16StereoDistVar_Interp( float distmix, portable_samplepair_t *pOutput
 			second  = (int)(pData[sampleIndex+2]);		
 			interpl = first + (((second - first) * (int)sampleFrac14) >> 14);
 	
-			pOutput[i].left += (volume[0] * interpl)>>8;
-			pOutput[i].right += (volume[1] * interpl)>>8;
+			pOutput[i].left += int((volume[0] * interpl)/256.0f);
+			pOutput[i].right += int((volume[1] * interpl)/256.0f);
 
 			sampleFrac14 += rateScaleFix14;
 			sampleIndex += FIX_INTPART14(sampleFrac14)<<1;
@@ -3454,8 +3970,8 @@ void SW_Mix16StereoDistVar_Interp( float distmix, portable_samplepair_t *pOutput
 
 		x = ( interpl + (((interpr - interpl) * farmix) >> 8) );
 
-		pOutput[i].left += (volume[0]  * x) >> 8;
-		pOutput[i].right += (volume[1] * x) >> 8;
+		pOutput[i].left += int((volume[0]  * x)/256.0f);
+		pOutput[i].right += int((volume[1] * x)/256.0f);
 
 		sampleFrac14 += rateScaleFix14;
 		sampleIndex += FIX_INTPART14(sampleFrac14)<<1;
@@ -3463,7 +3979,7 @@ void SW_Mix16StereoDistVar_Interp( float distmix, portable_samplepair_t *pOutput
 	}
 }
 
-void SW_Mix8Mono( portable_samplepair_t *pOutput, int *volume, byte *pData, int inputOffset, fixedint rateScaleFix, int outCount )
+void SW_Mix8Mono( portable_samplepair_t *pOutput, float *volume, byte *pData, int inputOffset, fixedint rateScaleFix, int outCount )
 {
 	// Not using pitch shift?
 	if ( rateScaleFix == FIX(1) )
@@ -3477,8 +3993,8 @@ void SW_Mix8Mono( portable_samplepair_t *pOutput, int *volume, byte *pData, int 
 	fixedint sampleFrac = inputOffset;
 	int		*lscale, *rscale;
 
-	lscale = snd_scaletable[volume[0] >> SND_SCALE_SHIFT];
-	rscale = snd_scaletable[volume[1] >> SND_SCALE_SHIFT];
+	lscale = snd_scaletable[int(volume[0]) >> SND_SCALE_SHIFT];
+	rscale = snd_scaletable[int(volume[1]) >> SND_SCALE_SHIFT];
 
 	for ( int i = 0; i < outCount; i++ )
 	{
@@ -3493,7 +4009,7 @@ void SW_Mix8Mono( portable_samplepair_t *pOutput, int *volume, byte *pData, int 
 
 // interpolating pitch shifter - sample(s) from preceding buffer are preloaded in
 // pData buffer, ensuring we can always provide 'outCount' samples.
-void SW_Mix8Mono_Interp( portable_samplepair_t *pOutput, int *volume, byte *pData, int inputOffset, fixedint rateScaleFix, int outCount)
+void SW_Mix8Mono_Interp( portable_samplepair_t *pOutput, float *volume, byte *pData, int inputOffset, fixedint rateScaleFix, int outCount)
 {
 	fixedint sampleIndex = 0;
 	fixedint rateScaleFix14 = FIX_28TO14(rateScaleFix);		// convert 28 bit fixed point to 14 bit fixed point
@@ -3502,8 +4018,8 @@ void SW_Mix8Mono_Interp( portable_samplepair_t *pOutput, int *volume, byte *pDat
 	int first, second, interp;
 	int	*lscale, *rscale;
 
-	lscale = snd_scaletable[volume[0] >> SND_SCALE_SHIFT];
-	rscale = snd_scaletable[volume[1] >> SND_SCALE_SHIFT];
+	lscale = snd_scaletable[int(volume[0]) >> SND_SCALE_SHIFT];
+	rscale = snd_scaletable[int(volume[1]) >> SND_SCALE_SHIFT];
 	
 	// iterate 0th sample to outCount-1 sample
 
@@ -3525,14 +4041,14 @@ void SW_Mix8Mono_Interp( portable_samplepair_t *pOutput, int *volume, byte *pDat
 	}
 }
 
-void SW_Mix8Stereo( portable_samplepair_t *pOutput, int *volume, byte *pData, int inputOffset, fixedint rateScaleFix, int outCount )
+void SW_Mix8Stereo( portable_samplepair_t *pOutput, float *volume, byte *pData, int inputOffset, fixedint rateScaleFix, int outCount )
 {
 	int sampleIndex = 0;
 	fixedint sampleFrac = inputOffset;
 	int		*lscale, *rscale;
 
-	lscale = snd_scaletable[volume[0] >> SND_SCALE_SHIFT];
-	rscale = snd_scaletable[volume[1] >> SND_SCALE_SHIFT];
+	lscale = snd_scaletable[int(volume[0]) >> SND_SCALE_SHIFT];
+	rscale = snd_scaletable[int(volume[1]) >> SND_SCALE_SHIFT];
 
 	for ( int i = 0; i < outCount; i++ )
 	{
@@ -3548,7 +4064,7 @@ void SW_Mix8Stereo( portable_samplepair_t *pOutput, int *volume, byte *pData, in
 
 // interpolating pitch shifter - sample(s) from preceding buffer are preloaded in
 // pData buffer, ensuring we can always provide 'outCount' samples.
-void SW_Mix8Stereo_Interp( portable_samplepair_t *pOutput, int *volume, byte *pData, int inputOffset, fixedint rateScaleFix, int outCount)
+void SW_Mix8Stereo_Interp( portable_samplepair_t *pOutput, float *volume, byte *pData, int inputOffset, fixedint rateScaleFix, int outCount)
 {
 	fixedint sampleIndex = 0;
 	fixedint rateScaleFix14 = FIX_28TO14(rateScaleFix);		// convert 28 bit fixed point to 14 bit fixed point
@@ -3557,8 +4073,8 @@ void SW_Mix8Stereo_Interp( portable_samplepair_t *pOutput, int *volume, byte *pD
 	int first, second, interpl, interpr;
 	int		*lscale, *rscale;
 
-	lscale = snd_scaletable[volume[0] >> SND_SCALE_SHIFT];
-	rscale = snd_scaletable[volume[1] >> SND_SCALE_SHIFT];
+	lscale = snd_scaletable[int(volume[0]) >> SND_SCALE_SHIFT];
+	rscale = snd_scaletable[int(volume[1]) >> SND_SCALE_SHIFT];
 	
 	// iterate 0th sample to outCount-1 sample
 
@@ -3585,19 +4101,19 @@ void SW_Mix8Stereo_Interp( portable_samplepair_t *pOutput, int *volume, byte *pD
 	}
 }
 
-void SW_Mix16Mono_Shift( portable_samplepair_t *pOutput, int *volume, short *pData, int inputOffset, fixedint rateScaleFix, int outCount )
+void SW_Mix16Mono_Shift( portable_samplepair_t *pOutput, float *volume, short *pData, int inputOffset, fixedint rateScaleFix, int outCount )
 {
-	int vol0 = volume[0];
-	int vol1 = volume[1];
+	float vol0 = volume[0];
+	float vol1 = volume[1];
 
-#if !id386
+#if 1
 	int sampleIndex = 0;
 	fixedint sampleFrac = inputOffset;
 
 	for ( int i = 0; i < outCount; i++ )
 	{
-		pOutput[i].left  += (vol0 * (int)(pData[sampleIndex]))>>8;
-		pOutput[i].right += (vol1 * (int)(pData[sampleIndex]))>>8;
+		pOutput[i].left  += int((vol0 * (int)(pData[sampleIndex]))/256.0f);
+		pOutput[i].right += int((vol1 * (int)(pData[sampleIndex]))/256.0f);
 		sampleFrac += rateScaleFix;
 		sampleIndex += FIX_INTPART(sampleFrac);
 		sampleFrac = FIX_FRACPART(sampleFrac);
@@ -3673,16 +4189,16 @@ END:
 #endif
 }
 
-void SW_Mix16Mono_NoShift( portable_samplepair_t *pOutput, int *volume, short *pData, int outCount )
+void SW_Mix16Mono_NoShift( portable_samplepair_t *pOutput, float *volume, short *pData, int outCount )
 {
-	int vol0 = volume[0];
-	int vol1 = volume[1];
-#if !id386
+	float vol0 = volume[0];
+	float vol1 = volume[1];
+#if 1
 	for ( int i = 0; i < outCount; i++ )
 	{
 		int x = *pData++;
-		pOutput[i].left += (x * vol0) >> 8;
-		pOutput[i].right += (x * vol1) >> 8;
+		pOutput[i].left += int((x * vol0) / 256.0f);
+		pOutput[i].right += int((x * vol1) / 256.0f);
 	}
 #else
 	__asm
@@ -3747,7 +4263,178 @@ END:
 #endif
 }
 
-void SW_Mix16Mono( portable_samplepair_t *pOutput, int *volume, short *pData, int inputOffset, fixedint rateScaleFix, int outCount )
+
+enum SW_FillMode
+{
+	FM_SAME_VOL,
+	FM_LEFT_ZERO,
+	FM_RIGHT_ZERO,
+	FM_NORMAL,
+};
+
+// Try to keep the number of parameters to 4 to make sure the optimizer is not doing something too stupid.
+// Pass the volume by pointer instead of left and right values. It seems that the compiler has harder time optimizing with one more variable.
+template <SW_FillMode MODE>
+void FillMonoOutput( int nValue, portable_samplepair_t * RESTRICT pOutput, float * RESTRICT pVolume );
+
+template <>
+FORCEINLINE
+void FillMonoOutput<FM_SAME_VOL>( int nValue, portable_samplepair_t * RESTRICT pOutput, float * RESTRICT pVolume )
+{
+	nValue = int(( pVolume[0] * nValue ) /256.0f);
+	pOutput->left  += nValue;
+	pOutput->right += nValue;
+}
+
+template <>
+FORCEINLINE
+void FillMonoOutput<FM_LEFT_ZERO>( int nValue, portable_samplepair_t * RESTRICT pOutput, float * RESTRICT pVolume )
+{
+	pOutput->right += int(( pVolume[1] * nValue ) / 256.0f);
+}
+
+template <>
+FORCEINLINE
+void FillMonoOutput<FM_RIGHT_ZERO>( int nValue, portable_samplepair_t * RESTRICT pOutput, float * RESTRICT pVolume )
+{
+	pOutput->left += int(( pVolume[0] * nValue ) / 256.0f);
+}
+
+template <>
+FORCEINLINE
+void FillMonoOutput<FM_NORMAL>( int nValue, portable_samplepair_t * RESTRICT pOutput, float * RESTRICT pVolume )
+{
+	pOutput->left  += int(( pVolume[0] * nValue ) /256.0f);
+	pOutput->right += int(( pVolume[1] * nValue ) /256.0f);
+}
+
+template <SW_FillMode MODE>
+void SW_Mix16Mono_Shift_OptMeta( portable_samplepair_t * RESTRICT pOutput, float * RESTRICT pVolume, short * RESTRICT pData, int nInputOffset, fixedint nRateScaleFix, int nOutCount  )
+{
+	fixedint nSampleFrac = nInputOffset;
+
+	while ( nOutCount >= 4 )
+	{
+		FillMonoOutput<MODE>( *pData, pOutput, pVolume );
+
+		nSampleFrac += nRateScaleFix;
+		pData += FIX_INTPART(nSampleFrac);
+		nSampleFrac = FIX_FRACPART(nSampleFrac);
+
+		FillMonoOutput<MODE>( *pData, pOutput + 1, pVolume );
+
+		nSampleFrac += nRateScaleFix;
+		pData += FIX_INTPART(nSampleFrac);
+		nSampleFrac = FIX_FRACPART(nSampleFrac);
+
+		FillMonoOutput<MODE>( *pData, pOutput + 2, pVolume );
+
+		nSampleFrac += nRateScaleFix;
+		pData += FIX_INTPART(nSampleFrac);
+		nSampleFrac = FIX_FRACPART(nSampleFrac);
+
+		FillMonoOutput<MODE>( *pData, pOutput + 3, pVolume );
+
+		nSampleFrac += nRateScaleFix;
+		pData += FIX_INTPART(nSampleFrac);
+		nSampleFrac = FIX_FRACPART(nSampleFrac);
+
+		pOutput += 4;
+		nOutCount -= 4;
+	}
+
+	while ( nOutCount > 0 )
+	{	
+		FillMonoOutput<MODE>( *pData, pOutput, pVolume );
+
+		nSampleFrac += nRateScaleFix;
+		pData += FIX_INTPART(nSampleFrac);
+		nSampleFrac = FIX_FRACPART(nSampleFrac);
+
+		++pOutput;
+		--nOutCount;
+	}
+}
+
+void SW_Mix16Mono_Shift_Opt( portable_samplepair_t * RESTRICT pOutput, float * RESTRICT pVolume, short * RESTRICT pData, int nInputOffset, fixedint nRateScaleFix, int nOutCount )
+{
+	int nVolumeLeft = pVolume[0];
+	int nVolumeRight = pVolume[1];
+
+	if ( nVolumeLeft == nVolumeRight )
+	{
+		SW_Mix16Mono_Shift_OptMeta<FM_SAME_VOL>( pOutput, pVolume, pData, nInputOffset, nRateScaleFix, nOutCount );
+	}
+	else
+	{
+		if ( nVolumeLeft <= CULLED_VOLUME )
+		{
+			SW_Mix16Mono_Shift_OptMeta<FM_LEFT_ZERO>( pOutput, pVolume, pData, nInputOffset, nRateScaleFix, nOutCount );
+		}
+		else if ( nVolumeRight <= CULLED_VOLUME )
+		{
+			SW_Mix16Mono_Shift_OptMeta<FM_RIGHT_ZERO>( pOutput, pVolume, pData, nInputOffset, nRateScaleFix, nOutCount );
+		}
+		else
+		{
+			SW_Mix16Mono_Shift_OptMeta<FM_NORMAL>( pOutput, pVolume, pData, nInputOffset, nRateScaleFix, nOutCount );
+		}
+	}
+}
+
+template <SW_FillMode MODE>
+void SW_Mix16Mono_NoShift_OptMeta( portable_samplepair_t * RESTRICT pOutput, float * RESTRICT pVolume, short * RESTRICT pData, int nOutCount  )
+{
+	// This code is relatively lightweight, and usually 255 to 1020 samples are passed. So 8 at a time.
+	while ( nOutCount >= 4 )
+	{
+		FillMonoOutput<MODE>( pData[0], pOutput, pVolume );
+		FillMonoOutput<MODE>( pData[1], pOutput + 1, pVolume );
+		FillMonoOutput<MODE>( pData[2], pOutput + 2, pVolume );
+		FillMonoOutput<MODE>( pData[3], pOutput + 3, pVolume );
+
+		pData += 4;
+		pOutput += 4;
+		nOutCount -= 4;
+	}
+
+	while ( nOutCount > 0 )
+	{	
+		FillMonoOutput<MODE>( pData[0], pOutput, pVolume );
+
+		++pData;
+		++pOutput;
+		--nOutCount;
+	}
+}
+
+void SW_Mix16Mono_NoShift_Opt( portable_samplepair_t * RESTRICT pOutput, float * RESTRICT pVolume, short * RESTRICT pData, int nOutCount )
+{
+	int nVolumeLeft = pVolume[0];
+	int nVolumeRight = pVolume[1];
+
+	if ( nVolumeLeft == nVolumeRight )
+	{
+		SW_Mix16Mono_NoShift_OptMeta<FM_SAME_VOL>( pOutput, pVolume, pData, nOutCount );
+	}
+	else
+	{
+		if ( nVolumeLeft <= CULLED_VOLUME )
+		{
+			SW_Mix16Mono_NoShift_OptMeta<FM_LEFT_ZERO>( pOutput, pVolume, pData, nOutCount );
+		}
+		else if ( nVolumeRight <= CULLED_VOLUME )
+		{
+			SW_Mix16Mono_NoShift_OptMeta<FM_RIGHT_ZERO>( pOutput, pVolume, pData, nOutCount );
+		}
+		else
+		{
+			SW_Mix16Mono_NoShift_OptMeta<FM_NORMAL>( pOutput, pVolume, pData, nOutCount );
+		}
+	}
+}
+
+void SW_Mix16Mono( portable_samplepair_t * RESTRICT pOutput, float * RESTRICT volume, short * RESTRICT pData, int inputOffset, fixedint rateScaleFix, int outCount )
 {
 	if ( rateScaleFix == FIX(1) )
 	{
@@ -3759,10 +4446,22 @@ void SW_Mix16Mono( portable_samplepair_t *pOutput, int *volume, short *pData, in
 	}
 }
 
+void SW_Mix16Mono_Opt(portable_samplepair_t * RESTRICT pOutput, float * RESTRICT volume, short * RESTRICT pData, int inputOffset, fixedint rateScaleFix, int outCount)
+{
+	if ( rateScaleFix == FIX(1) )
+	{
+		SW_Mix16Mono_NoShift_Opt( pOutput, volume, pData, outCount );
+	}
+	else
+	{
+		SW_Mix16Mono_Shift_Opt( pOutput, volume, pData, inputOffset, rateScaleFix, outCount );
+	}
+}
+
 // interpolating pitch shifter - sample(s) from preceding buffer are preloaded in
 // pData buffer, ensuring we can always provide 'outCount' samples.
 
-void SW_Mix16Mono_Interp( portable_samplepair_t *pOutput, int *volume, short *pData, int inputOffset, fixedint rateScaleFix, int outCount  )
+void SW_Mix16Mono_Interp(portable_samplepair_t * RESTRICT pOutput, float * RESTRICT volume, short * RESTRICT pData, int inputOffset, fixedint rateScaleFix, int outCount)
 {
 	fixedint sampleIndex = 0;
 	fixedint rateScaleFix14 = FIX_28TO14(rateScaleFix);		// convert 28 bit fixed point to 14 bit fixed point
@@ -3777,8 +4476,8 @@ void SW_Mix16Mono_Interp( portable_samplepair_t *pOutput, int *volume, short *pD
 		
 		interp = first + (((second - first) * (int)sampleFrac14) >> 14);
 
-		pOutput[i].left  += (volume[0] * interp) >> 8;
-		pOutput[i].right += (volume[1] * interp) >> 8;
+		pOutput[i].left  += int( (volume[0] * interp) / 256.0f);
+		pOutput[i].right += int( (volume[1] * interp) / 256.0f);
 
 		sampleFrac14 += rateScaleFix14;
 		sampleIndex += FIX_INTPART14(sampleFrac14);
@@ -3786,26 +4485,313 @@ void SW_Mix16Mono_Interp( portable_samplepair_t *pOutput, int *volume, short *pD
 	}
 }
 
-void SW_Mix16Stereo( portable_samplepair_t *pOutput, int *volume, short *pData, int inputOffset, fixedint rateScaleFix, int outCount )
+template <SW_FillMode MODE>
+void SW_Mix16Mono_Interp_OptMeta( portable_samplepair_t * RESTRICT pOutput, float * RESTRICT pVolume, short * RESTRICT pData, int nInputOffset, fixedint nRateScaleFix, int nOutCount  )
 {
-	int sampleIndex = 0;
-	fixedint sampleFrac = inputOffset;
+	fixedint rateScaleFix14 = FIX_28TO14(nRateScaleFix);		// convert 28 bit fixed point to 14 bit fixed point
+	fixedint sampleFrac14   = FIX_28TO14(nInputOffset);
 
-	for ( int i = 0; i < outCount; i++ )
+	int first, second, interp;
+
+	while ( nOutCount >= 4 )
 	{
-		pOutput[i].left  += (volume[0] * (int)(pData[sampleIndex]))>>8;
-		pOutput[i].right += (volume[1] * (int)(pData[sampleIndex+1]))>>8;
+		first   = (int)(pData[0]);
+		second  = (int)(pData[1]);
+		interp = first + (((second - first) * (int)sampleFrac14) >> 14);
+		FillMonoOutput<MODE>( interp, pOutput, pVolume );
 
-		sampleFrac += rateScaleFix;
-		sampleIndex += FIX_INTPART(sampleFrac)<<1;
-		sampleFrac = FIX_FRACPART(sampleFrac);
+		sampleFrac14 += rateScaleFix14;
+		pData += FIX_INTPART14(sampleFrac14);
+		sampleFrac14 = FIX_FRACPART14(sampleFrac14);
+
+		first   = (int)(pData[0]);
+		second  = (int)(pData[1]);
+		interp = first + (((second - first) * (int)sampleFrac14) >> 14);
+		FillMonoOutput<MODE>( interp, pOutput + 1, pVolume );
+
+		sampleFrac14 += rateScaleFix14;
+		pData += FIX_INTPART14(sampleFrac14);
+		sampleFrac14 = FIX_FRACPART14(sampleFrac14);
+
+		first   = (int)(pData[0]);
+		second  = (int)(pData[1]);
+		interp = first + (((second - first) * (int)sampleFrac14) >> 14);
+		FillMonoOutput<MODE>( interp, pOutput + 2, pVolume );
+
+		sampleFrac14 += rateScaleFix14;
+		pData += FIX_INTPART14(sampleFrac14);
+		sampleFrac14 = FIX_FRACPART14(sampleFrac14);
+
+		first   = (int)(pData[0]);
+		second  = (int)(pData[1]);
+		interp = first + (((second - first) * (int)sampleFrac14) >> 14);
+		FillMonoOutput<MODE>( interp, pOutput + 3, pVolume );
+
+		sampleFrac14 += rateScaleFix14;
+		pData += FIX_INTPART14(sampleFrac14);
+		sampleFrac14 = FIX_FRACPART14(sampleFrac14);
+
+		pOutput += 4;
+		nOutCount -= 4;
 	}
+
+	while ( nOutCount > 0 )
+	{	
+		first   = (int)(pData[0]);
+		second  = (int)(pData[1]);	
+		interp = first + (((second - first) * (int)sampleFrac14) >> 14);
+		FillMonoOutput<MODE>( interp, pOutput, pVolume );
+
+		sampleFrac14 += rateScaleFix14;
+		pData += FIX_INTPART14(sampleFrac14);
+		sampleFrac14 = FIX_FRACPART14(sampleFrac14);
+
+		++pOutput;
+		--nOutCount;
+	}
+}
+
+void SW_Mix16Mono_Interp_Opt( portable_samplepair_t * RESTRICT pOutput, float * RESTRICT pVolume, short * RESTRICT pData, int nInputOffset, fixedint nRateScaleFix, int nOutCount  )
+{
+	// Besides unrolling, there are 2 other possible optimizations:
+	//	In some cases both volumes are the same.
+	//  In other cases, one of the volume is zero. (no case where both volumes are zero).
+
+	// Would doing one 32 bit load and one 64 bits write instead of 2 be better? (although the 32 bit load would be unaligned, so may not be possible).
+	// We "save" on the potential memory access, on the other hand we have to mask / shift, etc... to get the two members. (On PPC, it could save on the numbers of write that can be scheduled out of order).
+
+	// Except for the multiplication, there would be a potential to use integer VMX. It is not clear if that would be a real gain though as we would only do the calculation 2 samples at a time. :(
+
+	// There is also a potential for not always load 2 samples every time (can at least re-use a previous one) but I don't know how much this would save though.
+	// Would have to do a branch-less select and still load one regardless, may not be worth the effort.
+
+	int nVolumeLeft = pVolume[0];
+	int nVolumeRight = pVolume[1];
+
+	if ( nVolumeLeft == nVolumeRight )
+	{
+		SW_Mix16Mono_Interp_OptMeta<FM_SAME_VOL>( pOutput, pVolume, pData, nInputOffset, nRateScaleFix, nOutCount );
+	}
+	else
+	{
+		if ( nVolumeLeft <= CULLED_VOLUME )
+		{
+			SW_Mix16Mono_Interp_OptMeta<FM_LEFT_ZERO>( pOutput, pVolume, pData, nInputOffset, nRateScaleFix, nOutCount );
+		}
+		else if ( nVolumeRight <= CULLED_VOLUME )
+		{
+			SW_Mix16Mono_Interp_OptMeta<FM_RIGHT_ZERO>( pOutput, pVolume, pData, nInputOffset, nRateScaleFix, nOutCount );
+		}
+		else
+		{
+			SW_Mix16Mono_Interp_OptMeta<FM_NORMAL>( pOutput, pVolume, pData, nInputOffset, nRateScaleFix, nOutCount );
+		}
+	}
+}
+
+// Try to keep the number of parameters to 4 to make sure the optimizer is not doing something too stupid.
+// Pass the volume by pointer instead of left and right values. It seems that the compiler has harder time optimizing with one more variable.
+template <SW_FillMode MODE>
+void FillStereoOutput(short * RESTRICT pInput, portable_samplepair_t * RESTRICT pOutput, float * RESTRICT pVolume);
+
+template <>
+FORCEINLINE
+void FillStereoOutput<FM_SAME_VOL>(short * RESTRICT pInput, portable_samplepair_t * RESTRICT pOutput, float * RESTRICT pVolume)
+{
+	int nVolume = pVolume[0];
+	pOutput->left += int((nVolume * (int)(pInput[0])) / 256.0f);
+	pOutput->right += int((nVolume * (int)(pInput[1])) / 256.0f);
+}
+
+template <>
+FORCEINLINE
+void FillStereoOutput<FM_LEFT_ZERO>(short * RESTRICT pInput, portable_samplepair_t * RESTRICT pOutput, float * RESTRICT pVolume)
+{
+	pOutput->right += int((pVolume[1] * (int)(pInput[1])) / 256.0f);
+}
+
+template <>
+FORCEINLINE
+void FillStereoOutput<FM_RIGHT_ZERO>(short * RESTRICT pInput, portable_samplepair_t * RESTRICT pOutput, float * RESTRICT pVolume)
+{
+	pOutput->left += int((pVolume[0] * (int)(pInput[0])) / 256.0f);
+}
+
+template <>
+FORCEINLINE
+void FillStereoOutput<FM_NORMAL>( short * RESTRICT pInput, portable_samplepair_t * RESTRICT pOutput, float * RESTRICT pVolume )
+{
+	pOutput->left  += int((pVolume[0] * (int)(pInput[0])) / 256.0f);
+	pOutput->right += int((pVolume[1] * (int)(pInput[1])) / 256.0f);
+}
+
+template <SW_FillMode MODE>
+void SW_Mix16Stereo_NoShift_OptMeta( portable_samplepair_t * RESTRICT pOutput, float * RESTRICT pVolume, short * RESTRICT pData, int nOutCount )
+{
+	while ( nOutCount >= 4 )
+	{
+		FillStereoOutput<MODE>( pData + 0, pOutput + 0, pVolume );
+		FillStereoOutput<MODE>( pData + 2, pOutput + 1, pVolume );
+		FillStereoOutput<MODE>( pData + 4, pOutput + 2, pVolume );
+		FillStereoOutput<MODE>( pData + 6, pOutput + 3, pVolume );
+
+		pOutput += 4;
+		pData += 8;
+		nOutCount -= 4;
+	}
+
+	while ( nOutCount > 0 )
+	{
+		FillStereoOutput<MODE>( pData, pOutput, pVolume );
+
+		++pOutput;
+		pData += 2;
+		--nOutCount;
+	}
+}
+
+template <SW_FillMode MODE>
+void SW_Mix16Stereo_Shift_OptMeta( portable_samplepair_t * RESTRICT pOutput, float * RESTRICT pVolume, short * RESTRICT pData, int nInputOffset, fixedint nRateScaleFix, int nOutCount )
+{
+	fixedint nSampleFrac = nInputOffset;
+
+	while ( nOutCount >= 4 )
+	{
+		FillStereoOutput<MODE>( pData, pOutput, pVolume );
+		nSampleFrac += nRateScaleFix;
+		pData += FIX_INTPART(nSampleFrac)<<1;
+		nSampleFrac = FIX_FRACPART(nSampleFrac);
+
+		FillStereoOutput<MODE>( pData, pOutput + 1, pVolume );
+		nSampleFrac += nRateScaleFix;
+		pData += FIX_INTPART(nSampleFrac)<<1;
+		nSampleFrac = FIX_FRACPART(nSampleFrac);
+
+		FillStereoOutput<MODE>( pData, pOutput + 2, pVolume );
+		nSampleFrac += nRateScaleFix;
+		pData += FIX_INTPART(nSampleFrac)<<1;
+		nSampleFrac = FIX_FRACPART(nSampleFrac);
+
+		FillStereoOutput<MODE>( pData, pOutput + 3, pVolume );
+		nSampleFrac += nRateScaleFix;
+		pData += FIX_INTPART(nSampleFrac)<<1;
+		nSampleFrac = FIX_FRACPART(nSampleFrac);
+
+		pOutput += 4;
+		nOutCount -= 4;
+	}
+
+	while ( nOutCount > 0 )
+	{
+		FillStereoOutput<MODE>( pData, pOutput, pVolume );
+		nSampleFrac += nRateScaleFix;
+		pData += FIX_INTPART(nSampleFrac)<<1;
+		nSampleFrac = FIX_FRACPART(nSampleFrac);
+
+		++pOutput;
+		--nOutCount;
+	}
+}
+
+void SW_Mix16Stereo_Opt( portable_samplepair_t * RESTRICT pOutput, float * RESTRICT pVolume, short * RESTRICT pData, int nInputOffset, fixedint nRateScaleFix, int nOutCount )
+{
+	int nVolumeLeft = pVolume[0];
+	int nVolumeRight = pVolume[1];
+
+	if ( nRateScaleFix == FIX(1) )
+	{
+		if ( nVolumeLeft == nVolumeRight )
+		{
+			SW_Mix16Stereo_NoShift_OptMeta<FM_SAME_VOL>( pOutput, pVolume, pData, nOutCount );
+		}
+		else
+		{
+			if ( nVolumeLeft <= CULLED_VOLUME )
+			{
+				SW_Mix16Stereo_NoShift_OptMeta<FM_LEFT_ZERO>( pOutput, pVolume, pData, nOutCount );
+			}
+			else if ( nVolumeRight <= CULLED_VOLUME )
+			{
+				SW_Mix16Stereo_NoShift_OptMeta<FM_RIGHT_ZERO>( pOutput, pVolume, pData, nOutCount );
+			}
+			else
+			{
+				SW_Mix16Stereo_NoShift_OptMeta<FM_NORMAL>( pOutput, pVolume, pData, nOutCount );
+			}
+		}
+	}
+	else
+	{
+		if ( nVolumeLeft == nVolumeRight )
+		{
+			SW_Mix16Stereo_Shift_OptMeta<FM_SAME_VOL>( pOutput, pVolume, pData, nInputOffset, nRateScaleFix, nOutCount );
+		}
+		else
+		{
+			if ( nVolumeLeft <= CULLED_VOLUME )
+			{
+				SW_Mix16Stereo_Shift_OptMeta<FM_LEFT_ZERO>( pOutput, pVolume, pData, nInputOffset, nRateScaleFix, nOutCount );
+			}
+			else if ( nVolumeRight <= CULLED_VOLUME )
+			{
+				SW_Mix16Stereo_Shift_OptMeta<FM_RIGHT_ZERO>( pOutput, pVolume, pData, nInputOffset, nRateScaleFix, nOutCount );
+			}
+			else
+			{
+				SW_Mix16Stereo_Shift_OptMeta<FM_NORMAL>( pOutput, pVolume, pData, nInputOffset, nRateScaleFix, nOutCount );
+			}
+		}
+	}
+}
+
+void SW_Mix16Stereo_NoOpt( portable_samplepair_t * RESTRICT pOutput, float * RESTRICT pVolume, short * RESTRICT pData, int nInputOffset, fixedint nRateScaleFix, int nOutCount )
+{
+	int nSampleIndex = 0;
+	fixedint nSampleFrac = nInputOffset;
+
+	for ( int i = 0; i < nOutCount; i++ )
+	{
+		pOutput[i].left  += int( (pVolume[0] * (int)(pData[nSampleIndex])) / 256.0f);
+		pOutput[i].right += int( (pVolume[1] * (int)(pData[nSampleIndex+1])) / 256.0f);
+
+		nSampleFrac += nRateScaleFix;
+		nSampleIndex += FIX_INTPART(nSampleFrac)<<1;
+		nSampleFrac = FIX_FRACPART(nSampleFrac);
+	}
+}
+
+void SW_Mix16Stereo( portable_samplepair_t * RESTRICT pOutput, float * RESTRICT pVolume, short * RESTRICT pData, int nInputOffset, fixedint nRateScaleFix, int nOutCount )
+{
+#if CHECK_VALUES_AFTER_REFACTORING
+	// Backup the output and apply the same changes
+	portable_samplepair_t * pOldOutput = DuplicateSamplePairs( pOutput, nOutCount );
+
+	// Run the old code
+	SW_Mix16Stereo_NoOpt( pOldOutput, pVolume, pData, nInputOffset, nRateScaleFix, nOutCount );
+#endif
+
+	if ( snd_mix_optimization.GetBool() )
+	{
+		SW_Mix16Stereo_Opt( pOutput, pVolume, pData, nInputOffset, nRateScaleFix, nOutCount );
+	}
+	else
+	{
+		SW_Mix16Stereo_NoOpt( pOutput, pVolume, pData, nInputOffset, nRateScaleFix, nOutCount );
+	}
+
+#if CHECK_VALUES_AFTER_REFACTORING
+	// Compare side by side
+	bool bFailed = ( memcmp( pOutput, pOldOutput, nOutCount * sizeof( portable_samplepair_t ) ) != 0 );
+	Assert( bFailed == false );
+
+	FreeDuplicatedSamplePairs( pOldOutput, nOutCount );
+#endif
 }
 
 // interpolating pitch shifter - sample(s) from preceding buffer are preloaded in
 // pData buffer, ensuring we can always provide 'outCount' samples.
-
-void SW_Mix16Stereo_Interp( portable_samplepair_t *pOutput, int *volume, short *pData, int inputOffset, fixedint rateScaleFix, int outCount  )
+// The loop is already long, unrolling more is not going to help much.
+void SW_Mix16Stereo_Interp( portable_samplepair_t * RESTRICT pOutput, float * RESTRICT pVolume, short * RESTRICT pData, int inputOffset, fixedint rateScaleFix, int outCount  )
 {
 	fixedint sampleIndex = 0;
 	fixedint rateScaleFix14 = FIX_28TO14(rateScaleFix);		// convert 28 bit fixed point to 14 bit fixed point
@@ -3817,16 +4803,16 @@ void SW_Mix16Stereo_Interp( portable_samplepair_t *pOutput, int *volume, short *
 	{	
 		first   = (int)(pData[sampleIndex]);
 		second  = (int)(pData[sampleIndex+2]);	
-		
+
 		interpl = first + (((second - first) * (int)sampleFrac14) >> 14);
 
 		first   = (int)(pData[sampleIndex+1]);
 		second  = (int)(pData[sampleIndex+3]);	
-		
+
 		interpr = first + (((second - first) * (int)sampleFrac14) >> 14);
 
-		pOutput[i].left  += (volume[0] * interpl) >> 8;
-		pOutput[i].right += (volume[1] * interpr) >> 8;
+		pOutput[i].left  += int((pVolume[0] * interpl) / 256.0f);
+		pOutput[i].right += int((pVolume[1] * interpr) / 256.0f);
 
 		sampleFrac14 += rateScaleFix14;
 		sampleIndex += FIX_INTPART14(sampleFrac14)<<1;
@@ -3850,7 +4836,7 @@ bool FUseHighQualityPitch( channel_t *pChannel )
 //===============================================================================
 // DISPATCHERS FOR MIXING ROUTINES
 //===============================================================================
-void Mix8MonoWavtype( channel_t *pChannel, portable_samplepair_t *pOutput, int *volume, byte *pData, int inputOffset, fixedint rateScaleFix, int outCount )
+void Mix8MonoWavtype( channel_t *pChannel, portable_samplepair_t *pOutput, float *volume, byte *pData, int inputOffset, fixedint rateScaleFix, int outCount )
 {
 	if ( FUseHighQualityPitch( pChannel ) )
 		SW_Mix8Mono_Interp( pOutput, volume, pData, inputOffset, rateScaleFix, outCount );
@@ -3858,19 +4844,69 @@ void Mix8MonoWavtype( channel_t *pChannel, portable_samplepair_t *pOutput, int *
 		SW_Mix8Mono( pOutput, volume, pData, inputOffset, rateScaleFix, outCount );
 }
 
-void Mix16MonoWavtype( channel_t *pChannel, portable_samplepair_t *pOutput, int *volume, short *pData, int inputOffset, fixedint rateScaleFix, int outCount )
+void Mix16MonoWavtype( channel_t *pChannel, portable_samplepair_t *pOutput, float *volume, short *pData, int inputOffset, fixedint rateScaleFix, int outCount )
 {
+	float fTotalVolume = volume[0] + volume[1];
+	if ( fTotalVolume <= SKIP_MIXING_IF_TOTAL_VOLUME_LESS_OR_EQUAL_THAN )
+	{
+		// Not enough volume to mix, skip it
+		return;
+	}
+
+#if CHECK_VALUES_AFTER_REFACTORING
+	// Backup the output and apply the same changes
+	portable_samplepair_t * pOldOutput = DuplicateSamplePairs( pOutput, outCount );
+
+	// Run the old code
 	if ( FUseHighQualityPitch( pChannel ) )
-		SW_Mix16Mono_Interp( pOutput, volume, pData, inputOffset, rateScaleFix, outCount );
+		SW_Mix16Mono_Interp( pOldOutput, volume, pData, inputOffset, rateScaleFix, outCount );
 	else
 		// fast native coded mixers with lower quality pitch shift
-		SW_Mix16Mono( pOutput, volume, pData, inputOffset, rateScaleFix, outCount );
+		SW_Mix16Mono( pOldOutput, volume, pData, inputOffset, rateScaleFix, outCount );
+#endif
+
+// The optimized path has not been ported to PC, run the normal mode, except in debug to test the optimization process.
+#if ( !IsPlatformWindowsPC() || defined(_DEBUG) )
+	if ( snd_mix_optimization.GetBool() )
+#else
+	if ( false )
+#endif
+	{
+	if ( FUseHighQualityPitch( pChannel ) )
+		SW_Mix16Mono_Interp_Opt( pOutput, volume, pData, inputOffset, rateScaleFix, outCount );
+	else
+		// fast native coded mixers with lower quality pitch shift
+		SW_Mix16Mono_Opt( pOutput, volume, pData, inputOffset, rateScaleFix, outCount );
+	}
+	else
+	{
+		if ( FUseHighQualityPitch( pChannel ) )
+			SW_Mix16Mono_Interp( pOutput, volume, pData, inputOffset, rateScaleFix, outCount );
+		else
+			// fast native coded mixers with lower quality pitch shift
+			SW_Mix16Mono( pOutput, volume, pData, inputOffset, rateScaleFix, outCount );
+	}
+
+#if CHECK_VALUES_AFTER_REFACTORING
+	// Compare side by side
+	bool bFailed = ( memcmp( pOutput, pOldOutput, outCount * sizeof( portable_samplepair_t ) ) != 0 );
+	Assert( bFailed == false );
+
+	FreeDuplicatedSamplePairs( pOldOutput, outCount );
+#endif
 }
 
-void Mix8StereoWavtype( channel_t *pChannel, portable_samplepair_t *pOutput, int *volume, byte *pData, int inputOffset, fixedint rateScaleFix, int outCount )
+void Mix8StereoWavtype(channel_t *pChannel, portable_samplepair_t *pOutput, float *volume, byte *pData, int inputOffset, fixedint rateScaleFix, int outCount)
 {
-	switch ( pChannel->wavtype )
+	char nWavType = pChannel->wavtype;
+	if ( snd_mix_soundchar_enabled.GetBool() == false )
 	{
+		nWavType = 0;		// Let's use the default value
+	}
+
+	switch ( nWavType )
+	{
+	case CHAR_DIRSTEREO:
 	case CHAR_DOPPLER:
 		SW_Mix8StereoDopplerLeft( pOutput, volume, pData, inputOffset, rateScaleFix, outCount );
 		SW_Mix8StereoDopplerRight( pOutput, &volume[IFRONT_LEFTD], pData, inputOffset, rateScaleFix, outCount );
@@ -3908,25 +4944,58 @@ void Mix8StereoWavtype( channel_t *pChannel, portable_samplepair_t *pOutput, int
 	}
 }
 
-
-void Mix16StereoWavtype( channel_t *pChannel, portable_samplepair_t *pOutput, int *volume, short *pData, int inputOffset, fixedint rateScaleFix, int outCount )
+void Mix16StereoWavtype(channel_t *pChannel, portable_samplepair_t *pOutput, float *volume, short *pData, int inputOffset, fixedint rateScaleFix, int outCount)
 {
-	switch ( pChannel->wavtype )
+	float fTotalVolume = volume[0] + volume[1];
+	if ( fTotalVolume <= SKIP_MIXING_IF_TOTAL_VOLUME_LESS_OR_EQUAL_THAN )
 	{
+		// Not enough volume to mix, skip it
+		return;
+	}
+
+	bool bUseHighQualityPitch = FUseHighQualityPitch( pChannel );
+	char nWavType = pChannel->wavtype;
+	if ( snd_mix_soundchar_enabled.GetBool() == false )
+	{
+		nWavType = 0;		// Let's use the default value
+	}
+
+	switch ( nWavType )
+	{
+	case CHAR_HRTF:
+
+		float volumes_averaged[2];
+		volumes_averaged[0] = float((volume[0] + volume[1]) * 4 * pChannel->hrtf.lerp + volume[0] * 8 * (1.0f - pChannel->hrtf.lerp));
+		volumes_averaged[1] = float((volume[0] + volume[1]) * 4 * pChannel->hrtf.lerp + volume[1] * 8 * (1.0f - pChannel->hrtf.lerp));
+
+		if (bUseHighQualityPitch)
+			SW_Mix16Stereo_Interp(pOutput, volumes_averaged, pData, inputOffset, rateScaleFix, outCount);
+		else
+			SW_Mix16Stereo(pOutput, volumes_averaged, pData, inputOffset, rateScaleFix, outCount);
+		break;
+	case CHAR_DIRSTEREO:
 	case CHAR_DOPPLER:
-		SW_Mix16StereoDopplerLeft( pOutput, volume, pData, inputOffset, rateScaleFix, outCount );
-		SW_Mix16StereoDopplerRight( pOutput, &volume[IFRONT_LEFTD], pData, inputOffset, rateScaleFix, outCount );
+		if ( bUseHighQualityPitch )
+		{
+			SW_Mix16StereoDopplerLeft_Interp( pOutput, volume, pData, inputOffset, rateScaleFix, outCount );
+			SW_Mix16StereoDopplerRight_Interp( pOutput, &volume[IFRONT_LEFTD], pData, inputOffset, rateScaleFix, outCount );
+		}
+		else
+		{
+			SW_Mix16StereoDopplerLeft( pOutput, volume, pData, inputOffset, rateScaleFix, outCount );
+			SW_Mix16StereoDopplerRight( pOutput, &volume[IFRONT_LEFTD], pData, inputOffset, rateScaleFix, outCount );
+		}
 		break;
 
 	case CHAR_DIRECTIONAL:
-		if ( FUseHighQualityPitch( pChannel ) )
+		if ( bUseHighQualityPitch )
 			SW_Mix16StereoDirectional_Interp( pChannel->dspface, pOutput, volume, pData, inputOffset, rateScaleFix, outCount );
 		else
 			SW_Mix16StereoDirectional( pChannel->dspface, pOutput, volume, pData, inputOffset, rateScaleFix, outCount );
 		break;
 
 	case CHAR_DISTVARIANT:
-		if ( FUseHighQualityPitch( pChannel ) )
+		if ( bUseHighQualityPitch )
 			SW_Mix16StereoDistVar_Interp( pChannel->distmix, pOutput, volume, pData, inputOffset, rateScaleFix, outCount);
 		else
 			SW_Mix16StereoDistVar( pChannel->distmix, pOutput, volume, pData, inputOffset, rateScaleFix, outCount);
@@ -3934,7 +5003,7 @@ void Mix16StereoWavtype( channel_t *pChannel, portable_samplepair_t *pOutput, in
 
 	case CHAR_OMNI:
 		// non directional stereo - all channel volumes are same
-		if ( FUseHighQualityPitch( pChannel ) )
+		if ( bUseHighQualityPitch )
 			SW_Mix16Stereo_Interp( pOutput, volume, pData, inputOffset, rateScaleFix, outCount );
 		else
 			SW_Mix16Stereo( pOutput, volume, pData, inputOffset, rateScaleFix, outCount );
@@ -3942,14 +5011,13 @@ void Mix16StereoWavtype( channel_t *pChannel, portable_samplepair_t *pOutput, in
 
 	default:
 	case CHAR_SPATIALSTEREO:
-		if ( FUseHighQualityPitch( pChannel ) )
+		if ( bUseHighQualityPitch )
 			SW_Mix16Stereo_Interp( pOutput, volume, pData, inputOffset, rateScaleFix, outCount );
 		else
 			SW_Mix16Stereo( pOutput, volume, pData, inputOffset, rateScaleFix, outCount );
 		break;
 	}
 }
-
 
 //===============================================================================
 // Client entity mouth movement code.  Set entity mouthopen variable, based
@@ -3958,17 +5026,9 @@ void Mix16StereoWavtype( channel_t *pChannel, portable_samplepair_t *pOutput, in
 //===============================================================================
 
 
-extern IBaseClientDLL *g_ClientDLL;
-
 // called when voice channel is first opened on this entity
 static CMouthInfo *GetMouthInfoForChannel( channel_t *pChannel )
 {
-#ifndef DEDICATED
-	// If it's a sound inside the client UI, ask the client for the mouthinfo
-	if ( pChannel->soundsource == SOUND_FROM_UI_PANEL )
-		return g_ClientDLL ? g_ClientDLL->GetClientUIMouthInfo() : NULL;
-#endif
-
 	int mouthentity = pChannel->speakerentity == -1 ? pChannel->soundsource : pChannel->speakerentity;
 
 	IClientEntity *pClientEntity = entitylist->GetClientEntity( mouthentity );
@@ -3978,6 +5038,34 @@ static CMouthInfo *GetMouthInfoForChannel( channel_t *pChannel )
 
 	return pClientEntity->GetMouth();
 }
+
+//-----------------------------------------------------------------------------
+// Purpose: 
+// Input  : *pChannel - 
+// Output : Returns true on success, false on failure.
+//-----------------------------------------------------------------------------
+static bool SND_IsMouth( channel_t *pChannel )
+{
+	if ( !entitylist )
+	{
+		return false;
+	}
+
+	if ( pChannel->entchannel == CHAN_VOICE )
+	{
+		return true;
+	}
+
+	if ( pChannel->sfx && 
+		pChannel->sfx->pSource && 
+		pChannel->sfx->pSource->GetSentence() )
+	{
+		return true;	
+	}
+
+	return false;
+}
+
 
 void SND_InitMouth( channel_t *pChannel )
 {
@@ -3990,6 +5078,9 @@ void SND_InitMouth( channel_t *pChannel )
 			pMouth->mouthopen = 0;
 			pMouth->sndavg = 0;
 			pMouth->sndcount = 0;
+			pChannel->flags.m_bHasMouth = true;
+			pChannel->flags.m_bMouthEnvelope = pMouth->NeedsEnvelope();
+
 			if ( pChannel->sfx->pSource && pChannel->sfx->pSource->GetSentence() )
 			{
 				pMouth->AddSource( pChannel->sfx->pSource, pChannel->flags.m_bIgnorePhonemes );
@@ -4000,54 +5091,86 @@ void SND_InitMouth( channel_t *pChannel )
 
 // called when channel stops
 
+// mouth updates are queued into these entries during mixing
+// That way they can be applied during a time when the sound is synchronized with the client
+// instead of mutexing the code inside the callbacks
+struct mouthoutput_t
+{
+	int				entityId;
+	CAudioSource	*pSource;
+	float			elapsedTime;	// if this is negative, we want to clear the mouth data
+};
+
+// mouth envelope data is queued here until it can be processed by the main thread
+struct mouthenvelope_t
+{
+	int				entityId;
+	int				sampleTotal;
+	int				sampleCount;
+};
+
+// a couple of simple arrays for queuing the mouth data
+static CUtlVector<mouthoutput_t> g_MouthOutput;
+static CUtlVector<mouthenvelope_t> g_MouthEnvelope;
+#define CAVGSAMPLES 10
+
+// queue up a command to remove the channel's mouth source if playing
 void SND_CloseMouth(channel_t *pChannel) 
 {
-	if ( SND_IsMouth( pChannel ) )
+	if ( pChannel->flags.m_bHasMouth )
 	{
-		CMouthInfo *pMouth = GetMouthInfoForChannel(pChannel);
-		if ( pMouth )
+		int mouthentity = pChannel->speakerentity == -1 ? pChannel->soundsource : pChannel->speakerentity;
+		IClientEntity *pClientEntity = entitylist->GetClientEntity( mouthentity );
+		if ( pClientEntity )
 		{
-			// shut mouth
-			int idx = pMouth->GetIndexForSource( pChannel->sfx->pSource );
-
-			if ( idx != UNKNOWN_VOICE_SOURCE )
+			CMouthInfo *pMouth = pClientEntity->GetMouth();
+			if ( pMouth )
 			{
-				pMouth->RemoveSourceByIndex(idx);
+				int index = g_MouthOutput.AddToTail();
+				g_MouthOutput[index].entityId = mouthentity;
+				g_MouthOutput[index].pSource = pChannel->sfx->pSource;
+				g_MouthOutput[index].elapsedTime = -1;
 			}
-			else
-			{
-				pMouth->ClearVoiceSources();
-			}
-			pMouth->mouthopen = 0;
 		}
 	}
 }
 
-#define CAVGSAMPLES 10
-// need this to make the debug code below work.
-//#include "snd_wave_source.h"
-void SND_MoveMouth8( channel_t *ch, CAudioSource *pSource, int count ) 
+
+
+// This processes all queued mouth updates
+// Call this from the main thread to avoid callbacks while the client thread is running
+void SND_MouthUpdateAll()
 {
-	int 	data;
-	char	*pdata = NULL;
-	int		i;
-	int		savg;
-	int		scount;
-
-	CMouthInfo *pMouth = GetMouthInfoForChannel( ch );
-	
-	if ( !pMouth )
-		return;
-
-	if ( pSource->GetSentence() )
+	for ( int i = 0; i < g_MouthOutput.Count(); i++ )
 	{
-		int idx = pMouth->GetIndexForSource( pSource );
-		
+		const mouthoutput_t &rec = g_MouthOutput[i];
+		IClientEntity *pClientEntity = entitylist->GetClientEntity( rec.entityId );
+		if( !pClientEntity )
+			continue;
+		CMouthInfo *pMouth = pClientEntity->GetMouth();
+		if ( !pMouth )
+			continue;
+		Assert(rec.pSource);
+
+		if ( rec.elapsedTime < 0 )
+		{
+			pMouth->RemoveSource( rec.pSource );
+			pMouth->mouthopen = 0;
+			continue;
+		}
+
+		int idx = pMouth->GetIndexForSource( rec.pSource );
+		CVoiceData *vd = NULL;
 		if ( idx == UNKNOWN_VOICE_SOURCE )
 		{
-			if ( pMouth->AddSource( pSource, ch->flags.m_bIgnorePhonemes ) == NULL )
+			vd = pMouth->AddSource( rec.pSource, false );
+			if ( vd == NULL )
 			{
-				DevMsg( 1, "out of voice sources, won't lipsync %s\n", ch->sfx->getname() );
+				// clear, any sources still playing will re-add themselves within a frame
+				pMouth->ClearVoiceSources();
+
+				char nameBuf[MAX_PATH];
+				DevMsg( 2, "out of voice sources, won't lipsync %s\n", rec.pSource->GetFileName(nameBuf, sizeof(nameBuf)) );
 #if 0
 				for ( int i = 0; i < pMouth->GetNumVoiceSources(); i++ )
 				{
@@ -4059,124 +5182,138 @@ void SND_MoveMouth8( channel_t *ch, CAudioSource *pSource, int count )
 					Msg("Playing %s...\n", pName );
 				}
 #endif
-			 }
+				// try again to add after clearing
+				vd = pMouth->AddSource( rec.pSource, false );
+			}
 		}
 		else
 		{
+			vd = pMouth->GetVoiceSource(idx);
+		}
+		if ( vd )
+		{
 			// Update elapsed time from mixer
-			CVoiceData *vd = pMouth->GetVoiceSource( idx );
-			Assert( vd );
-			if ( vd )
+			vd->SetElapsedTime( rec.elapsedTime );
+		}
+	}
+	g_MouthOutput.RemoveAll();
+
+	for ( int i = 0; i < g_MouthEnvelope.Count(); i++ )
+	{
+		const mouthenvelope_t &rec = g_MouthEnvelope[i];
+		IClientEntity *pClientEntity = entitylist->GetClientEntity( rec.entityId );
+		if( !pClientEntity )
+			continue;
+		CMouthInfo *pMouth = pClientEntity->GetMouth();
+		if ( !pMouth )
+			continue;
+
+		if ( pMouth->NeedsEnvelope() )
+		{
+			pMouth->sndavg = rec.sampleTotal + pMouth->sndavg;
+			int count = rec.sampleCount + pMouth->sndcount;
+			if ( count >= CAVGSAMPLES )
 			{
-				Assert( pSource->SampleRate() > 0 );
-
-				float elapsed = ( float )ch->pMixer->GetSamplePosition() / ( float )pSource->SampleRate();
-
-				vd->SetElapsedTime( elapsed );
+				pMouth->mouthopen = pMouth->sndavg / count;
+				pMouth->sndavg = 0;
+				pMouth->sndcount = 0;
+			}
+			else
+			{
+				pMouth->sndcount = count;
 			}
 		}
-	}
-
-	if ( IsX360() )
-	{
-		// not supporting because data is assumed to be 8 bit and bypasses mixer (decoding)
-		return;
-	}
-
-	if ( pMouth->NeedsEnvelope() )
-	{
-		int availableSamples = pSource->GetOutputData((void**)&pdata, ch->pMixer->GetSamplePosition(), count, NULL );
-
-		if( pdata == NULL )
-			return;
-		
-		i = 0;
-		scount = pMouth->sndcount;
-		savg = 0;
-
-		while ( i < availableSamples && scount < CAVGSAMPLES )
+		else
 		{
-			data = pdata[i];
-			savg += abs(data);	
-
-			i += 80 + ((byte)data & 0x1F);
-			scount++;
-		}
-
-		pMouth->sndavg += savg;
-		pMouth->sndcount = (byte) scount;
-
-		if ( pMouth->sndcount >= CAVGSAMPLES ) 
-		{
-			pMouth->mouthopen = pMouth->sndavg / CAVGSAMPLES;
-			pMouth->sndavg = 0;
-			pMouth->sndcount = 0;
+			pMouth->mouthopen = 0;
 		}
 	}
-	else
-	{
-		pMouth->mouthopen = 0;
-	}
+	g_MouthEnvelope.RemoveAll();
 }
 
-
-void SND_UpdateMouth( channel_t *pChannel )
+// need this to make the debug code below work.
+//#include "snd_wave_source.h"
+// this will queue up a command to update the client-entity's mouth data
+void SND_MoveMouth8( channel_t *ch, CAudioSource *pSource, int count ) 
 {
-	CMouthInfo *m = GetMouthInfoForChannel( pChannel );
-	if ( !m )
+	if ( !ch->flags.m_bHasMouth )
 		return;
 
-	if ( pChannel->sfx )
+	int mouthentity = ch->speakerentity == -1 ? ch->soundsource : ch->speakerentity;
+
+	if ( !ch->flags.m_bIgnorePhonemes )
 	{
-		m->AddSource( pChannel->sfx->pSource, pChannel->flags.m_bIgnorePhonemes );
+		if ( pSource->GetSentence() )
+		{
+			int index = g_MouthOutput.AddToTail();
+			g_MouthOutput[index].entityId = mouthentity;
+			g_MouthOutput[index].pSource = pSource;
+			Assert( pSource->SampleRate() > 0 );
+			float elapsed = ( float )ch->pMixer->GetSamplePosition() / ( float )pSource->SampleRate();
+			g_MouthOutput[index].elapsedTime = elapsed;
+		}
 	}
 }
 
 
+void SND_MouthEnvelopeFollower( channel_t *pChannel, char *pData, int count ) 
+{
+	if ( !pChannel->flags.m_bHasMouth )
+		return;
+
+	if ( !pChannel->flags.m_bMouthEnvelope )
+		return;
+
+	if ( pData == NULL || count == 0 )
+		return;
+
+	int mouthentity = pChannel->speakerentity == -1 ? pChannel->soundsource : pChannel->speakerentity;
+	int mix_sample_size = pChannel->pMixer->GetMixSampleSize();
+
+	int i = 0;
+	int scount = 0;
+	int savg = 0;
+	int sample = 0;
+
+	while ( i < count && scount < CAVGSAMPLES )
+	{
+		if ( mix_sample_size == 1 )
+		{
+			sample = *(((char *)pData) + i );
+		}
+		else if ( mix_sample_size == 2 )
+		{
+			sample = *(((short *)pData) + i ) >> 8;
+		}
+
+		savg += abs(sample);
+		// skip ahead pseudo randomly
+		i += 80 + ((byte)sample & 0x1F);
+		scount++;
+	} 
+
+	int index = g_MouthEnvelope.AddToTail();
+	g_MouthEnvelope[index].entityId = mouthentity;
+	g_MouthEnvelope[index].sampleTotal = savg;
+	g_MouthEnvelope[index].sampleCount = scount;
+}
+
+
+// note: since mixing may be threaded these calls are all queued now
+// queue up a command to clear the current source out of the mouth for this entity
 void SND_ClearMouth( channel_t *pChannel )
 {
-	CMouthInfo *m = GetMouthInfoForChannel( pChannel );
-	if ( !m )
-		return;
-
-	if ( pChannel->sfx )
+	if ( pChannel->flags.m_bHasMouth && pChannel->sfx )
 	{
-		m->RemoveSource( pChannel->sfx->pSource );
+		int mouthentity = pChannel->speakerentity == -1 ? pChannel->soundsource : pChannel->speakerentity;
+
+		int index = g_MouthOutput.AddToTail();
+		g_MouthOutput[index].entityId = mouthentity;
+		g_MouthOutput[index].pSource = pChannel->sfx->pSource;
+		g_MouthOutput[index].elapsedTime = -1;
 	}
 }
 
-
-//-----------------------------------------------------------------------------
-// Purpose: 
-// Input  : *pChannel - 
-// Output : Returns true on success, false on failure.
-//-----------------------------------------------------------------------------
-bool SND_IsMouth( channel_t *pChannel )
-{
-#ifndef DEDICATED
-	if ( pChannel->soundsource == SOUND_FROM_UI_PANEL )
-		return true;
-#endif
-
-	if ( !entitylist )
-	{
-		return false;
-	}
-
-	if ( pChannel->entchannel == CHAN_VOICE || pChannel->entchannel == CHAN_VOICE2 )
-	{
-		return true;
-	}
-
-	if ( pChannel->sfx && 
-		 pChannel->sfx->pSource && 
-		 pChannel->sfx->pSource->GetSentence() )
-	{
-		return true;	
-	}
-
-	return false;
-}
 
 //-----------------------------------------------------------------------------
 // Purpose: 
@@ -4192,27 +5329,39 @@ bool SND_ShouldPause( channel_t *pChannel )
 // Movie recording support
 //===============================================================================
 
-void SND_RecordInit()
+extern float host_time;
+extern double g_soundtimeerror;
+static int g_nMovieSamples = 0;	
+extern int host_tickcount;
+
+// We don't want to record sound until the tick after we start the movie
+static int g_nMovieStartTick;
+
+static ConVar snd_moviefix( "snd_moviefix", "1", 0, "Defer sound recording until next tick when laying off movies." );
+
+float g_moviestart;
+
+void SND_MovieStart( void )
 {
+	if ( IsGameConsole() )
+		return;
+
+	if ( !cl_movieinfo.IsRecording() )
+		return;
+
 	g_paintedtime = 0;
+#if USE_AUDIO_DEVICE_V1
 	g_soundtime = 0;
+	g_soundtimeerror = 0.0;
+#endif
+	g_moviestart = host_time;
+	g_nMovieStartTick = host_tickcount;
 
 	// TMP Wave file supports stereo only, so force stereo
 	if ( snd_surround.GetInt() != 2 )
 	{
 		snd_surround.SetValue( 2 );
 	}
-}
-
-void SND_MovieStart( void )
-{
-	if ( IsX360() )
-		return;
-
-	if ( !cl_movieinfo.IsRecording() )
-		return;
-
-	SND_RecordInit();
 
 	// 44k: engine playback rate is now 44100...changed from 22050
 	if ( cl_movieinfo.DoWav() )
@@ -4223,7 +5372,7 @@ void SND_MovieStart( void )
 
 void SND_MovieEnd( void )
 {
-	if ( IsX360() )
+	if ( IsGameConsole() )
 		return;
 
 	if ( !cl_movieinfo.IsRecording() )
@@ -4239,15 +5388,22 @@ void SND_MovieEnd( void )
 
 bool SND_IsRecording()
 {
-	return ( ( IsReplayRendering() || cl_movieinfo.IsRecording() ) && !Con_IsVisible() );
+	if ( cl_movieinfo.IsRecording() && !Con_IsVisible() )
+	{
+		// Defer first buffer until next tick if snd_moviefix is true
+		if ( ( host_tickcount == g_nMovieStartTick ) && 
+			snd_moviefix.GetBool() )
+		{
+			return false;
+		}
+		return true;
+	}
+	return false;
 }
 
-
-
-extern IVideoRecorder *g_pVideoRecorder;
 void SND_RecordBuffer( void )
 {
-	if ( IsX360() )
+	if ( IsGameConsole() )
 		return;
 
 	if ( !SND_IsRecording() )
@@ -4256,38 +5412,27 @@ void SND_RecordBuffer( void )
 	int		i;
 	int		val;
 	int		bufferSize = snd_linear_count * sizeof(short);
-	short	*tmp = (short *)_alloca( bufferSize );
+	short	*tmp = (short *)stackalloc( bufferSize );
 	
 	for (i=0 ; i<snd_linear_count ; i+=2)
 	{
 		val = (snd_p[i]*snd_vol)>>8;
-		tmp[i] = CLIP(val);
+		tmp[i] = iclip(val);
 		
 		val = (snd_p[i+1]*snd_vol)>>8;
-		tmp[i+1] = CLIP(val);
+		tmp[i+1] = iclip(val);
 	}
 
-	if ( IsReplayRendering() )
+	if ( cl_movieinfo.DoWav() )
 	{
-#if defined( REPLAY_ENABLED )
-		extern IClientReplayContext *g_pClientReplayContext;
-		IReplayMovieRenderer *pMovieRenderer = g_pClientReplayContext->GetMovieRenderer();
-		if ( IsReplayRendering() && pMovieRenderer && pMovieRenderer->IsAudioSyncFrame() )
-		{
-			pMovieRenderer->RenderAudio( (unsigned char *)tmp, bufferSize, snd_linear_count );
-		}
-#endif
+		WaveAppendTmpFile( cl_movieinfo.moviename, tmp, 16, snd_linear_count );
 	}
-	else
-	{
-		if ( cl_movieinfo.DoWav() )
-		{
-			WaveAppendTmpFile( cl_movieinfo.moviename, tmp, 16, snd_linear_count );
-		}
 
-		if ( cl_movieinfo.DoVideoSound() )
-		{
-			g_pVideoRecorder->AppendAudioSamples( tmp, bufferSize );
-		}
+	if ( cl_movieinfo.DoAVISound() )
+	{
+		g_pAVI->AppendMovieSound( g_hCurrentAVI, tmp, bufferSize );
 	}
+
+	g_nMovieSamples += ( snd_linear_count >> 1 );
+	//Msg( "%d %f %f sound file time %f\n", host_tickcount, host_time, host_time - g_moviestart, (double)g_nMovieSamples/(double)44100);
 }

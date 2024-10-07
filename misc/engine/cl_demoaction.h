@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -12,7 +12,7 @@
 #endif
 
 // Forward declarations
-#include <KeyValues.h>
+#include <keyvalues.h>
 
 class CUtlBuffer;
 class CBaseDemoAction;
@@ -155,7 +155,7 @@ public:
 	static bool				HasEditorFactory( DEMOACTION actionType );
 
 	// Serialization helper ( handles indenting )
-	static void				BufPrintf( int depth, CUtlBuffer& buf, PRINTF_FORMAT_STRING char const *fmt, ... );
+	static void				BufPrintf( int depth, CUtlBuffer& buf, char const *fmt, ... );
 
 private:
 

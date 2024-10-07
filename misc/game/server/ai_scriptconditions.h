@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose:
 //
@@ -36,7 +36,7 @@ public:
 
 	bool Check( CBaseEntity *pEntity1, CBaseEntity *pEntity2 )
 	{
-		if ( m_distSq != 0 )
+		if ( m_distSq != 0 && pEntity1 && pEntity2 )
 		{
 			float distSq = ( pEntity1->GetAbsOrigin() - pEntity2->GetAbsOrigin() ).LengthSqr();
 			bool fInside = ( distSq < m_distSq );

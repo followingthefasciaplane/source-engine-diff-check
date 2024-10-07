@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: IGameResources interface
 //
@@ -29,7 +29,7 @@ public:
 	virtual bool	IsLocalPlayer( int index ) = 0;
 
 	virtual const char *GetPlayerName( int index ) = 0;
-	virtual int		GetPlayerScore( int index ) = 0;
+	virtual int		GetKills( int index ) = 0;
 	virtual int		GetPing( int index ) = 0;
 //	virtual int		GetPacketloss( int index ) = 0;
 	virtual int		GetDeaths( int index ) = 0;

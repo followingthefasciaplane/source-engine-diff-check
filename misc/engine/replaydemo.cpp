@@ -1,11 +1,9 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
 //=============================================================================//
-
 #if defined( REPLAY_ENABLED )
-
 #include <tier1/strtools.h>
 #include <eiface.h>
 #include <bitbuf.h>
@@ -14,7 +12,6 @@
 #include "replayserver.h"
 #include "demo.h"
 #include "host_cmd.h"
-#include "proto_version.h"
 #include "demofile/demoformat.h"
 #include "filesystem_engine.h"
 #include "net.h"
@@ -23,20 +20,14 @@
 #include "host.h"
 #include "server.h"
 #include "networkstringtableclient.h"
-#include "replay_internal.h"
-#include "GameEventManager.h"
-#include "replay/ireplaysystem.h"
-#include "replay/ireplaysessionrecorder.h"
-#include "replay/shared_defs.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
+static ConVar replay_record_directly_to_disk( "replay_record_directly_to_disk", "0", FCVAR_HIDDEN );
+
 extern CNetworkStringTableContainer *networkStringTableContainerServer;
 extern CGlobalVars g_ServerGlobalVariables;
-extern IServerReplayContext *g_pServerReplayContext;
-
-static ConVar *replay_record_voice = NULL;
 
 //////////////////////////////////////////////////////////////////////
 // Construction/Destruction
@@ -57,58 +48,45 @@ CReplayDemoRecorder::~CReplayDemoRecorder()
 	StopRecording();
 }
 
-void CReplayDemoRecorder::GetUniqueDemoFilename( char *pOut, int nLength )
+void CReplayDemoRecorder::GetUniqueDemoFilename( char* pOut, int nLength )
 {
 	Assert( pOut );
-	tm today; VCRHook_LocalTime( &today );
-	Q_snprintf( pOut, nLength, "%04i%02i%02i-%02i%02i%02i-%s.dem", 
+	tm today; 
+	Plat_GetLocalTime( &today );
+	Q_snprintf( pOut, nLength, "replay-%04i%02i%02i-%02i%02i%02i-%s.dem", 
 		1900 + today.tm_year, today.tm_mon+1, today.tm_mday, 
 		today.tm_hour, today.tm_min, today.tm_sec, m_pReplayServer->GetMapName() ); 
 }
 
-void CReplayDemoRecorder::StartRecording() 
+void CReplayDemoRecorder::StartAutoRecording() 
 {
-	// Get a proper filename and cache it for later
-	GetUniqueDemoFilename( m_szDumpFilename, sizeof( m_szDumpFilename ) );
+	char fileName[MAX_OSPATH];
 
-	// Start recording to the temporary location in the game dir
-	StartRecording( TMP_REPLAY_FILENAME, false );
+	GetUniqueDemoFilename( fileName, sizeof(fileName) );
+
+	StartRecording( fileName, false );
 }
 
-const char *CReplayDemoRecorder::GetDemoFilename()
+void CReplayDemoRecorder::StartRecording( const char *filename, bool bContinuously ) 
 {
-	static char s_szDemoFilename[ MAX_OSPATH ];
-	const char *pFilename = replay->m_DemoRecorder.GetRecordingFilename();		Assert( pFilename && pFilename[0] );
-	V_strcpy( s_szDemoFilename, pFilename );
-	return s_szDemoFilename;
-}
-
-void CReplayDemoRecorder::StartRecording( const char *pFilename, bool bContinuously ) 
-{
-	SETUP_CVAR_REF( replay_recording );
-
 	StopRecording();	// stop if we're already recording
-
-	// Attempt to "open" the demo file
-	ConVarRef replay_buffersize( "replay_buffersize" );
-	const int nBufferSize = 1024 * 1024 * ( replay_buffersize.IsValid() ? replay_buffersize.GetInt() : 16 );
-	if ( !m_DemoFile.Open( NULL, false, true, nBufferSize, false ) )
+	
+	if ( !m_DemoFile.Open( filename, false, !replay_record_directly_to_disk.GetInt() ) )
 	{
-		Warning( "Failed to start recording - couldn't open demo file %s.\n", pFilename );
+		ConMsg ("StartRecording: couldn't open demo file %s.\n", filename );
 		return;
 	}
-	
-	// Using this tickcount allows us to sync up client-side recorded ragdolls later with replay demos on clients
-	m_nStartTick = g_ServerGlobalVariables.tickcount;
+
+	ConMsg ("Recording Replay demo to %s...\n", filename);
 
 	demoheader_t *dh = &m_DemoFile.m_DemoHeader;
 
-	// open demo header file containing sigon data
+	// open demo header file containing sigondata
 	Q_memset( dh, 0, sizeof(demoheader_t) );
 
 	Q_strncpy( dh->demofilestamp, DEMO_HEADER_ID, sizeof(dh->demofilestamp) );
 	dh->demoprotocol = DEMO_PROTOCOL;
-	dh->networkprotocol = PROTOCOL_VERSION;
+	dh->networkprotocol = GetHostVersion();
 
 	Q_strncpy( dh->mapname, m_pReplayServer->GetMapName(), sizeof( dh->mapname ) );
 
@@ -127,21 +105,22 @@ void CReplayDemoRecorder::StartRecording( const char *pFilename, bool bContinuou
 
 	m_nFrameCount = 0;
 
+	// Using this tickcount allows us to sync up client-side recorded ragdolls later with replay demos on clients
+	m_nStartTick = g_ServerGlobalVariables.tickcount;
+
 	// Demo playback should read this as an incoming message.
 	// Write the client's realtime value out so we can synchronize the reads.
-	m_DemoFile.WriteCmdHeader( dem_synctick, 0 );
+	m_DemoFile.WriteCmdHeader( dem_synctick, 0, 0 );
+
+	// This tells the demo buffer (see demobuffer.cpp) that we are done writing all signon data, so that
+	// it can maintain be maintained separately, so that we can write a demo after stale frames have been
+	// removed.
+	m_DemoFile.NotifySignonComplete();
 
 	m_bIsRecording = true;
 
 	m_SequenceInfo = 1;
 	m_nDeltaTick = -1;
-
-	replay_recording.SetValue( 1 );
-
-	extern ConVar replay_debug;
-	if ( replay_debug.GetBool() ) ConMsg( "%f: Recording Replay...\n", host_time );
-
-	g_pServerReplayContext->GetSessionRecorder()->SetCurrentRecordingStartTick( m_nStartTick );
 }
 
 bool CReplayDemoRecorder::IsRecording()
@@ -149,15 +128,27 @@ bool CReplayDemoRecorder::IsRecording()
 	return m_bIsRecording;
 }
 
-void CReplayDemoRecorder::StopRecording()
+void CReplayDemoRecorder::StopRecording( const CGameInfo *pGameInfo )
 {
-	if ( !IsRecording() )
+	if ( !m_bIsRecording )
 		return;
 
-	// Wipe the demo (does not write to disk)
+	// Demo playback should read this as an incoming message.
+	m_DemoFile.NotifyBeginFrame();
+		m_DemoFile.WriteCmdHeader( dem_stop, GetRecordingTick(), 0 );
+	m_DemoFile.NotifyEndFrame();
+
+	// update demo header info
+	// This stuff gets computed in demobuffer.cpp
+// 	m_DemoFile.m_DemoHeader.playback_ticks = GetRecordingTick();
+// 	m_DemoFile.m_DemoHeader.playback_time =  host_state.interval_per_tick *	GetRecordingTick();
+// 	m_DemoFile.m_DemoHeader.playback_frames = m_nFrameCount;
+
+	// write updated version
+	m_DemoFile.WriteDemoHeader();
+
 	m_DemoFile.Close();
 
-	// Set recording flag
 	m_bIsRecording = false;
 
 	// clear writing data buffer
@@ -167,7 +158,15 @@ void CReplayDemoRecorder::StopRecording()
 		m_MessageData.StartWriting( NULL, 0 );
 	}
 	
-	// replay_stoprecording gets set to 0 from within the replay session recorder, but only if we aren't starting to record a new round
+// 	ConMsg("Completed Replay demo \"%s\", recording time %.1f\n",
+// 		m_DemoFile.m_szFileName,
+// 		m_DemoFile.m_DemoHeader.playback_time );
+}
+
+void CReplayDemoRecorder::DumpToFile( char const *filename )
+{
+	// No need to write header here, since the demo buffer's dump function writes the adjusted header
+	m_DemoFile.DumpBufferToFile( filename, m_DemoFile.m_DemoHeader );
 }
 
 CDemoFile *CReplayDemoRecorder::GetDemoFile()
@@ -182,33 +181,40 @@ int CReplayDemoRecorder::GetRecordingTick()
 
 void CReplayDemoRecorder::WriteServerInfo()
 {
-	ALIGN4 byte		buffer[ NET_MAX_PAYLOAD ] ALIGN4_POST;
+	byte		buffer[ NET_MAX_PAYLOAD ];
 	bf_write	msg( "CReplayDemoRecorder::WriteServerInfo", buffer, sizeof( buffer ) );
 
 	SVC_ServerInfo serverinfo;	// create serverinfo message
 
 	// on the master demos are using sv object, on relays replay
-	CBaseServer *pServer = (CBaseServer*)&sv;
+	CSVCMsg_ServerInfo_t serverinfo;	// create serverinfo message
 	
 	m_pReplayServer->FillServerInfo( serverinfo ); // fill rest of info message
 	
 	serverinfo.WriteToBuffer( msg );
 
 	// send first tick
-	NET_Tick signonTick( m_nSignonTick, 0, 0 );
+	CNETMsg_Tick_t signonTick( m_nSignonTick, 0, 0 );
 	signonTick.WriteToBuffer( msg );
 
 	// Write replicated ConVars to non-listen server clients only
-	NET_SetConVar convars;
+	NETMsg_SetConVar_t convars;
 	// build a list of all replicated convars
-	Host_BuildConVarUpdateMessage( &convars, FCVAR_REPLICATED, true );
+	Host_BuildConVarUpdateMessage( convars.m_ConVars, FCVAR_REPLICATED, true );
+
+	// for Replay server demos write set "replay_transmitall 1" even
+	// if it's off for the real broadcast
+	NetMessageCvar_t acvar;
+	Q_strncpy( acvar.name, "replay_transmitall", MAX_OSPATH );
+	Q_strncpy( acvar.value, "1", MAX_OSPATH );
+	convars.m_ConVars.AddToTail( acvar );
 
 	// write convars to demo
 	convars.WriteToBuffer( msg );
 
 	// write stringtable baselines
 #ifndef SHARED_NET_STRING_TABLES
-	m_pReplayServer->m_StringTables->WriteBaselines( msg );
+	m_pReplayServer->m_StringTables->WriteBaselines( pServer->GetMapName(), msg );
 #endif
 
 	// send signon state
@@ -226,32 +232,13 @@ void CReplayDemoRecorder::RecordCommand( const char *cmdstring )
 	if ( !cmdstring || !cmdstring[0] )
 		return;
 
-	GET_REPLAY_DBG_REF();
-	if ( replay_debug.GetBool() ) Msg( "recording command, \"%s\"\n", cmdstring );
-
-	m_DemoFile.WriteConsoleCommand( cmdstring, GetRecordingTick() );
+	m_DemoFile.WriteConsoleCommand( cmdstring, GetRecordingTick(), 0 );
 }
 
 void CReplayDemoRecorder::RecordServerClasses( ServerClass *pClasses )
 {
-	MEM_ALLOC_CREDIT();
-
-	char *pBigBuffer;
-	CUtlBuffer bigBuff;
-
-	int buffSize = 256*1024;
-	if ( !IsX360() )
-	{
-		pBigBuffer = (char*)stackalloc( buffSize );
-	}
-	else
-	{
-		// keep temp large allocations off of stack
-		bigBuff.EnsureCapacity( buffSize );
-		pBigBuffer = (char*)bigBuff.Base();
-	}
-
-	bf_write buf( pBigBuffer, buffSize );
+	byte data[NET_MAX_PAYLOAD];
+	bf_write buf( data, sizeof(data) );
 
 	// Send SendTable info.
 	DataTable_WriteSendTablesBuffer( pClasses, &buf );
@@ -263,40 +250,20 @@ void CReplayDemoRecorder::RecordServerClasses( ServerClass *pClasses )
 	m_DemoFile.WriteNetworkDataTables( &buf, GetRecordingTick() );
 }
 
+void CReplayDemoRecorder::RecordCustomData( int iCallbackIndex, const void *pData, size_t iDataLength )
+{
+	m_DemoFile.WriteCustomData( iCallbackIndex, pData, iDataLength, GetRecordingTick() );
+}
+
 void CReplayDemoRecorder::RecordStringTables()
 {
-	// !KLUDGE! It would be nice if the bit buffer could write into a stream
-	// with the power to grow itself.  But it can't.  Hence this really bad
-	// kludge
-	void *data = NULL;
-	int dataLen = 512 * 1024;
-	while ( dataLen <= DEMO_FILE_MAX_STRINGTABLE_SIZE )
-	{
-		data = realloc( data, dataLen );
-		bf_write buf( data, dataLen );
-		buf.SetDebugName("CReplayDemoRecorder::RecordStringTables");
-		buf.SetAssertOnOverflow( false ); // Doesn't turn off all the spew / asserts, but turns off one
-		networkStringTableContainerServer->WriteStringTables( buf );
+	byte data[256 * 1024];
+	bf_write buf( data, sizeof(data) );
 
-		// Did we fit?
-		if ( !buf.IsOverflowed() )
-		{
+	networkStringTableContainerServer->WriteStringTables( buf );
 
-			// Now write the buffer into the demo file
-			m_DemoFile.WriteStringTables( &buf, GetRecordingTick() );
-			break;
-		}
-
-		// Didn't fit.  Try doubling the size of the buffer
-		dataLen *= 2;
-	}
-	
-	if ( dataLen > DEMO_FILE_MAX_STRINGTABLE_SIZE )
-	{
-		Warning( "Failed to RecordStringTables. Trying to record string table that's bigger than max string table size\n" );
-	}
-
-	free(data);
+	// Now write the buffer into the demo file
+	m_DemoFile.WriteStringTables( &buf, GetRecordingTick() );
 }
 
 int CReplayDemoRecorder::WriteSignonData()
@@ -313,11 +280,12 @@ int CReplayDemoRecorder::WriteSignonData()
 	RecordServerClasses( serverGameDLL->GetAllServerClasses() );
 	RecordStringTables();
 
-	ALIGN4 byte		buffer[ NET_MAX_PAYLOAD ] ALIGN4_POST;
+	byte		buffer[ NET_MAX_PAYLOAD ];
 	bf_write	msg( "CReplayDemo::WriteSignonData", buffer, sizeof( buffer ) );
 
 	// use your class infos, CRC is correct
-	SVC_ClassInfo classmsg( true, pServer->serverclasses );
+	CSVCMsg_ClassInfo_t classmsg;
+	classmsg.set_create_on_client( true );
 	classmsg.WriteToBuffer( msg );
 
 	// Write the regular signon now
@@ -331,7 +299,8 @@ int CReplayDemoRecorder::WriteSignonData()
 	msg.Reset();
 
 	// set view entity
-	SVC_SetView viewent( m_pReplayServer->m_nViewEntity );
+	CSVCMsg_SetView_t viewent;
+	viewent.set_entity_index( m_pReplayServer->m_nViewEntity );
 	viewent.WriteToBuffer( msg );
 
 	// Spawned into server, not fully active, though
@@ -346,8 +315,10 @@ int CReplayDemoRecorder::WriteSignonData()
 
 void CReplayDemoRecorder::WriteFrame( CReplayFrame *pFrame )
 {
-	ALIGN4 byte		buffer[ NET_MAX_PAYLOAD ] ALIGN4_POST;
+	byte		buffer[ NET_MAX_PAYLOAD ];
 	bf_write	msg( "CReplayDemo::RecordFrame", buffer, sizeof( buffer ) );
+
+	DevMsg( "CReplayDemoRecorder::WriteFrame, tick %d\n", GetRecordingTick() );
 
 	//first write reliable data
 	bf_write *data = &pFrame->m_Messages[REPLAY_BUFFER_RELIABLE];
@@ -357,7 +328,7 @@ void CReplayDemoRecorder::WriteFrame( CReplayFrame *pFrame )
 	//now send snapshot data
 
 	// send tick time
-	NET_Tick tickmsg( pFrame->tick_count, host_frametime_unbounded, host_frametime_stddeviation );
+	CNETMsg_Tick_t tickmsg( pFrame->tick_count, host_frametime_unbounded, host_frametime_stddeviation );
 	tickmsg.WriteToBuffer( msg );
 
 
@@ -368,6 +339,7 @@ void CReplayDemoRecorder::WriteFrame( CReplayFrame *pFrame )
 
 	// get delta frame
 	CClientFrame *deltaFrame = m_pReplayServer->GetClientFrame( m_nDeltaTick ); // NULL if m_nDeltaTick is not found or -1
+//	CClientFrame *deltaFrame = NULL; // For full update
 
 	// send entity update, delta compressed if deltaFrame != NULL
 	sv.WriteDeltaEntities( m_pReplayServer->m_MasterClient, pFrame, deltaFrame, msg );
@@ -382,29 +354,22 @@ void CReplayDemoRecorder::WriteFrame( CReplayFrame *pFrame )
 		msg.WriteBits( data->GetBasePointer(), data->GetNumBitsWritten()  );
 
 	// write voice data
-	if ( replay_record_voice == NULL )
-	{
-		replay_record_voice = g_pCVar->FindVar( "replay_record_voice" );
-		Assert( replay_record_voice != NULL );
-	}
-
-	if ( replay_record_voice && replay_record_voice->GetBool() )
-	{
-		data = &pFrame->m_Messages[REPLAY_BUFFER_VOICE];
-		if ( data->GetNumBitsWritten() )
-			msg.WriteBits( data->GetBasePointer(), data->GetNumBitsWritten()  );
-	}
+	data = &pFrame->m_Messages[REPLAY_BUFFER_VOICE];
+	if ( data->GetNumBitsWritten() )
+		msg.WriteBits( data->GetBasePointer(), data->GetNumBitsWritten()  );
 
 	// last write unreliable data
 	data = &pFrame->m_Messages[REPLAY_BUFFER_UNRELIABLE];
 	if ( data->GetNumBitsWritten() )
 		msg.WriteBits( data->GetBasePointer(), data->GetNumBitsWritten()  );
 
-	// update delta tick just like fake clients do
+	// update delta tick just like fakeclients do
 	m_nDeltaTick = pFrame->tick_count;
 
 	// write packet to demo file
-	WriteMessages( dem_packet, msg ); 
+	m_DemoFile.NotifyBeginFrame();
+		WriteMessages( dem_packet, msg ); 
+	m_DemoFile.NotifyEndFrame();
 }
 
 void CReplayDemoRecorder::WriteMessages( unsigned char cmd, bf_write &message )
@@ -433,7 +398,7 @@ void CReplayDemoRecorder::WriteMessages( unsigned char cmd, bf_write &message )
 	}
 
 	// write command & time
-	m_DemoFile.WriteCmdHeader( cmd, GetRecordingTick() ); 
+	m_DemoFile.WriteCmdHeader( cmd, GetRecordingTick(), 0 ); 
 	
 	// write NULL democmdinfo just to keep same format as client demos
 	democmdinfo_t info;
@@ -446,6 +411,11 @@ void CReplayDemoRecorder::WriteMessages( unsigned char cmd, bf_write &message )
 	
 	// Output the buffer.  Skip the network packet stuff.
 	m_DemoFile.WriteRawData( (char*)message.GetBasePointer(), len );
+	
+	if ( replay_debug.GetInt() > 1 )
+	{
+		Msg( "Writing Replay demo message %i bytes at file pos %i\n", len, m_DemoFile.GetCurPos( false ) );
+	}
 }
 
 void CReplayDemoRecorder::RecordMessages(bf_read &data, int bits)
@@ -471,18 +441,6 @@ void CReplayDemoRecorder::RecordPacket()
 		WriteMessages( dem_packet, m_MessageData );
 		m_MessageData.Reset(); // clear message buffer
 	}
-}
-
-const char *CReplayDemoRecorder::GetRecordingFilename()
-{
-	AssertMsg( 0, "Do we ever call this? " );
-	if ( !IsRecording() )
-	{
-		Assert( 0 );
-		return NULL;
-	}
-
-	return m_szDumpFilename;
 }
 
 #endif

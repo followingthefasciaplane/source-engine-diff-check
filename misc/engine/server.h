@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -24,6 +24,7 @@
 #include "sv_client.h"
 #include "baseserver.h"
 #include <ihltvdirector.h>
+#include <ireplaydirector.h>
 
 
 class CGameTrace;
@@ -46,6 +47,7 @@ ServerClass* SV_FindServerClass( int index );
 
 class CGameServer : public CBaseServer
 {
+	typedef CBaseServer BaseClass;
 
 public:
 	CGameServer();
@@ -62,10 +64,15 @@ public: // IServer implementation
 
 public: 
 	void	InitMaxClients( void );
-	bool	SpawnServer( const char *szMapName, const char *szMapFile, const char *startspot );
+	bool	SpawnServer( char *mapname, char *mapGroupNmae, char *startspot );
+	void	SetMapGroupName( char const *mapGroupName );
 	void	SetQueryPortFromSteamServer();
 	void	CopyPureServerWhitelistToStringTable();
 	void 	RemoveClientFromGame( CBaseClient *client );
+
+	void	SyncClientUpdates();
+	bool	ShouldSyncClientUpdates();
+
 	void	SendClientMessages ( bool bSendSnapshots );
 	void	FinishRestore();
 	void	BroadcastSound( SoundInfo_t &sound, IRecipientFilter &filter );
@@ -77,14 +84,15 @@ public:
 	
 	inline  CGameClient *Client( int i ) { return static_cast<CGameClient*>(m_Clients[i]); };
 
+	bool	AnyClientsInHltvReplayMode();
+
 protected :
 
 	// Reload the whitelist files for pure server mode.
 	void		ReloadWhitelist( const char *pMapName );
 
 	CBaseClient *CreateNewClient( int slot );
-	bool		FinishCertificateCheck( netadr_t &adr, int nAuthProtocol, const char *szRawCertificate, int clientChallenge );
-	void		SendClientDatagrams ( int clientCount, CGameClient** clients, CFrameSnapshot* pSnapshot );
+	bool		FinishCertificateCheck( netadr_t &adr, int nAuthProtocol, const char *szRawCertificate );
 	void		CopyTempEntities( CFrameSnapshot* pSnapshot );
 	void		AssignClassIds();
 
@@ -99,10 +107,10 @@ public:
 	
 	int			num_edicts;
 	int			max_edicts;
-	int			free_edicts; // how many edicts in num_edicts are free, in use is num_edicts - free_edicts
 	edict_t		*edicts;			// Can array index now, edict_t is fixed
 	IChangeInfoAccessor *edictchangeinfo; // HACK to allow backward compat since we can't change edict_t layout
 
+	int			m_nMinClientsLimit;    // Min slots allowed on server.
 	int			m_nMaxClientsLimit;    // Max allowed on server.
 	
 	bool		allowsignonwrites;
@@ -118,6 +126,9 @@ public:
 	bool		m_bLoadedPlugins;
 
 public:
+	INetworkStringTable *m_pDynamicModelTable;	
+
+public:
 
 	// New style precache lists are done this way
 	void		CreateEngineStringTables( void );
@@ -126,10 +137,8 @@ public:
 	INetworkStringTable *GetGenericPrecacheTable( void ) const;
 	INetworkStringTable *GetSoundPrecacheTable( void ) const;
 	INetworkStringTable *GetDecalPrecacheTable( void ) const;
+
 	
-	INetworkStringTable *GetDynamicModelsTable( void ) const { return m_pDynamicModelsTable; }
-
-
 	// Accessors to model precaching stuff
 	int			PrecacheModel( char const *name, int flags, model_t *model = NULL );
 	model_t		*GetModel( int index );
@@ -151,6 +160,10 @@ public:
 
 	bool		IsHibernating() const;
 	void		UpdateHibernationState();
+	void		UpdateHibernationStateDeferred();
+	void		UpdateReservedState();
+
+	void		ExecGameTypeCfg( const char *mapname );
 
 private:
 	void		SetHibernating( bool bHibernating );
@@ -165,9 +178,8 @@ private:
 	INetworkStringTable *m_pGenericPrecacheTable;
 	INetworkStringTable *m_pDecalPrecacheTable;
 
-	INetworkStringTable *m_pDynamicModelsTable;
-
 	CPureServerWhitelist *m_pPureServerWhitelist;
+	bool m_bUpdateHibernationStateDeferred;
 	bool m_bHibernating; 	// Are we hibernating.  Hibernation makes server process consume approx 0 CPU when no clients are connected
 };
 
@@ -178,13 +190,14 @@ class IServerGameEnts;
 class IServerGameClients;
 class IServerGameTags;
 extern IServerGameDLL	*serverGameDLL;
-extern int g_iServerGameDLLVersion;
+extern bool g_bServerGameDLLGreaterThanV5;
 extern IServerGameEnts *serverGameEnts;
 
 extern IServerGameClients *serverGameClients;
 extern int g_iServerGameClientsVersion;	// This matches the number at the end of the interface name (so for "ServerGameClients004", this would be 4).
 
 extern IHLTVDirector *serverGameDirector;
+extern IReplayDirector *serverReplayDirector;
 
 extern IServerGameTags *serverGameTags;
 

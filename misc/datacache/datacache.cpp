@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose:
 //
@@ -6,7 +6,7 @@
 
 #include "datacache/idatacache.h"
 
-#ifdef _LINUX
+#if defined( POSIX ) && !defined( _PS3 )
 #include <malloc.h>
 #endif
 
@@ -23,9 +23,16 @@
 #include "datacache.h"
 #include "utlvector.h"
 #include "fmtstr.h"
+#if defined( _X360 )
+#include "xbox/xbox_console.h"
+#endif
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
+#ifdef _PS3
+#include "tls_ps3.h"
+extern uint32 gMinAllocSize;
+#endif //_PS3
 
 //-----------------------------------------------------------------------------
 // Singleton
@@ -45,8 +52,8 @@ EXPOSE_SINGLE_INTERFACE_GLOBALVAR( CDataCache, IDataCache, DATACACHE_INTERFACE_V
 //-----------------------------------------------------------------------------
 // Console commands
 //-----------------------------------------------------------------------------
-ConVar developer( "developer", "0", FCVAR_INTERNAL_USE );
-static ConVar mem_force_flush( "mem_force_flush", "0", FCVAR_CHEAT, "Force cache flush of unlocked resources on every alloc" );
+static ConVar mem_force_flush( "mem_force_flush", "0", 0, "Force cache flush of unlocked resources on every alloc" );
+static ConVar mem_force_flush_section( "mem_force_flush_section", "", 0, "Cache section to restrict mem_force_flush" );
 static int g_iDontForceFlush;
 
 //-----------------------------------------------------------------------------
@@ -77,6 +84,7 @@ CDataCacheSection::CDataCacheSection( CDataCache *pSharedCache, IDataCacheClient
 	m_nFrameUnlockCounter( 0 ),
 	m_options( 0 )
 {
+	memset( m_FrameLocks, 0, sizeof( m_FrameLocks ) );
 	memset( &m_status, 0, sizeof(m_status) );
 	AssertMsg1( strlen(pszName) <= DC_MAX_CLIENT_NAME, "Cache client name too long \"%s\"", pszName );
 	Q_strncpy( szName, pszName, sizeof(szName) );
@@ -125,6 +133,10 @@ void CDataCacheSection::SetOptions( unsigned options )
 	m_options = options;
 }
 
+unsigned int CDataCacheSection::GetOptions()
+{
+	return m_options;
+}
 
 //-----------------------------------------------------------------------------
 // Purpose: Get the current state of the section
@@ -183,10 +195,9 @@ bool CDataCacheSection::AddEx( DataCacheClientID_t clientId, const void *pItemDa
 {
 	VPROF( "CDataCacheSection::Add" );
 
-	if ( mem_force_flush.GetBool() )
-	{
-		m_pSharedCache->Flush();
-	}
+#if !defined( _CERT )
+	ForceFlushDebug( true );
+#endif
 
 	if ( ( m_options & DC_VALIDATE ) && Find( clientId ) )
 	{
@@ -205,6 +216,12 @@ bool CDataCacheSection::AddEx( DataCacheClientID_t clientId, const void *pItemDa
 	};
 
 	memhandle_t hMem = m_LRU.CreateResource( itemData, true );
+#ifdef _PS3
+	if ( m_LRU.LockCount( hMem ) == 1 )
+	{
+		NoteLock( size );
+	}
+#endif
 
 	Assert( hMem != (memhandle_t)0 && hMem != (memhandle_t)DC_INVALID_HANDLE );
 
@@ -339,21 +356,60 @@ bool CDataCacheSection::IsPresent( DataCacheHandle_t handle )
 
 
 //-----------------------------------------------------------------------------
+// Purpose: Get without locking
+//-----------------------------------------------------------------------------
+void CDataCacheSection::GetAndLockMultiple( void **ppData, int nCount, DataCacheHandle_t *pHandles )
+{
+	VPROF( "CDataCacheSection::GetAndLockMultiple" );
+
+#if !defined( _CERT )
+	ForceFlushDebug( !g_iDontForceFlush );
+#endif
+
+	AUTO_LOCK( m_mutex );
+	for ( int i = 0; i < nCount; ++i )
+	{
+		if ( pHandles[i] == DC_INVALID_HANDLE )
+		{
+			ppData[i] = NULL;
+			continue;
+		}
+
+		int nLockCount;
+		DataCacheItem_t *pItem = m_LRU.LockResourceReturnCount( &nLockCount, (memhandle_t)pHandles[i] );
+		if ( !pItem )
+		{
+			ppData[i] = NULL;
+			continue;
+		}
+
+		if ( nLockCount == 1 )
+		{
+			NoteLock( pItem->size );
+		}
+		ppData[i] = const_cast<void *>( pItem->pItemData );
+	}
+}
+
+
+//-----------------------------------------------------------------------------
 // Purpose: Lock an item in the cache, returns NULL if item is not in the cache.
 //-----------------------------------------------------------------------------
 void *CDataCacheSection::Lock( DataCacheHandle_t handle )
 {
 	VPROF( "CDataCacheSection::Lock" );
 
-	if ( mem_force_flush.GetBool() && !g_iDontForceFlush)
-		Flush();
+#if !defined( _CERT )
+	ForceFlushDebug( !g_iDontForceFlush );
+#endif
 
 	if ( handle != DC_INVALID_HANDLE )
 	{
-		DataCacheItem_t *pItem = m_LRU.LockResource( (memhandle_t)handle );
+		int nCount;
+		DataCacheItem_t *pItem = m_LRU.LockResourceReturnCount( &nCount, (memhandle_t)handle );
 		if ( pItem )
 		{
-			if ( m_LRU.LockCount( (memhandle_t)handle ) == 1 )
+			if ( nCount == 1 )
 			{
 				NoteLock( pItem->size );
 			}
@@ -420,8 +476,9 @@ void *CDataCacheSection::Get( DataCacheHandle_t handle, bool bFrameLock )
 {
 	VPROF( "CDataCacheSection::Get" );
 
-	if ( mem_force_flush.GetBool() && !g_iDontForceFlush)
-		Flush();
+#if !defined( _CERT )
+	ForceFlushDebug( !g_iDontForceFlush );
+#endif
 
 	if ( handle != DC_INVALID_HANDLE )
 	{
@@ -470,7 +527,8 @@ void *CDataCacheSection::GetNoTouch( DataCacheHandle_t handle, bool bFrameLock )
 //-----------------------------------------------------------------------------
 int CDataCacheSection::BeginFrameLocking()
 {
-	FrameLock_t *pFrameLock = m_ThreadFrameLock.Get();
+	int nThreadID = g_nThreadID;
+	FrameLock_t *pFrameLock = m_FrameLocks[nThreadID];
 	if ( pFrameLock )
 	{
 		pFrameLock->m_iLock++;
@@ -484,7 +542,8 @@ int CDataCacheSection::BeginFrameLocking()
 		}
 		pFrameLock->m_iLock = 1;
 		pFrameLock->m_pFirst = NULL;
-		m_ThreadFrameLock.Set( pFrameLock );
+		m_FrameLocks[nThreadID] = pFrameLock;
+
 	}
 	return pFrameLock->m_iLock;
 }
@@ -495,7 +554,7 @@ int CDataCacheSection::BeginFrameLocking()
 //-----------------------------------------------------------------------------
 bool CDataCacheSection::IsFrameLocking()
 {
-	FrameLock_t *pFrameLock = m_ThreadFrameLock.Get();
+	FrameLock_t *pFrameLock = m_FrameLocks[g_nThreadID];
 	return ( pFrameLock != NULL );
 }
 
@@ -507,11 +566,12 @@ void *CDataCacheSection::FrameLock( DataCacheHandle_t handle )
 {
 	VPROF( "CDataCacheSection::FrameLock" );
 
-	if ( mem_force_flush.GetBool() && !g_iDontForceFlush)
-		Flush();
+#if !defined( _CERT )
+	ForceFlushDebug( !g_iDontForceFlush );
+#endif
 
 	void *pResult = NULL;
-	FrameLock_t *pFrameLock = m_ThreadFrameLock.Get();
+	FrameLock_t *pFrameLock = m_FrameLocks[g_nThreadID];
 	if ( pFrameLock )
 	{
 		DataCacheItem_t *pItem = m_LRU.LockResource( (memhandle_t)handle );
@@ -519,7 +579,7 @@ void *CDataCacheSection::FrameLock( DataCacheHandle_t handle )
 		if ( pItem )
 		{
 			int iThread = pFrameLock->m_iThread;
-			if ( pItem->pNextFrameLocked[iThread] == DC_NO_NEXT_LOCKED )
+			if ( pItem->pNextFrameLocked[iThread] == DC_NO_NEXT_LOCKED )	
 			{
 				pItem->pNextFrameLocked[iThread] = pFrameLock->m_pFirst;
 				pFrameLock->m_pFirst = pItem;
@@ -540,26 +600,32 @@ void *CDataCacheSection::FrameLock( DataCacheHandle_t handle )
 //-----------------------------------------------------------------------------
 int CDataCacheSection::EndFrameLocking()
 {
-	FrameLock_t *pFrameLock = m_ThreadFrameLock.Get();
+	int nThread = g_nThreadID;
+	FrameLock_t *pFrameLock = m_FrameLocks[nThread];
 	Assert( pFrameLock->m_iLock > 0 );
 
 	if ( pFrameLock->m_iLock == 1 )
 	{
 		VPROF( "CDataCacheSection::EndFrameLocking" );
 
-		DataCacheItem_t *pItem = pFrameLock->m_pFirst;
-		DataCacheItem_t *pNext;
-		int iThread = pFrameLock->m_iThread;
-		while ( pItem )
+		if ( pFrameLock->m_pFirst )
 		{
-			pNext = pItem->pNextFrameLocked[iThread];
-			pItem->pNextFrameLocked[iThread] = DC_NO_NEXT_LOCKED;
-			Unlock( pItem->hLRU );
-			pItem = pNext;
+			AUTO_LOCK( m_mutex );
+
+			DataCacheItem_t *pItem = pFrameLock->m_pFirst;
+			DataCacheItem_t *pNext;
+			int iThread = pFrameLock->m_iThread;
+			while ( pItem )
+			{
+				pNext = pItem->pNextFrameLocked[iThread];
+				pItem->pNextFrameLocked[iThread] = DC_NO_NEXT_LOCKED;
+				Unlock( pItem->hLRU );
+				pItem = pNext;
+			}
 		}
 
 		m_FreeFrameLocks.Push( pFrameLock );
-		m_ThreadFrameLock.Set( NULL );
+		m_FrameLocks[nThread] = NULL;
 		return 0;
 	}
 	else
@@ -685,13 +751,17 @@ unsigned CDataCacheSection::Purge( unsigned nBytes )
 
 	while ( hCurrent != INVALID_MEMHANDLE && nBytes > 0 )
 	{
+        bool bFree = true;
 		hNext = GetNextItem( hCurrent );
-		nBytesCurrent = AccessItem( hCurrent )->size;
+        if(bFree)
+        {
+			nBytesCurrent = AccessItem( hCurrent )->size;
 
-		if ( DiscardItem( hCurrent, DC_FLUSH_DISCARD  ) )
-		{
-			nBytesPurged += nBytesCurrent;
-			nBytes -= min( nBytesCurrent, nBytes );
+			if ( DiscardItem( hCurrent, DC_FLUSH_DISCARD  ) )
+			{
+				nBytesPurged += nBytesCurrent;
+				nBytes -= MIN( nBytesCurrent, nBytes );
+            }
 		}
 		hCurrent = hNext;
 	}
@@ -835,7 +905,7 @@ bool CDataCacheSection::DiscardItem( memhandle_t hItem, DataCacheNotificationTyp
 			NoteUnlock( pItem->size );
 		}
 
-		FrameLock_t *pFrameLock = m_ThreadFrameLock.Get();
+		FrameLock_t *pFrameLock = m_FrameLocks[g_nThreadID];
 		if ( pFrameLock )
 		{
 			int iThread = pFrameLock->m_iThread;
@@ -924,6 +994,38 @@ bool CDataCacheSection::DiscardItemData( DataCacheItem_t *pItem, DataCacheNotifi
 	return false;
 }
 
+void CDataCacheSection::ForceFlushDebug( bool bFlush )
+{
+	if ( bFlush && mem_force_flush.GetBool() )
+	{
+		if ( !*mem_force_flush_section.GetString() )
+		{
+			if ( IsGameConsole() )
+			{
+				// The 360 does not use LRU purge behavior on some sections (section limits are -1) and thus cannot handle arbitrary purges.
+				// Instead the 360 marks those sections, and then must iterate/skip here
+				int count = m_pSharedCache->GetSectionCount();
+				for ( int i = 0; i < count; i++ )
+				{
+					IDataCacheSection *pCacheSection = m_pSharedCache->FindSection( m_pSharedCache->GetSectionName( i ) );
+					if ( pCacheSection && !( pCacheSection->GetOptions() & DC_NO_USER_FORCE_FLUSH ) )
+					{
+						pCacheSection->Flush();
+					}
+				}
+			}
+			else
+			{
+				m_pSharedCache->Flush();
+			}
+		}
+		else if ( stricmp( szName, mem_force_flush_section.GetString() ) == 0 )
+		{
+			// allowing user to ignore safety barrier and force flush
+			Flush();
+		}
+	}
+}
 
 //-----------------------------------------------------------------------------
 // CDataCacheSectionFastFind
@@ -972,7 +1074,7 @@ void DataCacheSize_f( IConVar *pConVar, const char *pOldString, float flOldValue
 		g_DataCache.SetSize( var.GetInt() * 1024 * 1024 );
 	}
 }
-ConVar datacachesize( "datacachesize", "64", FCVAR_INTERNAL_USE, "Size in MB.", true, 32, true, 512, DataCacheSize_f );
+ConVar datacachesize( "datacachesize", "32", 0, "Size in MB.", true, 0, true, 128, DataCacheSize_f );
 
 //-----------------------------------------------------------------------------
 // Connect, disconnect
@@ -1030,6 +1132,7 @@ CDataCache::CDataCache()
 {
 	memset( &m_status, 0, sizeof(m_status) );
 	m_bInFlush = false;
+	m_LRU.SetFreeOnDestruct( false ); // Causes problems in error shut down scenarios as CDataCache::Shutdown() isn't called, so the LRU is pointing to things owned by unloaded DLLs
 }
 
 //-----------------------------------------------------------------------------
@@ -1039,13 +1142,6 @@ void CDataCache::SetSize( int nMaxBytes )
 {
 	m_LRU.SetTargetSize( nMaxBytes );
 	m_LRU.FlushToTargetSize();
-
-	nMaxBytes /= 1024 * 1024;
-
-	if ( datacachesize.GetInt() != nMaxBytes )
-	{
-		datacachesize.SetValue( nMaxBytes );
-	}
 }
 
 
@@ -1127,17 +1223,22 @@ IDataCacheSection *CDataCache::AddSection( IDataCacheClient *pClient, const char
 //-----------------------------------------------------------------------------
 void CDataCache::RemoveSection( const char *pszClientName, bool bCallFlush )
 {
-	int iSection = FindSectionIndex( pszClientName );
+#ifdef _PS3
+    // TODO: if (!g_bDoingExitSequence)
+#endif
+    {
+		int iSection = FindSectionIndex( pszClientName );
 
-	if ( iSection != m_Sections.InvalidIndex() )
-	{
-		if ( bCallFlush )
+		if ( iSection != m_Sections.InvalidIndex() )
 		{
-			m_Sections[iSection]->Flush( false );
-		}
-		delete m_Sections[iSection];
-		m_Sections.FastRemove( iSection );
-		return;
+			if ( bCallFlush )
+			{
+				m_Sections[iSection]->Flush( false );
+			}
+			delete m_Sections[iSection];
+			m_Sections.FastRemove( iSection );
+			return;
+        }
 	}
 }
 
@@ -1214,13 +1315,13 @@ unsigned CDataCache::Flush( bool bUnlockedOnly, bool bNotify )
 //-----------------------------------------------------------------------------
 void CDataCache::OutputReport( DataCacheReportType_t reportType, const char *pszSection )
 {
+	float percent;
 	int i;
 
 	AUTO_LOCK( m_mutex );
 	int bytesUsed = m_LRU.UsedSize();
 	int bytesTotal = m_LRU.TargetSize();
-
-	float percent = 100.0f * (float)bytesUsed / (float)bytesTotal;
+	percent = 100.0f * (float)bytesUsed / (float)bytesTotal;
 
 	CUtlVector<memhandle_t> lruList, lockedlist;
 
@@ -1274,6 +1375,26 @@ void CDataCache::OutputReport( DataCacheReportType_t reportType, const char *psz
 		}
 		OutputReport( DC_SUMMARY_REPORT, pszSection );
 	}
+#if defined( _X360 )
+	else if ( reportType == DC_DETAIL_REPORT_VXCONSOLE )
+	{
+		int numLockedItems = lockedlist.Count();
+		int numLruItems = lruList.Count();
+		CUtlVector< xDataCacheItem_t > vxconsoleItems;
+		vxconsoleItems.SetCount( numLockedItems + numLruItems );
+
+		for ( i = 0; i < numLockedItems; ++i )
+		{
+			OutputItemReport( lockedlist[i], &vxconsoleItems[i] );
+		}
+		for ( i = 0; i < numLruItems; ++i )
+		{
+			OutputItemReport( lruList[i], &vxconsoleItems[numLockedItems + i] );
+		}
+
+		XBX_rDataCacheList( vxconsoleItems.Count(), vxconsoleItems.Base() );
+	}
+#endif
 	else if ( reportType == DC_SUMMARY_REPORT )
 	{
 		if ( !pszSection )
@@ -1331,7 +1452,7 @@ void CDataCache::OutputReport( DataCacheReportType_t reportType, const char *psz
 
 //-------------------------------------
 
-void CDataCache::OutputItemReport( memhandle_t hItem )
+void CDataCache::OutputItemReport( memhandle_t hItem, void *pXboxData )
 {
 	AUTO_LOCK( m_mutex );
 	DataCacheItem_t *pItem = m_LRU.GetResource_NoLockNoLRUTouch( hItem );
@@ -1345,7 +1466,23 @@ void CDataCache::OutputItemReport( memhandle_t hItem )
 	name[0] = 0;
 	pSection->GetClient()->GetItemName( pItem->clientId, pItem->pItemData, name, DC_MAX_ITEM_NAME );
 
-	Msg( "\t%16.16s : %12s : 0x%08x, 0x%p, 0x%p : %s : %s\n", 
+#if defined( _X360 )
+	if ( pXboxData )
+	{
+		// spew into vxconsole friendly structure
+		xDataCacheItem_t *pXboxItem = (xDataCacheItem_t *)pXboxData;
+		V_strncpy( pXboxItem->name, name, sizeof( pXboxItem->section ) );
+		V_strncpy( pXboxItem->section, pItem->pSection->GetName(), sizeof( pXboxItem->section ) );
+		pXboxItem->size = pItem->size;
+		pXboxItem->lockCount = m_LRU.LockCount( hItem );
+		pXboxItem->clientId = pItem->clientId;
+		pXboxItem->itemData = (unsigned int)pItem->pItemData;
+		pXboxItem->handle = (unsigned int)hItem;
+		return;
+	}
+#endif
+
+	Msg( "\t%16.16s : %12s : 0x%08x, %p, 0x%p : %s : %s\n", 
 		Q_pretifymem( pItem->size, 2, true ), 
 		pSection->GetName(), 
 		pItem->clientId, pItem->pItemData, hItem,
@@ -1382,4 +1519,17 @@ bool CDataCache::SortMemhandlesBySizeLessFunc( const memhandle_t& lhs, const mem
 	return pItem1->size < pItem2->size;
 }
 
+int CDataCache::GetSectionCount( void )
+{
+	return m_Sections.Count();
+}
 
+const char *CDataCache::GetSectionName( int iIndex )
+{
+	if ( iIndex >= 0 && iIndex < m_Sections.Count() )
+	{
+		return m_Sections[iIndex]->GetName();
+	}
+
+	return "";
+}

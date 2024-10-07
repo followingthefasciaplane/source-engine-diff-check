@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -17,17 +17,27 @@
 
 #include <game/client/iviewport.h>
 #include "shareddefs.h"
+#include "GameEventListener.h"
+
 
 namespace vgui
 {
 	class TextEntry;
 }
 
+enum
+{
+	FADE_STATUS_IN = 0,
+	FADE_STATUS_HOLD, 
+	FADE_STATUS_OUT,
+	FADE_STATUS_OFF
+};
+
 //-----------------------------------------------------------------------------
 // Purpose: displays the MOTD
 //-----------------------------------------------------------------------------
 
-class CTextWindow : public vgui::Frame, public IViewPortPanel
+class CTextWindow : public vgui::Frame, public IViewPortPanel, public CGameEventListener
 {
 private:
 	DECLARE_CLASS_SIMPLE( CTextWindow, vgui::Frame );
@@ -40,32 +50,52 @@ public:
 	virtual void SetData(KeyValues *data);
 	virtual void Reset();
 	virtual void Update();
+//	virtual void UpdateContents( void );
 	virtual bool NeedsUpdate( void ) { return false; }
 	virtual bool HasInputElements( void ) { return true; }
 	virtual void ShowPanel( bool bShow );
+	void		 ShowPanel2( bool bShow );
+	bool		 HasMotd();
+	virtual void PaintBackground();
 
 	// both vgui::Frame and IViewPortPanel define these, so explicitly define them here as passthroughs to vgui
 	vgui::VPANEL GetVPanel( void ) { return BaseClass::GetVPanel(); }
   	virtual bool IsVisible() { return BaseClass::IsVisible(); }
   	virtual void SetParent( vgui::VPANEL parent ) { BaseClass::SetParent( parent ); }
 
+	virtual void FireGameEvent( IGameEvent *event ) { return; }; 
+	virtual bool WantsBackgroundBlurred( void ) { return false; };
+
 public:
 
-	virtual void SetData( int type, const char *title, const char *message, const char *message_fallback, int command, bool bUnload );
+	//=============================================================================
+	// HPE_BEGIN:
+	// [Forrest] Replaced text window command string with TEXTWINDOW_CMD enumeration
+	// of options.  Passing a command string is dangerous and allowed a server network
+	// message to run arbitrary commands on the client.
+	//=============================================================================
+	virtual void SetData( int type, const char *title, const char *message, const char *message_fallback, int command );
+	//=============================================================================
+	// HPE_END
+	//=============================================================================
 	virtual void ShowFile( const char *filename );
 	virtual void ShowText( const char *text );
 	virtual void ShowURL( const char *URL, bool bAllowUserToDisable = true );
 	virtual void ShowIndex( const char *entry );
+	virtual void ShowHtmlString( const char *entry );
+
 
 	virtual void ApplySchemeSettings( vgui::IScheme *pScheme );
-
-	virtual GameActionSet_t GetPreferredActionSet() { return GAME_ACTION_SET_IN_GAME_HUD; }
 
 protected:	
 	// vgui overrides
 	virtual void OnCommand( const char *command );
+	virtual void OnKeyCodePressed( vgui::KeyCode code );
 
-	void OnKeyCodePressed( vgui::KeyCode code );
+	int GetNumSecondsRequiredByServer() const;
+	int GetNumSecondsSponsorRequiredRemaining() const;
+
+	bool		m_bHasMotd;
 
 	IViewPort	*m_pViewPort;
 	char		m_szTitle[255];
@@ -78,12 +108,11 @@ protected:
 	// message to run arbitrary commands on the client.
 	//=============================================================================
 	int			m_nExitCommand;
+	double		m_dblTimeExecutedExitCommand;
 	//=============================================================================
 	// HPE_END
 	//=============================================================================
 	int			m_nContentType;
-	bool		m_bShownURL;
-	bool		m_bUnloadOnDismissal;
 
 	vgui::TextEntry	*m_pTextMessage;
 	
@@ -94,12 +123,16 @@ protected:
 	
 	public:
 		CMOTDHTML( Panel *parent, const char *pchName ) : vgui::HTML( parent, pchName ) {}
-		virtual bool OnStartRequest( const char *url, const char *target, const char *pchPostData, bool bIsRedirect ) OVERRIDE;
+		virtual bool OnStartRequest( const char *url, const char *target, const char *pchPostData, bool bIsRedirect );
 	};
 	CMOTDHTML		*m_pHTMLMessage;
 	
 	vgui::Button	*m_pOK;
 	vgui::Label		*m_pTitleLabel;
+	vgui::Label		*m_pInfoLabelTicker;
+
+	uint32 m_uiTimestampStarted, m_uiTimestampInfoLabelUpdated;
+	bool m_bForcingWindowCloseRegardlessOfTime;
 };
 
 

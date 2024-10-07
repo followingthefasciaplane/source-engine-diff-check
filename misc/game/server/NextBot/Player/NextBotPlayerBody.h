@@ -1,7 +1,7 @@
 // NextBotPlayerBody.h
 // Control and information about the bot's body state (posture, animation state, etc)
 // Author: Michael Booth, October 2006
-//========= Copyright Valve Corporation, All rights reserved. ============//
+// Copyright (c) 2006 Turtle Rock Studios, Inc. - All Rights Reserved
 
 #ifndef _NEXT_BOT_PLAYER_BODY_H_
 #define _NEXT_BOT_PLAYER_BODY_H_
@@ -78,7 +78,6 @@ public:
 	virtual bool IsHeadAimingOnTarget( void ) const;				// return true if the bot's head has achieved its most recent lookat target
 	virtual bool IsHeadSteady( void ) const;						// return true if head is not rapidly turning to look somewhere else
 	virtual float GetHeadSteadyDuration( void ) const;				// return the duration that the bot's head has been on-target
-	virtual void ClearPendingAimReply( void );						// clear out currently pending replyWhenAimed callback
 
 	virtual float GetMaxHeadAngularVelocity( void ) const;			// return max turn rate of head in degrees/second
 
@@ -125,8 +124,6 @@ private:
 
 	Vector m_lookAtPos;					// if m_lookAtSubject is non-NULL, it continually overwrites this position with its own
 	EHANDLE m_lookAtSubject;
-	Vector m_lookAtVelocity;			// world velocity of lookat point, for tracking moving subjects
-	CountdownTimer m_lookAtTrackingTimer;	
 
 	LookAtPriorityType m_lookAtPriority;
 	CountdownTimer m_lookAtExpireTimer;		// how long until this lookat expired
@@ -134,18 +131,16 @@ private:
 	INextBotReply *m_lookAtReplyWhenAimed;
 	bool m_isSightedIn;					// true if we are looking at our last lookat target
 	bool m_hasBeenSightedIn;			// true if we have hit the current lookat target
+	float m_yawRate;
+	float m_pitchRate;
 
 	IntervalTimer m_headSteadyTimer;
 	QAngle m_priorAngles;				// last update's head angles
 	QAngle m_desiredAngles;
-
-	CountdownTimer m_anchorRepositionTimer;	// the time is takes us to recenter our virtual mouse
-	Vector m_anchorForward;
 };
 
 inline bool PlayerBody::IsHeadAimingOnTarget( void ) const
 {
-	// TODO: Calling this immediately after AimHeadTowards will always return false until next Upkeep() (MSB)
 	return m_isSightedIn;
 }
 

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =======
 //
 // A class representing session state for the SFM
 //
@@ -87,6 +87,7 @@ public:
 	void SetRoot( CDmElement *pRoot );
 
 	// Methods to get at session settings
+	CDmElement *					GetSettings() const;
 	template< class T > const T&	GetSettings( const char *pSettingName ) const;
 	CDmAttribute *					GetSettingsAttribute( const char *pSettingName, DmAttributeType_t type );
 	template< class E > E*			GetSettingsElement( const char *pSettingName ) const;
@@ -98,12 +99,12 @@ public:
 	// Creates a camera
 	CDmeCamera *CreateCamera( const DmeCameraParams_t& params );
 
-	// Finds or creates a scene
-	CDmeDag *FindOrCreateScene( CDmeFilmClip *pShot, const char *pSceneName );
-
 private:
-	void CreateRenderSettings( CDmElement *pSettings, float flLegacyFramerate );
+	void CreateRenderSettings( CDmElement *pSettings );
 	void CreateProgressiveRefinementSettings( CDmElement *pRenderSettings );
+	void CreatePosterSettings( CDmElement *pRenderSettings );
+	void CreateMovieSettings( CDmElement *pRenderSettings );
+	void CreateSharedPresetGroupSettings( CDmElement *pRenderSettings );
 
 	CDmeHandle< CDmElement > m_hRoot;
 //	CDmeHandle< CDmeFilmClip >				m_hCurrentMovie;
@@ -129,10 +130,16 @@ inline const CDmElement *CSFMSession::Root() const
 //-----------------------------------------------------------------------------
 // Method to get at various settings
 //-----------------------------------------------------------------------------
+
+inline CDmElement *CSFMSession::GetSettings() const
+{
+	return m_hRoot.Get() ? m_hRoot->GetValueElement< CDmElement >( "settings" ) : NULL;
+}
+
 template< class T >
 inline const T& CSFMSession::GetSettings( const char *pSettingName ) const
 {
-	CDmElement *pSettings = m_hRoot.Get() ? m_hRoot->GetValueElement< CDmElement >( "settings" ) : NULL;
+	CDmElement *pSettings = GetSettings();
 	if ( pSettings )
 		return pSettings->GetValue< T >( pSettingName );
 
@@ -143,7 +150,7 @@ inline const T& CSFMSession::GetSettings( const char *pSettingName ) const
 
 inline CDmAttribute *CSFMSession::GetSettingsAttribute( const char *pSettingName, DmAttributeType_t type )
 {
-	CDmElement *pSettings = m_hRoot.Get() ? m_hRoot->GetValueElement< CDmElement >( "settings" ) : NULL;
+	CDmElement *pSettings = GetSettings();
 	if ( pSettings )
 		return pSettings->GetAttribute( pSettingName, type );
 	return NULL;
@@ -152,7 +159,7 @@ inline CDmAttribute *CSFMSession::GetSettingsAttribute( const char *pSettingName
 template< class T > 
 inline void CSFMSession::SetSettings( const char *pSettingName, const T& value )
 {
-	CDmElement *pSettings = m_hRoot.Get() ? m_hRoot->GetValueElement< CDmElement >( "settings" ) : NULL;
+	CDmElement *pSettings = GetSettings();
 	if ( pSettings )
 	{
 		pSettings->SetValue( pSettingName, value );
@@ -162,7 +169,7 @@ inline void CSFMSession::SetSettings( const char *pSettingName, const T& value )
 template< class E >
 inline E* CSFMSession::GetSettingsElement( const char *pSettingName ) const
 {
-	CDmElement *pSettings = m_hRoot->GetValueElement< CDmElement >( "settings" );
+	CDmElement *pSettings = GetSettings();
 	return pSettings ? pSettings->GetValueElement< E >( pSettingName ) : NULL;
 }
 

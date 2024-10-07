@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -23,6 +23,9 @@
 #include "materialsystem/idebugtextureinfo.h"
 #include "materialsystem/ivballoctracker.h"
 #include "tier2/tier2.h"
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
 
 
 //-----------------------------------------------------------------------------

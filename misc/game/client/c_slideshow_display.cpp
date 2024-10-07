@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -14,7 +14,7 @@
 #include "iefx.h"
 #include "SoundEmitterSystem/isoundemittersystembase.h"
 #include "filesystem.h"
-#include "KeyValues.h"
+#include "keyvalues.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -202,7 +202,7 @@ void C_SlideshowDisplay::BuildSlideShowImagesList( void )
 	char szFileBuffer[ SLIDESHOW_LIST_BUFFER_MAX ];
 	char *pchCurrentLine = NULL;
 
-	if ( IsX360() )
+	if ( IsGameConsole() )
 	{
 		Q_snprintf( szDirectory, sizeof( szDirectory ), "materials/vgui/%s/slides.txt", m_szSlideshowDirectory );
 
@@ -269,10 +269,9 @@ void C_SlideshowDisplay::BuildSlideShowImagesList( void )
 
 		KeyValues *pMaterialKeys = new KeyValues( "material" );
 		bool bLoaded = pMaterialKeys->LoadFromFile( g_pFullFileSystem, szFullFileName, NULL );
-
 		if ( bLoaded )
 		{
-			char szKeywords[ 256 ] = {0};
+			char szKeywords[ 256 ];
 			V_strcpy_safe( szKeywords, pMaterialKeys->GetString( "%keywords", "" ) );
 
 			char *pchKeyword = szKeywords;
@@ -306,7 +305,7 @@ void C_SlideshowDisplay::BuildSlideShowImagesList( void )
 				{
 					// Couldn't find the list, so create it
 					iList = m_SlideMaterialLists.AddToTail( new SlideMaterialList_t );
-					V_strcpy_safe( m_SlideMaterialLists[iList]->szSlideKeyword, pchKeyword );
+					V_strcpy_safe( m_SlideMaterialLists[ iList ]->szSlideKeyword, pchKeyword );
 				}
 
 				// Add material index to this list
@@ -316,6 +315,8 @@ void C_SlideshowDisplay::BuildSlideShowImagesList( void )
 				pchKeyword = pNextKeyword;
 			}
 		}
+		pMaterialKeys->deleteThis();
+		pMaterialKeys = NULL;
 
 		// Find the generic list
 		int iList;
@@ -329,14 +330,14 @@ void C_SlideshowDisplay::BuildSlideShowImagesList( void )
 		{
 			// Couldn't find the generic list, so create it
 			iList = m_SlideMaterialLists.AddToHead( new SlideMaterialList_t );
-			V_strcpy_safe( m_SlideMaterialLists[iList]->szSlideKeyword, "" );
+			V_strcpy_safe( m_SlideMaterialLists[ iList ]->szSlideKeyword, "" );
 		}
 
 		// Add material index to this list
 		m_SlideMaterialLists[ iList ]->iSlideMaterials.AddToTail( iMatIndex );
 		m_SlideMaterialLists[ iList ]->iSlideIndex.AddToTail( iSlideIndex );
 		
-		if ( IsX360() )
+		if ( IsGameConsole() )
 		{
 			// Seek to end of first line
 			char *pchNextLine = pchCurrentLine;
@@ -370,7 +371,7 @@ void C_SlideshowDisplay::BuildSlideShowImagesList( void )
 		++iSlideIndex;
 	}
 
-	if ( !IsX360() )
+	if ( !IsGameConsole() )
 	{
 		g_pFullFileSystem->FindClose( matHandle );
 	}

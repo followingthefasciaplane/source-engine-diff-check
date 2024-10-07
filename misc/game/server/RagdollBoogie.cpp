@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: Dissolve entity to be attached to target entity. Serves two purposes:
 //
@@ -7,7 +7,7 @@
 //
 //			2) An entity that can be created at runtime to ignite a target entity.
 //
-//=============================================================================//
+//===========================================================================//
 
 #include "cbase.h"
 #include "RagdollBoogie.h"
@@ -72,8 +72,25 @@ CRagdollBoogie *CRagdollBoogie::Create( CBaseEntity *pTarget, float flMagnitude,
 //-----------------------------------------------------------------------------
 // Spawn
 //-----------------------------------------------------------------------------
+void CRagdollBoogie::Precache()
+{
+	BaseClass::Precache();
+
+	PrecacheEffect( "TeslaHitboxes" );
+
+#ifdef HL2_EPISODIC
+	PrecacheScriptSound( "RagdollBoogie.Zap" );
+#endif
+}
+
+
+//-----------------------------------------------------------------------------
+// Spawn
+//-----------------------------------------------------------------------------
 void CRagdollBoogie::Spawn()
 {
+	Precache();
+
 	BaseClass::Spawn();
 
 	SetThink( &CRagdollBoogie::BoogieThink );
@@ -248,7 +265,6 @@ void CRagdollBoogie::BoogieThink( void )
 		flMagnitude = SimpleSplineRemapVal( dt, 0.0f, m_flBoogieLength, m_flMagnitude, 0.0f ); 
 	}
 
-#ifndef _XBOX
 	if ( m_nSuppressionCount == 0 )
 	{
 		ragdoll_t *pRagdollPhys = pRagdoll->GetRagdoll( );
@@ -262,7 +278,6 @@ void CRagdollBoogie::BoogieThink( void )
 			pRagdollPhys->list[j].pObject->ApplyForceCenter( vecForce ); 
 		}
 	}
-#endif // !_XBOX
 
 	SetNextThink( gpGlobals->curtime + random->RandomFloat( 0.1, 0.2f ) );
 }

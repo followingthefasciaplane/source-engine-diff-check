@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -23,8 +23,10 @@ public:
 
 	virtual bool	IsActive( void ) = 0; // true if director is active
 
-	virtual void	SetHLTVServer( IHLTVServer *hltv ) = 0; // give the director the engine HLTV interface 
-	virtual IHLTVServer* GetHLTVServer( void ) = 0; // get current HLTV server interface
+	virtual void	AddHLTVServer( IHLTVServer *hltv ) = 0; // give the director the engine HLTV interface 
+	virtual void	RemoveHLTVServer( IHLTVServer *hltv ) = 0; // give the director the engine HLTV interface 
+	virtual IHLTVServer* GetHLTVServer( int nIndex ) = 0; // get current HLTV server interface
+	virtual	int GetHLTVServerCount() = 0;
 	
 	virtual int		GetDirectorTick( void ) = 0;	// get current broadcast tick from director
 	virtual int		GetPVSEntity( void ) = 0; // get current view entity (PVS), 0 if coords are used

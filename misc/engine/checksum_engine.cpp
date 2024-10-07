@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Engine specific CRC functions
 //
@@ -63,6 +63,12 @@ byte COM_BlockSequenceCRCByte( byte *base, int length, int sequence )
 	return (byte)(crc & 0xFF);
 }
 
+#if defined(_X360)
+const int CRC_BUFSIZE = 16384;
+#else
+const int CRC_BUFSIZE = 65536;
+#endif
+
 // YWB:  5/18
 /*
 ===================
@@ -79,7 +85,7 @@ bool CRC_File(CRC32_t *crcvalue, const char *pszFileName)
 	CRC32_Init( crcvalue );
 
 	FileHandle_t fp;
-	byte chunk[1024];
+	byte chunk[CRC_BUFSIZE];
 	int nBytesRead;
 	
 	int nSize;
@@ -88,11 +94,11 @@ bool CRC_File(CRC32_t *crcvalue, const char *pszFileName)
 	if ( !fp || ( nSize == -1 ) )
 		return FALSE;
 
-	// Now read in 1K chunks
+	// Now read in chunks
 	while (nSize > 0)
 	{
-		if (nSize > 1024)
-			nBytesRead = g_pFileSystem->Read(chunk, 1024, fp);
+		if (nSize > sizeof(chunk))
+			nBytesRead = g_pFileSystem->Read(chunk, sizeof(chunk), fp);
 		else
 			nBytesRead = g_pFileSystem->Read(chunk, nSize, fp);
 
@@ -111,7 +117,7 @@ bool CRC_File(CRC32_t *crcvalue, const char *pszFileName)
 			break;
 		}
 		// If there was a disk error, indicate failure.
-		else if ( nBytesRead <= 0 || !g_pFileSystem->IsOk(fp) )
+		else if ( !g_pFileSystem->IsOk(fp) )
 		{
 			if ( fp )
 				g_pFileSystem->Close(fp);
@@ -122,6 +128,15 @@ bool CRC_File(CRC32_t *crcvalue, const char *pszFileName)
 	if ( fp )
 		g_pFileSystem->Close(fp);
 	return TRUE;
+}
+
+static BSPHeader_t *g_pMapHeader = NULL;
+
+int __cdecl LumpCompare( const void *pElem0, const void *pElem1 )
+{
+	const int *pLump0 = (const int *)pElem0;
+	const int *pLump1 = (const int *)pElem1;
+	return g_pMapHeader->lumps[*pLump0].fileofs - g_pMapHeader->lumps[*pLump1].fileofs;
 }
 
 // YWB:  5/18
@@ -137,13 +152,15 @@ bool CRC_MapFile(unsigned short *crcvalue, char *pszFileName)
   //FIXME make this work
  ==================
  */
+
+ConVar debug_map_crc( "debug_map_crc", "0", FCVAR_RELEASE, "Prints CRC for each map lump loaded" );
+
 bool CRC_MapFile(CRC32_t *crcvalue, const char *pszFileName)
 {
 	FileHandle_t fp;
-	byte chunk[1024];
-	int i, l;
+	byte chunk[CRC_BUFSIZE];
 	int nBytesRead;
-	dheader_t	header;
+	BSPHeader_t	header;
 	int nSize;
 	lump_t *curLump;
 	long startOfs;
@@ -155,18 +172,17 @@ bool CRC_MapFile(CRC32_t *crcvalue, const char *pszFileName)
 	startOfs = g_pFileSystem->Tell(fp);
 
 	// Don't CRC the header.
-	if (g_pFileSystem->Read(&header, sizeof(dheader_t), fp) == 0)
+	if (g_pFileSystem->Read(&header, sizeof(BSPHeader_t), fp) == 0)
 	{
 		ConMsg("Could not read BSP header for map [%s].\n", pszFileName);
 		g_pFileSystem->Close(fp);
 		return false;
 	}
 
-	i = header.version;
-	if ( i < MINBSPVERSION || i > BSPVERSION )
+	if ( header.m_nVersion < MINBSPVERSION || header.m_nVersion > BSPVERSION )
 	{
 		g_pFileSystem->Close(fp);
-		ConMsg("Map [%s] has incorrect BSP version (%i should be %i).\n", pszFileName, i, BSPVERSION);
+		ConMsg("Map [%s] has incorrect BSP version (%i should be %i).\n", pszFileName, header.m_nVersion, BSPVERSION);
 		return false;
 	}
 
@@ -178,22 +194,58 @@ bool CRC_MapFile(CRC32_t *crcvalue, const char *pszFileName)
 		return true;
 	}
 
-	// CRC across all lumps except for the Entities lump
-	for (l = 0; l < HEADER_LUMPS; l++)
+	static char gamedir[MAX_OSPATH];
+	Q_FileBase( com_gamedir, gamedir, sizeof( gamedir ) );
+
+	g_pMapHeader = &header;
+	int lumpList[HEADER_LUMPS];
+	for ( int i = 0; i < HEADER_LUMPS; i++ )
 	{
+		lumpList[i] = i;
+	}
+	qsort( lumpList, HEADER_LUMPS, sizeof(lumpList[0]), LumpCompare );
+
+	CRC32_t lumpCRC;
+	
+	// CRC across all lumps except for the Entities lump
+	for (int i = 0; i < HEADER_LUMPS; i++)
+	{
+		int l = lumpList[i];
 		if (l == LUMP_ENTITIES)
 			continue;
 
+		CRC32_Init(&lumpCRC);
+
+		// INFESTED_DLL - Alien Swarm wants a more relaxed CRC check so each client can compile the map themselves
+		if ( !Q_stricmp( gamedir, "infested" ) )
+		{
+			if ( l == LUMP_LIGHTING ||
+				l == LUMP_DISPINFO ||
+				l == LUMP_GAME_LUMP ||
+				l == LUMP_PRIMITIVES ||
+				l == LUMP_LEAF_AMBIENT_INDEX_HDR ||
+				l == LUMP_LEAF_AMBIENT_INDEX ||
+				l == LUMP_LEAF_AMBIENT_LIGHTING_HDR ||
+				l == LUMP_LEAF_AMBIENT_LIGHTING ||
+				l == LUMP_PAKFILE ||
+				l == LUMP_PHYSCOLLIDE ||
+				l == LUMP_TEXINFO ||
+				l == LUMP_PHYSDISP )
+			continue;
+		}
+
 		curLump = &header.lumps[l];
 		nSize = curLump->filelen;
+		if ( nSize <= 0 )
+			continue;
 
 		g_pFileSystem->Seek( fp, startOfs + curLump->fileofs, FILESYSTEM_SEEK_HEAD );
 
-		// Now read in 1K chunks
+		// Now read chunks
 		while (nSize > 0)
 		{
-			if (nSize > 1024)
-				nBytesRead = g_pFileSystem->Read(chunk, 1024, fp);
+			if (nSize > sizeof(chunk))
+				nBytesRead = g_pFileSystem->Read(chunk, sizeof(chunk), fp);
 			else
 				nBytesRead = g_pFileSystem->Read(chunk, nSize, fp);
 
@@ -202,6 +254,11 @@ bool CRC_MapFile(CRC32_t *crcvalue, const char *pszFileName)
 			{
 				nSize -= nBytesRead;
 				CRC32_ProcessBuffer(crcvalue, chunk, nBytesRead);
+
+				if ( debug_map_crc.GetBool() )
+				{
+					CRC32_ProcessBuffer(&lumpCRC, chunk, nBytesRead);
+				}
 			}
 
 			// If there was a disk error, indicate failure.
@@ -212,100 +269,20 @@ bool CRC_MapFile(CRC32_t *crcvalue, const char *pszFileName)
 				return false;
 			}
 		}	
+
+		if ( debug_map_crc.GetBool() )
+		{
+			Msg( "Lump %d crc %lu\n", l, lumpCRC );
+		}
 	}
 	
 	if ( fp )
 		g_pFileSystem->Close(fp);
-	return true;
-}
 
-bool MD5_MapFile(MD5Value_t *md5value, const char *pszFileName)
-{
-	FileHandle_t fp;
-	byte chunk[1024];
-	int i, l;
-	int nBytesRead;
-	dheader_t	header;
-	int nSize;
-	lump_t *curLump;
-	long startOfs;
-
-	nSize = COM_OpenFile(pszFileName, &fp);
-	if ( !fp || ( nSize == -1 ) )
-		return false;
-
-	MD5Context_t ctx;
-	V_memset( &ctx, 0, sizeof(MD5Context_t) );
-	MD5Init( &ctx );
-
-	startOfs = g_pFileSystem->Tell(fp);
-
-	// Don't MD5 the header.
-	if (g_pFileSystem->Read(&header, sizeof(dheader_t), fp) == 0)
+	if ( debug_map_crc.GetBool() )
 	{
-		ConMsg("Could not read BSP header for map [%s].\n", pszFileName);
-		g_pFileSystem->Close(fp);
-		return false;
+		Msg( "Map file '%s' CRC = %lu\n", pszFileName, *crcvalue );
 	}
-
-	i = header.version;
-	if ( i < MINBSPVERSION || i > BSPVERSION )
-	{
-		g_pFileSystem->Close(fp);
-		ConMsg("Map [%s] has incorrect BSP version (%i should be %i).\n", pszFileName, i, BSPVERSION);
-		return false;
-	}
-
-	if ( IsX360() )
-	{
-		// 360 bsp's store the pc checksum in the flags lump header
-		g_pFileSystem->Close(fp);
-		char versionString[65] = {0};
-		V_snprintf( versionString, ARRAYSIZE(versionString), "%d", header.lumps[LUMP_MAP_FLAGS].version );
-		V_memcpy( md5value->bits, versionString, MD5_DIGEST_LENGTH );
-		return true;
-	}
-
-	// MD5 across all lumps except for the Entities lump
-	for (l = 0; l < HEADER_LUMPS; l++)
-	{
-		if (l == LUMP_ENTITIES)
-			continue;
-
-		curLump = &header.lumps[l];
-		nSize = curLump->filelen;
-
-		g_pFileSystem->Seek( fp, startOfs + curLump->fileofs, FILESYSTEM_SEEK_HEAD );
-
-		// Now read in 1K chunks
-		while (nSize > 0)
-		{
-			if (nSize > 1024)
-				nBytesRead = g_pFileSystem->Read(chunk, 1024, fp);
-			else
-				nBytesRead = g_pFileSystem->Read(chunk, nSize, fp);
-
-			// If any data was received, CRC it.
-			if (nBytesRead > 0)
-			{
-				nSize -= nBytesRead;
-				MD5Update( &ctx, chunk, nBytesRead );
-			}
-
-			// If there was a disk error, indicate failure.
-			if ( !g_pFileSystem->IsOk(fp) )
-			{
-				if ( fp )
-					g_pFileSystem->Close(fp);
-				return false;
-			}
-		}	
-	}
-
-	if ( fp )
-		g_pFileSystem->Close(fp);
-
-	MD5Final( md5value->bits, &ctx );
 
 	return true;
 }
@@ -318,7 +295,7 @@ bool MD5_MapFile(MD5Value_t *md5value, const char *pszFileName)
 //			seed[4] - 
 // Output : Returns true on success, false on failure.
 //-----------------------------------------------------------------------------
-bool MD5_Hash_File(unsigned char digest[16], const char *pszFileName, bool bSeed /* = FALSE */, unsigned int seed[4] /* = NULL */)
+bool MD5_Hash_File(unsigned char digest[16], char *pszFileName, bool bSeed /* = FALSE */, unsigned int seed[4] /* = NULL */)
 {
 	FileHandle_t fp;
 	byte chunk[1024];
@@ -380,36 +357,3 @@ bool MD5_Hash_File(unsigned char digest[16], const char *pszFileName, bool bSeed
 	return TRUE;
 }
 
-//-----------------------------------------------------------------------------
-// Purpose: 
-//-----------------------------------------------------------------------------
-bool MD5_Hash_Buffer( unsigned char pDigest[16], const unsigned char *pBuffer, int nSize, bool bSeed /* = FALSE */, unsigned int seed[4] /* = NULL */ )
-{
-	MD5Context_t ctx;
-	
-	if ( !pBuffer || !nSize )
-		return false;
-
-	memset( &ctx, 0, sizeof( MD5Context_t ) );
-	MD5Init( &ctx );
-
-	if ( bSeed )
-	{
-		// Seed the hash with the seed value
-		MD5Update( &ctx, (const unsigned char *)&seed[0], 16 );
-	}
-
-	// Now read in 1024 chunks
-	const unsigned char *pChunk = pBuffer;
-	while ( nSize > 0 )
-	{
-		const int nChunkSize = MIN( 1024, nSize );
-		MD5Update( &ctx, pChunk, nChunkSize );
-		nSize -= nChunkSize;
-		pChunk += nChunkSize;	AssertValidReadPtr( pChunk );
-	}	
-
-	MD5Final( pDigest, &ctx );
-
-	return true;
-}

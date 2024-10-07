@@ -1,4 +1,3 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
 // NextBotKnownEntity.h
 // Encapsulation of being aware of an entity
 // Author: Michael Booth, June 2009
@@ -101,20 +100,9 @@ public:
 		m_isVisible = visible;
 	}
 
-	virtual bool IsVisibleInFOVNow( void ) const	// return true if this entity is currently visible and in my field of view
+	virtual bool IsVisible( void ) const			// return true if this entity is currently visible
 	{
 		return m_isVisible;
-	}
-
-	virtual bool IsVisibleRecently( void ) const	// return true if this entity is visible or was very recently visible
-	{
-		if ( m_isVisible )
-			return true;
-
-		if ( WasEverVisible() && GetTimeSinceLastSeen() < 3.0f )
-			return true;
-
-		return false;
 	}
 
 	virtual float GetTimeSinceBecameVisible( void ) const
@@ -149,14 +137,6 @@ public:
 			return false;
 
 		return ( GetEntity() == other.GetEntity() );
-	}
-
-	virtual bool Is( CBaseEntity *who ) const
-	{
-		if ( GetEntity() == NULL || who == NULL )
-			return false;
-
-		return ( GetEntity() == who );
 	}
 
 private:

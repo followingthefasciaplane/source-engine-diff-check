@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -6,9 +6,7 @@
 // $NoKeywords: $
 //===========================================================================//
 #include "server_pch.h"
-#include "tier0/valve_minmax_off.h"
 #include <algorithm>
-#include "tier0/valve_minmax_on.h"
 #include "vengineserver_impl.h"
 #include "vox.h"
 #include "sound.h"
@@ -42,12 +40,17 @@
 #include "networkstringtable.h"
 #include "LocalNetworkBackdoor.h"
 #include "host_phonehome.h"
-#include "matchmaking.h"
 #include "sv_plugin.h"
+#include "singleplayersharedmemory.h"
+#include "MapReslistGenerator.h"
 #include "sv_steamauth.h"
-#include "replay_internal.h"
-#include "replayserver.h"
-#include "replay/iserverengine.h"
+#include "LoadScreenUpdate.h"
+#include "paint.h"
+#include "matchmaking/imatchframework.h"
+#include "r_decal.h"
+#include "igame.h"
+#include "sv_packedentities.h"
+#include "hltvserver.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -55,16 +58,20 @@
 #define MAX_MESSAGE_SIZE	2500
 #define MAX_TOTAL_ENT_LEAFS		128
 
-void SV_DetermineMulticastRecipients( bool usepas, const Vector& origin, CBitVec< ABSOLUTE_PLAYER_LIMIT >& playerbits );
+void SV_DetermineMulticastRecipients( bool usepas, const Vector& origin, CPlayerBitVec& playerbits );
 
-int MapList_ListMaps( const char *pszSubString, bool listobsolete, bool verbose, int maxcount, int maxitemlength, char maplist[][ 64 ] );
+void DecalRemove( const model_t *model, const Vector& origin, float radius );
 
 extern CNetworkStringTableContainer *networkStringTableContainerServer;
+
+extern ConVar host_timescale;
 
 CSharedEdictChangeInfo g_SharedEdictChangeInfo;
 CSharedEdictChangeInfo *g_pSharedChangeInfo = &g_SharedEdictChangeInfo;
 IAchievementMgr *g_pAchievementMgr = NULL;
 CGamestatsData *g_pGamestatsData = NULL;
+
+static ConVar sv_show_usermessage( "sv_show_usermessage", "0", 0, "Shows the user messages that the server is sending to clients. Setting this to 2 will show the contents of the message");
 
 void InvalidateSharedEdictChangeInfos()
 {
@@ -73,12 +80,17 @@ void InvalidateSharedEdictChangeInfos()
 		// Reset all edicts to 0.
 		g_SharedEdictChangeInfo.m_iSerialNumber = 1;
 		for ( int i=0; i < sv.num_edicts; i++ )
-			sv.edicts[i].SetChangeInfoSerialNumber( 0 );
+		{
+			//if the edict has any changes, force a full state change (which will release the change info)
+			if( sv.edicts[i].HasStateChanged() )
+				sv.edicts[i].StateChanged();
+		}
 	}
 	else
 	{
 		g_SharedEdictChangeInfo.m_iSerialNumber++;
 	}
+
 	g_SharedEdictChangeInfo.m_nChangeInfos = 0;
 }
 
@@ -94,39 +106,28 @@ struct MsgData
 		Reset();
 
 		// link buffers to messages
-		entityMsg.m_DataOut.StartWriting( entitydata, sizeof(entitydata) );
-		entityMsg.m_DataOut.SetDebugName( "s_MsgData.entityMsg.m_DataOut" );
-
-		userMsg.m_DataOut.StartWriting( userdata, sizeof(userdata) );
-		userMsg.m_DataOut.SetDebugName( "s_MsgData.userMsg.m_DataOut" );
+		m_DataOut.StartWriting( entitydata, sizeof(entitydata) );
+		m_DataOut.SetDebugName( "s_MsgData.entityMsg.m_DataOut" );
 	}
 
 	void Reset()
 	{
 		filter			= NULL;
 		reliable		= false;
-		subtype			= 0;
 		started			= false;
-		usermessagesize = -1;
-		usermessagename = NULL;
-		currentMsg		= NULL;
+		entityMsg.Clear();
 	}
 
-	byte				userdata[ PAD_NUMBER( MAX_USER_MSG_DATA, 4 ) ];	// buffer for outgoing user messages
 	byte				entitydata[ PAD_NUMBER( MAX_ENTITY_MSG_DATA, 4 ) ]; // buffer for outgoing entity messages
 
 	IRecipientFilter	*filter;		// clients who get this message
 	bool				reliable;
 	
-	INetMessage			*currentMsg;				// pointer to entityMsg or userMessage
-	int					subtype;			// usermessage index
 	bool				started;			// IS THERE A MESSAGE IN THE PROCESS OF BEING SENT?
-	int					usermessagesize;
-	char const			*usermessagename;
-	
 
-	SVC_EntityMessage	entityMsg;
-	SVC_UserMessage		userMsg;
+	CSVCMsg_EntityMsg_t entityMsg;
+	bf_write			m_DataOut;
+
 
 };
 
@@ -136,14 +137,15 @@ void SeedRandomNumberGenerator( bool random_invariant )
 {
 	if (!random_invariant)
 	{
-		long iSeed;
-		g_pVCR->Hook_Time( &iSeed );
-		float flAppTime = Plat_FloatTime();
-		ThreadId_t threadId = ThreadGetCurrentId();
-
-		iSeed ^= (*((int *)&flAppTime));
-		iSeed ^= threadId;
-
+		int iSeed = -(long)Sys_FloatTime();
+		if (1000 < iSeed)
+		{
+			iSeed = -iSeed;
+		}
+		else if (-1000 < iSeed)
+		{
+			iSeed -= 22261048;
+		}
 		RandomSeed( iSeed );
 	}
 	else
@@ -156,6 +158,7 @@ void SeedRandomNumberGenerator( bool random_invariant )
 // ---------------------------------------------------------------------- //
 // Static helpers.
 // ---------------------------------------------------------------------- //
+
 static void PR_CheckEmptyString (const char *s)
 {
 	if (s[0] <= ' ')
@@ -265,6 +268,39 @@ static bool ValidCmd( const char *pCmd )
 	return false;
 }
 
+//
+// HLTV relay proxy whitelist
+//
+struct HltvRelayProxyWhitelistMask_t
+{
+	uint32 a, b, c, d;
+	uint32 numbits;
+
+	bool operator==( HltvRelayProxyWhitelistMask_t const &other ) const
+	{
+		return 0 == Q_memcmp( this, &other, sizeof( *this ) );
+	}
+};
+static CUtlVector< HltvRelayProxyWhitelistMask_t > s_arrHltvRelayProxyWhitelist;
+
+bool IsHltvRelayProxyWhitelisted( ns_address const &adr )
+{
+	if ( !adr.IsType<netadr_t>() )
+		return false;
+
+	uint32 uiServerIP = adr.AsType<netadr_t>().GetIPHostByteOrder();
+#define MAKE_IP_MASK( a, b, c, d, numbits ) ( uint32( ( (uint32(a)&0xFF) << 24 ) | ( (uint32(b)&0xFF) << 16 ) | ( (uint32(c)&0xFF) << 8 ) | ( (uint32(d)&0xFF) ) ) & ( (~0u) << (32-numbits) ) )
+#define IPRANGEENTRY( a, b, c, d, numbits ) if ( ( uiServerIP & ( (~0u) << (32-numbits) ) ) == MAKE_IP_MASK( a, b, c, d, numbits ) ) return true;
+	FOR_EACH_VEC( s_arrHltvRelayProxyWhitelist, idx )
+	{
+		HltvRelayProxyWhitelistMask_t const &e = s_arrHltvRelayProxyWhitelist[idx];
+		IPRANGEENTRY( e.a, e.b, e.c, e.d, e.numbits );
+	}
+#undef IPRANGEENTRY
+#undef MAKE_IP_MASK
+	return false;
+}
+
 // ---------------------------------------------------------------------- //
 // CVEngineServer
 // ---------------------------------------------------------------------- //
@@ -274,53 +310,64 @@ public:
 
 	virtual void ChangeLevel( const char* s1, const char* s2)
 	{
+		static	int	last_spawncount;
+		
+		// make sure we don't issue two changelevels
+		if (sv.GetSpawnCount() == last_spawncount)
+			return;
+
+		last_spawncount = sv.GetSpawnCount();
+		
 		if ( !s1 )
 		{
 			Sys_Error( "CVEngineServer::Changelevel with NULL s1\n" );
 		}
-
+		
 		char cmd[ 256 ];
-		char s1Escaped[ sizeof( cmd ) ];
-		char s2Escaped[ sizeof( cmd ) ];
-		if ( !Cbuf_EscapeCommandArg( s1, s1Escaped, sizeof( s1Escaped ) ) ||
-		     ( s2 && !Cbuf_EscapeCommandArg( s2, s2Escaped, sizeof( s2Escaped ) )))
-		{
-			Warning( "Illegal map name in ChangeLevel\n" );
-			return;
-		}
-
-		int cmdLen = 0;
+		
 		if ( !s2 ) // no indication of where they are coming from;  so just do a standard old changelevel
 		{
-			cmdLen = Q_snprintf( cmd, sizeof( cmd ), "changelevel %s\n", s1Escaped );
+			Q_snprintf( cmd, sizeof( cmd ), "changelevel %s\n", s1 );
 		}
 		else
 		{
-			cmdLen = Q_snprintf( cmd, sizeof( cmd ), "changelevel2 %s %s\n", s1Escaped, s2Escaped );
+			Q_snprintf( cmd, sizeof( cmd ), "changelevel2 %s %s\n", s1, s2 );
 		}
-
-		if ( !cmdLen || cmdLen >= sizeof( cmd ) )
-		{
-			Warning( "Paramter overflow in ChangeLevel\n" );
-			return;
-		}
-
-		Cbuf_AddText( cmd );
+		
+		Cbuf_AddText( CBUF_SERVER, cmd );
 	}
-
+	
+	
 	virtual int	IsMapValid( const char *filename )
 	{
 		return modelloader->Map_IsValid( filename );
 	}
-
+	
 	virtual bool IsDedicatedServer( void )
 	{
 		return sv.IsDedicated();
 	}
+
+	virtual int GetLocalClientIndex( void )
+	{
+#ifndef DEDICATED
+		if ( sv.IsDedicated() )
+		{
+			return 0; // this query really makes no sense on a dedicated server, but we can agree that "local client" means "the person typing at the text console"
+		}
+		else
+	 	{
+			// return splitscreen->IsLocalPlayerResolvable() ? GetLocalClient().m_nPlayerSlot : GetBaseLocalClient().m_nPlayerSlot; // this is the same check as in Cmd_ExecuteCommand()
+			return GetBaseLocalClient().m_nPlayerSlot + 1; // Conver 0-based slot to 1-based client index. Look at UTIL_GetCommandClientIndex() usage for reference.
+		}
+#else
+		return 0;
+#endif
+	}
 	
 	virtual int IsInEditMode( void )
 	{
-#ifdef SWDS
+#ifdef DEDICATED
 		return false;
 #else
 		return g_bInEditMode;
@@ -329,11 +376,21 @@ public:
 
 	virtual int IsInCommentaryMode( void )
 	{
-#ifdef SWDS
+#ifdef DEDICATED
 		return false;
 #else
 		return g_bInCommentaryMode;
 #endif
+	}
+
+	virtual KeyValues* GetLaunchOptions( void )
+	{
+		return g_pLaunchOptions;
+	}
+	
+	virtual bool IsLevelMainMenuBackground( void )
+	{
+		return sv.IsLevelMainMenuBackground();
 	}
 	
 	virtual void NotifyEdictFlagsChange( int iEdict )
@@ -417,7 +474,8 @@ public:
 
 	virtual void ForceExactFile( const char *s )
 	{
-		Warning( "ForceExactFile no longer supported.  Use sv_pure instead.  (%s)\n", s );
+		PR_CheckEmptyString( s );
+		SV_ForceExactFile( s );
 	}
 
 	virtual void ForceModelBounds( const char *s, const Vector &mins, const Vector &maxs )
@@ -535,11 +593,11 @@ public:
 		
 		for ( int i = 0; i < sv.GetClientCount(); i++ )
 		{
-			CGameClient *pClient = sv.Client(i);
+			CGameClient *cl = sv.Client(i);
 			
-			if ( pClient->edict == e )
+			if ( cl->edict == e )
 			{
-				return pClient->m_UserID;
+				return cl->m_UserID;
 			}
 		}
 		
@@ -554,11 +612,11 @@ public:
 		
 		for ( int i = 0; i < sv.GetClientCount(); i++ )
 		{
-			CGameClient *pGameClient = sv.Client(i);
+			CGameClient *cl = sv.Client(i);
 			
-			if ( pGameClient->edict == e )
+			if ( cl->edict == e )
 			{
-				return pGameClient->GetNetworkIDString();
+				return cl->GetNetworkIDString();
 			}
 		}
 		
@@ -566,129 +624,49 @@ public:
 		return NULL;
 
 	}
-	
-	virtual bool IsPlayerNameLocked( const edict_t *pEdict )
+
+	virtual bool IsUserIDInUse( int userID )
 	{
-		if ( !sv.IsActive() || !pEdict )
+		if ( !sv.IsActive() )
 			return false;
 
 		for ( int i = 0; i < sv.GetClientCount(); i++ )
 		{
-			CGameClient *pClient = sv.Client( i );
+			CGameClient *cl = sv.Client(i);
 
-			if ( pClient->edict == pEdict )
+			if ( cl->GetUserID() == userID )
 			{
-				return pClient->IsPlayerNameLocked();
+				return true;
 			}
 		}
 
+		// Couldn't find it
 		return false;
 	}
 
-	virtual bool CanPlayerChangeName( const edict_t *pEdict )
+
+	virtual int GetLoadingProgressForUserID( int userID )
 	{
-		if ( !sv.IsActive() || !pEdict )
+		if ( !sv.IsActive() )
 			return false;
 
 		for ( int i = 0; i < sv.GetClientCount(); i++ )
 		{
-			CGameClient *pClient = sv.Client( i );
+			CGameClient *cl = sv.Client(i);
 
-			if ( pClient->edict == pEdict )
+			if ( cl->GetUserID() == userID )
 			{
-				return ( !pClient->IsPlayerNameLocked() && !pClient->IsNameChangeOnCooldown() );
+				return cl->m_nLoadingProgress;
 			}
 		}
 
-		return false;
+		// Couldn't find it
+		return -1;
 	}
 
-	// See header comment. This is the canonical map lookup spot, and a superset of the server gameDLL's
-	// CanProvideLevel/PrepareLevelResources
-	virtual eFindMapResult FindMap( /* in/out */ char *pMapName, int nMapNameMax )
-	{
-		char szOriginalName[256] = { 0 };
-		V_strncpy( szOriginalName, pMapName, sizeof( szOriginalName ) );
-
-		IServerGameDLL::eCanProvideLevelResult eCanGameDLLProvide = IServerGameDLL::eCanProvideLevel_CannotProvide;
-		if ( g_iServerGameDLLVersion >= 10 )
-		{
-			eCanGameDLLProvide = serverGameDLL->CanProvideLevel( pMapName, nMapNameMax );
-		}
-
-		if ( eCanGameDLLProvide == IServerGameDLL::eCanProvideLevel_Possibly )
-		{
-			return eFindMap_PossiblyAvailable;
-		}
-		else if ( eCanGameDLLProvide == IServerGameDLL::eCanProvideLevel_CanProvide )
-		{
-			// See if the game dll fixed up the map name
-			return ( V_strcmp( szOriginalName, pMapName ) == 0 ) ? eFindMap_Found : eFindMap_NonCanonical;
-		}
-
-		AssertMsg( eCanGameDLLProvide == IServerGameDLL::eCanProvideLevel_CannotProvide,
-		           "Unhandled enum member" );
-
-		char szDiskName[MAX_PATH] = { 0 };
-		// Check if we can directly use this as a map
-		Host_DefaultMapFileName( pMapName, szDiskName, sizeof( szDiskName ) );
-		if ( *szDiskName && modelloader->Map_IsValid( szDiskName, true ) )
-		{
-			return eFindMap_Found;
-		}
-
-		// Fuzzy match in map list and check file
-		char match[1][64] = { {0} };
-		if ( MapList_ListMaps( pMapName, false, false, 1, sizeof( match[0] ), match ) && *(match[0]) )
-		{
-			Host_DefaultMapFileName( match[0], szDiskName, sizeof( szDiskName ) );
-			if ( modelloader->Map_IsValid( szDiskName, true ) )
-			{
-				V_strncpy( pMapName, match[0], nMapNameMax );
-				return eFindMap_FuzzyMatch;
-			}
-		}
-
-		return eFindMap_NotFound;
-	}
-
-	virtual int IndexOfEdict(const edict_t *pEdict)
-	{
-		if ( !pEdict )
-		{
-			return 0;
-		}
-		
-		int index = (int) ( pEdict - sv.edicts );
-		if ( index < 0 || index > sv.max_edicts )
-		{
-			Sys_Error( "Bad entity in IndexOfEdict() index %i pEdict %p sv.edicts %p\n",
-				index, pEdict, sv.edicts );
-		}
-		
-		return index;
-	}
-	
-	
-	// Returns a pointer to an entity from an index,  but only if the entity
-	// is a valid DLL entity (ie. has an attached class)
-	virtual edict_t* PEntityOfEntIndex(int iEntIndex)
-	{
-		if ( iEntIndex >= 0 && iEntIndex < sv.max_edicts )
-		{
-			edict_t *pEdict = EDICT_NUM( iEntIndex );
-			if ( !pEdict->IsFree() )
-			{
-				return pEdict;
-			}
-		}
-		
-		return NULL;
-	}
-	
 	virtual int	GetEntityCount( void )
 	{
-		return sv.num_edicts - sv.free_edicts;
+		return sv.num_edicts;
 	}
 	
 	
@@ -751,7 +729,7 @@ public:
 	
 	virtual void		*SaveAllocMemory( size_t num, size_t size )
 	{
-#ifndef SWDS
+#ifndef DEDICATED
 		return ::SaveAllocMemory(num, size);
 #else
 		return NULL;
@@ -760,7 +738,7 @@ public:
 	
 	virtual void		SaveFreeMemory( void *pSaveMem )
 	{
-#ifndef SWDS
+#ifndef DEDICATED
 		::SaveFreeMemory(pSaveMem);
 #endif
 	}
@@ -801,7 +779,7 @@ public:
 		{
 			sound.bIsSentence = true;
 			sound.nSoundNum = Q_atoi( PSkipSoundChars(samp) );
-			if ( sound.nSoundNum >= VOX_SentenceCount() )
+			if ( sound.nSoundNum >= (unsigned int)VOX_SentenceCount() )
 			{
 				ConMsg("EmitAmbientSound: invalid sentence number: %s", PSkipSoundChars(samp));
 				return;
@@ -821,16 +799,10 @@ public:
 
 		if ( (fFlags & SND_SPAWNING) && sv.allowsignonwrites )
 		{
-			SVC_Sounds	sndmsg;
-			char		buffer[32];
+			CSVCMsg_Sounds_t sndmsg;
 
-			sndmsg.m_DataOut.StartWriting(buffer, sizeof(buffer) );
-			sndmsg.m_nNumSounds = 1;
-			sndmsg.m_bReliableSound = true;
-
-			SoundInfo_t	defaultSound; defaultSound.SetDefault();
-
-			sound.WriteDelta( &defaultSound, sndmsg.m_DataOut );
+			sndmsg.set_reliable_sound( true );
+			sound.WriteDelta( NULL, sndmsg, sv.GetFinalTickTime() );
 			
 			 // write into signon buffer
 			if ( !sndmsg.WriteToBuffer( sv.m_Signon ) )
@@ -868,7 +840,7 @@ public:
 		
 		IClient	*client = sv.Client(entnum-1);
 
-		NET_StringCmd sndMsg( va("soundfade	%.1f %.1f %.1f %.1f", fadePercent, holdTime, fadeOutSeconds, fadeInSeconds ) );
+		CNETMsg_StringCmd_t sndMsg( va("soundfade	%.1f %.1f %.1f %.1f", fadePercent, holdTime, fadeOutSeconds, fadeInSeconds ) );
 				
 		client->SendNetMsg( sndMsg );
 	}
@@ -969,7 +941,7 @@ public:
 		}
 		if ( ValidCmd( str ) )
 		{
-			Cbuf_AddText( str );
+			Cbuf_AddText( CBUF_SERVER, str );
 		}
 		else
 		{
@@ -1026,7 +998,7 @@ public:
 			return;
 		}
 		
-		NET_StringCmd string( szOut );
+		CNETMsg_StringCmd_t string( szOut );
 		sv.GetClient(entnum-1)->SendNetMsg( string );
 		
 	}
@@ -1037,6 +1009,9 @@ public:
 	{
 		if ( !pCommand )
 			return;
+		
+		// Ensure the contract of deleting the key values here
+		KeyValues::AutoDelete autodelete_pCommand( pCommand );
 
 		int entnum = NUM_FOR_EDICT( pEdict );
 
@@ -1047,8 +1022,9 @@ public:
 			return;
 		}
 
-		SVC_CmdKeyValues cmd( pCommand );
-		sv.GetClient(entnum-1)->SendNetMsg( cmd );
+		CSVCMsg_CmdKeyValues_t cmd;
+		CmdKeyValuesHelper::SVCMsg_SetKeyValues( cmd, pCommand );
+		sv.GetClient(entnum-1)->SendNetMsg( cmd );	
 	}
 	
 	/*
@@ -1075,14 +1051,16 @@ public:
 		
 	virtual void StaticDecal( const Vector& origin, int decalIndex, int entityIndex, int modelIndex, bool lowpriority )
 	{
-		SVC_BSPDecal decal;
-		
-		decal.m_Pos = origin;
-		decal.m_nDecalTextureIndex = decalIndex;
-		decal.m_nEntityIndex = entityIndex;
-		decal.m_nModelIndex = modelIndex;
-		decal.m_bLowPriority = lowpriority;
-		
+		CSVCMsg_BSPDecal_t decal;
+
+		decal.mutable_pos()->set_x( origin.x );
+		decal.mutable_pos()->set_y( origin.y );
+		decal.mutable_pos()->set_z( origin.z );
+		decal.set_decal_texture_index( decalIndex );
+		decal.set_entity_index( entityIndex );
+		decal.set_model_index( modelIndex );
+		decal.set_low_priority( lowpriority );
+
 		if ( sv.allowsignonwrites )
 		{
 			decal.WriteToBuffer( sv.m_Signon );
@@ -1092,8 +1070,8 @@ public:
 			sv.BroadcastMessage( decal, false, true );
 		}
 	}
-	
-	void Message_DetermineMulticastRecipients( bool usepas, const Vector& origin, CBitVec< ABSOLUTE_PLAYER_LIMIT >& playerbits )
+
+	void Message_DetermineMulticastRecipients( bool usepas, const Vector& origin, CPlayerBitVec& playerbits )
 	{
 		SV_DetermineMulticastRecipients( usepas, origin, playerbits );
 	}
@@ -1123,95 +1101,27 @@ public:
 		
 		s_MsgData.started = true;
 		
-		s_MsgData.currentMsg = &s_MsgData.entityMsg;
-		
-		s_MsgData.entityMsg.m_nEntityIndex = ent_index;
-		s_MsgData.entityMsg.m_nClassID = ent_class->m_ClassID;
-		s_MsgData.entityMsg.m_DataOut.Reset();	
+		s_MsgData.entityMsg.set_ent_index( ent_index );
+		s_MsgData.entityMsg.set_class_id( ent_class->m_ClassID );
+		s_MsgData.m_DataOut.Reset();	
 				
-		return &s_MsgData.entityMsg.m_DataOut;
-	}
-	
-	virtual bf_write *UserMessageBegin( IRecipientFilter *filter, int msg_index )
-	{
-		if ( s_MsgData.started )
-		{
-			Sys_Error( "UserMessageBegin:  New message started before matching call to EndMessage.\n " );
-			return NULL;
-		}
-		
-		s_MsgData.Reset();
-		
-		Assert( filter );
-
-		s_MsgData.filter = filter;
-		s_MsgData.reliable = filter->IsReliable();
-		s_MsgData.started = true;
-		
-		s_MsgData.currentMsg = &s_MsgData.userMsg;
-		
-		s_MsgData.userMsg.m_nMsgType = msg_index;
-		
-		
-		s_MsgData.userMsg.m_DataOut.Reset();	
-		
-		return &s_MsgData.userMsg.m_DataOut;
+		return &s_MsgData.m_DataOut;
 	}
 	
 	// Validates user message type and checks to see if it's variable length
 	// returns true if variable length
 	int Message_CheckMessageLength()
 	{
-		if ( s_MsgData.currentMsg == &s_MsgData.userMsg )
-		{	
-			char msgname[ 256 ];
-			int  msgsize = -1;
-			int  msgtype = s_MsgData.userMsg.m_nMsgType;
-
-			if ( !serverGameDLL->GetUserMessageInfo( msgtype, msgname, sizeof(msgname), msgsize ) )
-			{
-				Warning( "Unable to find user message for index %i\n", msgtype );
-				return -1;
-			}
-					
-			int bytesWritten = s_MsgData.userMsg.m_DataOut.GetNumBytesWritten();
+		int bytesWritten = s_MsgData.m_DataOut.GetNumBytesWritten();
 			
-			if ( msgsize == -1 )
-			{
-				if ( bytesWritten > MAX_USER_MSG_DATA )
-				{
-					Warning( "DLL_MessageEnd:  Refusing to send user message %s of %i bytes to client, user message size limit is %i bytes\n",
-						msgname, bytesWritten, MAX_USER_MSG_DATA );
-					return -1;
-				}
-			}
-			else if ( msgsize != bytesWritten )
-			{
-				Warning( "User Msg '%s': %d bytes written, expected %d\n",
-					msgname, bytesWritten, msgsize );
-				return -1;
-			}
-			
-			return bytesWritten; // all checks passed, estimated final length
-		}
-		
-		if ( s_MsgData.currentMsg == &s_MsgData.entityMsg )
+		if ( bytesWritten > MAX_ENTITY_MSG_DATA )	// TODO use a define or so
 		{
-			int bytesWritten = s_MsgData.entityMsg.m_DataOut.GetNumBytesWritten();
-			
-			if ( bytesWritten > MAX_ENTITY_MSG_DATA )	// TODO use a define or so
-			{
-				Warning( "Entity Message to %i, %i bytes written (max is %d)\n",
-					s_MsgData.entityMsg.m_nEntityIndex, bytesWritten, MAX_ENTITY_MSG_DATA );
-				return -1;
-			}
-			
-			return bytesWritten; // all checks passed, estimated final length
+			Warning( "Entity Message to %i, %i bytes written (max is %d)\n",
+				s_MsgData.entityMsg.ent_index(), bytesWritten, MAX_ENTITY_MSG_DATA );
+			return -1;
 		}
-		
-		Warning( "MessageEnd unknown message type.\n" );
-		return -1;
-		
+			
+		return bytesWritten; // all checks passed, estimated final length
 	}
 	
 	virtual void MessageEnd( void )
@@ -1231,20 +1141,51 @@ public:
 			return;
 		}
 
+		s_MsgData.entityMsg.set_ent_data( s_MsgData.entitydata, s_MsgData.m_DataOut.GetNumBytesWritten() );
+
 		if ( s_MsgData.filter )
 		{
 			// send entity/user messages only to full connected clients in filter
-			sv.BroadcastMessage( *s_MsgData.currentMsg, *s_MsgData.filter );
+			sv.BroadcastMessage( s_MsgData.entityMsg, *s_MsgData.filter );
 		}
 		else
 		{
 			// send entity messages to all full connected clients 
-			sv.BroadcastMessage( *s_MsgData.currentMsg, true, s_MsgData.reliable );
+			sv.BroadcastMessage( s_MsgData.entityMsg, true, s_MsgData.reliable );
 		}
 		
 		s_MsgData.Reset(); // clear message data
 	}
 	
+	virtual void SendUserMessage( IRecipientFilter& filter, int message, const ::google::protobuf::Message &msg )
+	{
+		CSVCMsg_UserMessage_t _userMsg;
+
+		if ( !msg.IsInitialized() )
+		{
+			Msg("SendUserMessage %s(%d) is not initialized! Probably missing required fields!\n", msg.GetTypeName().c_str(), message );
+		}
+
+		int size = msg.ByteSize();
+
+		if ( sv_show_usermessage.GetBool() )
+		{
+			Msg("SendUserMessage - %s(%d) bytes: %d\n", msg.GetTypeName().c_str(), message, size );
+			if( sv_show_usermessage.GetInt() > 1 )
+				Msg("%s", msg.DebugString().c_str() );
+		}
+
+		_userMsg.set_msg_type( message );
+		_userMsg.mutable_msg_data()->resize( size );
+		if ( !msg.SerializeWithCachedSizesToArray( (uint8*)&(*_userMsg.mutable_msg_data())[0] ) )
+		{
+			Msg( "SendUserMessage: Error serializing %s!\n", msg.GetTypeName().c_str() );
+			return;
+		}
+
+		sv.BroadcastMessage( _userMsg, filter );
+	}
+
 	/* single print to a specific client */
 	virtual void ClientPrintf( edict_t *pEdict, const char *szMsg )
 	{
@@ -1259,7 +1200,7 @@ public:
 		sv.Client(entnum-1)->ClientPrintf( "%s", szMsg );
 	}
 	
-#ifdef SWDS
+#ifdef DEDICATED
 	void Con_NPrintf( int pos, const char *fmt, ... )
 	{
 	}
@@ -1308,13 +1249,10 @@ public:
 
 		client->m_pViewEntity = viewent;
 		
-		SVC_SetView view( NUM_FOR_EDICT(viewent) );
+		CSVCMsg_SetView_t view;
+		view.set_entity_index( NUM_FOR_EDICT(viewent) );
+
 		client->SendNetMsg( view );
-	}
-	
-	virtual float Time(void)
-	{
-		return Sys_FloatTime();
 	}
 	
 	virtual void CrosshairAngle(const edict_t *clientent, float pitch, float yaw)
@@ -1335,12 +1273,12 @@ public:
 		if (yaw < -180)
 			yaw += 360;
 		
-		SVC_CrosshairAngle crossHairMsg;
-		
-		crossHairMsg.m_Angle.x = pitch;
-		crossHairMsg.m_Angle.y = yaw;
-		crossHairMsg.m_Angle.y = 0;
-		
+		CSVCMsg_CrosshairAngle_t crossHairMsg;
+
+		crossHairMsg.mutable_angle()->set_x( pitch );
+		crossHairMsg.mutable_angle()->set_y( yaw );
+		crossHairMsg.mutable_angle()->set_z( 0 );
+
 		client->SendNetMsg( crossHairMsg );
 	}
 	
@@ -1363,24 +1301,17 @@ public:
 	// For use with FAKE CLIENTS
 	virtual edict_t* CreateFakeClient( const char *netname )
 	{
-		CGameClient *fcl = static_cast<CGameClient*>( sv.CreateFakeClient( netname ) );
+		CGameClient *fcl = static_cast<CGameClient*>(sv.CreateFakeClient(netname));
 		if ( !fcl )
 		{
 			// server is full
-			return NULL;
+			return NULL;		
 		}
 
+		fcl->UpdateUserSettings();
+
 		return fcl->edict;
-	}
-
-	// For use with FAKE CLIENTS
-	virtual edict_t* CreateFakeClientEx( const char *netname, bool bReportFakeClient /*= true*/ )
-	{
-		sv.SetReportNewFakeClients( bReportFakeClient );
-		edict_t *ret = CreateFakeClient( netname );
-		sv.SetReportNewFakeClients( true ); // Leave this set as true so other callers of sv.CreateFakeClient behave correctly.
-
-		return ret;
+		
 	}
 	
 	// Get a keyvalue for s specified client
@@ -1472,7 +1403,13 @@ public:
 		return sv.IsPaused();
 	}
 
-	virtual void SetFakeClientConVarValue( edict_t *pEntity, const char *pCvarName, const char *value )
+	virtual float GetTimescale( void ) const
+	{
+		extern float CL_GetHltvReplayTimeScale();
+		return sv.GetTimescale() * host_timescale.GetFloat() * CL_GetHltvReplayTimeScale();
+	}
+
+	virtual void SetFakeClientConVarValue( edict_t *pEntity, const char *cvar, const char *value )
 	{
 		int clientnum = NUM_FOR_EDICT( pEntity );
 		if (clientnum < 1 || clientnum > sv.GetClientCount() )
@@ -1481,7 +1418,7 @@ public:
 		CGameClient *client = sv.Client(clientnum-1);
 		if ( client->IsFakeClient() )
 		{
-			client->SetUserCVar( pCvarName, value );
+			client->SetUserCVar( cvar, value );
 			client->m_bConVarsChanged = true;
 		}
 	}
@@ -1493,7 +1430,10 @@ public:
 
 	virtual IChangeInfoAccessor *GetChangeAccessor( const edict_t *pEdict )
 	{
-		return &sv.edictchangeinfo[ NUM_FOR_EDICT( pEdict ) ];
+		extern int NUM_FOR_EDICTINFO( const edict_t * e );
+
+		int idx = NUM_FOR_EDICTINFO( pEdict );
+		return &sv.edictchangeinfo[ idx ];
 	}
 
 	virtual QueryCvarCookie_t StartQueryCvarValue( edict_t *pPlayerEntity, const char *pCvarName )
@@ -1509,7 +1449,7 @@ public:
 	// Name of most recently load .sav file
 	virtual char const *GetMostRecentlyLoadedFileName()
 	{
-#if !defined( SWDS )
+#if !defined( DEDICATED )
 		return saverestore->GetMostRecentlyLoadedFileName();
 #else
 		return "";
@@ -1518,7 +1458,7 @@ public:
 
 	virtual char const *GetSaveFileName()
 	{
-#if !defined( SWDS )
+#if !defined( DEDICATED )
 		return saverestore->GetSaveFileName();
 #else
 		return "";
@@ -1532,20 +1472,6 @@ public:
 		ED_AllowImmediateReuse();
 	}
 			
-	virtual void MultiplayerEndGame()
-	{
-#if !defined( SWDS )
-		g_pMatchmaking->EndGame();
-#endif
-	}
-
-	virtual void ChangeTeam( const char *pTeamName )
-	{
-#if !defined( SWDS )
-		g_pMatchmaking->ChangeTeam( pTeamName );
-#endif
-	}
-
 	virtual void SetAchievementMgr( IAchievementMgr *pAchievementMgr )
 	{
 		g_pAchievementMgr = pAchievementMgr;
@@ -1562,6 +1488,8 @@ public:
 	}
 	
 	virtual bool IsLowViolence();
+
+	virtual bool IsAnyClientLowViolence();
 
 	/*
 	=================
@@ -1580,7 +1508,7 @@ public:
 		}
 		if ( ValidCmd( str ) )
 		{
-			Cbuf_InsertText( str );
+			Cbuf_InsertText( CBUF_SERVER, str );
 		}
 		else
 		{
@@ -1607,6 +1535,142 @@ public:
 
 		return false;
 	}
+	
+	virtual ISPSharedMemory *GetSinglePlayerSharedMemorySpace( const char *szName, int ent_num = MAX_EDICTS )
+	{
+		return g_pSinglePlayerSharedMemoryManager->GetSharedMemory( szName, ent_num );
+	}
+
+	virtual void *AllocLevelStaticData( size_t bytes )
+	{
+		return Hunk_AllocName( bytes, "AllocLevelStaticData", false );
+	}
+	bool IsSplitScreenPlayer( int entnum )
+	{
+		if (entnum < 1 || entnum > sv.GetClientCount() )
+			return false;
+
+		CGameClient *client = sv.Client(entnum-1);
+		return client->IsSplitScreenUser();
+	}
+
+	edict_t *GetSplitScreenPlayerAttachToEdict( int ent_num )
+	{
+		if (ent_num < 1 || ent_num > sv.GetClientCount() )
+			return NULL;
+
+		CGameClient *client = sv.Client(ent_num-1);
+		if ( !client->IsSplitScreenUser() )
+			return NULL;
+
+		Assert( client->m_pAttachedTo );
+		if ( !client->m_pAttachedTo )
+			return NULL;
+
+		return static_cast< CGameClient * >( client->m_pAttachedTo )->edict;
+	}
+
+	CrossPlayPlatform_t GetClientCrossPlayPlatform( int entnum )
+	{
+		if (entnum < 1 || entnum > sv.GetClientCount() )
+			return CROSSPLAYPLATFORM_UNKNOWN;
+
+		CGameClient *client = sv.Client(entnum-1);
+		return client->GetClientPlatform();
+	}
+
+	void EnsureInstanceBaseline( int ent_num )
+	{
+		edict_t *pEnt = EDICT_NUM( ent_num );
+		Assert ( pEnt && pEnt->GetNetworkable() );
+		if ( pEnt && pEnt->GetNetworkable() )
+		{
+			SerializedEntityHandle_t handle = g_pSerializedEntities->AllocateSerializedEntity(__FILE__, __LINE__);
+			Assert( handle != SERIALIZED_ENTITY_HANDLE_INVALID);
+			if ( handle != SERIALIZED_ENTITY_HANDLE_INVALID )
+			{
+				ServerClass *pServerClass = pEnt->GetNetworkable()->GetServerClass();
+				SV_EnsureInstanceBaseline( pServerClass, ent_num, handle );
+			}
+			g_pSerializedEntities->ReleaseSerializedEntity( handle );
+		}
+	}
+
+	// Sets server reservation payload
+	bool ReserveServerForQueuedGame( char const *szReservationPayload )
+	{
+		bool bResult = sv.ReserveServerForQueuedGame( szReservationPayload );
+		if ( bResult && szReservationPayload && ( szReservationPayload[0] != 'R' ) )
+		{
+			ServerCommand( "removeallids\n" );
+		}
+		return bResult;
+	}
+
+	bool GetEngineHltvInfo( CEngineHltvInfo_t &info )
+	{
+		Q_memset( &info, 0, sizeof( info ) );
+		CActiveHltvServerIterator hltv;
+		if ( !hltv )
+			return false; // broadcast is not active, no active GOTV[] instances
+
+		info.m_bBroadcastActive = true;
+		info.m_bMasterProxy = !hltv->IsDemoPlayback() && hltv->IsMasterProxy();
+		
+		if ( info.m_bMasterProxy )
+			info.m_flDelay = hltv->GetDirector()->GetDelay();
+
+		info.m_nTvPort = hltv->GetUDPPort();
+		info.m_flTime = hltv->GetTime();
+
+		hltv->GetGlobalStats( info.m_numProxies, info.m_numSlots, info.m_numClients );
+		hltv->GetLocalStats( info.m_numLocalProxies, info.m_numLocalSlots, info.m_numLocalClients );
+		hltv->GetRelayStats( info.m_numRelayProxies, info.m_numRelaySlots, info.m_numRelayClients );
+		hltv->GetExternalStats( info.m_numExternalTotalViewers, info.m_numExternalLinkedViewers );
+
+		const netadr_t *pRelayAdr = info.m_bMasterProxy ? NULL : hltv->GetRelayAddress();
+		if ( pRelayAdr )
+		{
+			info.m_relayAddress = pRelayAdr->GetIPHostByteOrder();
+			info.m_relayPort = pRelayAdr->GetPort();
+		}
+		else
+		{
+			info.m_relayAddress = 0;
+			info.m_relayPort = 0;
+		}
+
+		// while ( hltv.Next() )
+		// {
+		// 	// ... reduce the information from multiple broadcasts here?
+		// }
+
+		return true;
+	}
+
+	// Add HLTV proxy whitelist to bypass password and Steam Auth checks upon connection, as CIDR a.b.c.d/numbits
+	void AddHltvRelayProxyWhitelist( uint32 a, uint32 b, uint32 c, uint32 d, uint32 numbits )
+	{
+		HltvRelayProxyWhitelistMask_t mask;
+		Q_memset( &mask, 0, sizeof( mask ) );
+		mask.a = a;
+		mask.b = b;
+		mask.c = c;
+		mask.d = d;
+		mask.numbits = numbits;
+		// Add a mask if it hasn't been added yet
+		if ( s_arrHltvRelayProxyWhitelist.Find( mask ) == s_arrHltvRelayProxyWhitelist.InvalidIndex() )
+			s_arrHltvRelayProxyWhitelist.AddToTail( mask );
+	}
+
+	// On master HLTV this call updates number of external viewers and which portion of those are linked with Steam
+	void UpdateHltvExternalViewers( uint32 numTotalViewers, uint32 numLinkedViewers )
+	{
+		for ( CHltvServerIterator hltv; hltv; hltv.Next() )
+		{
+			hltv->UpdateHltvExternalViewers( numTotalViewers, numLinkedViewers );
+		}
+	}
 
 	void SetDedicatedServerBenchmarkMode( bool bBenchmarkMode )
 	{
@@ -1627,43 +1691,43 @@ public:
 		return &Steam3Server().GetGSSteamID();
 	}
 
-	// Returns the SteamID of the specified player. It'll be NULL if the player hasn't authenticated yet.
-	const CSteamID	*GetClientSteamID( edict_t *pPlayerEdict )
+
+	int	GetNumSplitScreenUsersAttachedToEdict( int ent_num )
 	{
-		int entnum = NUM_FOR_EDICT( pPlayerEdict );
-		return GetClientSteamIDByPlayerIndex( entnum );
+		if (ent_num < 1 || ent_num > sv.GetClientCount() )
+			return 0;
+
+		CGameClient *client = sv.Client(ent_num-1);
+		if ( client->IsSplitScreenUser() )
+			return 0;
+
+		int c = 0;
+		for ( int i = 1; i < host_state.max_splitscreen_players; ++i )
+		{
+			if ( client->m_SplitScreenUsers[ i ] )
+				++c;
+		}
+
+		return c;
 	}
 	
-	const CSteamID	*GetClientSteamIDByPlayerIndex( int entnum )
+	edict_t *GetSplitScreenPlayerForEdict( int ent_num, int nSlot )
 	{
-		if (entnum < 1 || entnum > sv.GetClientCount() )
+		if (ent_num < 1 || ent_num > sv.GetClientCount() )
 			return NULL;
 
-		// Entity numbers are offset by 1 from the player numbers
-		CGameClient *client = sv.Client(entnum-1);
-		if ( !client )
+		CGameClient *client = sv.Client(ent_num-1);
+		if ( client->IsSplitScreenUser() )
 			return NULL;
 
-		// Make sure they are connected and Steam ID is valid
-		if ( !client->IsConnected() || !client->m_SteamID.IsValid() )
+		if ( nSlot <= 0 || nSlot >= host_state.max_splitscreen_players )
 			return NULL;
 
-		return &client->m_SteamID;
-	}
-	
-	void SetGamestatsData( CGamestatsData *pGamestatsData )
-	{
-		g_pGamestatsData = pGamestatsData;
-	}
+		CBaseClient *cl = client->m_SplitScreenUsers[ nSlot ];
+		if ( !cl )
+			return NULL;
 
-	CGamestatsData *GetGamestatsData()
-	{
-		return g_pGamestatsData;
-	}
-
-	virtual IReplaySystem *GetReplay()
-	{
-		return g_pReplay;
+		return (( CGameClient * )cl)->edict;
 	}
 
 	virtual int GetClusterCount()
@@ -1709,24 +1773,187 @@ public:
 		return 0;
 	}
 
-	virtual int GetServerVersion() const OVERRIDE
+	virtual bool IsCreatingReslist()
 	{
-		return GetSteamInfIDVersionInfo().ServerVersion;
+		return MapReslistGenerator().IsEnabled();
+	}
+	virtual bool IsCreatingXboxReslist()
+	{
+		return MapReslistGenerator().IsCreatingForXbox();
 	}
 
-	virtual float GetServerTime() const OVERRIDE
+	virtual bool IsDedicatedServerForXbox()
 	{
-		return sv.GetTime();
+		return sv.IsDedicatedForXbox();
 	}
 
-	virtual IServer *GetIServer() OVERRIDE
+	virtual bool IsDedicatedServerForPS3( void )
 	{
-		return (IServer *)&sv;
+		return sv.IsDedicatedForPS3();
 	}
 
-	virtual void SetPausedForced( bool bPaused, float flDuration /*= -1.f*/ ) OVERRIDE
+	virtual void Pause( bool bPause, bool bForce )
 	{
-		sv.SetPausedForced( bPaused, flDuration );
+		ConVarRef sv_pausable( "sv_pausable" );
+		int oldValue = sv_pausable.GetInt();
+		if ( bForce && !oldValue )
+		{
+			sv_pausable.SetValue( 1 );
+		}
+
+		sv.SetPaused( bPause );
+
+		if ( bForce && !oldValue )
+		{
+			sv_pausable.SetValue( 0 );
+		}
+	}
+
+	virtual void SetTimescale( float flTimescale )
+	{
+		sv.SetTimescale( flTimescale );
+	}
+
+	virtual bool HasPaintmap()
+	{
+		return g_PaintManager.m_bShouldRegister;
+	}
+
+	virtual bool SpherePaintSurface( const model_t *pModel, const Vector& vPosition, BYTE colorIndex, float flSphereRadius, float flPaintCoatPercent )
+	{
+		return ShootPaintSphere( pModel, vPosition, colorIndex, flSphereRadius, flPaintCoatPercent );
+	}
+
+	virtual void SphereTracePaintSurface( const model_t *pModel, const Vector& vPosition, const Vector& vContactNormal, float flSphereRadius, CUtlVector<BYTE>& surfColors )
+	{
+		TracePaintSphere( pModel, vPosition, vContactNormal, flSphereRadius, surfColors );
+	}
+	
+	virtual void RemoveAllPaint()
+	{
+		g_PaintManager.RemoveAllPaint();
+	}
+
+	virtual void PaintAllSurfaces( BYTE color )
+	{
+		g_PaintManager.PaintAllSurfaces( color );
+	}
+
+	virtual void GetPaintmapDataRLE( CUtlVector<uint32> &data )
+	{
+		g_PaintManager.GetPaintmapDataRLE( data );
+	}
+
+	virtual void LoadPaintmapDataRLE( const CUtlVector<uint32> &data )
+	{
+		g_PaintManager.LoadPaintmapDataRLE( data );
+	}
+
+	virtual void RemovePaint( const model_t* pModel )
+	{
+		g_PaintManager.RemovePaint( pModel );
+	}
+
+	virtual void SendPaintmapDataToClient( edict_t *pPlayerEdict )
+	{
+		int entnum = NUM_FOR_EDICT( pPlayerEdict );
+		if (entnum < 1 || entnum > sv.GetClientCount() )
+			return;
+
+		// Entity numbers are offset by 1 from the player numbers
+		CGameClient *client = sv.Client(entnum-1);
+		if ( !client )
+			return;
+
+		CUtlVector< uint32 > data;
+		g_PaintManager.GetPaintmapDataRLE( data );
+		
+		AssertMsg2( data.Count() < NET_MAX_PAYLOAD, "Sending paint data with size [%d bytes] to client, max payload is [%d bytes]\n", data.Count(), NET_MAX_PAYLOAD );
+
+		if ( data.Count() > 0 )
+		{
+			//handle endian issue between platforms
+			CByteswap swap;
+			swap.ActivateByteSwapping( !CByteswap::IsMachineBigEndian() );
+			swap.SwapBufferToTargetEndian( data.Base(), data.Base(), data.Count() );
+
+			CSVCMsg_PaintmapData_t svcPaintmap;
+			int nBytes = data.Count() * sizeof( data.Base()[0] );
+			svcPaintmap.set_paintmap( (void*)data.Base(), nBytes );
+			
+			client->SendNetMsg( svcPaintmap, true );
+		}
+	}
+
+
+	// Returns the SteamID of the specified player. It'll be NULL if the player hasn't authenticated yet.
+	const CSteamID	*GetClientSteamID( const edict_t *pPlayerEdict, bool bRequireFullyAuthenticated )
+	{
+		int entnum = NUM_FOR_EDICT( pPlayerEdict );
+		if (entnum < 1 || entnum > sv.GetClientCount() )
+			return NULL;
+
+		// Entity numbers are offset by 1 from the player numbers
+		CGameClient *client = sv.Client(entnum-1);
+		if ( !client )
+			return NULL;
+
+		if ( !client->m_SteamID.IsValid() )
+			return NULL;
+
+		if ( bRequireFullyAuthenticated && !client->IsFullyAuthenticated() )
+			return NULL;
+
+		return &client->m_SteamID;
+	}
+
+	// Returns the XUID of the specified player. It'll be NULL if the player hasn't connected yet.
+	XUID GetClientXUID( edict_t *pPlayerEdict )
+	{
+		int entnum = NUM_FOR_EDICT( pPlayerEdict );
+		if (entnum < 1 || entnum > sv.GetClientCount() )
+			return 0ull;
+
+		// Entity numbers are offset by 1 from the player numbers
+		CGameClient *client = sv.Client(entnum-1);
+		if ( !client )
+			return 0ull;
+
+		return client->GetClientXuid();
+	}
+
+	void SetGamestatsData( CGamestatsData *pGamestatsData )
+	{
+		g_pGamestatsData = pGamestatsData;
+	}
+
+	CGamestatsData *GetGamestatsData()
+	{
+		return g_pGamestatsData;
+	}
+
+	void HostValidateSession()
+	{
+		extern void HostValidateSessionImpl();
+		HostValidateSessionImpl();
+	}
+
+	void RefreshScreenIfNecessary()
+	{
+		::RefreshScreenIfNecessary();
+	}
+
+	float GetLatencyForChoreoSounds();
+
+	int GetServerVersion() const
+	{
+		return ::GetServerVersion();
+	}
+
+	bool WasShutDownRequested() const
+	{
+		extern bool sv_ShutDown_WasRequested();
+		return sv_ShutDown_WasRequested();
 	}
 
 private:
@@ -1739,7 +1966,10 @@ private:
 	virtual bool GetAreaPortalPlane( Vector const &vViewOrigin, int portalKey, VPlane *pPlane );
 	virtual client_textmessage_t *TextMessageGet( const char *pName );
 	virtual void LogPrint(const char * msg);
+	virtual bool IsLogEnabled();
 	virtual bool LoadGameState( char const *pMapName, bool createPlayers );
+	virtual bool IsOverrideLoadGameEntsOn();
+	virtual void ForceFlushEntity( int iEntity );
 	virtual void LoadAdjacentEnts( const char *pOldLevel, const char *pLandmarkName );
 	virtual void ClearSaveDir();
 	virtual void ClearSaveDirAfterClientLoad();
@@ -1752,34 +1982,81 @@ private:
 
 	virtual ISpatialPartition *CreateSpatialPartition( const Vector& worldmin, const Vector& worldmax ) { return ::CreateSpatialPartition( worldmin, worldmax );	}
 	virtual void 		DestroySpatialPartition( ISpatialPartition *pPartition )						{ ::DestroySpatialPartition( pPartition );					}
-};
 
-// Backwards-compat shim that inherits newest then provides overrides for the legacy behavior
-class CVEngineServer22 : public CVEngineServer
-{
-	virtual int	IsMapValid( const char *filename ) OVERRIDE
+	public:
+
+	virtual bool IsActiveApp()
 	{
-		// For users of the older interface, preserve here the old modelloader behavior of wrapping maps/%.bsp around
-		// the filename. This went away in newer interfaces since maps can now live in other places.
-		char szWrappedName[MAX_PATH] = { 0 };
-		V_snprintf( szWrappedName, sizeof( szWrappedName ), "maps/%s.bsp", filename );
+		return game->IsActiveApp();
+	}
 
-		return modelloader->Map_IsValid( szWrappedName );
+	virtual void SetNoClipEnabled( bool bEnabled )
+	{
+		extern bool g_bNoClipEnabled;
+		g_bNoClipEnabled = bEnabled;
+	}
+
+	virtual bool StartClientHltvReplay( int nClientIndex, const HltvReplayParams_t &params ) OVERRIDE
+	{
+		if ( IClient *pClient = sv.GetClient( nClientIndex ) )
+		{
+			return pClient->StartHltvReplay( params );
+		}
+		return false;
+	}
+
+	virtual void StopClientHltvReplay( int nClientIndex ) OVERRIDE
+	{
+		if ( IClient *pClient = sv.GetClient( nClientIndex ) )
+		{
+			pClient->StopHltvReplay();
+		}
+	}
+
+	virtual int GetClientHltvReplayDelay( int nClientIndex ) OVERRIDE
+	{
+		if ( IClient *pClient = sv.GetClient( nClientIndex ) )
+		{
+			return pClient->GetHltvReplayDelay();
+		}
+		return 0;
+	}
+	
+	virtual bool ClientCanStartHltvReplay( int nClientIndex ) OVERRIDE
+	{
+		if ( IClient* pClient = sv.GetClient( nClientIndex ) )
+		{
+			return pClient->CanStartHltvReplay();
+		}
+		return false;
+	}
+
+	virtual bool HasHltvReplay( ) OVERRIDE
+	{
+		CActiveHltvServerIterator hltv;
+
+		return hltv && hltv->GetOldestTick() > 0;
+	}
+
+	virtual void ClientResetReplayRequestTime( int nClientIndex ) OVERRIDE
+	{
+		if ( IClient* pClient = sv.GetClient( nClientIndex ) )
+		{
+			return pClient->ResetReplayRequestTime();
+		}
+	}
+
+	virtual bool AnyClientsInHltvReplayMode() OVERRIDE
+	{
+		return sv.AnyClientsInHltvReplayMode();
 	}
 };
 
 //-----------------------------------------------------------------------------
 // Expose CVEngineServer to the game DLL.
 //-----------------------------------------------------------------------------
-static CVEngineServer   g_VEngineServer;
-static CVEngineServer22 g_VEngineServer22;
-// INTERFACEVERSION_VENGINESERVER_VERSION_21 is compatible with 22 latest since we only added virtuals to the end, so expose that as well.
-EXPOSE_SINGLE_INTERFACE_GLOBALVAR( CVEngineServer, IVEngineServer021, INTERFACEVERSION_VENGINESERVER_VERSION_21, g_VEngineServer22 );
-EXPOSE_SINGLE_INTERFACE_GLOBALVAR( CVEngineServer, IVEngineServer022, INTERFACEVERSION_VENGINESERVER_VERSION_22, g_VEngineServer22 );
-EXPOSE_SINGLE_INTERFACE_GLOBALVAR( CVEngineServer, IVEngineServer, INTERFACEVERSION_VENGINESERVER, g_VEngineServer );
-
-// When bumping the version to this interface, check that our assumption is still valid and expose the older version in the same way
-COMPILE_TIME_ASSERT( INTERFACEVERSION_VENGINESERVER_INT == 23 );
+static CVEngineServer	g_VEngineServer;
+EXPOSE_SINGLE_INTERFACE_GLOBALVAR(CVEngineServer, IVEngineServer, INTERFACEVERSION_VENGINESERVER, g_VEngineServer);
 
 //-----------------------------------------------------------------------------
 // Expose CVEngineServer to the engine.
@@ -1792,6 +2069,53 @@ IVEngineServer *g_pVEngineServer = &g_VEngineServer;
 //-----------------------------------------------------------------------------
 static CUtlMemoryPool s_PVSInfoAllocator( 128, 128 * 64, CUtlMemoryPool::GROW_SLOW, "pvsinfopool", 128 );
 
+//-----------------------------------------------------------------------------
+// Purpose: Sends a temp entity to the client, using the reliable data stream
+// Input  : delay - 
+//			*pSender - 
+//			*pST - 
+//			classID - 
+//-----------------------------------------------------------------------------
+static void WriteReliableEvent( const SendTable *pST, float delay, int classID, SerializedEntityHandle_t handle, IClient *client, bf_write *buf )
+{
+	CSVCMsg_TempEntities_t eventMsg;
+
+	eventMsg.set_reliable( true );
+
+	// special case 0 signals single reliable event
+	eventMsg.set_num_entries( 0 );
+	
+	eventMsg.mutable_entity_data()->resize( CEventInfo::MAX_EVENT_DATA );
+	bf_write buffer( &(*eventMsg.mutable_entity_data())[0], eventMsg.entity_data().size() );
+
+	if ( delay == 0.0f )
+	{
+		buffer.WriteOneBit( 0 ); // no delay
+	} 
+	else
+	{
+		buffer.WriteOneBit( 1 );
+		buffer.WriteUBitLong( delay*100.0f, 16 );
+	}
+
+	buffer.WriteOneBit( 1 ); // full update
+
+	buffer.WriteUBitLong( classID, sv.serverclassbits ); // classID 
+
+	// write event properties
+	SendTable_WritePropList( pST, handle, &buffer, -1, NULL );
+
+	// write message
+	if ( client )
+	{
+		client->SendNetMsg( eventMsg, true );
+	}
+
+	if ( buf )
+	{
+		eventMsg.WriteToBuffer( *buf );
+	}
+}
 
 //-----------------------------------------------------------------------------
 // Purpose: Sends a temp entity to the client ( follows the format of the original MESSAGE_BEGIN stuff from HL1
@@ -1818,17 +2142,38 @@ void CVEngineServer::PlaybackTempEntity( IRecipientFilter& filter, float delay, 
 	// Make this start at 1
 	classID = classID + 1;
 
-	// Encode now!
-	ALIGN4 unsigned char data[ CEventInfo::MAX_EVENT_DATA ] ALIGN4_POST;
-	bf_write buffer( "PlaybackTempEntity", data, sizeof(data) );
+	SerializedEntityHandle_t handle = g_pSerializedEntities->AllocateSerializedEntity(__FILE__, __LINE__);
 
 	// write all properties, if init or reliable message delta against zero values
-	if( !SendTable_Encode( pST, pSender, &buffer, classID, NULL, false ) )
+	if( !SendTable_Encode( pST, handle, pSender, classID, NULL ) )
 	{
-		Host_Error( "PlaybackTempEntity: SendTable_Encode returned false (ent %d), overflow? %i\n", classID, buffer.IsOverflowed() ? 1 : 0 );
+		Host_Error( "PlaybackTempEntity: SendTable_Encode returned false (ent %d), overflow?\n", classID );
 		return;
 	}
 	
+	bool bSendReliable = filter.IsReliable();
+
+	// Reliable events are sent one by one to each recipient
+	// Unreliable events are queued below and added to delta update packet if there is space...
+	if ( bSendReliable )
+	{
+		int c = filter.GetRecipientCount();
+		for ( int slot = 0; slot < c; slot++ )
+		{
+			int index = filter.GetRecipientIndex( slot );
+			if ( index < 1 || index > sv.GetClientCount() )
+				continue;
+			CGameClient *cl = sv.Client( index - 1 );
+			if ( ( cl->IsFakeClient() && !cl->IsHLTV() ) || !cl->IsActive() )
+				continue;
+
+			WriteReliableEvent( pST, delay, classID, handle, cl, NULL );
+		}
+
+		g_pSerializedEntities->ReleaseSerializedEntity( handle );
+		return;
+	}
+
 	// create CEventInfo:
 	CEventInfo *newEvent = new CEventInfo;
 
@@ -1839,10 +2184,7 @@ void CVEngineServer::PlaybackTempEntity( IRecipientFilter& filter, float delay, 
 	newEvent->pSendTable= pST;
 	newEvent->fire_delay= delay;
 
-	newEvent->bits = buffer.GetNumBitsWritten();
-	int size = Bits2Bytes( buffer.GetNumBitsWritten() );
-	newEvent->pData = new byte[size];
-	Q_memcpy( newEvent->pData, data, size );
+	newEvent->m_Packed = handle;
 
 	// add to list
 	sv.m_TempEntities[sv.m_TempEntities.AddToTail()] = newEvent;
@@ -1884,34 +2226,55 @@ void CVEngineServer::LogPrint(const char * msg)
 {
 	g_Log.Print( msg );
 }
+bool CVEngineServer::IsLogEnabled()
+{
+	return g_Log.IsActive();
+}
 
 // HACKHACK: Save/restore wrapper - Move this to a different interface
 bool CVEngineServer::LoadGameState( char const *pMapName, bool createPlayers )
 {
-#ifndef SWDS
+#ifndef DEDICATED
 	return saverestore->LoadGameState( pMapName, createPlayers ) != 0;
 #else
 	return 0;
 #endif
 }
 
+bool CVEngineServer::IsOverrideLoadGameEntsOn()
+{
+#ifndef DEDICATED
+	return saverestore->IsOverrideLoadGameEntsOn();
+#else
+	return false;
+#endif
+}
+
+void CVEngineServer::ForceFlushEntity( int iEntity )
+{
+	if ( g_pLocalNetworkBackdoor )
+	{
+		g_pLocalNetworkBackdoor->ForceFlushEntity( iEntity );
+	}
+}
+
 void CVEngineServer::LoadAdjacentEnts( const char *pOldLevel, const char *pLandmarkName )
 {
-#ifndef SWDS
+#ifndef DEDICATED
 	saverestore->LoadAdjacentEnts( pOldLevel, pLandmarkName );
 #endif
 }
 
 void CVEngineServer::ClearSaveDir()
 {
-#ifndef SWDS
+#ifndef DEDICATED
 	saverestore->ClearSaveDir();
 #endif
 }
 
 void CVEngineServer::ClearSaveDirAfterClientLoad()
 {
-#ifndef SWDS
+#ifndef DEDICATED
 	saverestore->RequestClearSaveDir();
 #endif
 }
@@ -1959,6 +2322,7 @@ void CVEngineServer::BuildEntityClusterList( edict_t *pEdict, PVSInfo_t *pPVSInf
 	leafCount = CM_BoxLeafnums( vecWorldMins, vecWorldMaxs, leafs, MAX_TOTAL_ENT_LEAFS, &topnode );
 
 	// set areas
+	bool bAreaCheck = false;
 	for ( i = 0; i < leafCount; i++ )
 	{
 		clusters[i] = CM_LeafCluster( leafs[i] );
@@ -1970,10 +2334,14 @@ void CVEngineServer::BuildEntityClusterList( edict_t *pEdict, PVSInfo_t *pPVSInf
 		// but nothing should ever need more than that
 		if ( pPVSInfo->m_nAreaNum && pPVSInfo->m_nAreaNum != area )
 		{
-			if ( pPVSInfo->m_nAreaNum2 && pPVSInfo->m_nAreaNum2 != area && sv.IsLoading() )
+			if ( !bAreaCheck && pPVSInfo->m_nAreaNum2 && pPVSInfo->m_nAreaNum2 != area )
 			{
-				ConDMsg ("Object touching 3 areas at %f %f %f\n",
-					vecWorldMins[0], vecWorldMins[1], vecWorldMins[2]);
+				// if you are touching more than 2 areas, do a check to get the approximate best area
+				bAreaCheck = true;
+				if ( sv.IsLoading() )
+				{
+					ConDMsg ("Object touching 3 areas at %f %f %f\n", vecWorldMins[0], vecWorldMins[1], vecWorldMins[2]);
+				}
 			}
 			pPVSInfo->m_nAreaNum2 = area;
 		}
@@ -1985,6 +2353,17 @@ void CVEngineServer::BuildEntityClusterList( edict_t *pEdict, PVSInfo_t *pPVSInf
 
 	Vector center = (vecWorldMins+vecWorldMaxs) * 0.5f; // calc center
 
+	if ( bAreaCheck )
+	{
+		// make sure the area of your center is being tested, otherwise just pick the first ones 
+		// in the list
+		int leaf = CM_PointLeafnum( center );
+		int area = CM_LeafArea(leaf);
+		if ( pPVSInfo->m_nAreaNum != area && pPVSInfo->m_nAreaNum2 != area )
+		{
+			pPVSInfo->m_nAreaNum = area;
+		}
+	}
 	pPVSInfo->m_nHeadNode = topnode;	// save headnode
 
 	// save origin
@@ -2101,3 +2480,69 @@ bool CVEngineServer::IsLowViolence()
 {
 	return g_bLowViolence;
 }
+
+//-----------------------------------------------------------------------------
+// Called by the (multiplayer) server to determine violence settings.
+//-----------------------------------------------------------------------------
+bool CVEngineServer::IsAnyClientLowViolence()
+{
+	for ( int i=0; i<sv.GetClientCount(); ++i )
+	{
+		CGameClient *client = sv.Client(i);
+		if ( client && client->IsLowViolenceClient() )
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
+//-----------------------------------------------------------------------------
+// Called by server to delay choreo sounds accordingly to IO latency.
+//-----------------------------------------------------------------------------
+float CVEngineServer::GetLatencyForChoreoSounds()
+{
+#ifdef DEDICATED
+  return 0.0f;
+#elif LINUX
+  return 0.0f;
+#else
+	extern ConVar	snd_mixahead;
+	extern ConVar	snd_delay_for_choreo_enabled;
+	extern ConVar	snd_delay_for_choreo_reset_after_N_milliseconds;
+	extern float	g_fDelayForChoreo;
+	extern uint32	g_nDelayForChoreoLastCheckInMs;
+	extern int		g_nDelayForChoreoNumberOfSoundsPlaying;
+
+	float fResult = snd_mixahead.GetFloat();
+	if ( snd_delay_for_choreo_enabled.GetBool() )
+	{
+		float fDelayForChoreo = g_fDelayForChoreo;
+		if ( fDelayForChoreo != 0.0f )
+		{
+			// Let's see if we have to reset the delay due to choreo (do this just before we return any useful information from scene entity).
+			// Note that this access is not thread safe, however there is no dire consequence here in case of race conditions.
+			// Delay may be reset when it should not, or delay may not be reset when it should (that case would be corrected by a subsequent call anyway).
+			if ( g_nDelayForChoreoNumberOfSoundsPlaying == 0 )
+			{
+				// We only reset the delay if no other sound is still behind in term of latency. Several VCDs could be running in parallel.
+				// As if we do it later, like when the samples are ready, we are going to hit the timeout more easily. We would then lose previously accumulated delay,
+				// and the sound could be potentially cut off later.
+				uint32 nCurrentTime = Plat_MSTime();
+				uint32 nLastCheck = g_nDelayForChoreoLastCheckInMs;
+				if ( nLastCheck + snd_delay_for_choreo_reset_after_N_milliseconds.GetInt() < nCurrentTime )
+				{
+					// Msg( "Reset delay for choreo as no choreo has been executed for the past %f seconds. Old value=%f.\n", (float)( nCurrentTime - nLastCheck ) / 1000.0f, fDelayForChoreo );
+					g_fDelayForChoreo = fDelayForChoreo = 0.0f;
+				}
+			}
+		}
+
+		// Remove the delay to the mix-ahead, which is going to push back the latency.
+		fResult -= fDelayForChoreo;
+	}
+	return fResult;
+#endif
+}
+

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2001, Valve LLC, All rights reserved. ============
 //
 // Purpose: 
 //
@@ -21,7 +21,7 @@
 //-----------------------------------------------------------------------------
 // Forward declarations
 //-----------------------------------------------------------------------------
-class CDmeAnimationSet;
+class CDmeFilmClip;
 class CDmePresetListPanel;
 class CDmePresetGroupListPanel;
 class CDmePresetGroup;
@@ -46,28 +46,27 @@ public:
 	CDmePresetGroupEditorPanel( vgui::Panel *pParent, const char *pName );
 	virtual ~CDmePresetGroupEditorPanel();
 
-	// Sets the current scene + animation list
-	void SetAnimationSet( CDmeAnimationSet *pAnimationSet );
-	CDmeAnimationSet *GetAnimationSet();
+	void SetAnimationSetClip( CDmeFilmClip *pFilmClip );
+	CDmeFilmClip *GetAnimationSetClip();
 
 	void RefreshAnimationSet();
 	void NotifyDataChanged();
 
 	// Returns selected presets/groups
-	CDmePresetGroup* GetSelectedPresetGroup( );
-	CDmePreset* GetSelectedPreset( );
+	const char* GetSelectedPresetGroupName();
+	const char* GetSelectedPresetName();
 
 	// Drag/drop reordering of preset groups
-	void MovePresetGroupInFrontOf( CDmePresetGroup *pDragGroup, CDmePresetGroup *pDropGroup );
+	void MovePresetGroupInFrontOf( const char *pDragGroupName, const char *pDropGroupName );
 
 	// Drag/drop reordering of presets
-	void MovePresetInFrontOf( CDmePreset *pDragPreset, CDmePreset *pDropPreset );
+	void MovePresetInFrontOf( const char *pDragPresetName, const char *pDropPresetName );
 
 	// Drag/drop preset moving
-	void MovePresetIntoGroup( CDmePreset *pPreset, CDmePresetGroup *pGroup );
+	void MovePresetIntoGroup( const char *pPresetName, const char *pSrcGroupName, const char *pDstGroupName );
 
 	// Toggle group visibility
-	void ToggleGroupVisibility( CDmePresetGroup *pPresetGroup );
+	void ToggleGroupVisibility( const char *pPresetGroupName );
 
 	MESSAGE_FUNC( OnMovePresetUp, "MovePresetUp" );
 	MESSAGE_FUNC( OnMovePresetDown, "MovePresetDown" );
@@ -87,10 +86,7 @@ private:
 	MESSAGE_FUNC( OnAddGroup, "AddGroup" );
 	MESSAGE_FUNC( OnAddPhonemeGroup, "AddPhonemeGroup" );
 	MESSAGE_FUNC( OnRenameGroup, "RenameGroup" );
-	MESSAGE_FUNC( OnEditPresetRemapping, "EditPresetRemapping" );
 	MESSAGE_FUNC( OnRemoveDefaultControls, "RemoveDefaultControls" );
-	MESSAGE_FUNC( OnRemapPresets, "RemapPresets" );
-	MESSAGE_FUNC( OnAddPreset, "AddPreset" );
 	MESSAGE_FUNC( OnRenamePreset, "RenamePreset" );
 	MESSAGE_FUNC( OnToggleGroupVisibility, "ToggleGroupVisibility" );
 	MESSAGE_FUNC( OnToggleGroupSharing, "ToggleGroupSharing" );
@@ -110,8 +106,8 @@ private:
 	void CleanupContextMenu();
 
 	// If it finds a duplicate group/preset name, reports an error message and returns it found one
-	bool HasDuplicatePresetName( const char *pPresetName, CDmePreset *pIgnorePreset = NULL );
-	bool HasDuplicateGroupName( const char *pControlName, CDmePresetGroup *pIgnoreGroup = NULL );
+	bool HasDuplicatePresetName( const char *pPresetName, const char *pIgnorePresetName = NULL );
+	bool HasDuplicateGroupName ( const char *pGroupName,  const char *pIgnorePresetGroupName = NULL );
 
 	// Refreshes the list of presets
 	void RefreshPresetNames( );
@@ -120,22 +116,21 @@ private:
 	void PerformAddGroup( const char *pNewGroupName );
 	void PerformAddPhonemeGroup( const char *pNewGroupName );
 	void PerformRenameGroup( const char *pNewGroupName );
-	void PerformAddPreset( const char *pNewPresetName );
 	void PerformRenamePreset( const char *pNewPresetName );
 
 	// Called to open a context-sensitive menu for a particular preset
 	void OnOpenPresetContextMenu( );
 
 	// Gets/sets a selected preset
-	void SetSelectedPreset( CDmePreset* pPreset );
+	void SetSelectedPreset( const char* pPresetName );
 
 	// Selects a particular preset group
-	void SetSelectedPresetGroup( CDmePresetGroup* pPresetGroup );
+	void SetSelectedPresetGroup( const char* pPresetGroupName );
 
 	// Imports presets
-	void ImportPresets( const CUtlVector< CDmePreset * >& presets );
+	void ImportPresets( CUtlVector< const char * >& presetNames, CDmElement *pRoot );
 
-	CDmeHandle< CDmeAnimationSet > m_hAnimationSet;
+	CDmeHandle< CDmeFilmClip > m_hFilmClip;
 	vgui::Splitter *m_pSplitter;
 	CDmePresetGroupListPanel *m_pPresetGroupList;
 	CDmePresetListPanel *m_pPresetList;
@@ -155,15 +150,14 @@ public:
 	CDmePresetGroupEditorFrame( vgui::Panel *pParent, const char *pTitle );
 	~CDmePresetGroupEditorFrame();
 
-	// Sets the current scene + animation list
-	void SetAnimationSet( CDmeAnimationSet *pAnimationSet );
-
 	// Inherited from IDmNotify
 	virtual void NotifyDataChanged( const char *pReason, int nNotifySource, int nNotifyFlags );
 
+	void SetAnimationSetClip( CDmeFilmClip *pClip ) { m_pEditor->SetAnimationSetClip( pClip ); }
+	void RefreshAnimationSet() { m_pEditor->RefreshAnimationSet(); }
+
 private:
 	MESSAGE_FUNC( OnPresetsChanged, "PresetsChanged" );
-	MESSAGE_FUNC_PARAMS( OnAddNewPreset, "AddNewPreset", params );
 	KEYBINDING_FUNC( undo, KEY_Z, vgui::MODIFIER_CONTROL, OnUndo, "#undo_help", 0 );
 	KEYBINDING_FUNC( redo, KEY_Z, vgui::MODIFIER_CONTROL | vgui::MODIFIER_SHIFT, OnRedo, "#redo_help", 0 );
 

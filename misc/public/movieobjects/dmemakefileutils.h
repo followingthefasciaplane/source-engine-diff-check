@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =====//
 //
 // Interface for makefiles to build differently depending on where they are run from
 //
@@ -64,7 +64,7 @@ protected:
 	CCompileFuncAdapterBase( ) {}
 
 public:
-	CUtlSymbol m_ElementType;
+	CUtlSymbolLarge m_ElementType;
 
 	CCompileFuncAdapterBase *m_pNext;
 };
@@ -115,7 +115,7 @@ protected:
 	COpenEditorFuncAdapterBase( ) {}
 
 public:
-	CUtlSymbol m_ElementType;
+	CUtlSymbolLarge m_ElementType;
 	COpenEditorFuncAdapterBase *m_pNext;
 };
 
@@ -265,7 +265,7 @@ protected:
 
 	// Sets the compilation process handle
 	// ( Call only in PERFORMING_COMPILATION )
-	void SetCompileProcess( ProcessHandle_t hProcess );
+	void SetCompileProcess( IProcess *hProcess );
 
 private:
 	struct CompileInfo_t
@@ -291,7 +291,7 @@ private:
 	bool AddCompileDependencies( CDmeMakefile *pMakefile, bool bBuildAllDependencies );
 
 	CUtlVector< CompileInfo_t > m_CompileTasks;
-	ProcessHandle_t m_hCompileProcess;
+	IProcess *m_hCompileProcess;
 	int m_nCurrentCompileTask;
 	int m_nExitCode;
 	CompilationStep_t m_CompilationStep;

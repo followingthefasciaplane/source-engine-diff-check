@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -11,6 +11,9 @@
 #include "portal_ps20b.inc"
 #include "convar.h"
 #include "cpp_shader_constant_register_map.h"
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
 
 
 DEFINE_FALLBACK_SHADER( Portal, Portal_DX90 )
@@ -42,9 +45,6 @@ BEGIN_VS_SHADER( Portal_DX90,
 
 	SHADER_FALLBACK
 	{
-		if ( g_pHardwareConfig->GetDXSupportLevel() < 90 )
-			return "Portal_DX80";
-
 		return 0;
 	}
 
@@ -52,7 +52,7 @@ BEGIN_VS_SHADER( Portal_DX90,
 	{
 		if ( params[BASETEXTURE]->IsDefined() )
 		{
-			if ( IsX360() )
+			if ( IsGameConsole() )
 			{
 				// prevent unused rt access
 				IMaterialVar* pNameVar = params[BASETEXTURE];
@@ -141,7 +141,7 @@ BEGIN_VS_SHADER( Portal_DX90,
 
 			int fmt = VERTEX_POSITION | VERTEX_NORMAL;
 			int userDataSize = 0;
-			int	iTexCoords = 1;
+			int	iTexCoords = 2;
 			if( IS_FLAG_SET( MATERIAL_VAR_MODEL ) )
 			{
 				userDataSize = 4;				
@@ -161,6 +161,10 @@ BEGIN_VS_SHADER( Portal_DX90,
 			if( bStaticBlendTexture && bAlphaMaskTexture )
 				pShaderShadow->EnableTexture( SHADER_SAMPLER2, true );
 			
+			// Sampler for nvidia's stereo hackery
+			pShaderShadow->EnableTexture( SHADER_SAMPLER3, true );
+			pShaderShadow->EnableSRGBRead( SHADER_SAMPLER3, false );
+
 			DECLARE_STATIC_VERTEX_SHADER( portal_vs20 );
 			SET_STATIC_VERTEX_SHADER_COMBO( HASALPHAMASK, bAlphaMaskTexture );
 			SET_STATIC_VERTEX_SHADER_COMBO( HASSTATICTEXTURE, bStaticBlendTexture );
@@ -199,23 +203,23 @@ BEGIN_VS_SHADER( Portal_DX90,
 			pShaderAPI->SetPixelShaderConstant( PSREG_EYEPOS_SPEC_EXPONENT, vEyePos_SpecExponent, 1 );
 
 			if ( params[BASETEXTURE]->IsTexture() )
-				BindTexture( SHADER_SAMPLER0, BASETEXTURE, FRAME );
+				BindTexture( SHADER_SAMPLER0, TEXTURE_BINDFLAGS_SRGBREAD, BASETEXTURE, FRAME );
 			else
-				pShaderAPI->BindStandardTexture( SHADER_SAMPLER0, TEXTURE_FRAME_BUFFER_FULL_TEXTURE_0 );
+				pShaderAPI->BindStandardTexture( SHADER_SAMPLER0, TEXTURE_BINDFLAGS_SRGBREAD, TEXTURE_FRAME_BUFFER_FULL_TEXTURE_0 );
 
 			bool bHasStatic = (fStaticAmount > 0.0f);
 			bool bUsingStaticTexture = (bStaticBlendTexture && bHasStatic);
 
 			if ( bAlphaMaskTexture )
 			{
-				BindTexture( SHADER_SAMPLER1, ALPHAMASKTEXTURE, ALPHAMASKTEXTUREFRAME );
+				BindTexture( SHADER_SAMPLER1, TEXTURE_BINDFLAGS_NONE, ALPHAMASKTEXTURE, ALPHAMASKTEXTUREFRAME );
 				if ( bUsingStaticTexture )
-					BindTexture( SHADER_SAMPLER2, STATICBLENDTEXTURE, STATICBLENDTEXTUREFRAME );
+					BindTexture( SHADER_SAMPLER2, TEXTURE_BINDFLAGS_NONE, STATICBLENDTEXTURE, STATICBLENDTEXTUREFRAME );
 			}
 			else
 			{
 				if ( bUsingStaticTexture )
-					BindTexture( SHADER_SAMPLER1, STATICBLENDTEXTURE, STATICBLENDTEXTUREFRAME );
+					BindTexture( SHADER_SAMPLER1, TEXTURE_BINDFLAGS_NONE, STATICBLENDTEXTURE, STATICBLENDTEXTUREFRAME );
 			}
 
 			if ( params[USEALTERNATEVIEWMATRIX]->GetIntValue() != 0 )
@@ -228,7 +232,46 @@ BEGIN_VS_SHADER( Portal_DX90,
 
 				VMatrix matFinal;
 				MatrixMultiply( matProj, matCustomView, matFinal );
+#ifdef _PS3
+				// PS3's Cg likes things in row-major rather than column-major
+				MatrixTranspose( matFinal, matFinal );
+#endif // _PS3
 				pShaderAPI->SetVertexShaderConstant( VERTEX_SHADER_SHADER_SPECIFIC_CONST_0, matFinal.Base(), 4 );
+			}
+
+			// Get viewport and render target dimensions and set shader constant to do a 2D mad
+			{
+				int nViewportX, nViewportY, nViewportWidth, nViewportHeight;
+				pShaderAPI->GetCurrentViewport( nViewportX, nViewportY, nViewportWidth, nViewportHeight );
+
+				int nRtWidth, nRtHeight;
+				pShaderAPI->GetCurrentRenderTargetDimensions( nRtWidth, nRtHeight );
+
+				float vViewportMad[4];
+				vViewportMad[0] = ( float )nViewportWidth / ( float )nRtWidth;
+				vViewportMad[1] = ( float )nViewportHeight / ( float )nRtHeight;
+				vViewportMad[2] = ( float )nViewportX / ( float )nRtWidth;
+				vViewportMad[3] = ( float )nViewportY / ( float )nRtHeight;
+
+				pShaderAPI->SetVertexShaderConstant( VERTEX_SHADER_SHADER_SPECIFIC_CONST_4, vViewportMad, 1 );
+			}
+
+			int nPortalRecursionDepth = ShaderApiFast( pShaderAPI )->GetIntRenderingParameter( INT_RENDERPARM_PORTAL_RECURSION_DEPTH );
+			float vPackedConst4[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+			if( g_pHardwareConfig->UseFastClipping() )
+			{
+				vPackedConst4[0] = ( nPortalRecursionDepth > 0 ) ? 1.0f : 0.0f;
+			}
+			else
+			{
+				vPackedConst4[0] = ( nPortalRecursionDepth > 1 )? 1.0f : 0.0f;
+			}
+			ShaderApiFast( pShaderAPI )->SetVertexShaderConstant( VERTEX_SHADER_SHADER_SPECIFIC_CONST_5, vPackedConst4, 1 );
+
+			bool bNvidiaStereoActiveThisFrame = pShaderAPI->IsStereoActiveThisFrame();
+			if ( bNvidiaStereoActiveThisFrame )
+			{
+				pShaderAPI->BindStandardTexture( SHADER_SAMPLER3, TEXTURE_BINDFLAGS_NONE, TEXTURE_STEREO_PARAM_MAP );
 			}
 
 			DECLARE_DYNAMIC_VERTEX_SHADER( portal_vs20 );
@@ -240,16 +283,13 @@ BEGIN_VS_SHADER( Portal_DX90,
 			{
 				DECLARE_DYNAMIC_PIXEL_SHADER( portal_ps20b );
 				SET_DYNAMIC_PIXEL_SHADER_COMBO( ADDSTATIC, bHasStatic );
-				SET_DYNAMIC_PIXEL_SHADER_COMBO( HDRENABLED, IsHDREnabled() );
-				SET_DYNAMIC_PIXEL_SHADER_COMBO( PIXELFOGTYPE, pShaderAPI->GetPixelFogCombo() );
+				SET_DYNAMIC_PIXEL_SHADER_COMBO( D_NVIDIA_STEREO, bNvidiaStereoActiveThisFrame );
 				SET_DYNAMIC_PIXEL_SHADER( portal_ps20b );
 			}
 			else
 			{
 				DECLARE_DYNAMIC_PIXEL_SHADER( portal_ps20 );
 				SET_DYNAMIC_PIXEL_SHADER_COMBO( ADDSTATIC, bHasStatic );
-				SET_DYNAMIC_PIXEL_SHADER_COMBO( HDRENABLED, IsHDREnabled() );
-				SET_DYNAMIC_PIXEL_SHADER_COMBO( PIXELFOGTYPE, pShaderAPI->GetPixelFogCombo() );
 				SET_DYNAMIC_PIXEL_SHADER( portal_ps20 );
 			}
 		}

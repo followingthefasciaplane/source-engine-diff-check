@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2006, Valve Corporation, All rights reserved. ============//
 
 #include "BaseVSShader.h"
 #include "eye_refract_helper.h"
@@ -30,9 +30,10 @@ BEGIN_VS_SHADER( EyeRefract_dx9, "Help for Eyes" )
 		SHADER_PARAM( CORNEABUMPSTRENGTH, SHADER_PARAM_TYPE_FLOAT, "1", "Cornea strength" )
 
 		SHADER_PARAM( AMBIENTOCCLCOLOR, SHADER_PARAM_TYPE_VEC3, "[1 1 1]", "Ambient occlusion color" )
+		SHADER_PARAM( AMBIENTOCCLUSION, SHADER_PARAM_TYPE_FLOAT, "1.0", "Dynamic ambient occlusion strength" )
+		
 		SHADER_PARAM( EYEBALLRADIUS, SHADER_PARAM_TYPE_FLOAT, "0", "Eyeball radius for ray casting" )
 
-		SHADER_PARAM( INTRO, SHADER_PARAM_TYPE_BOOL, "0", "is eyes in the ep1 intro" )
  	    SHADER_PARAM( ENTITYORIGIN, SHADER_PARAM_TYPE_VEC3,"0.0","center if the model in world space" )
  	    SHADER_PARAM( WARPPARAM, SHADER_PARAM_TYPE_FLOAT,"0.0","animation param between 0 and 1" )
 
@@ -63,7 +64,6 @@ BEGIN_VS_SHADER( EyeRefract_dx9, "Help for Eyes" )
 		info.m_nIrisV = IRISV;
 		info.m_nDilation = DILATION;
 		info.m_nGlossiness = GLOSSINESS;
-		info.m_nIntro = INTRO;
 		info.m_nEntityOrigin = ENTITYORIGIN;
 		info.m_nWarpParam = WARPPARAM;
 		info.m_nCorneaTexture = CORNEATEXTURE;
@@ -76,6 +76,7 @@ BEGIN_VS_SHADER( EyeRefract_dx9, "Help for Eyes" )
 		info.m_nAmbientOcclColor = AMBIENTOCCLCOLOR;
 		info.m_nEyeballRadius = EYEBALLRADIUS;
 		info.m_nDiffuseWarpTexture = LIGHTWARPTEXTURE;
+		info.m_nAmbientOcclusion = AMBIENTOCCLUSION;
 	}
 
 	// Cloak Pass
@@ -158,11 +159,6 @@ BEGIN_VS_SHADER( EyeRefract_dx9, "Help for Eyes" )
 
 	SHADER_FALLBACK
 	{
-		if ( g_pHardwareConfig->GetDXSupportLevel() < 90 )
-		{
-			return "Eyes_dx8";
-		}
-
 		return 0;
 	}
 

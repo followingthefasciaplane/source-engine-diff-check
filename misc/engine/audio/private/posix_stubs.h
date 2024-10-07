@@ -1,9 +1,9 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright 1996-2004, Valve LLC, All rights reserved. ============
 //
 // Purpose: Posix win32 replacements - Mocks trivial windows flow
 //
 //=============================================================================
-#ifndef POSIX_AUDIO_STUBS_H
+#if !defined( POSIX_AUDIO_STUBS_H ) && !defined( _PS3 )
 #define POSIX_AUDIO_STUBS_H
 
 #define DSBCAPS_LOCSOFTWARE		0
@@ -62,8 +62,8 @@
 typedef wchar_t BCHAR;
 
 typedef uint MMRESULT;
-typedef uint32 *DWORD_PTR;
-typedef char *LPCSTR;
+//typedef uint32 *DWORD_PTR;
+typedef const char *LPCSTR;
 typedef uint POINTL;
 
 #define IDLE_PRIORITY_CLASS	1

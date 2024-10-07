@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========== Copyright 2005, Valve Corporation, All rights reserved. ========
 //
 // Purpose:
 //
@@ -17,14 +17,14 @@
 #include "shaderapi/ishaderutil.h"
 #include "materialsystem/deformations.h"
 
-#include "tier1/utlintrusivelist.h"
-#include "utlvector.h"
-#include "utldict.h"
 #include "cmaterialdict.h"
 #include "cmatlightmaps.h"
+#include "cmatpaintmaps.h"
 #include "cmatrendercontext.h"
 #include "cmatqueuedrendercontext.h"
 #include "materialsystem_global.h"
+#include "custom_material.h"
+#include "composite_texture.h"
 
 #ifndef MATSYS_INTERNAL
 #error "This file is private to the implementation of IMaterialSystem/IMaterialSystemInternal"
@@ -34,11 +34,15 @@
 #pragma once
 #endif
 
+#ifdef _PS3
+#include "tls_ps3.h"
+inline IMatRenderContextInternal *& Ps3TlsMaterialSystemRenderContextFn() { void **ppv = &( GetTLSGlobals()->pMaterialSystemRenderContext ); return *( IMatRenderContextInternal ** ) ppv; }
+#define Ps3TlsMaterialSystemRenderContext Ps3TlsMaterialSystemRenderContextFn()
+#endif
+
 //-----------------------------------------------------------------------------
 
 class CJob;
-class CTextureCompositor;
-class IThreadPool;
 struct DeferredUpdateLightmapInfo_t;
 
 // typedefs to allow use of delegation macros
@@ -48,10 +52,24 @@ typedef int LightmapOffset_t[2];
 
 extern CThreadFastMutex g_MatSysMutex;
 
+enum AsyncTextureLoadError_t
+{
+	ASYNCTEXTURE_LOADERROR_NONE     = 0,
+	ASYNCTEXTURE_LOADERROR_FILEOPEN = -1,
+	ASYNCTEXTRUE_LOADERROR_READING  = -2,
+};
+
+struct AsyncTextureLoad_t
+{
+	AsyncTextureContext_t		*m_pContext;
+	void						*m_pData;
+	int							m_nNumReadBytes;
+	AsyncTextureLoadError_t		m_LoadError;
+};
+
 //-----------------------------------------------------------------------------
 // The material system implementation
 //-----------------------------------------------------------------------------
-
 
 class CMaterialSystem : public CTier2AppSystem< IMaterialSystemInternal >, public IShaderUtil
 {
@@ -73,6 +91,9 @@ public:
 	virtual void *							QueryInterface( const char *pInterfaceName );
 	virtual InitReturnVal_t					Init();
 	virtual void							Shutdown();
+	virtual const AppSystemInfo_t *			GetDependencies( ) { return NULL; }
+	virtual AppSystemTier_t					GetTier() { return APP_SYSTEM_TIER2; }
+	virtual void Reconnect( CreateInterfaceFn factory, const char *pInterfaceName )	{ BaseClass::Reconnect( factory, pInterfaceName ); }
 
 	CreateInterfaceFn						Init( const char* pShaderDLL,
 													IMaterialProxyFactory* pMaterialProxyFactory,
@@ -103,15 +124,16 @@ private:
 	// force the thread mode to single threaded, synchronizes with render thread if running
 	void									ForceSingleThreaded();
 
-	void									ThreadRelease( );
-	void									ThreadAcquire( bool bForce = false );
+	void									ThreadRelease( void );	// Tell QMS to release GL
+	void									ThreadAcquire( void );	// Tell QMS to acquire GL
 
 public:
 	virtual void							SetThreadMode( MaterialThreadMode_t nextThreadMode, int nServiceThread );
-	virtual MaterialThreadMode_t			GetThreadMode( ); // current thread mode
+	virtual MaterialThreadMode_t			GetThreadMode(); // current thread mode
 	virtual bool							IsRenderThreadSafe( );
 	virtual bool							AllowThreading( bool bAllow, int nServiceThread );
 	virtual void							ExecuteQueued();
+	virtual void                            OnDebugEvent( const char * pEvent = "" );
 
 	//---------------------------------------------------------
 	// Component accessors
@@ -119,12 +141,23 @@ public:
 	const CMatLightmaps *					GetLightmaps() const		{ return &m_Lightmaps; }
 	CMatLightmaps *							GetLightmaps()				{ return &m_Lightmaps; }
 
+	const CMatPaintmaps *							GetPaintmaps( void ) const	{ return &m_Paintmaps; }
+	CMatPaintmaps *							GetPaintmaps( void ) { return &m_Paintmaps; }
+
 	IMatRenderContext *						GetRenderContext();
 	IMatRenderContext *						CreateRenderContext( MaterialContextType_t type );
 	IMatRenderContext *						SetRenderContext( IMatRenderContext * );
 
-	const IMatRenderContextInternal *		GetRenderContextInternal() const	{ IMatRenderContextInternal *pRenderContext = m_pRenderContext.Get(); return ( pRenderContext ) ? pRenderContext : &m_HardwareRenderContext; }
-	IMatRenderContextInternal *				GetRenderContextInternal()			{ IMatRenderContextInternal *pRenderContext = m_pRenderContext.Get(); return ( pRenderContext ) ? pRenderContext : &m_HardwareRenderContext; }
+#ifdef _PS3
+	const IMatRenderContextInternal *		GetRenderContextInternal() const	{ IMatRenderContextInternal *pRenderContext = Ps3TlsMaterialSystemRenderContext; return ( pRenderContext ) ? pRenderContext : &m_HardwareRenderContext; }
+	IMatRenderContextInternal *				GetRenderContextInternal()			{ IMatRenderContextInternal *pRenderContext = Ps3TlsMaterialSystemRenderContext; return ( pRenderContext ) ? pRenderContext : &m_HardwareRenderContext; }
+#elif defined(_X360)
+	const IMatRenderContextInternal *		GetRenderContextInternal() const	{ IMatRenderContextInternal *pRenderContext = m_pRenderContexts[(int)ThreadInMainThread()]; return ( pRenderContext ) ? pRenderContext : &m_HardwareRenderContext; }
+	IMatRenderContextInternal *				GetRenderContextInternal()			{ IMatRenderContextInternal *pRenderContext = m_pRenderContexts[(int)ThreadInMainThread()]; return ( pRenderContext ) ? pRenderContext : &m_HardwareRenderContext; }
+#else
+	const IMatRenderContextInternal *		GetRenderContextInternal() const	{ IMatRenderContextInternal *pRenderContext = m_pRenderContext; return ( pRenderContext ) ? pRenderContext : &m_HardwareRenderContext; }
+	IMatRenderContextInternal *				GetRenderContextInternal()			{ IMatRenderContextInternal *pRenderContext = m_pRenderContext; return ( pRenderContext ) ? pRenderContext : &m_HardwareRenderContext; }
+#endif
 
 	const CMaterialDict *					GetMaterialDict() const		{ return &m_MaterialDict; }
 	CMaterialDict *							GetMaterialDict()			{ return &m_MaterialDict; }
@@ -144,7 +177,8 @@ public:
 	virtual bool							OverrideConfig( const MaterialSystem_Config_t &config, bool bForceUpdate );
 	const MaterialSystem_Config_t &			GetCurrentConfigForVideoCard() const;
 
-	// Gets *recommended* configuration information associated with the display card, 
+	// Gets *recommended* configuration information associated with the display card and dxsupport.
+	virtual bool							GetRecommendedVideoConfig( KeyValues *pKeyValues );
 	virtual bool							GetRecommendedConfigurationInfo( int nDXLevel, KeyValues * pKeyValues );
 
 	// IShaderUtil
@@ -160,17 +194,12 @@ private:
 	void									ReadConfigFromConVars( MaterialSystem_Config_t *pConfig );
 	void									WriteConfigIntoConVars( const MaterialSystem_Config_t &config );
 
-	// Write dxsupport info to configvars 
-	void									WriteConfigurationInfoToConVars( bool bOverwriteCommandLineValues = true );
-
-
 public:
 	// -----------------------------------------------------------
 	// Device methods
 	// -----------------------------------------------------------
 	int										GetDisplayAdapterCount() const;
 	int										GetCurrentAdapter() const;
-	char									*GetDisplayDeviceName() const OVERRIDE;
 	void									GetDisplayAdapterInfo( int adapter, MaterialAdapterInfo_t& info ) const;
 	int										GetModeCount( int adapter ) const;
 	void									GetModeInfo( int adapter, int mode, MaterialVideoMode_t& info ) const;
@@ -191,30 +220,20 @@ public:
 
 	bool									UsesSRGBCorrectBlending() const;
 
-	// Reports support for shadow depth texturing
-	bool									SupportsShadowDepthTextures( void );
-
-	// Reports support for fetch4 texture access (useful for shadow map PCF in shader)
-	bool									SupportsFetch4( void );
-
-	// Vendor-dependent shadow depth texture format
-	ImageFormat								GetShadowDepthTextureFormat( void );
-
-	// Vendor-dependent slim texture format
-	ImageFormat								GetNullTextureFormat( void );
-
 	// Shadow depth bias factors
 	void									SetShadowDepthBiasFactors( float fShadowSlopeScaleDepthBias, float fShadowDepthBias );
+
+	void									FlipCulling( bool bFlipCulling );
 
 	const MaterialSystemHardwareIdentifier_t &GetVideoCardIdentifier() const;
 
 	// Use this to spew information about the 3D layer 
 	void									SpewDriverInfo() const;
 
-	DELEGATE_TO_OBJECT_2V(					GetDXLevelDefaults, uint &, uint &, g_pShaderAPI );
-
 	DELEGATE_TO_OBJECT_2VC(					GetBackBufferDimensions, int &, int &, g_pShaderDevice );
 	DELEGATE_TO_OBJECT_0C( ImageFormat,		GetBackBufferFormat, g_pShaderDevice );
+	DELEGATE_TO_OBJECT_0C( const AspectRatioInfo_t &, GetAspectRatioInfo, g_pShaderAPI );
+
 
 	DELEGATE_TO_OBJECT_1V(                  PushDeformation, DeformationBase_t const *, g_pShaderAPI );
 
@@ -240,6 +259,7 @@ public:
 	virtual bool							IsInFrame( ) const;
 	void									Flush( bool flushHardware = false );
 	void									SwapBuffers();
+	uint32									GetCurrentFrameCount();
 
 	// Flushes managed textures from the texture cacher
 	void									EvictManagedResources();
@@ -264,8 +284,24 @@ public:
 	void									RemoveRestoreFunc( MaterialBufferRestoreFunc_t func );
 
 	// Called by the shader API when it's just about to lose video memory
-	void									ReleaseShaderObjects();
+	void									ReleaseShaderObjects( int nChangeFlags );
 	void									RestoreShaderObjects( CreateInterfaceFn shaderFactory, int nChangeFlags = 0 );
+
+	// Installs a function to be called when we need to delete objects at the end of the render frame
+	virtual void							AddEndFrameCleanupFunc( EndFrameCleanupFunc_t func );
+	virtual void							RemoveEndFrameCleanupFunc( EndFrameCleanupFunc_t func );
+
+	// Gets called when the level is shuts down, will call the registered callback
+	virtual void							OnLevelShutdown();
+	// Installs a function to be called when the level is shuts down
+	virtual bool							AddOnLevelShutdownFunc( OnLevelShutdownFunc_t func, void * pUserData );
+	virtual bool							RemoveOnLevelShutdownFunc( OnLevelShutdownFunc_t func, void * pUserData );
+
+	// Installs a function to be called when we need to perform operation before next rendering context is started
+	virtual void							AddEndFramePriorToNextContextFunc( EndFramePriorToNextContextFunc_t func );
+	virtual void							RemoveEndFramePriorToNextContextFunc( EndFramePriorToNextContextFunc_t func );
+
+	virtual void							OnLevelLoadingComplete();
 
 	// Release temporary HW memory...
 	void									ResetTempHWMemory( bool bExitingLevel = false );
@@ -283,13 +319,21 @@ public:
 	const char *							ShaderFlagName( int nIndex ) const;
 	void									GetShaderFallback( const char *pShaderName, char *pFallbackShader, int nFallbackLength );
 
-
 	// -----------------------------------------------------------
 	// Material proxies
 	// -----------------------------------------------------------
 	IMaterialProxyFactory*					GetMaterialProxyFactory();
 	void									SetMaterialProxyFactory( IMaterialProxyFactory* pFactory );
 
+	IClientMaterialSystem*					GetClientMaterialSystemInterface();
+
+	// -----------------------------------------------------------
+	// Refresh the spinner on load screens
+	// -----------------------------------------------------------
+	void									RefreshFrontBufferNonInteractive();
+	virtual uint32 GetFrameTimestamps( ApplicationPerformanceCountersInfo_t &apci, ApplicationInstantCountersInfo_t & aici );
+
+	bool									CanDownloadTextures() const;
 
 	// -----------------------------------------------------------
 	// Editor mode
@@ -298,9 +342,13 @@ public:
 
 	// Used to enable editor materials. Must be called before Init.
 	void									EnableEditorMaterials();
+	void EnableGBuffers( void );
+
 
 	// Can we use editor materials?
-	bool									CanUseEditorMaterials() const;
+	bool                        CanUseEditorMaterials( void ) const;
+
+	int                         GetConfigurationFlags( void ) const;
 
 
 	// -----------------------------------------------------------
@@ -337,12 +385,6 @@ public:
 
 
 	//---------------------------------------------------------
-	// Compositor Support
-	//---------------------------------------------------------
-	void									CreateCompositorMaterials();
-	void									CleanUpCompositorMaterials();
-
-	//---------------------------------------------------------
 	// Misc features
 	//---------------------------------------------------------
 
@@ -360,12 +402,15 @@ public:
 
 	IMaterialInternal *						GetDrawFlatMaterial()									{ return m_pDrawFlatMaterial; }
 	IMaterialInternal *						GetBufferClearObeyStencil( int i )						{ return m_pBufferClearObeyStencil[i]; }
+	IMaterialInternal *						GetReloadZcullMaterial()								{ return m_pReloadZcullMaterial; }
 	IMaterialInternal *						GetRenderTargetBlitMaterial()							{ return m_pRenderTargetBlitMaterial; }
 
 	ShaderAPITextureHandle_t				GetFullbrightLightmapTextureHandle() const				{ return m_FullbrightLightmapTextureHandle; }
 	ShaderAPITextureHandle_t				GetFullbrightBumpedLightmapTextureHandle() const		{ return m_FullbrightBumpedLightmapTextureHandle; }
 	ShaderAPITextureHandle_t				GetBlackTextureHandle() const							{ return m_BlackTextureHandle; }
+	ShaderAPITextureHandle_t				GetBlackAlphaZeroTextureHandle() const					{ return m_BlackAlphaZeroTextureHandle; }
 	ShaderAPITextureHandle_t				GetFlatNormalTextureHandle() const						{ return m_FlatNormalTextureHandle; }
+	ShaderAPITextureHandle_t				GetFlatSSBumpTextureHandle() const						{ return m_FlatSSBumpTextureHandle; }
 	ShaderAPITextureHandle_t				GetGreyTextureHandle() const							{ return m_GreyTextureHandle; }
 	ShaderAPITextureHandle_t				GetGreyAlphaZeroTextureHandle() const					{ return m_GreyAlphaZeroTextureHandle; }
 	ShaderAPITextureHandle_t				GetWhiteTextureHandle() const							{ return m_WhiteTextureHandle; }
@@ -376,26 +421,19 @@ public:
 	//---------------------------------------------------------
 	// Material and texture management
 	//---------------------------------------------------------
-	// Stop attempting to stream in textures in response to usage.  Useful for phases such as loading or other explicit
-	// operations that shouldn't take usage of textures as a signal to stream them in at full rez.
-	void									SuspendTextureStreaming( );
-	void									ResumeTextureStreaming( );
 	void									UncacheAllMaterials();
 	void									UncacheUnusedMaterials( bool bRecomputeStateSnapshots );
 	void									CacheUsedMaterials();
 	void									ReloadTextures();
 	void									ReloadMaterials( const char *pSubString = NULL );
 
-	// Create new materials	(currently only used by the editor!)
+	// Create new materials
 	IMaterial *								CreateMaterial( const char *pMaterialName, KeyValues *pVMTKeyValues );
 	IMaterial *								FindMaterial( const char *materialName, const char *pTextureGroupName, bool complain = true, const char *pComplainPrefix = NULL );
-	virtual IMaterial *						FindMaterialEx( char const* pMaterialName, const char *pTextureGroupName, int nContext, bool complain = true, const char *pComplainPrefix = NULL );
-	bool									IsMaterialLoaded( const char *materialName );
-	virtual IMaterial *						FindProceduralMaterial( const char *pMaterialName, const char *pTextureGroupName, KeyValues *pVMTKeyValues );
+	virtual IMaterial *						FindProceduralMaterial( const char *pMaterialName, const char *pTextureGroupName, KeyValues *pVMTKeyValues = NULL );
 	const char *							GetForcedTextureLoadPathID() { return m_pForcedTextureLoadPathID; }
-	
-	void									SetAsyncTextureLoadCache( void* h );
-	void									SetVMTFileLoadCache( void* h );
+
+	bool									LoadKeyValuesFromVMTFile( KeyValues &vmtKeyValues, const char *pMaterialName, bool bUsesUNCFilename  );
 
 	//---------------------------------
 
@@ -411,15 +449,17 @@ public:
 
 	//---------------------------------
 
-	ITexture *								FindTexture( char const* pTextureName, const char *pTextureGroupName, bool complain = true, int nAdditionalCreationFlags = 0 );
+	ITexture *								FindTexture( const char* pTextureName, const char *pTextureGroupName, bool complain = true, int nAdditionalCreationFlags = 0  );
 
 	bool									IsTextureLoaded( const char* pTextureName ) const;
+	bool									GetTextureInformation( char const *szTextureName, MaterialTextureInfo_t &info ) const;
 
 	void									AddTextureAlias( const char *pAlias, const char *pRealName );
 	void									RemoveTextureAlias( const char *pAlias );
 
-	void									SetExcludedTextures( const char *pScriptName );
+	void									SetExcludedTextures( const char *pScriptName, bool bUsingWeaponModelCache );
 	void									UpdateExcludedTextures( void );
+	void									ClearForceExcludes( void );
 
 	// Creates a procedural texture
 	ITexture *								CreateProceduralTexture( const char	*pTextureName, 
@@ -429,11 +469,37 @@ public:
 																		ImageFormat			fmt, 
 																		int					nFlags );
 
+   	virtual ICustomMaterialManager			*GetCustomMaterialManager();
+	virtual ICompositeTextureGenerator		*GetCompositeTextureGenerator();
+
+#if defined( _X360 )
+
+	// Create a texture for displaying gamerpics.
+	// This function allocates the texture in the correct gamerpic format, but it does not fill in the gamerpic data.
+	virtual ITexture *						CreateGamerpicTexture( const char *pTextureName,
+																   const char *pTextureGroupName,
+																   int nFlags );
+
+	// Update the given texture with the player gamerpic for the local player at the given index.
+	// Note: this texture must be the correct size and format. Use CreateGamerpicTexture.
+	virtual bool							UpdateLocalGamerpicTexture( ITexture *pTexture, DWORD userIndex );
+
+	// Update the given texture with a remote player's gamerpic.
+	// Note: this texture must be the correct size and format. Use CreateGamerpicTexture.
+	virtual bool							UpdateRemoteGamerpicTexture( ITexture *pTexture, XUID xuid );
+
+#endif // _X360
+
 	//
 	// Render targets
 	//
 	void									BeginRenderTargetAllocation();
 	void									EndRenderTargetAllocation();	// Simulate an Alt-Tab in here, which causes a release/restore of all resources
+
+	void FinishRenderTargetAllocation( void );
+	
+	void ReEnableRenderTargetAllocation_IRealizeIfICallThisAllTexturesWillBeUnloadedAndLoadTimeWillSufferHorribly( void );
+
 
 	// Creates a texture for use as a render target
 	ITexture *								CreateRenderTargetTexture( int w, 
@@ -469,39 +535,29 @@ public:
 																				unsigned int textureFlags = TEXTUREFLAGS_CLAMPS | TEXTUREFLAGS_CLAMPT,
 																				unsigned int renderTargetFlags = 0 );
 
-	virtual ITexture*			CreateTextureFromBits(int w, int h, int mips, ImageFormat fmt, int srcBufferSize, byte* srcBits);
-
-	virtual void				OverrideRenderTargetAllocation( bool rtAlloc );
-
-	virtual ITextureCompositor*	NewTextureCompositor( int w, int h, const char* pCompositeName, int nTeamNum, uint64 randomSeed, KeyValues* stageDesc, uint32 texCompositeCreateFlags ) OVERRIDE;
-	void						ScheduleTextureComposite( CTextureCompositor* _texCompositor );
-
-
-	virtual void				SetRenderTargetFrameBufferSizeOverrides( int nWidth, int nHeight ) OVERRIDE;
-	virtual void				GetRenderTargetFrameBufferDimensions( int & nWidth, int & nHeight ) OVERRIDE;
-
-	virtual void				AsyncFindTexture( const char* pFilename, const char *pTextureGroupName, IAsyncTextureOperationReceiver* pRecipient, void* pExtraArgs, bool bComplain = true, int nAdditionalCreationFlags = 0 ) OVERRIDE;
-	virtual ITexture*			CreateNamedTextureFromBitsEx( const char* pName, const char *pTextureGroupName, int w, int h, int mips, ImageFormat fmt, int srcBufferSize, byte* srcBits, int nFlags ) OVERRIDE;
-
-	virtual bool				AddTextureCompositorTemplate( const char* pName, KeyValues* pTmplDesc, int nTexCompositeTemplateFlags = 0 ) OVERRIDE;
-	virtual bool				VerifyTextureCompositorTemplates() OVERRIDE;
-
-
+	ITexture *								CreateNamedMultiRenderTargetTexture( const char *pRTName,				// Pass in NULL here for an unnamed render target.
+																					int w, 
+																					int h, 
+																					RenderTargetSizeMode_t sizeMode,	// Controls how size is generated (and regenerated on video mode change).
+																					ImageFormat format, 
+																					MaterialRenderTargetDepth_t depth = MATERIAL_RT_DEPTH_SHARED, 
+																					unsigned int textureFlags = TEXTUREFLAGS_CLAMPS | TEXTUREFLAGS_CLAMPT,
+																					unsigned int renderTargetFlags = 0 );
 
 
 	// -----------------------------------------------------------
 	
 	bool									OnDrawMesh( IMesh *pMesh, int firstIndex, int numIndices );
 	bool									OnDrawMesh( IMesh *pMesh, CPrimList *pLists, int nLists );
+	bool									OnDrawMeshModulated( IMesh *pMesh, const Vector4D &diffuseModulation, int firstIndex, int numIndices );
 	DELEGATE_TO_OBJECT_3( bool,				OnSetFlexMesh, IMesh *, IMesh *, int, GetRenderContextInternal() );
 	DELEGATE_TO_OBJECT_3( bool,				OnSetColorMesh, IMesh *, IMesh *, int, GetRenderContextInternal() );
 	DELEGATE_TO_OBJECT_2( bool,				OnSetPrimitiveType, IMesh *, MaterialPrimitiveType_t, GetRenderContextInternal() );
 	DELEGATE_TO_OBJECT_0V(					SyncMatrices, GetRenderContextInternal() );
 	DELEGATE_TO_OBJECT_1V(					SyncMatrix, MaterialMatrixMode_t, GetRenderContextInternal() );
-	DELEGATE_TO_OBJECT_0( bool,				OnFlushBufferedPrimitives, GetRenderContextInternal() );
 	void									OnThreadEvent( uint32 threadEvent );
-	ShaderAPITextureHandle_t				GetShaderAPITextureBindHandle( ITexture *pTexture, int nFrame, int nTextureChannel ); // JasonM ????
-
+	DELEGATE_TO_OBJECT_1( ShaderAPITextureHandle_t,	GetLightmapTexture, ShaderAPITextureHandle_t, GetRenderContextInternal() );
+	DELEGATE_TO_OBJECT_1( ShaderAPITextureHandle_t,	GetPaintmapTexture, ShaderAPITextureHandle_t, GetRenderContextInternal() );
 
 
 	// -----------------------------------------------------------
@@ -515,6 +571,11 @@ public:
 		AllocateStandardTextures();
 	}
 
+	void CleanupLightmaps()
+	{
+		GetLightmaps()->CleanupLightmaps();
+	}
+
 	DELEGATE_TO_OBJECT_4( int,				AllocateLightmap, int, int, LightmapOffset_t, IMaterial *, &m_Lightmaps );
 	DELEGATE_TO_OBJECT_1( int,				AllocateWhiteLightmap, IMaterial *, &m_Lightmaps );
 	DELEGATE_TO_OBJECT_3( int,				AllocateDynamicLightmap, LightmapOffset_t, int *, int, &m_Lightmaps );
@@ -523,10 +584,31 @@ public:
 	DELEGATE_TO_OBJECT_1V(					GetSortInfo, MaterialSystem_SortInfo_t *, &m_Lightmaps );
 	DELEGATE_TO_OBJECT_3VC(					GetLightmapPageSize, int, int *, int *, &m_Lightmaps );
 	DELEGATE_TO_OBJECT_0V(					ResetMaterialLightmapPageInfo, &m_Lightmaps );
+	DELEGATE_TO_OBJECT_0C( int,				GetNumLightmapPages, &m_Lightmaps );
 	DELEGATE_TO_OBJECT_1C( int,				GetLightmapWidth, int, &m_Lightmaps );
 	DELEGATE_TO_OBJECT_1C( int,				GetLightmapHeight, int, &m_Lightmaps );
 	DELEGATE_TO_OBJECT_0V(					BeginUpdateLightmaps, &m_Lightmaps );
 	DELEGATE_TO_OBJECT_0V(					EndUpdateLightmaps, &m_Lightmaps );
+
+
+	// -----------------------------------------------------------
+	// Paint map delegates
+	// -----------------------------------------------------------
+	DELEGATE_TO_OBJECT_1( void, RegisterPaintmapDataManager, IPaintmapDataManager *, &m_Paintmaps );
+	DELEGATE_TO_OBJECT_0V( BeginUpdatePaintmaps, &m_Paintmaps );
+	DELEGATE_TO_OBJECT_0V( EndUpdatePaintmaps, &m_Paintmaps );
+	void UpdatePaintmap( int paintmap, BYTE* pPaintData, int numRects, Rect_t* pRects );
+
+	// -----------------------------------------------------------
+	// Stereo
+	// -----------------------------------------------------------
+	bool IsStereoSupported();
+	bool IsStereoActiveThisFrame() const;
+	void NVStereoUpdate();
+
+	bool m_bStereoBoolsInitialized;
+	bool m_bIsStereoSupported;
+	bool m_bIsStereoActiveThisFrame;
 
 	// -----------------------------------------------------------
 	// Render context delegates
@@ -542,23 +624,34 @@ public:
 	DELEGATE_TO_OBJECT_1V(					ForceDepthFuncEquals, bool, GetRenderContextInternal() );
 	DELEGATE_TO_OBJECT_0( MaterialHeightClipMode_t, GetHeightClipMode, GetRenderContextInternal() );
 	DELEGATE_TO_OBJECT_0C( bool,			InFlashlightMode, GetRenderContextInternal() );
+	DELEGATE_TO_OBJECT_0C( bool,			IsRenderingPaint, GetRenderContextInternal() );
+	DELEGATE_TO_OBJECT_0C( bool,			IsCascadedShadowMapping, GetRenderContextInternal() );
 
 	// IShaderUtil
-	DELEGATE_TO_OBJECT_2V(					BindStandardTexture, Sampler_t, StandardTextureId_t, &m_HardwareRenderContext );
+	DELEGATE_TO_OBJECT_3V(					BindStandardTexture, Sampler_t, TextureBindFlags_t, StandardTextureId_t, &m_HardwareRenderContext );
+
+	DELEGATE_TO_OBJECT_1( ShaderAPITextureHandle_t,		GetStandardTexture, StandardTextureId_t, &m_HardwareRenderContext );
+
 	DELEGATE_TO_OBJECT_2V(					BindStandardVertexTexture, VertexTextureSampler_t, StandardTextureId_t, &m_HardwareRenderContext );
 	DELEGATE_TO_OBJECT_2V(					GetLightmapDimensions, int *, int *, &m_HardwareRenderContext );
 	DELEGATE_TO_OBJECT_3V(					GetStandardTextureDimensions, int *, int *, StandardTextureId_t, &m_HardwareRenderContext );
+	DELEGATE_TO_OBJECT_0( float,			GetSubDHeight, &m_HardwareRenderContext );
+
 	DELEGATE_TO_OBJECT_0( MorphFormat_t,	GetBoundMorphFormat, &m_HardwareRenderContext );
 	DELEGATE_TO_OBJECT_1( ITexture *,		GetRenderTargetEx, int, &m_HardwareRenderContext );
 	DELEGATE_TO_OBJECT_7V(					DrawClearBufferQuad, unsigned char, unsigned char, unsigned char, unsigned char, bool, bool, bool, &m_HardwareRenderContext );
+#if defined( _PS3 )
+	DELEGATE_TO_OBJECT_0V(					DrawReloadZcullQuad, &m_HardwareRenderContext );
+#endif // _PS3
 	DELEGATE_TO_OBJECT_0C( int,				MaxHWMorphBatchCount, g_pMorphMgr );
 	DELEGATE_TO_OBJECT_1V(					GetCurrentColorCorrection, ShaderColorCorrectionInfo_t*, g_pColorCorrectionSystem );
+	virtual ShaderAPITextureHandle_t		GetShaderAPITextureBindHandle( ITexture *pTexture, int nFrameVar, int nTextureChannel = 0 );
 
 #if defined( _X360 )
 	void									ListUsedMaterials();
 	HXUIFONT								OpenTrueTypeFont( const char *pFontname, int tall, int style );
 	void									CloseTrueTypeFont( HXUIFONT hFont );
-	bool									GetTrueTypeFontMetrics( HXUIFONT hFont, XUIFontMetrics *pFontMetrics, XUICharMetrics charMetrics[256] );
+	bool									GetTrueTypeFontMetrics( HXUIFONT hFont, wchar_t wchFirst, wchar_t wchLast, XUIFontMetrics *pFontMetrics, XUICharMetrics *pCharMetrics );
 	// Render a sequence of characters and extract the data into a buffer
 	// For each character, provide the width+height of the font texture subrect,
 	// an offset to apply when rendering the glyph, and an offset into a buffer to receive the RGBA data
@@ -567,7 +660,26 @@ public:
 	void									PersistDisplay();
 	void									*GetD3DDevice();
 	bool									OwnGPUResources( bool bEnable );
+#elif defined( _PS3 )
+	void									ListUsedMaterials();
+	virtual HPS3FONT						OpenTrueTypeFont( const char *pFontname, int tall, int style );
+	virtual void							CloseTrueTypeFont( HPS3FONT hFont );
+	virtual bool							GetTrueTypeFontMetrics( HPS3FONT hFont, int nFallbackTall, wchar_t wchFirst, wchar_t wchLast, CPS3FontMetrics *pFontMetrics, CPS3CharMetrics *pCharMetrics );
+	// Render a sequence of characters and extract the data into a buffer
+	// For each character, provide the width+height of the font texture subrect,
+	// an offset to apply when rendering the glyph, and an offset into a buffer to receive the RGBA data
+	virtual bool							GetTrueTypeGlyphs( HPS3FONT hFont, int nFallbackTall, int numChars, wchar_t *pWch, int *pOffsetX, int *pOffsetY, int *pWidth, int *pHeight, unsigned char *pRGBA, int *pRGBAOffset );
+	virtual void TransmitScreenshotToVX();
+	virtual void CompactRsxLocalMemory( char const *szReason );
+	virtual void SetFlipPresentFrequency( int nNumVBlanks );
+
+	static  void RunQMS(void* cmat, void* ptr)
+	{
+		((CMaterialSystem*)cmat)->ThreadExecuteQueuedContext((CMatQueuedRenderContext *)ptr);
+	}
+
 #endif
+	virtual void SpinPresent( uint nFrames );
 
 	MaterialLock_t							Lock();
 	void									Unlock( MaterialLock_t );
@@ -575,18 +687,14 @@ public:
 	uint									GetRenderThreadId() const { return m_nRenderThreadID; }
 	void									UnbindMaterial( IMaterial *pMaterial );
 
-	IMaterialProxy							*DetermineProxyReplacements( IMaterial *pMaterial, KeyValues *pFallbackKeyValues );
-	void									LoadReplacementMaterials();
-	void									ScanDirForReplacements( const char *pszPathName );
-	void									InitReplacementsFromFile( const char *pszPathName );
-
-	void									PreloadReplacements( );
-	CUtlDict< KeyValues *, int >			m_Replacements;
-
 	virtual void							CompactMemory();
 
-private:
-	void									OnRenderingAsyncComplete();
+	// Get stats on GPU memory usage
+	virtual void							GetGPUMemoryStats( GPUMemoryStats &stats );
+
+	bool									IsLevelLoadingComplete() const;
+
+	void									OnAsyncTextureDataComplete( AsyncTextureContext_t *pContext, void *pData, int nNumReadBytes, AsyncTextureLoadError_t loadError );
 
 	// -----------------------------------------------------------
 private:
@@ -596,28 +704,40 @@ private:
 	CON_COMMAND_MEMBER_F( CMaterialSystem, "mat_reloadallmaterials", ReloadAllMaterials, "Reloads all materials", FCVAR_CHEAT );
 	CON_COMMAND_MEMBER_F( CMaterialSystem, "mat_reloadmaterial", ReloadMaterials, "Reloads a single material", FCVAR_CHEAT );
 	CON_COMMAND_MEMBER_F( CMaterialSystem, "mat_reloadtextures", ReloadTextures, "Reloads all textures", FCVAR_CHEAT );
+	CON_COMMAND_MEMBER_F( CMaterialSystem, "mat_showaspectratioinfo", DebugPrintAspectRatioInfo, "Spew info about the hardware aspect ratio", FCVAR_DEVELOPMENTONLY );
 
-#if defined( _X360 )
+#if defined( _X360 ) || defined(_PS3)
 	CON_COMMAND_MEMBER_F( CMaterialSystem, "mat_material_list", ListUsedMaterials, "Show used textures.", 0 );
 #endif
 
 	friend void* InstantiateMaterialSystemV76Interface();
 	friend CMaterialSystem *CMatLightmaps::GetMaterialSystem() const;
+	friend CMaterialSystem *CMatPaintmaps::GetMaterialSystem() const;
 
 	void ThreadExecuteQueuedContext( CMatQueuedRenderContext *pContext );
 
 	IThreadPool * CreateMatQueueThreadPool();
 	void DestroyMatQueueThreadPool();
 
-#ifdef DX_TO_GL_ABSTRACTION
+#if defined( DX_TO_GL_ABSTRACTION ) && !defined( _GAMECONSOLE )
 	void									DoStartupShaderPreloading( void );
 #endif
+	
+	void									ServiceAsyncTextureLoads();
+	void									ServiceEndFramePriorToNextContext();
 
 	// -----------------------------------------------------------
 
 	CMaterialDict							m_MaterialDict;
 	CMatLightmaps							m_Lightmaps;
-	CThreadLocal<IMatRenderContextInternal *> m_pRenderContext;
+	CMatPaintmaps							m_Paintmaps;
+
+
+#if defined(_X360)
+	static IMatRenderContextInternal *CMaterialSystem::m_pRenderContexts[2];
+#elif !defined(_PS3)
+	static CTHREADLOCALPTR(IMatRenderContextInternal) m_pRenderContext;
+#endif
 	CMatRenderContext						m_HardwareRenderContext;
 
 	CMatQueuedRenderContext					m_QueuedRenderContexts[2];
@@ -625,7 +745,6 @@ private:
 
 	MaterialThreadMode_t					m_ThreadMode;
 	MaterialThreadMode_t					m_IdealThreadMode;
-	bool									m_bThreadingNotAvailable;		// this is true if the VirtualAlloc()'s in the threading fail to allocate
 	int										m_nServiceThread;
 
 	//---------------------------------
@@ -636,20 +755,44 @@ private:
 
 	int										m_nAdapter;
 	int										m_nAdapterFlags;
+	int 									m_nConfigurationFlags; // MATCONFIG_FLAGS_xxxx
+	ShaderDisplayMode_t						m_nAdapterInfo;
 
 	//---------------------------------
 
 	IMaterialProxyFactory *					m_pMaterialProxyFactory;
+	IClientMaterialSystem *					m_pClientMaterialSystemInterface;
 	
 	//---------------------------------
 	// Callback methods for releasing + restoring video memory
 	CUtlVector< MaterialBufferReleaseFunc_t > m_ReleaseFunc;
 	CUtlVector< MaterialBufferRestoreFunc_t > m_RestoreFunc;
+	CUtlVector< EndFrameCleanupFunc_t > m_EndFrameCleanupFunc;
+	class COnLevelShutdownFunc
+	{
+	public:
+		COnLevelShutdownFunc( OnLevelShutdownFunc_t func, void * pUserData )
+			:
+			m_Func(func),
+			m_pUserData(pUserData)
+		{
+			// Do nothing... Is there a CUtlPair class or something like that? 
+		}
+		bool operator==(const COnLevelShutdownFunc & other) const
+		{
+			return ( (m_Func == other.m_Func) && (m_pUserData == other.m_pUserData) );
+		}
+		OnLevelShutdownFunc_t	m_Func;
+		void *					m_pUserData;
+	};
+	CUtlVector< COnLevelShutdownFunc > m_OnLevelShutdownFuncs;
+
+	CUtlVector< EndFramePriorToNextContextFunc_t > m_EndFramePriorToNextContextFunc;
 
 	//---------------------------------
 
-	bool									m_bRequestedEditorMaterials;
-	bool									m_bCanUseEditorMaterials;
+	bool                                    m_bRequestedEditorMaterials;
+	bool                                    m_bRequestedGBuffers;
 
 	//---------------------------------
 
@@ -657,7 +800,9 @@ private:
 	ShaderAPITextureHandle_t				m_FullbrightLightmapTextureHandle;
 	ShaderAPITextureHandle_t				m_FullbrightBumpedLightmapTextureHandle;
 	ShaderAPITextureHandle_t 				m_BlackTextureHandle;
+	ShaderAPITextureHandle_t				m_BlackAlphaZeroTextureHandle;
 	ShaderAPITextureHandle_t				m_FlatNormalTextureHandle;
+	ShaderAPITextureHandle_t				m_FlatSSBumpTextureHandle;
 	ShaderAPITextureHandle_t				m_GreyTextureHandle;
 	ShaderAPITextureHandle_t				m_GreyAlphaZeroTextureHandle;
 	ShaderAPITextureHandle_t				m_WhiteTextureHandle;
@@ -668,8 +813,12 @@ private:
 	// Have we allocated the standard lightmaps?
 	bool									m_StandardTexturesAllocated;
 
+	// Do we need to restore mananged resources next time RestoreShaderObjects is called
+	bool									m_bRestoreManangedResources;
 
-	bool									m_bReplacementFilesValid;
+	// Deferred material reload ( so we don't call it when ALT-TABd
+	bool									m_bDeferredMaterialReload;
+	char									*m_pSubString; // allocated substring for deferred material reload
 
 	//---------------------------------
 	// Shared materials used for debugging....
@@ -690,45 +839,75 @@ private:
 	};
 
     IMaterialInternal *						m_pBufferClearObeyStencil[BUFFER_CLEAR_TYPE_COUNT];
+	IMaterialInternal *						m_pReloadZcullMaterial;
 	IMaterialInternal *						m_pDrawFlatMaterial;
 	IMaterialInternal *						m_pRenderTargetBlitMaterial;
-	CUtlVector< IMaterialInternal* >		m_pCompositorMaterials;
+	IMaterialInternal *						m_pBIKPreloadMaterial; // PORTAL2 - a dummy material which is used to ensure that the (~2 KB) bink shaders are always loaded
 
 	//---------------------------------
 
 	const char *							m_pForcedTextureLoadPathID;
-	FileCacheHandle_t						m_hAsyncLoadFileCache;
 	uint									m_nRenderThreadID;
-	bool									m_bAllocatingRenderTargets;
+	// nesting counter for render target allocation
+	int	  								    m_nAllocatingRenderTargets;
+	bool                                    m_bDisableRenderTargetAllocationForever;
+
 	bool									m_bInStubMode;
 	bool									m_bGeneratedConfig;
 	bool									m_bInFrame;
 	bool									m_bForcedSingleThreaded;
 	bool									m_bAllowQueuedRendering;
-	volatile bool							m_bThreadHasOwnership;
-	uint									m_ThreadOwnershipID;
+	bool									m_bThreadHasOwnership;
+	bool									m_bLevelLoadingComplete;
+
+	CTSQueue< AsyncTextureLoad_t >			m_QueuedAsyncTextureLoads;
+	AsyncTextureLoad_t						m_AsyncTextureLoad;
+	AsyncTextureLoad_t *					m_pActiveAsyncTextureLoad;
 
 	//---------------------------------
 
+	CCustomMaterialManager					m_CustomMaterialManager;
+	CCompositeTextureGenerator				m_CompositeTextureGenerator;
+
+#ifdef DX_TO_GL_ABSTRACTION
+	uint									m_ThreadOwnershipID;
+#endif	
+
+#ifndef _PS3
 	CJob *									m_pActiveAsyncJob;
+#else
+	bool									m_bQMSJobSubmitted;
+#endif
 	CUtlVector<uint32>						m_threadEvents;
 
 	IThreadPool *							m_pMatQueueThreadPool;
 
-	//---------------------------------
+#if defined(_PS3)	// some PS3-specific font info (hey, it was either do this or have a pointer to a pimpl struct)
+	CUtlVector< HPS3FONT > m_vExtantFonts; // used to catch leaks -- can't store a vector of the CellFonts directly bc the handle is a pointer and can't store pointers into a vector
+	void InitializePS3Fonts();
+	enum { kPS3_DEFAULT_MAX_USER_FONTS = 256 };
+public:
+	virtual bool PS3InitFontLibrary( unsigned fontFileCacheSizeInBytes, unsigned maxNumFonts );
+	virtual void PS3DumpFontLibrary();
+	virtual void *PS3GetFontLibPtr();
 
-	int										m_nRenderTargetFrameBufferWidthOverride;
-	int										m_nRenderTargetFrameBufferHeightOverride;
-
-	CUtlVector< CTextureCompositor* >		m_scheduledComposites;
-	CUtlVector< CTextureCompositor* >		m_pendingComposites;
+protected:
+#else
+	inline void InitializePS3Fonts(){};
+#endif
 };
+
 
 //-----------------------------------------------------------------------------
 
 inline CMaterialSystem *CMatLightmaps::GetMaterialSystem() const
 {
 	return GET_OUTER( CMaterialSystem, m_Lightmaps );
+}
+
+inline CMaterialSystem *CMatPaintmaps::GetMaterialSystem() const
+{
+	return GET_OUTER( CMaterialSystem, m_Paintmaps );
 }
 
 //-----------------------------------------------------------------------------

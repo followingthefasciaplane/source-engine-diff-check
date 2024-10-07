@@ -1,9 +1,9 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright (c) Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
 // $NoKeywords: $
-//=============================================================================//
+//============================================================================//
 
 #include "BaseVSShader.h"
 
@@ -28,14 +28,12 @@ BEGIN_VS_SHADER_FLAGS( WriteZ_DX9, "Help for WriteZ", SHADER_NOT_EDITABLE )
 
 	SHADER_FALLBACK
 	{
-		if ( g_pHardwareConfig->GetDXSupportLevel() < 90 )
-			return "WriteZ_DX8";
-
 		return 0;
 	}
 
 	SHADER_INIT
 	{
+		SET_FLAGS2( MATERIAL_VAR2_SUPPORTS_HW_SKINNING );
 	}
 
 	SHADER_DRAW
@@ -64,8 +62,8 @@ BEGIN_VS_SHADER_FLAGS( WriteZ_DX9, "Help for WriteZ", SHADER_NOT_EDITABLE )
 		DYNAMIC_STATE
 		{
 			DECLARE_DYNAMIC_VERTEX_SHADER( writez_vs20 );
-			SET_DYNAMIC_VERTEX_SHADER_COMBO( DOWATERFOG, pShaderAPI->GetSceneFogMode() == MATERIAL_FOG_LINEAR_BELOW_FOG_Z );
 			SET_DYNAMIC_VERTEX_SHADER_COMBO( COMPRESSED_VERTS, (int)vertexCompression );
+			SET_DYNAMIC_VERTEX_SHADER_COMBO( SKINNING, pShaderAPI->GetCurrentNumBones() > 0 );
 			SET_DYNAMIC_VERTEX_SHADER( writez_vs20 );
 
 			// No pixel shader on Direct3D, doubles fill rate
@@ -77,5 +75,29 @@ BEGIN_VS_SHADER_FLAGS( WriteZ_DX9, "Help for WriteZ", SHADER_NOT_EDITABLE )
 		}
 		Draw();
 	}
+
+	void ExecuteFastPath( int *dynVSIdx, int *dynPSIdx,  IMaterialVar** params, IShaderDynamicAPI * pShaderAPI, 
+		VertexCompressionType_t vertexCompression, CBasePerMaterialContextData **pContextDataPtr, BOOL bCSMEnabled )
+	{
+		DECLARE_DYNAMIC_VERTEX_SHADER( writez_vs20 );
+		SET_DYNAMIC_VERTEX_SHADER_COMBO( COMPRESSED_VERTS, (int)vertexCompression );
+		SET_DYNAMIC_VERTEX_SHADER_COMBO( SKINNING, pShaderAPI->GetCurrentNumBones() > 0 );
+		SET_DYNAMIC_VERTEX_SHADER( writez_vs20 );
+
+		*dynVSIdx = _vshIndex.GetIndex();
+
+		// No pixel shader on Direct3D, doubles fill rate
+		if ( IsOSXOpenGL() )
+		{
+			DECLARE_DYNAMIC_PIXEL_SHADER( white_ps20 );
+			SET_DYNAMIC_PIXEL_SHADER( white_ps20 );
+			*dynPSIdx = _pshIndex.GetIndex();
+		}
+		else
+		{
+			*dynPSIdx = 0;
+		}
+	}
+
 END_SHADER
 

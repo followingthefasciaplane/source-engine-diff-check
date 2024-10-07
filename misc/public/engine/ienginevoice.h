@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Engine voice interface
 //
@@ -17,13 +17,18 @@
 
 #define IENGINEVOICE_INTERFACE_VERSION	"IEngineVoice001"
 
+enum EngineVoiceFlags_t
+{
+	ENGINE_VOICE_FLAG_PS3		=	( 1 << 0 )
+};
+
 abstract_class IEngineVoice
 {
 public:
 	virtual bool IsHeadsetPresent( int iController ) = 0;
 	virtual bool IsLocalPlayerTalking( int iController ) = 0;
 
-	virtual void AddPlayerToVoiceList( XUID xPlayer, int iController ) = 0;
+	virtual void AddPlayerToVoiceList( XUID xPlayer, int iController, uint64 uiFlags ) = 0;
 	virtual void RemovePlayerFromVoiceList( XUID xPlayer, int iController ) = 0;
 
 	virtual void GetRemoteTalkers( int *pNumTalkers, XUID *pRemoteTalkers ) = 0;

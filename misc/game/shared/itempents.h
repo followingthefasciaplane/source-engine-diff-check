@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -26,6 +26,7 @@ class KeyValues;
 abstract_class ITempEntsSystem : public IPredictionSystem
 {
 public:
+	virtual bool SuppressTE( IRecipientFilter& filter ) = 0;
 	virtual void ArmorRicochet( IRecipientFilter& filer, float delay,
 		const Vector* pos, const Vector* dir ) = 0;
 	virtual void BeamEntPoint( IRecipientFilter& filer, float delay,
@@ -75,7 +76,7 @@ public:
 	virtual void DynamicLight( IRecipientFilter& filer, float delay,
 		const Vector* org, int r, int g, int b, int exponent, float radius, float time, float decay ) = 0;
 	virtual void Explosion( IRecipientFilter& filer, float delay,
-		const Vector* pos, int modelindex, float scale, int framerate, int flags, int radius, int magnitude, const Vector* normal = NULL, unsigned char materialType = 'C' ) = 0;
+		const Vector& pos, int modelindex, float scale, int framerate, int flags, int radius, int magnitude, const Vector* normal = NULL, unsigned char materialType = 'C' ) = 0;
 	virtual void ShatterSurface( IRecipientFilter& filer, float delay,
 		const Vector* pos, const QAngle* angle, const Vector* vForce, const Vector* vForcePos, 
 		float width, float height, float shardsize, ShatterSurface_t surfacetype,
@@ -95,7 +96,7 @@ public:
 	virtual void EnergySplash( IRecipientFilter& filer, float delay,
 		const Vector* pos, const Vector* dir, bool bExplosive ) = 0;
 	virtual void PlayerDecal( IRecipientFilter& filer, float delay,
-		const Vector* pos, int player, int entity ) = 0;
+		const Vector* pos, const Vector* start, const Vector* right, int player, int entity, int hitbox ) = 0;
 	virtual void ShowLine( IRecipientFilter& filer, float delay,
 		const Vector* start, const Vector* end ) = 0;
 	virtual void Smoke( IRecipientFilter& filer, float delay,
@@ -114,10 +115,8 @@ public:
 				 const Vector &pos, const Vector &dir, float size, float speed ) = 0;
 	virtual void GaussExplosion( IRecipientFilter& filer, float delay,
 				const Vector &pos, const Vector &dir, int type ) = 0;
-	virtual void DispatchEffect( IRecipientFilter& filter, float delay,
-				const Vector &pos, const char *pName, const CEffectData &data ) = 0;
 	virtual void PhysicsProp( IRecipientFilter& filter, float delay, int modelindex, int skin, 
-		const Vector& pos, const QAngle &angles, const Vector& vel, int flags, int effects ) = 0;
+		const Vector& pos, const QAngle &angles, const Vector& vel, int flags, int effects, color24 renderColor ) = 0;
 
 	// For playback from external tools
 	virtual void TriggerTempEntity( KeyValues *pKeyValues ) = 0;

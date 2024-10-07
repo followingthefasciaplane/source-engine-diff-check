@@ -1,10 +1,11 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =======
 //
 // Purpose: See notes below
 //
 //=============================================================================
 
 #include "movieobjects/movieobjects.h"
+#include "datamodel/dmelementfactoryhelper.h"
 
 // YOU MUST INCLUDE THIS FILE INTO ANY PROJECT WHICH USES THE movieobjects.lib FILE
 // This hack causes the class factories for the element types to be imported into the compiled code...
@@ -15,7 +16,10 @@ USING_ELEMENT_FACTORY( DmElement );
 // Movie types
 USING_ELEMENT_FACTORY( DmeTransform );
 USING_ELEMENT_FACTORY( DmeTransformList );
+USING_ELEMENT_FACTORY( DmeVertexDataBase );
 USING_ELEMENT_FACTORY( DmeVertexData );
+USING_ELEMENT_FACTORY( DmeVertexDeltaData );
+USING_ELEMENT_FACTORY( DmeShape );
 USING_ELEMENT_FACTORY( DmeMesh );
 USING_ELEMENT_FACTORY( DmeDag );
 USING_ELEMENT_FACTORY( DmeFaceSet );
@@ -25,13 +29,21 @@ USING_ELEMENT_FACTORY( DmeAttachment );
 USING_ELEMENT_FACTORY( DmeMakefile );
 USING_ELEMENT_FACTORY( DmeMDLMakefile );
 USING_ELEMENT_FACTORY( DmeDCCMakefile );
+
+USING_ELEMENT_FACTORY( DmeMayaAnimationMakefile );
+USING_ELEMENT_FACTORY( DmeMayaCombinationOperator );
 USING_ELEMENT_FACTORY( DmeMayaMakefile );
+USING_ELEMENT_FACTORY( DmeMayaModelMakefile );
 USING_ELEMENT_FACTORY( DmeXSIMakefile );
+USING_ELEMENT_FACTORY( DmeSource );
 USING_ELEMENT_FACTORY( DmeSourceDCCFile );
 USING_ELEMENT_FACTORY( DmeSourceMayaFile );
+USING_ELEMENT_FACTORY( DmeSourceMayaModelFile );
+USING_ELEMENT_FACTORY( DmeSourceMayaAnimationFile );
 USING_ELEMENT_FACTORY( DmeSourceXSIFile );
 USING_ELEMENT_FACTORY( DmeAnimationList );
 USING_ELEMENT_FACTORY( DmeClip );
+
 USING_ELEMENT_FACTORY( DmeChannelsClip );
 USING_ELEMENT_FACTORY( DmeChannel );
 USING_ELEMENT_FACTORY( DmeTimeFrame );
@@ -78,5 +90,3 @@ USING_ELEMENT_FACTORY( DmeVMatrixCurveInfo );
 USING_ELEMENT_FACTORY( DmeComponent );
 USING_ELEMENT_FACTORY( DmeSingleIndexedComponent );
 USING_ELEMENT_FACTORY( DmeDrawSettings );
-USING_ELEMENT_FACTORY( DmeEyePosition );
-USING_ELEMENT_FACTORY( DmeEyeball );

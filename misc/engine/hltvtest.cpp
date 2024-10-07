@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -8,7 +8,7 @@
 // hltvtest.cpp: implementation of the CHLTVTestSystem class.
 //
 //////////////////////////////////////////////////////////////////////
-
+#include "basetypes.h"
 #include "cmd.h"
 #include "convar.h"
 #include "hltvtest.h"
@@ -44,7 +44,8 @@ bool CHLTVTestSystem::StartTest(int nClients, const char *pszAddress)
 
 	while ( m_Servers.Count() < nClients )
 	{
-		CHLTVServer *pServer = new CHLTVServer();
+		extern ConVar tv_snapshotrate;
+		CHLTVServer *pServer = new CHLTVServer(0, tv_snapshotrate.GetFloat() );
 		m_Servers.AddToTail( pServer );
 		pServer->Init( NET_IsDedicated() );
 		pServer->m_ClientState.m_Socket = NET_AddExtraSocket( PORT_ANY );
@@ -60,12 +61,15 @@ bool CHLTVTestSystem::StartTest(int nClients, const char *pszAddress)
 
 void CHLTVTestSystem::RetryTest(int nClients)
 {
-	int maxClients = min( nClients+1, m_Servers.Count() );
+	int maxClients = MIN( nClients+1, m_Servers.Count() );
 		
 	for ( int i=0; i<maxClients; i++ )
 	{
 		CHLTVServer *pHLTV = m_Servers[i];
-		pHLTV->ConnectRelay( pHLTV->m_ClientState.m_szRetryAddress );
+		if ( pHLTV->m_ClientState.m_Remote.Count() > 0 )
+		{
+			pHLTV->ConnectRelay( pHLTV->m_ClientState.m_Remote.Get( 0 ).m_szRetryAddress );
+		}
 	}
 }
 
@@ -86,7 +90,7 @@ bool CHLTVTestSystem::StopsTest()
 
 #ifdef _HLTVTEST
 
-CON_COMMAND( tv_test_start, "Starts the SourceTV test system" )
+CON_COMMAND( tv_test_start, "Starts the GOTV test system" )
 {
 	if ( args.ArgC() < 3 )
 	{
@@ -108,9 +112,9 @@ CON_COMMAND( tv_test_start, "Starts the SourceTV test system" )
 	}
 
 	// If it's not a single player connection to "localhost", initialize networking & stop listenserver
-	if ( !Q_strncmp( address, "localhost", 9 ) )
+	if ( StringHasPrefixCaseSensitive( address, "localhost" ) )
 	{
-		Msg( "SourceTV test can't connect to localhost.\n" );
+		Msg( "GOTV test can't connect to localhost.\n" );
 		return;
 	}
 
@@ -129,7 +133,7 @@ CON_COMMAND( tv_test_start, "Starts the SourceTV test system" )
 	Host_Disconnect( false );
 
 	// start networking
-	NET_SetMutiplayer( true );	
+	NET_SetMultiplayer( true );	
 
 	hltvtest->StartTest( nClients, address );
 }
@@ -154,7 +158,7 @@ CON_COMMAND( tv_test_retry, "Tell test clients to reconnect" )
 	}
 }
 
-CON_COMMAND( tv_test_stop, "Stops the SourceTV test system" )
+CON_COMMAND( tv_test_stop, "Stops the GOTV test system" )
 {
 	if ( hltvtest )
 	{

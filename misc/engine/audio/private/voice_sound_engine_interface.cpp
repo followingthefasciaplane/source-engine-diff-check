@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright � 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -39,8 +39,8 @@ public:
 	}
 
 
-	virtual CAudioMixer			*CreateMixer( int initialStreamPosition = 0 );
-	virtual int					GetOutputData( void **pData, int samplePosition, int sampleCount, char copyBuf[AUDIOSOURCE_COPYBUF_SIZE] );
+	virtual CAudioMixer			*CreateMixer( int initialStreamPosition, int skipInitialSamples, bool bUpdateDelayForChoreo, SoundError &soundError, struct hrtf_info_t* pHRTFVec );
+	virtual int					GetOutputData( void **pData, int64 samplePosition, int sampleCount, char copyBuf[AUDIOSOURCE_COPYBUF_SIZE] );
 	virtual int					SampleRate( void );
 	
 	// Sample size is in bytes.  It will not be accurate for compressed audio.  This is a best estimate.
@@ -53,6 +53,7 @@ public:
 	virtual int					SampleCount( void );
 
 	virtual bool				IsVoiceSource()				{return true;}
+	virtual bool				IsPlayerVoice()				{return true;}
 
 	virtual bool				IsLooped()					{return false;}
 	virtual bool				IsStreaming()				{return true;}
@@ -61,6 +62,7 @@ public:
 	virtual void				CacheLoad()					{}
 	virtual void				CacheUnload()				{}
 	virtual CSentence			*GetSentence()				{return NULL;}
+	virtual int					GetQuality()				{ return 0; }
 
 	virtual int					ZeroCrossingBefore( int sample )	{return sample;}
 	virtual int					ZeroCrossingAfter( int sample )		{return sample;}
@@ -91,7 +93,7 @@ private:
 		}
 		
 		// this file is in memory, simply pass along the data request to the source
-		virtual int ReadSourceData( void **pData, int sampleIndex, int sampleCount, char copyBuf[AUDIOSOURCE_COPYBUF_SIZE] )
+		virtual int ReadSourceData( void **pData, int64 sampleIndex, int sampleCount, char copyBuf[AUDIOSOURCE_COPYBUF_SIZE] )
 		{
 			return m_source.GetOutputData( pData, sampleIndex, sampleCount, copyBuf );
 		}
@@ -99,6 +101,12 @@ private:
 		virtual bool IsReadyToMix() 
 		{ 
 			return true; 
+		}
+
+		void UpdateLoopPosition( int nLoopPosition )
+		{
+			// Should not be necessary in this implementation...
+			Assert( false );
 		}
 
 	private:
@@ -128,9 +136,11 @@ extern WAVEFORMATEX g_VoiceSampleFormat;
 class CVoiceSfx : public CSfxTable
 {
 public:
-	virtual const char *getname()
+	virtual const char	*getname( char *pBuf, size_t bufLen )
 	{
-		return "?VoiceSfx";
+		const char *pName = "?VoiceSfx";
+		V_strncpy( pBuf, pName, bufLen );
+		return pBuf;
 	}
 };
 
@@ -173,35 +183,45 @@ CAudioSourceVoice::~CAudioSourceVoice()
 	Voice_OnAudioSourceShutdown( m_iChannel );
 }
 
-CAudioMixer *CAudioSourceVoice::CreateMixer( int initialStreamPosition )
+CAudioMixer *CAudioSourceVoice::CreateMixer( int initialStreamPosition, int skipInitialSamples, bool bUpdateDelayForChoreo, SoundError &soundError, struct hrtf_info_t* pHRTFVec )
 {
+	soundError = SE_OK;
 	CWaveDataVoice *pVoice = new CWaveDataVoice(*this);
 	if(!pVoice)
-		return NULL;
-
-	CAudioMixer *pMixer = CreateWaveMixer( pVoice, WAVE_FORMAT_PCM, 1, BYTES_PER_SAMPLE*8, 0 );
-	if(!pMixer)
 	{
-		delete pVoice;
+		Assert( false );
+		soundError = SE_CANT_CREATE_MIXER;
 		return NULL;
 	}
 
+	CAudioMixer *pMixer = CreateWaveMixer( pVoice, WAVE_FORMAT_PCM, 1, BYTES_PER_SAMPLE*8, initialStreamPosition, skipInitialSamples, bUpdateDelayForChoreo );
+	if(!pMixer)
+	{
+		delete pVoice;
+		soundError = SE_CANT_CREATE_MIXER;
+		return NULL;
+	}
+
+	ReferenceAdd( pMixer );
 	return pMixer;
 }
 
-int CAudioSourceVoice::GetOutputData( void **pData, int samplePosition, int sampleCount, char copyBuf[AUDIOSOURCE_COPYBUF_SIZE] )
+int CAudioSourceVoice::GetOutputData( void **pData, int64 samplePosition, int sampleCount, char copyBuf[AUDIOSOURCE_COPYBUF_SIZE] )
 {
 	int nSamplesGotten = Voice_GetOutputData(
 		m_iChannel,
 		copyBuf,
 		AUDIOSOURCE_COPYBUF_SIZE,
-		samplePosition,
+		(int)samplePosition,
 		sampleCount );
 	
 	// If there weren't enough bytes in the received data channel, pad it with zeros.
 	if( nSamplesGotten < sampleCount )
 	{
-		memset( &copyBuf[nSamplesGotten], 0, (sampleCount - nSamplesGotten) * BYTES_PER_SAMPLE );
+		if ( copyBuf != NULL )
+		{
+			memset( &copyBuf[nSamplesGotten], 0, (sampleCount - nSamplesGotten) * BYTES_PER_SAMPLE );
+		}
 		nSamplesGotten = sampleCount;
 	}
 
@@ -268,14 +288,14 @@ void VoiceSE_Idle(float frametime)
 
 	if( g_bVoiceOverdriveOn )
 	{
-		g_VoiceOverdriveDuration = min( g_VoiceOverdriveDuration+frametime, voice_overdrivefadetime.GetFloat() );
+		g_VoiceOverdriveDuration = MIN( g_VoiceOverdriveDuration+frametime, voice_overdrivefadetime.GetFloat() );
 	}
 	else
 	{
 		if(g_VoiceOverdriveDuration == 0)
 			return;
 
-		g_VoiceOverdriveDuration = max(g_VoiceOverdriveDuration-frametime, 0.f);
+		g_VoiceOverdriveDuration = MAX(g_VoiceOverdriveDuration-frametime, 0);
 	}
 
 	float percent = g_VoiceOverdriveDuration / voice_overdrivefadetime.GetFloat();

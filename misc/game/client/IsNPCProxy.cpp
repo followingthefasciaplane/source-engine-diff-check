@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2007, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -6,13 +6,10 @@
 //=============================================================================//
 #include "cbase.h"
 #include "functionproxy.h"
-#include "toolframework_client.h"
 
+#include "imaterialproxydict.h"
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
-
-// forward declarations
-void ToolFramework_RecordMaterialParams( IMaterial *pMaterial );
 
 //-----------------------------------------------------------------------------
 // Returns the player health (from 0 to 1)
@@ -52,12 +49,8 @@ void CProxyIsNPC::OnBind( void *pC_BaseEntity )
 	{
 		SetFloatResult( 0.0f );
 	}
-	if ( ToolsEnabled() )
-	{
-		ToolFramework_RecordMaterialParams( GetMaterial() );
-	}
 }
 
-EXPOSE_INTERFACE( CProxyIsNPC, IMaterialProxy, "IsNPC" IMATERIAL_PROXY_INTERFACE_VERSION );
+EXPOSE_MATERIAL_PROXY( CProxyIsNPC, IsNPC );
 
 

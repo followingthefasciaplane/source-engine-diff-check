@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright  1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -18,6 +18,7 @@
 #include "igamesystem.h"
 #include "utlmultilist.h"
 #include "tier1/callqueue.h"
+#include "engine/ivdebugoverlay.h"
 
 #ifdef PORTAL
 	#include "portal_util_shared.h"
@@ -67,15 +68,24 @@ int groundlinksallocated = 0;
 #define DEF_THINK_LIMIT "10"
 #endif
 
-ConVar think_limit( "think_limit", DEF_THINK_LIMIT, FCVAR_REPLICATED, "Maximum think time in milliseconds, warning is printed if this is exceeded." );
+ConVar think_limit( "think_limit", DEF_THINK_LIMIT, FCVAR_REPLICATED | FCVAR_RELEASE, "Maximum think time in milliseconds, warning is printed if this is exceeded." );
+
 #ifndef CLIENT_DLL
+
 ConVar debug_touchlinks( "debug_touchlinks", "0", 0, "Spew touch link activity" );
 #define DebugTouchlinks() debug_touchlinks.GetBool()
+
 #else
+
 #define DebugTouchlinks() false
+
 #endif
 
-
+ConVar sv_grenade_trajectory("sv_grenade_trajectory", "0", FCVAR_REPLICATED | FCVAR_RELEASE | FCVAR_CHEAT, "Shows grenade trajectory visualization in-game." );
+ConVar sv_grenade_trajectory_time("sv_grenade_trajectory_time", "20", FCVAR_REPLICATED | FCVAR_RELEASE, "Length of time grenade trajectory remains visible.", true, 0.1f, true, 20.0f );
+ConVar sv_grenade_trajectory_time_spectator("sv_grenade_trajectory_time_spectator", "4", FCVAR_REPLICATED | FCVAR_RELEASE, "Length of time grenade trajectory remains visible as a spectator.", true, 0.0f, true, 8.0f );
+ConVar sv_grenade_trajectory_thickness("sv_grenade_trajectory_thickness", "0.2", FCVAR_REPLICATED | FCVAR_RELEASE, "Visible thickness of grenade trajectory arc", true, 0.1f, true, 1.0f );
+ConVar sv_grenade_trajectory_dash("sv_grenade_trajectory_dash", "0", FCVAR_REPLICATED | FCVAR_RELEASE, "Dot-dash style grenade trajectory arc" );
 
 //-----------------------------------------------------------------------------
 // Portal-specific hack designed to eliminate re-entrancy in touch functions
@@ -129,8 +139,7 @@ public:
 
 	CDataObjectAccessSystem()
 	{
-		// Cast to int to make it clear that we know we are comparing different enum types.
-		COMPILE_TIME_ASSERT( (int)NUM_DATAOBJECT_TYPES <= (int)MAX_ACCESSORS );
+    	COMPILE_TIME_ASSERT( (int)NUM_DATAOBJECT_TYPES <= (int)MAX_ACCESSORS );
 
 		Q_memset( m_Accessors, 0, sizeof( m_Accessors ) );
 	}
@@ -491,7 +500,7 @@ static inline float GetActualGravity( CBaseEntity *pEnt )
 		ent_gravity = 1.0f;
 	}
 
-	return ent_gravity * GetCurrentGravity();
+	return ent_gravity * sv_gravity.GetFloat();
 }
 
 
@@ -537,12 +546,6 @@ inline void FreeTouchLink( touchlink_t *link )
 	g_EdictTouchLinks.Free( link );
 }
 
-#ifdef STAGING_ONLY
-#ifndef CLIENT_DLL
-ConVar sv_groundlink_debug( "sv_groundlink_debug", "0", FCVAR_NONE, "Enable logging of alloc/free operations for debugging." );
-#endif
-#endif // STAGING_ONLY
-
 //-----------------------------------------------------------------------------
 // Purpose: 
 // Output : inline groundlink_t
@@ -556,17 +559,8 @@ inline groundlink_t *AllocGroundLink( void )
 	}
 	else
 	{
-		DevMsg( "AllocGroundLink: failed to allocate groundlink_t.!!!  groundlinksallocated=%d g_EntityGroundLinks.Count()=%d\n", groundlinksallocated, g_EntityGroundLinks.Count() );
+		DevMsg( "AllocGroundLink: failed to allocate groundlink_t.!!!\n" );
 	}
-
-#ifdef STAGING_ONLY
-#ifndef CLIENT_DLL
-	if ( sv_groundlink_debug.GetBool() )
-	{
-		UTIL_LogPrintf( "Groundlink Alloc: %p at %d\n", link, groundlinksallocated );
-	}
-#endif
-#endif // STAGING_ONLY
 
 	return link;
 }
@@ -578,15 +572,6 @@ inline groundlink_t *AllocGroundLink( void )
 //-----------------------------------------------------------------------------
 inline void FreeGroundLink( groundlink_t *link )
 {
-#ifdef STAGING_ONLY
-#ifndef CLIENT_DLL
-	if ( sv_groundlink_debug.GetBool() )
-	{
-		UTIL_LogPrintf( "Groundlink Free: %p at %d\n", link, groundlinksallocated );
-	}
-#endif
-#endif // STAGING_ONLY
-
 	if ( link )
 	{
 		--groundlinksallocated;
@@ -782,6 +767,11 @@ groundlink_t *CBaseEntity::AddEntityToGroundList( CBaseEntity *other )
 
 	if ( this == other )
 		return NULL;
+
+	if ( other->IsMarkedForDeletion() )
+	{
+		return NULL;
+	}
 
 	// check if the edict is already in the list
 	groundlink_t *root = ( groundlink_t * )GetDataObject( GROUNDLINK );
@@ -1074,8 +1064,18 @@ const trace_t &CBaseEntity::GetTouchTrace( void )
 void CBaseEntity::PhysicsMarkEntitiesAsTouching( CBaseEntity *other, trace_t &trace )
 {
 	g_TouchTrace = trace;
-	PhysicsMarkEntityAsTouched( other );
-	other->PhysicsMarkEntityAsTouched( this );
+	touchlink_t *pLink0 = PhysicsMarkEntityAsTouched( other );
+	touchlink_t *pLInk1 = other->PhysicsMarkEntityAsTouched( this );
+
+	if ( pLink0 && !pLInk1 )
+	{
+		PhysicsNotifyOtherOfUntouch( other, this );
+	}
+	if ( pLInk1 && !pLink0 )
+	{
+		PhysicsNotifyOtherOfUntouch( this, other );
+	}
+	UTIL_ClearTrace( g_TouchTrace );
 }
 
 void CBaseEntity::PhysicsMarkEntitiesAsTouchingEventDriven( CBaseEntity *other, trace_t &trace )
@@ -1097,6 +1097,7 @@ void CBaseEntity::PhysicsMarkEntitiesAsTouchingEventDriven( CBaseEntity *other, 
 	{
 		link->touchStamp = TOUCHSTAMP_EVENT_DRIVEN;
 	}
+	UTIL_ClearTrace( g_TouchTrace );
 }
 
 //-----------------------------------------------------------------------------
@@ -1130,7 +1131,15 @@ unsigned int CBaseEntity::PhysicsSolidMaskForEntity( void ) const
 	return MASK_SOLID;
 }
 
-
+static inline int GetWaterContents( const Vector &point )
+{
+#ifdef HL2_DLL
+	return UTIL_PointContents(point, MASK_WATER);
+#else
+	// left 4 dead doesn't support moveable water brushes, only world water
+	return enginetrace->GetPointContents_WorldOnly(point, MASK_WATER);
+#endif
+}
 //-----------------------------------------------------------------------------
 // Computes the water level + type
 //-----------------------------------------------------------------------------
@@ -1146,7 +1155,7 @@ void CBaseEntity::UpdateWaterState()
 
 	SetWaterLevel( 0 );
 	SetWaterType( CONTENTS_EMPTY );
-	int cont = UTIL_PointContents (point);
+	int cont = GetWaterContents(point);
 
 	if (( cont & MASK_WATER ) == 0)
 		return;
@@ -1164,14 +1173,14 @@ void CBaseEntity::UpdateWaterState()
 		// Check the exact center of the box
 		point[2] = WorldSpaceCenter().z;
 
-		int midcont = UTIL_PointContents (point);
+		int midcont = GetWaterContents(point);
 		if ( midcont & MASK_WATER )
 		{
 			// Now check where the eyes are...
 			SetWaterLevel( 2 );
 			point[2] = EyePosition().z;
 
-			int eyecont = UTIL_PointContents (point);
+			int eyecont = GetWaterContents(point);
 			if ( eyecont & MASK_WATER )
 			{
 				SetWaterLevel( 3 );
@@ -1188,48 +1197,7 @@ void CBaseEntity::UpdateWaterState()
 //-----------------------------------------------------------------------------
 bool CBaseEntity::PhysicsCheckWater( void )
 {
-	if (GetMoveParent())
-		return GetWaterLevel() > 1;
-
-	int cont = GetWaterType();
-
-	// If we're not in water + don't have a current, we're done
-	if ( ( cont & (MASK_WATER | MASK_CURRENT) ) != (MASK_WATER | MASK_CURRENT) )
-		return GetWaterLevel() > 1;
-
-	// Compute current direction
-	Vector v( 0, 0, 0 );
-	if ( cont & CONTENTS_CURRENT_0 )
-	{
-		v[0] += 1;
-	}
-	if ( cont & CONTENTS_CURRENT_90 )
-	{
-		v[1] += 1;
-	}
-	if ( cont & CONTENTS_CURRENT_180 )
-	{
-		v[0] -= 1;
-	}
-	if ( cont & CONTENTS_CURRENT_270 )
-	{
-		v[1] -= 1;
-	}
-	if ( cont & CONTENTS_CURRENT_UP )
-	{
-		v[2] += 1;
-	}
-	if ( cont & CONTENTS_CURRENT_DOWN )
-	{
-		v[2] -= 1;
-	}
-
-	// The deeper we are, the stronger the current.
-	Vector newBaseVelocity;
-	VectorMA (GetBaseVelocity(), 50.0*GetWaterLevel(), v, newBaseVelocity);
-	SetBaseVelocity( newBaseVelocity );
-	
-	return GetWaterLevel() > 1;
+	return GetWaterLevel() > WL_Feet;
 }
 
 
@@ -1365,10 +1333,6 @@ int CBaseEntity::PhysicsClipVelocity( const Vector& in, const Vector& normal, Ve
 //-----------------------------------------------------------------------------
 void CBaseEntity::ResolveFlyCollisionBounce( trace_t &trace, Vector &vecVelocity, float flMinTotalElasticity )
 {
-#ifdef HL1_DLL
-	flMinTotalElasticity = 0.3f;
-#endif//HL1_DLL
-
 	// Get the impact surface's elasticity.
 	float flSurfaceElasticity;
 	physprops->GetPhysicsProperties( trace.surface.surfaceProps, NULL, NULL, NULL, &flSurfaceElasticity );
@@ -1673,8 +1637,8 @@ void CBaseEntity::PhysicsToss( void )
 		// taking it into account
 		Vector vecAbsVelocity = GetAbsVelocity();
 		vecAbsVelocity += GetBaseVelocity();
-		VectorScale(vecAbsVelocity, gpGlobals->frametime, move);
-		PhysicsCheckVelocity( );
+		VectorScale( vecAbsVelocity, gpGlobals->frametime, move );
+		PhysicsCheckVelocity();
 	}
 
 	// move angles
@@ -1683,28 +1647,49 @@ void CBaseEntity::PhysicsToss( void )
 	// move origin
 	PhysicsPushEntity( move, &trace );
 
-#if !defined( CLIENT_DLL )
 	if ( VPhysicsGetObject() )
 	{
 		VPhysicsGetObject()->UpdateShadow( GetAbsOrigin(), vec3_angle, true, gpGlobals->frametime );
 	}
-#endif
 
 	PhysicsCheckVelocity();
+
+/*
+	NOTE[pmf]: removed this because grenades can start out inside a player volume (particularly in casual mode).
+	Behavior for this is handled properly in the grenade's custom FlyCollisionResolution function
 
 	if (trace.allsolid )
 	{	
 		// entity is trapped in another solid
-		// UNDONE: does this entity needs to be removed?
 		SetAbsVelocity(vec3_origin);
 		SetLocalAngularVelocity(vec3_angle);
 		return;
 	}
+*/
 	
 #if !defined( CLIENT_DLL )
 	if (IsEdictFree())
 		return;
 #endif
+	
+	if ( debugoverlay && sv_grenade_trajectory.GetInt() && (GetFlags() & FL_GRENADE) )
+	{
+		QAngle angGrTrajAngles;
+		Vector vec3tempOrientation = (trace.endpos - trace.startpos);
+		VectorAngles( vec3tempOrientation, angGrTrajAngles );
+
+		float flGrTraThickness = sv_grenade_trajectory_thickness.GetFloat();
+		Vector vec3_GrTrajMin = Vector( 0, -flGrTraThickness, -flGrTraThickness );
+		Vector vec3_GrTrajMax = Vector( vec3tempOrientation.Length(), flGrTraThickness, flGrTraThickness );
+		bool bDotted = ( sv_grenade_trajectory_dash.GetInt() && (fmod( gpGlobals->curtime, 0.1f ) < 0.05f) );
+		
+		//extruded "line" is really a box for more visible thickness
+		debugoverlay->AddBoxOverlay( trace.startpos, vec3_GrTrajMin, vec3_GrTrajMax, angGrTrajAngles, 0, (bDotted ? 20 : 200), 0, 255, sv_grenade_trajectory_time.GetFloat() );
+
+		//per-bounce box
+		if (trace.fraction != 1.0f)
+			debugoverlay->AddBoxOverlay( trace.endpos, Vector( -GRENADE_DEFAULT_SIZE, -GRENADE_DEFAULT_SIZE, -GRENADE_DEFAULT_SIZE ), Vector( GRENADE_DEFAULT_SIZE, GRENADE_DEFAULT_SIZE, GRENADE_DEFAULT_SIZE ), QAngle( 0, 0, 0 ), 220, 0, 0, 190, sv_grenade_trajectory_time.GetFloat( ) );
+	}	
 
 	if (trace.fraction != 1.0f)
 	{
@@ -1790,8 +1775,10 @@ void CBaseEntity::PhysicsSimulate( void )
 	// NOTE:  Players override PhysicsSimulate and drive through their CUserCmds at that point instead of
 	//  processng through this function call!!!  They shouldn't chain to here ever.
 	// Make sure not to simulate this guy twice per frame
-	if (m_nSimulationTick == gpGlobals->tickcount)
+	if ( !IsPlayerSimulated() && m_nSimulationTick == gpGlobals->tickcount )
+	{
 		return;
+	}
 
 	m_nSimulationTick = gpGlobals->tickcount;
 

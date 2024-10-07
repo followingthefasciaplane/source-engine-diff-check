@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: Core Movie Maker UI API
 //
@@ -13,9 +13,9 @@
 
 #include "tier1/interface.h"
 #include "toolframework/itoolsystem.h"
-#include "vgui/IScheme.h"
-#include "vgui_controls/EditablePanel.h"
-#include "vgui_controls/PHandle.h"
+#include "vgui/ischeme.h"
+#include "vgui_controls/editablepanel.h"
+#include "vgui_controls/phandle.h"
 #include "toolutils/recentfilelist.h"
 #include "vgui/keycode.h"
 #include "vgui_controls/fileopenstatemachine.h"
@@ -81,8 +81,8 @@ public:
 	virtual bool	ClientInit( CreateInterfaceFn clientFactory );
 	virtual void	ServerShutdown();
 	virtual void	ClientShutdown();
-	virtual bool	CanQuit(); 
-    virtual void	PostMessage( HTOOLHANDLE hEntity, KeyValues *message );
+	virtual bool	CanQuit( const char *pExitMsg ); 
+    virtual void	PostToolMessage( HTOOLHANDLE hEntity, KeyValues *message );
 	virtual void	Think( bool finalTick );
 	virtual void	ServerLevelInitPreEntity();
 	virtual void	ServerLevelInitPostEntity();
@@ -93,6 +93,7 @@ public:
 	virtual void	ServerPreClientUpdate();
 	virtual void	ServerPreSetupVisibility();
 	virtual const char* GetEntityData( const char *pActualEntityData );
+	virtual void*	QueryInterface( const char *pInterfaceName );
 	virtual void	ClientLevelInitPreEntity();
 	virtual void	ClientLevelInitPostEntity();
 	virtual void	ClientLevelShutdownPreEntity();
@@ -106,6 +107,7 @@ public:
 	virtual bool	SetupEngineView( Vector &origin, QAngle &angles, float &fov );
 	virtual bool	SetupAudioState( AudioState_t &audioState );
 	virtual bool	ShouldGameRenderView();
+	virtual bool	ShouldGamePlaySounds();
 	virtual bool	IsThirdPersonCamera();
 	virtual bool	IsToolRecording();
 	virtual IMaterialProxy *LookupProxy( const char *proxyName );
@@ -118,7 +120,7 @@ public:
 	virtual void	VGui_PostRender( int paintMode );
 	virtual void	VGui_PreSimulate();
 	virtual void	VGui_PostSimulate();
-
+	virtual vgui::VPANEL GetClientWorkspaceArea();
 	// Inherited from vgui::Panel
 	virtual void	OnMousePressed( vgui::MouseCode code );
 	virtual void	OnThink();
@@ -144,6 +146,12 @@ public:
 
 	// Returns the client area
 	vgui::Panel* GetClientArea();
+
+	// Returns the menu bar
+	vgui::MenuBar* GetMenuBar();
+
+	// Returns the status bar
+	vgui::Panel* GetStatusBar();
 
 	// Adds a menu button to the main menu bar
 	void		AddMenuButton( CToolMenuButton *pMenuButton );
@@ -201,7 +209,7 @@ protected:
 	virtual void OnModeChanged() {}
 
 	// Derived classes can implement this to get a new scheme to be applied to this tool
-	virtual vgui::HScheme	GetToolScheme() { return 0; }
+	virtual vgui::HScheme	GetToolScheme();
 
 	// Derived classes can implement this to get notified when files are saved/loaded
 	virtual void OnFileOperationCompleted( const char *pFileType, bool bWroteFile, vgui::FileOpenStateMachine::CompletionState_t state, KeyValues *pContextKeyValues ) {}
@@ -240,9 +248,12 @@ protected:
 	void	PostMessageToActiveTool( char const *msg, float delay = 0.0f );
 	void	PostMessageToActiveTool( KeyValues *pKeyValues, float flDelay = 0.0f );
 
+	// Destroys all tool windows containers
+	virtual void DestroyToolContainers();
+
 protected:
 	// Recent file list
-	CRecentFileList	m_RecentFiles;
+	CToolsRecentFileList	m_RecentFiles;
 
 private:
 	// Shows/hides the tool
@@ -322,5 +333,13 @@ inline bool CBaseToolSystem::IsGameInputEnabled() const
 	return m_bGameInputEnabled || !m_bIsActive;
 }
 
+inline vgui::VPANEL CBaseToolSystem::GetClientWorkspaceArea()
+{
+	if ( GetClientArea() )
+	{
+		return (vgui::VPANEL)GetClientArea()->GetVPanel();
+	}
+	return (vgui::VPANEL)0;
+}
 
 #endif // BASETOOLSYSTEM_H

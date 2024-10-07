@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: Handling for the base world item. Most of this was moved from items.cpp.
 //
@@ -12,17 +12,6 @@
 #include "engine/IEngineSound.h"
 #include "iservervehicle.h"
 #include "physics_saverestore.h"
-#include "world.h"
-
-#ifdef HL2MP
-#include "hl2mp_gamerules.h"
-#endif
-
-#ifdef TF_DLL
-#include "tf_player.h"
-#include "entity_healthkit.h"
-#include "particle_parse.h"
-#endif
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -104,11 +93,6 @@ BEGIN_DATADESC( CItem )
 	DEFINE_THINKFUNC( Materialize ),
 	DEFINE_THINKFUNC( ComeToRest ),
 
-#if defined( HL2MP ) || defined( TF_DLL )
-	DEFINE_FIELD( m_flNextResetCheckTime, FIELD_TIME ),
-	DEFINE_THINKFUNC( FallThink ),
-#endif
-
 	// Outputs
 	DEFINE_OUTPUT( m_OnPlayerTouch, "OnPlayerTouch" ),
 	DEFINE_OUTPUT( m_OnCacheInteraction, "OnCacheInteraction" ),
@@ -122,6 +106,15 @@ END_DATADESC()
 CItem::CItem()
 {
 	m_bActivateWhenAtRest = false;
+}
+
+CItem::~CItem()
+{
+	if ( m_pConstraint )
+	{
+		physenv->DestroyConstraint( m_pConstraint );
+		m_pConstraint = NULL;
+	}
 }
 
 bool CItem::CreateItemVPhysicsObject( void )
@@ -155,6 +148,8 @@ bool CItem::CreateItemVPhysicsObject( void )
 //-----------------------------------------------------------------------------
 void CItem::Spawn( void )
 {
+	SetNetworkQuantizeOriginAngAngles( true );
+
 	if ( g_pGameRules->IsAllowedToSpawn( this ) == false )
 	{
 		UTIL_Remove( this );
@@ -166,7 +161,7 @@ void CItem::Spawn( void )
 	SetBlocksLOS( false );
 	AddEFlags( EFL_NO_ROTORWASH_PUSH );
 	
-	if( IsX360() )
+	if( IsGameConsole() )
 	{
 		AddEffects( EF_ITEM_BLINK );
 	}
@@ -174,7 +169,10 @@ void CItem::Spawn( void )
 	// This will make them not collide with the player, but will collide
 	// against other items + weapons
 	SetCollisionGroup( COLLISION_GROUP_WEAPON );
-	CollisionProp()->UseTriggerBounds( true, ITEM_PICKUP_BOX_BLOAT );
+	if( HasBloatedCollision() )
+	{
+		CollisionProp()->UseTriggerBounds( true, ITEM_PICKUP_BOX_BLOAT );
+	}
 	SetTouch(&CItem::ItemTouch);
 
 	if ( CreateItemVPhysicsObject() == false )
@@ -208,15 +206,12 @@ void CItem::Spawn( void )
 	}
 #endif //CLIENT_DLL
 
-#if defined( HL2MP ) || defined( TF_DLL )
-	SetThink( &CItem::FallThink );
-	SetNextThink( gpGlobals->curtime + 0.1f );
-#endif
-}
 
-unsigned int CItem::PhysicsSolidMaskForEntity( void ) const
-{ 
-	return BaseClass::PhysicsSolidMaskForEntity() | CONTENTS_PLAYERCLIP;
+	Vector origin = GetAbsOrigin();
+	QAngle angles = GetAbsAngles();
+	NetworkQuantize( origin, angles );
+	SetAbsOrigin( origin );
+	SetAbsAngles( angles );
 }
 
 void CItem::Use( CBaseEntity *pActivator, CBaseEntity *pCaller, USE_TYPE useType, float value )
@@ -251,16 +246,15 @@ void CItem::OnEntityEvent( EntityEvent_t event, void *pEventData )
 {
 	BaseClass::OnEntityEvent( event, pEventData );
 
-	switch( event )
+	if( event == ENTITY_EVENT_WATER_TOUCH && m_bActivateWhenAtRest )
 	{
-	case ENTITY_EVENT_WATER_TOUCH:
-		{
-			// Delay rest for a sec, to avoid changing collision 
-			// properties inside a collision callback.
-			SetThink( &CItem::ComeToRest );
-			SetNextThink( gpGlobals->curtime + 0.1f );
-		}
-		break;
+		// Check if we are stomping on someone else's think function
+		Assert( m_pfnThink == nullptr || m_pfnThink == static_cast <void (CBaseEntity::*)(void)>(&CItem::ComeToRest) );
+
+		// Delay rest for a sec, to avoid changing collision 
+		// properties inside a collision callback.
+		SetThink( &CItem::ComeToRest );
+		SetNextThink( gpGlobals->curtime + 0.1f );
 	}
 }
 
@@ -278,65 +272,6 @@ void CItem::ComeToRest( void )
 	}
 }
 
-#if defined( HL2MP ) || defined( TF_DLL )
-
-//-----------------------------------------------------------------------------
-// Purpose: Items that have just spawned run this think to catch them when 
-//			they hit the ground. Once we're sure that the object is grounded, 
-//			we change its solid type to trigger and set it in a large box that 
-//			helps the player get it.
-//-----------------------------------------------------------------------------
-void CItem::FallThink ( void )
-{
-	SetNextThink( gpGlobals->curtime + 0.1f );
-
-#if defined( HL2MP )
-	bool shouldMaterialize = false;
-	IPhysicsObject *pPhysics = VPhysicsGetObject();
-	if ( pPhysics )
-	{
-		shouldMaterialize = pPhysics->IsAsleep();
-	}
-	else
-	{
-		shouldMaterialize = (GetFlags() & FL_ONGROUND) ? true : false;
-	}
-
-	if ( shouldMaterialize )
-	{
-		SetThink ( NULL );
-
-		m_vOriginalSpawnOrigin = GetAbsOrigin();
-		m_vOriginalSpawnAngles = GetAbsAngles();
-
-		HL2MPRules()->AddLevelDesignerPlacedObject( this );
-	}
-#endif // HL2MP
-
-#if defined( TF_DLL )
-	// We only come here if ActivateWhenAtRest() is never called,
-	// which is the case when creating currencypacks in MvM
-	if ( !( GetFlags() & FL_ONGROUND ) )
-	{
-		if ( !GetAbsVelocity().Length() && GetMoveType() == MOVETYPE_FLYGRAVITY )
-		{
-			// Mr. Game, meet Mr. Hammer.  Mr. Hammer, meet the uncooperative Mr. Physics.
-			// Mr. Physics really doesn't want to give our friend the FL_ONGROUND flag.
-			// This means our wonderfully helpful radius currency collection code will be sad.
-			// So in the name of justice, we ask that this flag be delivered unto him.
-
-			SetMoveType( MOVETYPE_NONE );
-			SetGroundEntity( GetWorldEntity() );
-		}
-	}
-	else
-	{
-		SetThink( &CItem::ComeToRest );
-	}
-#endif // TF
-}
-
-#endif // HL2MP, TF
 
 //-----------------------------------------------------------------------------
 // Purpose: Used to tell whether an item may be picked up by the player.  This
@@ -368,17 +303,6 @@ bool UTIL_ItemCanBeTouchedByPlayer( CBaseEntity *pItem, CBasePlayer *pPlayer )
 		// Use the generic bbox center
 		vecStartPos = pItem->CollisionProp()->WorldSpaceCenter();
 	}
-
-#ifdef TF_DLL
-	//Plague powerup carrier collects health kits in a radius so we want to skip the occlusion trace
-	CTFPlayer *pTFPlayer = dynamic_cast<CTFPlayer*>( pPlayer );
-	if ( pTFPlayer && ( pTFPlayer->m_Shared.GetCarryingRuneType() == RUNE_PLAGUE ) )
-	{
-		CHealthKit *pHealthKit = dynamic_cast<CHealthKit*>( pItem );
-		if ( pHealthKit )
-			return true;
-	}
-#endif
 
 	Vector vecEndPos = pPlayer->EyePosition();
 
@@ -414,6 +338,16 @@ bool CItem::ItemCanBeTouchedByPlayer( CBasePlayer *pPlayer )
 //-----------------------------------------------------------------------------
 void CItem::ItemTouch( CBaseEntity *pOther )
 {
+	ItemTouchInternal( pOther, false );
+}
+
+void CItem::ItemForceTouch( CBaseEntity *pOther )
+{
+	ItemTouchInternal( pOther, true );
+}
+
+void CItem::ItemTouchInternal( CBaseEntity *pOther, bool bForceTouch )
+{
 	// Vehicles can touch items + pick them up
 	if ( pOther->GetServerVehicle() )
 	{
@@ -431,7 +365,7 @@ void CItem::ItemTouch( CBaseEntity *pOther )
 	// Must be a valid pickup scenario (no blocking). Though this is a more expensive
 	// check than some that follow, this has to be first Obecause it's the only one
 	// that inhibits firing the output OnCacheInteraction.
-	if ( ItemCanBeTouchedByPlayer( pPlayer ) == false )
+	if ( !bForceTouch && ItemCanBeTouchedByPlayer( pPlayer ) == false )
 		return;
 
 	m_OnCacheInteraction.FireOutput(pOther, this);
@@ -451,18 +385,6 @@ void CItem::ItemTouch( CBaseEntity *pOther )
 	{
 		m_OnPlayerTouch.FireOutput(pOther, this);
 
-#if TF_DLL
-		CHealthKit *pHealthKit = dynamic_cast<CHealthKit*>( this );
-		if ( pHealthKit )
-		{
-			CTFPlayer *pTFPlayer = ToTFPlayer( pPlayer );
-			if ( pTFPlayer && ( pTFPlayer->m_Shared.GetCarryingRuneType() == RUNE_PLAGUE ) )
-			{
-				DispatchParticleEffect( "plague_healthkit_pickup", GetAbsOrigin(), GetAbsAngles() );
-			}
-		}
-#endif
-
 		SetTouch( NULL );
 		SetThink( NULL );
 
@@ -476,9 +398,6 @@ void CItem::ItemTouch( CBaseEntity *pOther )
 		{
 			UTIL_Remove( this );
 
-#ifdef HL2MP
-			HL2MPRules()->RemoveLevelDesignerPlacedObject( this );
-#endif
 		}
 	}
 	else if (gEvilImpulse101)
@@ -520,11 +439,8 @@ void CItem::Materialize( void )
 	{
 		// changing from invisible state to visible.
 
-#ifdef HL2MP
-		EmitSound( "AlyxEmp.Charge" );
-#else
-		EmitSound( "Item.Materialize" );
-#endif
+		// this sound no longer exists
+		// EmitSound( "Item.Materialize" );
 		RemoveEffects( EF_NODRAW );
 		DoMuzzleFlash();
 	}
@@ -539,7 +455,8 @@ void CItem::Precache()
 {
 	BaseClass::Precache();
 
-	PrecacheScriptSound( "Item.Materialize" );
+	// this sound no longer exists
+	// PrecacheScriptSound( "Item.Materialize" );
 }
 
 //-----------------------------------------------------------------------------

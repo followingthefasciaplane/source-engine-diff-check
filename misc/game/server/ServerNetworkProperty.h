@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -44,6 +44,7 @@ public:
 public:
 	// Other public methods
 	void Init( CBaseEntity *pEntity );
+	void CacheServerClass();
 
 	void AttachEdict( edict_t *pRequiredEdict = NULL );
 	

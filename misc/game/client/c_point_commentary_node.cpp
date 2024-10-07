@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -22,12 +22,15 @@
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
+
 #define MAX_SPEAKER_NAME	256
 #define MAX_COUNT_STRING	64
+
 
 extern ConVar english;
 extern ConVar closecaption;
 class C_PointCommentaryNode;
+
 
 CUtlVector< CHandle<C_PointCommentaryNode> >	g_CommentaryNodes;
 bool IsInCommentaryMode( void )
@@ -35,7 +38,9 @@ bool IsInCommentaryMode( void )
 	return (g_CommentaryNodes.Count() > 0);
 }
 
+
 static bool g_bTracingVsCommentaryNodes = false;
+
 
 //-----------------------------------------------------------------------------
 // Purpose: 
@@ -54,6 +59,7 @@ public:
 	void StartCommentary( C_PointCommentaryNode *pNode, char *pszSpeakers, int iNode, int iNodeMax, float flStartTime, float flEndTime );
 	void StopCommentary( void );
 	bool IsTheActiveNode( C_PointCommentaryNode *pNode ) { return (pNode == m_hActiveNode); }
+	bool HasActiveNode( void ) { return m_hActiveNode.Get() != NULL; }
 
 	// vgui overrides
 	virtual void Paint( void );
@@ -68,6 +74,7 @@ private:
 	wchar_t	m_szCount[MAX_COUNT_STRING];
 	CMaterialReference m_matIcon;
 	bool	m_bHiding;
+	bool	m_bSoundStarted;
 
 	// Painting
 	CPanelAnimationVarAliasType( int, m_iBarX, "bar_xpos", "8", "proportional_int" );
@@ -88,6 +95,19 @@ private:
 	CPanelAnimationVar( Color, m_BackgroundColor, "BackgroundColor", "0 0 0 0" );
 	CPanelAnimationVar( Color, m_BGOverrideColor, "BackgroundOverrideColor", "Panel.BgColor" );
 };
+
+
+bool IsListeningToCommentary( void )
+{
+	CHudCommentary *pHudCommentary = (CHudCommentary *)GET_HUDELEMENT( CHudCommentary );
+	if ( !pHudCommentary )
+	{
+		return false;
+	}
+
+	return pHudCommentary->HasActiveNode();
+}
+
 
 //-----------------------------------------------------------------------------
 // Purpose: 
@@ -147,11 +167,12 @@ public:
 	{
 		if ( !g_CommentaryNodes.Count() )
 		{
-			int iRenderGroup = gHUD.LookupRenderGroupIndexByName( "commentary" );
-			gHUD.LockRenderGroup( iRenderGroup );
+			HACK_GETLOCALPLAYER_GUARD( "C_PointCommentaryNode::AddAndLockCommentaryHudGroup" );
+			int iRenderGroup = GetHud().RegisterForRenderGroup( "commentary" );
+			GetHud().LockRenderGroup( iRenderGroup );
 		}
 
-		if ( g_CommentaryNodes.Find(this) == g_CommentaryNodes.InvalidIndex() )
+		if ( g_CommentaryNodes.Find( this ) == g_CommentaryNodes.InvalidIndex() )
 		{
 			g_CommentaryNodes.AddToTail( this );
 		}
@@ -163,9 +184,15 @@ public:
 
 		if ( !g_CommentaryNodes.Count() )
 		{
-			int iRenderGroup = gHUD.LookupRenderGroupIndexByName( "commentary" );
-			gHUD.UnlockRenderGroup( iRenderGroup );
+			HACK_GETLOCALPLAYER_GUARD( "C_PointCommentaryNode::RemoveAndUnlockCommentaryHudGroup" );
+			int iRenderGroup = GetHud().RegisterForRenderGroup( "commentary" );
+			GetHud().UnlockRenderGroup( iRenderGroup );
 		}
+	}
+
+	CSoundPatch *GetSoundPatch() const
+	{
+		return m_sndCommentary;
 	}
 
 public:
@@ -226,6 +253,8 @@ void C_PointCommentaryNode::OnDataChanged( DataUpdateType_t updateType )
 	if ( m_bWasActive == m_bActive && !m_bRestartAfterRestore )
 		return;
 
+	HACK_GETLOCALPLAYER_GUARD( "C_PointCommentaryNode::OnDataChanged" );
+
 	C_BasePlayer *pPlayer = C_BasePlayer::GetLocalPlayer();
 	if ( m_bActive && pPlayer )
 	{
@@ -273,10 +302,13 @@ void C_PointCommentaryNode::OnDataChanged( DataUpdateType_t updateType )
 			(CSoundEnvelopeController::GetController()).Play( m_sndCommentary, 1.0f, 100, m_flStartTime );
 		}
 
-		// Get the duration so we know when it finishes
-		float flDuration = enginesound->GetSoundDuration( STRING( CSoundEnvelopeController::GetController().SoundGetName( m_sndCommentary ) ) ) ;
+		// Strip the #off of the commentary file path if there is one
+		char *pcCommentaryWAVPath = V_stristr( (char*)STRING( CSoundEnvelopeController::GetController().SoundGetName( m_sndCommentary ) ) , "commentary" );
 
-		CHudCloseCaption *pHudCloseCaption = (CHudCloseCaption *)GET_HUDELEMENT( CHudCloseCaption );
+		// Get the duration so we know when it finishes
+		float flDuration = enginesound->GetSoundDuration( pcCommentaryWAVPath ) ;
+
+		CHudCloseCaption *pHudCloseCaption = (CHudCloseCaption *)GET_FULLSCREEN_HUDELEMENT( CHudCloseCaption );
 		if ( pHudCloseCaption )
 		{
 			// This is where we play the commentary close caption (and lock the other captions out).
@@ -353,7 +385,7 @@ bool IsNodeUnderCrosshair( C_BasePlayer *pPlayer )
 	if ( !tr.m_pEnt )
 		return false;
 
-	return dynamic_cast<C_PointCommentaryNode*>(tr.m_pEnt);
+	return dynamic_cast<C_PointCommentaryNode*>(tr.m_pEnt) ? true : false;
 }
 
 //===================================================================================================================
@@ -366,7 +398,7 @@ DECLARE_HUDELEMENT( CHudCommentary );
 //-----------------------------------------------------------------------------
 CHudCommentary::CHudCommentary( const char *name ) : vgui::Panel( NULL, "HudCommentary" ), CHudElement( name )
 {
-	vgui::Panel *pParent = g_pClientMode->GetViewport();
+	vgui::Panel *pParent = GetClientMode()->GetViewport();
 	SetParent( pParent );
 
 	SetPaintBorderEnabled( false );
@@ -374,6 +406,9 @@ CHudCommentary::CHudCommentary( const char *name ) : vgui::Panel( NULL, "HudComm
 
 	m_hActiveNode = NULL;
 	m_bShouldPaint = true;
+	m_bSoundStarted = false;
+
+	SetScheme( "basemodui_scheme" );
 }
 
 void CHudCommentary::ApplySchemeSettings( vgui::IScheme *pScheme )
@@ -392,16 +427,17 @@ void CHudCommentary::ApplySchemeSettings( vgui::IScheme *pScheme )
 void CHudCommentary::Paint()
 {
 	float flDuration = (m_flEndTime - m_flStartTime);
-	float flPercentage = clamp( ( gpGlobals->curtime - m_flStartTime ) / flDuration, 0.f, 1.f );
+	float flPercentage = 1.0f;
 
 	if ( !m_hActiveNode )
 	{
 		if ( !m_bHiding )
 		{
 			m_bHiding = true;
-			g_pClientMode->GetViewportAnimationController()->StartAnimationSequence( "HideCommentary" );
+			GetClientMode()->GetViewportAnimationController()->StartAnimationSequence( "HideCommentary" );
 
-			CHudCloseCaption *pHudCloseCaption = (CHudCloseCaption *)GET_HUDELEMENT( CHudCloseCaption );
+			CHudCloseCaption *pHudCloseCaption = (CHudCloseCaption *)GET_FULLSCREEN_HUDELEMENT( CHudCloseCaption );
+
 			if ( pHudCloseCaption )
 			{
 				pHudCloseCaption->Reset();
@@ -410,13 +446,24 @@ void CHudCommentary::Paint()
 	}
 	else
 	{
-		// Detect the end of the commentary
-		if ( flPercentage >= 1 && m_hActiveNode )
+		CSoundPatch *pSoundPatch = m_hActiveNode->GetSoundPatch();
+		float fElapsedTime = CSoundEnvelopeController::GetController().SoundGetElapsedTime( pSoundPatch );
+		flPercentage = clamp( fElapsedTime / flDuration, 0.0f, 1.0f );
+
+		// Detect if we started the commentary (we may not always reach 100% from the elapsed time, and then it gets back to 0% directly)
+		if ( flPercentage > 0.00f )
 		{
+			m_bSoundStarted = true;
+		}
+
+		if ( m_bSoundStarted && ( flPercentage == 0.0f ) && m_hActiveNode )
+		{
+			// The sound started and is now finished (elapsed time is 0% as the sound is not present anymore), time to stop.
 			m_hActiveNode = NULL;
-			g_pClientMode->GetViewportAnimationController()->StartAnimationSequence( "HideCommentary" );
+			GetClientMode()->GetViewportAnimationController()->StartAnimationSequence( "HideCommentary" );
 
 			engine->ServerCmd( "commentary_finishnode\n" );
+			flPercentage = 1.0f;		// Set the percentage to 1, so we don't see the progress bar go back to 0 when it reached the end.
 		}
 	}
 
@@ -440,11 +487,11 @@ void CHudCommentary::Paint()
 
 	// Draw the speaker names
 	// Get our scheme and font information
-	vgui::HScheme scheme = vgui::scheme()->GetScheme( "ClientScheme" );
-	vgui::HFont hFont = vgui::scheme()->GetIScheme(scheme)->GetFont( "CommentaryDefault" );
+	vgui::HScheme scheme = GetScheme();
+	vgui::HFont hFont = vgui::scheme()->GetIScheme(scheme)->GetFont( "CommentaryDefault", true );
 	if ( !hFont )
 	{
-		hFont = vgui::scheme()->GetIScheme(scheme)->GetFont( "Default" );
+		hFont = vgui::scheme()->GetIScheme(scheme)->GetFont( "Default", true );
 	}
 	vgui::surface()->DrawSetTextFont( hFont );
 	vgui::surface()->DrawSetTextColor( clr ); 
@@ -524,6 +571,7 @@ void CHudCommentary::StartCommentary( C_PointCommentaryNode *pNode, char *pszSpe
 	m_hActiveNode = pNode;
 	m_flStartTime = flStartTime;
 	m_flEndTime = flEndTime;
+	m_bSoundStarted = false;
 	m_bHiding = false;
 	g_pVGuiLocalize->ConvertANSIToUnicode( pszSpeakers, m_szSpeakers, sizeof(m_szSpeakers) );
 
@@ -546,7 +594,7 @@ void CHudCommentary::StartCommentary( C_PointCommentaryNode *pNode, char *pszSpe
 	// If the commentary just started, play the commentary fade in.
 	if ( fabs(flStartTime - gpGlobals->curtime) < 1.0 )
 	{
-		g_pClientMode->GetViewportAnimationController()->StartAnimationSequence( "ShowCommentary" );
+		GetClientMode()->GetViewportAnimationController()->StartAnimationSequence( "ShowCommentary" );
 	}
 	else
 	{

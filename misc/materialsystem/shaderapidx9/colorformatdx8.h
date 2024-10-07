@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ====//
 //
 // Purpose: 
 //
@@ -48,7 +48,7 @@ bool D3DSupportsCompressedTextures();
 //-----------------------------------------------------------------------------
 // Returns closest supported format
 //-----------------------------------------------------------------------------
-ImageFormat FindNearestSupportedFormat( ImageFormat format, bool bIsVertexTexture, bool bIsRenderTarget, bool bFilterableRequired );
+D3DFORMAT FindNearestSupportedFormat( ImageFormat format, bool bIsVertexTexture, bool bIsRenderTarget, bool bFilterableRequired );
 
 //-----------------------------------------------------------------------------
 // Finds the nearest supported depth buffer format

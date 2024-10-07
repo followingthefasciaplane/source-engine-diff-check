@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright  1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -16,20 +16,85 @@
 #include <vgui/IPanel.h>
 #include "materialsystem/imaterialsystemhardwareconfig.h"
 #include "filesystem.h"
-#include "../common/xbox/xboxstubs.h"
 #include "steam/steam_api.h"
+#include "../common/xbox/xboxstubs.h"
+#include "engineinterface.h"
+#include "tier0/perfstats.h"
 #include "tier0/cpumonitoring.h"
+#ifdef PORTAL
+#include "c_prop_portal.h"
+#include "iextpropportallocator.h"
+#include "matchmaking/imatchframework.h"
+#endif
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
-static ConVar cl_showfps( "cl_showfps", "0", FCVAR_ALLOWED_IN_COMPETITIVE, "Draw fps meter at top of screen (1 = fps, 2 = smooth fps)" );
-static ConVar cl_showpos( "cl_showpos", "0", 0, "Draw current position at top of screen" );
+static ConVar cl_showfps( "cl_showfps", "0", FCVAR_RELEASE, "Draw fps meter (1 = fps, 2 = smooth, 3 = server, 4 = Show+LogToFile, 5 = Thread and wait times +10 = detailed )" );
+static ConVar cl_showpos( "cl_showpos", "0", FCVAR_RELEASE, "Draw current position at top of screen" );
 static ConVar cl_showbattery( "cl_showbattery", "0", 0, "Draw current battery level at top of screen when on battery power" );
+static ConVar cl_showfps5_disp_time( "cl_showfps5_disp_time", "1.0", 0, "Time interval (s) at which thread and wait times are sampled and display is updated" );
+static ConVar cl_showfps5_btlneck_disp_time( "cl_showfps5_btlneck_disp_time", "5.0", 0, "Time interval (s) for which main/render/gpu bottleneck times are displayed" );
+
+extern unsigned int g_nNumBonesSetupBlendingRulesOnly;
+extern unsigned int g_nNumBonesSetupAll;
+ConVar cl_countbones( "cl_countbones", "0", FCVAR_CHEAT, "" );
+
+#ifdef _GAMECONSOLE
+static ConVar cl_showlowmemory( "cl_showlowmemory", "0", FCVAR_CHEAT, "Set to N to display a warning message if we have less than N MB of free memory (0 disables)." );
+#endif
+
+struct PerfStatRecord
+{
+	float m_lastUpdateTime;
+	int	  m_fps;
+	float m_mainThreadTime;
+	float m_mainThreadWaitTime;
+	float m_renderThreadTime;
+	float m_renderThreadWaitTime;
+};
+
+template < int kNumSamples >
+class FpsSpikesTracker_t
+{
+public:
+	ApplicationPerformanceCountersInfo_t m_Samples[kNumSamples];
+	ApplicationPerformanceCountersInfo_t m_min, m_max, m_avg, m_cur;
+	int m_nSampleIdx;
+
+	void AddSample( const ApplicationPerformanceCountersInfo_t& x )
+	{
+		m_Samples[ m_nSampleIdx ] = m_cur = x;
+		m_nSampleIdx = ( m_nSampleIdx + 1 ) % kNumSamples;
+		RecomputeData();
+	}
+
+	void RecomputeField( float ApplicationPerformanceCountersInfo_t::*pfl, ApplicationPerformanceCountersInfo_t const &x )
+	{
+		m_min.*pfl = MIN( m_min.*pfl, x.*pfl );
+		m_max.*pfl = MAX( m_max.*pfl, x.*pfl );
+		m_avg.*pfl += x.*pfl / kNumSamples;
+	}
+
+	void RecomputeData()
+	{
+		V_memset( &m_avg, 0, sizeof( m_avg ) );
+		m_min = m_max = m_Samples[0];
+		for ( int k = 0; k < kNumSamples; ++ k )
+		{
+			RecomputeField( &ApplicationPerformanceCountersInfo_t::msMain, m_Samples[k] );
+			RecomputeField( &ApplicationPerformanceCountersInfo_t::msMST, m_Samples[k] );
+			RecomputeField( &ApplicationPerformanceCountersInfo_t::msGPU, m_Samples[k] );
+			RecomputeField( &ApplicationPerformanceCountersInfo_t::msFlip, m_Samples[k] );
+			RecomputeField( &ApplicationPerformanceCountersInfo_t::msTotal, m_Samples[k] );
+		}
+	}
+};
 
 extern bool g_bDisplayParticlePerformance;
 int GetParticlePerformance();
 
+#define PERF_HISTOGRAM_BUCKET_SIZE 60
 
 //-----------------------------------------------------------------------------
 // Purpose: Framerate indicator panel
@@ -39,14 +104,16 @@ class CFPSPanel : public vgui::Panel
 	DECLARE_CLASS_SIMPLE( CFPSPanel, vgui::Panel );
 
 public:
-	CFPSPanel( vgui::VPANEL parent );
+	explicit		CFPSPanel( vgui::VPANEL parent );
 	virtual			~CFPSPanel( void );
 
 	virtual void	ApplySchemeSettings(vgui::IScheme *pScheme);
 	virtual void	Paint();
 	virtual void	OnTick( void );
+	virtual void	DumpStats();
 
 	virtual bool	ShouldDraw( void );
+
 
 protected:
 	MESSAGE_FUNC_INT_INT( OnScreenSizeChanged, "OnScreenSizeChanged", oldwide, oldtall );
@@ -59,19 +126,34 @@ private:
 		m_lastRealTime = -1;
 		m_high = -1;
 		m_low = -1;
+		memset( m_pServerTimes, 0, sizeof(m_pServerTimes) );
+		memset( m_perfStats, 0, sizeof( m_perfStats ) );
 	}
+
+	enum { SERVER_TIME_HISTORY = 32 };
 
 	vgui::HFont		m_hFont;
 	float			m_AverageFPS;
 	float			m_lastRealTime;
+	float			m_pServerTimes[SERVER_TIME_HISTORY];
+	int				m_nServerTimeIndex;
 	int				m_high;
 	int				m_low;
 	bool			m_bLastDraw;
+
+	int				m_nLinesNeeded;
+
+	TimedEvent		m_tLogTimer;
+	FileHandle_t	m_fhLog;
+	char			m_szLevelname[32];
+	int				m_nNumFramesTotal;
+	int				m_nNumFramesBucket[PERF_HISTOGRAM_BUCKET_SIZE];
+
 	int				m_BatteryPercent;
 	float			m_lastBatteryPercent;
-};
 
-#define FPS_PANEL_WIDTH 300
+	PerfStatRecord	m_perfStats[4];
+};
 
 //-----------------------------------------------------------------------------
 // Purpose: 
@@ -79,14 +161,17 @@ private:
 //-----------------------------------------------------------------------------
 CFPSPanel::CFPSPanel( vgui::VPANEL parent ) : BaseClass( NULL, "CFPSPanel" )
 {
+	memset( m_pServerTimes, 0, sizeof(m_pServerTimes) );
+	m_nServerTimeIndex = 0;
 	SetParent( parent );
 	SetVisible( false );
-	SetCursor( null );
+	SetCursor( 0 );
 
 	SetFgColor( Color( 0, 0, 0, 255 ) );
 	SetPaintBackgroundEnabled( false );
-
+					    
 	m_hFont = 0;
+	m_nLinesNeeded = 5;		  
 	m_BatteryPercent = -1;
 	m_lastBatteryPercent = -1.0f;
 
@@ -94,6 +179,11 @@ CFPSPanel::CFPSPanel( vgui::VPANEL parent ) : BaseClass( NULL, "CFPSPanel" )
 
 	vgui::ivgui()->AddTickSignal( GetVPanel(), 250 );
 	m_bLastDraw = false;
+
+	m_tLogTimer.Init( 6 );
+	m_fhLog = FILESYSTEM_INVALID_HANDLE;
+	m_nNumFramesTotal = 0;
+	memset( m_nNumFramesBucket, 0, sizeof(m_nNumFramesBucket) );
 }
 
 //-----------------------------------------------------------------------------
@@ -120,22 +210,26 @@ void CFPSPanel::ComputeSize( void )
 	int wide, tall;
 	vgui::ipanel()->GetSize(GetVParent(), wide, tall );
 
-	int x = wide - FPS_PANEL_WIDTH;
+	int x = 0;;
 	int y = 0;
-	if ( IsX360() )
+	if ( IsGameConsole() )
 	{
-		x -= XBOX_MINBORDERSAFE * wide;
+		x += XBOX_MINBORDERSAFE * wide;
 		y += XBOX_MINBORDERSAFE * tall;
 	}
 	SetPos( x, y );
-	SetSize( FPS_PANEL_WIDTH, 4 * vgui::surface()->GetFontTall( m_hFont ) + 8 );
+	SetSize(  wide, ( m_nLinesNeeded + 2 ) * vgui::surface()->GetFontTall( m_hFont ) + 4 );
 }
 
 void CFPSPanel::ApplySchemeSettings(vgui::IScheme *pScheme)
 {
 	BaseClass::ApplySchemeSettings(pScheme);
 
-	m_hFont = pScheme->GetFont( "DefaultFixedOutline" );
+#if defined( _GAMECONSOLE )
+	m_hFont = pScheme->GetFont( "CloseCaption_Normal" );
+#else
+	m_hFont = pScheme->GetFont( "MenuLarge" );
+#endif
 	Assert( m_hFont );
 
 	ComputeSize();
@@ -162,8 +256,14 @@ bool CFPSPanel::ShouldDraw( void )
 {
 	if ( g_bDisplayParticlePerformance )
 		return true;
-	if ( ( !cl_showfps.GetInt() || ( gpGlobals->absoluteframetime <= 0 ) ) &&
-		 ( !cl_showpos.GetInt() ) )
+	if ( ( !cl_showfps.GetInt( ) || ( gpGlobals->absoluteframetime <= 0 ) ) && !cl_showpos.GetInt( ) 
+#ifdef CSTRIKE15		 
+		 && !cl_countbones.GetBool()
+#endif
+#ifdef _GAMECONSOLE
+		&& !cl_showlowmemory.GetInt()
+#endif
+	)
 	{
 		m_bLastDraw = false;
 		return false;
@@ -186,26 +286,35 @@ void GetFPSColor( int nFps, unsigned char ucColor[3] )
 
 	int nFPSThreshold1 = 20;
 	int nFPSThreshold2 = 15;
-	
-	if ( IsPC() && g_pMaterialSystemHardwareConfig->GetDXSupportLevel() >= 95 )
+
+	if ( IsPC() )
 	{
 		nFPSThreshold1 = 60;
-		nFPSThreshold2 = 50;
+		nFPSThreshold2 = 30;
 	}
-	else if ( IsX360() || g_pMaterialSystemHardwareConfig->GetDXSupportLevel() >= 90 )
+	else
 	{
-		nFPSThreshold1 = 30;
-		nFPSThreshold2 = 25;
+		if ( engine->IsSplitScreenActive() )
+		{
+			nFPSThreshold1 = 19; //20; // 19 shows up commonly when testing on the 360
+			nFPSThreshold2 = 15;
+		}
+		else
+		{
+			nFPSThreshold1 = 59; //30; 29 shows up commonly when testing on the 360
+			nFPSThreshold2 = 29;
+		}
 	}
 
 	if ( nFps >= nFPSThreshold1 )
 	{
-		ucColor[0] = 0; 
-		ucColor[1] = 255;
+		ucColor[0] = 10; 
+		ucColor[1] = 200;
 	}
 	else if ( nFps >= nFPSThreshold2 )
 	{
-		ucColor[1] = 255;
+		ucColor[0] = 220;
+		ucColor[1] = 220;
 	}
 }
 
@@ -240,6 +349,8 @@ void CFPSPanel::Paint()
 	int i = 0;
 	int x = 2;
 
+	int lineHeight = vgui::surface()->GetFontTall( m_hFont ) + 1;
+
 	if ( g_bDisplayParticlePerformance )
 	{
 		int nPerf = GetParticlePerformance();
@@ -254,18 +365,285 @@ void CFPSPanel::Paint()
 	}
 	float realFrameTime = gpGlobals->realtime - m_lastRealTime;
 
-	if ( cl_showfps.GetInt() && realFrameTime > 0.0 )
-	{
-		if ( m_lastRealTime != -1.0f )
-		{
-			i++;
+	int nFPSMode = cl_showfps.GetInt()%10;
 
+	ApplicationPerformanceCountersInfo_t apci = { 0, 0, 0, 0, 0 };
+	ApplicationInstantCountersInfo_t aici = { 0, 0 };
+	uint32 uiAPCI = 0;
+	if ( cl_showfps.GetInt() >= 10 )
+	{
+		uiAPCI = g_pMaterialSystem->GetFrameTimestamps( apci, aici );
+	}
+
+
+	apci.msFlip = realFrameTime * 1000.0f;
+
+
+	if ( nFPSMode == 3 && (!uiAPCI))
+	{
+		float flServerTime = engine->GetServerSimulationFrameTime();
+		if ( flServerTime != 0.0f )
+		{
+			m_nServerTimeIndex = ( m_nServerTimeIndex + 1 ) & ( SERVER_TIME_HISTORY - 1 );
+			m_pServerTimes[ m_nServerTimeIndex ] = flServerTime;
+		}
+
+		flServerTime = m_pServerTimes[ m_nServerTimeIndex ];
+
+		float flTotalTime = 0.0f;
+		float flPeakTime = 0.0f;
+		for ( int i = 0; i < SERVER_TIME_HISTORY; ++i )
+		{
+			flTotalTime += m_pServerTimes[i];
+			if ( flPeakTime < m_pServerTimes[i] )
+			{
+				flPeakTime = m_pServerTimes[i];
+			}
+		}
+		flTotalTime /= SERVER_TIME_HISTORY;
+
+		unsigned char ucColor[3];
+		int nFps = static_cast<int>( 1.0f / ( flServerTime * 0.001f ) );
+		GetFPSColor( nFps, ucColor );
+		g_pMatSystemSurface->DrawColoredText( m_hFont, x, 2, ucColor[0], ucColor[1], ucColor[2], 255, 
+			"server %5.1f ms curr, %5.1f ave, %5.1f peak", flServerTime, flTotalTime, flPeakTime );
+	}
+	else if ( nFPSMode == 4 && m_lastRealTime > 0.0f && realFrameTime > 0.0f && engine->IsInGame() )
+	{
+		char levelName[32];
+		Q_strncpy( levelName, engine->GetLevelNameShort(), sizeof( levelName ) );
+		if ( Q_strcmp( m_szLevelname, levelName ) && m_fhLog != FILESYSTEM_INVALID_HANDLE )
+		{
+			DumpStats();
+		}
+
+
+		float flServerTime = engine->GetServerSimulationFrameTime();
+		if ( flServerTime != 0.0f )
+		{
+			m_nServerTimeIndex = ( m_nServerTimeIndex + 1 ) & ( SERVER_TIME_HISTORY - 1 );
+			m_pServerTimes[ m_nServerTimeIndex ] = flServerTime;
+		}
+
+		flServerTime = m_pServerTimes[ m_nServerTimeIndex ];
+
+		const float NewWeight  = 0.1f;
+		float NewFrame = 1.0f / realFrameTime;
+
+		if ( m_AverageFPS <= 0.0f )
+		{
+			m_AverageFPS = NewFrame;
+		} 
+		else
+		{				
+			m_AverageFPS *= ( 1.0f - NewWeight ) ;
+			m_AverageFPS += ( ( NewFrame ) * NewWeight );
+		}
+
+		int nAvgFps = static_cast<int>( m_AverageFPS );
+		float flAverageMS = 1000.0f / m_AverageFPS;
+		float flFrameMS = realFrameTime * 1000.0f;
+		int	nFrameFps = static_cast<int>( 1.0f / realFrameTime );
+		float flCurTime = gpGlobals->frametime;
+
+		m_nNumFramesTotal++;
+		int nBucket = MIN ( PERF_HISTOGRAM_BUCKET_SIZE, MAX ( 0, nFrameFps ) );
+		m_nNumFramesBucket[nBucket]++;
+
+		unsigned char ucColor[3];
+		GetFPSColor( nAvgFps, ucColor );
+		g_pMatSystemSurface->DrawColoredText( m_hFont, x, 2, ucColor[0], ucColor[1], ucColor[2], 255, 
+			"Avg FPS %3i, Frame MS %5.1f, Frame Server MS %5.1f", nAvgFps, flFrameMS, flServerTime );
+
+		if ( m_fhLog == FILESYSTEM_INVALID_HANDLE )
+		{
+			Q_strncpy( m_szLevelname, levelName, sizeof( m_szLevelname ) );
+			// Maximum 360 file name length
+			char fileString[42];
+			Q_snprintf( fileString, 42, "prof_%s.csv", m_szLevelname );
+			m_fhLog = g_pFullFileSystem->Open( fileString, "w", "GAME" );
+			g_pFullFileSystem->FPrintf( m_fhLog, "Time,Player 1 Position,Player 2 Position,Smooth FPS,Frame FPS,Smooth MS,Frame MS,Server Frame MS\n");
+		}
+
+		if ( ( m_tLogTimer.NextEvent( flCurTime ) && nFrameFps < 28.0f ) || nFrameFps < 15.0f )
+		{
+			// We always print data for two players so make sure the array always has room for at least two players.
+			Vector vecOrigin[MAX_SPLITSCREEN_PLAYERS > 2 ? MAX_SPLITSCREEN_PLAYERS : 2] = {};
+			QAngle angles[MAX_SPLITSCREEN_PLAYERS > 2 ? MAX_SPLITSCREEN_PLAYERS : 2] = {};
+			FOR_EACH_VALID_SPLITSCREEN_PLAYER( hh )
+			{
+				vecOrigin[hh] = MainViewOrigin(hh);
+				angles[hh]= MainViewAngles(hh);
+
+				C_BasePlayer *pPlayer = C_BasePlayer::GetLocalPlayer(hh);
+
+				if ( pPlayer )
+				{
+					vecOrigin[hh] = pPlayer->GetAbsOrigin();
+					angles[hh] = pPlayer->GetAbsAngles();
+				}
+			}
+
+			char outputString[256];
+			Q_snprintf( outputString, 256, "%5.1f,setpos %0.2f %0.2f %0.2f ; setang %0.2f %0.2f %0.2f,setpos %0.2f %0.2f %0.2f ; setang %0.2f %0.2f %0.2f,%3i,%3i,%4.1f,%4.1f,%5.1f\n", 
+				gpGlobals->curtime,vecOrigin[0].x, vecOrigin[0].y, vecOrigin[0].z, angles[0].x, angles[0].y, angles[0].z, 
+				vecOrigin[1].x, vecOrigin[1].y, vecOrigin[1].z, angles[1].x, angles[1].y, angles[1].z, nAvgFps, 
+				nFrameFps, flAverageMS, flFrameMS, flServerTime );
+
+			if ( m_fhLog != FILESYSTEM_INVALID_HANDLE )
+			{
+				g_pFullFileSystem->FPrintf( m_fhLog, "%s", outputString );
+			}
+		}
+
+	}
+	else if ( uiAPCI )
+	{
+		// Do not render old cl_showfps 2 if there's detailed perf information
+		-- i;
+	}
+	else if ( nFPSMode && realFrameTime > 0.0 )
+	{
+		if ( nFPSMode == 5 )
+		{
+			char *perfStatTitle[4] = 
+			{
+				"Current",
+				"Main    ",
+				"Render ",
+				"GPU    "
+			};
+
+			static Color perfStatClr[4];
+			Color red( 255, 0, 0, 255 );
+			Color blue( 0, 0, 255, 255 );
+			Color black(0, 0, 0, 255 );
+
+			float dt = gpGlobals->realtime - m_perfStats[0].m_lastUpdateTime;
+			float eps = 0.015;	// ms
+
+			if ( dt >= cl_showfps5_disp_time.GetFloat() )
+			{
+				m_perfStats[0].m_lastUpdateTime = gpGlobals->realtime;
+
+				m_perfStats[0].m_mainThreadTime			=	g_PerfStats.m_Slots[PERF_STATS_SLOT_MAINTHREAD].m_PrevFrameTime.GetMillisecondsF();
+				m_perfStats[0].m_mainThreadWaitTime		=	g_PerfStats.m_Slots[PERF_STATS_SLOT_END_FRAME].m_PrevFrameTime.GetMillisecondsF();
+				m_perfStats[0].m_renderThreadTime		=	g_PerfStats.m_Slots[PERF_STATS_SLOT_RENDERTHREAD].m_PrevFrameTime.GetMillisecondsF();
+				m_perfStats[0].m_renderThreadWaitTime	= 	g_PerfStats.m_Slots[PERF_STATS_SLOT_FORCE_HARDWARE_SYNC].m_PrevFrameTime.GetMillisecondsF();
+
+				if ( m_perfStats[0].m_mainThreadWaitTime < eps )
+				{
+					 // We are main thread bound
+					if ( m_perfStats[1].m_mainThreadTime < m_perfStats[0].m_mainThreadTime)
+					{
+						m_perfStats[1] = m_perfStats[0];
+					}
+				}
+				else if ( m_perfStats[0].m_renderThreadWaitTime < eps )
+				{
+					// We are render thread bound
+					if ( m_perfStats[2].m_renderThreadTime < m_perfStats[0].m_renderThreadTime )
+					{
+						m_perfStats[2] = m_perfStats[0];
+					}
+				}
+				else
+				{
+					// We are gpu bound
+					if ( m_perfStats[3].m_renderThreadWaitTime < m_perfStats[0].m_renderThreadWaitTime )
+					{
+						m_perfStats[3] = m_perfStats[0];
+					}
+				}
+
+				// Determine perf stat clrs
+				perfStatClr[0] = black;
+				if ( m_perfStats[1].m_lastUpdateTime > m_perfStats[2].m_lastUpdateTime )
+				{
+					if ( m_perfStats[1].m_lastUpdateTime > m_perfStats[3].m_lastUpdateTime )
+					{
+						perfStatClr[1] = red;
+						perfStatClr[2] = blue;
+						perfStatClr[3] = blue;
+					}
+					else
+					{
+						perfStatClr[3] = red;
+						perfStatClr[1] = blue;
+						perfStatClr[2] = blue;
+					}
+				}
+				else
+				{
+					perfStatClr[1] = blue;
+
+					if ( m_perfStats[3].m_lastUpdateTime > m_perfStats[2].m_lastUpdateTime )
+					{
+						perfStatClr[3] = red;
+						perfStatClr[2] = blue;
+					}
+					else
+					{
+						perfStatClr[2] = red;
+						perfStatClr[3] = blue;
+					}
+				}
+			}
+
+			// Reset bottlenecks if time is up
+			for ( int i = 1; i < 4; i ++)
+			{
+				dt = gpGlobals->realtime - m_perfStats[i].m_lastUpdateTime;
+				if ( dt >= cl_showfps5_btlneck_disp_time.GetFloat() )
+				{
+					memset( &m_perfStats[i], 0, sizeof(m_perfStats[i]) );
+				}
+			}
+
+			int iy = 2;
+
+			g_pMatSystemSurface->DisableClipping( true );
+		
+			for ( int i = 0; i < 4; i++)
+			{
+				int fps = 0;
+				if ( m_perfStats[i].m_mainThreadTime > 0.0f )
+				{
+					fps = (int)(1000.0f / m_perfStats[i].m_mainThreadTime);
+				}
+
+				char buff[256];
+				Q_snprintf( buff, 256, "%s: Main: %6.2f, MainWt: %6.2f, Rdr: %6.2f, RdrWt: %6.2f (%3d fps) ", 
+					perfStatTitle[i],
+					m_perfStats[i].m_mainThreadTime, m_perfStats[i].m_mainThreadWaitTime,
+					m_perfStats[i].m_renderThreadTime, m_perfStats[i].m_renderThreadWaitTime, fps );
+
+				int len = g_pMatSystemSurface->DrawTextLen( m_hFont, buff );
+				int ht = 15;
+
+				g_pMatSystemSurface->DrawSetColor(0xff, 0xff, 0xff, 192 );
+				g_pMatSystemSurface->DrawFilledRect( x, iy, x + len, iy + ht );
+				g_pMatSystemSurface->DrawColoredText( m_hFont, x, iy, perfStatClr[i].r(), perfStatClr[i].g(), perfStatClr[i].b(), perfStatClr[i].a(), buff );
+
+				iy += ht;
+			}
+
+			g_pMatSystemSurface->DisableClipping( false );
+		}
+		else if ( m_lastRealTime != -1.0f )
+		{
 			int nFps = -1;
 			unsigned char ucColor[3];
-			if ( cl_showfps.GetInt() == 2 )
+			if ( nFPSMode == 2 )
 			{
 				const float NewWeight  = 0.1f;
 				float NewFrame = 1.0f / realFrameTime;
+
+				// If we're just below an integer boundary, we're good enough to call ourselves good WRT to coloration
+				if ( (int)(NewFrame + 0.05) > (int )( NewFrame ) )
+				{
+					NewFrame = ceil( NewFrame );
+				}
 
 				if ( m_AverageFPS < 0.0f )
 				{
@@ -278,20 +656,28 @@ void CFPSPanel::Paint()
 					m_AverageFPS *= ( 1.0f - NewWeight ) ;
 					m_AverageFPS += ( ( NewFrame ) * NewWeight );
 				}
-			
+
 				int NewFrameInt = (int)NewFrame;
 				if( NewFrameInt < m_low ) m_low = NewFrameInt;
 				if( NewFrameInt > m_high ) m_high = NewFrameInt;	
 
 				nFps = static_cast<int>( m_AverageFPS );
+				float averageMS = 1000.0f / m_AverageFPS;
 				float frameMS = realFrameTime * 1000.0f;
 				GetFPSColor( nFps, ucColor );
-				g_pMatSystemSurface->DrawColoredText( m_hFont, x, 2, ucColor[0], ucColor[1], ucColor[2], 255, "%3i fps (%3i, %3i) %.1f ms on %s", nFps, m_low, m_high, frameMS, engine->GetLevelName() );
-			} 
+				g_pMatSystemSurface->DrawColoredText( m_hFont, x, 2, ucColor[0], ucColor[1], ucColor[2], 255, "%3i fps (%3i, %3i) smth:%4.1f ms frm:%4.1f ms on %s", nFps, m_low, m_high, averageMS, frameMS, engine->GetLevelName() );
+			}
 			else
 			{
 				m_AverageFPS = -1;
-				nFps = static_cast<int>( 1.0f / realFrameTime );
+				float flFps = ( 1.0f / realFrameTime );
+
+				// If we're just below an integer boundary, we're good enough to call ourselves good WRT to coloration
+				if ( (int)(flFps + 0.05) > (int )( flFps ) )
+				{
+					flFps = ceil( flFps );
+				}
+				nFps = static_cast<int>( flFps );
 				GetFPSColor( nFps, ucColor );
 				g_pMatSystemSurface->DrawColoredText( m_hFont, x, 2, ucColor[0], ucColor[1], ucColor[2], 255, "%3i fps on %s", nFps, engine->GetLevelName() );
 			}
@@ -301,54 +687,214 @@ void CFPSPanel::Paint()
 			const double displayTime = 5.0f; // Display frequency results for this long.
 			if ( frequency.m_GHz > 0 && frequency.m_timeStamp + displayTime > currentTime )
 			{
-				int lineHeight = vgui::surface()->GetFontTall( m_hFont );
 				// Optionally print out the CPU frequency monitoring data.
 				GetCPUColor( frequency.m_percentage, ucColor );
 				g_pMatSystemSurface->DrawColoredText( m_hFont, x, lineHeight + 2, ucColor[0], ucColor[1], ucColor[2], 255, "CPU frequency percent: %3.1f%%   Min percent: %3.1f%%", frequency.m_percentage, frequency.m_lowestPercentage );
 			}
 		}
 	}
+	else if ( m_fhLog != FILESYSTEM_INVALID_HANDLE )
+	{
+		DumpStats();
+	}
+
 	m_lastRealTime = gpGlobals->realtime;
+
+	if ( uiAPCI )
+	{
+		static FpsSpikesTracker_t<100> s_tracker;
+		s_tracker.AddSample( apci );
+
+		struct FpsDetail_t { char *sz; float fl; };
+		static ConVarRef mat_queue_mode( "mat_queue_mode" );
+		static ConVarRef mat_vsync( "mat_vsync" );
+		int nMSTmode = mat_queue_mode.GetInt();
+		char *szMSTname = ( char * )( (nMSTmode == 2) ? "QMS2" : ( (nMSTmode == 1) ? "QMS1" : ( ( nMSTmode == -1 ) ? "QMS-" : "QMS0" ) ) );
+		char *szFlipName = ( char * ) ( mat_vsync.GetBool() ? "TOTAL" : "TOTAL" );
+		FpsDetail_t arrGrid[6][5] = {
+			{ { "PERF/ms",0 },		{ "MAX",0 },					{ "AVG",0 },					{ "MIN",0 },					{ "CUR",0 } },
+			{ { "MAIN",0 },			{ 0,s_tracker.m_max.msMain },	{ 0,s_tracker.m_avg.msMain },	{ 0,s_tracker.m_min.msMain },	{ 0,s_tracker.m_cur.msMain } },
+			{ { szMSTname,0 },		{ 0,s_tracker.m_max.msMST },	{ 0,s_tracker.m_avg.msMST },	{ 0,s_tracker.m_min.msMST },	{ 0,s_tracker.m_cur.msMST } },
+			{ { "GPU",0 },			{ 0,s_tracker.m_max.msGPU },	{ 0,s_tracker.m_avg.msGPU },	{ 0,s_tracker.m_min.msGPU },	{ 0,s_tracker.m_cur.msGPU } },
+			{ { szFlipName,0 },		{ 0,s_tracker.m_max.msFlip },	{ 0,s_tracker.m_avg.msFlip },	{ 0,s_tracker.m_min.msFlip },	{ 0,s_tracker.m_cur.msFlip } },
+			{ { "TOTAL",0 },		{ 0,s_tracker.m_max.msTotal },	{ 0,s_tracker.m_avg.msTotal },	{ 0,s_tracker.m_min.msTotal },	{ 0,s_tracker.m_cur.msTotal } }
+		};
+		int numRowsToDisplay = ( cl_showfps.GetInt() >= 20 ? 6 : 5 );
+		if (IsPS3() || IsX360() )
+		{
+			if(cl_showfps.GetInt() > 100) 
+			{
+				numRowsToDisplay = 2;
+				
+				int32 row = cl_showfps.GetInt() - 100;
+				row = MAX(row,1);
+				row = MIN(row,3);
+
+				V_memcpy(arrGrid[1], arrGrid[row], sizeof(arrGrid[1]));
+			}
+		}
+
+		for ( int iRow = 0; iRow < numRowsToDisplay; ++ iRow )
+		{
+			if ( iRow == 2 && !nMSTmode )
+				continue;
+			i++;
+			for ( int iCol = 0; iCol < 5; ++ iCol )
+			{
+				unsigned char ucColor[3] = { 255, 255, 255 };
+				if ( !arrGrid[iRow][iCol].sz ) GetFPSColor( ( arrGrid[iRow][iCol].fl > 0.1 ) ? ( 1000.0f / arrGrid[iRow][iCol].fl ) : 1000, ucColor );
+				g_pMatSystemSurface->DrawColoredText( m_hFont, x + iCol*lineHeight*6, 2 + i * lineHeight, 
+					ucColor[0], ucColor[1], ucColor[2], 255, 
+					arrGrid[iRow][iCol].sz ? arrGrid[iRow][iCol].sz : (char*)"%0.2f", 
+					arrGrid[iRow][iCol].fl );
+			}
+			if ( iRow == 0 )
+			{
+				g_pMatSystemSurface->DrawColoredText( m_hFont, x + 5*lineHeight*6, 2 + i * lineHeight, 
+					255, 255, 255, 255, 
+					"%s @ %dfps", 
+					engine->GetLevelNameShort(),
+					( s_tracker.m_avg.msFlip > 0.1 ) ? int( ( 1000.0f / s_tracker.m_avg.msFlip ) + 0.2 ) : 1000 );
+			}
+		}
+
+		i++;
+	}
+	if( aici.m_nDeferredWordsAllocated )
+	{
+		g_pMatSystemSurface->DrawColoredText( m_hFont, x + 6*lineHeight*6, 2 + 2 * lineHeight, 255, 255, 255, 255,
+			"defer %u kB", ( aici.m_nDeferredWordsAllocated + 255 ) / 256 );
+	}
+	
 
 	int nShowPosMode = cl_showpos.GetInt();
 	if ( nShowPosMode > 0 )
 	{
-		Vector vecOrigin = MainViewOrigin();
-		QAngle angles = MainViewAngles();
-		if ( nShowPosMode == 2 )
+		FOR_EACH_VALID_SPLITSCREEN_PLAYER( hh )
 		{
-			C_BasePlayer *pPlayer = C_BasePlayer::GetLocalPlayer();
+			Vector vecOrigin = MainViewOrigin(hh);
+			QAngle angles = MainViewAngles(hh);
+			Vector vel( 0, 0, 0 );
+
+			char szName[ 32 ] = { 0 };
+
+			C_BasePlayer *pPlayer = C_BasePlayer::GetLocalPlayer(hh);
 			if ( pPlayer )
+			{
+				Q_strncpy( szName, pPlayer->GetPlayerName(), sizeof( szName ) );
+				vel = pPlayer->GetLocalVelocity();
+			}
+			if ( !engine->IsConnected() )
+			{
+				V_sprintf_safe( szName, "unconnected" );
+			}
+			else if ( engine->GetDemoPlaybackParameters() && engine->GetDemoPlaybackParameters()->m_bAnonymousPlayerIdentity )
+			{
+				V_sprintf_safe( szName, "unknown" );
+			}
+
+			if ( nShowPosMode == 2 && pPlayer )
 			{
 				vecOrigin = pPlayer->GetAbsOrigin();
 				angles = pPlayer->GetAbsAngles();
 			}
+
+			if ( uiAPCI )
+			{
+				i++;
+
+				g_pMatSystemSurface->DrawColoredText( m_hFont, x, 2+ i * lineHeight, 
+					255, 255, 255, 255, 
+					"pos:  %.02f %.02f %.02f   (%s)", 
+					vecOrigin.x, vecOrigin.y, vecOrigin.z, szName );
+				i++;
+
+				g_pMatSystemSurface->DrawColoredText( m_hFont, x, 2 + i * lineHeight, 
+					255, 255, 255, 255, 
+					"ang:  %.02f %.02f %.02f   (vel:  %.2f)", 
+					angles.x, angles.y, angles.z, vel.Length2D() );
+			}
+			else
+			{
+				i++;
+
+				g_pMatSystemSurface->DrawColoredText( m_hFont, x, 2 + i * lineHeight, 
+														255, 255, 255, 255, 
+														"name: %s", szName );
+				i++;
+
+				g_pMatSystemSurface->DrawColoredText( m_hFont, x, 2+ i * lineHeight, 
+													  255, 255, 255, 255, 
+													  "pos:  %.02f %.02f %.02f", 
+													  vecOrigin.x, vecOrigin.y, vecOrigin.z );
+				i++;
+
+				g_pMatSystemSurface->DrawColoredText( m_hFont, x, 2 + i * lineHeight, 
+													  255, 255, 255, 255, 
+													  "ang:  %.02f %.02f %.02f", 
+													  angles.x, angles.y, angles.z );
+				i++;
+
+				g_pMatSystemSurface->DrawColoredText( m_hFont, x, 2 + i * lineHeight, 
+													  255, 255, 255, 255, 
+													  "vel:  %.2f", 
+													  vel.Length2D() );
+			}
 		}
-
-		g_pMatSystemSurface->DrawColoredText( m_hFont, x, 2+ i * ( vgui::surface()->GetFontTall( m_hFont ) + 2 ), 
-											  255, 255, 255, 255, 
-											  "pos:  %.02f %.02f %.02f", 
-											  vecOrigin.x, vecOrigin.y, vecOrigin.z );
-		i++;
-
-		g_pMatSystemSurface->DrawColoredText( m_hFont, x, 2 + i * ( vgui::surface()->GetFontTall( m_hFont ) + 2 ), 
-											  255, 255, 255, 255, 
-											  "ang:  %.02f %.02f %.02f", 
-											  angles.x, angles.y, angles.z );
-		i++;
-
-		Vector vel( 0, 0, 0 );
-		C_BasePlayer *player = C_BasePlayer::GetLocalPlayer();
-		if ( player )
+		#ifdef PORTAL
+		if ( uiAPCI )
 		{
-			vel = player->GetLocalVelocity();
-		}
+			static IPortalServerDllPropPortalLocator *s_pPortalLocator;
+			if ( !s_pPortalLocator )
+			{
+				if ( g_pMatchFramework )
+				{
+					s_pPortalLocator = ( IPortalServerDllPropPortalLocator * )
+						g_pMatchFramework->GetMatchExtensions()->GetRegisteredExtensionInterface( IEXTPROPPORTALLOCATOR_INTERFACE_NAME );
+				}
+			}
+			if ( s_pPortalLocator )
+			{
+				CUtlVector < IPortalServerDllPropPortalLocator::PortalInfo_t > arrPortals;
+				arrPortals.EnsureCapacity( 4 );
+				s_pPortalLocator->LocateAllPortals( arrPortals );
 
-		g_pMatSystemSurface->DrawColoredText( m_hFont, x, 2 + i * ( vgui::surface()->GetFontTall( m_hFont ) + 2 ), 
-											  255, 255, 255, 255, 
-											  "vel:  %.2f", 
-											  vel.Length() );
+				i++;
+				for ( int j = 0; j < arrPortals.Count(); ++ j )
+				{
+					IPortalServerDllPropPortalLocator::PortalInfo_t const &pi = arrPortals[j];
+					i++;
+					g_pMatSystemSurface->DrawColoredText( m_hFont, x, 2 + i * lineHeight, 
+						255, 255, 255, 255, 
+						"P %d %d %.02f %.02f %.02f %.02f %.02f %.02f", 
+						pi.iLinkageGroupId, pi.nPortal,
+						pi.vecOrigin.x, pi.vecOrigin.y, pi.vecOrigin.z,
+						pi.vecAngle.x, pi.vecAngle.y, pi.vecAngle.z
+						);
+				}
+			}
+		}
+		#endif
 	}
+
+#ifdef CSTRIKE15
+
+	if ( cl_countbones.GetBool() )
+	{
+		i++;
+		g_pMatSystemSurface->DrawColoredText( m_hFont, x, 2 + i * lineHeight,
+				255, 255, 255, 255,
+				"All computed bones:  %i",
+				g_nNumBonesSetupAll );
+		i++;
+		g_pMatSystemSurface->DrawColoredText( m_hFont, x, 2 + i * lineHeight,
+				255, 255, 255, 255,
+				"Blending rules only:  %i",
+				g_nNumBonesSetupBlendingRulesOnly );
+		
+	}
+
+#endif
 	
 	if ( cl_showbattery.GetInt() > 0 )
 	{
@@ -363,16 +909,66 @@ void CFPSPanel::Paint()
 		{
 			if ( m_BatteryPercent == 255 )
 			{
-				g_pMatSystemSurface->DrawColoredText( m_hFont, x, 2+ i * ( vgui::surface()->GetFontTall( m_hFont ) + 2 ), 
-													 255, 255, 255, 255,  "battery: On AC" );	
+				g_pMatSystemSurface->DrawColoredText( m_hFont, x, 2 + i * lineHeight, 
+													  255, 255, 255, 255,
+													  "battery: On AC" );
 			}
 			else
 			{
-				g_pMatSystemSurface->DrawColoredText( m_hFont, x, 2+ i * ( vgui::surface()->GetFontTall( m_hFont ) + 2 ), 
-											 255, 255, 255, 255,  "battery:  %d%%",m_BatteryPercent );	
+				g_pMatSystemSurface->DrawColoredText( m_hFont, x, 2 + i * lineHeight, 
+													  255, 255, 255, 255,
+													  "battery:  %d%%",
+													  m_BatteryPercent );	
 			}
 		}
 	}
+
+
+#ifdef _GAMECONSOLE
+	// Display a warning message if free memory dips below a certain threshold
+	size_t nUsedMem = 0, nFreeMem = 0, nMemoryThreshold = 1024*1024*cl_showlowmemory.GetInt();
+	if ( nMemoryThreshold )
+	{
+		g_pMemAlloc->GlobalMemoryStatus( &nUsedMem, &nFreeMem );
+		if ( nFreeMem < nMemoryThreshold )
+		{
+			i += 2;
+			g_pMatSystemSurface->DrawColoredText(	m_hFont, x, 2 + i * lineHeight, 255, 150, 40, 255,
+													"WARNING: low memory! (%3.1fMB)  Report if seen at a test station...\n", nFreeMem/(float)(1024*1024) );
+		}
+	}
+#endif // _GAMECONSOLE
+
+	if ( m_nLinesNeeded != i )
+	{
+	    m_nLinesNeeded = i;
+		ComputeSize();
+	}
+}
+
+//-----------------------------------------------------------------------------
+// Purpose: Outputs the frame rate histogram and closes the file
+//-----------------------------------------------------------------------------
+void CFPSPanel::DumpStats() 
+{
+	Assert ( m_fhLog != FILESYSTEM_INVALID_HANDLE );
+	if ( m_nNumFramesTotal	> 0 )
+	{
+		g_pFullFileSystem->FPrintf( m_fhLog, "\n\nTotal Frames : %3i\n\n", m_nNumFramesTotal );
+		g_pFullFileSystem->FPrintf( m_fhLog, "Frame Rate, Number of Frames, Percent of Frames\n" );
+
+		for ( int i = 0; i < PERF_HISTOGRAM_BUCKET_SIZE; i++ )
+		{
+			float flPercent = m_nNumFramesBucket[i];
+			flPercent /= m_nNumFramesTotal;
+			flPercent *= 100.0f;
+			g_pFullFileSystem->FPrintf( m_fhLog, "%3i, %3i, %5.1f\n", i, m_nNumFramesBucket[i], flPercent );
+			m_nNumFramesBucket[i] = 0;
+		}
+	}
+	g_pFullFileSystem->Close( m_fhLog );
+	m_fhLog = FILESYSTEM_INVALID_HANDLE;
+	m_nNumFramesTotal = 0;
 }
 
 class CFPS : public IFPSPanel
@@ -395,8 +991,7 @@ public:
 		if ( fpsPanel )
 		{
 			fpsPanel->SetParent( (vgui::Panel *)NULL );
-			fpsPanel->MarkForDeletion();
-			fpsPanel = NULL;
+			delete fpsPanel;
 		}
 	}
 };
@@ -404,7 +999,7 @@ public:
 static CFPS g_FPSPanel;
 IFPSPanel *fps = ( IFPSPanel * )&g_FPSPanel;
 
-#if defined( TRACK_BLOCKING_IO ) && !defined( _RETAIL )
+#if defined( TRACK_BLOCKING_IO )
 
 static ConVar cl_blocking_threshold( "cl_blocking_threshold", "0.000", 0, "If file ops take more than this amount of time, add to 'spewblocking' history list" );
 
@@ -480,7 +1075,7 @@ CBlockingFileIOPanel::CBlockingFileIOPanel( vgui::VPANEL parent ) : BaseClass( N
 
 	int x = 2;
 	int y = 100;
-	if ( IsX360() )
+	if ( IsGameConsole() )
 	{
 		x += XBOX_MAXBORDERSAFE * wide;
 		y += XBOX_MAXBORDERSAFE * tall;
@@ -490,7 +1085,7 @@ CBlockingFileIOPanel::CBlockingFileIOPanel( vgui::VPANEL parent ) : BaseClass( N
 	SetSize( IO_PANEL_WIDTH, 140 );
 
 	SetVisible( false );
-	SetCursor( null );
+	SetCursor( 0 );
 
 	SetFgColor( Color( 0, 0, 0, 255 ) );
 	SetPaintBackgroundEnabled( false );
@@ -814,8 +1409,7 @@ public:
 		if ( ioPanel )
 		{
 			ioPanel->SetParent( (vgui::Panel *)NULL );
-			ioPanel->MarkForDeletion();
-			ioPanel = NULL;
+			delete ioPanel;
 		}
 	}
 

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========== Copyright © 2005, Valve Corporation, All rights reserved. ========
 //
 // Purpose:
 //
@@ -16,7 +16,11 @@
 #include "windows.h"
 #endif
 
+#if defined( _PS3 )
+#include <stdlib.h>
+#else //_PS3
 #include <malloc.h>
+#endif //_PS3
 #include <string.h>
 #include "crtmemdebug.h"
 
@@ -34,7 +38,7 @@
 #include "tier0/icommandline.h"
 #include "mathlib/vmatrix.h"
 #include "icvar.h"
-#include "KeyValues.h"
+#include "keyvalues.h"
 #include "convar.h"
 
 #include "tier2/tier2.h"

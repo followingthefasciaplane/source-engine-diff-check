@@ -1,21 +1,27 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
-//----------------------------------------------------------------------------------------
-
+// Purpose: 
+//
+// $NoKeywords: $
+//
+//=============================================================================//
+// replayserver.cpp: implementation of the CReplayServer class.
+//
+//////////////////////////////////////////////////////////////////////
 #if defined( REPLAY_ENABLED )
-
 #include <server_class.h>
 #include <inetmessage.h>
 #include <tier0/vprof.h>
-#include <tier0/vcrmode.h>
-#include <KeyValues.h>
+#include <keyvalues.h>
 #include <edict.h>
 #include <eiface.h>
 #include <PlayerState.h>
+#include <ireplaydirector.h>
 #include <time.h>
 
 #include "replayserver.h"
 #include "sv_client.h"
+#include "replayclient.h"
 #include "server.h"
 #include "sv_main.h"
 #include "framesnapshot.h"
@@ -25,14 +31,12 @@
 #include "cdll_engine_int.h"
 #include "GameEventManager.h"
 #include "host.h"
-#include "proto_version.h"
 #include "dt_common_eng.h"
 #include "baseautocompletefilelist.h"
 #include "sv_steamauth.h"
 #include "con_nprint.h"
 #include "tier0/icommandline.h"
 #include "client_class.h"
-#include "replay_internal.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -44,6 +48,38 @@ extern CNetworkStringTableContainer *networkStringTableContainerClient;
 //////////////////////////////////////////////////////////////////////
 
 CReplayServer *replay = NULL;
+
+static void replay_title_changed_f( IConVar *var, const char *pOldString, float flOldValue )
+{
+	if ( replay && replay->IsActive() )
+	{
+		replay->BroadcastLocalTitle();
+	}
+}
+
+static void replay_name_changed_f( IConVar *var, const char *pOldValue, float flOldValue )
+{
+	Steam3Server().NotifyOfServerNameChange();
+}
+
+static ConVar replay_maxclients( "replay_maxclients", "128", 0, "Maximum client number on Replay server.",
+							  true, 0, true, 255 );
+
+ConVar replay_autorecord( "replay_autorecord", "1", 0, "Automatically records all games as Replay demos." );
+ConVar replay_name( "replay_name", "Replay", 0, "Replay host name", replay_name_changed_f );
+static ConVar replay_password( "replay_password", "", FCVAR_NOTIFY | FCVAR_PROTECTED | FCVAR_DONTRECORD, "Replay password for all clients" );
+
+static ConVar replay_overridemaster( "replay_overridemaster", "0", 0, "Overrides the Replay master root address." );
+static ConVar replay_dispatchmode( "replay_dispatchmode", "1", 0, "Dispatch clients to relay proxies: 0=never, 1=if appropriate, 2=always" );
+ConVar replay_transmitall( "replay_transmitall", "1", FCVAR_REPLICATED, "Transmit all entities (not only director view)" );
+ConVar replay_debug( "replay_debug", "0", 0, "Replay debug info." );
+ConVar replay_title( "replay_title", "Replay", 0, "Set title for Replay spectator UI", replay_title_changed_f );
+static ConVar replay_deltacache( "replay_deltacache", "2", 0, "Enable delta entity bit stream cache" );
+static ConVar replay_relayvoice( "replay_relayvoice", "1", 0, "Relay voice data: 0=off, 1=on" );
+ConVar replay_movielength( "replay_movielength", "60", FCVAR_REPLICATED | FCVAR_DONTRECORD, "Replay movie length in seconds" );
+ConVar replay_demolifespan( "replay_demolifespan", "5", FCVAR_REPLICATED | FCVAR_DONTRECORD, "The number of days allowed to pass before cleaning up replay demos.", true, 1, true, 30 );
+ConVar replay_cleanup_time( "replay_cleanup_time", "1", FCVAR_REPLICATED | FCVAR_DONTRECORD, "The Replay system will periodically remove stale (never downloaded) .dem files from disk.  This variable represents the "
+						   "amount of time (in hours) between each cleanup.", true, 1, true, 24 );
 
 CReplayDeltaEntityCache::CReplayDeltaEntityCache()
 {
@@ -85,7 +121,7 @@ void CReplayDeltaEntityCache::SetTick( int nTick, int nMaxEntities )
 
 	Flush();
 
-	m_nCacheSize = 2 * 1024;
+	m_nCacheSize = replay_deltacache.GetInt() * 1024;
 
 	if ( m_nCacheSize <= 0 )
 		return;
@@ -152,8 +188,7 @@ void CReplayDeltaEntityCache::AddDeltaBits( int nEntityIndex, int nDeltaTick, in
 		if ( ((char*)(pNew) + sizeof(DeltaEntityEntry_s) + nBufferSize) > pEnd )
 			return;	// data wouldn't fit into cache anymore, don't add new entries
 
-		pEntry = pNew;
-		pEntry->pNext = pEntry;
+		pEntry->pNext = pEntry = pNew;
 	}
 
 	pEntry->pNext = NULL; // link to next
@@ -361,7 +396,9 @@ void CReplayFrame::CopyReplayData( CReplayFrame &frame )
 	bits = frame.m_Messages[REPLAY_BUFFER_UNRELIABLE].GetNumBitsWritten();
 	bits += frame.m_Messages[REPLAY_BUFFER_TEMPENTS].GetNumBitsWritten();
 	bits += frame.m_Messages[REPLAY_BUFFER_SOUNDS].GetNumBitsWritten();
-	bits += frame.m_Messages[REPLAY_BUFFER_VOICE].GetNumBitsWritten();
+
+	if ( replay_relayvoice.GetBool() )
+		bits += frame.m_Messages[REPLAY_BUFFER_VOICE].GetNumBitsWritten();
 	
 	if ( bits > 0 )
 	{
@@ -371,7 +408,9 @@ void CReplayFrame::CopyReplayData( CReplayFrame &frame )
 		m_Messages[REPLAY_BUFFER_UNRELIABLE].WriteBits( frame.m_Messages[REPLAY_BUFFER_UNRELIABLE].GetData(), frame.m_Messages[REPLAY_BUFFER_UNRELIABLE].GetNumBitsWritten() ); 
 		m_Messages[REPLAY_BUFFER_UNRELIABLE].WriteBits( frame.m_Messages[REPLAY_BUFFER_TEMPENTS].GetData(), frame.m_Messages[REPLAY_BUFFER_TEMPENTS].GetNumBitsWritten() ); 
 		m_Messages[REPLAY_BUFFER_UNRELIABLE].WriteBits( frame.m_Messages[REPLAY_BUFFER_SOUNDS].GetData(), frame.m_Messages[REPLAY_BUFFER_SOUNDS].GetNumBitsWritten() ); 
-		m_Messages[REPLAY_BUFFER_UNRELIABLE].WriteBits( frame.m_Messages[REPLAY_BUFFER_VOICE].GetData(), frame.m_Messages[REPLAY_BUFFER_VOICE].GetNumBitsWritten() ); 
+
+		if ( replay_relayvoice.GetBool() )
+			m_Messages[REPLAY_BUFFER_UNRELIABLE].WriteBits( frame.m_Messages[REPLAY_BUFFER_VOICE].GetData(), frame.m_Messages[REPLAY_BUFFER_VOICE].GetNumBitsWritten() ); 
 	}
 }
 
@@ -400,11 +439,12 @@ void CReplayFrame::FreeBuffers( void )
 }
 
 CReplayServer::CReplayServer()
-:	m_DemoRecorder( this )
+:	m_DemoRecorder( this )	
 {
 	m_flTickInterval = 0.03;
 	m_MasterClient = NULL;
 	m_Server = NULL;
+	m_Director = NULL;
 	m_nFirstTick = -1;
 	m_nLastTick = 0;
 	m_CurrentFrame = NULL;
@@ -418,12 +458,16 @@ CReplayServer::CReplayServer()
 	Q_memset( m_pRecvTables, 0, sizeof( m_pRecvTables ) );
 	m_nRecvTables = 0;
 	m_vPVSOrigin.Init();
+	m_nStartTick = 0;
+	m_bPlayingBack = false;
+	m_bPlaybackPaused = false;
+	m_flPlaybackRateModifier = 0;
+	m_nSkipToTick = 0;
 	m_bMasterOnlyMode = false;
 	m_nGlobalSlots = 0;
 	m_nGlobalClients = 0;
 	m_nGlobalProxies = 0;
-	m_flStartRecordTime = 0.0f;
-	m_flStopRecordTime = 0.0f;
+	m_vecClientsDownloading.ClearAll();
 }
 
 CReplayServer::~CReplayServer()
@@ -455,6 +499,14 @@ void CReplayServer::StartMaster(CGameClient *client)
 		return;
 	}
 
+	m_Director = serverReplayDirector;	
+
+	if ( !m_Director )
+	{
+		ConMsg("Mod doesn't support Replay. No director module found.\n");
+		return;
+	}
+
 	m_MasterClient = client;
 	m_MasterClient->m_bIsHLTV = false;
 	m_MasterClient->m_bIsReplay = true;
@@ -468,11 +520,10 @@ void CReplayServer::StartMaster(CGameClient *client)
 	m_Server = (CGameServer*)m_MasterClient->GetServer();
 
 	// set default user settings
-	ConVarRef replay_name( "replay_name" );
 	m_MasterClient->m_ConVars->SetString( "name", replay_name.GetString() );
 	m_MasterClient->m_ConVars->SetString( "cl_team", "1" );
-	m_MasterClient->m_ConVars->SetString( "rate", "30000" );
-	m_MasterClient->m_ConVars->SetString( "cl_updaterate", "22" );
+	m_MasterClient->m_ConVars->SetString( "rate", va( "%d", DEFAULT_RATE ) );
+	m_MasterClient->m_ConVars->SetString( "cl_updaterate", "32" );
 	m_MasterClient->m_ConVars->SetString( "cl_interp_ratio", "1.0" );
 	m_MasterClient->m_ConVars->SetString( "cl_predict", "0" );
 
@@ -484,7 +535,8 @@ void CReplayServer::StartMaster(CGameClient *client)
 	m_nGameServerMaxClients = m_Server->GetMaxClients(); // maxclients is different on proxy (128)
 	serverclasses	= m_Server->serverclasses;
 	serverclassbits	= m_Server->serverclassbits;
-	worldmapMD5		= m_Server->worldmapMD5;
+	worldmapCRC		= m_Server->worldmapCRC;
+	clientDllCRC	= m_Server->clientDllCRC;
 	m_flTickInterval= m_Server->GetTickInterval();
 
 	// allocate buffers for input frame
@@ -492,12 +544,39 @@ void CReplayServer::StartMaster(CGameClient *client)
 			
 	InstallStringTables();
 
+	// activate director in game.dll
+	m_Director->SetReplayServer( this );
+
+	// register as listener for mod specific events
+	const char **modevents = m_Director->GetModEvents();
+
+	int j = 0;
+	while ( modevents[j] != NULL )
+	{
+		const char *eventname = modevents[j];
+
+		CGameEventDescriptor *descriptor = g_GameEventManager.GetEventDescriptor( eventname );
+
+		if ( descriptor )
+		{
+			g_GameEventManager.AddListener( this, descriptor, CGameEventManager::CLIENTSTUB );
+		}
+		else
+		{
+			DevMsg("CReplayServer::StartMaster: game event %s not found.\n", eventname );
+		}
+
+		j++;
+	}
+	
 	// copy signon buffers
 	m_Signon.StartWriting( m_Server->m_Signon.GetBasePointer(), m_Server->m_Signon.m_nDataBytes, 
 		m_Server->m_Signon.GetNumBitsWritten() );
 
 	Q_strncpy( m_szMapname, m_Server->m_szMapname, sizeof(m_szMapname) );
 	Q_strncpy( m_szSkyname, m_Server->m_szSkyname, sizeof(m_szSkyname) );
+
+	NET_ListenSocket( m_Socket, true );	// activated Replay TCP socket
 
 	m_MasterClient->ExecuteStringCommand( "spectate" ); // become a spectator
 
@@ -506,7 +585,13 @@ void CReplayServer::StartMaster(CGameClient *client)
 	// hack reduce signontick by one to catch changes made in the current tick
 	m_MasterClient->m_nSignonTick--;	
 
-	SetMaxClients( 0 );
+	if ( m_bMasterOnlyMode )
+	{
+		// we allow only one client in master only mode
+		replay_maxclients.SetValue( MIN(1,replay_maxclients.GetInt()) );
+	}
+
+	SetMaxClients( replay_maxclients.GetInt() );
 
 	m_bSignonState = false; //master proxy is instantly connected
 
@@ -517,9 +602,109 @@ void CReplayServer::StartMaster(CGameClient *client)
 	m_State = ss_active;
 
 	// stop any previous recordings
-	StopRecording();
+	m_DemoRecorder.StopRecording();
+
+	// start new recording if autorecord is enabled
+	if ( replay_autorecord.GetBool() )
+	{
+		m_DemoRecorder.StartAutoRecording();
+	}
 
 	ReconnectClients();
+}
+
+void CReplayServer::StartDemo(const char *filename)
+{
+
+}
+
+bool CReplayServer::DispatchToRelay( CReplayClient *pClient )
+{
+	if ( replay_dispatchmode.GetInt() <= DISPATCH_MODE_OFF )
+		return false; // don't redirect
+	
+	CBaseClient	*pBestProxy = NULL;
+	float fBestRatio = 1.0f;
+
+	// find best relay proxy
+	for (int i=0; i < GetClientCount(); i++ )
+	{
+		CBaseClient *pProxy = m_Clients[ i ];
+
+		// check all known proxies
+		if ( !pProxy->IsConnected() || !pProxy->IsReplay() || (pClient == pProxy) )
+			continue;
+
+		int slots = Q_atoi( pProxy->GetUserSetting( "replay_slots" ) );
+		int clients = Q_atoi( pProxy->GetUserSetting( "replay_clients" ) );
+
+		// skip overloaded proxies or proxies with no slots at all
+		if ( (clients > slots) || slots <= 0 )
+			continue;
+
+		// calc clients/slots ratio for this proxy
+		float ratio = ((float)(clients))/((float)slots);
+
+		if ( ratio < fBestRatio )
+		{
+			fBestRatio = ratio;
+			pBestProxy = pProxy;
+		}
+	}
+
+	if ( pBestProxy == NULL )
+	{
+		if ( replay_dispatchmode.GetInt() == DISPATCH_MODE_ALWAYS )
+		{
+			// we are in always forward mode, drop client if we can't forward it
+			pClient->Disconnect("No Replay relay available");
+			return true;
+		}
+		else
+		{
+			// just let client connect to this proxy
+			return false;
+		}
+	}
+
+	// check if client should stay on this relay server
+	if ( (replay_dispatchmode.GetInt() == DISPATCH_MODE_AUTO) && (GetMaxClients() > 0) )
+	{
+		// ratio = clients/slots. give relay proxies 25% bonus
+		float myRatio = ((float)GetNumClients()/(float)GetMaxClients()) * 1.25f;
+
+		myRatio = MIN( myRatio, 1.0f ); // clamp to 1
+
+		// if we have a better local ratio then other proxies, keep this client here
+		if ( myRatio < fBestRatio )
+			return false;	// don't redirect
+	}
+	
+	const char *pszRelayAddr = pBestProxy->GetUserSetting("replay_addr");
+
+	if ( !pszRelayAddr )
+		return false;
+	
+
+	ConMsg( "Redirecting spectator %s to Replay relay %s\n", 
+		pClient->GetNetChannel()->GetAddress(), 
+		pszRelayAddr );
+
+	// first tell that client that we are a Replay server,
+	// otherwise it's might ignore the "connect" command
+	CSVCMsg_ServerInfo_t serverInfo;	
+	FillServerInfo( serverInfo ); 
+	pClient->SendNetMsg( serverInfo, true );
+	
+	// tell the client to connect to this new address
+	CNETMsg_StringCmd_t cmdMsg( va("connect %s\n", pszRelayAddr ) ) ;
+	pClient->SendNetMsg( cmdMsg, true );
+    		
+ 	// increase this proxies client number in advance so this proxy isn't used again next time
+	int clients = Q_atoi( pBestProxy->GetUserSetting( "replay_clients" ) );
+	pBestProxy->SetUserCVar( "replay_clients", va("%d", clients+1 ) );
+	
+	return true;
 }
 
 int	CReplayServer::GetReplaySlot( void )
@@ -531,20 +716,144 @@ float CReplayServer::GetOnlineTime( void )
 {
 	return MAX(0, net_time - m_flStartTime);
 }
+void CReplayServer::BroadcastLocalTitle( CReplayClient *client )
+{
+	IGameEvent *event = g_GameEventManager.CreateEvent( "replay_title", true );
+
+	if ( !event )
+		return;
+
+	event->SetString( "text", replay_title.GetString() );
+
+	CSVCMsg_GameEvent_t eventMsg;
+
+	eventMsg.SetReliable( true );
+
+	// create bit stream from KeyValues
+	if ( !g_GameEventManager.SerializeEvent( event, &eventMsg ) )
+	{
+		DevMsg("CReplayServer: failed to serialize title '%s'.\n", event->GetName() );
+		g_GameEventManager.FreeEvent( event );
+		return;
+	}
+
+	if ( client )
+	{
+		client->SendNetMsg( eventMsg );
+	}
+	else
+	{
+		for ( int i = 0; i < m_Clients.Count(); i++ )
+		{
+			client = Client(i);
+
+			if ( !client->IsActive() || client->IsReplay() )
+				continue;
+
+			client->SendNetMsg( eventMsg );
+		}
+	}
+
+	g_GameEventManager.FreeEvent( event );
+}
+
+void CReplayServer::BroadcastLocalChat( const char *pszChat, const char *pszGroup )
+{
+	IGameEvent *event = g_GameEventManager.CreateEvent( "replay_chat", true );
+
+	if ( !event )
+		return;
+	
+	event->SetString( "text", pszChat );
+
+	CSVCMsg_GameEvent_t eventMsg;
+
+	eventMsg.SetReliable( false );
+
+	// create bit stream from KeyValues
+	if ( !g_GameEventManager.SerializeEvent( event, &eventMsg ) )
+	{
+		DevMsg("CReplayServer: failed to serialize chat '%s'.\n", event->GetName() );
+		g_GameEventManager.FreeEvent( event );
+		return;
+	}
+
+	for ( int i = 0; i < m_Clients.Count(); i++ )
+	{
+		CReplayClient *cl = Client(i);
+
+		if ( !cl->IsActive() || !cl->IsSpawned() || cl->IsReplay() )
+			continue;
+
+		// if this is a spectator chat message and client disabled it, don't show it
+		if ( Q_strcmp( cl->m_szChatGroup, pszGroup) || cl->m_bNoChat )
+			continue;
+
+		cl->SendNetMsg( eventMsg );
+	}
+
+	g_GameEventManager.FreeEvent( event );
+}
+
+void CReplayServer::BroadcastEventLocal( IGameEvent *event, bool bReliable )
+{
+	CSVCMsg_GameEvent_t eventMsg;
+
+	eventMsg.SetReliable( bReliable );
+
+	// create bit stream from KeyValues
+	if ( !g_GameEventManager.SerializeEvent( event, &eventMsg ) )
+	{
+		DevMsg("CReplayServer: failed to serialize local event '%s'.\n", event->GetName() );
+		return;
+	}
+
+	for ( int i = 0; i < m_Clients.Count(); i++ )
+	{
+		CReplayClient *cl = Client(i);
+
+		if ( !cl->IsActive() || !cl->IsSpawned() || cl->IsReplay() )
+			continue;
+
+		if ( !cl->SendNetMsg( eventMsg ) )
+		{
+			if ( eventMsg.IsReliable() )
+			{
+				DevMsg( "BroadcastMessage: Reliable broadcast message overflow for client %s", cl->GetClientName() );
+			}
+		}
+	}
+
+	if ( replay_debug.GetBool() )
+		Msg("Replay broadcast local event: %s\n", event->GetName() );
+}
+
+void CReplayServer::BroadcastEvent(IGameEvent *event)
+{
+	CSVCMsg_GameEvent_t eventMsg;
+
+	// create bit stream from KeyValues
+	if ( !g_GameEventManager.SerializeEvent( event, &eventMsg ) )
+	{
+		DevMsg("CReplayServer: failed to serialize event '%s'.\n", event->GetName() );
+		return;
+	}
+
+	BroadcastMessage( eventMsg, true, true );
+
+	if ( replay_debug.GetBool() )
+		Msg("Replay broadcast event: %s\n", event->GetName() );
+}
 
 void CReplayServer::FireGameEvent(IGameEvent *event)
 {
 	if ( !IsActive() )
 		return;
 
-	char buffer_data[MAX_EVENT_BYTES];
-
-	SVC_GameEvent eventMsg;
-
-	eventMsg.m_DataOut.StartWriting( buffer_data, sizeof(buffer_data) );
+	CSVCMsg_GameEvent_t eventMsg;
 
 	// create bit stream from KeyValues
-	if ( g_GameEventManager.SerializeEvent( event, &eventMsg.m_DataOut ) )
+	if ( g_GameEventManager.SerializeEvent( event, &eventMsg ) )
 	{
 		SendNetMsg( eventMsg );
 	}
@@ -561,8 +870,21 @@ int CReplayServer::GetEventDebugID()
 
 bool CReplayServer::ShouldUpdateMasterServer()
 {
-	// The replay server should never do this work
-	return false;
+	if ( IsUsingMasterLegacyMode() )
+	{
+		// In the legacy master server updater, we have to call the updater with our CBaseServer* for it to work right.
+		return true;
+	}
+	else
+	{
+		// If the main game server is active, then we let it update Steam with the server info.
+		return !sv.IsActive();
+	}
+}
+
+CBaseClient *CReplayServer::CreateNewClient(int slot )
+{
+	return new CReplayClient( slot, this );
 }
 
 void CReplayServer::InstallStringTables( void )
@@ -591,12 +913,12 @@ void CReplayServer::InstallStringTables( void )
 
 		// get matching client table
 		CNetworkStringTable *replayTable = 
-			(CNetworkStringTable*)m_StringTables->CreateStringTableEx(
+			(CNetworkStringTable*)m_StringTables->CreateStringTable(
 				serverTable->GetTableName(),
 				serverTable->GetMaxStrings(),
 				serverTable->GetUserDataSize(),
 				serverTable->GetUserDataSizeBits(),
-				serverTable->HasFileNameStrings() 
+				serverTable->IsUsingDictionary() ? NSF_DICTIONARY_ENABLED : NSF_NONE
 				);
 
 		if ( !replayTable )
@@ -641,7 +963,7 @@ void CReplayServer::UserInfoChanged( int nClientIndex )
 void CReplayServer::LinkInstanceBaselines( void )
 {	
 	// Forces to update m_pInstanceBaselineTable.
-	AUTO_LOCK( g_svInstanceBaselineMutex );
+	AUTO_LOCK_FM( g_svInstanceBaselineMutex );
 	GetInstanceBaselineTable(); 
 
 	Assert( m_pInstanceBaselineTable );
@@ -759,7 +1081,24 @@ void CReplayServer::EntityPVSCheck( CClientFrame *pFrame )
 
 	Assert ( pSnapshot->m_pReplayEntityData != NULL );
 
-	m_vPVSOrigin.Init();
+	int nDirectorEntity = m_Director->GetPVSEntity();
+    	
+	if ( pSnapshot && nDirectorEntity > 0 )
+	{
+		CReplayEntityData *pReplayData = FindReplayDataInSnapshot( pSnapshot, nDirectorEntity );
+
+		if ( pReplayData )
+		{
+			m_vPVSOrigin.x = pReplayData->origin[0];
+			m_vPVSOrigin.y = pReplayData->origin[1];
+			m_vPVSOrigin.z = pReplayData->origin[2];
+		}
+	}
+	else
+	{
+		m_vPVSOrigin = m_Director->GetPVSOrigin();
+	}
+
 
 	SV_AddOriginToPVS( m_vPVSOrigin );
 
@@ -858,6 +1197,36 @@ CClientFrame *CReplayServer::AddNewFrame( CClientFrame *clientFrame )
 	return replayFrame;
 }
 
+void CReplayServer::SendClientMessages ( bool bSendSnapshots )
+{
+	// build individual updates
+	for ( int i=0; i< m_Clients.Count(); i++ )
+	{
+		CReplayClient* client = Client(i);
+		
+		// Update Host client send state...
+		if ( !client->ShouldSendMessages() )
+		{
+			continue;
+		}
+
+		// Append the unreliable data (player updates and packet entities)
+		if ( m_CurrentFrame && client->IsActive() )
+		{
+			// don't send same snapshot twice
+			client->SendSnapshot( m_CurrentFrame );
+		}
+		else
+		{
+			// Connected, but inactive, just send reliable, sequenced info.
+			client->m_NetChannel->Transmit();
+		}
+
+		client->UpdateSendState();
+		client->m_fLastSendTime = net_time;
+	}
+}
+
 bool CReplayServer::SendNetMsg( INetMessage &msg, bool bForceReliable )
 {
 	if ( m_bSignonState	)
@@ -901,8 +1270,16 @@ IServer *CReplayServer::GetBaseServer()
 	return (IServer*)this;
 }
 
+IReplayDirector *CReplayServer::GetDirector()
+{
+	return m_Director;
+}
+
 CClientFrame *CReplayServer::GetDeltaFrame( int nTick )
 {
+	if ( !replay_deltacache.GetBool() )
+		return GetClientFrame( nTick ); //expensive
+
 	// TODO make that a utlmap
 	FOR_EACH_VEC( m_FrameCache, iFrame )
 	{
@@ -940,13 +1317,19 @@ void CReplayServer::RunFrame()
 	// world (stringtables, framebuffers) as they were at this time
 	UpdateTick();
 
+	// Run any commands from client and play client Think functions if it is time.
+	CBaseServer::RunFrame();
+
+	SendClientMessages( true );
+
 	// Update the Steam server if we're running a relay.
 	if ( !sv.IsActive() )
 		Steam3Server().RunFrame();
 	
 	UpdateMasterServer();
 
-	SendPendingEvents();
+//	::Con_NPrintf( 9 , "server time: %d", host_tickcount );
+//	::Con_NPrintf( 10, "replay time: %d", m_DemoRecorder.GetRecordingTick() );
 }
 
 void CReplayServer::UpdateTick( void )
@@ -960,8 +1343,16 @@ void CReplayServer::UpdateTick( void )
 		return;
 	}
 
+	// HACK: I'm not so sure this is the right place for this, but essentially the start tick needs to 
+	// represent the "oldest" tick in the cache of frames for a replay demo - for a regular demo, it need
+	// not be modified here.  NOTE: If this is a regular demo, this call does nothing.
+	m_DemoRecorder.m_DemoFile.UpdateStartTick( m_DemoRecorder.m_nStartTick );
+
 	// set tick time to last frame added
-	int nNewTick = MAX( m_nLastTick, 0 );
+	int nNewTick = m_nLastTick;
+
+	// get tick from director, he decides delay etc
+	nNewTick = MAX( m_nFirstTick, m_Director->GetDirectorTick() );
 
 	// the the closest available frame
 	CReplayFrame *newFrame = (CReplayFrame*) GetClientFrame( nNewTick, false );
@@ -978,6 +1369,12 @@ void CReplayServer::UpdateTick( void )
 	// restore string tables for this time
 	RestoreTick( m_nTickCount );
 
+	// remove entities out of current PVS
+	if ( !replay_transmitall.GetBool() )
+	{
+		EntityPVSCheck( m_CurrentFrame );	
+	}
+
 	int removeTick = m_nTickCount - 16.0f/m_flTickInterval; // keep 16 second buffer
 
 	if ( removeTick > 0 )
@@ -990,22 +1387,22 @@ void CReplayServer::UpdateTick( void )
 
 const char *CReplayServer::GetName( void ) const
 {
-	ConVarRef replay_name( "replay_name" );
 	return replay_name.GetString();
 }
 
-void CReplayServer::FillServerInfo(SVC_ServerInfo &serverinfo)
+void CReplayServer::FillServerInfo(CSVCMsg_ServerInfo &serverinfo)
 {
 	CBaseServer::FillServerInfo( serverinfo );
-	
-	serverinfo.m_nPlayerSlot = m_nPlayerSlot; // all spectators think they're the Replay client
-	serverinfo.m_nMaxClients = m_nGameServerMaxClients;
+
+	serverinfo.set_player_slot( m_nPlayerSlot ); // all spectators think they're the Replay client
+	serverinfo.set_max_clients( m_nGameServerMaxClients );
 }
 
 void CReplayServer::Clear( void )
 {
 	CBaseServer::Clear();
 
+	m_Director = NULL;
 	m_MasterClient = NULL;
 	m_Server = NULL;
 	m_nFirstTick = -1;
@@ -1019,6 +1416,7 @@ void CReplayServer::Clear( void )
 	m_fNextSendUpdateTime = 0.0f;
 	m_ReplayFrame.FreeBuffers();
 	m_vPVSOrigin.Init();
+	m_vecClientsDownloading.ClearAll();
 		
 	DeleteClientFrames( -1 );
 
@@ -1030,19 +1428,23 @@ void CReplayServer::Init(bool bIsDedicated)
 {
 	CBaseServer::Init( bIsDedicated );
 
-	// No broadcasting
-	m_bMasterOnlyMode = true;
+	m_Socket = NS_REPLAY;
+	
+	// check if only master proxy is allowed, no broadcasting
+	if ( CommandLine()->FindParm("-tvmasteronly") )
+	{
+		m_bMasterOnlyMode = true;
+	}
 }
 
 void CReplayServer::Changelevel()
 {
-	if ( g_pReplay->IsRecording() )
-	{
-		g_pReplay->SV_EndRecordingSession();
-	}
+	m_DemoRecorder.StopRecording();
 
 	InactivateClients();
+
 	DeleteClientFrames(-1);
+
 	m_CurrentFrame = NULL;
 }
 
@@ -1051,20 +1453,17 @@ void CReplayServer::GetNetStats( float &avgIn, float &avgOut )
 	CBaseServer::GetNetStats( avgIn, avgOut	);
 }
 
-void CReplayServer::Shutdown()
+void CReplayServer::Shutdown( void )
 {
-	StopRecording(); // if recording, stop now
+	m_DemoRecorder.StopRecording(); // if recording, stop now
 
 	if ( m_MasterClient )
 		m_MasterClient->Disconnect( "Replay stop." );
 
-	g_GameEventManager.RemoveListener( this );
+	if ( m_Director )
+		m_Director->SetReplayServer( NULL );
 
-	// Delete the temp replay if it exists
-	if ( g_pFullFileSystem->FileExists( TMP_REPLAY_FILENAME ) )
-	{
-		g_pFullFileSystem->RemoveFile( TMP_REPLAY_FILENAME );
-	}
+	g_GameEventManager.RemoveListener( this );
 
 	CBaseServer::Shutdown();
 }
@@ -1076,91 +1475,109 @@ int	CReplayServer::GetChallengeType ( netadr_t &adr )
 
 const char *CReplayServer::GetPassword() const
 {
-	return NULL;
-}
+	const char *password = replay_password.GetString();
 
-IClient *CReplayServer::ConnectClient ( netadr_t &adr, int protocol, int challenge, int clientChallenge, int authProtocol, 
-									 const char *name, const char *password, const char *hashedCDkey, int cdKeyLen )
-{
-	// Don't let anyone connect to the replay server
-	return NULL;
-}
-
-void CReplayServer::ReplyChallenge(netadr_t &adr, int clientChallenge )
-{
-	// No reply for replay.
-	return;
-}
-
-void CReplayServer::ReplyServerChallenge(netadr_t &adr)
-{
-	return;
-}
-
-void CReplayServer::RejectConnection( const netadr_t &adr, int clientChallenge, const char *s )
-{
-	return;
-}
-
-CBaseClient *CReplayServer::CreateFakeClient(const char *name)
-{
-	return NULL;
-}
-
-void CReplayServer::StartRecording()
-{
-	if ( m_DemoRecorder.IsRecording() )
-		return;
-
-	extern ConVar replay_debug;
-	if ( replay_debug.GetBool() )	Msg( "CReplayServer::StartRecording() now, %f\n", host_time );
-
-	m_DemoRecorder.StartRecording();
-	m_flStartRecordTime = host_time;
-}
-
-void CReplayServer::StopRecording()
-{
-	if ( !m_DemoRecorder.IsRecording() )
-		return;
-
-	m_DemoRecorder.StopRecording();
-	m_flStopRecordTime = host_time;
-}
-
-void CReplayServer::SendPendingEvents()
-{
-	// Did we recently stop recording?
-	if ( m_flStopRecordTime != 0.0f )
+	// if password is empty or "none", return NULL
+	if ( !password[0] || !Q_stricmp(password, "none" ) )
 	{
-		// Let clients know the server has stopped recording replays
-		g_pReplay->SV_SendReplayEvent( "replay_endrecord", -1 );
-
-		// Reset stop record time
-		m_flStopRecordTime = 0.0f;
+		return NULL;
 	}
 
-	// Did we recently begin recording?
-	if ( m_flStartRecordTime != 0.0f )
+	return password;
+}
+
+IClient *CReplayServer::ConnectClient ( const ns_address &adr, int protocol, int challenge, int authProtocol, 
+									    const char *name, const char *password, const char *hashedCDkey, int cdKeyLen,
+									    CUtlVector< CCLCMsg_SplitPlayerConnect_t * > & splitScreenClients, bool isClientLowViolence, CrossPlayPlatform_t clientPlatform,
+										const byte *pbEncryptionKey, int nEncryptionKeyIndex )
+{
+	IClient	*client = (CReplayClient*)CBaseServer::ConnectClient( 
+		adr, protocol, challenge,authProtocol, name, password, hashedCDkey, cdKeyLen, splitScreenClients, isClientLowViolence, clientPlatform,
+		pbEncryptionKey, nEncryptionKeyIndex );
+
+	if ( client )
 	{
-		// Send start record event to everyone
-		g_pReplay->SV_SendReplayEvent( "replay_startrecord", -1 );
-
-		// Send recording session info to everyone
-		IGameEvent *pSessionInfoEvent = g_pServerReplayContext->CreateReplaySessionInfoEvent();
-		if ( pSessionInfoEvent )
-		{
-			// Let clients know the server is ready to capture replays
-			g_pReplay->SV_SendReplayEvent( pSessionInfoEvent, -1 );
-		}
-		else
-		{
-			AssertMsg( 0, "Failed to create replay_sessioninfo event!" );
-		}
-
-		// Reset the start record timer
-		m_flStartRecordTime = 0.0f;
+		// remember password
+		CReplayClient *pReplayClient = (CReplayClient*)client;
+		Q_strncpy( pReplayClient->m_szPassword, password, sizeof(pReplayClient->m_szPassword) );
 	}
+
+	return client;
+}
+
+CON_COMMAND( replay_status, "Show Replay server status." ) 
+{
+	float	in, out;
+	char	gd[MAX_OSPATH];
+
+	Q_FileBase( com_gamedir, gd, sizeof( gd ) );
+
+	if ( !replay || !replay->IsActive() )
+	{
+		ConMsg("Replay not active.\n" );
+		return;
+	}
+
+	replay->GetNetStats( in, out );
+
+	in /= 1024; // as KB
+	out /= 1024;
+
+	ConMsg("--- Replay Status ---\n");
+	ConMsg("Online %s, FPS %.1f, Version %i (%s)\n", 
+		COM_FormatSeconds( replay->GetOnlineTime() ), replay->m_flFPS, build_number(),
+
+#ifdef _WIN32
+		"Win32" );
+#else
+		"Linux" );
+#endif
+
+	ConMsg("Master \"%s\", delay %.0f\n", replay->GetName(), replay->GetDirector()->GetDelay() );
+
+	ConMsg("Game Time %s, Mod \"%s\", Map \"%s\", Players %i\n", COM_FormatSeconds( replay->GetTime() ),
+		gd, replay->GetMapName(), replay->GetNumPlayers() );
+
+	ConMsg("Local IP %s:%i, KB/sec In %.1f, Out %.1f\n",
+		net_local_adr.ToString( true ), replay->GetUDPPort(), in ,out );
+
+	if ( replay->m_DemoRecorder.IsRecording() )
+	{
+		ConMsg("Recording to \"%s\", length %s.\n", replay->m_DemoRecorder.GetDemoFile()->m_szFileName, 
+			COM_FormatSeconds( host_state.interval_per_tick * replay->m_DemoRecorder.GetRecordingTick() ) );
+	}		
+}
+
+CON_COMMAND( replay_record, "Starts Replay demo recording." )
+{
+#if 0
+	AssertMsg( 0, "Use replay_autorecord 1!" );
+#else
+	if ( !replay || !replay->IsActive() )
+	{
+		ConMsg("Replay not active.\n" );
+		return;
+	}
+
+	if ( replay->m_DemoRecorder.IsRecording() )
+	{
+		ConMsg("Replay already recording to %s.\n", replay->m_DemoRecorder.GetDemoFile()->m_szFileName );
+		return;
+	}
+
+	replay->m_DemoRecorder.StartAutoRecording();
+#endif
+}
+
+CON_COMMAND( replay_stoprecord, "Stops Replay demo recording." )
+{
+	if ( !replay || !replay->IsActive() )
+	{
+		ConMsg("Replay not active.\n" );
+		return;
+	}
+	
+	replay->m_DemoRecorder.StopRecording();
 }
 
 #endif

@@ -1,12 +1,10 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
 // $NoKeywords: $
 //=============================================================================//
 #include "quakedef.h"
-#include "networkstringtable.h"
-#include "networkstringtableitem.h"
 #include "networkstringtable.h"
 #include "utlvector.h"
 #include "eiface.h"
@@ -25,7 +23,7 @@ static CNetworkStringTableContainer s_NetworkStringTableServer;
 CNetworkStringTableContainer *networkStringTableContainerServer = &s_NetworkStringTableServer;
 
 // Expose interface
-EXPOSE_SINGLE_INTERFACE_GLOBALVAR(CNetworkStringTableContainerServer, INetworkStringTableContainer, INTERFACENAME_NETWORKSTRINGTABLESERVER, s_NetworkStringTableServer );
+EXPOSE_SINGLE_INTERFACE_GLOBALVAR(CNetworkStringTableContainer, INetworkStringTableContainer, INTERFACENAME_NETWORKSTRINGTABLESERVER, s_NetworkStringTableServer );
 
 #ifdef SHARED_NET_STRING_TABLES
 	// Expose same interface to client .dll as client string tables
@@ -35,8 +33,11 @@ EXPOSE_SINGLE_INTERFACE_GLOBALVAR(CNetworkStringTableContainerServer, INetworkSt
 //-----------------------------------------------------------------------------
 // Purpose: 
 //-----------------------------------------------------------------------------
-void SV_CreateNetworkStringTables( void )
+void SV_CreateNetworkStringTables( char const *pchMapName )
 {
+	// Gather the string table dictionary from the .bsp file
+	g_pStringTableDictionary->OnLevelLoadStart( pchMapName, NULL );
+
 	// Remove any existing tables
 	s_NetworkStringTableServer.RemoveAllTables();
 
@@ -60,3 +61,7 @@ void SV_PrintStringTables( void )
 	s_NetworkStringTableServer.Dump();
 }
 
+void SV_CreateDictionary( char const *pchMapName )
+{
+	s_NetworkStringTableServer.CreateDictionary( pchMapName );
+}

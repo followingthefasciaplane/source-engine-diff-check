@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -641,7 +641,7 @@ void CDemoSmootherPanel::OnPreview( bool original )
 	m_bPreviewing = true;
 	m_bPreviewPaused = false;
 	m_bPreviewOriginal = original;
-	SetLastFrame( false, max( 0, m_nSelection[0] - 10 ) );
+	SetLastFrame( false, MAX( 0, m_nSelection[0] - 10 ) );
 	m_iPreviewStartTick = GetTickForFrame( m_nPreviewLastFrame );
 	m_fPreviewCurrentTime = TICKS_TO_TIME( m_iPreviewStartTick );
 }
@@ -655,6 +655,12 @@ void CDemoSmootherPanel::OnPreview( bool original )
 //-----------------------------------------------------------------------------
 bool CDemoSmootherPanel::OverrideView( democmdinfo_t& info, int tick )
 {
+	ASSERT_LOCAL_PLAYER_RESOLVABLE();
+	int nSlot = GET_ACTIVE_SPLITSCREEN_SLOT();
+
+	if ( nSlot != 0 )
+		return false;
+
 	if ( !CanEdit() )
 		return false;
 
@@ -665,17 +671,17 @@ bool CDemoSmootherPanel::OverrideView( democmdinfo_t& info, int tick )
 	{
 		if ( m_bPreviewPaused && GetCurrent() && GetCurrent()->samplepoint )
 		{
-			info.viewOrigin = GetCurrent()->vecmoved;
-			info.viewAngles = GetCurrent()->angmoved;
-			info.localViewAngles = info.viewAngles;
+			info.u[ nSlot ].viewOrigin = GetCurrent()->vecmoved;
+			info.u[ nSlot ].viewAngles = GetCurrent()->angmoved;
+			info.u[ nSlot ].localViewAngles = info.u[ nSlot ].viewAngles;
 
 			bool back_off = m_pBackOff->IsSelected();
 			if ( back_off )
 			{
 				Vector fwd;
-				AngleVectors( info.viewAngles, &fwd, NULL, NULL );
+				AngleVectors( info.u[ nSlot ].viewAngles, &fwd, NULL, NULL );
 
-				info.viewOrigin -= fwd * 75.0f;
+				info.u[ nSlot ].viewOrigin -= fwd * 75.0f;
 			}
 
 			return true;
@@ -687,9 +693,9 @@ bool CDemoSmootherPanel::OverrideView( democmdinfo_t& info, int tick )
 			m_fPreviewCurrentTime += host_frametime;
 		}
 
-		if ( GetInterpolatedViewPoint( info.viewOrigin, info.viewAngles ) )
+		if ( GetInterpolatedViewPoint( nSlot, info.u[ nSlot ].viewOrigin, info.u[ nSlot ].viewAngles ) )
 		{
-			info.localViewAngles = info.viewAngles;
+			info.u[ nSlot ].localViewAngles = info.u[ nSlot ].viewAngles;
 			return true;
 		}
 		else
@@ -707,9 +713,9 @@ bool CDemoSmootherPanel::OverrideView( democmdinfo_t& info, int tick )
 		{
 			demosmoothing_t	*p = &m_Smoothing.smooth[ useframe ];
 			Vector fwd;
-			AngleVectors( p->info.viewAngles, &fwd, NULL, NULL );
+			AngleVectors( p->info.u[ nSlot ].viewAngles, &fwd, NULL, NULL );
 
-			info.viewOrigin = p->info.viewOrigin - fwd * 75.0f;
+			info.u[ nSlot ].viewOrigin = p->info.u[ nSlot ].viewOrigin - fwd * 75.0f;
 		}
 	}
 
@@ -808,24 +814,26 @@ void CDemoSmootherPanel::DrawSmoothingSample( bool original, bool processed, int
 {
 	int r, g, b;
 
+	int nSlot = 0;
+
 	if ( original )
 	{
-		RenderLine( sample->info.viewOrigin + m_vecEyeOffset, next->info.viewOrigin + m_vecEyeOffset,
+		RenderLine( sample->info.u[ nSlot ].viewOrigin + m_vecEyeOffset, next->info.u[ nSlot ].viewOrigin + m_vecEyeOffset,
 			Color( 180, 180, 180, 255 ), true );
 
 		GetColorForSample( true, false, false, sample, r, g, b );
 
-		DrawVecForward( false, sample->info.viewOrigin + m_vecEyeOffset, sample->info.viewAngles, r, g, b );
+		DrawVecForward( false, sample->info.u[ nSlot ].viewOrigin + m_vecEyeOffset, sample->info.u[ nSlot ].viewAngles, r, g, b );
 	}
 
-	if ( processed && sample->info.flags != 0 )
+	if ( processed && sample->info.u[ nSlot ].flags != 0 )
 	{
-		RenderLine( sample->info.GetViewOrigin() + m_vecEyeOffset, next->info.GetViewOrigin() + m_vecEyeOffset,
+		RenderLine( sample->info.u[ nSlot ].GetViewOrigin() + m_vecEyeOffset, next->info.u[ nSlot ].GetViewOrigin() + m_vecEyeOffset,
 			Color( 255, 255, 180, 255 ), true );
 
 		GetColorForSample( false, false, false, sample, r, g, b );
 
-		DrawVecForward( false, sample->info.GetViewOrigin() + m_vecEyeOffset, sample->info.GetViewAngles(), r, g, b );
+		DrawVecForward( false, sample->info.u[ nSlot ].GetViewOrigin() + m_vecEyeOffset, sample->info.u[ nSlot ].GetViewAngles(), r, g, b );
 	}
 	if ( sample->samplepoint )
 	{
@@ -845,7 +853,7 @@ void CDemoSmootherPanel::DrawSmoothingSample( bool original, bool processed, int
 		r = 50;
 		g = 100;
 		b = 250;
-		RenderBox( sample->info.GetViewOrigin() + m_vecEyeOffset, sample->info.GetViewAngles(), Vector( -2, -2, -2 ), Vector( 2, 2, 2 ), Color( r, g, b, 92 ), false );
+		RenderBox( sample->info.u[ nSlot ].GetViewOrigin() + m_vecEyeOffset, sample->info.u[ nSlot ].GetViewAngles(), Vector( -2, -2, -2 ), Vector( 2, 2, 2 ), Color( r, g, b, 92 ), false );
 	}
 
 	if ( sample->targetpoint )
@@ -854,7 +862,7 @@ void CDemoSmootherPanel::DrawSmoothingSample( bool original, bool processed, int
 		g = 200;
 		b = 220;
 
-		RenderLine( sample->info.GetViewOrigin() + m_vecEyeOffset, sample->vectarget, Color( r, g, b, 255 ), true );
+		RenderLine( sample->info.u[ nSlot ].GetViewOrigin() + m_vecEyeOffset, sample->vectarget, Color( r, g, b, 255 ), true );
 	}
 }
 
@@ -864,6 +872,11 @@ void CDemoSmootherPanel::DrawSmoothingSample( bool original, bool processed, int
 //-----------------------------------------------------------------------------
 void CDemoSmootherPanel::DrawDebuggingInfo(  int frame, float elapsed )
 {
+	if ( GET_ACTIVE_SPLITSCREEN_SLOT() != 0 )
+		return;
+
+	int nSlot = 0;
+
 	if ( !CanEdit() )
 		return;
 
@@ -880,14 +893,14 @@ void CDemoSmootherPanel::DrawDebuggingInfo(  int frame, float elapsed )
 	bool showall = m_pShowAllSamples->IsSelected();
 	if ( !showall )
 	{
-		start = max( frame - 200, 0 );
-		end = min( frame + 200, c - 1 );
+		start = MAX( frame - 200, 0 );
+		end = MIN( frame + 200, c - 1 );
 	}
 
 	if ( m_bHasSelection && !showall )
 	{
-		start = max( m_nSelection[ 0 ] - 10, 0 );
-		end = min( m_nSelection[ 1 ] + 10, c - 1 );
+		start = MAX( m_nSelection[ 0 ] - 10, 0 );
+		end = MIN( m_nSelection[ 1 ] + 10, c - 1 );
 	}
 
 	bool draworiginal = !m_pHideOriginal->IsSelected();
@@ -911,7 +924,7 @@ void CDemoSmootherPanel::DrawDebuggingInfo(  int frame, float elapsed )
 
 	if ( m_bPreviewing )
 	{
-		if ( GetInterpolatedOriginAndAngles( true, org, ang ) )
+		if ( GetInterpolatedOriginAndAngles( nSlot, true, org, ang ) )
 		{
 			DrawVecForward( true, org + m_vecEyeOffset, ang, 200, 10, 50 );
 		}
@@ -923,8 +936,8 @@ void CDemoSmootherPanel::DrawDebuggingInfo(  int frame, float elapsed )
 	if ( useframe < c )
 	{
 		p = &m_Smoothing.smooth[ useframe ];
-		org = p->info.GetViewOrigin();
-		ang = p->info.GetViewAngles();
+		org = p->info.u[ nSlot ].GetViewOrigin();
+		ang = p->info.u[ nSlot ].GetViewAngles();
 
 		DrawVecForward( true, org + m_vecEyeOffset, ang, 100, 220, 250 );
 		Draw_Box( org + m_vecEyeOffset, Vector( -1, -1, -1 ), Vector( 1, 1, 1 ), ang, 100, 220, 250, 127 );
@@ -1090,7 +1103,7 @@ static void InterpolateAngles( const QAngle& start, const QAngle& end, QAngle& o
 	QuaternionAngles( result, output );
 }
 
-bool CDemoSmootherPanel::GetInterpolatedOriginAndAngles( bool readonly, Vector& origin, QAngle& angles )
+bool CDemoSmootherPanel::GetInterpolatedOriginAndAngles( int nSlot, bool readonly, Vector& origin, QAngle& angles )
 {
 	origin.Init();
 	angles.Init();
@@ -1119,7 +1132,7 @@ bool CDemoSmootherPanel::GetInterpolatedOriginAndAngles( bool readonly, Vector& 
 		demosmoothing_t	*startsample = &m_Smoothing.smooth[ startframe ];
 		demosmoothing_t	*endsample = &m_Smoothing.smooth[ nextframe ];
 
-		if ( nextframe >= min( m_nSelection[1] + 10, c - 1 ) )
+		if ( nextframe >= MIN( m_nSelection[1] + 10, c - 1 ) )
 		{
 			if ( !readonly )
 			{
@@ -1140,7 +1153,7 @@ bool CDemoSmootherPanel::GetInterpolatedOriginAndAngles( bool readonly, Vector& 
 		if ( TICKS_TO_TIME( endsample->frametick ) >= time )
 		{
 			// Found a spot
-			dt = TICKS_TO_TIME( endsample->frametick - startsample->frametick );
+			float dt = TICKS_TO_TIME( endsample->frametick - startsample->frametick );
 			// Should never occur!!!
 			if ( dt <= 0.0f )
 			{
@@ -1157,13 +1170,13 @@ bool CDemoSmootherPanel::GetInterpolatedOriginAndAngles( bool readonly, Vector& 
 
 			if ( m_bPreviewOriginal )
 			{
-				VectorLerp( startsample->info.viewOrigin, endsample->info.viewOrigin, frac, renderOrigin );
-				InterpolateAngles( startsample->info.viewAngles, endsample->info.viewAngles, renderAngles, frac );
+				VectorLerp( startsample->info.u[ nSlot ].viewOrigin, endsample->info.u[ nSlot ].viewOrigin, frac, renderOrigin );
+				InterpolateAngles( startsample->info.u[ nSlot ].viewAngles, endsample->info.u[ nSlot ].viewAngles, renderAngles, frac );
 			}
 			else
 			{
-				VectorLerp( startsample->info.GetViewOrigin(), endsample->info.GetViewOrigin(), frac, renderOrigin );
-				InterpolateAngles( startsample->info.GetViewAngles(), endsample->info.GetViewAngles(), renderAngles, frac );
+				VectorLerp( startsample->info.u[ nSlot ].GetViewOrigin(), endsample->info.u[ nSlot ].GetViewOrigin(), frac, renderOrigin );
+				InterpolateAngles( startsample->info.u[ nSlot ].GetViewAngles(), endsample->info.u[ nSlot ].GetViewAngles(), renderAngles, frac );
 			}
 
 			origin = renderOrigin;
@@ -1189,11 +1202,11 @@ bool CDemoSmootherPanel::GetInterpolatedOriginAndAngles( bool readonly, Vector& 
 // Purpose: 
 // Input  : t - 
 //-----------------------------------------------------------------------------
-bool CDemoSmootherPanel::GetInterpolatedViewPoint(  Vector& origin, QAngle& angles )
+bool CDemoSmootherPanel::GetInterpolatedViewPoint( int nSlot, Vector& origin, QAngle& angles )
 {
 	Assert( m_bPreviewing );
 
-	if ( !GetInterpolatedOriginAndAngles( false, origin, angles ) )
+	if ( !GetInterpolatedOriginAndAngles( nSlot, false, origin, angles ) )
 		return false;
 
 	bool back_off = m_pBackOff->IsSelected();
@@ -1227,7 +1240,7 @@ void CDemoSmootherPanel::OnStep( bool forward )
 	int c = m_Smoothing.smooth.Count();
 
 	SetLastFrame( false, m_nPreviewLastFrame + ( forward ? 1 : -1 ) );
-	SetLastFrame( false, clamp( m_nPreviewLastFrame, max( m_nSelection[ 0 ] - 10, 0 ), min( m_nSelection[ 1 ] + 10, c - 1 ) ) );
+	SetLastFrame( false, clamp( m_nPreviewLastFrame, MAX( m_nSelection[ 0 ] - 10, 0 ), MIN( m_nSelection[ 1 ] + 10, c - 1 ) ) );
 	m_fPreviewCurrentTime = TICKS_TO_TIME( GetTickForFrame( m_nPreviewLastFrame ) );
 }
 
@@ -1235,6 +1248,8 @@ void CDemoSmootherPanel::DrawLegend( int startframe, int endframe )
 {
 	int i;
 	int skip = 20;
+
+	int nSlot = 0;
 
 	bool back_off = m_pBackOff->IsSelected();
 
@@ -1253,9 +1268,9 @@ void CDemoSmootherPanel::DrawLegend( int startframe, int endframe )
 		Q_snprintf( sz, sizeof( sz ), "%.3f", TICKS_TO_TIME(sample->frametick) );
 
 		Vector fwd;
-		AngleVectors( sample->info.GetViewAngles(), &fwd, NULL, NULL );
+		AngleVectors( sample->info.u[ nSlot ].GetViewAngles(), &fwd, NULL, NULL );
 
-		CDebugOverlay::AddTextOverlay( sample->info.GetViewOrigin() + m_vecEyeOffset + fwd * ( back_off ? 5.0f : 50.0f ), 0, -1.0f, sz );
+		CDebugOverlay::AddTextOverlay( sample->info.u[ nSlot ].GetViewOrigin() + m_vecEyeOffset + fwd * ( back_off ? 5.0f : 50.0f ), 0, -1.0f, sz );
 	}
 }
 
@@ -1317,14 +1332,16 @@ void CDemoSmootherPanel::OnSetKeys(float interval)
 
 	demosmoothing_t *lastkey = NULL;
 
+	int nSlot = 0;
+
 	for ( i = 0; i < c; i++ )
 	{
 		demosmoothing_t	*p = &m_Smoothing.smooth[ i ];
 		if ( !p->selected )
 			continue;
 
-		p->angmoved = p->info.GetViewAngles();;
-		p->vecmoved = p->info.GetViewOrigin();
+		p->angmoved = p->info.u[ nSlot ].GetViewAngles();;
+		p->vecmoved = p->info.u[ nSlot ].GetViewOrigin();
 		p->samplepoint = false;
 
 		if ( !lastkey || 
@@ -1346,6 +1363,8 @@ void CDemoSmootherPanel::OnSmoothSelectionAngles( void )
 	if ( !m_bHasSelection )
 		return;
 
+	int nSlot = 0;
+
 	int c = m_Smoothing.smooth.Count();
 	int i;
 
@@ -1366,18 +1385,18 @@ void CDemoSmootherPanel::OnSmoothSelectionAngles( void )
 		}
 
 		Quaternion q;
-		AngleQuaternion( p->info.GetViewAngles(), q );
+		AngleQuaternion( p->info.u[ nSlot ].GetViewAngles(), q );
 		stack.AddToTail( q );
 
-		p->info.flags |= FDEMO_USE_ANGLES2;
+		p->info.u[ nSlot ].flags |= FDEMO_USE_ANGLES2;
 
 		Quaternion aveq = SmoothAngles( stack );
 
 		QAngle outangles;
 		QuaternionAngles( aveq, outangles );
 
-		p->info.viewAngles2 = outangles;
-		p->info.localViewAngles2 = outangles;
+		p->info.u[ nSlot ].viewAngles2 = outangles;
+		p->info.u[ nSlot ].localViewAngles2 = outangles;
 	}
 
 	PushRedo( "smooth angles" );
@@ -1399,6 +1418,8 @@ void CDemoSmootherPanel::OnSmoothSelectionOrigin( void )
 	m_bDirty = true;
 	PushUndo( "smooth origin" );
 
+	int nSlot = 0;
+
 	for ( i = 0; i < c; i++ )
 	{
 		demosmoothing_t	*p = &m_Smoothing.smooth[ i ];
@@ -1415,14 +1436,14 @@ void CDemoSmootherPanel::OnSmoothSelectionOrigin( void )
 
 		for ( int j = -2; j <= 2; j++ )
 		{
-			stack.AddToTail( m_Smoothing.smooth[ i + j ].info.GetViewOrigin() );
+			stack.AddToTail( m_Smoothing.smooth[ i + j ].info.u[ nSlot ].GetViewOrigin() );
 		}
 
-		p->info.flags |= FDEMO_USE_ORIGIN2;
+		p->info.u[ nSlot ].flags |= FDEMO_USE_ORIGIN2;
 
 		Vector org = SmoothOrigin( stack );
 
-		p->info.viewOrigin2 = org;
+		p->info.u[ nSlot ].viewOrigin2 = org;
 	}
 
 	PushRedo( "smooth origin" );
@@ -1439,11 +1460,13 @@ void CDemoSmootherPanel::PerformLinearInterpolatedAngleSmoothing( int startframe
 		dt = 1;
 	}
 
+	int nSlot = 0;
+
 	CUtlVector< Quaternion > stack;
 
 	Quaternion qstart, qend;
-	AngleQuaternion( pstart->info.GetViewAngles(), qstart );
-	AngleQuaternion( pend->info.GetViewAngles(), qend );
+	AngleQuaternion( pstart->info.u[ nSlot ].GetViewAngles(), qstart );
+	AngleQuaternion( pend->info.u[ nSlot ].GetViewAngles(), qend );
 
 	for ( int i = startframe; i <= endframe; i++ )
 	{
@@ -1454,7 +1477,7 @@ void CDemoSmootherPanel::PerformLinearInterpolatedAngleSmoothing( int startframe
 
 		frac = clamp( frac, 0.0f, 1.0f );
 
-		p->info.flags |= FDEMO_USE_ANGLES2;
+		p->info.u[ nSlot ].flags |= FDEMO_USE_ANGLES2;
 
 		Quaternion interpolated;
 
@@ -1463,8 +1486,8 @@ void CDemoSmootherPanel::PerformLinearInterpolatedAngleSmoothing( int startframe
 		QAngle outangles;
 		QuaternionAngles( interpolated, outangles );
 
-		p->info.viewAngles2 = outangles;
-		p->info.localViewAngles2 = outangles;
+		p->info.u[ nSlot ].viewAngles2 = outangles;
+		p->info.u[ nSlot ].localViewAngles2 = outangles;
 	}
 }
 
@@ -1505,9 +1528,11 @@ void CDemoSmootherPanel::OnLinearInterpolateOriginBasedOnEndpoints( void )
 	m_bDirty = true;
 	PushUndo( "linear interp origin" );
 
+	int nSlot = 0;
+
 	Vector vstart, vend;
-	vstart = pstart->info.GetViewOrigin();
-	vend = pend->info.GetViewOrigin();
+	vstart = pstart->info.u[ nSlot ].GetViewOrigin();
+	vend = pend->info.u[ nSlot ].GetViewOrigin();
 
 	for ( int i = m_nSelection[0]; i <= m_nSelection[1]; i++ )
 	{
@@ -1518,13 +1543,13 @@ void CDemoSmootherPanel::OnLinearInterpolateOriginBasedOnEndpoints( void )
 
 		frac = clamp( frac, 0.0f, 1.0f );
 
-		p->info.flags |= FDEMO_USE_ORIGIN2;
+		p->info.u[ nSlot ].flags |= FDEMO_USE_ORIGIN2;
 
 		Vector interpolated;
 
 		VectorLerp( vstart, vend, frac, interpolated );
 
-		p->info.viewOrigin2 = interpolated;
+		p->info.u[ nSlot ].viewOrigin2 = interpolated;
 	}
 
 	PushRedo( "linear interp origin" );
@@ -1540,11 +1565,13 @@ void CDemoSmootherPanel::OnRevertPoint( void )
 	m_bDirty = true;
 	PushUndo( "revert point" );
 
-	p->angmoved = p->info.GetViewAngles();
-	p->vecmoved = p->info.GetViewOrigin();
+	int nSlot = 0;
+
+	p->angmoved = p->info.u[ nSlot ].GetViewAngles();
+	p->vecmoved = p->info.u[ nSlot ].GetViewOrigin();
 	p->samplepoint = false;
 
-	p->vectarget = p->info.GetViewOrigin();
+	p->vectarget = p->info.u[ nSlot ].GetViewOrigin();
 	p->targetpoint = false;
 
 //	m_ViewOrigin = p->info.viewOrigin;
@@ -1667,6 +1694,7 @@ void CDemoSmootherPanel::OnSplineSampleOrigin( void )
 
 	m_bDirty = true;
 	PushUndo( "spline origin" );
+	int nSlot = 0;
 
 	for ( int i = m_nSelection[0]; i <= m_nSelection[1]; i++ )
 	{
@@ -1700,8 +1728,8 @@ void CDemoSmootherPanel::OnSplineSampleOrigin( void )
 
 		Catmull_Rom_Spline_Normalize( earliest->vecmoved, current->vecmoved, next->vecmoved, latest->vecmoved, frac, splined );
 
-		p->info.flags |= FDEMO_USE_ORIGIN2;
-		p->info.viewOrigin2 = splined;
+		p->info.u[ nSlot ].flags |= FDEMO_USE_ORIGIN2;
+		p->info.u[ nSlot ].viewOrigin2 = splined;
 	}
 
 	PushRedo( "spline origin" );
@@ -1732,6 +1760,7 @@ void CDemoSmootherPanel::OnSplineSampleAngles( void )
 
 	m_bDirty = true;
 	PushUndo( "spline angles" );
+	int nSlot = 0;
 
 	for ( int i = m_nSelection[0]; i <= m_nSelection[1]; i++ )
 	{
@@ -1763,9 +1792,9 @@ void CDemoSmootherPanel::OnSplineSampleAngles( void )
 
 		InterpolateAngles( current->angmoved, next->angmoved, splined, frac );
 
-		p->info.flags |= FDEMO_USE_ANGLES2;
-		p->info.viewAngles2 = splined;
-		p->info.localViewAngles2 = splined;
+		p->info.u[ nSlot ].flags |= FDEMO_USE_ANGLES2;
+		p->info.u[ nSlot ].viewAngles2 = splined;
+		p->info.u[ nSlot ].localViewAngles2 = splined;
 	}
 
 	PushRedo( "spline angles" );
@@ -1796,6 +1825,7 @@ void CDemoSmootherPanel::OnLookAtPoints( bool spline )
 
 	m_bDirty = true;
 	PushUndo( "lookat points" );
+	int nSlot = 0;
 
 	for ( i = m_nSelection[0]; i <= m_nSelection[1]; i++ )
 	{
@@ -1837,15 +1867,15 @@ void CDemoSmootherPanel::OnLookAtPoints( bool spline )
 			VectorMA( current->vectarget, frac, d, splined );
 		}
 		
-		Vector vecToTarget = splined - ( p->info.GetViewOrigin() + m_vecEyeOffset );
+		Vector vecToTarget = splined - ( p->info.u[ nSlot ].GetViewOrigin() + m_vecEyeOffset );
 		VectorNormalize( vecToTarget );
 
 		QAngle angles;
 		VectorAngles( vecToTarget, angles );
 
-		p->info.flags |= FDEMO_USE_ANGLES2;
-		p->info.viewAngles2 = angles;
-		p->info.localViewAngles2 = angles;
+		p->info.u[ nSlot ].flags |= FDEMO_USE_ANGLES2;
+		p->info.u[ nSlot ].viewAngles2 = angles;
+		p->info.u[ nSlot ].localViewAngles2 = angles;
 	}
 
 	PushRedo( "lookat points" );
@@ -1855,7 +1885,7 @@ void CDemoSmootherPanel::SetLastFrame( bool jumptotarget, int frame )
 {
 	// bool changed = frame != m_nPreviewLastFrame;
 	
-	int useFrame = max( m_Smoothing.m_nFirstSelectableSample, frame );
+	int useFrame = MAX( m_Smoothing.m_nFirstSelectableSample, frame );
 
 	m_nPreviewLastFrame = useFrame;
 
@@ -1894,7 +1924,7 @@ void CDemoSmootherPanel::SetLastFrame( bool jumptotarget, int frame )
 // Undo/Redo
 void CDemoSmootherPanel::Undo( void )
 {
-	if ( m_UndoStack.Size() > 0 && m_nUndoLevel > 0 )
+	if ( m_UndoStack.Count() > 0 && m_nUndoLevel > 0 )
 	{
 		m_nUndoLevel--;
 		DemoSmoothUndo *u = m_UndoStack[ m_nUndoLevel ];
@@ -1907,7 +1937,7 @@ void CDemoSmootherPanel::Undo( void )
 
 void CDemoSmootherPanel::Redo( void )
 {
-	if ( m_UndoStack.Size() > 0 && m_nUndoLevel <= m_UndoStack.Size() - 1 )
+	if ( m_UndoStack.Count() > 0 && m_nUndoLevel <= m_UndoStack.Count() - 1 )
 	{
 		DemoSmoothUndo *u = m_UndoStack[ m_nUndoLevel ];
 		Assert( u->redo );
@@ -1919,7 +1949,7 @@ void CDemoSmootherPanel::Redo( void )
 	InvalidateLayout();
 }
 
-void CDemoSmootherPanel::PushUndo( const char *description )
+void CDemoSmootherPanel::PushUndo( char *description )
 {
 	Assert( !m_bRedoPending );
 	m_bRedoPending = true;
@@ -1937,7 +1967,7 @@ void CDemoSmootherPanel::PushUndo( const char *description )
 	m_nUndoLevel++;
 }
 
-void CDemoSmootherPanel::PushRedo( const char *description )
+void CDemoSmootherPanel::PushRedo( char *description )
 {
 	Assert( m_bRedoPending );
 	m_bRedoPending = false;
@@ -1952,7 +1982,7 @@ void CDemoSmootherPanel::PushRedo( const char *description )
 
 void CDemoSmootherPanel::WipeUndo( void )
 {
-	while ( m_UndoStack.Size() > 0 )
+	while ( m_UndoStack.Count() > 0 )
 	{
 		DemoSmoothUndo *u = m_UndoStack[ 0 ];
 		delete u->undo;
@@ -1968,7 +1998,7 @@ void CDemoSmootherPanel::WipeUndo( void )
 void CDemoSmootherPanel::WipeRedo( void )
 {
 	// Wipe everything above level
-	while ( m_UndoStack.Size() > m_nUndoLevel )
+	while ( m_UndoStack.Count() > m_nUndoLevel )
 	{
 		DemoSmoothUndo *u = m_UndoStack[ m_nUndoLevel ];
 		delete u->undo;
@@ -2000,7 +2030,7 @@ const char *CDemoSmootherPanel::GetUndoDescription( void )
 //-----------------------------------------------------------------------------
 const char *CDemoSmootherPanel::GetRedoDescription( void )
 {
-	if ( m_nUndoLevel != m_UndoStack.Size() )
+	if ( m_nUndoLevel != m_UndoStack.Count() )
 	{
 		DemoSmoothUndo *u = m_UndoStack[ m_nUndoLevel ];
 		return u->rdescription;
@@ -2051,9 +2081,11 @@ void CDemoSmootherPanel::OnToggleKeyFrame( void )
 	m_bDirty = true;
 	PushUndo( "toggle keyframe" );
 
+	int nSlot = 0;
+
 	// use orginal data by default
-	p->angmoved = p->info.GetViewAngles();
-	p->vecmoved = p->info.GetViewOrigin();
+	p->angmoved = p->info.u[ nSlot ].GetViewAngles();
+	p->vecmoved = p->info.u[ nSlot ].GetViewOrigin();
 
 	if ( !p->samplepoint )
 	{
@@ -2062,10 +2094,10 @@ void CDemoSmootherPanel::OnToggleKeyFrame( void )
 			g_pDemoUI->GetDriveViewPoint( p->vecmoved, p->angmoved );
 		}
 
-		if ( g_pDemoUI2->IsInDriveMode() )
-		{
-			g_pDemoUI2->GetDriveViewPoint( p->vecmoved, p->angmoved );
-		}
+		//if ( g_pDemoUI2->IsInDriveMode() )
+		//{
+		//	g_pDemoUI2->GetDriveViewPoint( p->vecmoved, p->angmoved );
+		//}
 
 		p->samplepoint = true;
 	}
@@ -2089,14 +2121,15 @@ void CDemoSmootherPanel::OnToggleLookTarget( void )
 	m_bDirty = true;
 	PushUndo( "toggle look target" );
 
+	int nSlot = 0;
 	// use orginal data by default
-	p->vectarget = p->info.GetViewOrigin();
+	p->vectarget = p->info.u[ nSlot ].GetViewOrigin();
 
 	if ( !p->targetpoint )
 	{
 		QAngle angles;
 		g_pDemoUI->GetDriveViewPoint( p->vectarget, angles );
-		g_pDemoUI2->GetDriveViewPoint( p->vectarget, angles );
+		//g_pDemoUI2->GetDriveViewPoint( p->vectarget, angles );
 
 		p->targetpoint = true;
 	}
@@ -2414,11 +2447,13 @@ void CDemoSmootherPanel::OnSaveKey()
 	m_bDirty = true;
 	PushUndo( "save key" );
 
-	p->info.viewAngles2 = p->angmoved;
-	p->info.localViewAngles2 = p->angmoved;
-	p->info.viewOrigin2 = p->vecmoved;
-	p->info.flags |= FDEMO_USE_ORIGIN2;
-	p->info.flags |= FDEMO_USE_ANGLES2;
+	int nSlot = 0;
+
+	p->info.u[ nSlot ].viewAngles2 = p->angmoved;
+	p->info.u[ nSlot ].localViewAngles2 = p->angmoved;
+	p->info.u[ nSlot ].viewOrigin2 = p->vecmoved;
+	p->info.u[ nSlot ].flags |= FDEMO_USE_ORIGIN2;
+	p->info.u[ nSlot ].flags |= FDEMO_USE_ANGLES2;
 	
 	PushRedo( "save key" );
 }
@@ -2432,11 +2467,12 @@ void CDemoSmootherPanel::OnSetView()
 	if ( !p )
 		return;
 
-	Vector origin = p->info.GetViewOrigin();
-	QAngle angle = p->info.GetViewAngles();
+	int nSlot = 0;
+	Vector origin = p->info.u[ nSlot ].GetViewOrigin();
+	QAngle angle = p->info.u[ nSlot ].GetViewAngles();
 
 	g_pDemoUI->SetDriveViewPoint( origin, angle );
-	g_pDemoUI2->SetDriveViewPoint( origin, angle );
+	//g_pDemoUI2->SetDriveViewPoint( origin, angle );
 }
 
 //-----------------------------------------------------------------------------
@@ -2492,9 +2528,11 @@ void CDemoSmootherPanel::OnOriginEaseCurve( EASEFUNC easefunc )
 	m_bDirty = true;
 	PushUndo( "ease origin" );
 
+	int nSlot = 0;
+
 	Vector vstart, vend;
-	vstart = pstart->info.GetViewOrigin();
-	vend = pend->info.GetViewOrigin();
+	vstart = pstart->info.u[ nSlot ].GetViewOrigin();
+	vend = pend->info.u[ nSlot ].GetViewOrigin();
 
 	for ( int i = m_nSelection[0]; i <= m_nSelection[1]; i++ )
 	{
@@ -2508,13 +2546,13 @@ void CDemoSmootherPanel::OnOriginEaseCurve( EASEFUNC easefunc )
 
 		frac = clamp( frac, 0.0f, 1.0f );
 
-		p->info.flags |= FDEMO_USE_ORIGIN2;
+		p->info.u[ nSlot ].flags |= FDEMO_USE_ORIGIN2;
 
 		Vector interpolated;
 
 		VectorLerp( vstart, vend, frac, interpolated );
 
-		p->info.viewOrigin2 = interpolated;
+		p->info.u[ nSlot ].viewOrigin2 = interpolated;
 	}
 
 	PushRedo( "ease origin" );
@@ -2536,7 +2574,8 @@ void CDemoSmootherPanel::ParseSmoothingInfo( CDemoFile &demoFile, CSmoothingCont
 		bool swallowmessages = true;
 		do
 		{
-			demoFile.ReadCmdHeader( cmd, tick );
+			int nPlayerSlot = 0;
+			demoFile.ReadCmdHeader( cmd, tick, nPlayerSlot );
 
 			// COMMAND HANDLERS
 			switch ( cmd )
@@ -2551,6 +2590,7 @@ void CDemoSmootherPanel::ParseSmoothingInfo( CDemoFile &demoFile, CSmoothingCont
 				break;
 			case dem_consolecmd:
 				{
+					ACTIVE_SPLITSCREEN_PLAYER_GUARD( nPlayerSlot );
 					demoFile.ReadConsoleCommand();
 				}
 				break;
@@ -2566,6 +2606,7 @@ void CDemoSmootherPanel::ParseSmoothingInfo( CDemoFile &demoFile, CSmoothingCont
 				break;
 			case dem_usercmd:
 				{
+					ACTIVE_SPLITSCREEN_PLAYER_GUARD( nPlayerSlot );
 					demoFile.ReadUserCmd( NULL, dummy );
 					
 				}
@@ -2594,14 +2635,15 @@ void CDemoSmootherPanel::ParseSmoothingInfo( CDemoFile &demoFile, CSmoothingCont
 		// Add to end of list
 		demosmoothing_t smoothing_entry;
 
+		int nSlot = 0;
 		smoothing_entry.file_offset = curpos;
 		smoothing_entry.frametick = tick; 
 		smoothing_entry.info = info;
 		smoothing_entry.samplepoint = false;
-		smoothing_entry.vecmoved = 	info.GetViewOrigin();
-		smoothing_entry.angmoved = 	info.GetViewAngles();
+		smoothing_entry.vecmoved = 	info.u[ nSlot ].GetViewOrigin();
+		smoothing_entry.angmoved = 	info.u[ nSlot ].GetViewAngles();
 		smoothing_entry.targetpoint = false;
-		smoothing_entry.vectarget = info.GetViewOrigin();
+		smoothing_entry.vectarget = info.u[ nSlot ].GetViewOrigin();
 
 		int sampleIndex = smoothing.smooth.AddToTail( smoothing_entry );
 
@@ -2628,7 +2670,7 @@ void CDemoSmootherPanel::LoadSmoothingInfo( const char *filename, CSmoothingCont
 		return;
 	}
 
-	demoheader_t * header = demoFile.ReadDemoHeader();
+	demoheader_t * header = demoFile.ReadDemoHeader( NULL );
 
 	if ( !header )
 	{
@@ -2663,11 +2705,12 @@ void CDemoSmootherPanel::ClearSmoothingInfo( CSmoothingContext& smoothing )
 	for ( i = 0; i < c; i++ )
 	{
 		demosmoothing_t	*p = &smoothing.smooth[ i ];
+		int nSlot = 0;
 		p->info.Reset();
-		p->vecmoved = p->info.GetViewOrigin();
-		p->angmoved = p->info.GetViewAngles();
+		p->vecmoved = p->info.u[ nSlot ].GetViewOrigin();
+		p->angmoved = p->info.u[ nSlot ].GetViewAngles();
 		p->samplepoint = false;
-		p->vectarget = p->info.GetViewOrigin();
+		p->vectarget = p->info.u[ nSlot ].GetViewOrigin();
 		p->targetpoint = false;
 	}
 }

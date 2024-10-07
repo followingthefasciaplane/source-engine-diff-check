@@ -1,10 +1,10 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright (c) 1996-2008, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
 // $NoKeywords: $
 //
-//===========================================================================//
+//=============================================================================//
 
 #ifndef SHADERDEVICEDX8_H
 #define SHADERDEVICEDX8_H
@@ -17,6 +17,7 @@
 #include "shaderdevicebase.h"
 #include "shaderapidx8_global.h"
 #include "tier1/utlvector.h"
+#include "materialsystem/imaterialsystem.h"
 
 
 
@@ -32,10 +33,9 @@
 
 // PC:    By default, PIX profiling is explicitly disallowed using the D3DPERF_SetOptions(1) API on PC
 // X360:  PIX_INSTRUMENTATION will only generate PIX events in RELEASE builds on 360
+// Also be sure to enable PIX_ENABLE in imaterialsystem.h
 // Uncomment to use PIX instrumentation:
-#if PIX_ENABLE
-#define	PIX_INSTRUMENTATION
-#endif
+//#define	PIX_INSTRUMENTATION
 
 #define MAX_PIX_ERRORS		3
 
@@ -105,6 +105,9 @@ protected:
 	bool DetermineHardwareCaps( );
 
 private:
+	// Returns the screen resolution
+	virtual void GetDesktopResolution( int *pWidth, int *pHeight, int nAdapter ) const;
+
 	// Initialize adapter information
 	void InitAdapterInfo();
 
@@ -117,6 +120,9 @@ private:
 	// Vendor-dependent code to detect Alpha To Coverage Backdoors
 	void CheckVendorDependentAlphaToCoverage( HardwareCaps_t *pCaps, int nAdapter );
 
+	// Vendor-dependent code to detect support for optimal depth buffer rt resolve
+	void CheckVendorDependentDepthResolveSupport( HardwareCaps_t *pCaps, int nAdapter );
+
 	// Compute the effective DX support level based on all the other caps
 	void ComputeDXSupportLevel( HardwareCaps_t &caps );
 
@@ -125,7 +131,6 @@ private:
 	IDirect3D9 *m_pD3D;
 #endif
 
-	bool m_bObeyDxCommandlineOverride : 1;
 	bool m_bAdapterInfoIntialized : 1;
 };
 
@@ -165,6 +170,7 @@ public:
 	virtual bool IsUsingGraphics() const;
 	virtual ImageFormat GetBackBufferFormat() const;
 	virtual void GetBackBufferDimensions( int& width, int& height ) const;
+	virtual const AspectRatioInfo_t &GetAspectRatioInfo( void ) const;
 	virtual void Present();
 	virtual IShaderBuffer* CompileShader( const char *pProgram, size_t nBufLen, const char *pShaderVersion );
 	virtual VertexShaderHandle_t CreateVertexShader( IShaderBuffer *pBuffer );
@@ -173,22 +179,21 @@ public:
 	virtual void DestroyGeometryShader( GeometryShaderHandle_t hShader );
 	virtual PixelShaderHandle_t CreatePixelShader( IShaderBuffer* pShaderBuffer );
 	virtual void DestroyPixelShader( PixelShaderHandle_t hShader );
-	virtual void ReleaseResources();
+	virtual void ReleaseResources( bool bReleaseManagedResources = true );
 	virtual void ReacquireResources();
-	virtual IMesh* CreateStaticMesh( VertexFormat_t format, const char *pBudgetGroup, IMaterial * pMaterial = NULL );
+	virtual IMesh* CreateStaticMesh( VertexFormat_t format, const char *pBudgetGroup, IMaterial * pMaterial = NULL, VertexStreamSpec_t *pStreamSpec = NULL );
 	virtual void DestroyStaticMesh( IMesh* mesh );
 	virtual IVertexBuffer *CreateVertexBuffer( ShaderBufferType_t type, VertexFormat_t fmt, int nVertexCount, const char *pBudgetGroup );
 	virtual void DestroyVertexBuffer( IVertexBuffer *pVertexBuffer );
 	virtual IIndexBuffer *CreateIndexBuffer( ShaderBufferType_t bufferType, MaterialIndexFormat_t fmt, int nIndexCount, const char *pBudgetGroup );
 	virtual void DestroyIndexBuffer( IIndexBuffer *pIndexBuffer );
 	virtual IVertexBuffer *GetDynamicVertexBuffer( int nStreamID, VertexFormat_t vertexFormat, bool bBuffered = true );
-	virtual IIndexBuffer *GetDynamicIndexBuffer( MaterialIndexFormat_t fmt, bool bBuffered = true );
+	virtual IIndexBuffer *GetDynamicIndexBuffer();
 	virtual void SetHardwareGammaRamp( float fGamma, float fGammaTVRangeMin, float fGammaTVRangeMax, float fGammaTVExponent, bool bTVEnabled );
 	virtual void SpewDriverInfo() const;
 	virtual int GetCurrentAdapter() const;
 	virtual void EnableNonInteractiveMode( MaterialNonInteractiveMode_t mode, ShaderNonInteractiveInfo_t *pInfo = NULL );
 	virtual void RefreshFrontBufferNonInteractive();
-	virtual char *GetDisplayDeviceName() OVERRIDE; 
 
 	// Alternative method for ib/vs
 	// NOTE: If this works, remove GetDynamicVertexBuffer/IndexBuffer
@@ -256,7 +261,8 @@ protected:
 	void DetectQuerySupport( IDirect3DDevice9* pD3DDevice );
 
 	// Computes the presentation parameters
-	void SetPresentParameters( void* hWnd, int nAdapter, const ShaderDeviceInfo_t &info );
+	void SetPresentParameters( void* hWnd, int nAdapter, const ShaderDeviceInfo_t &info, bool bSetSymbolsOnly = false );
+	void CalcBackBufferDimensions( const ShaderDisplayMode_t &mode, const ShaderDeviceInfo_t &info, int *pBackBufferWidth, int *pBackBufferHeight );
 
 	// Computes the supersample flags
 	D3DMULTISAMPLE_TYPE ComputeMultisampleType( int nSampleCount );
@@ -287,6 +293,8 @@ protected:
 	// Alloc and free objects necessary for noninteractive frame refresh on the x360
 	bool AllocNonInteractiveRefreshObjects();
 	void FreeNonInteractiveRefreshObjects();
+	bool BuildStaticShader(	bool bVertexShader, void **ppShader, const char *shaderName,
+							const char *strShaderProgram, const DWORD *shaderData, unsigned int shaderSize );
 
 	// FIXME: This is for backward compat; I still haven't solved a way of decoupling this
 	virtual bool OnAdapterSet() = 0;
@@ -299,10 +307,17 @@ protected:
 
 	void ReacquireResourcesInternal( bool bResetState = false, bool bForceReacquire = false, char const *pszForceReason = NULL );
 
+
+	void OnDebugEvent( const char * pEvent = "" );
 #ifdef DX_TO_GL_ABSTRACTION
 public:
 	virtual void DoStartupShaderPreloading( void );
+
 protected:
+#endif
+
+#ifndef _GAMECONSOLE
+	IDirect3DDevice9	*m_pD3DDevice;
 #endif
 
 	D3DPRESENT_PARAMETERS m_PresentParameters;
@@ -338,7 +353,7 @@ protected:
 	HXUIDC m_hDC;
 #endif
 
-	CUtlString			m_sDisplayDeviceName;
+	AspectRatioInfo_t m_AspectRatioInfo;
 
 	// Used for x360 only
 	NonInteractiveRefreshState_t m_NonInteractiveRefresh;
@@ -355,11 +370,16 @@ protected:
 //-----------------------------------------------------------------------------
 // Globals
 //-----------------------------------------------------------------------------
-extern IDirect3DDevice9 *g_pD3DDevice;
+#if defined( _GAMECONSOLE )
+extern IDirect3DDevice9 *m_pD3DDevice;
 FORCEINLINE IDirect3DDevice9 *Dx9Device()
 {
-	return g_pD3DDevice;
+	return m_pD3DDevice;
 }
+#else
+class D3DDeviceWrapper;
+D3DDeviceWrapper *Dx9Device();
+#endif
 
 extern CShaderDeviceDx8* g_pShaderDeviceDx8;
 
@@ -367,10 +387,12 @@ extern CShaderDeviceDx8* g_pShaderDeviceDx8;
 //-----------------------------------------------------------------------------
 // Inline methods
 //-----------------------------------------------------------------------------
+#if defined( _GAMECONSOLE )
 FORCEINLINE bool CShaderDeviceDx8::IsActive() const
 {
-	return ( g_pD3DDevice != NULL );
+	return ( m_pD3DDevice != NULL );
 }
+#endif
 
 // used to determine if we're deactivated
 FORCEINLINE bool CShaderDeviceDx8::IsDeactivated() const 

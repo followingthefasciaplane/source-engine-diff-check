@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -13,10 +13,6 @@
 
 #include "utlsymbol.h"
 #include "utlvector.h"
-
-#ifdef _XBOX
-#define SHARED_NET_STRING_TABLES
-#endif
 
 //-----------------------------------------------------------------------------
 // Purpose: 

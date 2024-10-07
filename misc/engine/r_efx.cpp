@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose:  Implements the Effects API
 // Created:  YWB 9/5/2000
@@ -51,14 +51,14 @@ const char *CVEfx::Draw_DecalNameFromIndex( int nIndex )
 //			position - 
 //			flags - 
 //-----------------------------------------------------------------------------
-void CVEfx::DecalShoot( int textureIndex, int entity, const model_t *model, const Vector& model_origin, const QAngle& model_angles, const Vector& position, const Vector *saxis, int flags)
+void CVEfx::DecalShoot( int textureIndex, int entity, const model_t *model, const Vector& model_origin, const QAngle& model_angles, const Vector& position, const Vector *saxis, int flags, const Vector *pNormal, int nAdditionalDecalFlags )
 {
 	color32 white = {255,255,255,255};
-	DecalColorShoot( textureIndex, entity, model, model_origin, model_angles, position, saxis, flags, white );
+	DecalColorShoot( textureIndex, entity, model, model_origin, model_angles, position, saxis, flags, white, pNormal, nAdditionalDecalFlags );
 }
 
 void CVEfx::DecalColorShoot( int textureIndex, int entity, const model_t *model, const Vector& model_origin, const QAngle& model_angles, 
-	const Vector& position, const Vector *saxis, int flags, const color32 &rgbaColor)
+	const Vector& position, const Vector *saxis, int flags, const color32 &rgbaColor, const Vector *pNormal, int nAdditionalDecalFlags )
 {
 	Vector localPosition = position;
 	if ( entity ) 	// Not world?
@@ -68,7 +68,7 @@ void CVEfx::DecalColorShoot( int textureIndex, int entity, const model_t *model,
 		VectorITransform( position, matrix, localPosition );
 	}
 
-	::R_DecalShoot( textureIndex, entity, model, localPosition, saxis, flags, rgbaColor, NULL );
+	::R_DecalShoot( textureIndex, entity, model, localPosition, saxis, flags, rgbaColor, pNormal, nAdditionalDecalFlags );
 }
 
 //-----------------------------------------------------------------------------
@@ -83,7 +83,7 @@ void CVEfx::DecalColorShoot( int textureIndex, int entity, const model_t *model,
 //			&rgbaColor - 
 //-----------------------------------------------------------------------------
 void CVEfx::PlayerDecalShoot( IMaterial *material, void *userdata, int entity, const model_t *model, const Vector& model_origin, const QAngle& model_angles, 
-	const Vector& position, const Vector *saxis, int flags, const color32 &rgbaColor )
+	const Vector& position, const Vector *saxis, int flags, const color32 &rgbaColor, int nAdditionalDecalFlags )
 {
 	Vector localPosition = position;
 	if ( entity ) 	// Not world?
@@ -93,7 +93,7 @@ void CVEfx::PlayerDecalShoot( IMaterial *material, void *userdata, int entity, c
 		VectorITransform( position, matrix, localPosition );
 	}
 
-	R_PlayerDecalShoot( material, userdata, entity, model, position, saxis, flags, rgbaColor );
+	R_PlayerDecalShoot( material, userdata, entity, model, position, saxis, flags, rgbaColor, nAdditionalDecalFlags );
 }
 
 //-----------------------------------------------------------------------------
@@ -146,7 +146,7 @@ dlight_t *CVEfx::GetElightByKey( int key )
 			{
 				// then if the light is active, return it. If it's died,
 				// return NULL.
-				if ( cl_elights[i].die > cl.GetTime() ) 
+				if ( cl_elights[i].die > GetBaseLocalClient().GetTime() ) 
 				{
 					return cl_elights + i;
 				}

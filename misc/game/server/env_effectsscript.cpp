@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -286,7 +286,9 @@ void CEnvEffectsScript::SpriteEffectEvent( CEffectScriptElement *pEffect )
 
 void CEnvEffectsScript::HandleAnimEvent ( animevent_t *pEvent ) 
 {
-	if ( pEvent->event == AE_START_SCRIPTED_EFFECT )
+	int nEvent = pEvent->Event();
+
+	if ( nEvent == AE_START_SCRIPTED_EFFECT )
 	{
 		CEffectScriptElement *pCurrent = GetScriptElementByName( pEvent->options );
 
@@ -301,7 +303,7 @@ void CEnvEffectsScript::HandleAnimEvent ( animevent_t *pEvent )
 		return;
 	}
 
-	if ( pEvent->event == AE_STOP_SCRIPTED_EFFECT )
+	if ( nEvent == AE_STOP_SCRIPTED_EFFECT )
 	{
 		CEffectScriptElement *pCurrent = GetScriptElementByName( pEvent->options );
 

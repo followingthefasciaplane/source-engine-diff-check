@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -81,6 +81,8 @@ public:
 	virtual bool	IsActive( void );
 	virtual void	Destroy( void );
 	virtual	void	Update( double frametime );
+
+protected:
 
 	FXQuadData_t	m_FXData;
 };

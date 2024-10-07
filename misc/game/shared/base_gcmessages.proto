@@ -43,7 +43,7 @@ enum EGCBaseMsg
 	k_EMsgGCSystemMessage =						4001; // broadcast announcements from the GC
 	k_EMsgGCReplicateConVars =					4002; // GC => client
 	k_EMsgGCConVarUpdated =						4003; // GC => client
-	//k_EMsgGCInQueue =							4008; // GC => client
+	k_EMsgGCInQueue =							4008; // GC => client
 
 	// !GROSS! These have ben moved to gcsystemmsgs.proto.  But I didn't reassign their number
 	//k_EMsgGCClientWelcome =						4004; // GC => client
@@ -100,6 +100,8 @@ message CMsgGCStorePurchaseInitResponse
 {
 	optional	int32	result = 1;					// Result of the operation
 	optional	uint64	txn_id = 2;					// Transaction ID of the new transaction
+	optional	string	url = 3;					// URL that the client will open to follow up
+	repeated	uint64	item_ids = 4;				// ItemIDs for immediately finalized txn
 };
 
 
@@ -134,70 +136,13 @@ message CMsgSystemBroadcast
 };
 
 //
-// CMsgClientHello
-//
-message CMsgClientHello
-{
-	optional uint32 version = 1;
-};
-
-//
-// CMsgServerHello
-//
-message CMsgServerHello
-{
-	optional uint32 version = 1;
-};
-
-//
-// CMsgClientWelcome
-//
-message CMsgClientWelcome
-{
-	optional uint32 version = 1;
-	optional bytes game_data = 2;
-};
-
-//
-// CMsgServerWelcome
-//
-message CMsgServerWelcome
-{
-	optional uint32 min_allowed_version = 1;
-	optional uint32 active_version = 2;
-};
-
-enum GCGoodbyeReason
-{
-	GCGoodbyeReason_GC_GOING_DOWN = 1;
-	GCGoodbyeReason_NO_SESSION = 2;
-};
-
-//
-// CMsgClientGoodbye
-//
-message CMsgClientGoodbye
-{
-	optional GCGoodbyeReason reason = 1;
-};
-
-//
-// CMsgServerGoodbye
-//
-message CMsgServerGoodbye
-{
-	optional GCGoodbyeReason reason = 1;
-};
-
-//
 // CMsgInviteToParty - sent from party leader to the GC
 //
 message CMsgInviteToParty
 {
 	optional	fixed64 steam_id = 1;
 	optional	uint32	client_version = 2;
-	optional	uint32	team_id = 3;
-	optional	bool	as_coach = 4;
+	optional	uint32	team_invite = 3;
 };
 
 
@@ -219,8 +164,7 @@ message CMsgPartyInviteResponse
 	optional	uint64	party_id = 1;
 	optional	bool	accept = 2;
 	optional	uint32	client_version = 3;
-	optional	uint32	team_id = 4;
-	optional	bool	as_coach = 5;
+	optional	uint32	team_invite = 4;
 };
 
 
@@ -237,8 +181,6 @@ message CMsgKickFromParty
 //
 message CMsgLeaveParty
 {
-	optional	uint64 party_id = 1;	// Party the user wants to leave
-	optional	uint64 lobby_id = 2;	// Lobby the user wants to leave
 };
 
 //
@@ -263,29 +205,20 @@ message CMsgLANServerAvailable
 message CSOEconGameAccountClient
 {
 	optional	uint32		additional_backpack_slots = 1 [ default = 0 ]; // the number of backpack slots this user has on top of DEFAULT_NUM_BACKPACK_SLOTS
-	optional	bool		trial_account = 2 [ default = false ];
-//	optional	bool		eligible_for_online_play = 3 [ default = true ];		// DEPRECATED
-	optional	bool		need_to_choose_most_helpful_friend = 4;
-	optional	bool		in_coaches_list = 5;
-	optional	fixed32		trade_ban_expiration = 6;
-	optional	fixed32		duel_ban_expiration = 7;
-	optional	uint32		preview_item_def = 8 [ default = 0 ];
-//	optional	bool		eligible_for_community_market = 9;						// DEPRECATED
-	optional	bool		phone_verified = 19 [ default = false ];
-	optional	uint32		skill_rating_6v6 = 20;
-	optional	uint32		skill_rating_9v9 = 21;
-//	optional	bool		two_factor_enabled = 22 [ default = false ]; // No longer shared with clients
-	optional	bool		competitive_access = 23 [ default = false ];
-	// !! 18 out of order slightly to be more properly grouped with the various ban fields
-	optional	uint32		matchmaking_ranked_ban_expiration = 18;             // player can't matchmake in ranked groups until this time
-	optional	uint32		matchmaking_ranked_low_priority_expiration = 24;    // MM low priority in ranked groups until
-	optional	uint32		matchmaking_ranked_ban_last_duration = 25;          // How long the current ranked ban's total duration was set for
-	optional	uint32		matchmaking_ranked_low_priority_last_duration = 26; // How long the current ranked ban's total duration was set for
-	optional	uint32		matchmaking_casual_ban_expiration = 27;             // player can't matchmake in casual groups until this time
-	optional	uint32		matchmaking_casual_low_priority_expiration = 28;    // MM low priority in casual groups until
-	optional	uint32		matchmaking_casual_ban_last_duration = 29;          // How long the current casual ban's total duration was set for
-	optional	uint32		matchmaking_casual_low_priority_last_duration = 30; // How long the current casual ban's total duration was set for
-	optional	bool		phone_identifying = 31 [ default = false ];
+	// optional	bool		trial_account = 2 [ default = false ];
+	// optional	bool		eligible_for_online_play = 3 [ default = true ];
+	// optional	bool		need_to_choose_most_helpful_friend = 4;
+	// optional	bool		in_coaches_list = 5;
+	// optional	fixed32		trade_ban_expiration = 6;
+	// optional	fixed32		duel_ban_expiration = 7;
+	// optional	uint32		preview_item_def = 8 [ default = 0 ];
+	// optional	bool		made_first_purchase = 9 [ default = false ];
+	// optional	bool		eligible_for_community_market = 10;
+	// optional	uint32		mission_refuse_allowed = 11;
+	optional	fixed32		bonus_xp_timestamp_refresh = 12;
+	optional	uint32		bonus_xp_usedflags = 13;
+	optional	uint32		elevated_state = 14;		// represents the state up to <= k_EGameAccountElevatedState_Elevated
+	optional	uint32		elevated_timestamp = 15;	// when applicable is the timestamp (e.g. elevation cooldown expiry, or time when became elevated, etc.)
 };
 
 //
@@ -315,8 +248,10 @@ message CSOItemCriteria
 
 	repeated CSOItemCriteriaCondition	conditions = 9;	
 
-	optional bool		recent_only = 10;
-	optional string		tags = 11;
+	optional int32		item_rarity = 10;
+	optional bool		item_rarity_set = 11;
+	
+	optional bool		recent_only = 12;
 };
 
 
@@ -354,58 +289,40 @@ message CMsgDevNewItemRequest
 	optional CSOItemCriteria criteria = 2;
 };
 
-// 
-// k_EMsgGCDev_DebugRollLootRequest
 //
-message CMsgDevDebugRollLootRequest
-{
-	//using fixed64 since steamids have lots of entropy in their bits
-	optional fixed64 receiver = 1;
-	optional string loot_list_name = 2;
-};
-
-//
-// k_EMsgGC_IncrementKillCountAttribute
+// k_EMsgGCIncrementKillCountAttribute
 //
 message CMsgIncrementKillCountAttribute
 {
-	optional uint64 killer_steam_id = 1;				// Kyle says: we could make these both fixed32!
-	optional uint64 victim_steam_id = 2;
+	optional fixed32 killer_account_id = 1;
+	optional fixed32 victim_account_id = 2;
 	optional uint64 item_id = 3;
-	
 	optional uint32 event_type = 4;
-	optional uint32 increment_value = 5;				// How much to increment the score by
+	optional uint32 amount = 5;
 };
 
 //
-// k_EMsgGC_IncrementKillCountAttribute_Multiple
+// k_EMsgGCApplySticker
 //
-message CMsgIncrementKillCountAttribute_Multiple
+message CMsgApplySticker
 {
-	repeated CMsgIncrementKillCountAttribute msgs = 1;
+	optional uint64 sticker_item_id = 1;				// which sticker are attaching?
+	optional uint64 item_item_id = 2;					// what item are we sticking it on to?
+	optional uint32 sticker_slot = 3;					// which sticker slot are we modifying? When attaching a sticker replace slot, when 0-sticker just applies wear.
+	optional uint32 baseitem_defidx = 4;				// If not sticking it on existing item support sticking it on base item
+	optional float  sticker_wear = 5;					// when applying sticker wear this field specifies current wear as seen by client (to prevent double-scraping in case message reaches GC multiple times)
 };
 
-//
-// k_EMsgGC_TrackUniquePlayerPairEvent
-//
-message CMsgTrackUniquePlayerPairEvent
-{
-	optional uint64 killer_steam_id = 1;				// Kyle says: we could make these both fixed32!
-	optional uint64 victim_steam_id = 2;
-	optional uint64 item_id = 3;
-	
-	optional uint32 event_type = 4;
-};
 
 //
-// k_EMsgGCApplyStrangeCountTransfer
+// k_EMsgGStatTrakSwap
 //
 
-message CMsgApplyStrangeCountTransfer
+message CMsgApplyStatTrakSwap
 {
 	optional uint64 tool_item_id = 1;					// item id of the xfer tool
-	optional uint64 item_src_item_id = 2;
-	optional uint64 item_dest_item_id = 3;
+	optional uint64 item_1_item_id = 2;
+	optional uint64 item_2_item_id = 3;
 };
 
 //
@@ -418,22 +335,21 @@ message CMsgApplyStrangePart
 };
 
 //
-// k_EMsgGCApplyStrangeRestriction
+// k_EMsgGCApplyPennantUpgrade
 //
-message CMsgApplyStrangeRestriction
+message CMsgApplyPennantUpgrade
 {
-	optional uint64 strange_part_item_id = 1;			// which restriction item are we "inserting"?
-	optional uint64 item_item_id = 2;					// what strange item are we inserting this new part into?
-	optional uint32 strange_attr_index = 3;				// which slot did the user select for application?
+	optional uint64 upgrade_item_id = 1;				// pennant upgrade
+	optional uint64 pennant_item_id = 2;				// what pennant are we upgrading?
 };
 
 //
-// k_EMsgGCApplyUpgradeCard
+// k_EMsgGCApplyEggEssence
 //
-message CMsgApplyUpgradeCard
+message CMsgApplyEggEssence
 {
-	optional uint64 upgrade_card_item_id = 1;			// which card are we attaching?
-	optional uint64 subject_item_id = 2;				// what item are we applying this new card to?
+	optional uint64 essence_item_id = 1;				// essence we are using
+	optional uint64 egg_item_id = 2;					// egg target
 };
 
 //
@@ -458,8 +374,8 @@ message CSOEconItem
 	optional uint32					account_id = 2;
 	optional uint32					inventory = 3;
 	optional uint32					def_index = 4;
-	optional uint32					quantity = 5;
-	optional uint32					level = 6;
+	optional uint32					quantity = 5;		// [ default = 1 ]; - Uncomment after 5/16 the client/server will have backwards compat with this change by that point
+	optional uint32					level = 6;		// [ default = 1 ]; - Uncomment after 5/16 the client/server will have backwards compat with this change by that point
 	optional uint32					quality = 7;
 	optional uint32					flags = 8 [ default = 0 ];
 	optional uint32					origin = 9;
@@ -470,9 +386,9 @@ message CSOEconItem
 	optional bool					in_use = 14 [ default = false ];
 	optional uint32					style = 15 [default = 0 ];
 	optional uint64					original_id = 16 [ default = 0 ];
-	optional bool					contains_equipped_state = 17;			// DEPRECATED
+//	optional bool					contains_equipped_state = 17;
 	repeated CSOEconItemEquipped	equipped_state = 18;
-	optional bool					contains_equipped_state_v2 = 19;		// will be set to true even if equipped_state is an empty array, meaning "unequipped from everything"
+	optional uint32					rarity = 19;
 }
 
 // 
@@ -483,6 +399,7 @@ message CMsgAdjustItemEquippedState
 	optional uint64		item_id = 1;
 	optional uint32		new_class = 2;
 	optional uint32		new_slot = 3;		// will be -1 if not equipped on this class any longer
+	optional bool		swap = 4;
 }
 
 // 
@@ -510,6 +427,10 @@ message CSOEconClaimCode
 message CMsgStoreGetUserData
 {
 	optional fixed32 price_sheet_version = 1;
+	optional int32	currency			= 2;	// Currency that the user is requesting for pricesheet (pre-negotiated during welcome)
+	// 14-November-2014: for backwards compatibility with older clients only new clients request user data with currency,
+	// the new clients don't expect to get response as a reply to msg, but rather want a multiplexed standalone pricesheet.
+	// old clients still want a reply to msg.
 }	
 
 
@@ -519,23 +440,25 @@ message CMsgStoreGetUserData
 message CMsgStoreGetUserDataResponse
 {
 	optional	int32		result = 1;				// Result of the call
-	optional	int32		currency = 2;			// Currency to display to the user
-	optional	string		country = 3;		// Country the purchase is being made from (Send back in k_EMsgGCStorePurchaseInit)
+// 14-Nov-2014: pricesheet response is now multiplexed, no personal data included
+	optional	int32		currency_deprecated = 2;			// Currency to display to the user
+	optional	string		country_deprecated = 3;		// Country the purchase is being made from (Send back in k_EMsgGCStorePurchaseInit)
 
 	optional	fixed32		price_sheet_version = 4;		// Version of the current price sheet on the GC
 
 	// experiments
-	optional	uint64		experiment_data = 5 [ default = 0 ];			// top 32 bits = experiment id, bottom 32 bits = experiment group number
-	optional	int32			featured_item_idx = 6;
-	optional	bool		show_hat_descriptions = 7	[ default = true ];
+// 14-Nov-2014: pricesheet response is now multiplexed, no personal data included
+//	optional	uint64		experiment_data = 5 [ default = 0 ];			// top 32 bits = experiment id, bottom 32 bits = experiment group number
+//	optional	int32			featured_item_idx = 6;
+//	optional	bool		show_hat_descriptions = 7	[ default = true ];
 
 	//	Serialized KV representing the price sheet menu 
 	optional	bytes		price_sheet = 8;
 	
-	optional	int32		default_item_sort = 9 [ default = 0 ];
+//	optional	int32		default_item_sort = 9 [ default = 0 ];
 	
 	// popular items by def
-	repeated	uint32		popular_items = 10;
+//	repeated	uint32		popular_items = 10;
 };
 
 //
@@ -545,8 +468,8 @@ message CMsgUpdateItemSchema
 {
 	optional bytes items_game = 1; // actual contents of items_game.txt (only used on dev)
 	optional fixed32 item_schema_version = 2;	// Version of the items_game.txt we're using
-	optional string items_game_url = 3; // HTTP URL where they can use to fetch the one we're using, if theirs is out of date and we don't send the contents
-	optional bytes signature = 4; // signature of the schema (either the one at the CDN, or the bytes we are providing).  In certain branches (TF) this is required.
+	optional string items_game_url_DEPRECATED2013 = 3; // HTTP URL where they can use to fetch the one we're using, if theirs is out of date and we don't send the contents (deprecated in January 2014, new schema format, actual URL in field#4 now)
+	optional string items_game_url = 4; // HTTP URL where they can use to fetch the one we're using, if theirs is out of date and we don't send the contents (rev'd to 4 for new schema format to not explode old clients/servers)
 };
 
 // sent from the GC to a client telling him about a GC error
@@ -590,7 +513,6 @@ message CMsgUseItem
 	repeated uint32 gift__potential_targets = 3;
 	optional uint32 duel__class_lock = 4;
 	optional fixed64 initiator_steam_id = 5;
-	optional bool itempack__ack_immediately = 6;
 };
 
 //
@@ -612,9 +534,9 @@ message CMsgConsumableExhausted
 };
 
 //
-// k_EMsgGCItemAcknowledged
+// k_EMsgGCItemAcknowledged__DEPRECATED
 //
-message CMsgItemAcknowledged
+message CMsgItemAcknowledged__DEPRECATED
 {
 	optional uint32					account_id = 1;
 	optional uint32					inventory = 2;
@@ -622,21 +544,19 @@ message CMsgItemAcknowledged
 	optional uint32					quality = 4;
 	optional uint32					rarity = 5;
 	optional uint32					origin = 6;
-	optional uint32					is_strange = 7;
-	optional uint32					is_unusual = 8;
-	optional float					wear = 9;
+	optional uint64					item_id = 7;
 };
 
 //
-// CMsgSetPresetItemPosition
+// OBSOLETE: CMsgSetPresetItemPosition
 //
-message CMsgSetPresetItemPosition
-{
-	optional uint32		class_id = 1;
-	optional uint32		preset_id = 2;
-	optional uint32		slot_id = 3;
-	optional uint64		item_id = 4;
-};
+// message CMsgSetPresetItemPosition
+// {
+// 	optional uint32		class_id = 1;
+// 	optional uint32		preset_id = 2;
+// 	optional uint32		slot_id = 3;
+// 	optional uint64		item_id = 4;
+// };
 
 //
 // CMsgSetItemPositions
@@ -645,47 +565,56 @@ message CMsgSetItemPositions
 {
 	message ItemPosition
 	{
-		optional uint64		item_id = 1;
+		optional uint32		legacy_item_id = 1;
 		optional uint32		position = 2;
+		optional uint64		item_id = 3;
 	}
 	
 	repeated ItemPosition item_positions = 1;	
 };
 
 // 
-// CSOEconItemPresetInstance - The preset, class and slot ID's are all marked key fields, so that those
+// OBSOLETE: CSOEconItemPresetInstance - The preset, class and slot ID's are all marked key fields, so that those
 // fields will always be networked down to clients, even if only the item ID is modified.  This is so that
 // when CSharedObjectTypeCache::BUpdateFromMsg() calls its FindSharedObject(), it will have the necessary
 // key data for CEconItemPresetInstance::BIsKeyLess() to be able to function.  Without these, FindSharedObject()
 // fails and no object is updated.
 //
-message CSOEconItemPresetInstance
-{
-//	optional uint32		account_id = 1;		// NOTE: Never use id '1' again - but we don't need to transmit the account id here
-	optional uint32		class_id = 2		[ (key_field) = true ];
-	optional uint32		preset_id = 3		[ (key_field) = true ];
-	optional uint32		slot_id = 4			[ (key_field) = true ];
-	optional uint64		item_id = 5;
-};
+// message CSOEconItemPresetInstance
+// {
+// //	optional uint32		account_id = 1;		// NOTE: Never use id '1' again - but we don't need to transmit the account id here
+// 	optional uint32		class_id = 2		[ (key_field) = true ];
+// 	optional uint32		preset_id = 3		[ (key_field) = true ];
+// 	optional uint32		slot_id = 4			[ (key_field) = true ];
+// 	optional uint64		item_id = 5;
+// };
 
 //
-// k_EMsgGCPresets_SelectPresetForClass
+// OBSOLETE: CMsgSelectItemPresetForClass
 //
-message CMsgSelectPresetForClass
-{
-	optional uint32					class_id = 1;			// which class we're changing the selection on
-	optional uint32					preset_id = 2;			// which preset we want to change to
-};
+// message CMsgSelectItemPresetForClass
+// {
+// 	optional	uint32	class_id = 1;
+// 	optional	uint32	preset_id = 2;
+// };
 
 //
-// CSOClassPresetClientData
+// OBSOLETE: CMsgSelectItemPresetForClassReply
 //
-message CSOClassPresetClientData
-{
-	optional uint32					account_id = 1;
-	optional uint32					class_id = 2;
-	optional uint32					active_preset_id = 3;
-};
+// message CMsgSelectItemPresetForClassReply
+// {
+// 	optional bool		success = 1;
+// };
+
+//
+// OBSOLETE: CSOSelectedItemPreset
+//
+// message CSOSelectedItemPreset
+// {
+// 	optional	uint32	account_id = 1		[ (key_field) = true ];
+// 	optional	uint32	class_id = 2		[ (key_field) = true ];
+// 	optional	uint32	preset_id = 3;
+// };
 
 //
 // k_EMsgGC_ReportAbuse
@@ -746,16 +675,6 @@ message CMsgGCShowItemsPickedUp
 };
 
 //
-// k_EMsgGC_UpdatePeriodicEvent
-//
-message CMsgUpdatePeriodicEvent
-{
-	optional uint32 account_id = 1;
-	optional uint32 event_type = 2;
-	optional uint32 amount = 3;
-};
-
-//
 // k_EMsgGCIncrementKillCountResponse
 //
 message CMsgGCIncrementKillCountResponse			// was CMsgTFIncrementKillCountResponse
@@ -766,40 +685,29 @@ message CMsgGCIncrementKillCountResponse			// was CMsgTFIncrementKillCountRespon
 	optional uint32		level_type = 4;									// what sort of rank is this? (ie., kills, gifts, etc.) used for looking up strings
 };
 
-//
-// k_EMsgGCRemoveStrangePart
-//
-message CMsgGCRemoveStrangePart
+message CSOEconItemDropRateBonus
 {
-	optional uint64 item_id = 1;					// ID of the item we're removing a part from
-	optional uint32 strange_part_score_type = 2;	// score type counted by the strange part we want to remove -- it doesn't matter what slot this part is in or what item def it came from as each item can only have one counter of each type
+	optional uint32		account_id = 1;
+	optional fixed32	expiration_date = 2;
+	optional float		bonus = 3;
+	optional uint32		bonus_count = 4;
+	optional uint64		item_id = 5;
+	optional uint32		def_index = 6;
 };
 
-//
-// k_EMsgGCRemoveUpgradeCard
-//
-message CMsgGCRemoveUpgradeCard
+message CSOEconItemLeagueViewPass
 {
-	optional uint64 item_id = 1;					// ID of the item we're removing a part from
-	optional uint32 attribute_index = 2;			// the attribute index of the attribute we want to remove; this is only valid if the attribute is set to be user-customizable
+	optional uint32	account_id = 1 [ (key_field) = true ];
+	optional uint32	league_id = 2  [ (key_field) = true ];
+	optional uint32	admin = 3;
+	optional uint32	itemindex = 4;
 };
 
-//
-// k_EMsgGCRemoveItemPaint
-// k_EMsgGCRemoveCustomTexture
-// k_EMsgGCRemoveMakersMark
-//
-message CMsgGCRemoveCustomizationAttributeSimple
+message CSOEconItemEventTicket
 {
-	optional uint64 item_id = 1;
-};
-
-//
-// k_EMsgGCResetStrangeScores
-//
-message CMsgGCResetStrangeScores
-{
-	optional uint64 item_id = 1;
+	optional uint32	account_id = 1;
+	optional uint32	event_id = 2;
+	optional uint64	item_id = 3;
 };
 
 //
@@ -850,14 +758,73 @@ message CMsgGCBannedWordListRequest
 	optional uint32			word_id = 2;						// The most recent word ID that we want to request (the response will include this ID if present)
 };
 
-//
-// k_EMsgGCGiftedItems
-//
-message CMsgGCGiftedItems
+// k_EMsgGCRequestAnnouncements
+message CMsgGCRequestAnnouncements
 {
-	optional uint64		gifter_steam_id = 1;
-	optional bool		was_random_person = 2;
-	repeated uint32		recipient_account_ids = 3;
+};
+
+// k_EMsgGCRequestAnnouncementsResponse
+message CMsgGCRequestAnnouncementsResponse
+{
+	optional string				announcement_title = 1;			// title of the announcement
+	optional string				announcement = 2;			// announcement
+	optional string				nextmatch_title = 3;		// nextmatch title
+	optional string				nextmatch = 4;				// nextmatch
+
+};
+
+enum GC_BannedWordType
+{
+	GC_BANNED_WORD_DISABLE_WORD	= 0;							// This word is disabled. It may be followed by an enable later
+	GC_BANNED_WORD_ENABLE_WORD	= 1;							// This word is enabled
+};
+
+message CMsgGCBannedWord
+{
+	optional uint32				word_id = 1;					// The ID of this word
+	optional GC_BannedWordType	word_type = 2;					// Enable, disable, or what
+	optional string				word = 3;						// The actual text of the word
+};
+
+// k_EMsgGCBannedWordListResponse
+message CMsgGCBannedWordListResponse
+{
+	optional uint32				ban_list_group_id = 1;			// The ban list group code to request the word list from (English, Chinese, etc)
+	repeated CMsgGCBannedWord	word_list = 2;					// The list of banned word updates relevant for this group
+};
+
+// k_EMsgGCToGCBannedWordListBroadcast
+message CMsgGCToGCBannedWordListBroadcast
+{
+	optional CMsgGCBannedWordListResponse	broadcast = 1;		// The banned word message to broadcast
+};
+
+// k_EMsgGCToGCBannedWordListUpdated
+message CMsgGCToGCBannedWordListUpdated
+{
+	optional uint32	group_id = 1;		// The id of the group that has been updated
+};
+
+message CSOEconDefaultEquippedDefinitionInstanceClient
+{	
+	optional uint32	account_id = 1 [ (key_field) = true ];
+	optional uint32	item_definition = 2;
+	optional uint32 class_id = 3 [ (key_field) = true ];
+	optional uint32 slot_id = 4 [ (key_field) = true ];
+};
+
+// k_EMsgGCToGCDirtySDOCache
+message CMsgGCToGCDirtySDOCache
+{
+	optional	uint32		sdo_type = 1;		// the type of the cache to dirty
+	optional	uint64		key_uint64 = 2;		// a 64 bit key type
+};
+
+// k_EMsgGCToGCDirtyMultipleSDOCache
+message CMsgGCToGCDirtyMultipleSDOCache
+{
+	optional	uint32		sdo_type = 1;		// the type of the cache to dirty
+	repeated	uint64		key_uint64 = 2;		// a 64 bit key type
 };
 
 //
@@ -869,163 +836,90 @@ message CMsgGCCollectItem
 	optional uint64		subject_item_id = 2;
 };
 
-//
-// k_EMsgGCClientRequestMarketData
-//
-message CMsgGCClientMarketDataRequest
+// No ID - Used for SDO objects that don't make use of memcached and therefore don't need to serialize into a proto object
+message CMsgSDONoMemcached
 {
-	optional uint32		user_currency = 1;
+};
+
+// k_EMsgGCToGCUpdateSQLKeyValue
+message CMsgGCToGCUpdateSQLKeyValue
+{
+	optional string		key_name = 1;
+};
+
+// k_EMsgGCToGCIsTrustedServer
+message CMsgGCToGCIsTrustedServer
+{
+	optional fixed64	steam_id = 1;
+};
+
+// k_EMsgGCToGCIsTrustedServerResponse
+message CMsgGCToGCIsTrustedServerResponse
+{
+	optional bool	is_trusted = 1;
+};
+
+// k_EMsgGCToGCBroadcastConsoleCommand
+message CMsgGCToGCBroadcastConsoleCommand
+{
+	optional string	con_command = 1;
+};
+
+// k_EMsgGCServerVersionUpdated
+message CMsgGCServerVersionUpdated
+{
+	optional uint32 server_version = 1;
+};
+
+// k_EMsgGCClientVersionUpdated
+message CMsgGCClientVersionUpdated
+{
+	optional uint32 client_version = 1;
+};
+
+// k_EMsgGCToGCWebAPIAccountChanged
+message CMsgGCToGCWebAPIAccountChanged
+{
+};
+
+// k_EMsgGCRequestPassportItemGrant
+message CMsgGCToGCRequestPassportItemGrant
+{
+	optional fixed64	steam_id = 1;
+	optional uint32		league_id = 2;
+	optional int32		reward_flag = 3;
 };
 
 //
-// k_EMsgGCClientRequestMarketDataResponse
+// CMsgGameServerInfo - server address information
 //
-message CMsgGCClientMarketDataEntry
+message CMsgGameServerInfo
 {
-	optional uint32		item_def_index = 1;
-	optional uint32		item_quality = 2;
-
-	optional uint32		item_sell_listings = 3;
-	optional uint32		price_in_local_currency = 4;
-};
-
-message CMsgGCClientMarketData
-{
-	repeated CMsgGCClientMarketDataEntry	entries = 1;
-};
-
-//
-// k_EMsgGCApplyStrangifier
-// k_EMsgGCUseItemEaterRecharger
-//
-message CMsgApplyToolToItem
-{
-	optional uint64 tool_item_id = 1;			// which item tool are we using
-	optional uint64 subject_item_id = 2;		// what item are we applying this tool to?
-};
-
-message CMsgApplyToolToBaseItem
-{
-	optional uint64 tool_item_id = 1;			// which item tool are we using
-	optional uint32 baseitem_def_index = 2;		// which base item def index are we applying this tool to?
-};
-
-message CMsgRecipeComponent
-{
-	optional uint64 subject_item_id = 1;
-	optional uint64 attribute_index = 2;
-};
-
-//
-// k_EMsgGCFulfillDynamicRecipeComponent
-//
-message CMsgFulfillDynamicRecipeComponent
-{
-	optional uint64 tool_item_id = 1;			// which item tool are we using
-	repeated CMsgRecipeComponent consumption_components = 2;	// Items to consume
-};
-
-//
-// k_EMsgGCSetItemEffectVerticalOffset
-//
-message CMsgSetItemEffectVerticalOffset
-{
-	optional uint64 item_id = 1;
-	optional float offset = 2;
-};
-
-//
-// k_EMsgGCSetHatEffectUseHeadOrigin
-//
-message CMsgSetHatEffectUseHeadOrigin
-{
-	optional uint64 item_id = 1;
-	optional bool use_head = 2;
-};
-
-//
-// k_EMsgGCDeliverGiftResponseGiver
-//
-message CMsgDeliverGiftResponseGiver
-{
-	optional uint32 response_code = 1;
-	optional string receiver_account_name = 2;		// will only be set if found and if the user wasn't specifically selected
-};
-
-//
-// Used by CEconGameAccountClientForGameServers
-//
-message CSOEconGameAccountForGameServers
-{
-	// Deprecated.
-	// optional uint32 skill_rating = 3;
-	// optional uint32 skill_rating_6v6 = 2;
-	// optional uint32 skill_rating_9v9 = 4;
-	// optional uint32 skill_rating_12v12 = 5;
-};
-
-// ================================================================================================
-// ================================================================================================
-// PROTOBUF DEFINITIONS COPIED FROM STEAM
-// ================================================================================================
-// ================================================================================================
-
-message CWorkshop_PopulateItemDescriptions_Request
-{
-	message SingleItemDescription
+	optional	fixed32 server_public_ip_addr = 1;
+	optional	fixed32 server_private_ip_addr = 2;
+	optional	uint32 server_port = 3;
+	optional	uint32 server_tv_port = 4;
+	optional	string server_key = 5;
+	optional	bool server_hibernation = 6;
+	enum ServerType
 	{
-		optional uint32 gameitemid = 1;
-		optional string item_description = 2;
+		UNSPECIFIED = 0; // We haven't received the type yet
+		GAME = 1; // Game server
+		PROXY = 2; // Source TV proxy relay
 	}
+	optional	ServerType server_type = 7 [ default = UNSPECIFIED ];
+	optional	uint32 server_region = 8; // Region value that matches regions.txt in the GC
+	optional	float server_loadavg = 9; // current load average
+	optional	float server_tv_broadcast_time = 10; // This may be negative if the game hasn't started broadcasting
+	optional	float server_game_time = 11; // Current game clock time
+	optional	fixed64 server_relay_connected_steam_id = 12; // SteamID of the game or relay server this relay is connected to
+	optional	uint32 relay_slots_max = 13; // slots total on relay
+	optional	int32 relays_connected = 14; // count of relays connected
+	optional	int32 relay_clients_connected = 15; // count of clients connected (all types)
+	optional	fixed64 relayed_game_server_steam_id = 16; // SteamID of the game server this relay is relaying
+	optional	uint32 parent_relay_count = 17; // The count of parent relays above this relay
+	optional	fixed64 tv_secret_code = 18; // The randomly generated ID for this server that requesting connections must use to hash the connecting steam ID to create a unique connection code
+};
 
-	message ItemDescriptionsLanguageBlock
-	{
-		optional string language = 1;						// ICU name
-		repeated SingleItemDescription descriptions = 2;
-	}
+// Do not remove this comment due to a bug on the Mac OS X protobuf compiler - lol
 
-	optional uint32 appid = 1;
-	repeated ItemDescriptionsLanguageBlock languages = 2;
-}
-
-message CWorkshop_GetContributors_Request
-{
-	optional uint32 appid = 1;
-	optional uint32 gameitemid = 2;
-}
-
-message CWorkshop_GetContributors_Response
-{
-	repeated fixed64 contributors = 1;
-}
-
-// ------------------------------------------------------------------------------------------------
-
-message CWorkshop_SetItemPaymentRules_Request
-{
-	message WorkshopItemPaymentRule
-	{
-		optional uint64 workshop_file_id = 1;
-		optional float revenue_percentage = 2;
-		optional string rule_description = 3;
-	}
-
-	message PartnerItemPaymentRule
-	{
-		optional uint32 account_id = 1;
-		optional float revenue_percentage = 2;
-		optional string rule_description = 3;
-	}
-
-	optional uint32 appid = 1;
-	optional uint32 gameitemid = 2;
-	repeated WorkshopItemPaymentRule associated_workshop_files = 3;
-	repeated PartnerItemPaymentRule partner_accounts = 4;
-
-}
-
-message CWorkshop_SetItemPaymentRules_Response
-{
-}
-
-// Don�t remove this line at the end of the file due a bug in the Mac OS X protobuf compiler

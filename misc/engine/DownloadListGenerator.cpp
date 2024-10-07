@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright  1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -30,9 +30,7 @@ CDownloadListGenerator &DownloadListGenerator()
 	return g_DownloadListGenerator;
 }
 
-ConVar	sv_logdownloadlist( "sv_logdownloadlist", IsX360() ? "0" : "1" );
-
-extern int GetSvPureMode();
+ConVar	sv_logdownloadlist( "sv_logdownloadlist", "0" );
 
 //-----------------------------------------------------------------------------
 // Purpose: Constructor
@@ -83,20 +81,16 @@ void CDownloadListGenerator::SetStringTable( INetworkStringTable *pStringTable )
 	OnResourcePrecached(path);
 
 	char resfilename[MAX_OSPATH];
-	KeyValues *resfilekeys = new KeyValues( "resourefiles" );
-
 	Q_snprintf( resfilename, sizeof( resfilename), "maps/%s.res", m_mapName );
 
+	KeyValues::AutoDelete resfilekeys( "resourcefiles" );
 	if ( resfilekeys->LoadFromFile( g_pFileSystem, resfilename, "GAME" ) )
 	{
-		KeyValues *entry = resfilekeys->GetFirstSubKey();
-		while ( entry )
+		for ( KeyValues *pKey = resfilekeys->GetFirstSubKey(); pKey != NULL; pKey = pKey->GetNextKey() )
 		{
-			OnResourcePrecached( entry->GetName() );
-			entry = entry->GetNextKey();
+			OnResourcePrecached( pKey->GetName() );
 		}
 	}
-	resfilekeys->deleteThis();
 }
 
 //-----------------------------------------------------------------------------
@@ -131,10 +125,10 @@ void CDownloadListGenerator::OnLevelLoadStart(const char *levelName)
 
 	// add a slash to the end of com_gamedir, so we can only deal with files for this mod
 	Q_snprintf( m_gameDir, sizeof(m_gameDir), "%s/", com_gamedir );
-	Q_FixSlashes( m_gameDir );
+	V_FixSlashes( m_gameDir, '/' );
 
 	// save off the map name
-	Q_snprintf( m_mapName, sizeof( m_mapName ), "%s", levelName );
+	V_strcpy_safe( m_mapName, levelName );
 }
 
 //-----------------------------------------------------------------------------
@@ -172,7 +166,7 @@ void CDownloadListGenerator::OnModelPrecached(const char *relativePathFileName)
 		// it's a materials file, make sure that it starts in the materials directory, and we get the .vtf
 		char file[_MAX_PATH];
 
-		if (!Q_strnicmp(relativePathFileName, "materials", strlen("materials")))
+		if ( StringHasPrefix( relativePathFileName, "materials" ) )
 		{
 			Q_strncpy(file, relativePathFileName, sizeof(file));
 		}
@@ -217,7 +211,7 @@ void CDownloadListGenerator::OnSoundPrecached(const char *relativePathFileName)
 
 	// prepend the sound/ directory if necessary
 	char file[_MAX_PATH];
-	if (!Q_strnicmp(relativePathFileName, "sound", strlen("sound")))
+	if ( StringHasPrefix( relativePathFileName, "sound" ) )
 	{
 		Q_strncpy(file, relativePathFileName, sizeof(file));
 	}
@@ -233,37 +227,80 @@ void CDownloadListGenerator::OnSoundPrecached(const char *relativePathFileName)
 //-----------------------------------------------------------------------------
 // Purpose: logs the precache as a file access
 //-----------------------------------------------------------------------------
-void CDownloadListGenerator::OnResourcePrecached(const char *relativePathFileName)
+void CDownloadListGenerator::OnResourcePrecached( const char *pRelativePathFileName )
 {
+	// not supporting
 	if ( IsX360() )
-	{
-		// not supporting
 		return;
-	}
 
 	// ignore empty string
-	if (relativePathFileName[0] == 0)
-	{
+	if ( pRelativePathFileName[0] == 0 )
 		return;
-	}
 
 	// ignore files that start with '*' since they signify special models
-	if (relativePathFileName[0] == '*')
+	if ( pRelativePathFileName[0] == '*' )
+		return;
+
+	if ( Q_IsAbsolutePath( pRelativePathFileName ) )
 	{
+		Warning( "*** CDownloadListGenerator::OnResourcePrecached: Encountered full path %s!\n", pRelativePathFileName );
 		return;
 	}
 
-	char fullPath[_MAX_PATH];
-	if (g_pFileSystem->GetLocalPath(relativePathFileName, fullPath, sizeof(fullPath)))
+	char pRelativePath[MAX_PATH];
+	Q_strncpy( pRelativePath, pRelativePathFileName, sizeof(pRelativePath) );
+	Q_FixSlashes( pRelativePath, '/' );
+
+	// make sure the filename hasn't already been written
+	UtlSymId_t filename = m_AlreadyWrittenFileNames.Find( pRelativePath );
+	if ( filename != UTL_INVAL_SYMBOL )
+		return;
+
+	// record in list, so we don't write it again
+	m_AlreadyWrittenFileNames.AddString( pRelativePath );
+
+	// don't allow files for download the server doesn't have
+	if ( !g_pFileSystem->FileExists( pRelativePath, "GAME" ) )
+		return;	
+
+	// add extras for mdl's
+	char *pExt = const_cast< char* >( Q_GetFileExtension( pRelativePath ) );
+	if ( !Q_stricmp( pExt, "mdl" ) )
 	{
-		OnResourcePrecachedFullPath( fullPath, relativePathFileName);
+		Q_strncpy(pExt, "vvd", 10);
+		OnResourcePrecached(pRelativePath);
+
+		Q_strncpy(pExt, "ani", 10);
+		OnResourcePrecached(pRelativePath);
+
+		Q_strncpy(pExt, "dx90.vtx", 10);
+		OnResourcePrecached(pRelativePath);
+
+		Q_strncpy(pExt, "phy", 10);
+		OnResourcePrecached(pRelativePath);
+
+		Q_strncpy(pExt, "jpg", 10);
+		OnResourcePrecached(pRelativePath);
+	}
+
+	FileHandle_t handle = m_hReslistFile;
+	if ( handle != FILESYSTEM_INVALID_HANDLE )
+	{
+		g_pFileSystem->Write("\"", 1, handle);
+		g_pFileSystem->Write( pRelativePath, Q_strlen(pRelativePath), handle );
+		g_pFileSystem->Write("\"\n", 2, handle);
+	}
+	if ( m_pStringTable )
+	{
+		m_pStringTable->AddString( true, pRelativePath );
 	}
 }
+
 
 //-----------------------------------------------------------------------------
 // Purpose: marks a precached file as needing a specific CRC on the client
 //-----------------------------------------------------------------------------
-void CDownloadListGenerator::ForceSimpleMaterial( const char *relativePathFileName )
+void CDownloadListGenerator::ForceExactFile( const char *relativePathFileName, ConsistencyType consistency )
 {
 	if ( IsX360() )
 	{
@@ -274,53 +311,61 @@ void CDownloadListGenerator::ForceSimpleMaterial( const char *relativePathFileNa
 	if ( !m_pStringTable )
 		return;
 
-	if ( !Q_stristr(relativePathFileName, ".vmt") && !Q_stristr(relativePathFileName, ".vtf"))
+	if ( consistency != CONSISTENCY_EXACT && consistency != CONSISTENCY_SIMPLE_MATERIAL )
 	{
-		DevMsg( "Tried to enforce simple material on %s\n", relativePathFileName );
-		return;
+		consistency = CONSISTENCY_EXACT;
 	}
 
-	// it's a materials file, make sure that it starts in the materials directory, and we get the .vtf
-	char szFixedFilename[_MAX_PATH];
-	if (!Q_strnicmp(relativePathFileName, "materials", strlen("materials")))
+	CRC32_t crc;
+	bool error = true;
+	char file[_MAX_PATH];
+	const char *filePtr = relativePathFileName;
+
+	if (Q_strstr(relativePathFileName, ".vmt") || Q_strstr(relativePathFileName, ".vtf"))
 	{
-		V_strcpy_safe( szFixedFilename, relativePathFileName );
+		// it's a materials file, make sure that it starts in the materials directory, and we get the .vtf
+		if ( StringHasPrefix(relativePathFileName, "materials" ) )
+		{
+			Q_strncpy(file, relativePathFileName, sizeof(file));
+		}
+		else
+		{
+			// prepend the materials directory
+			Q_snprintf(file, sizeof(file), "materials\\%s", relativePathFileName);
+		}
+		error = !CRC_File( &crc, file );
+		filePtr = file;
 	}
 	else
 	{
-		// prepend the materials directory
-		V_sprintf_safe( szFixedFilename, "materials\\%s", relativePathFileName );
-	}
-	V_FixSlashes( szFixedFilename );
-	if ( !g_pFullFileSystem->FileExists( szFixedFilename, "game" ) )
-	{
-		DevMsg( "Cannot force simple material on %s; file not found\n", szFixedFilename );
-		return;
+		error = !CRC_File( &crc, relativePathFileName );
 	}
 
-	ExactFileUserData userData;
-	userData.consistencyType = CONSISTENCY_SIMPLE_MATERIAL;
-	userData.crc = 0;
-
-	// Only set consistency data if pure, otherwise just create entry in download list
-	if ( GetSvPureMode() < 0 )
+	if ( error )
 	{
-		m_pStringTable->AddString( true, szFixedFilename );
+		DevWarning( "Failed to CRC %s\n", relativePathFileName );
 	}
 	else
 	{
-		int index = m_pStringTable->FindStringIndex( szFixedFilename );
+		char relativeFileName[_MAX_PATH];
+		Q_strncpy( relativeFileName, filePtr, sizeof( relativeFileName ) );
+		V_FixSlashes( relativeFileName, '/' );
+
+		ExactFileUserData userData;
+		userData.consistencyType = consistency;
+		userData.crc = crc;
+
+		int index = m_pStringTable->FindStringIndex( relativeFileName );
 		if ( index != INVALID_STRING_INDEX )
 		{
 			m_pStringTable->SetStringUserData( index, sizeof( ExactFileUserData ), &userData );
 		}
 		else
 		{
-			m_pStringTable->AddString( true, szFixedFilename, sizeof( ExactFileUserData ), &userData );
+			m_pStringTable->AddString( true, relativeFileName, sizeof( ExactFileUserData ), &userData );
 		}
 	}
 }
-
 
 //-----------------------------------------------------------------------------
 // Purpose: marks a precached model as having a maximum size on the client
@@ -341,113 +386,30 @@ void CDownloadListGenerator::ForceModelBounds( const char *relativePathFileName,
 
 	if (!Q_stristr(relativePathFileName, ".mdl"))
 	{
-		DevMsg( "Warning - trying to enforce model bounds on %s\n", relativePathFileName );
+		DevWarning( "Warning - trying to enforce model bounds on %s\n", relativePathFileName );
 		return;
 	}
 
 	char relativeFileName[_MAX_PATH];
 	Q_strncpy( relativeFileName, relativePathFileName, sizeof( relativeFileName ) );
-	Q_FixSlashes( relativeFileName );
+	V_FixSlashes( relativeFileName, '/' );
 
-	// Only set consistency data if pure, otherwise just create entry in download list
-	if ( GetSvPureMode() < 0 )
+	ModelBoundsUserData userData;
+	userData.consistencyType = CONSISTENCY_BOUNDS;
+	userData.mins = mins;
+	userData.maxs = maxs;
+
+	int index = m_pStringTable->FindStringIndex( relativeFileName );
+	if ( index != INVALID_STRING_INDEX )
 	{
-		m_pStringTable->AddString( true, relativePathFileName );
+		m_pStringTable->SetStringUserData( index, sizeof( ModelBoundsUserData ), &userData );
 	}
 	else
 	{
-		ModelBoundsUserData userData;
-		userData.consistencyType = CONSISTENCY_BOUNDS;
-		userData.mins = mins;
-		userData.maxs = maxs;
-
-		int index = m_pStringTable->FindStringIndex( relativeFileName );
-		if ( index != INVALID_STRING_INDEX )
-		{
-			m_pStringTable->SetStringUserData( index, sizeof( ModelBoundsUserData ), &userData );
-		}
-		else
-		{
-			m_pStringTable->AddString( true, relativeFileName, sizeof( ModelBoundsUserData ), &userData );
-		}
+		m_pStringTable->AddString( true, relativeFileName, sizeof( ModelBoundsUserData ), &userData );
 	}
 }
 
-//-----------------------------------------------------------------------------
-// Purpose: Logs out file access to a file
-//-----------------------------------------------------------------------------
-void CDownloadListGenerator::OnResourcePrecachedFullPath( char *fullPathFileName, const char *relativeFileName )
-{
-	if ( IsX360() )
-	{
-		// not supporting
-		return;
-	}
-
-	Q_FixSlashes( fullPathFileName );
-
-	if ( !g_pFileSystem->FileExists( fullPathFileName ) )
-	{
-		return;	// don't allow files for download the server doesn't have
-	}
-
-	if ( Q_strncasecmp( m_gameDir, fullPathFileName, Q_strlen( m_gameDir ) ) )
-	{
-		return;	// the game dir must be part of the full name
-	}
-
-	// make sure the filename hasn't already been written
-	UtlSymId_t filename = m_AlreadyWrittenFileNames.Find( fullPathFileName );
-	if ( filename != UTL_INVAL_SYMBOL )
-	{
-		return;
-	}
-
-	// record in list, so we don't write it again
-	m_AlreadyWrittenFileNames.AddString( fullPathFileName );
-
-	// add extras for mdl's
-	if (Q_strstr(relativeFileName, ".mdl"))
-	{
-		// it's a model, get it's other files as well
-		char file[_MAX_PATH];
-		Q_strncpy(file, relativeFileName, sizeof(file) - 10);
-		char *ext = Q_strstr(file, ".mdl");
-
-		Q_strncpy(ext, ".vvd", 10);
-		OnResourcePrecached(file);
-
-		Q_strncpy(ext, ".ani", 10);
-		OnResourcePrecached(file);
-
-		Q_strncpy(ext, ".dx80.vtx", 10);
-		OnResourcePrecached(file);
-
-		Q_strncpy(ext, ".dx90.vtx", 10);
-		OnResourcePrecached(file);
-
-		Q_strncpy(ext, ".sw.vtx", 10);
-		OnResourcePrecached(file);
-
-		Q_strncpy(ext, ".phy", 10);
-		OnResourcePrecached(file);
-
-		Q_strncpy(ext, ".jpg", 10);
-		OnResourcePrecached(file);
-	}
-
-	FileHandle_t handle = m_hReslistFile;
-	if ( handle != FILESYSTEM_INVALID_HANDLE )
-	{
-		g_pFileSystem->Write("\"", 1, handle);
-		g_pFileSystem->Write( relativeFileName, Q_strlen(relativeFileName), handle );
-		g_pFileSystem->Write("\"\n", 2, handle);
-	}
-	if ( m_pStringTable )
-	{
-		m_pStringTable->AddString( true, relativeFileName );
-	}
-}
 
 
 	

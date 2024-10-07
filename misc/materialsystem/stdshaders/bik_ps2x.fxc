@@ -1,7 +1,8 @@
-// DYNAMIC: "PIXELFOGTYPE"				"0..1"
+//========== Copyright (c) Valve Corporation, All rights reserved. ==========//
 
-// STATIC: "CONVERT_TO_SRGB" "0..1"	[ps20b][= g_pHardwareConfig->NeedsShaderSRGBConversion()] [PC]
-// STATIC: "CONVERT_TO_SRGB" "0..0"	[= 0] [XBOX]
+// STATIC: "VERTEXALPHA"					"0..1"
+
+#include "common_fog_ps_fxc.h"
 
 #include "common_ps_fxc.h"
 #include "shader_constant_register_map.h"
@@ -16,9 +17,9 @@ sampler cBTextureSampler	: register( s2 );
 
 struct PS_INPUT
 {
-	HALF2 baseTexCoord					: TEXCOORD0;
-	HALF4 worldPos_projPosZ				: TEXCOORD1;
-	float4 fogFactorW					: COLOR1;
+	float2 baseTexCoord					: TEXCOORD0;
+	float4 worldPos_projPosZ				: TEXCOORD1;
+	float flAlpha						: TEXCOORD2;		
 };
 
 #if 0
@@ -63,34 +64,48 @@ static float yuvtorgb[] =
 float4 main( PS_INPUT i ) : COLOR
 {
 	half y, cR, cB;
-	y = tex2D( YTextureSampler, i.baseTexCoord.xy );
-	cR = tex2D( cRTextureSampler, i.baseTexCoord.xy );
-	cB = tex2D( cBTextureSampler, i.baseTexCoord.xy );
+	y = tex2D( YTextureSampler, i.baseTexCoord.xy ).x;
+	cR = tex2D( cRTextureSampler, i.baseTexCoord.xy ).x;
+	cB = tex2D( cBTextureSampler, i.baseTexCoord.xy ).x;
 //	half a = tex2D( ATextureSampler, i.baseTexCoord.xy );
+
+	#if defined( _X360 )
+	{
+		// Reduce the black level of videos on X360 - this is a workaround for our highly tweaked gamma ramp, which was optimized for 3D content and non-PWL textures.
+		y = saturate( y - 6.0f / 255.0f );
+	}
+	#endif
 	
-	HALF4 c;
+	float4 c;
 	c = float4( y, cR, cB, 1.0f );
 
 	float4 tor = float4( 1.164123535f,  1.595794678f,  0.0f,         -0.87065506f );
 	float4 tog = float4( 1.164123535f, -0.813476563f, -0.391448975f,  0.529705048f );
 	float4 tob = float4( 1.164123535f,  0.0f,          2.017822266f, -1.081668854f );
 
-	HALF4 rgba;
+	float4 rgba;
 	
 	rgba.r = dot( c, tor );
 	rgba.g = dot( c, tog );
 	rgba.b = dot( c, tob );
-	rgba.a = 1.0f;
+	#if ( VERTEXALPHA )
+	{
+		rgba.a = i.flAlpha;
+	}
+	#else
+	{
+		rgba.a = 1.0f;
+	}
+	#endif
 
-	float fogFactor = CalcPixelFogFactor( PIXELFOGTYPE, g_FogParams, g_EyePos_SpecExponent.z, i.worldPos_projPosZ.z, i.worldPos_projPosZ.w );
+	float fogFactor = CalcPixelFogFactor( PIXELFOGTYPE, g_FogParams, g_EyePos_SpecExponent.xyz, i.worldPos_projPosZ.xyz, i.worldPos_projPosZ.w );
 	float4 result = FinalOutput( rgba, fogFactor, PIXELFOGTYPE, TONEMAP_SCALE_NONE );
 
 	// The 360 will do an sRGB write to put the linear values into 360 gamma space, but the PC just outputs gamma values directly
-	#if defined( _X360 )
-		result.r = SrgbGammaToLinear( result.r );
-		result.g = SrgbGammaToLinear( result.g );
-		result.b = SrgbGammaToLinear( result.b );
-	#endif
+// Commenting this out because we're not using PWL textures on X360 for Portal2. Also see the disabled sRGB write in bik_dx9.cpp.
+//	#if defined( _X360 )
+//		result.rgb = SrgbGammaToLinear( result.rgb );
+//	#endif
 
 	return result.rgba;
 }

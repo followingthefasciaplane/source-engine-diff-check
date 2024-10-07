@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -25,6 +25,11 @@ const char	*GlobalEntity_GetName( int globalIndex );
 int GlobalEntity_GetCounter( int globalIndex );
 void GlobalEntity_SetCounter( int globalIndex, int counter );
 int GlobalEntity_AddToCounter( int globalIndex, int delta );
+
+int GlobalEntity_GetFlags( int globalIndex );
+void GlobalEntity_SetFlags( int globalIndex, int flags );
+void GlobalEntity_AddFlags( int globalIndex, int flags );
+void GlobalEntity_RemoveFlags( int globalIndex, int flags );
 
 int			GlobalEntity_GetNumGlobals( void );
 void		GlobalEntity_EnableStateUpdates( bool bEnable );
@@ -98,6 +103,47 @@ inline int GlobalEntity_AddToCounter( const char *pGlobalName, int delta )
 {
 	return GlobalEntity_AddToCounter( GlobalEntity_GetIndex( pGlobalName ), delta );
 }
+
+inline int GlobalEntity_GetFlags( string_t globalname )
+{
+	return GlobalEntity_GetFlags( GlobalEntity_GetIndex( globalname ) );
+}
+
+inline int GlobalEntity_GetFlags( const char *pGlobalName )
+{
+	return GlobalEntity_GetFlags( GlobalEntity_GetIndex( pGlobalName ) );
+}
+
+inline void GlobalEntity_SetFlags( string_t globalname, int flags )
+{
+	GlobalEntity_SetFlags( GlobalEntity_GetIndex( globalname ), flags );
+}
+
+inline void GlobalEntity_SetFlags( const char *pGlobalName, int flags )
+{
+	GlobalEntity_SetFlags( GlobalEntity_GetIndex( pGlobalName ), flags );
+}
+
+inline void GlobalEntity_AddFlags( string_t globalname, int flags )
+{
+	GlobalEntity_AddFlags( GlobalEntity_GetIndex( globalname ), flags );
+}
+
+inline void GlobalEntity_AddFlags( const char *pGlobalName, int flags )
+{
+	GlobalEntity_AddFlags( GlobalEntity_GetIndex( pGlobalName ), flags );
+}
+
+inline void GlobalEntity_RemoveFlags( string_t globalname, int flags )
+{
+	GlobalEntity_RemoveFlags( GlobalEntity_GetIndex( globalname ), flags );
+}
+
+inline void GlobalEntity_RemoveFlags( const char *pGlobalName, int flags )
+{
+	GlobalEntity_RemoveFlags( GlobalEntity_GetIndex( pGlobalName ), flags );
+}
+
 
 inline GLOBALESTATE GlobalEntity_GetStateByIndex( int iIndex )
 {

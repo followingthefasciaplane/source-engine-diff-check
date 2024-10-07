@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//============ Copyright (c) Valve Corporation, All rights reserved. ============
 //
 // DirectX 9 Cloud shader
 //
@@ -26,7 +26,7 @@ BEGIN_VS_SHADER( Cloud_dx9, "Help for Cloud" )
 	SHADER_FALLBACK
 	{
 		if( g_pHardwareConfig->GetDXSupportLevel() < 90 )
-			return "Cloud_dx8";
+			return "Cloud";
 
 		return 0;
 	}
@@ -75,8 +75,8 @@ BEGIN_VS_SHADER( Cloud_dx9, "Help for Cloud" )
 
 		DYNAMIC_STATE
 		{
-			BindTexture( SHADER_SAMPLER0, BASETEXTURE, FRAME );
-			BindTexture( SHADER_SAMPLER1, CLOUDALPHATEXTURE );
+			BindTexture( SHADER_SAMPLER0, false, BASETEXTURE, FRAME );
+			BindTexture( SHADER_SAMPLER1, false, CLOUDALPHATEXTURE );
 
 			// Handle scrolling of base texture
 			SetVertexShaderTextureScaledTransform( VERTEX_SHADER_SHADER_SPECIFIC_CONST_0, BASETEXTURETRANSFORM, CLOUDSCALE );

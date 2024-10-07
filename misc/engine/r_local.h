@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -24,13 +24,13 @@ extern	int		d_lightstyleframe[256];	// Frame when the light style value changed
 extern	int		d_lightstylenumframes[256]; // number of frames in the lightstyle
 extern ConVar	r_lightmapcolorscale;
 extern ConVar	r_decals;
-extern ConVar	mp_decals;
 extern ConVar	r_lightmap;
 extern ConVar	r_lightstyle;
 
 extern int		r_dlightchanged;	// which ones changed
 extern int		r_dlightactive;		// which ones are active
 extern VMatrix g_BrushToWorldMatrix;
+extern bool		g_RendererInLevel;
 
 class IClientEntity;
 
@@ -57,6 +57,12 @@ inline float LightStyleValue( int style )
 {
 	Assert( style >= 0 && style < MAX_LIGHTSTYLES );
 	return ( float )d_lightstylevalue[style] * (1.0f / 264.0f);
+}
+
+// returns true if the LightStyleValue is != 1.0
+inline bool LightStyleIsModified( int nStyle )
+{
+	return d_lightstylevalue[nStyle] != 264 ? true : false;
 }
 
 #endif // R_LOCAL_H

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -22,7 +22,7 @@ public:
 	virtual void Shutdown() = 0;
 	virtual bool IsRunning() = 0;
 	virtual void ClearQueuedPacketsForChannel( INetChannel *pChan ) =  0;
-	virtual void QueuePacket( INetChannel *pChan, SOCKET s, const char FAR *buf, int len, const struct sockaddr FAR * to, int tolen, uint32 msecDelay ) = 0;
+	virtual void QueuePacket( INetChannel *pChan, SOCKET s, const char FAR *buf, int len, const ns_address &to, uint32 msecDelay ) = 0;
 	virtual bool HasQueuedPackets( const INetChannel *pChan ) const = 0;
 };
 

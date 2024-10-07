@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -32,6 +32,11 @@ public:
 	virtual bool		ShouldPause() const = 0;
 
 	virtual bool		IsVisible() const = 0; //< true iff the bug panel is active and on screen right now
+
+	// Methods to get bug count for internal dev work stat tracking.
+	// Will get the bug count and clear it every map transition
+	virtual int			GetBugSubmissionCount() const = 0;
+	virtual void		ClearBugSubmissionCount() = 0;
 };
 
 extern IEngineBugReporter *bugreporter;

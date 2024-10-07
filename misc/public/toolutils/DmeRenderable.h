@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =====//
 //
 // Purpose: Base decorator class to make a DME renderable 
 //
@@ -31,6 +31,9 @@ class CDmeRenderable : public T, public IClientUnknown, public IClientRenderable
 
 protected:
 	virtual void OnAttributeChanged( CDmAttribute *pAttribute );
+	virtual void OnAdoptedFromUndo();
+	virtual void OnOrphanedToUndo();
+	void UpdateIsDrawingInEngine();
 
 // IClientUnknown implementation.
 public:
@@ -43,24 +46,23 @@ public:
 	virtual IClientEntity*		GetIClientEntity()		{ return 0; }
 	virtual C_BaseEntity*		GetBaseEntity()			{ return 0; }
 	virtual IClientThinkable*	GetClientThinkable()	{ return 0; }
+	virtual IClientAlphaProperty*	GetClientAlphaProperty() { return 0; }
+
 //	virtual const Vector &		GetRenderOrigin( void )	{ return vec3_origin; }
 //	virtual const QAngle &		GetRenderAngles( void ) { return vec3_angle; }
 	virtual bool				ShouldDraw( void )		{ return false; }
-	virtual bool				IsTransparent( void )	{ return false; } 
-	virtual bool				IsTwoPass( void )		{ return false; } 
 	virtual void				OnThreadedDrawSetup()	{}
-	virtual bool				UsesPowerOfTwoFrameBufferTexture() { return false; }
-	virtual bool				UsesFullFrameBufferTexture() { return false; }
+	virtual int				    GetRenderFlags( void )  { return 0; }
 	virtual ClientShadowHandle_t	GetShadowHandle() const;
 	virtual ClientRenderHandle_t&	RenderHandle();
 	virtual int					GetBody()				{ return 0; }
 	virtual int					GetSkin()				{ return 0; }
 	virtual const model_t*		GetModel( ) const		{ return NULL; }
-//	virtual int					DrawModel( int flags );
-	virtual void				ComputeFxBlend( )		{ return; }
-	virtual int					GetFxBlend( )			{ return 255; }
+//	virtual int					DrawModel( int flags, const RenderableInstance_t &instance );
+	virtual uint8				OverrideAlphaModulation( uint8 nAlpha ) { return nAlpha; }
+	virtual uint8				OverrideShadowAlphaModulation( uint8 nAlpha ) { return nAlpha; }
 	virtual bool				LODTest()				{ return true; }
-	virtual bool				SetupBones( matrix3x4_t *pBoneToWorldOut, int nMaxBones, int boneMask, float currentTime ) { return true; }
+	virtual bool				SetupBones( matrix3x4a_t *pBoneToWorldOut, int nMaxBones, int boneMask, float currentTime ) { return true; }
 	virtual void				SetupWeights( const matrix3x4_t *pBoneToWorld, int nFlexWeightCount, float *pFlexWeights, float *pFlexDelayedWeights )	{}
 	virtual bool				UsesFlexDelayedWeights() { return false; }
 	virtual void				DoAnimationEvents( void ) {}
@@ -84,23 +86,32 @@ public:
 	virtual int LookupAttachment( const char *pAttachmentName ) { return -1; }
 	virtual	bool GetAttachment( int number, Vector &origin, QAngle &angles );
 	virtual bool GetAttachment( int number, matrix3x4_t &matrix );
+	virtual bool ComputeLightingOrigin( int nAttachmentIndex, Vector modelLightingCenter, const matrix3x4_t &matrix, Vector &transformedLightingCenter );
 	virtual float *GetRenderClipPlane() { return NULL; }
 	virtual void RecordToolMessage() {}
 	virtual bool IgnoresZBuffer( void ) const { return false; }
+	virtual bool ShouldDrawForSplitScreenUser( int nSlot ) { return true; }
+	virtual IClientModelRenderable*	GetClientModelRenderable()	{ return 0; }
 
 	// Add/remove to engine from drawing
 	void DrawInEngine( bool bDrawInEngine );
 	bool IsDrawingInEngine() const;
 
+	// Call this when the translucency type has changed for this renderable
+	void OnTranslucencyTypeChanged();
+
 protected:
 	virtual CDmAttribute* GetVisibilityAttribute() { return NULL; }
 	virtual CDmAttribute* GetDrawnInEngineAttribute() { return m_bWantsToBeDrawnInEngine.GetAttribute(); }
 
-	Vector m_vecRenderOrigin;
-	QAngle m_angRenderAngles;
+	// NOTE: The goal of this function is different from IsTranslucent().
+	// Here, we need to determine whether a renderable is inherently translucent
+	// when run-time alpha modulation or any other game code is not taken into account
+	virtual RenderableTranslucencyType_t ComputeTranslucencyType( );
 
 protected:
-
+	Vector m_vecRenderOrigin;
+	QAngle m_angRenderAngles;
 	CDmaVar<bool> m_bWantsToBeDrawnInEngine;
 	bool m_bIsDrawingInEngine;
 
@@ -122,6 +133,25 @@ void CDmeRenderable<T>::OnConstruction()
 
 template < class T >
 void CDmeRenderable<T>::OnDestruction()
+{
+	if ( m_bIsDrawingInEngine )
+	{
+		if ( clienttools )
+		{
+			clienttools->RemoveClientRenderable( this );
+		}
+		m_bIsDrawingInEngine = false;
+	}
+}
+
+template < class T >
+void CDmeRenderable<T>::OnAdoptedFromUndo()
+{
+	UpdateIsDrawingInEngine();
+}
+
+template < class T >
+void CDmeRenderable<T>::OnOrphanedToUndo()
 {
 	if ( m_bIsDrawingInEngine )
 	{
@@ -167,6 +197,28 @@ bool CDmeRenderable<T>::IsDrawingInEngine() const
 
 
 //-----------------------------------------------------------------------------
+// Here, we need to determine whether a renderable is inherently translucent
+// when run-time alpha modulation or any other game code is not taken into account
+//-----------------------------------------------------------------------------
+template < class T >
+RenderableTranslucencyType_t CDmeRenderable<T>::ComputeTranslucencyType( )
+{
+	return modelinfoclient->ComputeTranslucencyType( GetModel(), GetSkin(), GetBody() );
+}
+
+
+//-----------------------------------------------------------------------------
+// Call this when the translucency type has changed for this renderable
+//-----------------------------------------------------------------------------
+template < class T >
+void CDmeRenderable<T>::OnTranslucencyTypeChanged()
+{
+	RenderableTranslucencyType_t nType = ComputeTranslucencyType( );
+	clienttools->SetTranslucencyType( this, nType );
+}
+
+
+//-----------------------------------------------------------------------------
 // Called when attributes changed
 //-----------------------------------------------------------------------------
 template < class T >
@@ -176,21 +228,29 @@ void CDmeRenderable<T>::OnAttributeChanged( CDmAttribute *pAttribute )
 	CDmAttribute *pVisibilityAttribute = GetVisibilityAttribute();
 	if ( pAttribute == pVisibilityAttribute || pAttribute == m_bWantsToBeDrawnInEngine.GetAttribute() )
 	{
-		bool bIsVisible = pVisibilityAttribute ? pVisibilityAttribute->GetValue<bool>() : true;
-		bool bShouldDrawInEngine = m_bWantsToBeDrawnInEngine && bIsVisible;
-		if ( m_bIsDrawingInEngine != bShouldDrawInEngine )
+		UpdateIsDrawingInEngine();
+	}
+}
+
+template < class T >
+void CDmeRenderable<T>::UpdateIsDrawingInEngine()
+{
+	CDmAttribute *pVisibilityAttribute = GetVisibilityAttribute();
+	bool bIsVisible = pVisibilityAttribute ? pVisibilityAttribute->GetValue<bool>() : true;
+	bool bShouldDrawInEngine = m_bWantsToBeDrawnInEngine && bIsVisible;
+	if ( m_bIsDrawingInEngine != bShouldDrawInEngine )
+	{
+		m_bIsDrawingInEngine = bShouldDrawInEngine;
+		if ( clienttools && modelinfoclient )
 		{
-			m_bIsDrawingInEngine = bShouldDrawInEngine;
-			if ( clienttools )
+			if ( m_bIsDrawingInEngine )
 			{
-				if ( m_bIsDrawingInEngine )
-				{
-					clienttools->AddClientRenderable( this, IsTransparent() ? RENDER_GROUP_TRANSLUCENT_ENTITY : RENDER_GROUP_OPAQUE_ENTITY );
-				}
-				else
-				{
-					clienttools->RemoveClientRenderable( this );
-				}
+				RenderableTranslucencyType_t nType = ComputeTranslucencyType( );
+				clienttools->AddClientRenderable( this, false, nType );
+			}
+			else
+			{
+				clienttools->RemoveClientRenderable( this );
 			}
 		}
 	}
@@ -226,7 +286,23 @@ bool CDmeRenderable<T>::GetAttachment( int number, matrix3x4_t &matrix )
 	return true;
 }
 
-	
+
+template < class T >
+bool CDmeRenderable<T>::ComputeLightingOrigin( int nAttachmentIndex, Vector modelLightingCenter, const matrix3x4_t &matrix, Vector &transformedLightingCenter )
+{
+	if ( nAttachmentIndex <= 0 )
+	{
+		VectorTransform( modelLightingCenter, matrix, transformedLightingCenter );
+	}
+	else
+	{
+		matrix3x4_t attachmentTransform;
+		GetAttachment( nAttachmentIndex, attachmentTransform );
+		VectorTransform( modelLightingCenter, attachmentTransform, transformedLightingCenter );
+	}
+	return true;
+}
+
 //-----------------------------------------------------------------------------
 // Other methods
 //-----------------------------------------------------------------------------

@@ -1,10 +1,10 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright (c) Valve Corporation, All rights reserved. ======//
 //
 // hltvclient.cpp: implementation of the CHLTVClient class.
 //
 // $NoKeywords: $
 //
-//===========================================================================//
+//==================================================================//
 
 #include <tier0/vprof.h>
 #include "hltvclient.h"
@@ -17,14 +17,17 @@
 #include "cmd.h"
 #include "ihltvdirector.h"
 #include "host.h"
+#include "sv_steamauth.h"
+#include "fmtstr.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
-static ConVar tv_maxrate( "tv_maxrate", "8000", 0, "Max SourceTV spectator bandwidth rate allowed, 0 == unlimited" );
-static ConVar tv_relaypassword( "tv_relaypassword", "", FCVAR_NOTIFY | FCVAR_PROTECTED | FCVAR_DONTRECORD, "SourceTV password for relay proxies" );
-static ConVar tv_chattimelimit( "tv_chattimelimit", "8", 0, "Limits spectators to chat only every n seconds" );
-static ConVar tv_chatgroupsize( "tv_chatgroupsize", "0", 0, "Set the default chat group size" );
+static ConVar tv_maxrate( "tv_maxrate", STRINGIFY( DEFAULT_RATE ), FCVAR_RELEASE, "Max GOTV spectator bandwidth rate allowed, 0 == unlimited" );
+static ConVar tv_relaypassword( "tv_relaypassword", "", FCVAR_NOTIFY | FCVAR_PROTECTED | FCVAR_DONTRECORD | FCVAR_RELEASE, "GOTV password for relay proxies" );
+static ConVar tv_chattimelimit( "tv_chattimelimit", "8", FCVAR_RELEASE, "Limits spectators to chat only every n seconds" );
+static ConVar tv_chatgroupsize( "tv_chatgroupsize", "0", FCVAR_RELEASE, "Set the default chat group size" );
+extern ConVar replay_debug;
 
 //////////////////////////////////////////////////////////////////////
 // Construction/Destruction
@@ -34,12 +37,11 @@ CHLTVClient::CHLTVClient(int slot, CBaseServer *pServer)
 {
 	Clear();
 
-	Assert( hltv == pServer );
-
 	m_nClientSlot = slot;
 	m_Server = pServer;
 	m_pHLTV = dynamic_cast<CHLTVServer*>(pServer);
-	m_nEntityIndex = m_pHLTV->GetHLTVSlot() + 1;
+	Assert( g_pHltvServer[ m_pHLTV->GetInstanceIndex() ] == pServer );
+	m_nEntityIndex = slot < 0 ? slot : m_pHLTV->GetHLTVSlot() + 1;
 	m_nLastSendTick = 0;
 	m_fLastSendTime = 0.0f;
 	m_flLastChatTime = 0.0f;
@@ -71,49 +73,64 @@ bool CHLTVClient::SendSignonData( void )
 	else
 	{
 		// use your class infos, CRC is correct
-		SVC_ClassInfo classmsg( true, m_Server->serverclasses );
+		CSVCMsg_ClassInfo_t classmsg;
+		classmsg.set_create_on_client( true );		
 		m_NetChannel->SendNetMsg( classmsg );
 	}
 
 	 return CBaseClient::SendSignonData();
 }
 
-bool CHLTVClient::ProcessClientInfo( CLC_ClientInfo *msg )
+bool CHLTVClient::ProcessSignonStateMsg(int state, int spawncount)
 {
-	if ( !CBaseClient::ProcessClientInfo( msg ) )
+	if ( !CBaseClient::ProcessSignonStateMsg( state, spawncount ) )
+		return false;
+
+	if ( state == SIGNONSTATE_FULL )
+	{
+		// Send all the delayed avatar data to the fully connected client
+		if ( INetChannel *pMyNetChannel = GetNetChannel() )
+		{
+			FOR_EACH_MAP_FAST( m_pHLTV->m_mapPlayerAvatarData, iData )
+			{
+				pMyNetChannel->EnqueueVeryLargeAsyncTransfer( *m_pHLTV->m_mapPlayerAvatarData.Element( iData ) );
+			}
+		}
+	}
+	return true;
+}
+
+bool CHLTVClient::CLCMsg_ClientInfo( const CCLCMsg_ClientInfo& msg )
+{
+	if ( !CBaseClient::CLCMsg_ClientInfo( msg ) )
 		return false;
 
 	return true;
 }
 
-bool CHLTVClient::ProcessMove(CLC_Move *msg)
+bool CHLTVClient::CLCMsg_Move( const CCLCMsg_Move& msg )
 {
 	// HLTV clients can't move
 	return true;
 }
 
-bool CHLTVClient::ProcessListenEvents( CLC_ListenEvents *msg )
+bool CHLTVClient::CLCMsg_ListenEvents( const CCLCMsg_ListenEvents& msg )
 {
 	// HLTV clients can't subscribe to events, we just send them
 	return true;
 }
 
-bool CHLTVClient::ProcessRespondCvarValue( CLC_RespondCvarValue *msg )
+bool CHLTVClient::CLCMsg_RespondCvarValue( const CCLCMsg_RespondCvarValue& msg )
 {
 	return true;
 }
 
-bool CHLTVClient::ProcessFileCRCCheck( CLC_FileCRCCheck *msg )
+bool CHLTVClient::CLCMsg_FileCRCCheck( const CCLCMsg_FileCRCCheck& msg )
 {
 	return true;
 }
 
-bool CHLTVClient::ProcessSaveReplay( CLC_SaveReplay *msg )
-{
-	return true;
-}
-
-bool CHLTVClient::ProcessVoiceData(CLC_VoiceData *msg)
+bool CHLTVClient::CLCMsg_VoiceData(const CCLCMsg_VoiceData& msg)
 {
 	// HLTV clients can't speak
 	return true;
@@ -126,8 +143,6 @@ void CHLTVClient::ConnectionClosing(const char *reason)
 
 void CHLTVClient::ConnectionCrashed(const char *reason)
 {
-	DebuggerBreakIfDebugging_StagingOnly();
-
 	Disconnect ( (reason!=NULL)?reason:"Connection lost" );	
 }
 
@@ -142,24 +157,25 @@ void CHLTVClient::PacketEnd()
 	
 }
 
-void CHLTVClient::FileRequested(const char *fileName, unsigned int transferID )
+void CHLTVClient::FileRequested(const char *fileName, unsigned int transferID, bool bIsReplayDemoFile /* = false */ )
 {
 	DevMsg( "CHLTVClient::FileRequested: %s.\n", fileName );
-	m_NetChannel->DenyFile( fileName, transferID );
+	m_NetChannel->DenyFile( fileName, transferID, bIsReplayDemoFile );
 }
 
-void CHLTVClient::FileDenied(const char *fileName, unsigned int transferID )
+void CHLTVClient::FileDenied(const char *fileName, unsigned int transferID, bool bIsReplayDemoFile /* = false */ )
 {
 	DevMsg( "CHLTVClient::FileDenied: %s.\n", fileName );
 }
 
-void CHLTVClient::FileReceived( const char *fileName, unsigned int transferID )
+void CHLTVClient::FileReceived( const char *fileName, unsigned int transferID, bool bIsReplayDemoFile /* = false */ )
 {
 	DevMsg( "CHLTVClient::FileReceived: %s.\n", fileName );
 }
 
-void CHLTVClient::FileSent(const char *fileName, unsigned int transferID )
+void CHLTVClient::FileSent( const char *fileName, unsigned int transferID, bool bIsReplayDemoFile /* = false */ )
 {
+	DevMsg( "CHLTVClient::FileSent: %s.\n", fileName );
 }
 
 CClientFrame *CHLTVClient::GetDeltaFrame( int nTick )
@@ -178,14 +194,16 @@ bool CHLTVClient::ExecuteStringCommand( const char *pCommandString )
 		return true;
 
 	CCommand args;
-	if ( !args.Tokenize( pCommandString ) )
+	if ( !args.Tokenize( pCommandString, kCommandSrcNetServer ) )
 		return true;
 
 	const char *cmd = args[ 0 ];
 
 	if ( !Q_stricmp( cmd, "spec_next" ) || 
 		 !Q_stricmp( cmd, "spec_prev" ) ||
-		 !Q_stricmp( cmd, "spec_mode" ) )
+		 !Q_stricmp( cmd, "spec_mode" ) ||
+		 !Q_stricmp( cmd, "spec_goto" ) ||
+		 !Q_stricmp( cmd, "spec_lerpto" ) )
 	{
 		ClientPrintf("Camera settings can't be changed during a live broadcast.\n");
 		return true;
@@ -202,9 +220,21 @@ bool CHLTVClient::ExecuteStringCommand( const char *pCommandString )
 
 		m_flLastChatTime = net_time;
 
-		char chattext[128];
+		// Check if chat is non-empty string
+		bool bValidText = false;
+		for ( char const *szChatMsg = args[1]; szChatMsg && *szChatMsg; ++ szChatMsg )
+		{
+			if ( !V_isspace( *szChatMsg ) )
+			{
+				bValidText = true;
+				break;
+			}
+		}
+		if ( !bValidText )
+			return true;
 
-		Q_snprintf( chattext, sizeof(chattext), "%s : %s", GetClientName(), args[1]  );
+		char chattext[128];
+		V_sprintf_safe( chattext, "%s : %s", GetClientName(), args[1]  );
 		
 		m_pHLTV->BroadcastLocalChat( chattext, m_szChatGroup );
 		
@@ -230,19 +260,19 @@ bool CHLTVClient::ExecuteStringCommand( const char *pCommandString )
 		
 		if ( m_pHLTV->IsMasterProxy() )
 		{
-			ClientPrintf("SourceTV Master \"%s\", delay %.0f\n", 
+			ClientPrintf("GOTV Master \"%s\", delay %.0f\n", 
 				m_pHLTV->GetName(),	m_pHLTV->GetDirector()->GetDelay() );
 		}
 		else // if ( m_Server->IsRelayProxy() )
 		{
 			if ( m_pHLTV->GetRelayAddress() )
 			{
-				ClientPrintf("SourceTV Relay \"%s\", connected.\n",
+				ClientPrintf("GOTV Relay \"%s\", connected.\n",
 					m_pHLTV->GetName() );
 			}
 			else
 			{
-				ClientPrintf("SourceTV Relay \"%s\", not connect.\n", m_pHLTV->GetName() );
+				ClientPrintf("GOTV Relay \"%s\", not connect.\n", m_pHLTV->GetName() );
 			}
 		}
 
@@ -266,6 +296,15 @@ bool CHLTVClient::ExecuteStringCommand( const char *pCommandString )
 
 		ClientPrintf("Total Slots %i, Spectators %i, Proxies %i\n", 
 			slots, clients-proxies, proxies);
+
+		m_pHLTV->GetExternalStats( slots, clients );
+		if ( slots > 0 )
+		{
+			if ( clients > 0 )
+				ClientPrintf( "Streaming spectators %i, linked to Steam %i\n", slots, clients );
+			else
+				ClientPrintf( "Streaming spectators %i\n", slots );
+		}
 	}
 	else
 	{
@@ -289,7 +328,7 @@ bool CHLTVClient::ShouldSendMessages( void )
 	if ( m_NetChannel->IsOverflowed() )
 	{
 		m_NetChannel->Reset();
-		Disconnect ("%s overflowed reliable buffer\n", m_Name );
+		Disconnect( CFmtStr( "%s overflowed reliable buffer", m_Name ) );
 		return false;
 	}
 
@@ -316,7 +355,9 @@ void CHLTVClient::SpawnPlayer( void )
 {
 	// set view entity
 
-	SVC_SetView setView( m_pHLTV->m_nViewEntity );
+	CSVCMsg_SetView_t setView;
+
+	setView.set_entity_index( m_pHLTV->m_nViewEntity );
 
 	SendNetMsg( setView );
 
@@ -347,36 +388,37 @@ void CHLTVClient::SetRate(int nRate, bool bForce )
 	CBaseClient::SetRate( nRate, bForce );
 }
 
-void CHLTVClient::SetUpdateRate(int udpaterate, bool bForce)
+void CHLTVClient::SetUpdateRate( float fUpdateRate, bool bForce)
 {
 	// for HLTV clients ignore update rate settings, speed is tv_snapshotrate
-	m_fSnapshotInterval = 1.0f / 100.0f;
+	m_fSnapshotInterval = 1.0f / m_pHLTV->GetSnapshotRate();
 }
 
-bool CHLTVClient::ProcessSetConVar(NET_SetConVar *msg)
+bool CHLTVClient::NETMsg_SetConVar(const CNETMsg_SetConVar& msg)
 {
-	if ( !CBaseClient::ProcessSetConVar( msg ) )
+	if ( !CBaseClient::NETMsg_SetConVar( msg ) )
 		return false;
 
 	// if this is the first time we get user settings, check password etc
-	if ( m_nSignonState == SIGNONSTATE_CONNECTED )
+	if ( GetSignonState() == SIGNONSTATE_CONNECTED )
 	{
-		const char *checkpwd = NULL; 
-
+		// Note: the master client of HLTV server will replace the rate ConVars for us. It's necessary so that demo recorder can take those frames from the master client and write them with values already modified 
 		m_bIsHLTV = m_ConVars->GetInt( "tv_relay", 0 ) != 0;
 
 		if ( m_bIsHLTV )
 		{
-			// if the connecting client is a TV relay, check the password
-			checkpwd = tv_relaypassword.GetString();
-
-			if ( checkpwd && checkpwd[0] && Q_stricmp( checkpwd, "none") )
+			// The connecting client is a TV relay
+			// Check if this relay address is whitelisted by IP range mask and bypasses all checks
+			extern bool IsHltvRelayProxyWhitelisted( ns_address const &adr );
+			if ( IsHltvRelayProxyWhitelisted( m_NetChannel->GetRemoteAddress() ) )
 			{
-				if ( Q_stricmp( m_szPassword, checkpwd ) )
-				{
-					Disconnect("Bad relay password");
-					return false;
-				}
+				Msg( "Accepted GOTV relay proxy from whitelisted IP address: %s\n", m_NetChannel->GetAddress() );
+			}
+			// if the connecting client is a TV relay, check the password
+			else if ( !m_pHLTV->CheckHltvPasswordMatch( m_szPassword, m_pHLTV->GetHltvRelayPassword(), CSteamID() ) )
+			{
+				Disconnect("Bad relay password");
+				return false;
 			}
 		}
 		else
@@ -387,23 +429,47 @@ bool CHLTVClient::ProcessSetConVar(NET_SetConVar *msg)
 				return false;
 			}
 
-			// if client stays here, check the normal password
-			checkpwd = m_pHLTV->GetPassword();
-
-			if ( checkpwd )
+			// if we are not dispatching the client to other relay and we are the master server then validate
+			// the number of non-proxy clients
+			extern ConVar tv_maxclients_relayreserved;
+			if ( tv_maxclients_relayreserved.GetInt() )
 			{
-	
-				if ( Q_stricmp( m_szPassword, checkpwd ) )
+				int numActualNonProxyAccounts = 0;
+				for (int i=0; i < m_pHLTV->GetClientCount(); i++ )
 				{
-					Disconnect("Bad spectator password");
+					CBaseClient *pProxy = static_cast< CBaseClient * >( m_pHLTV->GetClient( i ) );
+
+					// check if this is a proxy
+					if ( !pProxy->IsConnected() || pProxy->IsHLTV() || (this == pProxy) )
+						continue;
+
+					++ numActualNonProxyAccounts;
+				}
+				if ( numActualNonProxyAccounts > m_pHLTV->GetMaxClients() - tv_maxclients_relayreserved.GetInt() )
+				{
+					this->Disconnect( "No GOTV relays available" );
 					return false;
 				}
+			}
+
+			// if client stays here, check the normal password
+			// additionally if the first variable is client accountid then use that to validate personalized password
+			CSteamID steamUserAccountID;
+			if ( Steam3Server().SteamGameServerUtils() &&
+				( msg.convars().cvars_size() > 1 ) &&
+				!Q_strcmp( NetMsgGetCVarUsingDictionary( msg.convars().cvars( 0 ) ), "accountid" ) )
+				steamUserAccountID = CSteamID( Q_atoi( msg.convars().cvars( 0 ).value().c_str() ), Steam3Server().SteamGameServerUtils()->GetConnectedUniverse(), k_EAccountTypeIndividual );
+			
+			if ( !m_pHLTV->CheckHltvPasswordMatch( m_szPassword, m_pHLTV->GetPassword(), steamUserAccountID ) )
+			{
+				Disconnect("Bad spectator password");
+				return false;
 			}
 
 			// check if server is LAN only
 			if ( !m_pHLTV->CheckIPRestrictions( m_NetChannel->GetRemoteAddress(), PROTOCOL_HASHEDCDKEY ) )
 			{
-				Disconnect( "SourceTV server is restricted to local spectators (class C).\n" );
+				Disconnect( "GOTV server is restricted to local spectators (class C).\n" );
 				return false;
 			}
 
@@ -421,11 +487,11 @@ void CHLTVClient::UpdateUserSettings()
 	CBaseClient::UpdateUserSettings();
 }
 
-void CHLTVClient::SendSnapshot( CClientFrame * pFrame )
+bool CHLTVClient::SendSnapshot( CClientFrame * pFrame )
 {
 	VPROF_BUDGET( "CHLTVClient::SendSnapshot", "HLTV" );
 
-	ALIGN4 byte		buf[NET_MAX_PAYLOAD] ALIGN4_POST;
+	byte		buf[NET_MAX_PAYLOAD];
 	bf_write	msg( "CHLTVClient::SendSnapshot", buf, sizeof(buf) );
 
 	// if we send a full snapshot (no delta-compression) before, wait until client
@@ -435,7 +501,7 @@ void CHLTVClient::SendSnapshot( CClientFrame * pFrame )
 	{
 		// never send the same snapshot twice
 		m_NetChannel->Transmit();	
-		return;
+		return false;
 	}
 
 	if ( m_nForceWaitForTick > 0 )
@@ -443,7 +509,7 @@ void CHLTVClient::SendSnapshot( CClientFrame * pFrame )
 		// just continue transmitting reliable data
 		Assert( !m_bFakePlayer );	// Should never happen
 		m_NetChannel->Transmit();	
-		return;
+		return false;
 	}
 
 	CClientFrame	*pDeltaFrame = GetDeltaFrame( m_nDeltaTick ); // NULL if delta_tick is not found
@@ -465,6 +531,7 @@ void CHLTVClient::SendSnapshot( CClientFrame * pFrame )
 		{
 			// if we send entities delta compressed, also send unreliable data
 			m_NetChannel->SendData( pLastFrame->m_Messages[HLTV_BUFFER_UNRELIABLE], false );
+			m_NetChannel->SendData( pLastFrame->m_Messages[ HLTV_BUFFER_VOICE ], false ); // we separate voice, even though it's simply more unreliable data, because we don't send it in replay
 		}
 
 		pLastFrame = (CHLTVFrame*) pLastFrame->m_pNext;
@@ -473,7 +540,7 @@ void CHLTVClient::SendSnapshot( CClientFrame * pFrame )
 	// now create client snapshot packet
 
 	// send tick time
-	NET_Tick tickmsg( pFrame->tick_count, host_frametime_unbounded, host_frametime_stddeviation );
+	CNETMsg_Tick_t tickmsg( pFrame->tick_count, host_frameendtime_computationduration, host_frametime_stddeviation, host_framestarttime_stddeviation );
 	tickmsg.WriteToBuffer( msg );
 
 	// Update shared client/server string tables. Must be done before sending entities
@@ -481,7 +548,11 @@ void CHLTVClient::SendSnapshot( CClientFrame * pFrame )
 
 	// TODO delta cache whole snapshots, not just packet entities. then use net_Align
 	// send entity update, delta compressed if deltaFrame != NULL
-	m_Server->WriteDeltaEntities( this, pFrame, pDeltaFrame, msg );
+	{
+		CSVCMsg_PacketEntities_t packetmsg;
+		m_Server->WriteDeltaEntities( this, pFrame, pDeltaFrame, packetmsg );
+		packetmsg.WriteToBuffer( msg );
+	}
 
 	// write message to packet and check for overflow
 	if ( msg.IsOverflowed() )
@@ -490,7 +561,7 @@ void CHLTVClient::SendSnapshot( CClientFrame * pFrame )
 		{
 			// if this is a reliable snapshot, drop the client
 			Disconnect( "ERROR! Reliable snapshot overflow." );
-			return;
+			return false;
 		}
 		else
 		{
@@ -508,7 +579,7 @@ void CHLTVClient::SendSnapshot( CClientFrame * pFrame )
 	if ( m_bFakePlayer )
 	{
 		m_nDeltaTick = pFrame->tick_count;
-		return;
+		return true;
 	}
 
 	bool bSendOK;
@@ -516,6 +587,8 @@ void CHLTVClient::SendSnapshot( CClientFrame * pFrame )
 	// is this is a full entity update (no delta) ?
 	if ( !pDeltaFrame )
 	{
+		if ( replay_debug.GetInt() >= 10 )
+			Msg( "HLTV send full frame %d bytes\n", ( msg.m_iCurBit + 7 ) / 8 );
 		// transmit snapshot as reliable data chunk
 		bSendOK = m_NetChannel->SendData( msg );
 		bSendOK = bSendOK && m_NetChannel->Transmit();
@@ -526,6 +599,8 @@ void CHLTVClient::SendSnapshot( CClientFrame * pFrame )
 	}
 	else
 	{
+		if ( replay_debug.GetInt() >= 10 )
+			Msg( "HLTV send datagram %d bytes\n", ( msg.m_iCurBit + 7 ) / 8 );
 		// just send it as unreliable snapshot
 		bSendOK = m_NetChannel->SendDatagram( &msg ) > 0;
 	}
@@ -533,5 +608,8 @@ void CHLTVClient::SendSnapshot( CClientFrame * pFrame )
 	if ( !bSendOK )
 	{
 		Disconnect( "ERROR! Couldn't send snapshot." );
+		return false;
 	}
+	
+	return true;
 }

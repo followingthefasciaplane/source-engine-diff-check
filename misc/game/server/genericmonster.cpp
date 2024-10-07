@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -12,7 +12,7 @@
 #include "npcevent.h"
 #include "ai_basenpc.h"
 #include "ai_hull.h"
-#include "KeyValues.h"
+#include "keyvalues.h"
 #include "engine/IEngineSound.h"
 #include "physics_bone_follower.h"
 #include "ai_baseactor.h"
@@ -109,7 +109,7 @@ void CGenericNPC::TempGunEffect( void )
 //=========================================================
 void CGenericNPC::HandleAnimEvent( animevent_t *pEvent )
 {
-	switch( pEvent->event )
+	switch( pEvent->Event() )
 	{
 	case 1:
 		// TEMPORARLY. Makes the May 2001 sniper demo work (sjb)
@@ -229,6 +229,7 @@ public:
 	void InputDisablePlayerCollision( inputdata_t &inputdata );
 	void InputEnablePlayerCollision( inputdata_t &inputdata );
 	void UpdateBoneFollowerState( void );
+	int		GetSoundInterests ( void );
 
 private:
 	// Contained Bone Follower manager
@@ -297,6 +298,14 @@ void CNPC_Furniture::Spawn( )
 void CNPC_Furniture::Precache( void )
 {
 	PrecacheModel( STRING( GetModelName() ) );
+}
+
+//=========================================================
+// GetSoundInterests - generic NPC can't hear.
+//=========================================================
+int CNPC_Furniture::GetSoundInterests( void )
+{
+	return	NULL;
 }
 
 //-----------------------------------------------------------------------------
@@ -469,4 +478,135 @@ void CNPC_Furniture::DrawDebugGeometryOverlays( void )
 	}
 
 	BaseClass::DrawDebugGeometryOverlays();
+}
+
+
+//=======================================================================================
+// Furniture: A dumb "NPC" that is uses in scripted sequences
+//			  where an NPC needs to be frame locked with a prop.
+//=======================================================================================
+class CNPC_HearDanger : public CAI_BaseActor
+{
+	DECLARE_CLASS( CNPC_HearDanger, CAI_BaseActor );
+	DECLARE_DATADESC();
+	public:
+	void	Spawn( void );
+	void	Precache( void );
+	void	Die( void );
+	void	UpdateEfficiency( bool bInPVS )	{ SetEfficiency( ( GetSleepState() != AISS_AWAKE ) ? AIE_DORMANT : AIE_NORMAL ); SetMoveEfficiency( AIME_NORMAL ); }
+	Class_T	Classify( void );
+	float	MaxYawSpeed( void ){ return 0; }
+
+	bool	CreateVPhysics( void );
+
+	int		OnTakeDamage( const CTakeDamageInfo &info )
+	{
+		if ( m_iHealth <= info.GetDamage() )
+			m_iHealth = info.GetDamage() + TOO_MUCH_HEALTH_TO_DIE;
+		return BaseClass::OnTakeDamage( info );
+	}
+
+
+	void SetPlayerAvoidState( void );
+
+	int		GetSoundInterests( void );
+};
+
+LINK_ENTITY_TO_CLASS( npc_heardanger, CNPC_HearDanger );
+
+//-----------------------------------------------------------------------------
+// Save/load
+//-----------------------------------------------------------------------------
+
+BEGIN_DATADESC( CNPC_HearDanger )
+END_DATADESC()
+
+//-----------------------------------------------------------------------------
+// Purpose: This used to have something to do with bees flying, but 
+//			now it only initializes moving furniture in scripted sequences
+//-----------------------------------------------------------------------------
+void CNPC_HearDanger::Spawn()
+{
+	Precache();
+
+	SetModel( STRING( GetModelName() ) );
+
+	SetMoveType( MOVETYPE_STEP );
+	SetSolid( SOLID_BBOX );
+
+	// Our collision, if needed, will be done through bone followers
+	AddSolidFlags( FSOLID_NOT_SOLID );
+
+	SetBloodColor( DONT_BLEED );
+	m_iHealth = TOO_MUCH_HEALTH_TO_DIE; //wow
+	m_takedamage = DAMAGE_AIM;
+	SetSequence( 0 );
+	SetCycle( 0 );
+	SetNavType( NAV_FLY );
+	AddFlag( FL_FLY );
+
+	CapabilitiesAdd( bits_CAP_MOVE_FLY | bits_CAP_TURN_HEAD | bits_CAP_ANIMATEDFACE );
+
+	AddEFlags( EFL_NO_MEGAPHYSCANNON_RAGDOLL );
+
+	SetCollisionGroup( COLLISION_GROUP_NPC_ACTOR );
+
+	//	pev->nextthink += 1.0;
+	//	SetThink (WalkMonsterDelay);
+
+	ResetSequenceInfo();
+	SetCycle( 0 );
+	NPCInit();
+
+	// Furniture needs to block LOS
+	SetBlocksLOS( false );
+
+	// Furniture just wastes CPU doing sensing code, since all they do is idle and play scripts
+	GetSenses()->AddSensingFlags( SENSING_FLAGS_DONT_LOOK );
+}
+
+//-----------------------------------------------------------------------------
+// Purpose: 
+//-----------------------------------------------------------------------------
+void CNPC_HearDanger::Precache( void )
+{
+	PrecacheModel( STRING( GetModelName() ) );
+}
+
+//=========================================================
+// GetSoundInterests - generic NPC can't hear.
+//=========================================================
+int CNPC_HearDanger::GetSoundInterests( void )
+{
+	return SOUND_WORLD | SOUND_COMBAT | SOUND_PLAYER | SOUND_PLAYER_VEHICLE | SOUND_BULLET_IMPACT;
+}
+
+//-----------------------------------------------------------------------------
+// Purpose: Furniture is killed
+//-----------------------------------------------------------------------------
+void CNPC_HearDanger::Die( void )
+{
+	SetThink( &CNPC_HearDanger::SUB_Remove );
+	SetNextThink( gpGlobals->curtime );
+}
+
+//-----------------------------------------------------------------------------
+// Purpose: ID's Furniture as neutral (noone will attack it)
+//-----------------------------------------------------------------------------
+Class_T CNPC_HearDanger::Classify( void )
+{
+	return CLASS_NONE;
+}
+
+//------------------------------------------------------------------------------
+// Purpose:
+//------------------------------------------------------------------------------
+bool CNPC_HearDanger::CreateVPhysics( void )
+{
+	return false;
+}
+
+void CNPC_HearDanger::SetPlayerAvoidState( void )
+{
+
 }

@@ -1,10 +1,10 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright  1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
 // $Workfile:     $
 // $NoKeywords: $
-//=============================================================================//
+//===========================================================================//
 #include "cbase.h"
 #include <stdarg.h>
 #include "hud.h"
@@ -27,13 +27,19 @@
 #include <vgui/ILocalize.h>
 #include "view.h"
 #include "ixboxsystem.h"
-#include "inputsystem/iinputsystem.h"
+#include <ctype.h>
+#include <vgui_controls/EditablePanel.h>
+#include "vgui_int.h"
+#include "cdll_client_int.h"
+#include "c_cs_playerresource.h"
+#include "c_cs_player.h"
+#include "cs_gamerules.h"
+#include "weapon_c4.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
-																						
-ConVar localplayer_visionflags( "localplayer_visionflags", "0", FCVAR_DEVELOPMENTONLY );
-																						
+
+
 //-----------------------------------------------------------------------------
 // ConVars
 //-----------------------------------------------------------------------------
@@ -80,49 +86,7 @@ int GetLocalPlayerIndex( void )
 	if ( player )
 		return player->entindex();
 	else
-		return 0;	// game not started yet
-}
-
-// NOTE: cache these because this gets executed hundreds of times per frame
-static int g_nLocalPlayerVisionFlagsWeaponsCheck = 0;
-static int g_nLocalPlayerVisionFlags = 0;
-int GetLocalPlayerVisionFilterFlags( bool bWeaponsCheck /*= false */ )
-{
-	return bWeaponsCheck ? g_nLocalPlayerVisionFlagsWeaponsCheck : g_nLocalPlayerVisionFlags;
-}
-
-void UpdateLocalPlayerVisionFlags()
-{
-	g_nLocalPlayerVisionFlagsWeaponsCheck = 0;
-	g_nLocalPlayerVisionFlags = 0;
-	C_BasePlayer *pPlayer = C_BasePlayer::GetLocalPlayer();
-	if ( pPlayer )
-	{
-		g_nLocalPlayerVisionFlagsWeaponsCheck = pPlayer->GetVisionFilterFlags( true );
-		g_nLocalPlayerVisionFlags = pPlayer->GetVisionFilterFlags( false );
-	}
-}
-
-bool IsLocalPlayerUsingVisionFilterFlags( int nFlags, bool bWeaponsCheck /* = false */ )
-{
-	int nLocalPlayerFlags = GetLocalPlayerVisionFilterFlags( bWeaponsCheck );
-
-	if ( !bWeaponsCheck )
-	{
-		// We can only modify the RJ flags with normal checks that won't take the forced kill cam flags that can happen in weapon checks
-		int nRJShaderFlags = nLocalPlayerFlags;
-		if ( nRJShaderFlags != 0 && GameRules() && !GameRules()->AllowMapVisionFilterShaders() )
-		{
-			nRJShaderFlags = 0;
-		}
-
-		if ( nRJShaderFlags != localplayer_visionflags.GetInt() )
-		{
-			localplayer_visionflags.SetValue( nRJShaderFlags );
-		}
-	}
-
-	return ( nLocalPlayerFlags & nFlags ) == nFlags;
+		return  0;	// game not started yet
 }
 
 bool IsLocalPlayerSpectator( void )
@@ -162,6 +126,85 @@ int GetSpectatorTarget( void )
 	{
 		return  0;	// game not started yet
 	}
+}
+
+// this is meant to be called on a bot character
+// note: This is quite similar to CCSPlayer::CanControlBot.  This is here since calling into the CCSPlayer was unrealistic in some code paths
+// TODO: Fix this so it ACTUALLY calls CanControlBot, there are bugs otherwise (and will be more) do to them being different functions
+bool CanControlSpectatedTarget( void )
+{
+	C_CSPlayer * player = ( C_CSPlayer* )C_BasePlayer::GetLocalPlayer();
+
+    if ( !player || ( player->GetPendingTeamNumber() != player->GetTeamNumber() ) )
+        return false;
+
+	C_CSPlayer * target = dynamic_cast<C_CSPlayer*>(player->GetObserverTarget());
+	if ( !target )
+		return false;
+
+	if ( !target->IsAlive() )
+		return false;
+		
+	if ( !target->IsOtherSameTeam( GetLocalPlayerTeam() ) || target->IsOtherEnemy( player ) )
+		return false;
+
+	C_CS_PlayerResource *pCSPR = ( C_CS_PlayerResource* )GameResources();
+	int entIndex = target->entindex();
+		
+	bool targetIsFakePlayer = pCSPR->IsFakePlayer( entIndex );
+	if ( !targetIsFakePlayer )
+		return false;
+
+	AssertMsg(pCSPR, "Expected PlayerResources to exsist");
+	AssertMsg(entIndex > 0 && entIndex <= MAX_PLAYERS, "Bad entity index for player");
+
+
+	// need to duplicate some of the checks that CanControlBot already does so they match up....	
+	// Can't control a bot that is setting a bomb
+	const CC4 *pC4 = dynamic_cast<CC4*>( target->GetActiveWeapon() );
+	if ( pC4 && pC4->m_bStartedArming )
+		return false;
+
+	if ( CSGameRules() && CSGameRules()->IsRoundOver() ) 
+		return false;
+
+	if ( CSGameRules() && CSGameRules()->IsFreezePeriod() )
+		return false;
+
+	return  true;	
+}
+
+bool CanSeeSpectatorOnlyTools( void )
+{
+	C_BasePlayer *pPlayer = C_BasePlayer::GetLocalPlayer();
+	if ( !pPlayer )
+		return false;
+
+	if ( pPlayer->IsHLTV() )
+		return true;
+
+	if ( pPlayer->IsSpectator() )
+	{
+		if ( sv_competitive_official_5v5.GetBool() )
+			return true;
+
+		if ( CSGameRules() && CSGameRules()->IsQueuedMatchmaking() )
+			return true;
+	}
+		
+	return false;
+}
+
+bool CanToggleXRayView( void )
+{
+	C_BasePlayer *pPlayer = C_BasePlayer::GetLocalPlayer();
+	if ( !pPlayer )
+		return false;
+
+	if ( CanSeeSpectatorOnlyTools() )
+		return true;
+
+	return false;
 }
 
 int GetLocalPlayerTeam( void ) 
@@ -288,37 +331,6 @@ float UTIL_AngleDiff( float destAngle, float srcAngle )
 	return delta;
 }
 
-
-float UTIL_WaterLevel( const Vector &position, float minz, float maxz )
-{
-	Vector midUp = position;
-	midUp.z = minz;
-
-	if ( !(UTIL_PointContents(midUp) & MASK_WATER) )
-		return minz;
-
-	midUp.z = maxz;
-	if ( UTIL_PointContents(midUp) & MASK_WATER )
-		return maxz;
-
-	float diff = maxz - minz;
-	while (diff > 1.0)
-	{
-		midUp.z = minz + diff/2.0;
-		if ( UTIL_PointContents(midUp) & MASK_WATER )
-		{
-			minz = midUp.z;
-		}
-		else
-		{
-			maxz = midUp.z;
-		}
-		diff = maxz - minz;
-	}
-
-	return midUp.z;
-}
-
 void UTIL_Bubbles( const Vector& mins, const Vector& maxs, int count )
 {
 	Vector mid =  (mins + maxs) * 0.5;
@@ -380,6 +392,23 @@ void UTIL_Tracer( const Vector &vecStart, const Vector &vecEnd, int iEntIndex, i
 	}
 }
 
+// Tried to include this in the actual trace function, but ran into
+// linker issues.  Just dropped it here instead.  Michael Dorgan
+
+static bool HasValidDirection(trace_t *pTrace)
+{
+	if(pTrace->fraction <= 0.0001f)
+	{
+		// Ok, there is a very, very strong chance our vectors are out of wack
+		// Add a direct check against the actual start and end points to be sure.
+		if( VectorsAreEqual( pTrace->startpos, pTrace->endpos, 0.0001f ) )
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
 
 //------------------------------------------------------------------------------
 // Purpose : Creates both an decal and any associated impact effects (such
@@ -387,7 +416,7 @@ void UTIL_Tracer( const Vector &vecStart, const Vector &vecEnd, int iEntIndex, i
 // Input   :
 // Output  :
 //------------------------------------------------------------------------------
-void UTIL_ImpactTrace( trace_t *pTrace, int iDamageType, const char *pCustomImpactName )
+void UTIL_ImpactTrace( trace_t *pTrace, int iDamageType, char *pCustomImpactName )
 {
 	C_BaseEntity *pEntity = pTrace->m_pEnt;
 
@@ -395,8 +424,14 @@ void UTIL_ImpactTrace( trace_t *pTrace, int iDamageType, const char *pCustomImpa
 	if ( !pEntity || (pTrace->surface.flags & SURF_SKY) )
 		return;
 
-	if (pTrace->fraction == 1.0)
+	if (pTrace->fraction >= 1.0f)
 		return;
+
+	// Very, very, very close range shots cause all sorts of issues with normal and correct
+	// decal orientation.  Just skip them to prevent heartache.
+	if ( !HasValidDirection(pTrace) )
+		return;
+
 
 	// don't decal nodraw surfaces
 	if ( pTrace->surface.flags & SURF_NODRAW )
@@ -413,7 +448,7 @@ int UTIL_PrecacheDecal( const char *name, bool preload )
 	return effects->Draw_DecalIndexFromName( (char*)name );
 }
 
-extern short g_sModelIndexSmoke;
+extern int g_sModelIndexSmoke;
 
 void UTIL_Smoke( const Vector &origin, const float scale, const float framerate )
 {
@@ -495,7 +530,7 @@ void UTIL_PrecacheOther( const char *szClassname )
 	}
 
 	// Bye bye
-	pEntity->Release();
+	UTIL_Remove( pEntity );
 }
 
 static csurface_t	g_NullSurface = { "**empty**", 0 };
@@ -529,38 +564,20 @@ bool GetVectorInScreenSpace( Vector pos, int& iX, int& iY, Vector *vecOffset )
 		pos += *vecOffset;
 
 	// Transform to screen space
+	int x, y, screenWidth, screenHeight;
+	int insetX, insetY;
+	VGui_GetEngineRenderBounds( GET_ACTIVE_SPLITSCREEN_SLOT(), x, y, screenWidth, screenHeight, insetX, insetY );
+
+	// Transform to screen space
 	int iFacing = ScreenTransform( pos, screen );
-	iX = 0.5f * ( 1.0f + screen[0] ) * ScreenWidth();
-	iY = 0.5f * ( 1.0f - screen[1] ) * ScreenHeight();
 
-	// Make sure the player's facing it
-	if ( iFacing )
-	{
-		// We're actually facing away from the Target. Stomp the screen position.
-		iX = -640;
-		iY = -640;
-		return false;
-	}
+	iX = 0.5 * screen[0] * screenWidth;
+	iY = -0.5 * screen[1] * screenHeight;
+	iX += 0.5 * screenWidth;
+	iY += 0.5 * screenHeight;	
 
-	return true;
-}
-
-//-----------------------------------------------------------------------------
-// Purpose: Get the x & y positions of a world position in HUD space
-//			Returns true if it's onscreen
-//-----------------------------------------------------------------------------
-bool GetVectorInHudSpace( Vector pos, int& iX, int& iY, Vector *vecOffset )
-{
-	Vector screen;
-
-	// Apply the offset, if one was specified
-	if ( vecOffset != NULL )
-		pos += *vecOffset;
-
-	// Transform to HUD space
-	int iFacing = HudTransform( pos, screen );
-	iX = 0.5f * ( 1.0f + screen[0] ) * ScreenWidth();
-	iY = 0.5f * ( 1.0f - screen[1] ) * ScreenHeight();
+	iX += insetX;
+	iY += insetY;
 
 	// Make sure the player's facing it
 	if ( iFacing )
@@ -583,15 +600,6 @@ bool GetTargetInScreenSpace( C_BaseEntity *pTargetEntity, int& iX, int& iY, Vect
 	return GetVectorInScreenSpace( pTargetEntity->WorldSpaceCenter(), iX, iY, vecOffset );
 }
 
-//-----------------------------------------------------------------------------
-// Purpose: Get the x & y positions of an entity in Vgui space
-//			Returns true if it's onscreen
-//-----------------------------------------------------------------------------
-bool GetTargetInHudSpace( C_BaseEntity *pTargetEntity, int& iX, int& iY, Vector *vecOffset )
-{
-	return GetVectorInHudSpace( pTargetEntity->WorldSpaceCenter(), iX, iY, vecOffset );
-}
-
 
 //-----------------------------------------------------------------------------
 // Purpose: 
@@ -607,60 +615,7 @@ void ClientPrint( C_BasePlayer *player, int msg_dest, const char *msg_name, cons
 {
 }
 
-//-----------------------------------------------------------------------------
-// class CFlaggedEntitiesEnum
-//-----------------------------------------------------------------------------
-// enumerate entities that match a set of edict flags into a static array
-class CFlaggedEntitiesEnum : public IPartitionEnumerator
-{
-public:
-	CFlaggedEntitiesEnum( C_BaseEntity **pList, int listMax, int flagMask );
-	// This gets called	by the enumeration methods with each element
-	// that passes the test.
-	virtual IterationRetval_t EnumElement( IHandleEntity *pHandleEntity );
-	
-	int GetCount() { return m_count; }
-	bool AddToList( C_BaseEntity *pEntity );
-	
-private:
-	C_BaseEntity		**m_pList;
-	int				m_listMax;
-	int				m_flagMask;
-	int				m_count;
-};
 
-CFlaggedEntitiesEnum::CFlaggedEntitiesEnum( C_BaseEntity **pList, int listMax, int flagMask )
-{
-	m_pList = pList;
-	m_listMax = listMax;
-	m_flagMask = flagMask;
-	m_count = 0;
-}
-
-bool CFlaggedEntitiesEnum::AddToList( C_BaseEntity *pEntity )
-{
-	if ( m_count >= m_listMax )
-		return false;
-	m_pList[m_count] = pEntity;
-	m_count++;
-	return true;
-}
-
-IterationRetval_t CFlaggedEntitiesEnum::EnumElement( IHandleEntity *pHandleEntity )
-{
-	IClientEntity *pClientEntity = cl_entitylist->GetClientEntityFromHandle( pHandleEntity->GetRefEHandle() );
-	C_BaseEntity *pEntity = pClientEntity ? pClientEntity->GetBaseEntity() : NULL;
-	if ( pEntity )
-	{
-		if ( m_flagMask && !(pEntity->GetFlags() & m_flagMask) )	// Does it meet the criteria?
-			return ITERATION_CONTINUE;
-
-		if ( !AddToList( pEntity ) )
-			return ITERATION_STOP;
-	}
-
-	return ITERATION_CONTINUE;
-}
 
 //-----------------------------------------------------------------------------
 // Purpose: Pass in an array of pointers and an array size, it fills the array and returns the number inserted
@@ -698,21 +653,12 @@ int UTIL_EntitiesInSphere( C_BaseEntity **pList, int listMax, const Vector &cent
 
 }
 
-//-----------------------------------------------------------------------------
-// Purpose: Pass in an array of pointers and an array size, it fills the array and returns the number inserted
-// Input  : **pList - 
-//			listMax - 
-//			&ray - 
-//			flagMask - 
-// Output : int
-//-----------------------------------------------------------------------------
-int UTIL_EntitiesAlongRay( C_BaseEntity **pList, int listMax, const Ray_t &ray, int flagMask, int partitionMask )
-{
-	CFlaggedEntitiesEnum rayEnum( pList, listMax, flagMask );
-	::partition->EnumerateElementsAlongRay( partitionMask, ray, false, &rayEnum );
 
-	return rayEnum.GetCount();
+int	UTIL_RenderablesInBox( C_BaseEntity** pList, int listMax, const Vector &mins, const Vector &maxs )
+{
+	return g_pClientLeafSystem->GetEntitiesInBox( pList, listMax, mins, maxs );
 }
+
 
 CEntitySphereQuery::CEntitySphereQuery( const Vector &center, float radius, int flagMask, int partitionMask )
 {
@@ -736,14 +682,14 @@ CBaseEntity *CEntitySphereQuery::GetCurrentEntity()
 int UTIL_ComputeStringWidth( vgui::HFont& font, const char *str )
 {
 	float pixels = 0;
-	const char *p = str;
-	const char *pAfter = p + 1;
-	const char *pBefore = "\0";
+	char *p = (char *)str;
+	char *pAfter = p + 1;
+	char *pBefore = "\0";
 	while ( *p )
 	{
-#if USE_GETKERNEDCHARWIDTH
-		float wide, abcA;
-		vgui::surface()->GetKernedCharWidth( font, *p, *pBefore, *pAfter, wide, abcA );
+#ifdef OSX
+		float wide, abcA, abcC;
+		vgui::surface()->GetKernedCharWidth( font, *p, *pBefore, *pAfter, wide, abcA, abcC );
 		pixels += wide;
 #else
 		pixels += vgui::surface()->GetCharacterWidth( font, *p );
@@ -768,14 +714,14 @@ int UTIL_ComputeStringWidth( vgui::HFont& font, const char *str )
 int UTIL_ComputeStringWidth( vgui::HFont& font, const wchar_t *str )
 {
 	float pixels = 0;
-	const wchar_t *p = str;
-	const wchar_t *pAfter = p + 1;
-	const wchar_t *pBefore = L"\0";
+	wchar_t *p = (wchar_t *)str;
+	wchar_t *pAfter = p + 1;
+	wchar_t *pBefore = L"\0";
 	while ( *p )
 	{
-#if USE_GETKERNEDCHARWIDTH
-		float wide, abcA;
-		vgui::surface()->GetKernedCharWidth( font, *p, *pBefore, *pAfter, wide, abcA );
+#ifdef OSX
+		float wide, abcA, abcC;
+		vgui::surface()->GetKernedCharWidth( font, *p, *pBefore, *pAfter, wide, abcA, abcC );
 		pixels += wide;
 #else
 		pixels += vgui::surface()->GetCharacterWidth( font, *p );
@@ -800,8 +746,6 @@ int UTIL_ComputeStringWidth( vgui::HFont& font, const wchar_t *str )
 
 void UTIL_MakeSafeName( const char *oldName, char *newName, int newNameBufSize )
 {
-	Assert( newNameBufSize >= sizeof(newName[0]) );
-
 	int newpos = 0;
 
 	for( const char *p=oldName; *p != 0 && newpos < newNameBufSize-1; p++ )
@@ -860,20 +804,17 @@ const char * UTIL_SafeName( const char *oldName )
 //			for consistency with other APIs.  If inbufsizebytes is 0 a NULL-terminated
 //			input buffer is assumed, or you can pass the size of the input buffer if
 //			not NULL-terminated.
-//
-//			If actionset is other than GAME_ACTION_SET_NONE (the default), then a lookup is first
-//			attempted for a Steam Controller binding in the given action set. If none if found, fallback
-//			is to the usual keyboard binding path.
 //-----------------------------------------------------------------------------
-void UTIL_ReplaceKeyBindings( const wchar_t *inbuf, int inbufsizebytes, OUT_Z_BYTECAP(outbufsizebytes) wchar_t *outbuf, int outbufsizebytes, GameActionSet_t actionset )
+void UTIL_ReplaceKeyBindings( const wchar_t *inbuf, int inbufsizebytes, wchar_t *outbuf, int outbufsizebytes )
 {
-	Assert( outbufsizebytes >= sizeof(outbuf[0]) );
-	// copy to a new buf if there are vars
-	outbuf[0]=0;
-
 	if ( !inbuf || !inbuf[0] )
 		return;
 
+	ASSERT_LOCAL_PLAYER_RESOLVABLE();
+	int nSlot = GET_ACTIVE_SPLITSCREEN_SLOT();
+
+	// copy to a new buf if there are vars
+	outbuf[0]=0;
 	int pos = 0;
 	const wchar_t *inbufend = NULL;
 	if ( inbufsizebytes > 0 )
@@ -901,57 +842,39 @@ void UTIL_ReplaceKeyBindings( const wchar_t *inbuf, int inbufsizebytes, OUT_Z_BY
 				char binding[64];
 				g_pVGuiLocalize->ConvertUnicodeToANSI( token, binding, sizeof(binding) );
 
-				// Find a Steam Controller mapping, if an action set was specified.
-				const wchar_t* sc_origin = nullptr;
-				if ( actionset != GAME_ACTION_SET_NONE)
-				{
-					auto origin = g_pInputSystem->GetSteamControllerActionOrigin( *binding == '+' ? binding + 1 : binding, actionset );
-					if ( origin != k_EControllerActionOrigin_None )
-					{
-						sc_origin = g_pInputSystem->GetSteamControllerDescriptionForActionOrigin( origin );
-					}
-				}
-
-				// Find also the keyboard mapping
-				const char *key = engine->Key_LookupBinding( *binding == '+' ? binding + 1 : binding );
-				if ( !key )
-				{
-					key = IsX360() ? "" : "< not bound >";
-				}
+				const char *key = engine->Key_LookupBindingEx( *binding == '+' ? binding + 1 : binding, nSlot );
 
 				//!! change some key names into better names
 				char friendlyName[64];
 				bool bAddBrackets = false;
-				if ( IsX360() )
+				if ( IsGameConsole() )
 				{
 					if ( !key || !key[0] )
 					{
-						Q_snprintf( friendlyName, sizeof(friendlyName), "#GameUI_None" );
+						Q_snprintf( friendlyName, sizeof(friendlyName), "%s", binding );
 						bAddBrackets = true;
 					}
 					else
 					{
 						Q_snprintf( friendlyName, sizeof(friendlyName), "#GameUI_KeyNames_%s", key );
+						Q_strupr( friendlyName );
 					}
 				}
 				else
 				{
-					Q_snprintf( friendlyName, sizeof(friendlyName), "%s", key );
+					if ( !key || !key[0] )
+					{
+						Q_snprintf( friendlyName, sizeof(friendlyName), "%s", binding );
+					}
+					else
+					{
+						Q_snprintf( friendlyName, sizeof(friendlyName), "%s", key );
+						Q_strupr( friendlyName );
+					}
 				}
-				Q_strupr( friendlyName );
+				
 
-				const wchar_t* locName = nullptr;
-
-				// If we got a Steam Controller key description, use that, otherwise use the (possibly localized) key name
-				if ( sc_origin )
-				{
-					locName = sc_origin;
-				}
-				else
-				{
-					locName = g_pVGuiLocalize->Find( friendlyName );
-				}
-
+				wchar_t *locName = g_pVGuiLocalize->Find( friendlyName );
 				if ( !locName || wcslen(locName) <= 0)
 				{
 					g_pVGuiLocalize->ConvertANSIToUnicode( friendlyName, token, sizeof(token) );
@@ -993,6 +916,27 @@ void UTIL_ReplaceKeyBindings( const wchar_t *inbuf, int inbufsizebytes, OUT_Z_BY
 	}
 
 	outbuf[pos] = '\0';
+}
+
+//-----------------------------------------------------------------------------
+// Purpose: 
+//-----------------------------------------------------------------------------
+void UTIL_SetControlStringWithKeybindings( vgui::EditablePanel *panel, const char *controlName, const char *str )
+{
+	if ( !panel || !controlName || !str )
+		return;
+
+	const wchar_t *unicodeStr = g_pVGuiLocalize->Find( str );
+	if ( unicodeStr )
+	{
+		wchar_t buf[512];
+		UTIL_ReplaceKeyBindings( unicodeStr, 0, buf, sizeof( buf ) );
+		panel->SetControlString( controlName, buf );
+	}
+	else
+	{
+		panel->SetControlString( controlName, str );
+	}
 }
 
 //-----------------------------------------------------------------------------
@@ -1056,7 +1000,7 @@ static unsigned char ComputeDistanceFade( C_BaseEntity *pEntity, float flMinDist
 
 	if( flMinDist > flMaxDist )
 	{
-		::V_swap( flMinDist, flMaxDist );
+		V_swap( flMinDist, flMaxDist );
 	}
 
 	// If a negative value is provided for the min fade distance, then base it off the max.
@@ -1102,7 +1046,7 @@ unsigned char UTIL_ComputeEntityFade( C_BaseEntity *pEntity, float flMinDist, fl
 	unsigned char nAlpha = 255;
 
 	// If we're taking devshots, don't fade props at all
-	if ( g_MakingDevShots || cl_leveloverview.GetFloat() > 0 )
+	if ( g_MakingDevShots || cl_leveloverview.GetInt() != 0 || input->CAM_IsThirdPersonOverview() )
 		return 255;
 
 #ifdef _DEBUG
@@ -1131,7 +1075,7 @@ unsigned char UTIL_ComputeEntityFade( C_BaseEntity *pEntity, float flMinDist, fl
 			vecAbsCenter = pEntity->GetRenderOrigin();
 		}
 
-		unsigned char nGlobalAlpha = IsXbox() ? 255 : modelinfo->ComputeLevelScreenFade( vecAbsCenter, flRadius, flFadeScale );
+		unsigned char nGlobalAlpha = modelinfo->ComputeLevelScreenFade( vecAbsCenter, flRadius, flFadeScale );
 		unsigned char nDistAlpha;
 
 		if ( !engine->IsLevelMainMenuBackground() )
@@ -1171,30 +1115,111 @@ void UTIL_BoundToWorldSize( Vector *pVecPos )
 	}
 }
 
-#ifdef _X360
+#ifdef _GAMECONSOLE
 #define MAP_KEY_FILE_DIR	"cfg"
 #else
 #define MAP_KEY_FILE_DIR	"media"
 #endif
+//-----------------------------------------------------------------------------
+// Purpose: 
+//-----------------------------------------------------------------------------
+C_BasePlayer* UTIL_PlayerByUserId( int userID )
+{
+	for (int i = 1; i<=gpGlobals->maxClients; i++ )
+	{
+		C_BasePlayer *pPlayer = UTIL_PlayerByIndex( i );
+
+		if ( !pPlayer )
+			continue;
+
+		if ( pPlayer->GetUserID() == userID )
+		{
+			return pPlayer;
+		}
+	}
+
+	return NULL;
+}
+
+C_BaseEntity* UTIL_EntityFromUserMessageEHandle( long nEncodedEHandle )
+{
+	int nEntity, nSerialNum;
+	if( nEncodedEHandle == INVALID_NETWORKED_EHANDLE_VALUE )
+		return NULL;
+
+	nEntity = nEncodedEHandle & ((1 << MAX_EDICT_BITS) - 1);
+	nSerialNum = nEncodedEHandle >> MAX_EDICT_BITS;
+
+	EHANDLE hEntity( nEntity, nSerialNum );
+	return hEntity.Get();
+}
+
+//-----------------------------------------------------------------------------
+// 
+//-----------------------------------------------------------------------------
+void UTIL_ApproachTarget( float target, float increaseSpeed, float decreaseSpeed, float *val )
+{
+	if ( *val < target )
+	{
+		*val += gpGlobals->frametime*increaseSpeed;
+		*val = MIN( *val, target );
+	}
+	else if ( *val > target )
+	{
+		*val -= gpGlobals->frametime*decreaseSpeed;
+		*val = MAX( *val, target );
+	}
+}
+
+//-----------------------------------------------------------------------------
+// 
+//-----------------------------------------------------------------------------
+void UTIL_ApproachTarget( const Vector &target, float increaseSpeed, float decreaseSpeed, Vector *val )
+{
+	UTIL_ApproachTarget( target.x, increaseSpeed, decreaseSpeed, &val->x );
+	UTIL_ApproachTarget( target.y, increaseSpeed, decreaseSpeed, &val->y );
+	UTIL_ApproachTarget( target.z, increaseSpeed, decreaseSpeed, &val->z );
+}
 
 //-----------------------------------------------------------------------------
 // Purpose: Returns the filename to count map loads in
 //-----------------------------------------------------------------------------
-bool UTIL_GetMapLoadCountFileName( const char *pszFilePrependName, char *pszBuffer, int iBuflen )
+bool UTIL_GetMapLoadCountFileName( int iController, const char *pszFilePrependName, char *pszBuffer, int iBuflen )
 {
 	if ( IsX360() )
 	{
 #ifdef _X360
-		if ( XBX_GetStorageDeviceId() == XBX_INVALID_STORAGE_ID || XBX_GetStorageDeviceId() == XBX_STORAGE_DECLINED )
+		if ( iController < 0 || iController >= XUSER_MAX_COUNT )
+			return false;
+
+		int iSlot = -1;
+		for ( unsigned int k = 0; k < XBX_GetNumGameUsers(); ++ k )
+		{
+			if ( XBX_GetUserId( k ) == iController )
+			{
+				iSlot = k;
+				if ( XBX_GetUserIsGuest( k ) )
+					return false;
+			}
+		}
+		if ( iSlot < 0 )
+			return false;
+
+		DWORD nStorageDevice = XBX_GetStorageDeviceId( iController );
+		if ( !XBX_DescribeStorageDevice( nStorageDevice ) )
 			return false;
 #endif
 	}
 
+#ifdef _X360
 	if ( IsX360() )
 	{
-		Q_snprintf( pszBuffer, iBuflen, "%s:/%s", MAP_KEY_FILE_DIR, pszFilePrependName );
+		XBX_MakeStorageContainerRoot( iController, XBX_USER_SETTINGS_CONTAINER_DRIVE, pszBuffer, iBuflen );
+		int nLen = strlen( pszBuffer );
+		Q_snprintf( pszBuffer + nLen, iBuflen - nLen, ":/%s", pszFilePrependName );
 	}
 	else
+#endif
 	{
 		Q_snprintf( pszBuffer, iBuflen, "%s/%s", MAP_KEY_FILE_DIR, pszFilePrependName );
 	}
@@ -1210,11 +1235,17 @@ bool UTIL_GetMapLoadCountFileName( const char *pszFilePrependName, char *pszBuff
 
 void UTIL_IncrementMapKey( const char *pszCustomKey )
 {
+#ifdef _X360
+	// TODO: controller-specific code required
+	return;
+#endif
+	int iController = -1;
+
 	if ( !pszCustomKey )
 		return;
 
 	char szFilename[ _MAX_PATH ];
-	if ( !UTIL_GetMapLoadCountFileName( MAP_KEY_FILE, szFilename, _MAX_PATH ) )
+	if ( !UTIL_GetMapLoadCountFileName( iController, MAP_KEY_FILE, szFilename, _MAX_PATH ) )
 		return;
 
 	int iCount = 1;
@@ -1257,21 +1288,27 @@ void UTIL_IncrementMapKey( const char *pszCustomKey )
 		kvMapLoadFile->deleteThis();
 	}
 
-	if ( IsX360() )
-	{
 #ifdef _X360
-		xboxsystem->FinishContainerWrites();
-#endif
+	if ( xboxsystem )
+	{
+		xboxsystem->FinishContainerWrites( iController );
 	}
+#endif
 }
 
 int UTIL_GetMapKeyCount( const char *pszCustomKey )
 {
+#ifdef _X360
+	// TODO: controller-specific code required
+	return 0;
+#endif
+	int iController = -1;
+
 	if ( !pszCustomKey )
 		return 0;
 
 	char szFilename[ _MAX_PATH ];
-	if ( !UTIL_GetMapLoadCountFileName( MAP_KEY_FILE, szFilename, _MAX_PATH ) )
+	if ( !UTIL_GetMapLoadCountFileName( iController, MAP_KEY_FILE, szFilename, _MAX_PATH ) )
 		return 0;
 
 	int iCount = 0;
@@ -1309,9 +1346,109 @@ int UTIL_GetMapKeyCount( const char *pszCustomKey )
 
 bool UTIL_HasLoadedAnyMap()
 {
+#ifdef _X360
+	// TODO: controller-specific code required
+	return 0;
+#endif
+	int iController = -1;
+
 	char szFilename[ _MAX_PATH ];
-	if ( !UTIL_GetMapLoadCountFileName( MAP_KEY_FILE, szFilename, _MAX_PATH ) )
+	if ( !UTIL_GetMapLoadCountFileName( iController, MAP_KEY_FILE, szFilename, _MAX_PATH ) )
 		return false;
 
 	return g_pFullFileSystem->FileExists( szFilename, "MOD" );
 }
+
+wchar_t *UTIL_GetLocalizedKeyString( const char *command, const char *fmt, const wchar_t *arg1, const wchar_t *arg2, const wchar_t *arg3 )
+{
+	static wchar_t useString[4][256];
+	static int index = 0;
+
+	index = index + 1;
+	if ( index > 3 )
+		index = 0;
+
+	const char *lowercaseKey = engine->Key_LookupBinding( command );
+	if ( !lowercaseKey )
+	{
+		lowercaseKey = "<NOT BOUND>";
+	}
+
+	char szKey[64];
+	V_strncpy( szKey, lowercaseKey, sizeof( szKey ) );
+	for ( char *tmp = szKey; *tmp; ++tmp )
+	{
+		*tmp = toupper( *tmp );
+	}
+
+	wchar_t wszKey[64];
+	g_pVGuiLocalize->ConvertANSIToUnicode( szKey,  wszKey, sizeof(wszKey) );
+
+	int argCount = 1;
+	if ( arg1 )
+	{
+		++argCount;
+		if ( arg2 )
+		{
+			++argCount;
+			if ( arg3 )
+			{
+				++argCount;
+			}
+		}
+	}
+
+	g_pVGuiLocalize->ConstructString( useString[index], sizeof( useString[index] ), g_pVGuiLocalize->Find( fmt ), argCount, wszKey, arg1, arg2, arg3 );
+	return useString[index];
+}
+
+void UTIL_GetClientStatusText( char *buffer, int nSize )
+{
+	if ( !buffer || nSize==0 ) {return;}
+	buffer[0] = 0;
+
+#if defined ( CSTRIKE15 )
+	extern float g_flReadyToCheckForPCBootInvite;
+	bool bStartupFinished = g_flReadyToCheckForPCBootInvite && ( ( Plat_FloatTime() - g_flReadyToCheckForPCBootInvite ) > 1.5f );
+	if ( bStartupFinished )
+		Q_snprintf( buffer, nSize, "+" );
+	if ( nSize <= 2 )
+		return;
+
+	C_CS_PlayerResource *pCSPR = ( C_CS_PlayerResource* )GameResources();
+	if (pCSPR)
+	{
+		Q_snprintf( buffer, nSize, "%sPlayers: ", ( bStartupFinished ? "+" : "" ) );
+		for ( int i = 1; i <= MAX_PLAYERS; i++ )
+		{
+			if ( pCSPR->IsConnected(i) )
+			{
+				const char *name = pCSPR->GetPlayerName(i);
+				if (name && name[0])
+				{
+					V_strncat( buffer, name, nSize );
+					V_strncat( buffer, ", ", nSize );
+				}
+			}
+		}
+		buffer[nSize-1]=0;
+	}
+#endif
+}
+
+void UTIL_ClearTrace( trace_t &trace )
+{
+	memset( &trace, 0, sizeof(trace));
+	trace.fraction = 1.f;
+	trace.fractionleftsolid = 0;
+	trace.surface = g_NullSurface;
+}
+
+//-----------------------------------------------------------------------------
+// Also in cdll so linked libs can extern it
+//-----------------------------------------------------------------------------
+bool UTIL_IsDedicatedServer( void )
+{
+	return false;
+}
+

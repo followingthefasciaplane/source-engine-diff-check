@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =====//
 //
 // Dme version of a lod
 //
@@ -33,6 +33,7 @@ class CDmeLOD : public CDmElement
 public:
 	// NOTE: It may be possible to eliminate the skeleton here
 	// and assume the LOD always uses the root skeleton.
+	CDmaString					m_Path;
 	CDmaElement< CDmeModel >	m_Model;
 	CDmaElement< CDmeDag >		m_Skeleton;
 	CDmaElement< CDmeCombinationOperator >	m_CombinationOperator;

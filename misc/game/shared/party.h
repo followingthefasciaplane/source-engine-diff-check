@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright (C), Valve Corporation, All rights reserved. =======
 //
 // Purpose:  Parties are a specific type of CPlayerGroup with a leader that can invite and kick members.
 //			
@@ -11,6 +11,7 @@
 #endif
 
 #include "playergroup.h"
+#include "base_gcmessages.pb.h"
 
 namespace GCSDK
 {
@@ -35,14 +36,16 @@ public:
 	virtual const char* GetSenderName() const { return Obj().sender_name().c_str(); }
 
 	virtual GCSDK::CSharedObject* GetSharedObject() { return this; }
+	virtual const GCSDK::CSharedObject* GetSharedObject() const { return this; }
 
 #ifdef GC
-	virtual void YldInitFromPlayerGroup( GCSDK::IPlayerGroup *pPlayerGroup );
+	virtual void YldInitFromPlayerGroup( const GCSDK::IPlayerGroup *pPlayerGroup );
 
 	// NOTE: These do not dirty fields
 	virtual void SetSenderID( const CSteamID &steamID ) { Obj().set_sender_id( steamID.ConvertToUint64() ); }
 	virtual void SetGroupID( PlayerGroupID_t nGroupID ) { Obj().set_group_id( nGroupID ); }
 	virtual void SetSenderName( const char *szName ) { Obj().set_sender_name( szName ); }
+	virtual void SetTeamInvite( uint32 unTeamID ) {}
 #endif
 };
 

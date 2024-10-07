@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Implements a grab bag of visual effects entities.
 //
@@ -24,11 +24,20 @@
 #include "env_wind_shared.h"
 #include "filesystem.h"
 #include "engine/IEngineSound.h"
+#ifdef INFESTED_DLL
+#include "asw_fire.h"
+#else
 #include "fire.h"
+#endif
 #include "te_effect_dispatch.h"
 #include "Sprite.h"
 #include "precipitation_shared.h"
 #include "shot_manipulator.h"
+#include "modelentities.h"
+#if defined( CSTRIKE15 )
+#include "fx_cs_shared.h"
+#include "cs_player.h"
+#endif
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -107,7 +116,7 @@ void CBubbling::Spawn( void )
 	SetModel( STRING( GetModelName() ) );		// Set size
 
 	// Make it invisible to client
-	SetRenderColorA( 0 );
+	SetRenderAlpha( 0 );
 
 	SetSolid( SOLID_NONE );						// Remove model & collisions
 
@@ -491,9 +500,7 @@ void CGibShooter::InitPointGib( CGib *pGib, const Vector &vecShootDir, float flS
 		pGib->m_lifeTime = (m_flGibLife * random->RandomFloat( 0.95, 1.05 ));	// +/- 5%
 
 		// HL1 gibs always die after a certain time, other games have to opt-in
-#ifndef HL1_DLL
 		if( HasSpawnFlags( SF_SHOOTER_STRICT_REMOVE ) )
-#endif
 		{
 			pGib->SetNextThink( gpGlobals->curtime + pGib->m_lifeTime );
 			pGib->SetThink ( &CGib::DieThink );
@@ -568,9 +575,7 @@ CBaseEntity *CGibShooter::SpawnGib( const Vector &vecShootDir, float flSpeed )
 
 					pPhysicsObject->ApplyTorqueCenter( torque );
 
-#ifndef HL1_DLL
 					if( HasSpawnFlags( SF_SHOOTER_STRICT_REMOVE ) )
-#endif
 					{
 						pGib->m_bForceRemove = true;
 						pGib->SetNextThink( gpGlobals->curtime + pGib->m_lifeTime );
@@ -768,10 +773,9 @@ CGib *CEnvShooter::CreateGib ( void )
 	if ( HasSpawnFlags( SF_SHOOTER_FLAMING ) )
 	{
 		// Tag an entity flame along with us
-		CEntityFlame *pFlame = CEntityFlame::Create( pGib, false );
+		CEntityFlame *pFlame = CEntityFlame::Create( pGib, pGib->m_lifeTime );
 		if ( pFlame != NULL )
 		{
-			pFlame->SetLifetime( pGib->m_lifeTime );
 			pGib->SetFlame( pFlame );
 		}
 	}
@@ -1020,6 +1024,7 @@ class CBlood : public CPointEntity
 public:
 	DECLARE_CLASS( CBlood, CPointEntity );
 
+	void	Precache();
 	void	Spawn( void );
 	bool	KeyValue( const char *szKeyName, const char *szValue );
 
@@ -1066,10 +1071,22 @@ END_DATADESC()
 
 
 //-----------------------------------------------------------------------------
+// Precache
+//-----------------------------------------------------------------------------
+void CBlood::Precache()
+{
+	BaseClass::Precache();
+	UTIL_BloodSprayPrecache();
+}
+
+
+//-----------------------------------------------------------------------------
 // Purpose:
 //-----------------------------------------------------------------------------
 void CBlood::Spawn( void )
 {
+	Precache();
+
 	// Convert spraydir from angles to a vector
 	QAngle angSprayDir = QAngle( m_vecSprayDir.x, m_vecSprayDir.y, m_vecSprayDir.z );
 	AngleVectors( angSprayDir, &m_vecSprayDir );
@@ -1146,6 +1163,11 @@ Vector CBlood::BloodPosition( CBaseEntity *pActivator )
 //-----------------------------------------------------------------------------
 // Purpose:
 //-----------------------------------------------------------------------------
+void UTIL_BloodSprayPrecache()
+{
+	PrecacheEffect( "bloodspray" );
+}
+
 void UTIL_BloodSpray( const Vector &pos, const Vector &dir, int color, int amount, int flags )
 {
 	if( color == DONT_BLEED )
@@ -1213,23 +1235,6 @@ void CBlood::InputEmitBlood( inputdata_t &inputdata )
 		UTIL_BloodSpray(GetAbsOrigin(), Direction(), Color(), BloodAmount(), nFlags);
 	}
 }
-
-
-//-----------------------------------------------------------------------------
-// Purpose: Console command for emitting the blood spray effect from an NPC.
-//-----------------------------------------------------------------------------
-void CC_BloodSpray( const CCommand &args )
-{
-	CBaseEntity *pEnt = NULL;
-	while ( ( pEnt = gEntList.FindEntityGeneric( pEnt, args[1] ) ) != NULL )
-	{
-		Vector forward;
-		pEnt->GetVectors(&forward, NULL, NULL);
-		UTIL_BloodSpray( (forward * 4 ) + ( pEnt->EyePosition() + pEnt->WorldSpaceCenter() ) * 0.5f, forward, BLOOD_COLOR_RED, 4, FX_BLOODSPRAY_ALL );
-	}
-}
-
-static ConCommand bloodspray( "bloodspray", CC_BloodSpray, "blood", FCVAR_CHEAT );
 
 
 //-----------------------------------------------------------------------------
@@ -1466,7 +1471,6 @@ void CItemSoda::CanTouch ( CBaseEntity *pOther )
 	SetNextThink( gpGlobals->curtime );
 }
 
-#ifndef _XBOX
 //=========================================================
 // func_precipitation - temporary snow solution for first HL2
 // technology demo
@@ -1480,39 +1484,71 @@ public:
 	DECLARE_SERVERCLASS();
 
 	CPrecipitation();
+	int UpdateTransmitState();
 	void	Spawn( void );
 
 	CNetworkVar( PrecipitationType_t, m_nPrecipType );
+#ifdef INFESTED_DLL
+	CNetworkVar( int, m_nSnowDustAmount );
+#endif
 };
 
 LINK_ENTITY_TO_CLASS( func_precipitation, CPrecipitation );
 
 BEGIN_DATADESC( CPrecipitation )
 	DEFINE_KEYFIELD( m_nPrecipType, FIELD_INTEGER, "preciptype" ),
+#ifdef INFESTED_DLL
+	DEFINE_KEYFIELD( m_nSnowDustAmount, FIELD_INTEGER, "snowDustAmt" ),
+#endif
 END_DATADESC()
 
 // Just send the normal entity crap
 IMPLEMENT_SERVERCLASS_ST( CPrecipitation, DT_Precipitation)
-	SendPropInt( SENDINFO( m_nPrecipType ), Q_log2( NUM_PRECIPITATION_TYPES ) + 1, SPROP_UNSIGNED )
+	SendPropInt( SENDINFO( m_nPrecipType ), Q_log2( NUM_PRECIPITATION_TYPES ) + 1, SPROP_UNSIGNED ),
+#ifdef INFESTED_DLL
+	SendPropInt( SENDINFO( m_nSnowDustAmount ) ),
+#endif
 END_SEND_TABLE()
 
 
 CPrecipitation::CPrecipitation()
 {
 	m_nPrecipType = PRECIPITATION_TYPE_RAIN; // default to rain.
+#ifdef INFESTED_DLL
+	m_nSnowDustAmount = 0;
+#endif
+}
+
+int CPrecipitation::UpdateTransmitState()
+{
+	return SetTransmitState( FL_EDICT_ALWAYS );
 }
 
 void CPrecipitation::Spawn( void )
 {
+	//SetTransmitState( FL_EDICT_ALWAYS );
+	SetTransmitState( FL_EDICT_PVSCHECK );
+
 	PrecacheMaterial( "effects/fleck_ash1" );
 	PrecacheMaterial( "effects/fleck_ash2" );
 	PrecacheMaterial( "effects/fleck_ash3" );
 	PrecacheMaterial( "effects/ember_swirling001" );
-
 	Precache();
-	SetSolid( SOLID_NONE );							// Remove model & collisions
+
 	SetMoveType( MOVETYPE_NONE );
 	SetModel( STRING( GetModelName() ) );		// Set size
+	if ( m_nPrecipType == PRECIPITATION_TYPE_PARTICLERAIN )
+	{
+		SetSolid( SOLID_VPHYSICS );
+		AddSolidFlags( FSOLID_NOT_SOLID );
+		AddSolidFlags( FSOLID_FORCE_WORLD_ALIGNED );
+		VPhysicsInitStatic();
+	}
+	else
+	{
+		SetSolid( SOLID_NONE );							// Remove model & collisions
+	}
+
 
 	// Default to rain.
 	if ( m_nPrecipType < 0 || m_nPrecipType > NUM_PRECIPITATION_TYPES )
@@ -1520,7 +1556,66 @@ void CPrecipitation::Spawn( void )
 
 	m_nRenderMode = kRenderEnvironmental;
 }
-#endif
+
+
+//=========================================================
+// func_precipitation_blocker - prevents precipitation from happening in this volume
+//=========================================================
+
+class CPrecipitationBlocker : public CBaseEntity
+{
+public:
+	DECLARE_CLASS( CPrecipitationBlocker, CBaseEntity );
+	DECLARE_DATADESC();
+	DECLARE_SERVERCLASS();
+
+	CPrecipitationBlocker();
+	void	Spawn( void );
+	int		UpdateTransmitState( void );
+};
+
+LINK_ENTITY_TO_CLASS( func_precipitation_blocker, CPrecipitationBlocker );
+
+BEGIN_DATADESC( CPrecipitationBlocker )
+END_DATADESC()
+
+// Just send the normal entity crap
+IMPLEMENT_SERVERCLASS_ST( CPrecipitationBlocker, DT_PrecipitationBlocker )
+END_SEND_TABLE()
+
+
+CPrecipitationBlocker::CPrecipitationBlocker()
+{
+}
+
+int CPrecipitationBlocker::UpdateTransmitState()
+{
+	return SetTransmitState( FL_EDICT_ALWAYS );
+}
+
+
+void CPrecipitationBlocker::Spawn( void )							   
+{
+	SetTransmitState( FL_EDICT_ALWAYS );
+	Precache();
+	SetSolid( SOLID_NONE );							// Remove model & collisions
+	SetMoveType( MOVETYPE_NONE );
+	SetModel( STRING( GetModelName() ) );		// Set size
+
+	m_nRenderMode = kRenderEnvironmental;
+}
+
+//--------------------------------------------------------------------------------------------------------
+class CDetailBlocker : public CServerOnlyEntity
+{
+	DECLARE_CLASS( CDetailBlocker, CServerOnlyEntity );
+public:
+
+	CDetailBlocker() : CServerOnlyEntity() {}
+	virtual ~CDetailBlocker() {}
+};
+
+LINK_ENTITY_TO_CLASS( func_detail_blocker, CDetailBlocker );
 
 //-----------------------------------------------------------------------------
 // EnvWind - global wind info
@@ -1539,7 +1634,7 @@ public:
 	DECLARE_SERVERCLASS();
 
 private:
-#ifdef POSIX
+#ifdef GNUC
 	CEnvWindShared m_EnvWindShared; // FIXME - fails to compile as networked var due to operator= problem
 #else
 	CNetworkVarEmbedded( CEnvWindShared, m_EnvWindShared );
@@ -1615,7 +1710,8 @@ void CEnvWind::Spawn( void )
 	SetSolid( SOLID_NONE );
 	AddEffects( EF_NODRAW );
 
-	m_EnvWindShared.Init( entindex(), 0, gpGlobals->frametime, GetLocalAngles().y, 0 );
+	m_EnvWindShared.m_iInitialWindDir = (int)( anglemod( m_EnvWindShared.m_iInitialWindDir ) );
+	m_EnvWindShared.Init( entindex(), 0, gpGlobals->curtime, GetLocalAngles().y, 0 );
 
 	SetThink( &CEnvWind::WindThink );
 	SetNextThink( gpGlobals->curtime );
@@ -1695,7 +1791,7 @@ void CEmbers::Spawn( void )
 	SetModel( STRING( GetModelName() ) );
 
 	SetSolid( SOLID_NONE );
-	SetRenderColorA( 0 );
+	SetRenderAlpha( 0 );
 	m_nRenderMode	= kRenderTransTexture;
 
 	SetUse( &CEmbers::EmberUse );
@@ -1897,7 +1993,7 @@ void CEnvMuzzleFlash::Spawn()
 	{
 		CBaseAnimating *pAnim = GetParent()->GetBaseAnimating();
 		int nParentAttachment = pAnim->LookupAttachment( STRING(m_iszParentAttachment) );
-		if ( nParentAttachment > 0 )
+		if ( nParentAttachment != 0 )
 		{
 			SetParent( GetParent(), nParentAttachment );
 			SetLocalOrigin( vec3_origin );
@@ -1927,6 +2023,9 @@ class CEnvSplash : public CPointEntity
 	DECLARE_CLASS( CEnvSplash, CPointEntity );
 
 public:
+	virtual void Precache();
+	virtual void Spawn();
+
 	// Input handlers
 	void	InputSplash( inputdata_t &inputdata );
 
@@ -1949,6 +2048,19 @@ LINK_ENTITY_TO_CLASS( env_splash, CEnvSplash );
 // Purpose:
 // Input  : &inputdata -
 //-----------------------------------------------------------------------------
+
+void CEnvSplash::Precache()
+{
+	BaseClass::Precache();
+	PrecacheEffect( "watersplash" );
+}
+
+void CEnvSplash::Spawn()
+{
+	Precache();
+	BaseClass::Spawn();
+}
+
 #define SPLASH_MAX_DEPTH	120.0f
 void CEnvSplash::InputSplash( inputdata_t &inputdata )
 {
@@ -1960,7 +2072,7 @@ void CEnvSplash::InputSplash( inputdata_t &inputdata )
 
 	if( HasSpawnFlags( SF_ENVSPLASH_FINDWATERSURFACE ) )
 	{
-		if( UTIL_PointContents(GetAbsOrigin()) & MASK_WATER )
+		if( UTIL_PointContents(GetAbsOrigin(), MASK_WATER) & MASK_WATER )
 		{
 			// No splash if I'm supposed to find the surface of the water, but I'm underwater.
 			return;
@@ -2033,6 +2145,20 @@ public:
 	void StopShooting();
 	void ShootThink();
 	void UpdateTarget();
+	void FireBullet(
+		Vector vecSrc,	// shooting postion
+		const QAngle &shootAngles,  //shooting angle
+		float flDistance, // max distance 
+		float flPenetration, // the power of the penetration
+		int nPenetrationCount,
+		int iBulletType, // ammo type
+		int iDamage, // base damage
+		float flRangeModifier, // damage range modifier
+		CBaseEntity *pevAttacker, // shooter
+		bool bDoEffects,
+		float xSpread, float ySpread,
+		const char *pszTracerName
+		);
 
 	void InputEnable( inputdata_t &inputdata );
 	void InputDisable( inputdata_t &inputdata );
@@ -2047,6 +2173,7 @@ public:
 
 	string_t	m_iszShootSound;
 	string_t	m_iszTracerType;
+	string_t	m_iszWeaponName;
 
 	bool m_bDisabled;
 
@@ -2078,6 +2205,7 @@ BEGIN_DATADESC( CEnvGunfire )
 	DEFINE_KEYFIELD( m_iSpread, FIELD_INTEGER, "spread" ),
 	DEFINE_KEYFIELD( m_flBias, FIELD_FLOAT, "bias" ),
 	DEFINE_KEYFIELD( m_bCollide, FIELD_BOOLEAN, "collisions" ),
+	DEFINE_KEYFIELD( m_iszWeaponName, FIELD_STRING, "weaponname" ),
 
 	DEFINE_FIELD( m_iShotsRemaining, FIELD_INTEGER ),
 	DEFINE_FIELD( m_vecSpread, FIELD_VECTOR ),
@@ -2098,6 +2226,8 @@ LINK_ENTITY_TO_CLASS( env_gunfire, CEnvGunfire );
 void CEnvGunfire::Precache()
 {
 	PrecacheScriptSound( STRING( m_iszShootSound ) );
+	PrecacheEffect( "impact_wallbang_heavy" );
+	PrecacheEffect( "impact_wallbang_light" );
 }
 
 //-----------------------------------------------------------------------------
@@ -2190,8 +2320,6 @@ void CEnvGunfire::ShootThink()
 		StopShooting();
 	}
 
-	SetNextThink( gpGlobals->curtime + m_flRateOfFire );
-
 	UpdateTarget();
 
 	Vector vecDir = m_vecTargetPosition - GetAbsOrigin();
@@ -2202,6 +2330,69 @@ void CEnvGunfire::ShootThink()
 	vecDir = manipulator.ApplySpread( m_vecSpread, m_flBias );
 
 	Vector vecEnd;
+
+#if defined( CSTRIKE15 )
+
+	CEconItemDefinition *pItemDef = GetItemSchema()->GetItemDefinitionByName( STRING(m_iszWeaponName) );
+	if ( pItemDef && pItemDef->GetDefinitionIndex() != 0 )
+	{
+		CSWeaponID wid = WeaponIdFromString( STRING(m_iszWeaponName) );
+		const CCSWeaponInfo* pWeaponInfo = GetWeaponInfo( wid );
+		
+		uint16 nItemDefIndex = pItemDef->GetDefinitionIndex();
+	
+		QAngle angDir;
+		VectorAngles( vecDir, angDir );
+
+		FX_FireBullets(
+			entindex(),
+			nItemDefIndex,
+			GetAbsOrigin(),
+			angDir,
+			wid,
+			0,
+			CBaseEntity::GetPredictionRandomSeed( SERVER_PLATTIME_RNG ) & 255,
+			0,
+			0,
+			0,
+			0,
+			SINGLE,
+			0 );
+
+		int nPenetrationCount = 4;
+
+		int		iDamage = pWeaponInfo->GetDamage( NULL );
+		float	flRange = pWeaponInfo->GetRange( NULL );
+		float	flPenetration = pWeaponInfo->GetPenetration( NULL );
+		float	flRangeModifier = pWeaponInfo->GetRangeModifier( NULL );
+		int		iAmmoType = pWeaponInfo->GetPrimaryAmmoType( NULL );
+
+		FireBullet(
+			GetAbsOrigin(),
+			angDir,
+			flRange,
+			flPenetration,
+			nPenetrationCount,
+			iAmmoType,
+			iDamage,
+			flRangeModifier,
+			this,
+			true,
+			0, 0,
+			pWeaponInfo->GetTracerEffectName() );
+
+		m_iShotsRemaining--;
+		float flNextShot = gpGlobals->curtime + pWeaponInfo->GetCycleTime();
+		SetNextThink( flNextShot );
+
+		if( m_iShotsRemaining == 0 )
+		{
+			StartShooting();
+			SetNextThink( gpGlobals->curtime + random->RandomFloat( m_flMinBurstDelay, m_flMaxBurstDelay ) );	
+		}
+	}
+#else
+	SetNextThink( gpGlobals->curtime + m_flRateOfFire );
 
 	if( m_bCollide )
 	{
@@ -2234,11 +2425,378 @@ void CEnvGunfire::ShootThink()
 
 	m_iShotsRemaining--;
 
-	if( m_iShotsRemaining == 0 )
+	if ( m_iShotsRemaining == 0 )
 	{
 		StartShooting();
 		SetNextThink( gpGlobals->curtime + random->RandomFloat( m_flMinBurstDelay, m_flMaxBurstDelay ) );
 	}
+#endif
+
+}
+
+static const int kMaxNumPenetrationsSupported = 4;
+struct DelayedDamageInfoData_t
+{
+	CTakeDamageInfo m_info;
+	trace_t m_tr;
+
+	typedef CUtlVectorFixedGrowable< DelayedDamageInfoData_t, kMaxNumPenetrationsSupported > Array;
+};
+
+inline void UTIL_TraceLineIgnoreTwoEntities( const Vector& vecAbsStart, const Vector& vecAbsEnd, unsigned int mask,
+											 const IHandleEntity *ignore, const IHandleEntity *ignore2, int collisionGroup, trace_t *ptr )
+{
+	Ray_t ray;
+	ray.Init( vecAbsStart, vecAbsEnd );
+	CTraceFilterSkipTwoEntities traceFilter( ignore, ignore2, collisionGroup );
+	enginetrace->TraceRay( ray, mask, &traceFilter, ptr );
+	if ( r_visualizetraces.GetBool() )
+	{
+		DebugDrawLine( ptr->startpos, ptr->endpos, 255, 0, 0, true, -1.0f );
+	}
+}
+
+extern ConVar sv_showbullethits;
+extern ConVar sv_penetration_type;
+#define	CS_MASK_SHOOT (MASK_SOLID|CONTENTS_DEBRIS)
+
+void CEnvGunfire::FireBullet(
+	Vector vecSrc,	// shooting postion
+	const QAngle &shootAngles,  //shooting angle
+	float flDistance, // max distance 
+	float flPenetration, // the power of the penetration
+	int nPenetrationCount,
+	int iBulletType, // ammo type
+	int iDamage, // base damage
+	float flRangeModifier, // damage range modifier
+	CBaseEntity *pevAttacker, // shooter
+	bool bDoEffects,
+	float xSpread, float ySpread,
+	const char *pszTracerName
+	)
+{
+	CCSPlayer *pPlayer = NULL;
+	for ( int i = 1; i <= MAX_PLAYERS; i++ )
+	{
+		pPlayer = ToCSPlayer( UTIL_PlayerByIndex( i ) );
+		if ( pPlayer )
+			break;
+	}
+
+	float fCurrentDamage = iDamage;   // damage of the bullet at it's current trajectory
+	float flCurrentDistance = 0.0;  //distance that the bullet has traveled so far
+
+	Vector vecDirShooting, vecRight, vecUp;
+	AngleVectors( shootAngles, &vecDirShooting, &vecRight, &vecUp );
+
+	// MIKETODO: put all the ammo parameters into a script file and allow for CS-specific params.
+	float flPenetrationPower = 35;		// thickness of a wall that this bullet can penetrate
+	float flPenetrationDistance = 3000;	// distance at which the bullet is capable of penetrating a wall
+	float flDamageModifier = 0.5f;		// default modification of bullets power after they go through a wall.
+	float flPenetrationModifier = 1.0f;
+
+	// we use the max penetrations on this gun to figure out how much penetration it's capable of
+	if ( sv_penetration_type.GetInt() == 1 )
+		flPenetrationPower = flPenetration;
+
+	if ( !pevAttacker )
+		pevAttacker = this;  // the default attacker is ourselves
+
+	// add the spray 
+	Vector vecDir = vecDirShooting + xSpread * vecRight + ySpread * vecUp;
+
+	VectorNormalize( vecDir );
+
+	bool bFirstHit = true;
+
+	const CBaseCombatCharacter *lastPlayerHit = NULL;	// this includes players, bots, and hostages
+
+//#ifdef CLIENT_DLL
+	Vector vecWallBangHitStart, vecWallBangHitEnd;
+	vecWallBangHitStart.Init();
+	vecWallBangHitEnd.Init();
+	bool bWallBangStarted = false;
+	bool bWallBangEnded = false;
+	bool bWallBangHeavyVersion = false;
+//#endif
+
+	bool bBulletHitPlayer = false;
+
+	MDLCACHE_CRITICAL_SECTION();
+
+//#ifndef CLIENT_DLL
+	DelayedDamageInfoData_t::Array arrPendingDamage;
+//#endif
+
+	bool bShotHitTeammate = false;
+
+	float flDist_aim = 0;
+	while ( fCurrentDamage > 0 )
+	{
+		Vector vecEnd = vecSrc + vecDir * ( flDistance - flCurrentDistance );
+
+		trace_t tr; // main enter bullet trace
+
+		UTIL_TraceLineIgnoreTwoEntities( vecSrc, vecEnd, CS_MASK_SHOOT | CONTENTS_HITBOX, this, lastPlayerHit, COLLISION_GROUP_NONE, &tr );
+		{
+			CTraceFilterSkipTwoEntities filter( this, lastPlayerHit, COLLISION_GROUP_NONE );
+
+			// Check for player hitboxes extending outside their collision bounds
+			const float rayExtension = 40.0f;
+			UTIL_ClipTraceToPlayers( vecSrc, vecEnd + vecDir * rayExtension, CS_MASK_SHOOT | CONTENTS_HITBOX, &filter, &tr );
+		}
+
+		if ( !flDist_aim )
+		{
+			flDist_aim = ( tr.fraction != 1.0 ) ? ( tr.startpos - tr.endpos ).Length() : 0;
+		}
+
+		lastPlayerHit = dynamic_cast< const CBaseCombatCharacter * >( tr.m_pEnt );
+
+		if ( lastPlayerHit )
+		{
+			if ( lastPlayerHit->GetTeamNumber() == GetTeamNumber() )
+			{
+				bShotHitTeammate = true;
+			}
+
+			bBulletHitPlayer = true;
+		}
+
+		if ( tr.fraction == 1.0f )
+			break; // we didn't hit anything, stop tracing shoot
+
+//#ifdef CLIENT_DLL
+		if ( !bWallBangStarted && !bBulletHitPlayer )
+		{
+			vecWallBangHitStart = tr.endpos;
+			vecWallBangHitEnd = tr.endpos;
+			bWallBangStarted = true;
+
+			if ( fCurrentDamage > 20 )
+				bWallBangHeavyVersion = true;
+		}
+		else if ( !bWallBangEnded )
+		{
+			vecWallBangHitEnd = tr.endpos;
+
+			if ( bBulletHitPlayer )
+				bWallBangEnded = true;
+		}
+//#endif
+
+		bFirstHit = false;
+#ifndef CLIENT_DLL
+		//
+		// Propogate a bullet impact event
+		// @todo Add this for shotgun pellets (which dont go thru here)
+		//
+// 		IGameEvent * event = gameeventmanager->CreateEvent( "bullet_impact" );
+// 		if ( event )
+// 		{
+// 			event->SetInt( "userid", GetUserID() );
+// 			event->SetFloat( "x", tr.endpos.x );
+// 			event->SetFloat( "y", tr.endpos.y );
+// 			event->SetFloat( "z", tr.endpos.z );
+// 			gameeventmanager->FireEvent( event );
+// 		}
+#endif
+
+		/************* MATERIAL DETECTION ***********/
+		surfacedata_t *pSurfaceData = physprops->GetSurfaceData( tr.surface.surfaceProps );
+		int iEnterMaterial = pSurfaceData->game.material;
+
+		flPenetrationModifier = pSurfaceData->game.penetrationModifier;
+		flDamageModifier = pSurfaceData->game.damageModifier;
+
+		bool hitGrate = ( tr.contents & CONTENTS_GRATE ) != 0;
+
+		//calculate the damage based on the distance the bullet travelled.
+		flCurrentDistance += tr.fraction * ( flDistance - flCurrentDistance );
+		fCurrentDamage *= pow( flRangeModifier, ( flCurrentDistance / 500 ) );
+
+#ifndef CLIENT_DLL
+		// the value of iPenetration when the round reached its max penetration distance
+		int nPenetrationAtMaxDistance = 0;
+#endif
+
+		// check if we reach penetration distance, no more penetrations after that
+		// or if our modifyer is super low, just stop the bullet
+		if ( ( flCurrentDistance > flPenetrationDistance && flPenetration > 0 ) ||
+			 flPenetrationModifier < 0.1 )
+		{
+#ifndef CLIENT_DLL
+			nPenetrationAtMaxDistance = 0;
+#endif
+			nPenetrationCount = 0;
+		}
+
+		int iDamageType = DMG_BULLET | DMG_NEVERGIB;
+		//CWeaponCSBase* pActiveWeapon = NULL;
+
+		if ( bDoEffects )
+		{
+			// See if the bullet ended up underwater + started out of the water
+			if ( enginetrace->GetPointContents( tr.endpos, MASK_WATER ) & ( CONTENTS_WATER | CONTENTS_SLIME ) )
+			{
+				trace_t waterTrace;
+				UTIL_TraceLine( vecSrc, tr.endpos, ( MASK_SHOT | CONTENTS_WATER | CONTENTS_SLIME ), this, COLLISION_GROUP_NONE, &waterTrace );
+
+				if ( waterTrace.allsolid != 1 )
+				{
+					CEffectData	data;
+					data.m_vOrigin = waterTrace.endpos;
+					data.m_vNormal = waterTrace.plane.normal;
+					data.m_flScale = random->RandomFloat( 8, 12 );
+
+					if ( waterTrace.contents & CONTENTS_SLIME )
+					{
+						data.m_fFlags |= FX_WATER_IN_SLIME;
+					}
+
+					DispatchEffect( "gunshotsplash", data );
+				}
+			}
+			else
+			{
+				//Do Regular hit effects
+
+				// Don't decal nodraw surfaces
+				if ( !( tr.surface.flags & ( SURF_SKY | SURF_NODRAW | SURF_HINT | SURF_SKIP ) ) )
+				{
+					//CBaseEntity *pEntity = tr.m_pEnt;
+					UTIL_ImpactTrace( &tr, iDamageType );
+				}
+			}
+		}
+
+#ifndef CLIENT_DLL
+		// decal players on the server to eliminate the disparity between where the client thinks the decal went and where it actually went
+		// we want to eliminate the case where a player sees a blood decal on someone, but they are at 100 health
+		if ( tr.DidHit() && tr.m_pEnt && tr.m_pEnt->IsPlayer() )
+		{
+			UTIL_ImpactTrace( &tr, iDamageType );
+		}
+#endif
+
+// #ifdef CLIENT_DLL
+// 		// create the tracer
+// 		CreateWeaponTracer( vecSrc, tr.endpos );
+// #endif
+		if ( bWallBangStarted == false )
+			UTIL_ParticleTracer( pszTracerName, vecSrc, tr.endpos, entindex() );
+
+		// add damage to entity that we hit
+
+#ifndef CLIENT_DLL
+		// CBaseEntity *pEntity = tr.m_pEnt;
+
+		//Shooting dropped grenades detonates them
+		//
+		// DAMAGE MUST BE DEFERRED TILL LATER IF WE DECIDE TO SHIP IT
+		//
+		// 		if ( sv_shoot_dropped_grenades.GetBool() )
+		// 		{
+		// 			CBaseCSGrenade* pWeapon = dynamic_cast<CBaseCSGrenade*>( pEntity );
+		// 			//Only detonate shot grenades if they have been dropped in the world longer than the grace period.
+		// 			//This prevents shooting at players and they miraculously explode - because you shot their grenade the instant they died
+		// 			if ( pWeapon && gpGlobals->curtime > (pWeapon->m_flDroppedAtTime + sv_shoot_dropped_grenades_grace_time.GetFloat()) )
+		// 			{
+		// 				pWeapon->ShotDetonate( this, pWeapon->GetCSWpnData() );
+		// 				pWeapon->AddSolidFlags( FSOLID_NOT_SOLID );
+		// 				pWeapon->AddEffects( EF_NODRAW );
+		// 				UTIL_Remove( pWeapon );
+		// 			}
+		// 		}
+
+		// [pfreese] Check if enemy players were killed by this bullet, and if so,
+		// add them to the iPenetrationKills count
+
+		DelayedDamageInfoData_t &delayedDamage = arrPendingDamage.Element( arrPendingDamage.AddToTail() );
+		delayedDamage.m_tr = tr;
+
+		int nObjectsPenetrated = kMaxNumPenetrationsSupported - ( nPenetrationCount + nPenetrationAtMaxDistance );
+		CTakeDamageInfo &info = delayedDamage.m_info;
+		info.Set( pevAttacker, pevAttacker, NULL/*GetActiveWeapon()*/, fCurrentDamage, iDamageType, 0, nObjectsPenetrated );
+
+		// Set the bullet ID so that we can later track all the enemies that are damage by the same bullet
+		info.SetAmmoType( iBulletType );
+		CalculateBulletDamageForce( &info, iBulletType, vecDir, tr.endpos );
+
+		//bool bWasAlive = pEntity->IsAlive();
+
+		// === Damage applied later ===
+#endif
+
+		// [dkorus] note: values are changed inside of HandleBulletPenetration
+		bool bulletStopped = pPlayer->HandleBulletPenetration( flPenetration, iEnterMaterial, hitGrate, tr, vecDir, pSurfaceData, flPenetrationModifier,
+													  flDamageModifier, bDoEffects, iDamageType, flPenetrationPower, nPenetrationCount, vecSrc, flDistance,
+													  flCurrentDistance, fCurrentDamage );
+
+		// [dkorus] bulletStopped is true if the bullet can no longer continue penetrating materials
+		if ( bulletStopped )
+			break;
+	}
+
+
+#ifndef CLIENT_DLL
+	FOR_EACH_VEC( arrPendingDamage, idxDamage )
+	{
+		ClearMultiDamage();
+
+		CTakeDamageInfo &info = arrPendingDamage[idxDamage].m_info;
+		trace_t &tr = arrPendingDamage[idxDamage].m_tr;
+
+		CBaseEntity *pEntity = tr.m_pEnt;
+		//bool bWasAlive = pEntity->IsAlive();
+
+		pEntity->DispatchTraceAttack( info, vecDir, &tr );
+		TraceAttackToTriggers( info, tr.startpos, tr.endpos, vecDir );
+		ApplyMultiDamage();
+
+// 		if ( bWasAlive && !pEntity->IsAlive() && pEntity->IsPlayer() && IsOtherEnemy( pEntity->entindex() ) )
+// 		{
+// 			++iPenetrationKills;
+// 		}
+	}
+#endif
+
+//#ifdef CLIENT_DLL
+	if ( bWallBangStarted )
+	{
+		float flWallBangLength = ( vecWallBangHitEnd - vecWallBangHitStart ).Length();
+		if ( flWallBangLength > 0 && flWallBangLength < 800 )
+		{
+			QAngle temp;
+			VectorAngles( vecWallBangHitEnd - vecWallBangHitStart, temp );
+
+// 			CEffectData	data;
+// 			data.m_vOrigin = vecWallBangHitStart;
+// 			data.m_vStart = vecWallBangHitEnd;
+// 			data.m_vAngles = temp;
+// 			//data.m_vNormal = vecWallBangHitStart - vecWallBangHitEnd;
+// 			data.m_flScale = 1.0f;
+
+			//why is particle system index stored on m_nHitBox?
+			if ( bWallBangHeavyVersion )
+			{
+				//data.m_nHitBox = GetParticleSystemIndex( "impact_wallbang_heavy" );
+				//UTIL_Tracer( vecWallBangHitStart, vecWallBangHitEnd, 0, TRACER_DONT_USE_ATTACHMENT, 0, true, "impact_wallbang_heavy"/*, data.m_nHitBox */);
+				UTIL_ParticleTracer( "impact_wallbang_heavy", vecWallBangHitStart, vecWallBangHitEnd, entindex() );
+			}
+			else
+			{
+				//data.m_nHitBox = GetParticleSystemIndex( "impact_wallbang_light" );
+				//UTIL_Tracer( vecWallBangHitStart, vecWallBangHitEnd, 0, TRACER_DONT_USE_ATTACHMENT, 0, true, "impact_wallbang_light"/*, data.m_nHitBox*/ );
+				UTIL_ParticleTracer( "impact_wallbang_light", vecWallBangHitStart, vecWallBangHitEnd, entindex() );
+			}
+
+			//StartParticleEffect( data );
+
+			//debugoverlay->AddLineOverlay( vecWallBangHitStart, vecWallBangHitEnd, 0, 255, 0, false, 3 );
+		}
+	}
+//#endif
 }
 
 //-----------------------------------------------------------------------------
@@ -2293,24 +2851,19 @@ CEnvQuadraticBeam *CreateQuadraticBeam( const char *pSpriteName, const Vector &s
 	return pBeam;
 }
 
-void EffectsPrecache( void *pUser )
-{
-	CBaseEntity::PrecacheScriptSound( "Underwater.BulletImpact" );
-
-	CBaseEntity::PrecacheScriptSound( "FX_RicochetSound.Ricochet" );
-
-	CBaseEntity::PrecacheScriptSound( "Physics.WaterSplash" );
-	CBaseEntity::PrecacheScriptSound( "BaseExplosionEffect.Sound" );
-	CBaseEntity::PrecacheScriptSound( "Splash.SplashSound" );
-
-	if ( gpGlobals->maxClients > 1 )
-	{
-		CBaseEntity::PrecacheScriptSound( "HudChat.Message" );
-	}
-}
-
-PRECACHE_REGISTER_FN( EffectsPrecache );
-
+PRECACHE_REGISTER_BEGIN( GLOBAL, EffectsPrecache )
+#ifndef DOTA_DLL
+	PRECACHE( GAMESOUND, "Underwater.BulletImpact" )
+	PRECACHE( GAMESOUND, "FX_RicochetSound.Ricochet" )
+	PRECACHE(GAMESOUND, "FX_RicochetSound.Ricochet_Legacy")
+	PRECACHE( GAMESOUND, "Physics.WaterSplash" )
+	PRECACHE( GAMESOUND, "BaseExplosionEffect.Sound" )
+	PRECACHE( GAMESOUND, "Splash.SplashSound" )
+#ifndef _WIN64 // TODO64: PRECACHE_CONDITIONAL is not supported on 64bit , hopefully it's not an issue for the server to not precache a sound
+	PRECACHE_CONDITIONAL( GAMESOUND, "HudChat.Message", gpGlobals->maxClients > 1 )
+#endif
+#endif
+PRECACHE_REGISTER_END()
 
 class CEnvViewPunch : public CPointEntity
 {

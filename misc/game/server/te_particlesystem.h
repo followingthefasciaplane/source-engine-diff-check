@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -26,7 +26,7 @@ public:
 		m_vecOrigin.GetForModify().Init();
 	}
 
-	CNetworkVector( m_vecOrigin );
+	CNetworkVectorXYZ( m_vecOrigin );
 };
 
 

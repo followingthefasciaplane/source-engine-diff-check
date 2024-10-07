@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Local fast collision system for particles
 //
@@ -11,12 +11,7 @@
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
-#ifdef _XBOX
-#define	__DEBUG_PARTICLE_COLLISION_RETEST			0
-#else
 #define	__DEBUG_PARTICLE_COLLISION_RETEST			1
-#endif // _XBOX
-
 #define	__DEBUG_PARTICLE_COLLISION_OVERLAY			0
 #define	__DEBUG_PARTICLE_COLLISION_OVERLAY_LIFETIME	0.1f
 
@@ -93,10 +88,7 @@ void CBaseSimpleCollision::TraceLine( const Vector &start, const Vector &end, tr
 		}
 
 		#if	__DEBUG_PARTICLE_COLLISION_OVERLAY
-		if ( debugoverlay )
-		{
-			debugoverlay->AddBoxOverlay( vIntersection, Vector(-1,-1,-1), Vector(1,1,1), QAngle(0,0,0), 0, 255, 0, 16, __DEBUG_PARTICLE_COLLISION_OVERLAY_LIFETIME );
-		}
+		debugoverlay->AddBoxOverlay( vIntersection, Vector(-1,-1,-1), Vector(1,1,1), QAngle(0,0,0), 0, 255, 0, 16, __DEBUG_PARTICLE_COLLISION_OVERLAY_LIFETIME );
 		#endif	//__DEBUG_PARTICLE_COLLISION_OVERLAY
 		
 		//Done
@@ -173,17 +165,14 @@ void CBaseSimpleCollision::TestForPlane( const Vector &start, const Vector &dir,
 		if ( tr.fraction != 1.0f )
 		{
 			#if	__DEBUG_PARTICLE_COLLISION_OVERLAY
-			if ( debugoverlay )
-			{
-				debugoverlay->AddLineOverlay( testStart, tr.endpos, 255, 0, 0, true, __DEBUG_PARTICLE_COLLISION_OVERLAY_LIFETIME );
+			debugoverlay->AddLineOverlay( testStart, tr.endpos, 255, 0, 0, true, __DEBUG_PARTICLE_COLLISION_OVERLAY_LIFETIME );
 			
-				QAngle angles;
+			QAngle angles;
 
-				VectorAngles( tr.plane.normal,angles );
-				angles[PITCH] += 90;
+			VectorAngles( tr.plane.normal,angles );
+			angles[PITCH] += 90;
 
-				debugoverlay->AddBoxOverlay( tr.endpos, Vector(-64,-64,0), Vector(64,64,0), angles, 255, 0, 0, 16, __DEBUG_PARTICLE_COLLISION_OVERLAY_LIFETIME );
-			}
+			debugoverlay->AddBoxOverlay( tr.endpos, Vector(-64,-64,0), Vector(64,64,0), angles, 255, 0, 0, 16, __DEBUG_PARTICLE_COLLISION_OVERLAY_LIFETIME );
 			#endif	//__DEBUG_PARTICLE_COLLISION_OVERLAY
 			
 			//Test the plane against a set of criteria
@@ -194,10 +183,7 @@ void CBaseSimpleCollision::TestForPlane( const Vector &start, const Vector &dir,
 
 		//We missed
 		#if	__DEBUG_PARTICLE_COLLISION_OVERLAY
-		if ( debugoverlay )
-		{
-			debugoverlay->AddLineOverlay( testStart, tr.endpos, 0, 128.0f+(128.0f*((float)i/(float)NUM_DISCREET_STEPS)), 0, true, __DEBUG_PARTICLE_COLLISION_OVERLAY_LIFETIME );
-		}
+		debugoverlay->AddLineOverlay( testStart, tr.endpos, 0, 128.0f+(128.0f*((float)i/(float)NUM_DISCREET_STEPS)), 0, true, __DEBUG_PARTICLE_COLLISION_OVERLAY_LIFETIME );
 		#endif	//__DEBUG_PARTICLE_COLLISION_OVERLAY
 		
 		//Save that position for the next round
@@ -372,10 +358,7 @@ bool CParticleCollision::MoveParticle( Vector &origin, Vector &velocity, float *
 			{
 				#if	__DEBUG_PARTICLE_COLLISION_OVERLAY
 				//Display a false hit
-				if ( debugoverlay )
-				{
-					debugoverlay->AddBoxOverlay( pTrace->endpos, Vector(-1,-1,-1), Vector(1,1,1), QAngle(0,0,0), 255, 0, 0, 16, __DEBUG_PARTICLE_COLLISION_OVERLAY_LIFETIME );
-				}
+				debugoverlay->AddBoxOverlay( pTrace->endpos, Vector(-1,-1,-1), Vector(1,1,1), QAngle(0,0,0), 255, 0, 0, 16, __DEBUG_PARTICLE_COLLISION_OVERLAY_LIFETIME );
 				#endif	//__DEBUG_PARTICLE_COLLISION_OVERLAY
 			}
 		}

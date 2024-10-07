@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -7,6 +7,9 @@
 #include <stdlib.h>
 #include <ctype.h>
 #include "utlbuffer.h"
+#ifdef _PS3
+#include <wctype.h>
+#endif
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"

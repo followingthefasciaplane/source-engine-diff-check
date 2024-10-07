@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Deals with singleton  
 //
@@ -13,10 +13,17 @@
 #include "vprof.h"
 #if defined( _X360 )
 #include "xbox/xbox_console.h"
+#elif defined( _PS3 )
+#include "materialsystem/imaterialsystem.h" // for loading fontlib
 #endif
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
+
+// enable this #define (here or in your vpc) to have 
+// each GameSystem accounted for individually in the vprof.
+// You must enable VPROF_LEVEL 1 too.
+// #define VPROF_ACCOUNT_GAMESYSTEMS
 
 // Pointer to a member method of IGameSystem
 typedef void (IGameSystem::*GameSystemFunc_t)();
@@ -26,6 +33,8 @@ typedef void (IGameSystemPerFrame::*PerFrameGameSystemFunc_t)();
 
 // Used to invoke a method of all added Game systems in order
 static void InvokeMethod( GameSystemFunc_t f, char const *timed = 0 );
+// Used to invoke a method of all added Game systems in order
+static void InvokeMethodTickProgress( GameSystemFunc_t f, char const *timed = 0 );
 // Used to invoke a method of all added Game systems in reverse order
 static void InvokeMethodReverseOrder( GameSystemFunc_t f );
 
@@ -206,25 +215,30 @@ bool IGameSystem::InitAllSystems()
 	// Now remember that we are initted so new CAutoGameSystems will add themselves automatically.
 	s_bSystemsInitted = true;
 
+	// PS3: haul the fontlib into memory; some systems (eg vgui) need it.
 	for ( i = 0; i < s_GameSystems.Count(); ++i )
 	{
+		MDLCACHE_COARSE_LOCK();
 		MDLCACHE_CRITICAL_SECTION();
 
 		IGameSystem *sys = s_GameSystems[i];
 
-#if defined( _X360 )
+#if defined( _GAMECONSOLE )
 		char sz[128];
 		Q_snprintf( sz, sizeof( sz ), "%s->Init():Start", sys->Name() );
-		XBX_rTimeStampLog( Plat_FloatTime(), sz );
+		COM_TimestampedLog( sz );
 #endif
 		bool valid = sys->Init();
 
-#if defined( _X360 )
+#if defined( _GAMECONSOLE )
 		Q_snprintf( sz, sizeof( sz ), "%s->Init():Finish", sys->Name() );
-		XBX_rTimeStampLog( Plat_FloatTime(), sz );
+		COM_TimestampedLog( sz );
 #endif
 		if ( !valid )
+		{
+			DevWarning( 1, "Failed to load %s\n", sys->Name() );
 			return false;
+		}
 	}
 
 	return true;
@@ -251,18 +265,13 @@ void IGameSystem::LevelInitPreEntityAllSystems( char const* pMapName )
 	int len = Q_strlen(pMapName) + 1;
 	s_pMapName = new char [ len ];
 	Q_strncpy( s_pMapName, pMapName, len );
-
-	InvokeMethod( &IGameSystem::LevelInitPreEntity, "LevelInitPreEntity" );
+	
+	InvokeMethodTickProgress( &IGameSystem::LevelInitPreEntity, "LevelInitPreEntity" );
 }
 
 void IGameSystem::LevelInitPostEntityAllSystems( void )
 {
 	InvokeMethod( &IGameSystem::LevelInitPostEntity, "LevelInitPostEntity" );
-}
-
-void IGameSystem::LevelShutdownPreClearSteamAPIContextAllSystems()
-{
-	InvokeMethodReverseOrder( &IGameSystem::LevelShutdownPreClearSteamAPIContext );
 }
 
 void IGameSystem::LevelShutdownPreEntityAllSystems()
@@ -293,6 +302,7 @@ void IGameSystem::OnRestoreAllSystems()
 
 void IGameSystem::SafeRemoveIfDesiredAllSystems()
 {
+    SNPROF("SafeRemoveIfDesiredAllSystems");
 	InvokeMethodReverseOrder( &IGameSystem::SafeRemoveIfDesired );
 }
 
@@ -310,11 +320,10 @@ void IGameSystem::UpdateAllSystems( float frametime )
 
 	int i;
 	int c = s_GameSystemsPerFrame.Count();
+	MDLCACHE_CRITICAL_SECTION();
 	for ( i = 0; i < c; ++i )
 	{
 		IGameSystemPerFrame *sys = s_GameSystemsPerFrame[i];
-		MDLCACHE_CRITICAL_SECTION();
-		tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s - %s", __FUNCTION__, sys->Name() );
 		sys->Update( frametime );
 	}
 }
@@ -328,11 +337,13 @@ void IGameSystem::PostRenderAllSystems()
 
 void IGameSystem::FrameUpdatePreEntityThinkAllSystems()
 {
+	SNPROF("FrameUpdatePreEntityThinkAllSystems");
 	InvokePerFrameMethod( &IGameSystemPerFrame::FrameUpdatePreEntityThink );
 }
 
 void IGameSystem::FrameUpdatePostEntityThinkAllSystems()
 {
+	SNPROF("FrameUpdatePostEntityThinkAllSystems");
 	SafeRemoveIfDesiredAllSystems();
 
 	InvokePerFrameMethod( &IGameSystemPerFrame::FrameUpdatePostEntityThink );
@@ -340,6 +351,7 @@ void IGameSystem::FrameUpdatePostEntityThinkAllSystems()
 
 void IGameSystem::PreClientUpdateAllSystems() 
 {
+	SNPROF("PreClientUpdateAllSystems");
 	InvokePerFrameMethod( &IGameSystemPerFrame::PreClientUpdate );
 }
 
@@ -353,18 +365,39 @@ void InvokeMethod( GameSystemFunc_t f, char const *timed /*=0*/ )
 {
 	NOTE_UNUSED( timed );
 
+	MDLCACHE_COARSE_LOCK();
+	MDLCACHE_CRITICAL_SECTION();
 	int i;
 	int c = s_GameSystems.Count();
 	for ( i = 0; i < c ; ++i )
 	{
 		IGameSystem *sys = s_GameSystems[i];
 
-		MDLCACHE_CRITICAL_SECTION();
-
 		(sys->*f)();
 	}
 }
 
+//-----------------------------------------------------------------------------
+// Invokes a method on all installed game systems in proper order
+//-----------------------------------------------------------------------------
+void InvokeMethodTickProgress( GameSystemFunc_t f, char const *timed /*=0*/ )
+{
+	NOTE_UNUSED( timed );
+
+	int i;
+	int c = s_GameSystems.Count();
+	for ( i = 0; i < c ; ++i )
+	{
+		IGameSystem *sys = s_GameSystems[i];
+
+		MDLCACHE_COARSE_LOCK();
+		MDLCACHE_CRITICAL_SECTION();
+#if defined( CLIENT_DLL )
+		engine->TickProgressBar();
+#endif
+		(sys->*f)();
+	}
+}
 //-----------------------------------------------------------------------------
 // Invokes a method on all installed game systems in proper order
 //-----------------------------------------------------------------------------
@@ -377,7 +410,14 @@ void InvokePerFrameMethod( PerFrameGameSystemFunc_t f, char const *timed /*=0*/ 
 	for ( i = 0; i < c ; ++i )
 	{
 		IGameSystemPerFrame *sys  = s_GameSystemsPerFrame[i];
-		MDLCACHE_CRITICAL_SECTION();
+#if (VPROF_LEVEL > 0) && defined(VPROF_ACCOUNT_GAMESYSTEMS)   // make sure each game system is individually attributed
+		// because vprof nodes must really be constructed with a pointer to a static
+		// string, we can't create a temporary char[] here and sprintf a distinctive
+		// V_snprintf( buf, 63, "gamesys_preframe_%s", sys->Name() ). We'll have to
+		// settle for just the system name, and distinguish between pre and post frame
+		// in hierarchy.
+		VPROF( sys->Name() );
+#endif
 		(sys->*f)();
 	}
 }
@@ -389,10 +429,18 @@ void InvokeMethodReverseOrder( GameSystemFunc_t f )
 {
 	int i;
 	int c = s_GameSystems.Count();
+	MDLCACHE_CRITICAL_SECTION();
 	for ( i = c; --i >= 0; )
 	{
 		IGameSystem *sys = s_GameSystems[i];
-		MDLCACHE_CRITICAL_SECTION();
+#if (VPROF_LEVEL > 0) && defined(VPROF_ACCOUNT_GAMESYSTEMS)   // make sure each game system is individually attributed
+		// because vprof nodes must really be constructed with a pointer to a static
+		// string, we can't create a temporary char[] here and sprintf a distinctive
+		// V_snprintf( buf, 63, "gamesys_preframe_%s", sys->Name() ). We'll have to
+		// settle for just the system name, and distinguish between pre and post frame
+		// in hierarchy.
+		VPROF( sys->Name() );
+#endif
 		(sys->*f)();
 	}
 }

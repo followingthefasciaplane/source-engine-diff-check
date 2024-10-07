@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -19,74 +19,57 @@
 
 ConVar r_ClipAreaPortals( "r_ClipAreaPortals", "1", FCVAR_CHEAT );
 ConVar r_DrawPortals( "r_DrawPortals", "0", FCVAR_CHEAT );
+ConVar r_ClipAreaFrustums( "r_ClipAreaFrustums", "1", FCVAR_CHEAT );
 
 CUtlVector<CPortalRect> g_PortalRects;
-static bool				g_bViewerInSolidSpace = false;
-
-			  
+bool g_bViewerInSolidSpace = false;		  
 
 // ------------------------------------------------------------------------------------ //
 // Classes.
 // ------------------------------------------------------------------------------------ //
 
+
 #define MAX_PORTAL_VERTS	32
-
-
-class CAreaCullInfo
-{
-public:
-	CAreaCullInfo()
-	{
-		m_GlobalCounter = 0;
-		memset( &m_Frustum, 0, sizeof( m_Frustum ) );
-		memset( &m_Rect, 0, sizeof( m_Rect ) );
-	}
-	Frustum_t		m_Frustum;
-	CPortalRect		m_Rect;
-	unsigned short	m_GlobalCounter; // Used to tell if it's been touched yet this frame.
-};
-
-
 
 // ------------------------------------------------------------------------------------ //
 // Globals.
 // ------------------------------------------------------------------------------------ //
 
 // Visible areas from the client DLL + occluded areas using area portals.
+#if defined(_PS3)
+unsigned char g_RenderAreaBits[32] ALIGN16;
+#else
 unsigned char g_RenderAreaBits[32];
+#endif
 
 // Used to prevent it from coming back into portals while flowing through them.
 static unsigned char g_AreaStack[32];
+static uint32 g_AreaCounter[MAX_MAP_AREAS];
+static CPortalRect g_AreaRect[MAX_MAP_AREAS];
 
 // Frustums for each area for the current frame. Used to cull out leaves.
-static CUtlVector<CAreaCullInfo> g_AreaCullInfo;
+CUtlVector< Frustum_t, CUtlMemoryAligned< Frustum_t,16 > > g_AreaFrustum;
 
 // List of areas marked visible this frame.
 static unsigned short g_VisibleAreas[MAX_MAP_AREAS];
 static int g_nVisibleAreas;
 
-// Tied to CAreaCullInfo::m_GlobalCounter.
-static unsigned short g_GlobalCounter = 1;
-
-
-// A copy of the current view setup, but possibly nobbled a bit.
-static CViewSetup g_viewSetup;
-static CPortalRect g_viewWindow;
-// Maps from world space to normalised (-1,1) screen coords.
-static VMatrix g_ScreenFromWorldProjection;
-
+// Tied to g_AreaCounter.
+static uint32 g_GlobalCounter = 1;
 
 // ------------------------------------------------------------------------------------ //
 // Functions.
 // ------------------------------------------------------------------------------------ //
 void R_Areaportal_LevelInit()
 {
-	g_AreaCullInfo.SetCount( host_state.worldbrush->m_nAreas );
+	g_AreaFrustum.SetCount( host_state.worldbrush->m_nAreas );
+	V_memset( g_AreaCounter, 0, sizeof(g_AreaCounter) );
+	g_GlobalCounter = 1;
 }
 
 void R_Areaportal_LevelShutdown()
 {
-	g_AreaCullInfo.Purge();
+	g_AreaFrustum.Purge();
 	g_PortalRects.Purge();
 }
 
@@ -120,14 +103,14 @@ struct portalclip_t
 // Transforms and clips the portal's verts to the view frustum. Returns false
 // if the verts lie outside the frustum.
 static inline bool GetPortalScreenExtents( dareaportal_t *pPortal, 
-	portalclip_t * RESTRICT clip, CPortalRect &portalRect , float *pReflectionWaterHeight )
+	portalclip_t * RESTRICT clip, CPortalRect &portalRect , float *pReflectionWaterHeight, VPlane *pFrustumPlanes )
 {
 	portalRect.left = portalRect.bottom = 1e24;
 	portalRect.right = portalRect.top   = -1e24;
 	bool bValidExtents = false;
 	worldbrushdata_t *pBrushData = host_state.worldbrush;
 	
-	int nStartVerts = min( (int)pPortal->m_nClipPortalVerts, MAX_PORTAL_VERTS );
+	int nStartVerts = MIN( pPortal->m_nClipPortalVerts, MAX_PORTAL_VERTS );
 
 	// NOTE: We need two passes to deal with reflection. We need to compute
 	// the screen extents for both the reflected + non-reflected area portals
@@ -151,17 +134,15 @@ static inline bool GetPortalScreenExtents( dareaportal_t *pPortal,
 		bool bAllClipped = false;
 		for( int iPlane=0; iPlane < 4; iPlane++ )
 		{
-			const cplane_t *pPlane = g_Frustum.GetPlane(iPlane);
-
 			Vector *pIn = clip->lists[iCurList];
 			Vector *pOut = clip->lists[!iCurList];
 
 			int nOutVerts = 0;
 			int iPrev = nStartVerts - 1;
-			float flPrevDot = pPlane->normal.Dot( pIn[iPrev] ) - pPlane->dist;
+			float flPrevDot = pFrustumPlanes[iPlane].m_Normal.Dot( pIn[iPrev] ) - pFrustumPlanes[iPlane].m_Dist;
 			for( int iCur=0; iCur < nStartVerts; iCur++ )
 			{
-				float flCurDot = pPlane->normal.Dot( pIn[iCur] ) - pPlane->dist;
+				float flCurDot = pFrustumPlanes[iPlane].m_Normal.Dot( pIn[iCur] ) - pFrustumPlanes[iPlane].m_Dist;
 
 				if( (flCurDot > 0) != (flPrevDot > 0) )
 				{
@@ -210,7 +191,7 @@ static inline bool GetPortalScreenExtents( dareaportal_t *pPortal,
 		{
 			Vector &point = clip->v0[i];
 
-			g_EngineRenderer->ClipTransformWithProjection ( g_ScreenFromWorldProjection, point, &screenPos );
+			g_EngineRenderer->ClipTransform( point, &screenPos );
 
 			portalRect.left   = fpmin( screenPos.x, portalRect.left );
 			portalRect.bottom = fpmin( screenPos.y, portalRect.bottom );
@@ -249,20 +230,20 @@ inline bool GetRectIntersection( CPortalRect const *pRect1, CPortalRect const *p
 static void R_FlowThroughArea( int area, const Vector &vecVisOrigin, const CPortalRect *pClipRect, 
 	const VisOverrideData_t* pVisData, float *pReflectionWaterHeight )
 {
-#ifndef SWDS
+#ifndef DEDICATED
 	// Update this area's frustum.
-	if( g_AreaCullInfo[area].m_GlobalCounter != g_GlobalCounter )
+	if( g_AreaCounter[area] != g_GlobalCounter )
 	{
 		g_VisibleAreas[g_nVisibleAreas] = area;
 		++g_nVisibleAreas;
 
-		g_AreaCullInfo[area].m_GlobalCounter = g_GlobalCounter;
-		g_AreaCullInfo[area].m_Rect = *pClipRect;
+		g_AreaCounter[area] = g_GlobalCounter;
+		g_AreaRect[area] = *pClipRect;
 	}
 	else
 	{
 		// Expand the areaportal's rectangle to include the new cliprect.
-		CPortalRect *pFrustumRect = &g_AreaCullInfo[area].m_Rect;
+		CPortalRect *pFrustumRect = &g_AreaRect[area];
 		pFrustumRect->left   = fpmin( pFrustumRect->left, pClipRect->left );
 		pFrustumRect->bottom = fpmin( pFrustumRect->bottom, pClipRect->bottom );
 		pFrustumRect->top    = fpmax( pFrustumRect->top, pClipRect->top );
@@ -281,7 +262,8 @@ static void R_FlowThroughArea( int area, const Vector &vecVisOrigin, const CPort
 	darea_t *pArea = &host_state.worldbrush->m_pAreas[area];
 	// temp buffer for clipping
 	portalclip_t clipTmp;
-
+	VPlane frustumPlanes[FRUSTUM_NUMPLANES];
+	g_Frustum.GetPlanes( frustumPlanes );
 	// Check all areas that connect to this area.
 	for( int iAreaPortal=0; iAreaPortal < pArea->numareaportals; iAreaPortal++ )
 	{
@@ -293,7 +275,7 @@ static void R_FlowThroughArea( int area, const Vector &vecVisOrigin, const CPort
 			continue;
 
 		// If this portal is closed, don't go through it.
-		if ( !R_TestBit( cl.m_chAreaPortalBits, pAreaPortal->m_PortalKey ) )
+		if ( !R_TestBit( GetBaseLocalClient().m_chAreaPortalBits, pAreaPortal->m_PortalKey ) )
 			continue;
 
 		// Make sure the viewer is on the right side of the portal to see through it.
@@ -304,7 +286,7 @@ static void R_FlowThroughArea( int area, const Vector &vecVisOrigin, const CPort
 			continue;
 
 		// If the client doesn't want this area visible, don't try to flow into it.
-		if( !R_TestBit( cl.m_chAreaBits, pAreaPortal->otherarea ) )
+		if( !R_TestBit( GetBaseLocalClient().m_chAreaBits, pAreaPortal->otherarea ) )
 			continue;
 
 		CPortalRect portalRect;
@@ -314,7 +296,7 @@ static void R_FlowThroughArea( int area, const Vector &vecVisOrigin, const CPort
 		float fDistTolerance = (pVisData)?(pVisData->m_fDistToAreaPortalTolerance):(0.1f);
 		if ( flDist > fDistTolerance )
 		{
-			portalVis = GetPortalScreenExtents( pAreaPortal, &clipTmp, portalRect, pReflectionWaterHeight );
+			portalVis = GetPortalScreenExtents( pAreaPortal, &clipTmp, portalRect, pReflectionWaterHeight, frustumPlanes );
 		}
 		else
 		{
@@ -350,10 +332,10 @@ static void R_FlowThroughArea( int area, const Vector &vecVisOrigin, const CPort
 
 static void IncrementGlobalCounter()
 {
-	if( g_GlobalCounter == 0xFFFF )
+	if( g_GlobalCounter == 0xFFFFFFFF )
 	{
-		for( int i=0; i < g_AreaCullInfo.Count(); i++ )
-			g_AreaCullInfo[i].m_GlobalCounter = 0;
+		for( int i=0; i < g_AreaFrustum.Count(); i++ )
+			g_AreaCounter[i] = 0;
 	
 		g_GlobalCounter = 1;
 	}
@@ -363,20 +345,19 @@ static void IncrementGlobalCounter()
 	}
 }
 
-
-static void R_SetupGlobalFrustum()
+ConVar r_snapportal( "r_snapportal", "-1" );
+static void R_SetupVisibleAreaFrustums()
 {
-#ifndef SWDS
-
-	// Copy the current view away so that we can play with it if needed.
-	g_viewSetup = g_EngineRenderer->ViewGetCurrent();
-
-	if( g_viewSetup.m_bOrtho )
+#ifndef DEDICATED
+	const CViewSetup &viewSetup = g_EngineRenderer->ViewGetCurrent();
+	
+	CPortalRect viewWindow;
+	if( viewSetup.m_bOrtho )
 	{
-		g_viewWindow.right	= g_viewSetup.m_OrthoRight;
-		g_viewWindow.left		= g_viewSetup.m_OrthoLeft;
-		g_viewWindow.top		= g_viewSetup.m_OrthoTop;
-		g_viewWindow.bottom	= g_viewSetup.m_OrthoBottom;
+		viewWindow.right	= viewSetup.m_OrthoRight;
+		viewWindow.left		= viewSetup.m_OrthoLeft;
+		viewWindow.top		= viewSetup.m_OrthoTop;
+		viewWindow.bottom	= viewSetup.m_OrthoBottom;
 	}
 	else
 	{
@@ -385,233 +366,115 @@ static void R_SetupGlobalFrustum()
 		float xFOV = g_EngineRenderer->GetFov() * 0.5f;
 		float yFOV = g_EngineRenderer->GetFovY() * 0.5f;
 
-		g_viewWindow.right	= tan( DEG2RAD( xFOV ) );
-		g_viewWindow.left	= -g_viewWindow.right;
-		g_viewWindow.top	= tan( DEG2RAD( yFOV ) );
-		g_viewWindow.bottom	= -g_viewWindow.top;
-
-		if ( g_viewSetup.m_bOffCenter )
-		{
-			// How did this ever work?
-			Assert ( !"test m_bOffCenter frustums with area portals" );
-		}
-		else if ( g_viewSetup.m_bViewToProjectionOverride )
-		{
-			// ...this has been tested and works!
-		}
-
-		// Rather than try to deal with crazy projection matrices (shear, trapezoid, etc), take whatever FOV we're given,
-		// assume it's conservative, and then construct a matching projection matrix for it. Then use that consistent
-		// hallucination throughout, rather than refer back to the engine's actual proj. matrix for anything.
-		VMatrix matrixView;
-		VMatrix matrixProjection;
-		VMatrix matrixWorldToScreen;
-		g_viewSetup.m_bViewToProjectionOverride = false;
-
-		ComputeViewMatrices (
-			&matrixView, 
-			&matrixProjection,
-			&matrixWorldToScreen,
-			g_viewSetup );
-
-		g_ScreenFromWorldProjection = matrixWorldToScreen;
+		viewWindow.right	= tan( DEG2RAD( xFOV ) );
+		viewWindow.left		= -viewWindow.right;
+		viewWindow.top		= tan( DEG2RAD( yFOV ) );
+		viewWindow.bottom	= -viewWindow.top;
 	}
 
-#endif //#ifndef SWDS
-}
-
-ConVar r_snapportal( "r_snapportal", "-1" );
-extern void CSGFrustum( Frustum_t &frustum );
-
-static void R_SetupVisibleAreaFrustums()
-{
-#ifndef SWDS
+	Vector viewOrigin = CurrentViewOrigin();
+	Vector forward = CurrentViewForward();
+	Vector right = CurrentViewRight();
+	Vector up = CurrentViewUp();
+	VPlane planes[FRUSTUM_NUMPLANES];
 
 	// Now scale the portals as specified in the normalized view frustum (-1,-1,1,1)
 	// into our view window and generate planes out of that.
 	for( int i=0; i < g_nVisibleAreas; i++ )
 	{
-		CAreaCullInfo *pInfo = &g_AreaCullInfo[ g_VisibleAreas[i] ];
-
+		CPortalRect *pRect = &g_AreaRect[ g_VisibleAreas[i] ];
+		Frustum_t *pFrustum = &g_AreaFrustum[g_VisibleAreas[i]];
 		CPortalRect portalWindow;
-		portalWindow.left    = RemapVal( pInfo->m_Rect.left,   -1, 1, g_viewWindow.left,   g_viewWindow.right );
-		portalWindow.right   = RemapVal( pInfo->m_Rect.right,  -1, 1, g_viewWindow.left,   g_viewWindow.right );
-		portalWindow.top     = RemapVal( pInfo->m_Rect.top,    -1, 1, g_viewWindow.bottom, g_viewWindow.top );
-		portalWindow.bottom  = RemapVal( pInfo->m_Rect.bottom, -1, 1, g_viewWindow.bottom, g_viewWindow.top );
+		portalWindow.left    = RemapVal( pRect->left,   -1, 1, viewWindow.left,   viewWindow.right );
+		portalWindow.right   = RemapVal( pRect->right,  -1, 1, viewWindow.left,   viewWindow.right );
+		portalWindow.top     = RemapVal( pRect->top,    -1, 1, viewWindow.bottom, viewWindow.top );
+		portalWindow.bottom  = RemapVal( pRect->bottom, -1, 1, viewWindow.bottom, viewWindow.top );
 		
-		if( g_viewSetup.m_bOrtho )
+		if( viewSetup.m_bOrtho )
 		{
 			// Left and right planes...
-			float orgOffset = DotProduct(CurrentViewOrigin(), CurrentViewRight());
-			pInfo->m_Frustum.SetPlane( FRUSTUM_LEFT, PLANE_ANYZ, CurrentViewRight(), portalWindow.left + orgOffset );
-			pInfo->m_Frustum.SetPlane( FRUSTUM_RIGHT, PLANE_ANYZ, -CurrentViewRight(), -portalWindow.right - orgOffset );
+			float orgOffset = DotProduct(viewOrigin, right);
+			planes[FRUSTUM_LEFT].Init( right, portalWindow.left + orgOffset );
+			planes[FRUSTUM_RIGHT].Init( -right, -portalWindow.right - orgOffset );
 
 			// Top and bottom planes...
-			orgOffset = DotProduct(CurrentViewOrigin(), CurrentViewUp());
-			pInfo->m_Frustum.SetPlane( FRUSTUM_TOP, PLANE_ANYZ, CurrentViewUp(), portalWindow.top + orgOffset );
-			pInfo->m_Frustum.SetPlane( FRUSTUM_BOTTOM, PLANE_ANYZ, -CurrentViewUp(), -portalWindow.bottom - orgOffset );
+			orgOffset = DotProduct(viewOrigin, up);
+			planes[FRUSTUM_TOP].Init( up, portalWindow.top + orgOffset );
+			planes[FRUSTUM_BOTTOM].Init( -up, -portalWindow.bottom - orgOffset );
+			planes[FRUSTUM_NEARZ].Init( forward, 0 );
+			planes[FRUSTUM_FARZ].Init( -forward, -1e6f );
+			pFrustum->SetPlanes(planes);
 		}
 		else
 		{
-
-			if ( g_viewSetup.m_bOffCenter )
-			{
-				// How did this ever work?
-				Assert ( !"test m_bOffCenter frustums with area portals" );
-			}
-			else if ( g_viewSetup.m_bViewToProjectionOverride )
-			{
-				// ...this has been tested and works!
-			}
-
 			Vector normal;
-			const cplane_t *pTest;
 
 			// right side
-			normal = portalWindow.right * CurrentViewForward() - CurrentViewRight();
-			VectorNormalize(normal); // OPTIMIZE: This is unnecessary for culling
-			pTest = pInfo->m_Frustum.GetPlane( FRUSTUM_RIGHT );
-			pInfo->m_Frustum.SetPlane( FRUSTUM_RIGHT, PLANE_ANYZ, normal, DotProduct(normal,CurrentViewOrigin()) );
-
+			normal = portalWindow.right * forward - right;
+			VectorNormalize(normal);
+			planes[FRUSTUM_RIGHT].Init( normal, DotProduct(normal,viewOrigin) );
 			// left side
-			normal = CurrentViewRight() - portalWindow.left * CurrentViewForward();
-			VectorNormalize(normal); // OPTIMIZE: This is unnecessary for culling
-			pTest = pInfo->m_Frustum.GetPlane( FRUSTUM_LEFT );
-			pInfo->m_Frustum.SetPlane( FRUSTUM_LEFT, PLANE_ANYZ, normal, DotProduct(normal,CurrentViewOrigin()) );
+			normal = CurrentViewRight() - portalWindow.left * forward;
+			VectorNormalize(normal);
+			planes[FRUSTUM_LEFT].Init( normal, DotProduct(normal,viewOrigin) );
 
 			// top
-			normal = portalWindow.top * CurrentViewForward() - CurrentViewUp();
-			VectorNormalize(normal); // OPTIMIZE: This is unnecessary for culling
-			pTest = pInfo->m_Frustum.GetPlane( FRUSTUM_TOP );
-			pInfo->m_Frustum.SetPlane( FRUSTUM_TOP, PLANE_ANYZ, normal, DotProduct(normal,CurrentViewOrigin()) );
+			normal = portalWindow.top * forward - up;
+			VectorNormalize(normal);
+			planes[FRUSTUM_TOP].Init( normal, DotProduct(normal,viewOrigin) );
 
 			// bottom
-			normal = CurrentViewUp() - portalWindow.bottom * CurrentViewForward();
-			VectorNormalize(normal); // OPTIMIZE: This is unnecessary for culling
-			pTest = pInfo->m_Frustum.GetPlane( FRUSTUM_BOTTOM );
-			pInfo->m_Frustum.SetPlane( FRUSTUM_BOTTOM, PLANE_ANYZ, normal, DotProduct(normal,CurrentViewOrigin()) );
+			normal = up - portalWindow.bottom * forward;
+			VectorNormalize(normal);
+			planes[FRUSTUM_BOTTOM].Init( normal, DotProduct(normal,viewOrigin) );
 
+			// nearz
+			planes[FRUSTUM_NEARZ].Init( forward, DotProduct(forward, viewOrigin) + viewSetup.zNear );
+			
 			// farz
-			pInfo->m_Frustum.SetPlane( FRUSTUM_FARZ, PLANE_ANYZ, -CurrentViewForward(), 
-				DotProduct(-CurrentViewForward(), CurrentViewOrigin() + CurrentViewForward()*g_viewSetup.zFar) );
+			planes[FRUSTUM_FARZ].Init( -forward, DotProduct(-forward, viewOrigin) - viewSetup.zFar );
+			pFrustum->SetPlanes(planes);
 		}
-
-		// DEBUG: Code to visualize the areaportal frustums in 3D
-		// Useful for debugging
+	}
+	// DEBUG: Code to visualize the areaportal frustums in 3D
+	// Useful for debugging
+	if ( r_snapportal.GetInt() >= 0 )
+	{
 		extern void CSGFrustum( Frustum_t &frustum );
-		if ( r_snapportal.GetInt() >= 0 )
+		for ( int i = 0; i < g_nVisibleAreas; i++ )
 		{
 			if ( g_VisibleAreas[i] == r_snapportal.GetInt() )
 			{
-				pInfo->m_Frustum.SetPlane( FRUSTUM_NEARZ, PLANE_ANYZ, CurrentViewForward(), 
-					DotProduct(CurrentViewForward(), CurrentViewOrigin()) );
-				pInfo->m_Frustum.SetPlane( FRUSTUM_FARZ, PLANE_ANYZ, -CurrentViewForward(), 
-					DotProduct(-CurrentViewForward(), CurrentViewOrigin() + CurrentViewForward()*500) );
+				Frustum_t *pFrustum = &g_AreaFrustum[ g_VisibleAreas[i] ];
+
+				pFrustum->SetPlane( FRUSTUM_NEARZ, forward, 
+					DotProduct(forward, viewOrigin) );
+				pFrustum->SetPlane( FRUSTUM_FARZ, -forward, 
+					DotProduct(-forward, viewOrigin + forward*500) );
 				r_snapportal.SetValue( -1 );
-				CSGFrustum( pInfo->m_Frustum );
+				CSGFrustum( *pFrustum );
 			}
 		}
 	}
+
 #endif
 }
 
-
-
-
-// Intersection of AABB and a frustum. The frustum may contain 0-32 planes
-// (active planes are defined by inClipMask). Returns boolean value indicating
-// whether AABB intersects the view frustum or not.
-// If AABB intersects the frustum, an output clip mask is returned as well
-// (indicating which planes are crossed by the AABB). This information
-// can be used to optimize testing of child nodes or objects inside the
-// nodes (pass value as 'inClipMask').
-inline bool R_CullNodeInternal( mnode_t *pNode, int &nClipMask, const Frustum_t& frustum )
+// culls a node to the frustum or area frustum
+bool R_CullNode( mnode_t *pNode )
 {
-	int nOutClipMask = nClipMask & FRUSTUM_CLIP_IN_AREA;	// init outclip mask
-
-	float flCenterDotNormal, flHalfDiagDotAbsNormal;
-	if (nClipMask & FRUSTUM_CLIP_RIGHT)
-	{
-		const cplane_t *pPlane = frustum.GetPlane(FRUSTUM_RIGHT);
-		flCenterDotNormal = DotProduct( pNode->m_vecCenter, pPlane->normal ) - pPlane->dist;
-		flHalfDiagDotAbsNormal = DotProduct( pNode->m_vecHalfDiagonal, frustum.GetAbsNormal(FRUSTUM_RIGHT) );
-		if (flCenterDotNormal + flHalfDiagDotAbsNormal < 0.0f)
-			return true;
-		if (flCenterDotNormal - flHalfDiagDotAbsNormal < 0.0f)
-			nOutClipMask |= FRUSTUM_CLIP_RIGHT;	
-	}
-
-	if (nClipMask & FRUSTUM_CLIP_LEFT)
-	{
-		const cplane_t *pPlane = frustum.GetPlane(FRUSTUM_LEFT);
-		flCenterDotNormal = DotProduct( pNode->m_vecCenter, pPlane->normal ) - pPlane->dist;
-		flHalfDiagDotAbsNormal = DotProduct( pNode->m_vecHalfDiagonal, frustum.GetAbsNormal(FRUSTUM_LEFT) );
-		if (flCenterDotNormal + flHalfDiagDotAbsNormal < 0.0f)
-			return true;
-		if (flCenterDotNormal - flHalfDiagDotAbsNormal < 0.0f)
-			nOutClipMask |= FRUSTUM_CLIP_LEFT;	
-	}
-
-	if (nClipMask & FRUSTUM_CLIP_TOP)
-	{
-		const cplane_t *pPlane = frustum.GetPlane(FRUSTUM_TOP);
-		flCenterDotNormal = DotProduct( pNode->m_vecCenter, pPlane->normal ) - pPlane->dist;
-		flHalfDiagDotAbsNormal = DotProduct( pNode->m_vecHalfDiagonal, frustum.GetAbsNormal(FRUSTUM_TOP) );
-		if (flCenterDotNormal + flHalfDiagDotAbsNormal < 0.0f)
-			return true;
-		if (flCenterDotNormal - flHalfDiagDotAbsNormal < 0.0f)
-			nOutClipMask |= FRUSTUM_CLIP_TOP;	
-	}
-
-	if (nClipMask & FRUSTUM_CLIP_BOTTOM)
-	{
-		const cplane_t *pPlane = frustum.GetPlane(FRUSTUM_BOTTOM);
-		flCenterDotNormal = DotProduct( pNode->m_vecCenter, pPlane->normal ) - pPlane->dist;
-		flHalfDiagDotAbsNormal = DotProduct( pNode->m_vecHalfDiagonal, frustum.GetAbsNormal(FRUSTUM_BOTTOM) );
-		if (flCenterDotNormal + flHalfDiagDotAbsNormal < 0.0f)
-			return true;
-		if (flCenterDotNormal - flHalfDiagDotAbsNormal < 0.0f)
-			nOutClipMask |= FRUSTUM_CLIP_BOTTOM;	
-	}
-
-	nClipMask = nOutClipMask;
-	return false;						// AABB intersects frustum
-}
-
-
-bool R_CullNode( Frustum_t *pAreaFrustum, mnode_t *pNode, int& nClipMask )
-{
-	// Now cull to this area's frustum.
-	if (( !g_bViewerInSolidSpace ) && ( pNode->area > 0 ))
+	if ( !g_bViewerInSolidSpace && pNode->area > 0 )
 	{
 		// First make sure its whole area is even visible.
 		if( !R_IsAreaVisible( pNode->area ) )
 			return true;
-
-		// This ConVar access causes a huge perf hit in some cases.
-		// If you want to put it back in please cache it's value.
-//#ifdef USE_CONVARS
-//		if( r_ClipAreaPortals.GetInt() )
-//#else
-		if( 1 )
-//#endif
-		{
-			if ((nClipMask & FRUSTUM_CLIP_IN_AREA) == 0)
-			{
-				// In this case, we've never hit this area before and
-				// we need to test all planes again because we just changed the frustum
-				nClipMask = FRUSTUM_CLIP_IN_AREA | FRUSTUM_CLIP_ALL;
-			}
-
-			pAreaFrustum = &g_AreaCullInfo[pNode->area].m_Frustum;
-		}
+		return CullNodeSIMD( g_AreaFrustum[pNode->area], pNode );
 	}
 
-	return R_CullNodeInternal( pNode, nClipMask, *pAreaFrustum );
+	return CullNodeSIMD( g_Frustum, pNode );
 }
 
-
-static ConVar r_portalscloseall( "r_portalscloseall", "0", FCVAR_CHEAT | FCVAR_DEVELOPMENTONLY );
+static ConVar r_portalscloseall( "r_portalscloseall", "0" );
 static ConVar r_portalsopenall( "r_portalsopenall", "0", FCVAR_CHEAT, "Open all portals" );
 static ConVar r_ShowViewerArea( "r_ShowViewerArea", "0" );
 
@@ -619,7 +482,7 @@ void R_SetupAreaBits( int iForceViewLeaf /* = -1 */, const VisOverrideData_t* pV
 {
 	IncrementGlobalCounter();
 
-	g_bViewerInSolidSpace = false;
+	Vector vVisOrigin =  pVisData ? pVisData->m_vecVisOrigin : g_EngineRenderer->ViewOrigin();
 
 	// Clear the visible area bits.
 	memset( g_RenderAreaBits, 0, sizeof( g_RenderAreaBits ) );
@@ -635,12 +498,13 @@ void R_SetupAreaBits( int iForceViewLeaf /* = -1 */, const VisOverrideData_t* pV
 	// If view point override wasn't specified, use the current view origin
 	if ( iForceViewLeaf == -1  ) 
 	{
-		leaf = CM_PointLeafnum( g_EngineRenderer->ViewOrigin() );
+		leaf = CM_PointLeafnum( vVisOrigin );
 	}
 
+	g_bViewerInSolidSpace = false;
 	if( r_portalscloseall.GetBool() )
 	{
-		if ( cl.m_bAreaBitsValid )
+		if ( GetBaseLocalClient().m_bAreaBitsValid )
 		{
 			// Clear the visible area bits.
 			memset( g_RenderAreaBits, 0, sizeof( g_RenderAreaBits ) );
@@ -650,56 +514,110 @@ void R_SetupAreaBits( int iForceViewLeaf /* = -1 */, const VisOverrideData_t* pV
 			g_VisibleAreas[0] = area;
 			g_nVisibleAreas = 1;
 
-			g_AreaCullInfo[area].m_GlobalCounter = g_GlobalCounter;
-			g_AreaCullInfo[area].m_Rect = rect;
-			
-			R_SetupVisibleAreaFrustums();
+			g_AreaCounter[area] = g_GlobalCounter;
+			g_AreaRect[area] = rect;
 		}
 		else
 		{
 			g_bViewerInSolidSpace = true;
 		}
-
-		return;
-	}
-
-#if defined( REPLAY_ENABLED )
-	if ( host_state.worldbrush->leafs[leaf].contents & CONTENTS_SOLID ||
-		 cl.ishltv || cl.isreplay || !cl.m_bAreaBitsValid || r_portalsopenall.GetBool()  )
-#else
-	if ( host_state.worldbrush->leafs[leaf].contents & CONTENTS_SOLID ||
-		 cl.ishltv || !cl.m_bAreaBitsValid || r_portalsopenall.GetBool()  )
-#endif
-	{
-		// Draw everything if we're in solid space or if r_portalsopenall is true (used for building cubemaps)
-		g_bViewerInSolidSpace = true;
-
-		if ( r_ShowViewerArea.GetInt() )
-			Con_NPrintf( 3, "Viewer area: (solid space)" );
 	}
 	else
 	{
-		int area = host_state.worldbrush->leafs[leaf].area;
-		
-		if ( r_ShowViewerArea.GetInt() )
-			Con_NPrintf( 3, "Viewer area: %d", area );
+		int ss_Slot = GET_ACTIVE_SPLITSCREEN_SLOT();
 
-		g_nVisibleAreas = 0;		
-		Vector vecVisOrigin = (pVisData)?(pVisData->m_vecVisOrigin):(g_EngineRenderer->ViewOrigin());
-		R_SetupGlobalFrustum();
-		R_FlowThroughArea ( area, vecVisOrigin, &rect, pVisData, pWaterReflectionHeight );
+		if ( host_state.worldbrush->leafs[leaf].contents & CONTENTS_SOLID ||
+			 GetBaseLocalClient().ishltv || 
+#if defined( REPLAY_ENABLED )
+			 GetBaseLocalClient().isreplay ||
+#endif
+			 !GetBaseLocalClient().m_bAreaBitsValid || 
+			 r_portalsopenall.GetBool()  )
+		{
+			// Draw everything if we're in solid space or if r_portalsopenall is true (used for building cubemaps)
+			g_bViewerInSolidSpace = true;
+
+			if ( r_ShowViewerArea.GetInt() )
+				Con_NPrintf( 3 + ss_Slot, "(%d), Viewer area: (solid space)", ss_Slot );
+		}
+		else
+		{
+			int area = host_state.worldbrush->leafs[leaf].area;
+			
+			if ( r_ShowViewerArea.GetInt() )
+				Con_NPrintf( 3 + ss_Slot, "(%d) Viewer area: %d", ss_Slot, area );
+
+			g_nVisibleAreas = 0;		
+			
+			if ( pVisData && pVisData->m_bTrimFrustumToPortalCorners && r_ClipAreaFrustums.GetBool() )
+			{
+				const float flDistToPortalTolerance = 16.0f;
+				// If the current view origin is within some perpendicular distance of the exit portal AND within the radius of the portal,
+				// don't attempt to optimize the area rect/frustum
+				Vector vViewOriginToPortalOrigin = CurrentViewOrigin() - pVisData->m_vPortalOrigin;
+				if ( fabsf( vViewOriginToPortalOrigin.Dot( pVisData->m_vPortalForward ) ) > flDistToPortalTolerance ||
+					 vViewOriginToPortalOrigin.Length() > pVisData->m_flPortalRadius )
+				{
+					// invert the rectangle and then grow it to fit the portal
+					rect.left = rect.bottom = 1;
+					rect.right = rect.top = -1;
+					for ( int i = 0; i < 4; ++ i )
+					{
+						Vector vScreenPos;
+						g_EngineRenderer->ClipTransform( pVisData->m_vPortalCorners[ i ], &vScreenPos );
+
+						rect.left   = fpmin( vScreenPos.x, rect.left );
+						rect.bottom = fpmin( vScreenPos.y, rect.bottom );
+						rect.right  = fpmax( vScreenPos.x, rect.right );
+						rect.top    = fpmax( vScreenPos.y, rect.top );					
+					}
+					rect.left = fpmax( rect.left, -1.0f );
+					rect.bottom = fpmax( rect.bottom, -1.0f );
+					rect.right = fpmin( rect.right, 1.0f );
+					rect.top = fpmin( rect.top, 1.0f );
+				}
+			}
+			R_FlowThroughArea( area, vVisOrigin, &rect, pVisData, pWaterReflectionHeight );
+		}
+	}
+	if ( !g_bViewerInSolidSpace )
+	{
 		R_SetupVisibleAreaFrustums();
 	}
 }
 
 
+bool R_ShouldUseAreaFrustum( int area )
+{
+	if ( g_AreaCounter[area] == g_GlobalCounter )
+		return true;
+	else
+		return false;
+}
+
 const Frustum_t* GetAreaFrustum( int area )
 {
-	if ( g_AreaCullInfo[area].m_GlobalCounter == g_GlobalCounter )
-		return &g_AreaCullInfo[area].m_Frustum;
+	if ( g_AreaCounter[area] == g_GlobalCounter )
+		return &g_AreaFrustum[area];
 	else
 		return &g_Frustum;
 }
 
 
-
+int GetAllAreaFrustums( Frustum_t **pFrustumList, int listMax )
+{
+	int count = g_AreaFrustum.Count();
+	count = MIN(listMax,count);
+	for ( int i = 0; i < count; i++ )
+	{
+		if ( g_AreaCounter[i] == g_GlobalCounter )
+		{
+			pFrustumList[i] = &g_AreaFrustum[i];
+		}
+		else
+		{
+			pFrustumList[i] = &g_Frustum;
+		}
+	}
+	return count;
+}

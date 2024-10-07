@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -38,12 +38,7 @@ static inline bool CanCheat()
 		return sv_cheats.GetBool();
 	return true;
 #else
-	return sv_cheats.GetBool();
-	// johns 07/10/2015 - Disabled -- RPT's conditions for activating are not sufficient for this to be reasonable -
-	//                    though it requires the remote client have valve credentials to issue commands, it can be set
-	//                    to 'active' on demand by clients, and thus needs to be reworked before it can be allowed to
-	//                    bypass cheats.
-	// return ( sv_cheats.GetBool() || Cmd_IsRptActive() );
+	return ( sv_cheats.GetBool() );
 #endif
 }
 

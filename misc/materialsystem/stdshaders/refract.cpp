@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -8,6 +8,10 @@
 #include "BaseVSShader.h"
 #include "convar.h"
 #include "refract_dx9_helper.h"
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
 
 DEFINE_FALLBACK_SHADER( Refract, Refract_DX90 )
 
@@ -38,7 +42,13 @@ BEGIN_VS_SHADER( Refract_DX90, "Help for Refract" )
 		SHADER_PARAM( NOWRITEZ, SHADER_PARAM_TYPE_INTEGER, "0", "0 == write z, 1 = no write z" )
 		SHADER_PARAM( MASKED, SHADER_PARAM_TYPE_BOOL, "0", "mask using dest alpha" )
 		SHADER_PARAM( VERTEXCOLORMODULATE, SHADER_PARAM_TYPE_BOOL, "0","Use the vertex color to effect refract color. alpha will adjust refract amount" )
-		SHADER_PARAM( FORCEALPHAWRITE, SHADER_PARAM_TYPE_BOOL, "0","Force the material to write alpha to the dest buffer" )
+		SHADER_PARAM( NOVIEWPORTFIXUP, SHADER_PARAM_TYPE_INTEGER, "0", "Don't adjust uv's for current viewport" )
+		SHADER_PARAM( MIRRORABOUTVIEWPORTEDGES, SHADER_PARAM_TYPE_INTEGER, "0", "don't sample outside of the viewport" )
+		SHADER_PARAM( MAGNIFYENABLE, SHADER_PARAM_TYPE_BOOL, "0", "Enable magnification of refracted image around the $magnifyCenter screen position by $magnifyScale" )
+		SHADER_PARAM( MAGNIFYCENTER, SHADER_PARAM_TYPE_VEC2, "[0 0]", "Magnify refracted image around this screen position" )
+		SHADER_PARAM( MAGNIFYSCALE, SHADER_PARAM_TYPE_FLOAT, "0", "Magnify refracted image by this factor" )
+		SHADER_PARAM( LOCALREFRACT, SHADER_PARAM_TYPE_BOOL, "0", "" )
+		SHADER_PARAM( LOCALREFRACTDEPTH, SHADER_PARAM_TYPE_FLOAT, "0", "" )
 	END_SHADER_PARAMS
 // FIXME: doesn't support Fresnel!
 
@@ -67,7 +77,13 @@ BEGIN_VS_SHADER( Refract_DX90, "Help for Refract" )
 		info.m_nNoWriteZ = NOWRITEZ;
 		info.m_nMasked = MASKED;
 		info.m_nVertexColorModulate = VERTEXCOLORMODULATE;
-		info.m_nForceAlphaWrite = FORCEALPHAWRITE;
+		info.m_nNoViewportFixup = NOVIEWPORTFIXUP;
+		info.m_nMirrorAboutViewportEdges = MIRRORABOUTVIEWPORTEDGES;
+		info.m_nMagnifyEnable = MAGNIFYENABLE;
+		info.m_nMagnifyCenter = MAGNIFYCENTER;
+		info.m_nMagnifyScale = MAGNIFYSCALE;
+		info.m_nLocalRefract = LOCALREFRACT;
+		info.m_nLocalRefractDepth = LOCALREFRACTDEPTH;
 	}
 
 	SHADER_INIT_PARAMS()
@@ -79,9 +95,6 @@ BEGIN_VS_SHADER( Refract_DX90, "Help for Refract" )
 
 	SHADER_FALLBACK
 	{
-		if( g_pHardwareConfig->GetDXSupportLevel() < 82 )
-			return "Refract_DX80";
-
 		return 0;
 	}
 
@@ -99,7 +112,8 @@ BEGIN_VS_SHADER( Refract_DX90, "Help for Refract" )
 		
 		// If ( snapshotting ) or ( we need to draw this frame )
 		bool bHasFlashlight = this->UsingFlashlight( params );
-		if ( ( pShaderShadow != NULL ) || ( bHasFlashlight == false ) )
+		bool bSinglePassFlashlight = ( pShaderAPI != NULL ) ? pShaderAPI->SinglePassFlashlightModeEnabled() : false;
+		if ( ( pShaderShadow != NULL ) || ( !bHasFlashlight ) || ( bSinglePassFlashlight ) )
 		{
 			DrawRefract_DX9( this, params, pShaderAPI, pShaderShadow, info, vertexCompression );
 		}

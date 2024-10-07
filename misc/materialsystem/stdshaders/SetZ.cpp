@@ -1,11 +1,11 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Naively sets the depth buffer values without testing the old values and without writing to alpha or color
 //
 // $NoKeywords: $
 //=============================================================================//
 
-#include "shaderlib/cshader.h"
+#include "shaderlib/CShader.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"

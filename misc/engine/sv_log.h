@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -24,6 +24,8 @@ public:
 public: // IGameEventListener Interface
 	
 	void FireGameEvent( IGameEvent *event );
+	int  m_nDebugID;
+	int	 GetEventDebugID( void );
 
 public: 
 
@@ -31,16 +33,13 @@ public:
 	void SetLoggingState( bool state );	// set the logging state to true (on) or false (off)
 	
 	bool UsingLogAddress( void );
-	bool AddLogAddress(netadr_t addr);
-	bool DelLogAddress(netadr_t addr);
+	bool AddLogAddress( netadr_t addr, uint64 ullToken = 0ull );
+	bool DelLogAddress( netadr_t addr );
 	void DelAllLogAddress( void );
 	void ListLogAddress( void );
 	
-	netadr_t GetLogAddress();
-	
 	void Open( void );  // opens logging file
 	void Close( void );	// closes logging file
-	void Flush( void ); // flushes the log file to disk
 
 	void Init( void );
 	void Reset( void );	// reset all logging streams
@@ -56,9 +55,13 @@ private:
 
 	bool m_bActive;		// true if we're currently logging
 
-	CUtlVector< netadr_t >	m_LogAddresses;		// Server frag log stream is sent to the address(es) in this list
-	FileHandle_t			m_hLogFile;			// File where frag log is put.
-	CUtlString				m_LogFilename;		// Name of our logfile.
+	struct LogAddressDestination_t
+	{
+		netadr_t m_adr;
+		uint64 m_ullToken;
+	};
+	CUtlVector< LogAddressDestination_t >	m_LogAddrDestinations;		// Server frag log stream is sent to the address(es) in this list
+	FileHandle_t			m_hLogFile;        // File where frag log is put.
 	double					m_flLastLogFlush;
 	bool					m_bFlushLog;
 };

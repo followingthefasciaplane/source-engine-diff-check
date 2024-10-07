@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//======= Copyright 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -10,8 +10,10 @@
 #include "bitmap/imageformat.h"
 #include "basetypes.h"
 #include "tier0/dbg.h"
+#ifndef _PS3
 #include <malloc.h>
 #include <memory.h>
+#endif
 #include "mathlib/mathlib.h"
 #include "mathlib/vector.h"
 #include "tier1/utlmemory.h"
@@ -19,15 +21,14 @@
 #include "mathlib/compressed_vector.h"
 #include "nvtc.h"
 
-#ifdef POSIX
+#if defined( POSIX ) && !defined( _PS3 )
 typedef int32 *DWORD_PTR;
 #endif
 
-#include "ATI_Compress.h"
-#include "bitmap/float_bm.h"
+#include "bitmap/floatbitmap.h"
 
 #define STB_DXT_IMPLEMENTATION
-#include "stb_dxt.h"
+#include "bitmap/stb_dxt.h"
 
 // Should be last include
 #include "tier0/memdbgon.h"
@@ -44,6 +45,10 @@ namespace ImageLoader
 {
 
 // Color Conversion functions
+static void RGBA8888ToRGBA32323232F( const uint8 *src, uint8 *dst, int numPixels );
+static void RGBA8888ToRGB323232F( const uint8 *src, uint8 *dst, int numPixels );
+static void RGBA8888ToRG3232F( const uint8 *src, uint8 *dst, int numPixels );
+static void RGBA8888ToR32F( const uint8 *src, uint8 *dst, int numPixels );
 static void RGBA8888ToRGBA8888( const uint8 *src, uint8 *dst, int numPixels );
 static void RGBA8888ToABGR8888( const uint8 *src, uint8 *dst, int numPixels );
 static void RGBA8888ToRGB888( const uint8 *src, uint8 *dst, int numPixels );
@@ -65,7 +70,7 @@ static void RGBA8888ToBGRA4444( const uint8 *src, uint8 *dst, int numPixels );
 static void RGBA8888ToUV88( const uint8 *src, uint8 *dst, int numPixels );
 static void RGBA8888ToUVWQ8888( const uint8 *src, uint8 *dst, int numPixels );
 static void RGBA8888ToUVLX8888( const uint8 *src, uint8 *dst, int numPixels );
-//static void RGBA8888ToRGBA16161616F( const uint8 *src, uint8 *dst, int numPixels );
+static void RGBA8888ToRGBA16161616F( const uint8 *src, uint8 *dst, int numPixels );
 
 static void ABGR8888ToRGBA8888( const uint8 *src, uint8 *dst, int numPixels );
 static void RGB888ToRGBA8888( const uint8 *src, uint8 *dst, int numPixels );
@@ -139,6 +144,12 @@ static UserFormatToRGBA8888Func_t GetUserFormatToRGBA8888Func_t( ImageFormat src
 		return RGBA16161616ToRGBA8888;
 	case IMAGE_FORMAT_RGBA16161616F:
 		return NULL;
+	case IMAGE_FORMAT_RGBA1010102:
+		return NULL;
+	case IMAGE_FORMAT_BGRA1010102:
+		return NULL;
+	case IMAGE_FORMAT_R16F:
+		return NULL;
 
 #if defined( _X360 )
 	case IMAGE_FORMAT_LINEAR_RGBA8888:
@@ -161,6 +172,8 @@ static UserFormatToRGBA8888Func_t GetUserFormatToRGBA8888Func_t( ImageFormat src
 		return BGRX5551ToRGBA8888;
 	case IMAGE_FORMAT_LINEAR_RGBA16161616:
 		return RGBA16161616ToRGBA8888;
+	case IMAGE_FORMAT_LINEAR_A8:
+		return A8ToRGBA8888;
 #endif
 
 	default:
@@ -172,6 +185,14 @@ static RGBA8888ToUserFormatFunc_t GetRGBA8888ToUserFormatFunc_t( ImageFormat dst
 {
 	switch( dstImageFormat )
 	{
+	case IMAGE_FORMAT_RGBA32323232F:
+		return RGBA8888ToRGBA32323232F;
+	case IMAGE_FORMAT_RGB323232F:
+		return RGBA8888ToRGB323232F;
+	case IMAGE_FORMAT_RG3232F:
+		return RGBA8888ToRG3232F;
+	case IMAGE_FORMAT_R32F:
+		return RGBA8888ToR32F;
 	case IMAGE_FORMAT_RGBA8888:
 		return RGBA8888ToRGBA8888;
 	case IMAGE_FORMAT_ABGR8888:
@@ -213,7 +234,7 @@ static RGBA8888ToUserFormatFunc_t GetRGBA8888ToUserFormatFunc_t( ImageFormat dst
 	case IMAGE_FORMAT_UVLX8888:
 		return RGBA8888ToUVLX8888;
 	case IMAGE_FORMAT_RGBA16161616F:
-		return NULL;
+		return RGBA8888ToRGBA16161616F;
 
 #if defined( _X360 )
 	case IMAGE_FORMAT_LINEAR_RGBA8888:
@@ -234,6 +255,8 @@ static RGBA8888ToUserFormatFunc_t GetRGBA8888ToUserFormatFunc_t( ImageFormat dst
 		return RGBA8888ToBGRX8888;
 	case IMAGE_FORMAT_LINEAR_BGRX5551:
 		return RGBA8888ToBGRX5551;
+	case IMAGE_FORMAT_LINEAR_A8:
+		return RGBA8888ToA8;
 #endif
 
 	default:
@@ -247,44 +270,73 @@ static RGBA8888ToUserFormatFunc_t GetRGBA8888ToUserFormatFunc_t( ImageFormat dst
 
 struct DXTColBlock
 {
-	WORD col0;
-	WORD col1;
+	uint16 col0;
+	uint16 col1;
 
 	// no bit fields - use bytes
-	BYTE row[4];
+	uint8 row[4];
 };
 
 struct DXTAlphaBlock3BitLinear
 {
-	BYTE alpha0;
-	BYTE alpha1;
+	uint8 alpha0;
+	uint8 alpha1;
 
-	BYTE stuff[6];
+	uint8 stuff[6];
 };
 
 #pragma pack()
 
+
+
+/*
+static unsigned int RescaleBitNumber( unsigned int nSrcValue, unsigned int nSrcBits, unsigned int nScaleToBits )
+{
+	unsigned int nMaxSrc = ( 1 << nSrcBits ) - 1;
+	float flValue = float( nSrcValue & nMaxSrc ) / float( nMaxSrc );
+	
+	unsigned int nMaxDest = ( 1 << nScaleToBits ) - 1;
+	return ( unsigned int ) ( flValue * nMaxDest );
+}
+-- produces same results as bit-propagation below
+*/
+
+static unsigned int RescaleBitNumber( unsigned int nSrcValue, unsigned int nSrcBits, unsigned int nScaleToBits )
+{
+	unsigned int nMaxSrc = ( 1 << nSrcBits ) - 1;
+
+	if ( nScaleToBits > nSrcBits )
+	{
+		return
+			( nSrcValue & nMaxSrc ) << ( nScaleToBits - nSrcBits ) |
+			( nSrcValue & nMaxSrc ) >> ( nSrcBits - ( nScaleToBits - nSrcBits ) );
+	}
+	else
+	{
+		return ( nSrcValue & nMaxSrc ) >> ( nSrcBits - nScaleToBits );
+	}
+}
+
+
 static inline void GetColorBlockColorsBGRA8888( DXTColBlock *pBlock, BGRA8888_t *col_0, 
 											    BGRA8888_t *col_1, BGRA8888_t *col_2, 
-												BGRA8888_t *col_3, WORD & wrd  )
+												BGRA8888_t *col_3, uint16 & wrd  )
 {
 	// input data is assumed to be x86 order
 	// swap to target platform for proper dxt decoding
-	WORD color0 = LittleShort( pBlock->col0 );
-	WORD color1 = LittleShort( pBlock->col1 );
+	uint16 color0 = LittleShort( pBlock->col0 );
+	uint16 color1 = LittleShort( pBlock->col1 );
 
-	// convert to full precision correctly.
-	// If this was a perf problem, we could optimize it. But this isn't used in any hotpaths 
-	// (now) so let's just do the correct but slow fp math.
+	// shift to full precision
 	col_0->a = 0xff;
-	col_0->r = ( uint8 ) round( ( ( BGR565_t* ) &color0 )->r * 255.0f / 31.0f );
-	col_0->g = ( uint8 ) round( ( ( BGR565_t* ) &color0 )->g * 255.0f / 63.0f );
-	col_0->b = ( uint8 ) round( ( ( BGR565_t* ) &color0 )->b * 255.0f / 31.0f );
+	col_0->r = RescaleBitNumber( ((BGR565_t*)&color0)->r, 5, 8 );
+	col_0->g = RescaleBitNumber( ((BGR565_t*)&color0)->g, 6, 8 );
+	col_0->b = RescaleBitNumber( ((BGR565_t*)&color0)->b, 5, 8 );
 
 	col_1->a = 0xff;
-	col_1->r = ( uint8 ) round( ( ( BGR565_t* ) &color1 )->r * 255.0f / 31.0f );
-	col_1->g = ( uint8 ) round( ( ( BGR565_t* ) &color1 )->g * 255.0f / 63.0f );
-	col_1->b = ( uint8 ) round( ( ( BGR565_t* ) &color1 )->b * 255.0f / 31.0f );
+	col_1->r = RescaleBitNumber( ((BGR565_t*)&color1)->r, 5, 8 );
+	col_1->g = RescaleBitNumber( ((BGR565_t*)&color1)->g, 6, 8 );
+	col_1->b = RescaleBitNumber( ((BGR565_t*)&color1)->b, 5, 8 );
 
 	if ( color0 > color1 )
 	{
@@ -293,25 +345,25 @@ static inline void GetColorBlockColorsBGRA8888( DXTColBlock *pBlock, BGRA8888_t 
 		// These two bit codes correspond to the 2-bit fields 
 		// stored in the 64-bit block.
 
-		wrd = ((WORD)col_0->r * 2 + (WORD)col_1->r )/3;
+		wrd = ((uint16)col_0->r * 2 + (uint16)col_1->r )/3;
 											// no +1 for rounding
 											// as bits have been shifted to 888
 		col_2->r = (BYTE)wrd;
 
-		wrd = ((WORD)col_0->g * 2 + (WORD)col_1->g )/3;
+		wrd = ((uint16)col_0->g * 2 + (uint16)col_1->g )/3;
 		col_2->g = (BYTE)wrd;
 
-		wrd = ((WORD)col_0->b * 2 + (WORD)col_1->b )/3;
+		wrd = ((uint16)col_0->b * 2 + (uint16)col_1->b )/3;
 		col_2->b = (BYTE)wrd;
 		col_2->a = 0xff;
 
-		wrd = ((WORD)col_0->r + (WORD)col_1->r *2 )/3;
+		wrd = ((uint16)col_0->r + (uint16)col_1->r *2 )/3;
 		col_3->r = (BYTE)wrd;
 
-		wrd = ((WORD)col_0->g + (WORD)col_1->g *2 )/3;
+		wrd = ((uint16)col_0->g + (uint16)col_1->g *2 )/3;
 		col_3->g = (BYTE)wrd;
 
-		wrd = ((WORD)col_0->b + (WORD)col_1->b *2 )/3;
+		wrd = ((uint16)col_0->b + (uint16)col_1->b *2 )/3;
 		col_3->b = (BYTE)wrd;
 		col_3->a = 0xff;
 	}
@@ -325,11 +377,11 @@ static inline void GetColorBlockColorsBGRA8888( DXTColBlock *pBlock, BGRA8888_t 
 
 		// explicit for each component, unlike some refrasts...????
 		
-		wrd = ((WORD)col_0->r + (WORD)col_1->r )/2;
+		wrd = ((uint16)col_0->r + (uint16)col_1->r )/2;
 		col_2->r = (BYTE)wrd;
-		wrd = ((WORD)col_0->g + (WORD)col_1->g )/2;
+		wrd = ((uint16)col_0->g + (uint16)col_1->g )/2;
 		col_2->g = (BYTE)wrd;
-		wrd = ((WORD)col_0->b + (WORD)col_1->b )/2;
+		wrd = ((uint16)col_0->b + (uint16)col_1->b )/2;
 		col_2->b = (BYTE)wrd;
 		col_2->a = 0xff;
 
@@ -346,15 +398,15 @@ static inline void DecodeColorBlock( CDestPixel *pOutputImage, DXTColBlock *pCol
 					                 BGRA8888_t *col_2, BGRA8888_t *col_3 )
 {
 	// width is width of image in pixels
-	DWORD bits;
+	uint32 bits;
 	int r,n;
 
 	// bit masks = 00000011, 00001100, 00110000, 11000000
-	const DWORD masks[] = { 3 << 0, 3 << 2, 3 << 4, 3 << 6 };
+	const uint32 masks[] = { 3 << 0, 3 << 2, 3 << 4, 3 << 6 };
 	const int   shift[] = { 0, 2, 4, 6 };
 
 	// r steps through lines in y
-	for ( r=0; r < 4; r++, pOutputImage += width-4 )	// no width*4 as DWORD ptr inc will *4
+	for ( r=0; r < 4; r++, pOutputImage += width-4 )	// no width*4 as uint32 ptr inc will *4
 	{
 		// width * 4 bytes per pixel per line
 		// each j dxtc row is 4 lines of pixels
@@ -396,7 +448,7 @@ template <class CDestPixel>
 static inline void DecodeAlpha3BitLinear( CDestPixel *pImPos, DXTAlphaBlock3BitLinear *pAlphaBlock, int width, int nChannelSelect = 3 )
 {
 	static BYTE		gBits[4][4];
-	static WORD		gAlphas[8];
+	static uint16		gAlphas[8];
 	static BGRA8888_t	gACol[4][4];
 
 	gAlphas[0] = pAlphaBlock->alpha0;
@@ -433,9 +485,9 @@ static inline void DecodeAlpha3BitLinear( CDestPixel *pImPos, DXTAlphaBlock3BitL
 
 	// first two rows of 4 pixels each:
 	// pRows = (Alpha3BitRows*) & ( pAlphaBlock->stuff[0] );
-	const DWORD mask = 0x00000007;		// bits = 00 00 01 11
+	const uint32 mask = 0x00000007;		// bits = 00 00 01 11
 
-	DWORD bits = *( (DWORD*) & ( pAlphaBlock->stuff[0] ));
+	uint32 bits = *( (uint32*) & ( pAlphaBlock->stuff[0] ));
 
 	gBits[0][0] = (BYTE)( bits & mask );
 	bits >>= 3;
@@ -454,7 +506,7 @@ static inline void DecodeAlpha3BitLinear( CDestPixel *pImPos, DXTAlphaBlock3BitL
 	gBits[1][3] = (BYTE)( bits & mask );
 
 	// now for last two rows:
-	bits = *( (DWORD*) & ( pAlphaBlock->stuff[3] ));		// last 3 bytes
+	bits = *( (uint32*) & ( pAlphaBlock->stuff[3] ));		// last 3 bytes
 
 	gBits[2][0] = (BYTE)( bits & mask );
 	bits >>= 3;
@@ -541,7 +593,7 @@ static void ConvertFromDXT1( const uint8 *src, CDestPixel *dst, int width, int h
 		width = ( width + 3 ) & ~3;
 		height = ( height + 3 ) & ~3;
 		realDst = dst;
-		dst = ( CDestPixel * )_alloca( width * height * sizeof( CDestPixel ) );
+		dst = ( CDestPixel * )stackalloc( width * height * sizeof( CDestPixel ) );
 		Assert( dst );
 	}
 	Assert( !( width % 4 ) );
@@ -551,11 +603,11 @@ static void ConvertFromDXT1( const uint8 *src, CDestPixel *dst, int width, int h
 	xblocks = width >> 2;
 	yblocks = height >> 2;
 	CDestPixel *pDstScan = dst;
-	DWORD *pSrcScan = ( DWORD * )src;
+	uint32 *pSrcScan = ( uint32 * )src;
 
 	DXTColBlock *pBlock;
 	BGRA8888_t col_0, col_1, col_2, col_3;
-	WORD wrdDummy;
+	uint16 wrdDummy;
 
 	int i, j;
 	for ( j = 0; j < yblocks; j++ )
@@ -603,7 +655,7 @@ static void ConvertFromDXT5( const uint8 *src, CDestPixel *dst, int width, int h
 		width = ( width + 3 ) & ~3;
 		height = ( height + 3 ) & ~3;
 		realDst = dst;
-		dst = ( CDestPixel * )_alloca( width * height * sizeof( CDestPixel ) );
+		dst = ( CDestPixel * )stackalloc( width * height * sizeof( CDestPixel ) );
 		Assert( dst );
 	}
 	Assert( !( width % 4 ) );
@@ -614,13 +666,13 @@ static void ConvertFromDXT5( const uint8 *src, CDestPixel *dst, int width, int h
 	yblocks = height >> 2;
 	
 	CDestPixel *pDstScan = dst;
-	DWORD *pSrcScan = ( DWORD * )src;
+	uint32 *pSrcScan = ( uint32 * )src;
 
 	DXTColBlock				*pBlock;
 	DXTAlphaBlock3BitLinear *pAlphaBlock;
 
 	BGRA8888_t col_0, col_1, col_2, col_3;
-	WORD wrd;
+	uint16 wrd;
 
 	int i,j;
 	for ( j=0; j < yblocks; j++ )
@@ -683,7 +735,7 @@ static void ConvertFromDXT5IgnoreAlpha( const uint8 *src, CDestPixel *dst, int w
 		width = ( width + 3 ) & ~3;
 		height = ( height + 3 ) & ~3;
 		realDst = dst;
-		dst = ( CDestPixel * )_alloca( width * height * sizeof( CDestPixel ) );
+		dst = ( CDestPixel * )stackalloc( width * height * sizeof( CDestPixel ) );
 		Assert( dst );
 	}
 	Assert( !( width % 4 ) );
@@ -694,12 +746,12 @@ static void ConvertFromDXT5IgnoreAlpha( const uint8 *src, CDestPixel *dst, int w
 	yblocks = height >> 2;
 	
 	CDestPixel *pDstScan = dst;
-	DWORD *pSrcScan = ( DWORD * )src;
+	uint32 *pSrcScan = ( uint32 * )src;
 
 	DXTColBlock *pBlock;
 
 	BGRA8888_t col_0, col_1, col_2, col_3;
-	WORD wrd;
+	uint16 wrd;
 
 	int i,j;
 	for ( j=0; j < yblocks; j++ )
@@ -755,7 +807,7 @@ static void ConvertFromATIxN( const uint8 *src, CDestPixel *dst, int width, int 
 		width = ( width + 3 ) & ~3;
 		height = ( height + 3 ) & ~3;
 		realDst = dst;
-		dst = ( CDestPixel * )_alloca( width * height * sizeof( CDestPixel ) );
+		dst = ( CDestPixel * )stackalloc( width * height * sizeof( CDestPixel ) );
 		Assert( dst );
 	}
 	Assert( !( width % 4 ) );
@@ -766,7 +818,7 @@ static void ConvertFromATIxN( const uint8 *src, CDestPixel *dst, int width, int 
 	yblocks = height >> 2;
 
 	CDestPixel *pDstScan = dst;
-	DWORD *pSrcScan = ( DWORD * )src;
+	uint32 *pSrcScan = ( uint32 * )src;
 
 	DXTAlphaBlock3BitLinear	*pBlock;
 
@@ -806,7 +858,7 @@ static void ConvertFromATIxN( const uint8 *src, CDestPixel *dst, int width, int 
 	}
 }
 
-static DWORD GetDXTCEncodeType( ImageFormat imageFormat )
+static uint32 GetDXTCEncodeType( ImageFormat imageFormat )
 {
 	switch ( imageFormat )
 	{
@@ -823,59 +875,19 @@ static DWORD GetDXTCEncodeType( ImageFormat imageFormat )
 	}
 }
 
-// Convert RGBA input to ATI1N or ATI2N format
+// Use AMD compressor to convert RGBA input to ATI1N, ATI2N or DXT5_GA format
 bool ConvertToATIxN(  const uint8 *src, ImageFormat srcImageFormat,
 					  uint8 *dst, ImageFormat dstImageFormat,
-					  int width, int height, int srcStride, int dstStride )
+					  int width, int height, int srcStride, int dstStride, bool bDXT5GA = false )
 {
-#if !defined( _X360 ) && !defined( POSIX )
-
-	// from rgb(a) to ATIxN
-	if( srcStride != 0 || dstStride != 0 )
-		return false;
-
-	// If we're not the right format for the ATI compressor, we bail
-	if ( srcImageFormat != IMAGE_FORMAT_ARGB8888 )
-		return false;
-
-	// Define source image parameters and copy the bits into buffer
-	ATI_TC_Texture srcTexture;
-	srcTexture.dwSize = sizeof( srcTexture );
-	srcTexture.dwWidth = width;
-	srcTexture.dwHeight = height;
-	srcTexture.dwPitch = srcStride;
-	srcTexture.format = ATI_TC_FORMAT_ARGB_8888;
-	srcTexture.dwDataSize = ATI_TC_CalculateBufferSize( &srcTexture );
-	srcTexture.pData = (ATI_TC_BYTE*) malloc( srcTexture.dwDataSize );
-	memcpy( srcTexture.pData, src, srcTexture.dwDataSize );
-
-	ATI_TC_Texture destTexture;
-	destTexture.dwSize = sizeof( destTexture );
-	destTexture.dwWidth = width;
-	destTexture.dwHeight = height;
-	destTexture.dwPitch = 0;
-	destTexture.format = dstImageFormat == IMAGE_FORMAT_ATI2N ? ATI_TC_FORMAT_ATI2N : ATI_TC_FORMAT_ATI1N;	// Assume it can only be one of these two...
-	destTexture.dwDataSize = ATI_TC_CalculateBufferSize( &destTexture );
-	destTexture.pData = (ATI_TC_BYTE*) dst;
-
-	ATI_TC_ERROR errATI = ATI_TC_ConvertTexture( &srcTexture, &destTexture, NULL, NULL, NULL, NULL );		// Convert it!
-	
-	free( srcTexture.pData );																				// Free temporary buffers
-
-	if ( errATI != ATI_TC_OK )
-		return false;
-
-	return true;
-#else
-	Assert( 0 );
+	Assert( !"ATIxN is no longer supported." );
 	return false;
-#endif
 }
 
 
-bool ConvertToDXTLegacy(  const uint8 *src, ImageFormat srcImageFormat,
- 						  uint8 *dst, ImageFormat dstImageFormat, 
-					      int width, int height, int srcStride, int dstStride )
+bool ConvertToDXT(  const uint8 *src, ImageFormat srcImageFormat,
+ 					uint8 *dst, ImageFormat dstImageFormat, 
+					int width, int height, int srcStride, int dstStride )
 {
 #if !defined( _X360 ) && !defined( POSIX )
 	// from rgb(a) to dxtN
@@ -887,7 +899,7 @@ bool ConvertToDXTLegacy(  const uint8 *src, ImageFormat srcImageFormat,
 	memset( &descIn, 0, sizeof(descIn) );
 	memset( &descOut, 0, sizeof(descOut) );
 	float weight[3] = {0.3086f, 0.6094f, 0.0820f};
-	DWORD dwEncodeType = GetDXTCEncodeType( dstImageFormat );
+	uint32 dwEncodeType = GetDXTCEncodeType( dstImageFormat );
 	
 	// Setup descIn
 	descIn.dwSize = sizeof(descIn);
@@ -951,101 +963,130 @@ bool ConvertToDXTLegacy(  const uint8 *src, ImageFormat srcImageFormat,
 #endif
 }
 
-template < typename SrcPixel_t >
-void CompressSTB( uint8 *pDstBytes, ImageFormat dstFmt, const uint8 *pSrcBytes, int nWidth, int nHeight )
+bool ConvertToDXTRuntime(	const uint8 *src, ImageFormat srcImageFormat,
+ 							uint8 *dst, ImageFormat dstImageFormat, 
+							int width, int height )
 {
-	const bool cbWriteAlpha = ( dstFmt == IMAGE_FORMAT_DXT5 );
-	const uint32 cDstStride = ( dstFmt == IMAGE_FORMAT_DXT1 ) ? 8 : 16;
+	// from rgba to dxtN using stb_dxt.h  (source format must always be RGBA8888, dest format must be DXT1_RUNTIME or DXT5_RUNTIME
+	Assert( ( srcImageFormat == IMAGE_FORMAT_RGBA8888 || srcImageFormat == IMAGE_FORMAT_BGRA8888 ) && ( dstImageFormat == IMAGE_FORMAT_DXT1_RUNTIME || dstImageFormat == IMAGE_FORMAT_DXT5_RUNTIME ) );
 
-	const uint32 cPixX = (uint32) nWidth;
-	const uint32 cPixY = (uint32) nHeight;
-	const uint32 cSrcPitch = cPixX * sizeof( SrcPixel_t );
-	const uint32 cLastX = cPixX - 1;
-	const uint32 cLastY = cPixY - 1;
+	const uint64 *sourcePixels = reinterpret_cast<const uint64 *>(src);
+	uint32 *dest32 = reinterpret_cast<uint32 *>(dst);
+	int width64 = width >> 1;
 
-	// STB always takes blocks as 4x4 of RGBA8888_t
-	RGBA8888_t srcBlock[16] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-	SrcPixel_t* pSrcs[4] = { 0, 0, 0, 0 };
-
-	for ( uint32 y = 0; y < cPixY; y += 4 ) 
+	if ( srcImageFormat == IMAGE_FORMAT_BGRA8888 )
 	{
-		// This handles clamping for cPixY % 4 != 0
-		pSrcs[ 0 ] = ( SrcPixel_t* ) ( pSrcBytes + cSrcPitch * Min( y + 0, cLastY ) );
-		pSrcs[ 1 ] = ( SrcPixel_t* ) ( pSrcBytes + cSrcPitch * Min( y + 1, cLastY ) );
-		pSrcs[ 2 ] = ( SrcPixel_t* ) ( pSrcBytes + cSrcPitch * Min( y + 2, cLastY ) );
-		pSrcs[ 3 ] = ( SrcPixel_t* ) ( pSrcBytes + cSrcPitch * Min( y + 3, cLastY ) );
-
-		for ( uint x = 0; x < cPixX; x += 4 ) 
+		for ( int y = 0; y < height; y += 4 )
 		{
-			for ( uint i = 0; i < 4; ++i )
+			if ( width == 1 )
 			{
-				uint32 offsetX = Min( x + i, cLastX );
-				srcBlock[ 0 + i ] =  pSrcs[ 0 ][ offsetX ];
-				srcBlock[ 4 + i ] =  pSrcs[ 1 ][ offsetX ];
-				srcBlock[ 8 + i ] =  pSrcs[ 2 ][ offsetX ];
-				srcBlock[ 12 + i ] = pSrcs[ 3 ][ offsetX ];
-			}
+				uint32 pixelBlock[16];
 
-			stb_compress_dxt_block( pDstBytes, ( const uint8* ) srcBlock, cbWriteAlpha, STB_DXT_NORMAL );
-			pDstBytes += cDstStride;
+				const uint32 *sourcePixels32 = reinterpret_cast<const uint32 *>(src);
+				pixelBlock[0] = sourcePixels32[0];
+				for ( int i = 1; i < 16; i++ )
+				{
+					pixelBlock[i] = 0;
+				}
+
+				// compress the pixelBlock into dest32
+				stb_compress_dxt_block( reinterpret_cast<uint8 *>(dest32), reinterpret_cast<uint8 *>(pixelBlock), (dstImageFormat == IMAGE_FORMAT_DXT5_RUNTIME) ? 1 : 0, STB_DXT_NORMAL );
+				dest32 += ( dstImageFormat == IMAGE_FORMAT_DXT1_RUNTIME ) ? 2 : 4;
+			}
+			else if ( width == 2 )
+			{
+				// copy a 4x4 block of pixels from the source image into 'pixelBlock'
+				uint64 pixelBlock[8];
+
+				pixelBlock[0] = sourcePixels[0];
+				pixelBlock[2] = sourcePixels[width64];
+				pixelBlock[1] = pixelBlock[3] = pixelBlock[4] = pixelBlock[5] = pixelBlock[6] = pixelBlock[7] = sourcePixels[0];
+
+				// compress the pixelBlock into dest32
+				stb_compress_dxt_block( reinterpret_cast<uint8 *>(dest32), reinterpret_cast<uint8 *>(pixelBlock), (dstImageFormat == IMAGE_FORMAT_DXT5_RUNTIME) ? 1 : 0, STB_DXT_NORMAL );
+				dest32 += ( dstImageFormat == IMAGE_FORMAT_DXT1_RUNTIME ) ? 2 : 4;
+			}
+			else
+			{
+				for ( int x = 0; x < width64; x += 2 )
+				{
+					// copy a 4x4 block of pixels from the source image into 'pixelBlock'
+					uint64 pixelBlock[8];
+
+					pixelBlock[0] = sourcePixels[x];
+					pixelBlock[1] = sourcePixels[x + 1];
+					pixelBlock[2] = sourcePixels[x + width64];
+					pixelBlock[3] = sourcePixels[x + width64 + 1];
+					pixelBlock[4] = sourcePixels[x + (width64 * 2)];
+					pixelBlock[5] = sourcePixels[x + (width64 * 2) + 1];
+					pixelBlock[6] = sourcePixels[x + (width64 * 3)];
+					pixelBlock[7] = sourcePixels[x + (width64 * 3) + 1];
+
+					// compress the pixelBlock into dest32
+					stb_compress_dxt_block( reinterpret_cast<uint8 *>(dest32), reinterpret_cast<uint8 *>(pixelBlock), (dstImageFormat == IMAGE_FORMAT_DXT5_RUNTIME) ? 1 : 0, STB_DXT_NORMAL );
+					dest32 += ( dstImageFormat == IMAGE_FORMAT_DXT1_RUNTIME ) ? 2 : 4;
+				}
+			}
+			sourcePixels += (width64 << 2);
 		}
 	}
-}
-
-inline ImageFormat GetTrueImageFormat( ImageFormat fmt )
-{
-	switch ( fmt )
+	else if ( srcImageFormat == IMAGE_FORMAT_RGBA8888 )
 	{
-	case IMAGE_FORMAT_DXT1_RUNTIME:
-		return IMAGE_FORMAT_DXT1;
-	case IMAGE_FORMAT_DXT5_RUNTIME:
-		return IMAGE_FORMAT_DXT5;
-	default: /* expected */
-		break;
+		for ( int y = 0; y < height; y += 4 )
+		{
+			if ( width == 1 )
+			{
+				uint32 pixelBlock[16];
+
+				const uint32 *sourcePixels32 = reinterpret_cast<const uint32 *>(src);
+				pixelBlock[0] = ( sourcePixels32[0] & 0x00FF00FF ) || ( ( sourcePixels32[0] & 0xFF000000 ) >> 16 ) || ( ( sourcePixels32[0] & 0x0000FF00 ) << 16 );
+				for ( int i = 1; i < 16; i++ )
+				{
+					pixelBlock[i] = 0;
+				}
+
+				// compress the pixelBlock into dest32
+				stb_compress_dxt_block( reinterpret_cast<uint8 *>(dest32), reinterpret_cast<uint8 *>(pixelBlock), (dstImageFormat == IMAGE_FORMAT_DXT5_RUNTIME) ? 1 : 0, STB_DXT_NORMAL );
+				dest32 += ( dstImageFormat == IMAGE_FORMAT_DXT1_RUNTIME ) ? 2 : 4;
+			}
+			else if ( width == 2 )
+			{
+				// copy a 4x4 block of pixels from the source image into 'pixelBlock'
+				uint64 pixelBlock[8];
+
+				pixelBlock[0] = ( sourcePixels[0] & 0x00FF00FF00FF00FFLL ) | ( ( sourcePixels[0] & 0xFF000000FF000000LL ) >> 16 ) | ( ( sourcePixels[0] & 0x0000FF000000FF00LL ) << 16 );
+				pixelBlock[2] = ( sourcePixels[width64] & 0x00FF00FF00FF00FFLL ) | ( ( sourcePixels[width64] & 0xFF000000FF000000LL ) >> 16 ) | ( ( sourcePixels[width64] & 0x0000FF000000FF00LL ) << 16 );
+				pixelBlock[1] = pixelBlock[3] = pixelBlock[4] = pixelBlock[5] = pixelBlock[6] = pixelBlock[7] = pixelBlock[0];
+
+				// compress the pixelBlock into dest32
+				stb_compress_dxt_block( reinterpret_cast<uint8 *>(dest32), reinterpret_cast<uint8 *>(pixelBlock), (dstImageFormat == IMAGE_FORMAT_DXT5_RUNTIME) ? 1 : 0, STB_DXT_NORMAL );
+				dest32 += ( dstImageFormat == IMAGE_FORMAT_DXT1_RUNTIME ) ? 2 : 4;
+			}
+			else
+			{
+				for ( int x = 0; x < width64; x += 2 )
+				{
+					// copy a 4x4 block of pixels from the source image into 'pixelBlock'
+					uint64 pixelBlock[8];
+
+					pixelBlock[0] = ( sourcePixels[x] & 0xFF00FF00FF00FF00LL ) | ( ( sourcePixels[x] & 0x00FF000000FF0000LL ) >> 16 ) | ( ( sourcePixels[x] & 0x000000FF000000FFLL ) << 16 );
+					pixelBlock[1] = ( sourcePixels[x + 1] & 0xFF00FF00FF00FF00LL ) | ( ( sourcePixels[x + 1] & 0x00FF000000FF0000LL ) >> 16 ) | ( ( sourcePixels[x + 1] & 0x000000FF000000FFLL ) << 16 );
+					pixelBlock[2] = ( sourcePixels[x + width64] & 0xFF00FF00FF00FF00LL ) | ( ( sourcePixels[x + width64] & 0x00FF000000FF0000LL ) >> 16 ) | ( ( sourcePixels[x + width64] & 0x000000FF000000FFLL ) << 16 );
+					pixelBlock[3] = ( sourcePixels[x + width64 + 1] & 0xFF00FF00FF00FF00LL ) | ( ( sourcePixels[x + width64 + 1] & 0x00FF000000FF0000LL ) >> 16 ) | ( ( sourcePixels[x + width64 + 1] & 0x000000FF000000FFLL ) << 16 );
+					pixelBlock[4] = ( sourcePixels[x + (width64 * 2)] & 0xFF00FF00FF00FF00LL ) | ( ( sourcePixels[x + (width64 * 2)] & 0x00FF000000FF0000LL ) >> 16 ) | ( ( sourcePixels[x + (width64 * 2)] & 0x000000FF000000FFLL ) << 16 );
+					pixelBlock[5] = ( sourcePixels[x + (width64 * 2) + 1] & 0xFF00FF00FF00FF00LL ) | ( ( sourcePixels[x + (width64 * 2) + 1] & 0x00FF000000FF0000LL ) >> 16 ) | ( ( sourcePixels[x + (width64 * 2) + 1] & 0x000000FF000000FFLL ) << 16 );
+					pixelBlock[6] = ( sourcePixels[x + (width64 * 3)] & 0xFF00FF00FF00FF00LL ) | ( ( sourcePixels[x + (width64 * 3)] & 0x00FF000000FF0000LL ) >> 16 ) | ( ( sourcePixels[x + (width64 * 3)] & 0x000000FF000000FFLL ) << 16 );
+					pixelBlock[7] = ( sourcePixels[x + (width64 * 3) + 1] & 0xFF00FF00FF00FF00LL ) | ( ( sourcePixels[x + (width64 * 3) + 1] & 0x00FF000000FF0000LL ) >> 16 ) | ( ( sourcePixels[x + (width64 * 3) + 1] & 0x000000FF000000FFLL ) << 16 );
+
+					// compress the pixelBlock into dest32
+					stb_compress_dxt_block( reinterpret_cast<uint8 *>(dest32), reinterpret_cast<uint8 *>(pixelBlock), (dstImageFormat == IMAGE_FORMAT_DXT5_RUNTIME) ? 1 : 0, STB_DXT_NORMAL );
+					dest32 += ( dstImageFormat == IMAGE_FORMAT_DXT1_RUNTIME ) ? 2 : 4;
+				}
+			}
+			sourcePixels += (width64 << 2);
+		}
 	}
-
-	return fmt;
-}
-
-bool ConvertToDXTRuntime( const uint8 *src, ImageFormat srcImageFormat,
-						  uint8 *dst, ImageFormat dstImageFormat,
-						  int width, int height, int srcStride, int dstStride )
-{
-	if ( srcStride != 0 || dstStride != 0 )
-		return false;
-
-	dstImageFormat = GetTrueImageFormat( dstImageFormat );
-
-	switch ( srcImageFormat )
-	{
-		case IMAGE_FORMAT_RGBA8888: CompressSTB<RGBA8888_t>( dst, dstImageFormat, src, width, height ); return true;
-		case IMAGE_FORMAT_RGB888:   CompressSTB<RGB888_t>  ( dst, dstImageFormat, src, width, height ); return true;
-		case IMAGE_FORMAT_BGRA8888: CompressSTB<BGRA8888_t>( dst, dstImageFormat, src, width, height ); return true;
-		case IMAGE_FORMAT_BGRX8888: CompressSTB<BGRX8888_t>( dst, dstImageFormat, src, width, height ); return true;
-		default:
-			Assert( !"Unexpected format here, wtf." );
-			break;
-	};
-
-	return false;
-}
-
-bool ConvertToDXT( const uint8 *src, ImageFormat srcImageFormat,
- 				   uint8 *dst, ImageFormat dstImageFormat, 
-				   int width, int height, int srcStride, int dstStride )
-{
-	// The STB compressor (the new compressor) is faster and higher quality in most cases, and has less error overall
-	// than the S3TC compressor. So use it by default, unless we're working with a format that STB doesn't support.
-	bool bUseNewCompressor = dstImageFormat != IMAGE_FORMAT_DXT1_ONEBITALPHA 
-		                  && dstImageFormat != IMAGE_FORMAT_DXT3;
-
-//	bool bUseNewCompressor = dstImageFormat == IMAGE_FORMAT_DXT1_RUNTIME 
-//		                  || dstImageFormat == IMAGE_FORMAT_DXT5_RUNTIME;
-
-	if ( bUseNewCompressor )
-		return ConvertToDXTRuntime( src, srcImageFormat, dst, dstImageFormat, width, height, srcStride, dstStride );
-
-	return ConvertToDXTLegacy( src, srcImageFormat, dst, dstImageFormat, width, height, srcStride, dstStride );
+	return true;
 }
 
 // HDRFIXME: This assumes that the 16-bit integer values are 4.12 fixed-point.
@@ -1073,9 +1114,9 @@ void ConvertImageFormat_RGB323232F_To_RGBA16161616( float *pSrcImage, unsigned s
 	for ( ; pSrcScan < pSrcEnd; pSrcScan += 3, pDstScan += 4 )
 	{
 
-		pDstScan[0] = ( unsigned short )min( 65535.0f, ( pSrcScan[0] * ( ( ( float )( 1 << 12 ) ) ) ) );
-		pDstScan[1] = ( unsigned short )min( 65535.0f, ( pSrcScan[1] * ( ( ( float )( 1 << 12 ) ) ) ) );
-		pDstScan[2] = ( unsigned short )min( 65535.0f, ( pSrcScan[2] * ( ( ( float )( 1 << 12 ) ) ) ) );
+		pDstScan[0] = ( unsigned short )MIN( 65535.0f, ( pSrcScan[0] * ( ( ( float )( 1 << 12 ) ) ) ) );
+		pDstScan[1] = ( unsigned short )MIN( 65535.0f, ( pSrcScan[1] * ( ( ( float )( 1 << 12 ) ) ) ) );
+		pDstScan[2] = ( unsigned short )MIN( 65535.0f, ( pSrcScan[2] * ( ( ( float )( 1 << 12 ) ) ) ) );
 		pDstScan[3] = 65535;
 	}
 }
@@ -1133,7 +1174,7 @@ void ConvertImageFormat_RGB323232F_To_RGBA16161616F( float *pSrcImage, float16 *
 void ConvertImageFormat_RGB323232F_To_RGBA8888( float *pSrcImage, uint8 *dst, int width, int height )
 {
 	FloatBitMap_t flbm;
-	flbm.AllocateRGB( width, height );
+	flbm.Init( width, height );
 
 	// Set the pixels
 	for ( int y = 0; y < height; ++ y )
@@ -1147,7 +1188,7 @@ void ConvertImageFormat_RGB323232F_To_RGBA8888( float *pSrcImage, uint8 *dst, in
 			fpix.Blue = pf[2];
 			fpix.Alpha = 0.f;
 			
-			flbm.WritePixelRGBAF( x, y, fpix );
+			flbm.WritePixelRGBAF( x, y, 0, fpix );
 		}
 	}
 	// memcpy( flbm.RGBAData, pSrcImage, width * height * 4 );
@@ -1159,7 +1200,7 @@ void ConvertImageFormat_RGB323232F_To_RGBA8888( float *pSrcImage, uint8 *dst, in
 	{
 		for ( int x = 0; x < width; ++ x )
 		{
-			PixRGBAF fpix = flbm.PixelRGBAF( x, y );
+			PixRGBAF fpix = flbm.PixelRGBAF( x, y, 0 );
 			PixRGBA8 pix8 = PixRGBAF_to_8( fpix );
 
 			uint8 *pch = &dst[ 4 * ( x + width * y ) ];
@@ -1175,7 +1216,7 @@ void ConvertImageFormat_RGB323232F_To_RGBA8888( float *pSrcImage, uint8 *dst, in
 void ConvertImageFormat_RGB323232F_To_BGRA8888( float *pSrcImage, uint8 *dst, int width, int height )
 {
 	FloatBitMap_t flbm;
-	flbm.AllocateRGB( width, height );
+	flbm.Init( width, height );
 
 	// Set the pixels
 	for ( int y = 0; y < height; ++ y )
@@ -1189,7 +1230,7 @@ void ConvertImageFormat_RGB323232F_To_BGRA8888( float *pSrcImage, uint8 *dst, in
 			fpix.Blue = pf[2];
 			fpix.Alpha = 0.f;
 
-			flbm.WritePixelRGBAF( x, y, fpix );
+			flbm.WritePixelRGBAF( x, y, 0, fpix );
 		}
 	}
 	// memcpy( flbm.RGBAData, pSrcImage, width * height * 4 );
@@ -1201,7 +1242,7 @@ void ConvertImageFormat_RGB323232F_To_BGRA8888( float *pSrcImage, uint8 *dst, in
 	{
 		for ( int x = 0; x < width; ++ x )
 		{
-			PixRGBAF fpix = flbm.PixelRGBAF( x, y );
+			PixRGBAF fpix = flbm.PixelRGBAF( x, y, 0 );
 			PixRGBA8 pix8 = PixRGBAF_to_8( fpix );
 
 			uint8 *pch = &dst[ 4 * ( x + width * y ) ];
@@ -1244,8 +1285,8 @@ void ConvertImageFormat_RGBA16161616F_To_RGBA16161616( float16 *pSrcImage, unsig
 			float val;
 			val = pSrcScan[i].GetFloat();
 			val *= ( float )( 1 << 12 );
-			val = max( val, 0.f );
-			val = min( val, 65535.0f );
+			val = MAX( val, 0 );
+			val = MIN( val, 65535.0f );
 			pDstScan[i] = ( unsigned short )val;
 		}
 	}
@@ -1321,9 +1362,9 @@ bool ConvertImageFormat( const uint8 *src, ImageFormat srcImageFormat,
 	}
 	
 	// Fast path for just copying a compressed texture
-	if ( ( ( dstImageFormat == IMAGE_FORMAT_DXT1 || dstImageFormat == IMAGE_FORMAT_DXT1_RUNTIME ||
-		     dstImageFormat == IMAGE_FORMAT_DXT3 ||
-		     dstImageFormat == IMAGE_FORMAT_DXT5 || dstImageFormat == IMAGE_FORMAT_DXT5_RUNTIME ||
+	if ( ( ( dstImageFormat == IMAGE_FORMAT_DXT1 || dstImageFormat == IMAGE_FORMAT_LINEAR_DXT1 || dstImageFormat == IMAGE_FORMAT_DXT1_RUNTIME || 
+		     dstImageFormat == IMAGE_FORMAT_DXT3 || dstImageFormat == IMAGE_FORMAT_LINEAR_DXT3 ||
+		     dstImageFormat == IMAGE_FORMAT_DXT5 || dstImageFormat == IMAGE_FORMAT_LINEAR_DXT5 || dstImageFormat == IMAGE_FORMAT_DXT5_RUNTIME ||  
 		     dstImageFormat == IMAGE_FORMAT_ATI1N ||
 		     dstImageFormat == IMAGE_FORMAT_ATI2N ) && ( srcImageFormat == dstImageFormat ) ) ||
 		 ( dstImageFormat == IMAGE_FORMAT_DXT5 && srcImageFormat == IMAGE_FORMAT_DXT5_RUNTIME ) ||
@@ -1345,11 +1386,15 @@ bool ConvertImageFormat( const uint8 *src, ImageFormat srcImageFormat,
 			   srcImageFormat == IMAGE_FORMAT_BGRX8888 ) &&	   													// and
 			 ( dstImageFormat == IMAGE_FORMAT_DXT1  ||															//
 			   dstImageFormat == IMAGE_FORMAT_DXT3  ||	   														// DXT compressed dest
-			   dstImageFormat == IMAGE_FORMAT_DXT5  ||
-			   dstImageFormat == IMAGE_FORMAT_DXT1_RUNTIME ||
-			   dstImageFormat == IMAGE_FORMAT_DXT5_RUNTIME ) )
+			   dstImageFormat == IMAGE_FORMAT_DXT5  ) )
 	{
-		return ConvertToDXT( src, srcImageFormat, dst, dstImageFormat, width, height, srcStride, dstStride );
+		return ConvertToDXT( src, srcImageFormat, dst, dstImageFormat, width, height, 0, 0 );
+	}
+	else if ( ( srcImageFormat == IMAGE_FORMAT_RGBA8888) &&
+			  ( dstImageFormat == IMAGE_FORMAT_DXT1_RUNTIME ||
+			    dstImageFormat == IMAGE_FORMAT_DXT5_RUNTIME ) )
+	{
+		return ConvertToDXTRuntime( src, srcImageFormat, dst, dstImageFormat, width, height );
 	}
 	else if ( ( srcImageFormat == IMAGE_FORMAT_ARGB8888 ) &&									 				// RGBA source and
 			  ( dstImageFormat == IMAGE_FORMAT_ATI1N    || dstImageFormat == IMAGE_FORMAT_ATI2N ) )				// ATI compressed dest
@@ -1509,7 +1554,9 @@ bool ConvertImageFormat( const uint8 *src, ImageFormat srcImageFormat,
 		if( ( srcImageFormat == dstImageFormat ) || 
 			((srcImageFormat == IMAGE_FORMAT_BGRA8888) && (dstImageFormat == IMAGE_FORMAT_BGRX8888)) )
 		{
-			if ( IsX360() && ( srcStride == dstStride ) && ( width*srcPixelSize == srcStride ) )
+			// I have no idea why this isn't true on all platforms but I didn't want to mess with stuff
+			if ( ( IsGameConsole() || (srcImageFormat == IMAGE_FORMAT_RGBA32323232F ) || ( srcImageFormat == IMAGE_FORMAT_RGBA8888 ) || ( srcImageFormat == IMAGE_FORMAT_BGRA8888 ) ) && 
+				 ( srcStride == dstStride ) && ( width*srcPixelSize == srcStride ) )
 			{
 				// fastest path
 				memcpy( dst, src, height*srcStride ); 
@@ -1524,9 +1571,16 @@ bool ConvertImageFormat( const uint8 *src, ImageFormat srcImageFormat,
 			}
 			return true;
 		}
+
+		// fast version of BGRA to RGBA
+		if ( ( srcImageFormat == IMAGE_FORMAT_BGRA8888 ) && ( dstImageFormat == IMAGE_FORMAT_RGBA8888 ) && ( srcStride == dstStride ) )
+		{
+			BGRA8888ToRGBA8888( src, dst, width * height );
+			return true;
+		}
 		
 		// format conversion
-		uint8 *lineBufRGBA8888 = (uint8 *)_alloca(width*4);
+		uint8 *lineBufRGBA8888 = (uint8 *)stackalloc(width*4);
 		
 		UserFormatToRGBA8888Func_t userFormatToRGBA8888Func;
 		RGBA8888ToUserFormatFunc_t RGBA8888ToUserFormatFunc;
@@ -1572,7 +1626,6 @@ void ConvertIA88ImageToNormalMapRGBA8888( const uint8 *src, int width,
 			cx = src[( t * width + ((s+1)%width) ) * 2];
 			cy = src[( ((t+1)%height) * width + s ) * 2];
 
-			/*
 			// \Z (out of screen)
 			//  \
 			//   \
@@ -1584,7 +1637,6 @@ void ConvertIA88ImageToNormalMapRGBA8888( const uint8 *src, int width,
 			//     |
 			//     |
 			//     Y
-			*/
 			
 			Vector xVect, yVect, normal;
 			xVect[0] = ooMaxDim;
@@ -1609,8 +1661,7 @@ void ConvertIA88ImageToNormalMapRGBA8888( const uint8 *src, int width,
 	}
 }
 
-void ConvertNormalMapRGBA8888ToDUDVMapUVWQ8888( const uint8 *src, int width, int height,
-										                     uint8 *dst_ )
+void ConvertNormalMapRGBA8888ToDUDVMapUVWQ8888( const uint8 *src, int width, int height, uint8 *dst_ )
 {
 	unsigned const char *lastPixel = src + width * height * 4;
 	char *dst = ( char * )dst_; // NOTE: this is signed!!!!
@@ -1624,8 +1675,7 @@ void ConvertNormalMapRGBA8888ToDUDVMapUVWQ8888( const uint8 *src, int width, int
 	}
 }
 
-void ConvertNormalMapRGBA8888ToDUDVMapUVLX8888( const uint8 *src, int width, int height,
-										                     uint8 *dst_ )
+void ConvertNormalMapRGBA8888ToDUDVMapUVLX8888( const uint8 *src, int width, int height, uint8 *dst_ )
 {
 	unsigned const char *lastPixel = src + width * height * 4;
 	char *dst = ( char * )dst_; // NOTE: this is signed!!!!
@@ -1639,6 +1689,13 @@ void ConvertNormalMapRGBA8888ToDUDVMapUVLX8888( const uint8 *src, int width, int
 		pUDst[2] = src[3];
 		pUDst[3] = 0xFF;
 	}
+}
+
+// Route to ATI compressor to convert normal map to DXT5 GA format
+void ConvertNormalMapARGB8888ToDXT5GA( const unsigned char *src, unsigned char *dst, int width, int height )
+{
+	// Use ATI compressor to convert to DXT5 GA normal map format
+	ConvertToATIxN( src, IMAGE_FORMAT_ARGB8888, dst, IMAGE_FORMAT_DXT5, width, height, 0, 0, true );
 }
 
 void ConvertNormalMapRGBA8888ToDUDVMapUV88( const uint8 *src, int width, int height,
@@ -1740,7 +1797,7 @@ bool FlipImageVertically( void *pSrc, void *pDst, int nWidth, int nHeight, Image
 	uint8 *pDstRow = (uint8*)pDst + ((nHeight-1) * nDstStride);
 	if ( pSrc == pDst )
 	{
-		uint8* pTemp = (uint8*)_alloca( nRowBytes );
+		uint8* pTemp = (uint8*)stackalloc( nRowBytes );
 		int nHalfHeight = nHeight >> 1;
 		for ( int i = 0; i < nHalfHeight; i++ )
 		{
@@ -1853,6 +1910,71 @@ bool SwapAxes( uint8 *src, int widthHeight, ImageFormat imageFormat )
 	}
 #undef SRC
 	return true;
+}
+
+void RGBA8888ToRGBA16161616F( const uint8 *src, uint8 *dst, int numPixels )
+{
+	float flOO255 = 1.0f / 255.0f;
+	float16 *pDest = (float16*)dst;
+	const uint8 *endSrc = src + numPixels * 4;
+	for ( ; src < endSrc; src += 4, pDest += 4 )
+	{
+		pDest[0].SetFloat( src[0] * flOO255 );
+		pDest[1].SetFloat( src[1] * flOO255 );
+		pDest[2].SetFloat( src[2] * flOO255 );
+		pDest[3].SetFloat( src[3] * flOO255 );
+	}
+}
+
+
+void RGBA8888ToRGBA32323232F( const uint8 *src, uint8 *dst, int numPixels )
+{
+	float flOO255 = 1.0f / 255.0f;
+	float32 *pDest = (float32*)dst;
+	const uint8 *endSrc = src + numPixels * 4;
+	for ( ; src < endSrc; src += 4, pDest += 4 )
+	{
+		pDest[0] = src[0] * flOO255;
+		pDest[1] = src[1] * flOO255;
+		pDest[2] = src[2] * flOO255;
+		pDest[3] = src[3] * flOO255;
+	}
+}
+
+void RGBA8888ToRGB323232F( const uint8 *src, uint8 *dst, int numPixels )
+{
+	float flOO255 = 1.0f / 255.0f;
+	float32 *pDest = (float32*)dst;
+	const uint8 *endSrc = src + numPixels * 4;
+	for ( ; src < endSrc; src += 4, pDest += 3 )
+	{
+		pDest[0] = src[0] * flOO255;
+		pDest[1] = src[1] * flOO255;
+		pDest[2] = src[2] * flOO255;
+	}
+}
+
+void RGBA8888ToRG3232F( const uint8 *src, uint8 *dst, int numPixels )
+{
+	float flOO255 = 1.0f / 255.0f;
+	float32 *pDest = (float32*)dst;
+	const uint8 *endSrc = src + numPixels * 4;
+	for ( ; src < endSrc; src += 4, pDest += 2 )
+	{
+		pDest[0] = src[0] * flOO255;
+		pDest[1] = src[1] * flOO255;
+	}
+}
+
+void RGBA8888ToR32F( const uint8 *src, uint8 *dst, int numPixels )
+{
+	float flOO255 = 1.0f / 255.0f;
+	float32 *pDest = (float32*)dst;
+	const uint8 *endSrc = src + numPixels * 4;
+	for ( ; src < endSrc; src += 4 )
+	{
+		*pDest++ = src[0] * flOO255;
+	}
 }
 
 void RGBA8888ToRGBA8888( const uint8 *src, uint8 *dst, int numPixels )
@@ -2360,10 +2482,10 @@ void RGBA16161616ToRGBA8888( const uint8 *src_, uint8 *dst, int numPixels )
 	unsigned short *pEndSrc = src + numPixels * 4;
 	for ( ; src < pEndSrc; src += 4, dst += 4 )
 	{
-		dst[0] = min( 255, src[0] >> 4 );
-		dst[1] = min( 255, src[1] >> 4 );
-		dst[2] = min( 255, src[2] >> 4 );
-		dst[3] = min( 255, src[3] >> 8 );
+		dst[0] = MIN( 255, src[0] >> 4 );
+		dst[1] = MIN( 255, src[1] >> 4 );
+		dst[2] = MIN( 255, src[2] >> 4 );
+		dst[3] = MIN( 255, src[3] >> 8 );
 	}
 }
 

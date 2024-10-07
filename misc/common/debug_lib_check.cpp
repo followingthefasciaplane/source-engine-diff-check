@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//======= Copyright © 1996-2008, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: Add a specially formatted string to each debug library of the form 
 //          "%LIBNAME%.lib is built debug!". We can search for this string via

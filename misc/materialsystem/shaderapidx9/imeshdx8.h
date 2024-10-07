@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -32,19 +32,17 @@ public:
 	// Releases all dynamic vertex buffers
 	virtual void DestroyVertexBuffers() = 0;
 
-	// Flushes the dynamic mesh. Should be called when state changes
-	virtual void Flush() = 0;
-
 	// Discards the dynamic vertex and index buffer
 	virtual void DiscardVertexBuffers() = 0;
 
 	// Creates, destroys static meshes
-	virtual IMesh*	CreateStaticMesh( VertexFormat_t vertexFormat, const char *pTextureBudgetGroup, IMaterial *pMaterial = NULL ) = 0;
+	virtual IMesh*	CreateStaticMesh( VertexFormat_t vertexFormat, const char *pTextureBudgetGroup, IMaterial *pMaterial = NULL, VertexStreamSpec_t *pStreamSpec = NULL ) = 0;
 	virtual void	DestroyStaticMesh( IMesh* pMesh ) = 0;
 
 	// Gets at the dynamic mesh
 	virtual IMesh*	GetDynamicMesh( IMaterial* pMaterial, VertexFormat_t vertexFormat, int nHWSkinBoneCount, bool buffered = true,
 		IMesh* pVertexOverride = 0, IMesh* pIndexOverride = 0) = 0;
+
 
 // ------------ New Vertex/Index Buffer interface ----------------------------
 	// Do we need support for bForceTempMesh and bSoftwareVertexShader?
@@ -55,13 +53,14 @@ public:
 	virtual void DestroyIndexBuffer( IIndexBuffer * ) = 0;
 	// Do we need to specify the stream here in the case of locking multiple dynamic VBs on different streams?
 	virtual IVertexBuffer *GetDynamicVertexBuffer( int streamID, VertexFormat_t vertexFormat, bool bBuffered = true ) = 0;
-	virtual IIndexBuffer *GetDynamicIndexBuffer( MaterialIndexFormat_t fmt, bool bBuffered = true ) = 0;
+	virtual IIndexBuffer *GetDynamicIndexBuffer( ) = 0;
 	virtual void BindVertexBuffer( int streamID, IVertexBuffer *pVertexBuffer, int nOffsetInBytes, int nFirstVertex, int nVertexCount, VertexFormat_t fmt, int nRepetitions = 1 ) = 0;
 	virtual void BindIndexBuffer( IIndexBuffer *pIndexBuffer, int nOffsetInBytes ) = 0;
 	virtual void Draw( MaterialPrimitiveType_t primitiveType, int nFirstIndex, int nIndexCount ) = 0;
 // ------------ End ----------------------------
 	virtual VertexFormat_t GetCurrentVertexFormat( void ) const = 0;
-	virtual void RenderPassWithVertexAndIndexBuffers( void ) = 0;
+	virtual void RenderPassWithVertexAndIndexBuffers( const unsigned char *pInstanceCommandBuffer ) = 0;
+	virtual void DrawInstancedPrims( const unsigned char *pInstanceCommandBuffer ) = 0;
 
 	// Computes the vertex format
 	virtual VertexFormat_t ComputeVertexFormat( unsigned int flags, 
@@ -89,10 +88,23 @@ public:
 
 	virtual void ComputeVertexDescription( unsigned char* pBuffer, VertexFormat_t vertexFormat, MeshDesc_t& desc ) const = 0;
 
+	virtual int VertexFormatSize(  VertexFormat_t vertexFormat ) const = 0;
+
 	virtual IVertexBuffer *GetDynamicVertexBuffer( IMaterial *pMaterial, bool buffered = true ) = 0;
-	virtual IIndexBuffer *GetDynamicIndexBuffer( IMaterial *pMaterial, bool buffered = true ) = 0;
 
 	virtual void MarkUnusedVertexFields( unsigned int nFlags, int nTexCoordCount, bool *pUnusedTexCoords ) = 0;
+
+	virtual void DrawInstances( int nInstanceCount, const MeshInstanceData_t *pInstances ) = 0;
+
+#ifdef _GAMECONSOLE
+	virtual int GetDynamicIndexBufferAllocationCount() = 0;
+	virtual int GetDynamicIndexBufferIndicesLeft() = 0;
+
+	// Backdoor used by the queued context to directly use write-combined memory
+	virtual IMesh *GetExternalMesh( const ExternalMeshInfo_t& info ) = 0;
+	virtual void SetExternalMeshData( IMesh *pMesh, const ExternalMeshData_t &data ) = 0;
+	virtual IIndexBuffer *GetExternalIndexBuffer( int nIndexCount, uint16 *pIndexData ) = 0;
+#endif
 };
 
 #endif // IMESHDX8_H

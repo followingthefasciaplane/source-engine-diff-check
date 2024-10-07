@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -9,7 +9,9 @@
 
 //#include <stdafx.h>
 #include <stdlib.h>
+#ifndef _PS3
 #include <malloc.h>
+#endif
 #include "builddisp.h"
 #include "collisionutils.h"
 #include "tier1/strtools.h"
@@ -171,10 +173,6 @@ bool CalcBarycentricCooefs( Vector const &v0, Vector const &v1, Vector const &v2
 	return false;
 }
 
-// For some reason, the global optimizer screws up the recursion here.  disable the global optimizations to fix this.
-// IN VC++ 6.0
-#pragma optimize( "g", off )
-
 CCoreDispSurface::CCoreDispSurface()
 {
 	Init();
@@ -206,6 +204,13 @@ void CCoreDispSurface::Init( void )
 		}
 
 		m_Alphas[i] = 1.0f;
+
+		m_MultiBlends[ i ].Init( 0.0f, 0.0f, 0.0f, 0.0f );
+		m_AlphaBlends[ i ].Init( 0.0f, 0.0f, 0.0f, 0.0f );
+		for( int j = 0; j < MAX_MULTIBLEND_CHANNELS; j++ )
+		{
+			m_vBlendColors[ i ][ j ].Init( 1.0f, 1.0f, 1.0f );
+		}
 	}
 
 	m_PointStartIndex = -1;
@@ -235,7 +240,7 @@ void CCoreDispSurface::SetNeighborData( const CDispNeighbor edgeNeighbors[4], co
 
 //-----------------------------------------------------------------------------
 //-----------------------------------------------------------------------------
-void CCoreDispSurface::GeneratePointStartIndexFromMappingAxes( Vector const &sAxis_, Vector const &tAxis_ )
+void CCoreDispSurface::GeneratePointStartIndexFromMappingAxes( Vector const &sAxis, Vector const &tAxis )
 {
 	if( m_PointStartIndex != -1 )
 		return;
@@ -247,14 +252,14 @@ void CCoreDispSurface::GeneratePointStartIndexFromMappingAxes( Vector const &sAx
     //
     // project all points on to the v-axis first and find the minimum
     //
-	float minValue = DotProduct( tAxis_, m_Points[0] );
+	float minValue = DotProduct( tAxis, m_Points[0] );
     indices[numIndices] = 0;
     numIndices++;
 
 	int i;
     for( i = 1; i < m_PointCount; i++ )
     {
-		float value = DotProduct( tAxis_, m_Points[i] );
+		float value = DotProduct( tAxis, m_Points[i] );
 		float delta = ( value - minValue );
 		delta = FloatMakePositive( delta );
         if( delta < 0.1 )
@@ -273,12 +278,12 @@ void CCoreDispSurface::GeneratePointStartIndexFromMappingAxes( Vector const &sAx
     //
     // break ties with the u-axis projection
     //
-	minValue = DotProduct( sAxis_, m_Points[indices[0]] );
+	minValue = DotProduct( sAxis, m_Points[indices[0]] );
     offsetIndex = indices[0];
     
     for( i = 1; i < numIndices; i++ )
     {
-		float value = DotProduct( sAxis_, m_Points[indices[i]] );
+		float value = DotProduct( sAxis, m_Points[indices[i]] );
         if( ( value < minValue ) )
         {
             minValue = value;
@@ -367,10 +372,13 @@ int CCoreDispSurface::FindSurfPointStartIndex( void )
 //-----------------------------------------------------------------------------
 void CCoreDispSurface::AdjustSurfPointData( void )
 {
-	Vector tmpPoints[4];
-	Vector tmpNormals[4];
-	Vector2D tmpTexCoords[4];
-	float  tmpAlphas[4];
+	Vector		tmpPoints[4];
+	Vector		tmpNormals[4];
+	Vector2D	tmpTexCoords[4];
+	float		tmpAlphas[4];
+	Vector4D	tmpMultiBlend[ 4 ];
+	Vector4D	tmpAlphaBlend[ 4 ];
+	Vector		tmpBlendColor[ 4 ][ MAX_MULTIBLEND_CHANNELS ];
 
 	int i;
 	for( i = 0; i < QUAD_POINT_COUNT; i++ )
@@ -380,6 +388,12 @@ void CCoreDispSurface::AdjustSurfPointData( void )
 		Vector2DCopy( m_TexCoords[i], tmpTexCoords[i] );
 
 		tmpAlphas[i] = m_Alphas[i];
+		tmpMultiBlend[ i ] = m_MultiBlends[ i ];
+		tmpAlphaBlend[ i ] = m_AlphaBlends[ i ];
+		for( int j = 0; j < MAX_MULTIBLEND_CHANNELS; j++ )
+		{
+			tmpBlendColor[ i ][ j ] = m_vBlendColors[ i ][ j ];
+		}
 	}
 
 	for( i = 0; i < QUAD_POINT_COUNT; i++ )
@@ -388,7 +402,13 @@ void CCoreDispSurface::AdjustSurfPointData( void )
 		VectorCopy( tmpNormals[(i+m_PointStartIndex)%4], m_Normals[i] );
 		Vector2DCopy( tmpTexCoords[(i+m_PointStartIndex)%4], m_TexCoords[i] );
 
-		m_Alphas[i] = tmpAlphas[i];
+		m_Alphas[i] = tmpAlphas[i];	// is this correct?
+		m_MultiBlends[ i ] = tmpMultiBlend[ (i+m_PointStartIndex)%4 ];
+		m_AlphaBlends[ i ] = tmpAlphaBlend[ (i+m_PointStartIndex)%4 ];
+		for( int j = 0; j < MAX_MULTIBLEND_CHANNELS; j++ )
+		{
+			m_vBlendColors[ i ][ j ] = tmpBlendColor[ ( i + m_PointStartIndex ) % 4 ][ j ];
+		}
 	}
 }
 
@@ -749,8 +769,7 @@ void CCoreDispInfo::InitSurf( int parentIndex, Vector points[4], Vector normals[
 
 //-----------------------------------------------------------------------------
 //-----------------------------------------------------------------------------
-void CCoreDispInfo::InitDispInfo( int power, int minTess, float smoothingAngle,
-		                          float *alphas, Vector *dispVectorField,  float *dispDistances )
+void CCoreDispInfo::InitDispInfo( int power, int minTess, float smoothingAngle, float *alphas, Vector *dispVectorField,  float *dispDistances, int nFlags, const CDispMultiBlend *pvMultiBlends )
 {
 	Assert( power >= MIN_MAP_DISP_POWER && power <= MAX_MAP_DISP_POWER );
 
@@ -758,6 +777,8 @@ void CCoreDispInfo::InitDispInfo( int power, int minTess, float smoothingAngle,
 	// general displacement data
 	//
 	m_Power = power;
+
+	m_nFlags = nFlags;
 
 	if ( ( minTess & 0x80000000 ) != 0 )
 	{
@@ -799,6 +820,12 @@ void CCoreDispInfo::InitDispInfo( int power, int minTess, float smoothingAngle,
 		}
 
 		m_pVerts[i].m_Alpha = 0.0f;
+		m_pVerts[i].m_MultiBlend.Init( 0.0f, 0.0f, 0.0f, 0.0f );
+		m_pVerts[i].m_AlphaBlend.Init( 0.0f, 0.0f, 0.0f, 0.0f );
+		for( int j = 0; j < MAX_MULTIBLEND_CHANNELS; j++ )
+		{
+			m_pVerts[i].m_vBlendColors[ j ].Init( 1.0f, 1.0f, 1.0f );
+		}
 	}
 
 	for( i = 0; i < nIndexCount; i++ )
@@ -825,6 +852,23 @@ void CCoreDispInfo::InitDispInfo( int power, int minTess, float smoothingAngle,
 		}
 	}
 
+	if ( ( m_nFlags & DISP_INFO_FLAG_HAS_MULTIBLEND ) != 0 && pvMultiBlends != NULL )
+	{
+		for( i = 0; i < size; i++ )
+		{
+			m_pVerts[ i ].m_MultiBlend = pvMultiBlends[ i ].m_vMultiBlend;
+			m_pVerts[ i ].m_AlphaBlend = pvMultiBlends[ i ].m_vAlphaBlend;
+			for( int j = 0; j < MAX_MULTIBLEND_CHANNELS; j++ )
+			{
+				m_pVerts[ i ].m_vBlendColors[ j ] = pvMultiBlends[ i ].m_vMultiBlendColors[ j ]; 
+			}
+		}
+	}
+	else
+	{	// clear it just in case
+		m_nFlags &= ~DISP_INFO_FLAG_HAS_MULTIBLEND;
+	}
+
 	// Init triangle information.
 	int nTriCount = GetTriCount();
 	if ( nTriCount != 0 )
@@ -838,8 +882,7 @@ void CCoreDispInfo::InitDispInfo( int power, int minTess, float smoothingAngle,
 }
 
 
-void CCoreDispInfo::InitDispInfo( int power, int minTess, float smoothingAngle, const CDispVert *pVerts,
-								  const CDispTri *pTris )
+void CCoreDispInfo::InitDispInfo( int power, int minTess, float smoothingAngle, const CDispVert *pVerts, const CDispTri *pTris, int nFlags, const CDispMultiBlend *pvMultiBlends )
 {
 	Vector vectors[MAX_DISPVERTS];
 	float dists[MAX_DISPVERTS];
@@ -853,7 +896,7 @@ void CCoreDispInfo::InitDispInfo( int power, int minTess, float smoothingAngle, 
 		alphas[i] = pVerts[i].m_flAlpha;
 	}
 
-	InitDispInfo( power, minTess, smoothingAngle, alphas, vectors, dists );
+	InitDispInfo( power, minTess, smoothingAngle, alphas, vectors, dists, nFlags, pvMultiBlends );
 
 	int nTris = NUM_DISP_POWER_TRIS( power );
 	for ( int iTri = 0; iTri < nTris; ++iTri )
@@ -2210,9 +2253,6 @@ int GetNodeNeighborNodeFromNeighborSurf( int power, int index, int direction, in
 }
 
 
-
-// Turn the optimizer back on
-#pragma optimize( "", on )
 
 //-----------------------------------------------------------------------------
 //-----------------------------------------------------------------------------

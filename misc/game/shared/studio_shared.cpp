@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -31,9 +31,14 @@ const studiohdr_t *virtualgroup_t::GetStudioHdr( ) const
 }
 
 
-byte *studiohdr_t::GetAnimBlock( int iBlock ) const
+byte *studiohdr_t::GetAnimBlock( int iBlock, bool preloadIfMissing ) const
 {
-	return modelinfo->GetAnimBlock( this, iBlock );
+	return modelinfo->GetAnimBlock( this, iBlock, preloadIfMissing );
+}
+
+bool studiohdr_t::hasAnimBlockBeenPreloaded( int i ) const
+{
+	return modelinfo->HasAnimBlockBeenPreloaded( this, i );
 }
 
 int	studiohdr_t::GetAutoplayList( unsigned short **pOut ) const

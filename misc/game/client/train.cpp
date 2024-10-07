@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -27,13 +27,15 @@ class CHudTrain: public CHudElement, public vgui::Panel
 {
 	DECLARE_CLASS_SIMPLE( CHudTrain, vgui::Panel );
 public:
-	CHudTrain( const char *pElementName );
+	explicit CHudTrain( const char *pElementName );
 	void Init( void );
 	void VidInit( void );
 	bool ShouldDraw( void );
 	virtual void	ApplySchemeSettings( vgui::IScheme *scheme );
 	virtual void	Paint( void );
-	void MsgFunc_Train(bf_read &msg);
+	bool MsgFunc_Train(const CCSUsrMsg_Train &msg);
+
+	CUserMessageBinder m_UMCMsgTrain;
 
 private:
 	int m_iPos;
@@ -53,7 +55,7 @@ DECLARE_HUD_MESSAGE( CHudTrain, Train )
 CHudTrain::CHudTrain( const char *pElementName ) :
 	CHudElement( pElementName ), BaseClass( NULL, "HudTrain" )
 {
-	vgui::Panel *pParent = g_pClientMode->GetViewport();
+	vgui::Panel *pParent = GetClientMode()->GetViewport();
 	SetParent( pParent );
 	
 	SetHiddenBits( HIDEHUD_MISCSTATUS );
@@ -106,8 +108,9 @@ void CHudTrain::Paint()
 //-----------------------------------------------------------------------------
 // Purpose: 
 //-----------------------------------------------------------------------------
-void CHudTrain::MsgFunc_Train( bf_read &msg )
+bool CHudTrain::MsgFunc_Train( const CCSUsrMsg_Train &msg )
 {
 	// update Train data
-	m_iPos = msg.ReadByte();
+	m_iPos = msg.train();
+	return true;
 }

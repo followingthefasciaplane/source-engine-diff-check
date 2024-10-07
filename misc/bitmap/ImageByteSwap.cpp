@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//======= Copyright 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: Image Byte Swapping. Isolate routines to own module to allow librarian
 // to ignore xbox 360 dependenices in non-applicable win32 projects.
@@ -16,15 +16,14 @@
 #include "tier0/memdbgon.h"
 
 #if defined( _WIN32 ) && !defined( _X360 ) && !defined( NO_X360_XDK ) && !defined( DX_TO_GL_ABSTRACTION )
+#if defined( XDK_INSTALLED )
 // the x86 version of the 360 (used by win32 tools)
 // It would have been nice to use the 360 D3DFORMAT bit encodings, but the codes
 // are different for WIN32, and this routine is used by a WIN32 library to
 // manipulate 360 data, so there can be no reliance on WIN32 D3DFORMAT bits
-#pragma warning(push)
-#pragma warning(disable : 4458)  // warning C4530: C++ exception handler used, but unwind semantics are not enabled. Specify /EHsc (disabled due to std headers having exception syntax)
-#include "..\x360xdk\include\win32\vs2005\d3d9.h"
-#include "..\x360xdk\include\win32\vs2005\XGraphics.h"
-#pragma warning(pop)
+#include "d3d9.h"
+#include "XGraphics.h"
+#endif
 #endif
 
 namespace ImageLoader
@@ -83,18 +82,20 @@ namespace ImageLoader
 // as expected by the conversion process, which varies according to format,
 // input, and output.
 //-----------------------------------------------------------------------------
-	void PreConvertSwapImageData( unsigned char *pImageData, int nImageSize, ImageFormat imageFormat, int width, int stride )
+	void PreConvertSwapImageData( unsigned char *pImageData, int nImageSize, ImageFormat imageFormat, VtfConsoleFormatType_t targetConsole, int width, int stride )
 	{
-
 		Assert( IsFormatValidForConversion( imageFormat ) );
 
-#if !defined( DX_TO_GL_ABSTRACTION ) && !defined( NO_X360_XDK )
+#ifndef DX_TO_GL_ABSTRACTION
 		if ( IsPC() )
 		{
 			// running as a win32 tool, data is in expected order
 			// for conversion code
 			return;
 		}
+
+		// If licensees don't have the XDK installed they are not going to be able to do image conversion and shouldn't need to
+#if defined (XDK_INSTALLED)
 
 		// running on 360 and converting, input data must be x86 order
 		// swap to ensure conversion code gets valid data
@@ -126,18 +127,23 @@ namespace ImageLoader
 				pImageData += stride;
 			}
 		}
-#endif
+#endif // XDK_INSTALLED
+#endif // COMPILER_MSVC32
 	}
 
 //-----------------------------------------------------------------------------
 // Swaps image bytes for use on a big endian platform. This is used after the conversion
 // process to match the 360 d3dformats.
 //-----------------------------------------------------------------------------
-	void PostConvertSwapImageData( unsigned char *pImageData, int nImageSize, ImageFormat imageFormat, int width, int stride )
+	void PostConvertSwapImageData( unsigned char *pImageData, int nImageSize, ImageFormat imageFormat, VtfConsoleFormatType_t targetConsole, int width, int stride )
 	{
 		Assert( IsFormatValidForConversion( imageFormat ) );
 
-#if !defined( DX_TO_GL_ABSTRACTION ) && !defined( NO_X360_XDK )
+#ifndef DX_TO_GL_ABSTRACTION
+
+		// If licensees don't have the XDK installed they are not going to be able to do image conversion and shouldn't need to
+#if defined (XDK_INSTALLED)
+
 		// It would have been nice to use the 360 D3DFORMAT bit encodings, but the codes
 		// are different for win32, and this routine is used by a win32 library to
 		// manipulate 360 data, so there can be no reliance on D3DFORMAT bits
@@ -147,8 +153,9 @@ namespace ImageLoader
 			default:
 				return;
 
+			case IMAGE_FORMAT_RGBA16161616F:
 			case IMAGE_FORMAT_RGBA16161616:
-				if ( IsX360() )
+				if ( IsGameConsole() )
 				{
 					// running on 360 the conversion output is correct
 					return;
@@ -164,6 +171,10 @@ namespace ImageLoader
 			case IMAGE_FORMAT_UV88:
 			case IMAGE_FORMAT_ATI1N:
 			case IMAGE_FORMAT_ATI2N:
+				
+				// Don't endian swap compressed textures for PS3, but swap everything else just like Xbox360
+				if ( targetConsole == VTF_CONSOLE_PS3 )
+					return;
 				xEndian = XGENDIAN_8IN16;
 				break;
 
@@ -191,7 +202,9 @@ namespace ImageLoader
 				pImageData += stride;
 			}
 		}
-#endif
+#endif // XDK_INSTALLED
+
+#endif // COMPILER_MSVC32
 	}
 
 //-----------------------------------------------------------------------------
@@ -201,7 +214,10 @@ namespace ImageLoader
 	{
 		Assert( IsFormatValidForConversion( imageFormat ) );
 
-#if !defined( DX_TO_GL_ABSTRACTION ) && !defined( NO_X360_XDK )
+#ifndef DX_TO_GL_ABSTRACTION
+		// If licensees don't have the XDK installed they are not going to be able to do image conversion and shouldn't need to
+#if defined (XDK_INSTALLED)
+
 		XGENDIANTYPE xEndian;
 		switch ( imageFormat )
 		{
@@ -254,7 +270,8 @@ namespace ImageLoader
 				pImageData += stride;
 			}
 		}
-#endif
-	}
-	
+#endif // XDK_INSTALLED
+
+#endif // COMPILER_MSVC32
+	}	
 }

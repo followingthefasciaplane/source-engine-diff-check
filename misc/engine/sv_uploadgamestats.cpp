@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -20,27 +20,26 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
-//$ #include <uuid/uuid.h>
-typedef unsigned char uuid_t[16];
 #ifdef OSX
 #include <uuid/uuid.h>
-#else
-typedef unsigned char uuid_t[16];
 #endif
+#ifdef _PS3
+#include "basetypes.h"
+#include "ps3/ps3_core.h"
+#else
 #include <pwd.h>
 #define closesocket close
+#endif
 #include "quakedef.h" // build_number()
 #endif
 
 #include "net.h"
 #include "quakedef.h"
-#include "sv_uploadgamestats.h"
 #include "host.h"
 #include "host_phonehome.h"
 #include "mathlib/IceKey.H"
 #include "bitbuf.h"
 #include "tier0/icommandline.h"
-#include "tier0/vcrmode.h"
 #include "blockingudpsocket.h"
 #include "cserserverprotocol_engine.h"
 #include "utlbuffer.h"
@@ -56,10 +55,15 @@ typedef unsigned char uuid_t[16];
 #include "tier2/tier2.h"
 #include "server.h"
 #include "sv_steamauth.h"
-#include "host_state.h"
+#include "threadtools.h"
 
 #if defined( _X360 )
 #include "xbox/xbox_win32stubs.h"
+#endif
+
+#if defined( _PS3 )
+#include "ps3/ps3_win32stubs.h"
+#define closesocket socketclose
 #endif
 
 // memdbgon must be the last include file in a .cpp file!!!
@@ -273,30 +277,28 @@ public:
 
 	#define GAMESTATSUPLOADER_CONNECT_RETRY_TIME	1.0
 
-	CUploadGameStats() : m_bConnected(false), m_flNextConnectAttempt(0) {}
-
 	//-----------------------------------------------------------------------------
 	// Purpose: Initializes the connection to the CSER
 	//-----------------------------------------------------------------------------
 	void InitConnection( void )
 	{
-		AsyncUpload_Shutdown();
-
 		m_bConnected = false;
 		m_Adr.Clear();
 		m_Adr.SetType( NA_IP );
 		m_flNextConnectAttempt = 0;
+
 		// don't call UpdateConnection here, does bad things
 	}
 
 	void UpdateConnection( void )
 	{
-		if ( m_bConnected || HostState_IsShuttingDown() )
+#ifndef DEDICATED
+		if ( m_bConnected )
 			return;
 
 		// try getting client SteamUtils interface
 		ISteamUtils *pSteamUtils = NULL;
-#ifndef SWDS
+#if !defined( DEDICATED )
 		pSteamUtils = Steam3Client().SteamUtils();
 #endif
 		// if that fails, try the game server SteamUtils interface
@@ -316,16 +318,8 @@ public:
 
 		uint32 unIP = 0;
 		uint16 usPort = 0;
-#if !defined( NO_VCR )
-		if ( VCRGetMode() != VCR_Playback )
-#endif
-		{
-			pSteamUtils->GetCSERIPPort( &unIP, &usPort );
-		}
-#if !defined( NO_VCR )
-		VCRGenericValue( "a", &unIP, sizeof( unIP ) );	
-		VCRGenericValue( "b", &usPort, sizeof( usPort ) );	
-#endif	
+
+		pSteamUtils->GetCSERIPPort( &unIP, &usPort );
 
 		if ( unIP == 0 )
 		{
@@ -339,143 +333,9 @@ public:
 			m_Adr.SetType( NA_IP );
 			m_bConnected = true;
 		}
+#endif	// DEDICATED
 	}
-
 	virtual bool UploadGameStats( char const *mapname,
-		unsigned int blobversion, unsigned int blobsize, const void *pvBlobData )
-	{
-		AsyncUpload_QueueData( mapname, blobversion, blobsize, pvBlobData );
-		return true;
-		//return UploadGameStatsInternal( mapname, blobversion, blobsize, pvBlobData );
-	}
-
-	// If user has disabled stats tracking, do nothing
-	virtual bool IsGameStatsLoggingEnabled()
-	{
-		if ( CommandLine()->FindParm( "-nogamestats" ) )
-			return false;
-
-#ifdef SWDS
-		return true;
-#else
-		IRegistry *temp = InstanceRegistry( "Steam" );
-		Assert( temp );
-		// Check registry
-		int iDisable = temp->ReadInt( "DisableGameStats", 0 );
-		
-		ReleaseInstancedRegistry( temp );
-
-		if ( iDisable != 0 )
-		{
-			return false;
-		}
-
-		return true;
-#endif
-	}
-    
-	// Gets a non-personally identifiable unique ID for this steam user, used for tracking total gameplay time across
-	//  multiple stats sessions, but isn't trackable back to their Steam account or id.
-	// Buffer should be 16 bytes, ID will come back as a hexadecimal string version of a GUID
-	virtual void GetPseudoUniqueId( char *buf, size_t bufsize )
-	{
-		Q_memset( buf, 0, bufsize );
-
-#ifndef SWDS
-		IRegistry *temp = InstanceRegistry( "Steam" );
-		Assert( temp );
-		// Check registry
-		char const *uuid = temp->ReadString( "PseudoUUID", "" );
-		
-		if ( !uuid || !*uuid )
-		{
-			// Create a new one
-#ifdef WIN32
-			UUID newId;
-			UuidCreate( &newId );
-#elif defined(POSIX)
-			uuid_t newId;
-#ifdef OSX
-			uuid_generate( newId );
-#endif
-#else
-#error
-#endif
-			char hex[ 17 ];
-			Q_memset( hex, 0, sizeof( hex ) );
-			Q_binarytohex( (const byte *)&newId, sizeof( newId ), hex, sizeof( hex ) );
-
-			// If running at Valve, copy in the users name here
-			if ( Steam3Client().SteamUtils() && ( Steam3Client().SteamUser()->BLoggedOn() ) && 
-				( k_EUniverseBeta == Steam3Client().SteamUtils()->GetConnectedUniverse() ) )
-			{
-				bool bOk = true;
-				char username[ 64 ];
-#if defined( _WIN32 )
-				Q_memset( username, 0, sizeof( username ) );
-				DWORD length = sizeof( username ) - 1;
-				if ( !GetUserName( username, &length ) )
-				{
-					bOk = false;
-				}
-#else
-				struct passwd *pass = getpwuid( getuid() );
-				if ( pass )
-				{
-					Q_strncpy( username, pass->pw_name, sizeof( username ) );
-				}
-				else
-				{
-					bOk = false;
-				}
-				username[sizeof(username)-1] = '\0';
-#endif
-				if ( bOk )
-				{
-					int nBytesToCopy = min( (size_t)Q_strlen( username ), sizeof( hex ) - 1 );
-					// NOTE:  This doesn't copy the NULL terminator from username because we want the "random" bits after the name
-					Q_memcpy( hex, username, nBytesToCopy );					
-				}
-			}
-
-			temp->WriteString( "PseudoUUID", hex );
-
-			Q_strncpy( buf, hex, bufsize );
-		}
-		else
-		{
-			Q_strncpy( buf, uuid, bufsize );
-		}
-
-	    ReleaseInstancedRegistry( temp );
-#endif		
-
-		if ( ( buf[0] == 0 ) && sv.IsDedicated() )
-		{
-			// For Linux dedicated servers, where we won't get a unique ID: set the ID to "unknown" so we have something.  (If there's no ID,
-			// stats don't get sent.)  This will later get altered to be a hash of IP&port, but this gets called early before IP is determined
-			// so we can't make the hash now.
-			Q_strncpy( buf, "unknown", bufsize );
-		}
-	}
-
-	virtual bool IsCyberCafeUser( void )
-	{
-		// TODO: convert this to be aware of proper Steam3'ified cafes once we actually implement that
-		return false;
-	}
-
-	// Only works in single player
-	virtual bool IsHDREnabled( void )
-	{
-#if defined( SWDS ) || defined( _X360 )
-		return false;
-#else
-		return g_pMaterialSystemHardwareConfig->GetHDREnabled();
-#endif
-	}
-
-	bool UploadGameStatsInternal( char const *mapname,
 		unsigned int blobversion, unsigned int blobsize, const void *pvBlobData )
 	{
 		// Attempt connection, for backwards compatibility
@@ -508,6 +368,154 @@ public:
 
 		EGameStatsUploadStatus result = Win32UploadGameStatsBlocking( params );
 		return ( result == eGameStatsUploadSucceeded ) ? true : false;
+	}
+
+	// If user has disabled stats tracking, do nothing
+	virtual bool IsGameStatsLoggingEnabled()
+	{
+		if ( CommandLine()->FindParm( "-nogamestats" ) )
+			return false;
+
+#ifdef DEDICATED
+		return true;
+#else
+		IRegistry *temp = InstanceRegistry( "Steam" );
+		Assert( temp );
+		// Check registry
+		int iDisable = temp->ReadInt( "DisableGameStats", 0 );
+
+		ReleaseInstancedRegistry( temp );
+
+		if ( iDisable != 0 )
+		{
+			return false;
+		}
+
+		return true;
+#endif
+	}
+    
+	// Gets a non-personally identifiable unique ID for this steam user, used for tracking total gameplay time across
+	//  multiple stats sessions, but isn't trackable back to their Steam account or id.
+	// Buffer should be 16 bytes, ID will come back as a hexadecimal string version of a GUID
+	virtual void GetPseudoUniqueId( char *buf, size_t bufsize )
+	{
+		Q_memset( buf, 0, bufsize );
+		Q_strncpy( buf, "unknown", bufsize );
+#ifndef DEDICATED
+		// If running at Valve, copy in the users name here
+		if ( Steam3Client().SteamUtils() && ( Steam3Client().SteamUser()->BLoggedOn() ) && ( k_EUniverseBeta == Steam3Client().SteamUtils()->GetConnectedUniverse() ) )
+		{
+			bool bOk = true;
+			char username[ 64 ] = {0};
+
+#if defined( _WIN32 )
+			Q_memset( username, 0, sizeof( username ) );
+			DWORD length = sizeof( username ) - 1;
+			if ( !GetUserName( username, &length ) )
+			{
+				bOk = false;
+			}
+#elif defined( _GAMECONSOLE )
+			Q_strncpy( username, "console", sizeof( username ) );
+#else
+			struct passwd *pass = getpwuid( getuid() );
+			if ( pass )
+			{
+				Q_strncpy( username, pass->pw_name, sizeof( username ) );
+			}
+			else
+			{
+				bOk = false;
+			}
+#endif
+
+
+			// we have a valid user name (on Windows) or password (Not Windows)
+			if ( bOk )
+			{
+				username[sizeof(username)-1] = '\0';
+				Q_strncpy( buf, username, bufsize );
+			}
+			else
+			{
+				// For Linux dedicated servers, where we won't get a unique ID: set the ID to "unknown" so we have something.  (If there's no ID,
+				// stats don't get sent.)  This will later get altered to be a hash of IP&port, but this gets called early before IP is determined
+				// so we can't make the hash now.
+				Q_strncpy( buf, "unknown", bufsize );
+			}
+
+		}
+		// customer so generate pseudo name
+		else
+		{
+			IRegistry *temp = InstanceRegistry( "Steam" );
+			Assert( temp );
+			// Check registry
+			char const *uuid = temp->ReadString( "PseudoUUID", "" );
+
+			if ( !uuid || !*uuid )
+			{
+				// Create a new one
+#ifdef WIN32
+				UUID newId;
+				UuidCreate( &newId );
+#elif defined(OSX)
+				uuid_t newId;
+				uuid_generate( newId );
+#else
+				char newId[32] = {0};	// TODO: add platform-specific UUID generation
+#endif
+				char hex[ 17 ];
+				Q_memset( hex, 0, sizeof( hex ) );
+				Q_binarytohex( (const byte *)&newId, sizeof( newId ), hex, sizeof( hex ) );
+
+
+				temp->WriteString( "PseudoUUID", hex );
+
+				Q_strncpy( buf, hex, bufsize );
+			}
+			else
+			{
+				Q_strncpy( buf, uuid, bufsize );
+			}
+
+			ReleaseInstancedRegistry( temp );
+			if ( ( buf[0] == 0 ) && sv.IsDedicated() )
+			{
+				// For Linux dedicated servers, where we won't get a unique ID: set the ID to "unknown" so we have something.  (If there's no ID,
+				// stats don't get sent.)  This will later get altered to be a hash of IP&port, but this gets called early before IP is determined
+				// so we can't make the hash now.
+				Q_strncpy( buf, "unknown", bufsize );
+			}
+		}
+
+
+#endif		
+
+		if ( ( buf[0] == 0 ) && sv.IsDedicated() )
+		{
+			// For Linux dedicated servers, where we won't get a unique ID: set the ID to "unknown" so we have something.  (If there's no ID,
+			// stats don't get sent.)  This will later get altered to be a hash of IP&port, but this gets called early before IP is determined
+			// so we can't make the hash now.
+			Q_strncpy( buf, "unknown", bufsize );
+		}
+	}
+
+	virtual bool IsCyberCafeUser( void )
+	{
+		// TODO: convert this to be aware of proper Steam3'ified cafes once we actually implement that
+		return false;
+	}
+
+	// Only works in single player
+	virtual bool IsHDREnabled( void )
+	{
+#if defined( DEDICATED ) || defined( _X360 )
+		return false;
+#else
+		return g_pMaterialSystemHardwareConfig->GetHDREnabled();
+#endif
 	}
 private:
 	netadr_t	m_Adr;
@@ -945,6 +953,9 @@ EGameStatsUploadStatus Win32UploadGameStatsBlocking
 	const TGameStatsParameters & rGameStatsParameters
 )
 {
+#ifdef _PS3
+	return eGameStatsUploadFailed;
+#else
 	EGameStatsUploadStatus status = eGameStatsUploadSucceeded;
 
 	CUtlBuffer buf( rGameStatsParameters.m_uStatsBlobSize + 4096 );
@@ -1059,22 +1070,31 @@ EGameStatsUploadStatus Win32UploadGameStatsBlocking
 	}
 
 	return status;
+#endif
 }
+
+
 //////////////////////////////////////////////////////////////////////////
 //
 // Implementation of async uploading
 //
 
+#ifdef IS_WINDOWS_PC
+
 class CAsyncUploaderThread
 {
 public:
 	CAsyncUploaderThread()
-		: m_hThread( NULL ), m_bRunning( false ), m_eventQueue(false), m_eventInitShutdown(false) {}
-
-	ThreadHandle_t m_hThread;
+		: m_hThread( NULL ) {}
+	~CAsyncUploaderThread()
+	{
+		if ( m_hThread )
+			ReleaseThreadHandle( m_hThread );
+	}
 
 protected:
-	
+	ThreadHandle_t m_hThread;
+	CThreadFastMutex m_mtx;
 	struct DataEntry
 	{
 		char const *szMapName;
@@ -1085,26 +1105,21 @@ protected:
 		DataEntry *AllocCopy() const;
 		void Free() { delete [] ( (char*)this ); }
 	};
-
-	CThreadEvent m_eventQueue;
-	CThreadEvent m_eventInitShutdown;
-	CThreadFastMutex m_mtx;
 	CUtlVector< DataEntry * > m_queue;
-	bool m_bRunning;
-	
-	void ThreadProc();
-	
+
 	enum {
-		SLEEP_ENTRY_UPLOADED	= 10 * 1000
+		SLEEP_QUEUE_EMPTY		= 60 * 1000,
+		SLEEP_RETRY_UPLOAD		= 10 * 1000,
+		SLEEP_ENTRY_UPLOADED	= 10 * 1000,
 	};
 
 public:
-	static unsigned CallbackThreadProc( void *pvParam ) { ((CAsyncUploaderThread*) pvParam)->ThreadProc(); return 0; }
+	static uintp CallbackThreadProc( void *pvParam ) { reinterpret_cast< CAsyncUploaderThread * >( pvParam )->ThreadProc(); return 0; }
+	void ThreadProc();
 	void QueueData( char const *szMapName, uint uiBlobVersion, uint uiBlobSize, const void *pvBlob );
-	void TerminateAndSelfDelete();
 };
 
-static CAsyncUploaderThread *g_pAsyncUploader = NULL;
+static CAsyncUploaderThread g_AsyncUploader;
 
 CAsyncUploaderThread::DataEntry * CAsyncUploaderThread::DataEntry::AllocCopy() const
 {
@@ -1136,65 +1151,29 @@ void CAsyncUploaderThread::QueueData( char const *szMapName, uint uiBlobVersion,
 {
 	// DevMsg( 3, "AsyncUploaderThread: Queue [%.*s]\n", uiBlobSize, pvBlob );
 
-	if ( !m_hThread )
-	{
-		// Start the thread and wait for it to be running.
-		// There is a slightly complicated two-event negotiation:
-		// ThreadProc signals eventInitShutdown then waits on eventQueue
-		Assert( m_bRunning == false );
-		m_hThread = CreateSimpleThread( CallbackThreadProc, this );
-		m_eventInitShutdown.Wait();
-		Assert( m_bRunning == true );
-		// At this point, both events are unsignaled and the thread
-		// is in its main loop.
-	}
-
 	// Prepare for a DataEntry
 	DataEntry de = { szMapName, uiBlobVersion, uiBlobSize, pvBlob };
 	if ( DataEntry *pNew = de.AllocCopy() )
 	{
+		AUTO_LOCK( m_mtx );
+		m_queue.AddToTail( pNew );
+
+		if ( !m_hThread )
 		{
-			AUTO_LOCK( m_mtx );
-			m_queue.AddToTail( pNew );
+			m_hThread = CreateSimpleThread( CallbackThreadProc, this );
 		}
-		m_eventQueue.Set();
-	}
-}
-
-void CAsyncUploaderThread::TerminateAndSelfDelete()
-{
-	ThreadHandle_t hThread = m_hThread;
-	if ( hThread )
-	{
-		m_bRunning = false;
-		m_eventQueue.Set();
-		m_eventInitShutdown.Set(); // MUST BE LAST MEMBER ACCESS, other thread may now delete this
-
-		// Wait for a while for upload to finish, but don't wait forever
-		ThreadJoin( hThread, 10 * 1000 );
-		ReleaseThreadHandle( hThread );
-	}
-	else
-	{
-		delete this;
 	}
 }
 
 void CAsyncUploaderThread::ThreadProc()
 {
-	bool bQueueDrained = true;
-	bool bGotShutdownEvent = false;
-
-	m_bRunning = true;
-	m_eventInitShutdown.Set();
-
-	while ( m_bRunning )
+#ifdef _GAMECONSOLE
+	Assert( !"This is illegal on console" );
+	DebuggerBreak();
+#endif
+	for ( ; ; )
 	{
-		if ( bQueueDrained )
-		{
-			m_eventQueue.Wait();
-		}
-
+		// Fetch an item from queue
 		DataEntry *pUpload = NULL;
 		{
 			AUTO_LOCK( m_mtx );
@@ -1203,51 +1182,39 @@ void CAsyncUploaderThread::ThreadProc()
 				pUpload = m_queue[0];
 				m_queue.Remove( 0 );
 			}
-			bQueueDrained = ( m_queue.Count() == 0 );
 		}
 
-		if ( m_bRunning && pUpload )
+		// If queue is empty, then sleep
+		if ( !pUpload )
 		{
-			// DevMsg( 3, "AsyncUploaderThread: Uploading [%.*s]\n", pUpload->uiBlobSize, pUpload->pvBlob );
-
-			// Attempt to upload the data until successful
-			bool bSuccess = g_UploadGameStats.UploadGameStatsInternal( pUpload->szMapName, pUpload->uiBlobVersion, pUpload->uiBlobSize, pUpload->pvBlob );
-			bSuccess;
-
-			pUpload->Free();
-
-			// After the data entry got uploaded, grab the next one
-			// DevMsg( 3, "AsyncUploaderThread: Upload finished (status=%d) for data [%.*s]\n", bSuccess, pUpload->uiBlobSize, pUpload->pvBlob );
-			
-			// Using an event as an interruptable sleep; signaled if m_bRunning is cleared
-			bGotShutdownEvent |= m_eventInitShutdown.Wait( SLEEP_ENTRY_UPLOADED );
+			ThreadSleep( SLEEP_QUEUE_EMPTY );
+			continue;
 		}
-	}
 
-	Assert( !m_bRunning );
+		// DevMsg( 3, "AsyncUploaderThread: Uploading [%.*s]\n", pUpload->uiBlobSize, pUpload->pvBlob );
 
-	// Deletes self at end of execution!
-	if ( !bGotShutdownEvent )
-	{
-		m_eventInitShutdown.Wait();
+		// Attempt to upload the data until successful
+		bool bSuccess = g_pUploadGameStats->UploadGameStats( pUpload->szMapName, pUpload->uiBlobVersion, pUpload->uiBlobSize, pUpload->pvBlob );
+		bSuccess;
+
+		// After the data entry got uploaded, grab the next one
+		// DevMsg( 3, "AsyncUploaderThread: Upload finished (status=%d) for data [%.*s]\n", bSuccess, pUpload->uiBlobSize, pUpload->pvBlob );
+		ThreadSleep( SLEEP_ENTRY_UPLOADED );
+		pUpload->Free();
 	}
-	delete this;
 }
 
 void AsyncUpload_QueueData( char const *szMapName, uint uiBlobVersion, uint uiBlobSize, const void *pvBlob )
 {
-	if ( !g_pAsyncUploader )
-	{
-		g_pAsyncUploader = new CAsyncUploaderThread;
-	}
-	g_pAsyncUploader->QueueData( szMapName, uiBlobVersion, uiBlobSize, pvBlob );
+	g_AsyncUploader.QueueData( szMapName, uiBlobVersion, uiBlobSize, pvBlob );
 }
 
-void AsyncUpload_Shutdown()
+#else
+
+void AsyncUpload_QueueData( char const *szMapName, uint uiBlobVersion, uint uiBlobSize, const void *pvBlob )
 {
-	if ( g_pAsyncUploader )
-	{
-		g_pAsyncUploader->TerminateAndSelfDelete();
-		g_pAsyncUploader = NULL;
-	}
+	// -- nothing -- g_AsyncUploader.QueueData( szMapName, uiBlobVersion, uiBlobSize, pvBlob );
 }
+
+#endif
+

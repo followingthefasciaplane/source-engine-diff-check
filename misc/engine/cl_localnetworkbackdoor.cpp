@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -35,7 +35,7 @@ void CL_SetupLocalNetworkBackDoor( bool bUseBackDoor )
 			// stop using localbackdooor mode
 			g_pLocalNetworkBackdoor->StopBackdoorMode();
 			g_pLocalNetworkBackdoor = NULL;
-			cl.ForceFullUpdate(); // clear baselines, request full packet update
+			GetBaseLocalClient().ForceFullUpdate( "cl_localnetworkbackdoor state change" ); // clear baselines, request full packet update
 		}
 	}
 }

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -95,9 +95,9 @@ void CVertexBufferBase::PrintVertexFormat( VertexFormat_t vertexFormat )
 	{
 		// FIXME: genericise this stuff using VertexElement_t data tables (so funcs like 'just work' if we make compression changes)
 		if ( compression == VERTEX_COMPRESSION_ON )
-			Msg( "VERTEX_NORMAL|" );
-		else
 			Msg( "VERTEX_NORMAL[COMPRESSED]|" );
+		else
+			Msg( "VERTEX_NORMAL|" );
 	}
 	if( vertexFormat & VERTEX_COLOR )
 	{
@@ -118,10 +118,6 @@ void CVertexBufferBase::PrintVertexFormat( VertexFormat_t vertexFormat )
 	if( vertexFormat & VERTEX_BONE_INDEX )
 	{
 		Msg( "VERTEX_BONE_INDEX|" );
-	}
-	if( vertexFormat & VERTEX_FORMAT_VERTEX_SHADER )
-	{
-		Msg( "VERTEX_FORMAT_VERTEX_SHADER|" );
 	}
 	if( NumBoneWeights( vertexFormat ) > 0 )
 	{
@@ -151,7 +147,7 @@ void CVertexBufferBase::PrintVertexFormat( VertexFormat_t vertexFormat )
 void CVertexBufferBase::ComputeVertexDescription( unsigned char *pBuffer, 
 	VertexFormat_t vertexFormat, VertexDesc_t &desc )
 {
-	ComputeVertexDesc( pBuffer, vertexFormat, desc );
+	ComputeVertexDesc< false >( pBuffer, vertexFormat, desc );
 }
 
 
@@ -160,10 +156,8 @@ void CVertexBufferBase::ComputeVertexDescription( unsigned char *pBuffer,
 //-----------------------------------------------------------------------------
 int CVertexBufferBase::VertexFormatSize( VertexFormat_t vertexFormat )
 {
-	// FIXME: We could make this much faster
-	MeshDesc_t temp;
-	ComputeVertexDescription( 0, vertexFormat, temp );
-	return temp.m_ActualVertexSize;
+	VertexDesc_t desc;
+	return ComputeVertexDesc< true >( NULL, vertexFormat, desc );
 }
 
 

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -106,7 +106,7 @@ void CDevShotGenerator::NextMap()
 	{
 		//Msg("DEVSHOTS: Switching to %s (%d).\n", m_Maps[m_iCurrentMap].name, m_iCurrentMap );
 		CFmtStr str("map %s\n", m_Maps[m_iCurrentMap].name);
-		Cbuf_AddText( str.Access() );
+		Cbuf_AddText( Cbuf_GetCurrentPlayer(), str.Access() );
 
 		++m_iCurrentMap;
 	}
@@ -115,7 +115,7 @@ void CDevShotGenerator::NextMap()
 		//Msg("DEVSHOTS: Finished on map %d.\n", m_iCurrentMap);
 
 		// no more levels, just quit
-		Cbuf_AddText( "quit\n" );
+		Cbuf_AddText( Cbuf_GetCurrentPlayer(), "quit\n" );
 	}
 }
 
@@ -136,7 +136,7 @@ void CDevShotGenerator::StartDevShotGeneration()
 	BuildMapList();
 
 	CFmtStr str("map %s\n", m_Maps[m_iCurrentMap].name);
-	Cbuf_AddText( str.Access() );
+	Cbuf_AddText( Cbuf_GetCurrentPlayer(), str.Access() );
 	++m_iCurrentMap;
 }
 

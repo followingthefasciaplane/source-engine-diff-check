@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright � 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -26,6 +26,7 @@ template<typename T>
 class CDispVector : public CUtlVector<T, CUtlMemoryAligned<T,16> >
 {
 };
+#define HUNK_ALLOC_CREDIT_( _x_ )
 #endif
 
 FORWARD_DECLARE_HANDLE( memhandle_t );
@@ -77,7 +78,7 @@ class CDispCollTri
 public:
 	unsigned short		m_ucSignBits:3;			// Plane test.
 	unsigned short		m_ucPlaneType:3;		// Axial test?
-	unsigned short		m_uiFlags:5;			// Uses 5-bits - maybe look into merging it with something?
+	unsigned short		m_uiFlags:7;			// Uses 7-bits - maybe look into merging it with something?
 
 	Vector				m_vecNormal;			// Triangle normal (plane normal).
 	float				m_flDist;				// Triangle plane dist.
@@ -186,6 +187,9 @@ public:
 	inline void SetFlags( int nFlags )								{ m_nFlags = nFlags; }
 	inline bool CheckFlags( int nFlags )							{ return ( ( nFlags & GetFlags() ) != 0 ) ? true : false; }
 
+	inline int	GetTexinfoFlags( void )								{ return m_nTexinfoFlags; }
+	inline void SetTexinfoFlags( int nFlags )						{ m_nTexinfoFlags = nFlags; }
+
 	inline int GetWidth( void )										{ return ( ( 1 << m_nPower ) + 1 ); }
 	inline int GetHeight( void )									{ return ( ( 1 << m_nPower ) + 1 ); }
 	inline int GetSize( void )										{ return ( ( 1 << m_nPower ) + 1 ) * ( ( 1 << m_nPower ) + 1 ); }
@@ -197,7 +201,7 @@ public:
 
 	inline void GetBounds( Vector &vecBoxMin, Vector &vecBoxMax )	{ vecBoxMin = m_mins; vecBoxMax = m_maxs; }
 	inline int GetContents( void )									{ return m_nContents; }
-	inline void SetSurfaceProps( int iProp, short nSurfProp )		{ Assert( ( iProp >= 0 ) && ( iProp < 2 ) ); m_nSurfaceProps[iProp] = nSurfProp; }
+	inline void SetSurfaceProps( int iProp, short nSurfProp )		{ Assert( ( iProp >= 0 ) && ( iProp < 4 ) ); m_nSurfaceProps[iProp] = nSurfProp; }
 	inline short GetSurfaceProps( int iProp )						{ return m_nSurfaceProps[iProp]; }
 
 	inline unsigned int GetMemorySize( void )						{ return m_nSize; }
@@ -313,12 +317,13 @@ protected:
 #endif
 
 	int								m_nPower;								// Size of the displacement ( 2^power + 1 )
-	int								m_nFlags;
+	uint16							m_nFlags;
+	uint16							m_nTexinfoFlags;
 
 	Vector							m_vecSurfPoints[4];						// Base surface points.
 	// Collision data.
 	Vector							m_vecStabDir;							// Direction to stab for this displacement surface (is the base face normal)
-	short							m_nSurfaceProps[2];						// Surface properties (save off from texdata for impact responses)
+	short							m_nSurfaceProps[4];						// Surface properties (save off from texdata for impact responses)
 
 protected:
 	CDispVector<Vector>				m_aVerts;								// Displacement verts.

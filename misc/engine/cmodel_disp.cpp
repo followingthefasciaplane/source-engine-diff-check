@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -16,6 +16,7 @@
 #include "tier0/fasttimer.h"
 #include "vphysics_interface.h"
 #include "vphysics/virtualmesh.h"
+#include "zone.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -27,8 +28,8 @@ class CVirtualTerrain;
 
 //csurface_t dispSurf = { "terrain", 0, 0 };
 
-void CM_PreStab( TraceInfo_t *pTraceInfo, cleaf_t *pLeaf, Vector &vStabDir, int collisionMask, int &contents );
-void CM_Stab( TraceInfo_t *pTraceInfo, Vector const &start, Vector const &vStabDir, int contents );
+void CM_PreStab( TraceInfo_t *pTraceInfo, const unsigned short *pDispList, int dispListCount, Vector &vStabDir, int collisionMask, int &contents );
+void CM_Stab( TraceInfo_t *pTraceInfo, const Vector &start, const Vector &vStabDir, int contents );
 void CM_PostStab( TraceInfo_t *pTraceInfo );
 
 //-----------------------------------------------------------------------------
@@ -37,8 +38,16 @@ static void SetDispTraceSurfaceProps( trace_t *pTrace, CDispCollTree *pDisp )
 {
 	// use the default surface properties
 	pTrace->surface.name = "**displacement**";
-	pTrace->surface.flags = 0;
-	if ( pTrace->IsDispSurfaceProp2() )
+	pTrace->surface.flags = pDisp->GetTexinfoFlags();
+	if ( pTrace->IsDispSurfaceProp4() )
+	{
+		pTrace->surface.surfaceProps = pDisp->GetSurfaceProps( 3 );
+	}
+	else if ( pTrace->IsDispSurfaceProp3() )
+	{
+		pTrace->surface.surfaceProps = pDisp->GetSurfaceProps( 2 );
+	}
+	else if ( pTrace->IsDispSurfaceProp2() )
 	{
 		pTrace->surface.surfaceProps = pDisp->GetSurfaceProps( 1 );
 	}
@@ -202,7 +211,8 @@ void CM_DispTreeLeafnum( CCollisionBSPData *pBSPData )
 		leafBuilder.BuildLeafListForDisplacement( i );
 	}
 	int count = leafBuilder.GetDispListCount();
-	pBSPData->map_dispList.Attach( count, (unsigned short*)Hunk_Alloc( sizeof(unsigned short) * count, false ) );
+	pBSPData->map_dispList.Attach( count, (unsigned short*)Hunk_AllocName( sizeof(unsigned short) * count, "CM_DispTreeLeafnum", false ) );
+	pBSPData->numdisplist = count;
 	leafBuilder.WriteLeafList( pBSPData->map_dispList.Base() );
 }
 
@@ -228,7 +238,7 @@ public:
 	// Fill out the meshlist for this terrain patch
 	virtual void GetVirtualMesh( void *userData, virtualmeshlist_t *pList )
 	{
-		int index = (int)userData;
+		int index = size_cast< int >( (intp) userData );
 		Assert(index >= 0 && index < g_DispCollTreeCount );
 		g_pDispCollTrees[index].GetVirtualMeshList( pList );
 		pList->pHull = NULL;
@@ -243,14 +253,14 @@ public:
 	// returns the bounds for the terrain patch
 	virtual void GetWorldspaceBounds( void *userData, Vector *pMins, Vector *pMaxs )
 	{
-		int index = (int)userData;
+		int index = size_cast< int >( (intp) userData );
 		*pMins = g_pDispBounds[index].mins;
 		*pMaxs = g_pDispBounds[index].maxs;
 	}
 	// Query against the AABB tree to find the list of triangles for this patch in a sphere
 	virtual void GetTrianglesInSphere( void *userData, const Vector &center, float radius, virtualmeshtrianglelist_t *pList )
 	{
-		int index = (int)userData;
+		int index = size_cast< int > ( (intp) userData );
 		pList->triangleCount = g_pDispCollTrees[index].AABBTree_GetTrisInSphere( center, radius, pList->triangleIndices, ARRAYSIZE(pList->triangleIndices) );
 	}
 	void LevelInit( dphysdisp_t *pLump, int lumpSize )
@@ -329,7 +339,7 @@ void CM_CreateDispPhysCollide( dphysdisp_t *pDispLump, int dispLumpSize )
 		}
 		virtualmeshparams_t params;
 		params.pMeshEventHandler = &g_VirtualTerrain;
-		params.userData = (void *)i;
+		params.userData = (void *) (intp ) i;
 		params.buildOuterHull = dispLumpSize > 0 ? false : true;
 
 		g_TerrainList[i] = physcollision->CreateVirtualMesh( params );
@@ -350,7 +360,7 @@ void CM_DestroyDispPhysCollide()
 //-----------------------------------------------------------------------------
 // New Collision!
 //-----------------------------------------------------------------------------
-void CM_TestInDispTree( TraceInfo_t *pTraceInfo, cleaf_t *pLeaf, const Vector &traceStart,
+void CM_TestInDispTree( TraceInfo_t *pTraceInfo, const unsigned short *pDispList, int dispListCount, const Vector &traceStart,
 					   const Vector &boxMin, const Vector &boxMax, int collisionMask, trace_t *pTrace )
 {
 	bool bIsBox = ( ( boxMin.x != 0.0f ) || ( boxMin.y != 0.0f ) || ( boxMin.z != 0.0f ) ||
@@ -366,9 +376,9 @@ void CM_TestInDispTree( TraceInfo_t *pTraceInfo, cleaf_t *pLeaf, const Vector &t
 		// Test box against all displacements in the leaf.
 		TraceCounter_t *pCounters = pTraceInfo->GetDispCounters();
 		int count = pTraceInfo->GetCount();
-		for( int i = 0; i < pLeaf->dispCount; i++ )
+		for( int i = 0; i < dispListCount; i++ )
 		{
-			int dispIndex = pTraceInfo->m_pBSPData->map_dispList[pLeaf->dispListStart + i];
+			int dispIndex = pDispList[i];
 			alignedbbox_t * RESTRICT pDispBounds = &g_pDispBounds[dispIndex];
 
 			// Respect trace contents
@@ -399,7 +409,7 @@ void CM_TestInDispTree( TraceInfo_t *pTraceInfo, cleaf_t *pLeaf, const Vector &t
 	//
 	Vector stabDir;
 	int    contents;
-	CM_PreStab( pTraceInfo, pLeaf, stabDir, collisionMask, contents );
+	CM_PreStab( pTraceInfo, pDispList, dispListCount, stabDir, collisionMask, contents );
 	CM_Stab( pTraceInfo, traceStart, stabDir, contents );
 	CM_PostStab( pTraceInfo );
 }
@@ -408,14 +418,14 @@ void CM_TestInDispTree( TraceInfo_t *pTraceInfo, cleaf_t *pLeaf, const Vector &t
 //-----------------------------------------------------------------------------
 // New Collision!
 //-----------------------------------------------------------------------------
-void CM_PreStab( TraceInfo_t *pTraceInfo, cleaf_t *pLeaf, Vector &vStabDir, int collisionMask, int &contents )
+void CM_PreStab( TraceInfo_t *pTraceInfo, const unsigned short *pDispList, int dispListCount, Vector &vStabDir, int collisionMask, int &contents )
 {
-	if( !pLeaf->dispCount )
+	if( !dispListCount )
 		return;
 
 	// if the point wasn't in the bounded area of any of the displacements -- stab in any
 	// direction and set contents to "solid"
-	int dispIndex = pTraceInfo->m_pBSPData->map_dispList[pLeaf->dispListStart];
+	int dispIndex = pDispList[0];
 	CDispCollTree *pDispTree = &g_pDispCollTrees[dispIndex];
 	pDispTree->GetStabDirection( vStabDir );
 	contents = CONTENTS_SOLID;
@@ -424,9 +434,9 @@ void CM_PreStab( TraceInfo_t *pTraceInfo, cleaf_t *pLeaf, Vector &vStabDir, int 
 	// if the point is inside a displacement's (in the leaf) bounded area
 	// then get the direction to stab from it
 	//
-	for( int i = 0; i < pLeaf->dispCount; i++ )
+	for( int i = 0; i < dispListCount; i++ )
 	{
-		dispIndex = pTraceInfo->m_pBSPData->map_dispList[pLeaf->dispListStart + i];
+		int dispIndex = pDispList[i];
 		pDispTree = &g_pDispCollTrees[dispIndex];
 
 		// Respect trace contents

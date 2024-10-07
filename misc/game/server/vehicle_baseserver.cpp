@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -13,7 +13,7 @@
 #include "soundenvelope.h"
 #include "SoundEmitterSystem/isoundemittersystembase.h"
 #include "saverestore_utlvector.h"
-#include "KeyValues.h"
+#include "keyvalues.h"
 #include "studio.h"
 #include "bone_setup.h"
 #include "collisionutils.h"
@@ -437,6 +437,44 @@ const PassengerSeatAnims_t *CBaseServerVehicle::NPC_GetPassengerSeatAnims( CBase
 	return NULL;
 }
 
+void CBaseServerVehicle::SetPassengerWeapon( bool bUseWeapon, CBaseCombatCharacter *pPassenger )
+{
+	CBasePlayer *pPlayer = ToBasePlayer( pPassenger );
+	if ( pPlayer == NULL )
+	{
+		return;
+	}
+
+	if ( pPassenger != NULL && pPassenger->IsPlayer() == false )
+	{
+		Assert( 0 );
+		return;
+	}
+
+	CBaseCombatWeapon *pWeapon = pPlayer->GetActiveWeapon();
+	if ( pWeapon == NULL )
+	{
+		Assert( 0 );
+		return;
+	}
+
+	if ( bUseWeapon )
+	{
+		pPlayer->ShowCrosshair( true );
+		pWeapon->Deploy();		
+#if defined ( PORTAL2 )
+		int iSeq = pWeapon->LookupSequence( "end_draw" );
+		Assert( iSeq >= 0 );
+		pWeapon->SendViewModelAnim( iSeq );
+#endif
+	}
+	else
+	{
+		pWeapon->Holster( NULL );
+		pPlayer->ShowCrosshair( false );
+	}
+}
+
 //-----------------------------------------------------------------------------
 // Purpose: Get and set the current driver. Use PassengerRole_t enum in shareddefs.h for adding passengers
 //-----------------------------------------------------------------------------
@@ -460,7 +498,10 @@ void CBaseServerVehicle::SetPassenger( int nRole, CBaseCombatCharacter *pPasseng
 		{
 			m_savedViewOffset = pPlayer->GetViewOffset();
 			pPlayer->SetViewOffset( vec3_origin );
-			pPlayer->ShowCrosshair( false );
+			if ( IsPassengerUsingStandardWeapons( nRole ) == false )
+			{
+				pPlayer->ShowCrosshair( false );
+			}
 
 			GetDrivableVehicle()->EnterVehicle( pPassenger );
 
@@ -489,7 +530,10 @@ void CBaseServerVehicle::SetPassenger( int nRole, CBaseCombatCharacter *pPasseng
 		{
 			// Restore the exiting player's view offset			
 			pPlayer->SetViewOffset( m_savedViewOffset );
-			pPlayer->ShowCrosshair( true );
+			if ( IsPassengerUsingStandardWeapons( nRole ) == false )
+			{
+				pPlayer->ShowCrosshair( true );
+			}
 		}
 
 		GetDrivableVehicle()->ExitVehicle( nRole );
@@ -653,7 +697,7 @@ void CBaseServerVehicle::ParseExitAnim( KeyValues *pkvExitList, bool bEscapeExit
 		int iIndex = m_ExitAnimations.AddToTail();
 		Q_strncpy( m_ExitAnimations[iIndex].szAnimName, pkvExitAnim->GetName(), sizeof(m_ExitAnimations[iIndex].szAnimName) );
 		m_ExitAnimations[iIndex].bEscapeExit = bEscapeExit;
-		if ( !Q_strncmp( pkvExitAnim->GetString(), "upsidedown", 10 ) )
+		if ( StringHasPrefixCaseSensitive( pkvExitAnim->GetString(), "upsidedown" ) )
 		{
 			m_ExitAnimations[iIndex].bUpright = false;
 		}
@@ -2593,7 +2637,7 @@ vehiclesound g_iSoundsToStopOnExit[] =
 	VS_ENGINE2_STOP,
 };
 
-const char *vehiclesound_parsenames[VS_NUM_SOUNDS] =
+char *vehiclesound_parsenames[VS_NUM_SOUNDS] =
 {
 	"skid_lowfriction",
 	"skid_normalfriction",

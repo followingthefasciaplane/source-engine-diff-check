@@ -1,6 +1,6 @@
 // NextBotManager.cpp
 // Author: Michael Booth, May 2006
-//========= Copyright Valve Corporation, All rights reserved. ============//
+// Copyright (c) 2006 Turtle Rock Studios, Inc. - All Rights Reserved
 
 #include "cbase.h"
 
@@ -35,19 +35,10 @@ ConVar nb_update_debug( "nb_update_debug", "0", FCVAR_CHEAT );
  */
 NextBotManager &TheNextBots( void )
 {
-	if ( NextBotManager::GetInstance() )
-	{
-		return *NextBotManager::GetInstance();
-	}
-	else
-	{
-		static NextBotManager manager;
-		NextBotManager::SetInstance( &manager );
-		return manager;
-	}
+	static NextBotManager manager;
+	return manager;
 }
 
-NextBotManager* NextBotManager::sInstance = NULL;
 
 //---------------------------------------------------------------------------------------------
 //---------------------------------------------------------------------------------------------
@@ -523,6 +514,86 @@ void NextBotManager::UnRegister( INextBot *bot )
 }
 
 
+//---------------------------------------------------------------------------------------------
+#ifdef TERROR
+extern ConVar ZombieNoticeItRange;
+
+class NextBotAttackTheIT
+{
+public:
+	NextBotAttackTheIT( CTerrorPlayer *victim, float range )
+	{
+		m_victim = victim;
+		m_chaseCount = 0;
+		m_range = range;
+	}
+
+	bool operator() ( INextBot *bot )
+	{
+		if ( bot->GetEntity()->GetTeamNumber() == TEAM_ZOMBIE && bot->GetEntity()->IsAlive() )
+		{
+			if ( ( bot->GetPosition() - m_victim->GetAbsOrigin() ).IsLengthLessThan( m_range ) )
+			{
+				// IT does not aggro Witches
+				Witch *witch = dynamic_cast< Witch * >( bot );
+				if ( !witch )
+				{
+					// close enough to smell the blood - attack the "it"!
+					bot->OnCommandAttack( m_victim );
+
+					++m_chaseCount;
+				}
+			}
+		}
+
+		return true;
+	}
+
+	CTerrorPlayer *m_victim;
+	int m_chaseCount;
+	float m_range;
+};
+
+
+//---------------------------------------------------------------------------------------------
+/**
+ * When a Survivor has been hit by Boomer Vomit
+ */
+void NextBotManager::OnSurvivorVomitedUpon( CTerrorPlayer *victim )
+{
+	NextBotAttackTheIT attackIT( victim, ZombieNoticeItRange.GetFloat() );
+	ForEachBot( attackIT );
+	
+	// make sure a mob chases the IT victim
+	int desiredCount = ZombieMobMaxSize.GetFloat();
+
+	UTIL_LogPrintf( "(MOB) %d wanderers grabbed for an IT mob of desired size %d.\n", attackIT.m_chaseCount, desiredCount );
+
+	if ( attackIT.m_chaseCount < desiredCount )
+	{
+		// fill out the IT mob a bit
+		TheZombieManager->SpawnITMob( desiredCount - attackIT.m_chaseCount );
+	}
+
+	// either via wanderers or an explicit mob, there was a rush
+	TheDirector->OnMobRushStart();
+}
+
+
+//---------------------------------------------------------------------------------------------
+CON_COMMAND_F( nb_rush, "Causes all infected to rush the survivors.", FCVAR_CHEAT )
+{
+	CTerrorPlayer *victim = TheDirector->GetRandomSurvivor();
+	if ( !victim )
+		return;
+
+	const float RushRange = 10000.0f;  // everyone, not just bots in IT range.
+	NextBotAttackTheIT attackIT( victim, RushRange );
+	TheNextBots().ForEachBot( attackIT );
+}
+#endif // TERROR
+
+
 //--------------------------------------------------------------------------------------------------------
 void NextBotManager::OnBeginChangeLevel( void )
 {
@@ -874,19 +945,3 @@ CON_COMMAND( nb_dump_debug_history, "Dumps debug history for the bot under the c
 	}
 }
 #endif // NEED_BLACK_BOX
-
-
-//---------------------------------------------------------------------------------------------
-void NextBotManager::CollectAllBots( CUtlVector< INextBot * > *botVector )
-{
-	if ( !botVector )
-		return;
-
-	botVector->RemoveAll();
-
-	for( int i=m_botList.Head(); i != m_botList.InvalidIndex(); i = m_botList.Next( i ) )
-	{
-		botVector->AddToTail( m_botList[i] );
-	}
-}
-

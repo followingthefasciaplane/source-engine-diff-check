@@ -1,7 +1,7 @@
 // NextBotIntentionInterface.cpp
 // Interface for intentional thinking
 // Author: Michael Booth, November 2007
-//========= Copyright Valve Corporation, All rights reserved. ============//
+// Copyright (c) 2007 Turtle Rock Studios, Inc. - All Rights Reserved
 
 #include "cbase.h"
 
@@ -48,18 +48,6 @@ Vector IIntention::SelectTargetPoint( const INextBot *me, const CBaseCombatChara
  */
 const CKnownEntity *IIntention::SelectMoreDangerousThreat( const INextBot *me, const CBaseCombatCharacter *subject, const CKnownEntity *threat1, const CKnownEntity *threat2 ) const
 {
-	if ( !threat1 || threat1->IsObsolete() )
-	{
-		if ( threat2 && !threat2->IsObsolete() )
-			return threat2;
-
-		return NULL;
-	}
-	else if ( !threat2 || threat2->IsObsolete() )
-	{
-		return threat1;
-	}
-
 	for ( INextBotEventResponder *sub = FirstContainedResponder(); sub; sub = NextContainedResponder( sub ) )
 	{
 		const IContextualQuery *query = dynamic_cast< const IContextualQuery * >( sub );

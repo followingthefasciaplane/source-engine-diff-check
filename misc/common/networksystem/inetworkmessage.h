@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: INetworkMessage interface
 //
@@ -46,7 +46,7 @@ public:
 	virtual void	SetReliable( bool state ) = 0;	// set to true if it's a reliable message
 		
 	virtual	bool	ReadFromBuffer( bf_read &buffer ) = 0; // returns true if parsing was OK
-	virtual	bool	WriteToBuffer( bf_write &buffer ) = 0;	// returns true if writing was OK
+	virtual	bool	WriteToBuffer( bf_write &buffer ) const = 0;	// returns true if writing was OK
 		
 	virtual bool	IsReliable( void ) const = 0;  // true, if message needs reliable handling
 	
@@ -70,7 +70,7 @@ protected:
 #define DECLARE_BASE_MESSAGE( group, msgtype, description )		\
 	public:														\
 		virtual bool			ReadFromBuffer( bf_read &buffer );	\
-		virtual bool			WriteToBuffer( bf_write &buffer );	\
+		virtual bool			WriteToBuffer( bf_write &buffer ) const;	\
 		virtual const char		*ToString() const { return description; } \
 		virtual int				GetGroup() const { return group; } \
 		virtual const char		*GetGroupName( void ) const { return #group; } \

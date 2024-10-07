@@ -13,19 +13,13 @@ $Configuration
 {
 	$Compiler
 	{
-		$AdditionalIncludeDirectories		"$BASE;$SRCDIR\game\shared\cstrike\control,.\cstrike,.\cstrike\control,.\cstrike\VGUI,$SRCDIR\game\shared\cstrike"
-		$PreprocessorDefinitions			"$BASE;CSTRIKE_DLL;NEXT_BOT"
+		$AdditionalIncludeDirectories		"$BASE;$SRCDIR\game\shared\cstrike\control,.\cstrike,.\cstrike\control,.\cstrike\vgui,$SRCDIR\game\shared\cstrike"
+		$PreprocessorDefinitions			"$BASE;CSTRIKE_DLL"
 	}
 }
 
 $Project "Client (CStrike)"
 {
-	$Folder "Replay"
-	{
-		$File	"cstrike\cs_replay.cpp"
-		$File	"cstrike\cs_replay.h"
-	}
-	
 	$Folder	"Source Files"
 	{
 		-$File	"$SRCDIR\game\shared\weapon_parse_default.cpp"
@@ -39,21 +33,18 @@ $Project "Client (CStrike)"
 		$File	"hud_voicestatus.cpp"
 		$File	"hud_baseachievement_tracker.cpp"
 		$File	"hud_baseachievement_tracker.h"
-		$File	"$SRCDIR\game\client\hud_vote.h"
-		$File	"$SRCDIR\game\client\hud_vote.cpp"
 		$File	"$SRCDIR\game\shared\predicted_viewmodel.cpp"
 		$File	"$SRCDIR\game\shared\predicted_viewmodel.h"
-		
+
 		$Folder	"CounterStrike DLL"
 		{
 			$File	"$SRCDIR\game\shared\cstrike\cs_achievement_constants.h"
 			$File	"$SRCDIR\game\shared\cstrike\cs_achievementdefs.h"
-			$File   "$SRCDIR\game\shared\cs_achievements_and_stats_interface.cpp"
-			$File   "$SRCDIR\game\shared\cs_achievements_and_stats_interface.h"
+			$File	"$SRCDIR\game\shared\cs_achievements_and_stats_interface.cpp"
+			$File	"$SRCDIR\game\shared\cs_achievements_and_stats_interface.h"
 			$File	"$SRCDIR\game\shared\cstrike\achievements_cs.cpp"
 			$File	"$SRCDIR\game\shared\cstrike\achievements_cs.h"
 			$File	"$SRCDIR\game\shared\cstrike\basecsgrenade_projectile.cpp"
-			$File	"$SRCDIR\game\shared\cstrike\basecsgrenade_projectile.h"
 			$File	"cstrike\buy_presets\buy_preset.cpp"
 			$File	"cstrike\buy_presets\buy_preset_debug.cpp"
 			$File	"cstrike\buy_presets\buy_preset_debug.h"
@@ -83,8 +74,6 @@ $Project "Client (CStrike)"
 			$File	"$SRCDIR\game\shared\cstrike\cs_gamerules.h"
 			$File	"$SRCDIR\game\shared\cstrike\cs_gamestats_shared.cpp"
 			$File	"$SRCDIR\game\shared\cstrike\cs_gamestats_shared.h"
-			$File	"$SRCDIR\game\shared\steamworks_gamestats.cpp"
-			$File	"$SRCDIR\game\shared\steamworks_gamestats.h"			
 			$File	"cstrike\cs_in_main.cpp"
 			$File	"$SRCDIR\game\shared\cstrike\cs_player_shared.cpp"
 			$File	"$SRCDIR\game\shared\cstrike\cs_playeranimstate.cpp"
@@ -99,12 +88,10 @@ $Project "Client (CStrike)"
 			$File	"$SRCDIR\game\shared\cstrike\cs_weapon_parse.cpp"
 			$File	"$SRCDIR\game\shared\cstrike\cs_weapon_parse.h"
 			$File	"cstrike\fx_cs_blood.cpp"
-			$File	"cstrike\fx_cs_blood.h"
 			$File	"cstrike\fx_cs_impacts.cpp"
 			$File	"cstrike\fx_cs_knifeslash.cpp"
 			$File	"cstrike\fx_cs_muzzleflash.cpp"
 			$File	"$SRCDIR\game\shared\cstrike\fx_cs_shared.cpp"
-			$File	"$SRCDIR\game\shared\cstrike\fx_cs_shared.h"
 			$File	"cstrike\fx_cs_weaponfx.cpp"
 			$File	"$SRCDIR\game\shared\cstrike\bot\shared_util.cpp"
 			$File	"$SRCDIR\game\shared\cstrike\bot\shared_util.h"
@@ -133,7 +120,6 @@ $Project "Client (CStrike)"
 				$File	"cstrike\hud_hostagerescue.cpp"
 				$File	"cstrike\hud_progressbar.cpp"
 				$File	"cstrike\hud_radar.cpp"
-				$File	"cstrike\hud_radar.h"
 				$File	"cstrike\hud_roundtimer.cpp"
 				$File	"cstrike\hud_scenarioicon.cpp"
 				$File	"cstrike\hud_shopping_cart.cpp"
@@ -162,12 +148,10 @@ $Project "Client (CStrike)"
 				$File	"$SRCDIR\game\shared\cstrike\weapon_famas.cpp"
 				$File	"$SRCDIR\game\shared\cstrike\weapon_fiveseven.cpp"
 				$File	"$SRCDIR\game\shared\cstrike\weapon_flashbang.cpp"
-				$File	"$SRCDIR\game\shared\cstrike\weapon_flashbang.h"
 				$File	"$SRCDIR\game\shared\cstrike\weapon_g3sg1.cpp"
 				$File	"$SRCDIR\game\shared\cstrike\weapon_galil.cpp"
 				$File	"$SRCDIR\game\shared\cstrike\weapon_glock.cpp"
 				$File	"$SRCDIR\game\shared\cstrike\weapon_hegrenade.cpp"
-				$File	"$SRCDIR\game\shared\cstrike\weapon_hegrenade.h"
 				$File	"$SRCDIR\game\shared\cstrike\weapon_knife.cpp"
 				$File	"$SRCDIR\game\shared\cstrike\weapon_knife.h"
 				$File	"$SRCDIR\game\shared\cstrike\weapon_m249.cpp"
@@ -209,15 +193,15 @@ $Project "Client (CStrike)"
 				$File	"cstrike\VGUI\backgroundpanel.cpp"
 				$File	"cstrike\VGUI\backgroundpanel.h"
 				$File	"cstrike\VGUI\buymouseoverpanelbutton.h"
-				$File	"cstrike\VGUI\buypreset_imageinfo.cpp"
-				$File	"cstrike\VGUI\buypreset_listbox.cpp"
-				$File	"cstrike\VGUI\buypreset_listbox.h"
-				$File	"cstrike\VGUI\buypreset_panel.cpp"
-				$File	"cstrike\VGUI\buypreset_weaponsetlabel.h"
-				$File	"cstrike\VGUI\career_box.cpp"
-				$File	"cstrike\VGUI\career_box.h"
-				$File	"cstrike\VGUI\career_button.cpp"
-				$File	"cstrike\VGUI\career_button.h"
+				$File	"cstrike\Vgui\buypreset_imageinfo.cpp"
+				$File	"cstrike\Vgui\buypreset_listbox.cpp"
+				$File	"cstrike\Vgui\buypreset_listbox.h"
+				$File	"cstrike\Vgui\buypreset_panel.cpp"
+				$File	"cstrike\Vgui\buypreset_weaponsetlabel.h"
+				$File	"cstrike\Vgui\career_box.cpp"
+				$File	"cstrike\Vgui\career_box.h"
+				$File	"cstrike\Vgui\career_button.cpp"
+				$File	"cstrike\Vgui\career_button.h"
 				$File	"cstrike\VGUI\counterstrikeviewport.cpp"
 				$File	"cstrike\VGUI\counterstrikeviewport.h"
 				$File	"cstrike\VGUI\cstrikebuyequipmenu.cpp"
@@ -240,12 +224,6 @@ $Project "Client (CStrike)"
 				$File	"cstrike\VGUI\win_panel_round.cpp"
 				$File	"cstrike\VGUI\win_panel_round.h"
 			}
-
-			$Folder	"NextBot"
-			{
-				$File	"NextBot\C_NextBot.cpp"
-				$File	"NextBot\C_NextBot.h"
-			}
 		}
 
 		$Folder	"game_controls"
@@ -266,10 +244,4 @@ $Project "Client (CStrike)"
 			$File	"game_controls\classmenu.h"
 		}
 	}
-
-	$Folder	"Link Libraries" 
-	{
-		$Lib vtf
-	}
-
 }

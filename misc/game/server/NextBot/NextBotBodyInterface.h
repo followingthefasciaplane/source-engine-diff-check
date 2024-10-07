@@ -1,7 +1,7 @@
 // NextBotBodyInterface.h
 // Control and information about the bot's body state (posture, animation state, etc)
 // Author: Michael Booth, April 2006
-//========= Copyright Valve Corporation, All rights reserved. ============//
+// Copyright (c) 2006 Turtle Rock Studios, Inc. - All Rights Reserved
 
 #ifndef _NEXT_BOT_BODY_INTERFACE_H_
 #define _NEXT_BOT_BODY_INTERFACE_H_
@@ -60,8 +60,6 @@ public:
 	virtual bool IsHeadSteady( void ) const;						// return true if head is not rapidly turning to look somewhere else
 	virtual float GetHeadSteadyDuration( void ) const;				// return the duration that the bot's head has not been rotating
 	virtual float GetHeadAimSubjectLeadTime( void ) const;			// return how far into the future we should predict our moving subject's position to aim at when tracking subject look-ats
-	virtual float GetHeadAimTrackingInterval( void ) const;			// return how often we should sample our target's position and velocity to update our aim tracking, to allow realistic slop in tracking
-	virtual void ClearPendingAimReply( void ) { }					// clear out currently pending replyWhenAimed callback
 
 	virtual float GetMaxHeadAngularVelocity( void ) const;			// return max turn rate of head in degrees/second
 
@@ -127,7 +125,6 @@ public:
 	virtual const Vector &GetHullMaxs( void ) const;					// return current collision hull maximums based on actual body posture
 
 	virtual unsigned int GetSolidMask( void ) const;					// return the bot's collision mask (hack until we get a general hull trace abstraction here or in the locomotion interface)
-	virtual unsigned int GetCollisionGroup( void ) const;
 };
 
 
@@ -146,14 +143,9 @@ inline float IBody::GetHeadAimSubjectLeadTime( void ) const
 	return 0.0f;
 }
 
-inline float IBody::GetHeadAimTrackingInterval( void ) const
-{
-	return 0.0f;
-}
-
 inline float IBody::GetMaxHeadAngularVelocity( void ) const
 {
-	return 1000.0f;
+	return 100.0f;
 }
 
 inline bool IBody::StartActivity( Activity act, unsigned int flags )
@@ -314,12 +306,6 @@ inline unsigned int IBody::GetSolidMask( void ) const
 {
 	return MASK_NPCSOLID;
 }
-
-inline unsigned int IBody::GetCollisionGroup( void ) const
-{
-	return COLLISION_GROUP_NONE;
-}
-
 
 
 #endif // _NEXT_BOT_BODY_INTERFACE_H_

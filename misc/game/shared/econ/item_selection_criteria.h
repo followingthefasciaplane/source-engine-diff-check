@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright ©, Valve Corporation, All rights reserved. =======
 //
 // Purpose: CItemSelectionCriteria, which serves as a criteria for selection
 //			of a econ item
@@ -10,6 +10,8 @@
 #ifdef _WIN32
 #pragma once
 #endif
+
+#include "game_item_schema.h"
 
 // Maximum string length in item create APIs
 const int k_cchCreateItemLen	= 64;	
@@ -43,8 +45,12 @@ const char *PchNameFromEItemCriteriaOperator( int eItemCriteriaOperator );
 
 class CEconItemSchema;
 class CEconItemDefinition;
+class CEconItem;
 class CSOItemCriteria;
 class CSOItemCriteriaCondition;
+
+const uint8	 k_unItemRarity_Any = 0xF;
+const uint8	 k_unItemQuality_Any = 0xF;
 
 //-----------------------------------------------------------------------------
 //-----------------------------------------------------------------------------
@@ -64,10 +70,14 @@ public:
 		  m_unItemLevel( 0 ),
 		  m_bQualitySet( false ),
 		  m_nItemQuality( k_unItemQuality_Any ), 
+		  m_bRaritySet( false ),
+		  m_nItemRarity( k_unItemRarity_Any ), 
 		  m_unInitialInventory( 0 ),
-		  m_bInitialQuantitySet( false ),
 		  m_unInitialQuantity( 1 ),
-		  m_bIgnoreEnabledFlag( false )
+		  m_bForcedQualityMatch( false ),
+		  m_bIgnoreEnabledFlag( false ),
+		  m_bRecentOnly( false ),
+		  m_bIsLootList( false )
 	  { 
 	  }
 
@@ -82,41 +92,27 @@ public:
 	  bool			BQualitySet( void ) const					{ return m_bQualitySet; }
 	  int32			GetQuality( void ) const					{ Assert( m_bQualitySet ); return m_nItemQuality; }
 	  void			SetQuality( int32 nQuality )				{ m_nItemQuality = nQuality; m_bQualitySet = true; }
+	  bool			BRaritySet( void ) const					{ return m_bRaritySet; }
+	  int32			GetRarity( void ) const						{ Assert( m_bRaritySet ); return m_nItemRarity; }
+	  void			SetRarity( int32 nRarity )					{ m_nItemRarity = nRarity; m_bRaritySet = true; }
 	  uint32		GetInitialInventory( void ) const			{ return m_unInitialInventory; }
 	  void			SetInitialInventory( uint32 unInventory )	{ m_unInitialInventory = unInventory; }
-	  bool			BInitialQuantitySet( void ) const			{ return m_bQualitySet; }
-	  uint32		GetInitialQuantity( void ) const			{ Assert( m_bQualitySet ); return m_unInitialQuantity; }
-	  void			SetInitialQuantity( uint32 unQuantity )		{ m_unInitialQuantity = unQuantity; m_bInitialQuantitySet = true; }
+	  uint32		GetInitialQuantity( void ) const			{ return m_unInitialQuantity; }
+	  void			SetInitialQuantity( uint32 unQuantity )		{ m_unInitialQuantity = unQuantity; }
+	  void			SetExplicitQualityMatch( bool bExplicit )	{ m_bForcedQualityMatch = bExplicit; }
 	  void			SetIgnoreEnabledFlag( bool bIgnore )		{ m_bIgnoreEnabledFlag = bIgnore; }
-
-	  // Tags
-	  void			SetTags( const char *pszTags );
-
+	  void			SetRecentOnly( bool bCheck )				{ m_bRecentOnly = bCheck; }
+	  bool			IsLootList( void ) const					{ return m_bIsLootList; }
 
 	  // Add conditions to the criteria
-	  class ICondition
-	  {
-		public:
-			virtual ~ICondition() { }
-
-			virtual bool BItemDefinitionPassesCriteria( const CEconItemDefinition *pItemDef ) const = 0;
-
-			virtual EItemCriteriaOperator GetEOp() const { return k_EItemCriteriaOperator_Count; }
-			virtual const char *GetField() const { return ""; }
-			virtual const char *GetValue() const { return ""; }
-
-			virtual bool BSerializeToMsg( CSOItemCriteriaCondition & msg ) const { Assert( !"BSerializeToMsg() called on for unimplementing ICondition!" ); return false; }
-	  };
-
 	  bool			BAddCondition( const char *pszField, EItemCriteriaOperator eOp, float flValue, bool bRequired );
 	  bool			BAddCondition( const char *pszField, EItemCriteriaOperator eOp, const char * pszValue, bool bRequired );
-	  bool			BAddCondition( ICondition *pCondition );
 	  int			GetConditionsCount() { return m_vecConditions.Count(); }
-	  const char	*GetValueForFirstConditionOfType( EItemCriteriaOperator eType ) const;
-	  const char	*GetFieldForFirstConditionOfType( EItemCriteriaOperator eType ) const;
+	  const char	*GetValueForFirstConditionOfFieldName( const char *pchName ) const;
 
 	  // Alternate ways of initializing
-	  bool			BInitFromKV( KeyValues *pKVCriteria );
+	  bool			BInitFromKV( KeyValues *pKVCriteria, const CEconItemSchema &schemaa );
+	  bool			BInitFromItemAndPaint( int nItemDef, int nPaintID, const CEconItemSchema &schemaa );
 
 	  // Serializes the criteria to and from messages
 	  bool			BSerializeToMsg( CSOItemCriteria & msg ) const;
@@ -124,19 +120,15 @@ public:
 
 	  // Evaluates an item definition against this criteria. Returns true if 
 	  // the definition passes the filter
-	  bool			BEvaluate( const CEconItemDefinition* pItemDef ) const;
-
-	  // Validation
-#ifdef DBGFLAG_VALIDATE
-	  void Validate( CValidator &validator, const char *pchName );
-#endif
+	  bool			BEvaluate( const CEconItemDefinition* pItemDef, const CEconItemSchema &pschema ) const;
+	  bool			BEvaluate( const CEconItem *pItem, const CEconItemSchema &pschema ) const;
 
 private:
 	//-----------------------------------------------------------------------------
 	// CItemSelectionCriteria::CCondition
 	// Represents one condition of the criteria
 	//-----------------------------------------------------------------------------
-	class CCondition : public ICondition
+	class CCondition
 	{
 	public:
 		CCondition( const char *pszField, EItemCriteriaOperator eOp, bool bRequired )
@@ -144,25 +136,18 @@ private:
 		{
 		}
 
-		// ICondition interface.
-		virtual bool BItemDefinitionPassesCriteria( const CEconItemDefinition *pItemDef ) const OVERRIDE;
+		virtual ~CCondition( ) { }
+
+		// Returns if the given KeyValues block passes this condition 
+		// Performs common checks and calls BInternalEvaluate
+		bool BEvaluate( KeyValues *pKVItem ) const;
 
 		// Serializes the condition to the message
 		virtual bool BSerializeToMsg( CSOItemCriteriaCondition & msg ) const;
 
-		// Validation
-#ifdef DBGFLAG_VALIDATE
-		virtual void Validate( CValidator &validator, const char *pchName );
-#endif
-
-		EItemCriteriaOperator	GetEOp( void ) const OVERRIDE { return m_EOp; }
-		virtual	const char		*GetField( void ) const OVERRIDE  { return m_sField.Get(); }
-		virtual	const char		*GetValue( void ) const OVERRIDE  { Assert(0); return NULL; }
-
-	private:
-		// Returns if the given KeyValues block passes this condition 
-		// Performs common checks and calls BInternalEvaluate
-		bool BEvaluate( KeyValues *pKVItem ) const;
+		EItemCriteriaOperator	GetEOp( void ) const { return m_EOp; }
+		virtual	const char		*GetField( void ) { return m_sField.Get(); }
+		virtual	const char		*GetValue( void ) { Assert(0); return NULL; }
 
 	protected:
 		// Returns true if applying the element's operator on m_sField of
@@ -192,12 +177,7 @@ private:
 
 		virtual ~CStringCondition( ) { }
 
-		virtual	const char		*GetValue( void ) const OVERRIDE { return m_sValue.Get(); }
-
-		// Validation
-#ifdef DBGFLAG_VALIDATE
-		virtual void Validate( CValidator &validator, const char *pchName );
-#endif
+		virtual	const char		*GetValue( void ) { return m_sValue.Get(); }
 
 	protected:
 		virtual bool BInternalEvaluate( KeyValues *pKVItem ) const;
@@ -245,11 +225,6 @@ private:
 
 		virtual ~CSetCondition( ) { }
 
-		// Validation
-#ifdef DBGFLAG_VALIDATE
-		virtual void Validate( CValidator &validator, const char *pchName );
-#endif
-
 	protected:
 		virtual bool BInternalEvaluate( KeyValues *pKVItem ) const;
 
@@ -267,23 +242,25 @@ private:
 	bool			m_bQualitySet;
 	// The quality of the item to generate
 	int32			m_nItemQuality;
+	// True if rarity is specified in this criteria
+	bool			m_bRaritySet;
+	// The rarity of the item to generate
+	int32			m_nItemRarity;
 	// The initial inventory token of the item
 	uint32			m_unInitialInventory;
-	// True if initial quantity is specified in this criteria.
-	bool			m_bInitialQuantitySet;
 	// The initial quantity of the item
 	uint32			m_unInitialQuantity;
 	// Enforced explicit quality matching
 	bool			m_bForcedQualityMatch;
 	// Ignoring enabled flag (used when crafting)
 	bool			m_bIgnoreEnabledFlag;
-
-	// A list of tags
-	CUtlString		m_strTags;
-	CUtlVector<econ_tag_handle_t>	m_vecTags;
+	// Check Recent flag
+	bool			m_bRecentOnly;
+	// Outputs an item from a loot list
+	bool			m_bIsLootList;
 
 	// A list of the conditions
-	CUtlVector<ICondition *>	m_vecConditions;
+	CUtlVector<CCondition *>	m_vecConditions;
 };
 
 

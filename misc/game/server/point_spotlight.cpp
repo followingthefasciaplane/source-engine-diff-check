@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -46,6 +46,8 @@ private:
 	// ------------------------------
 	void InputLightOn( inputdata_t &inputdata );
 	void InputLightOff( inputdata_t &inputdata );
+	void InputSetColor( inputdata_t &inputdata );
+	void InputForceUpdate( inputdata_t &inputdata );
 
 	// Creates the efficient spotlight 
 	void CreateEfficientSpotlight();
@@ -56,7 +58,6 @@ private:
 private:
 	bool	m_bSpotlightOn;
 	bool	m_bEfficientSpotlight;
-	bool	m_bIgnoreSolid;
 	Vector	m_vSpotlightTargetPos;
 	Vector	m_vSpotlightCurrentPos;
 	Vector	m_vSpotlightDir;
@@ -68,7 +69,6 @@ private:
 	float	m_flSpotlightCurLength;
 	float	m_flSpotlightGoalWidth;
 	float	m_flHDRColorScale;
-	int		m_nMinDXLevel;
 
 public:
 	COutputEvent m_OnOn, m_OnOff;     ///< output fires when turned on, off
@@ -89,15 +89,16 @@ BEGIN_DATADESC( CPointSpotlight )
 	DEFINE_FIELD( m_vSpotlightDir,			FIELD_VECTOR ),
 	DEFINE_FIELD( m_nHaloSprite,			FIELD_INTEGER ),
 
-	DEFINE_KEYFIELD( m_bIgnoreSolid, FIELD_BOOLEAN, "IgnoreSolid" ),
 	DEFINE_KEYFIELD( m_flSpotlightMaxLength,FIELD_FLOAT, "SpotlightLength"),
 	DEFINE_KEYFIELD( m_flSpotlightGoalWidth,FIELD_FLOAT, "SpotlightWidth"),
 	DEFINE_KEYFIELD( m_flHDRColorScale, FIELD_FLOAT, "HDRColorScale" ),
-	DEFINE_KEYFIELD( m_nMinDXLevel, FIELD_INTEGER, "mindxlevel" ),
 
 	// Inputs
 	DEFINE_INPUTFUNC( FIELD_VOID,		"LightOn",		InputLightOn ),
 	DEFINE_INPUTFUNC( FIELD_VOID,		"LightOff",		InputLightOff ),
+	DEFINE_INPUTFUNC( FIELD_COLOR32,	"SetColor",		InputSetColor ),
+	DEFINE_INPUTFUNC( FIELD_VOID,		"ForceUpdate",	InputForceUpdate ),
+
 	DEFINE_OUTPUT( m_OnOn, "OnLightOn" ),
 	DEFINE_OUTPUT( m_OnOff, "OnLightOff" ),
 
@@ -119,8 +120,6 @@ CPointSpotlight::CPointSpotlight()
 	m_vSpotlightDir.Init();
 #endif
 	m_flHDRColorScale = 1.0f;
-	m_nMinDXLevel = 0;
-	m_bIgnoreSolid = false;
 }
 
 
@@ -192,23 +191,23 @@ void CPointSpotlight::ComputeRenderInfo()
 	// Fade out spotlight end if past max length.  
 	if ( m_flSpotlightCurLength > 2*m_flSpotlightMaxLength )
 	{
-		m_hSpotlightTarget->SetRenderColorA( 0 );
+		m_hSpotlightTarget->SetRenderAlpha( 0 );
 		m_hSpotlight->SetFadeLength( m_flSpotlightMaxLength );
 	}
 	else if ( m_flSpotlightCurLength > m_flSpotlightMaxLength )		
 	{
-		m_hSpotlightTarget->SetRenderColorA( (1-((m_flSpotlightCurLength-m_flSpotlightMaxLength)/m_flSpotlightMaxLength)) );
+		m_hSpotlightTarget->SetRenderAlpha( (1-((m_flSpotlightCurLength-m_flSpotlightMaxLength)/m_flSpotlightMaxLength)) );
 		m_hSpotlight->SetFadeLength( m_flSpotlightMaxLength );
 	}
 	else
 	{
-		m_hSpotlightTarget->SetRenderColorA( 1.0 );
+		m_hSpotlightTarget->SetRenderAlpha( 1.0 );
 		m_hSpotlight->SetFadeLength( m_flSpotlightCurLength );
 	}
 
 	// Adjust end width to keep beam width constant
 	float flNewWidth = m_flSpotlightGoalWidth * (m_flSpotlightCurLength / m_flSpotlightMaxLength);
-	flNewWidth = clamp(flNewWidth, 0.f, MAX_BEAM_WIDTH );
+	flNewWidth = clamp(flNewWidth, 0, MAX_BEAM_WIDTH );
 	m_hSpotlight->SetEndWidth(flNewWidth);
 
 	// Adjust width of light on the end.  
@@ -335,21 +334,12 @@ void CPointSpotlight::SpotlightCreate(void)
 
 	AngleVectors( GetAbsAngles(), &m_vSpotlightDir );
 
-	Vector vTargetPos;
-	if ( m_bIgnoreSolid )
-	{
-		vTargetPos = GetAbsOrigin() + m_vSpotlightDir * m_flSpotlightMaxLength;
-	}
-	else
-	{
-		trace_t tr;
-		UTIL_TraceLine( GetAbsOrigin(), GetAbsOrigin() + m_vSpotlightDir * m_flSpotlightMaxLength, MASK_SOLID_BRUSHONLY, this, COLLISION_GROUP_NONE, &tr );
-		vTargetPos = tr.endpos;
-	}
+	trace_t tr;
+	UTIL_TraceLine( GetAbsOrigin(), GetAbsOrigin() + m_vSpotlightDir * m_flSpotlightMaxLength, MASK_SOLID_BRUSHONLY, this, COLLISION_GROUP_NONE, &tr);
 
 	m_hSpotlightTarget = (CSpotlightEnd*)CreateEntityByName( "spotlight_end" );
 	m_hSpotlightTarget->Spawn();
-	m_hSpotlightTarget->SetAbsOrigin( vTargetPos );
+	m_hSpotlightTarget->SetAbsOrigin( tr.endpos );
 	m_hSpotlightTarget->SetOwnerEntity( this );
 	m_hSpotlightTarget->m_clrRender = m_clrRender;
 	m_hSpotlightTarget->m_Radius = m_flSpotlightMaxLength;
@@ -369,9 +359,8 @@ void CPointSpotlight::SpotlightCreate(void)
 	m_hSpotlight->SetHaloScale(60);
 	m_hSpotlight->SetEndWidth(m_flSpotlightGoalWidth);
 	m_hSpotlight->SetBeamFlags( (FBEAM_SHADEOUT|FBEAM_NOTILE) );
-	m_hSpotlight->SetBrightness( 64 );
+	m_hSpotlight->SetBrightness( m_clrRender->a );
 	m_hSpotlight->SetNoise( 0 );
-	m_hSpotlight->SetMinDXLevel( m_nMinDXLevel );
 
 	if ( m_bEfficientSpotlight )
 	{
@@ -393,17 +382,9 @@ Vector CPointSpotlight::SpotlightCurrentPos(void)
 	AngleVectors( GetAbsAngles(), &m_vSpotlightDir );
 
 	//	Get beam end point.  Only collide with solid objects, not npcs
-	Vector vEndPos = GetAbsOrigin() + ( m_vSpotlightDir * 2 * m_flSpotlightMaxLength );
-	if ( m_bIgnoreSolid )
-	{
-		return vEndPos;
-	}
-	else
-	{
-		trace_t tr;
-		UTIL_TraceLine( GetAbsOrigin(), vEndPos, MASK_SOLID_BRUSHONLY, this, COLLISION_GROUP_NONE, &tr );
-		return tr.endpos;
-	}
+	trace_t tr;
+	UTIL_TraceLine( GetAbsOrigin(), GetAbsOrigin() + (m_vSpotlightDir * 2 * m_flSpotlightMaxLength), MASK_SOLID_BRUSHONLY, this, COLLISION_GROUP_NONE, &tr );
+	return tr.endpos;
 }
 
 //------------------------------------------------------------------------------
@@ -528,4 +509,24 @@ void CPointSpotlight::InputLightOff( inputdata_t &inputdata )
 			SpotlightDestroy();
 		}
 	}
+}
+
+//-----------------------------------------------------------------------------
+// Purpose: Set the beam's color
+//-----------------------------------------------------------------------------
+void CPointSpotlight::InputSetColor( inputdata_t &inputdata )
+{
+	if ( m_hSpotlight )
+	{
+		color32 clr = inputdata.value.Color32();
+		m_hSpotlight->SetColor( clr.r, clr.g, clr.b );
+	}
+}
+
+//-----------------------------------------------------------------------------
+// Purpose: Force update the spotlight
+//-----------------------------------------------------------------------------
+void CPointSpotlight::InputForceUpdate( inputdata_t &inputdata )
+{
+	SpotlightUpdate();
 }

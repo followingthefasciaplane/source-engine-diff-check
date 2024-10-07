@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Model loading / unloading interface
 //
@@ -50,10 +50,13 @@ public:
 	// clears a particular sort group
 	virtual void	ClearRenderLists( int nSortGroup ) = 0;
 	virtual void	AddFragmentListToRenderList( int nSortGroup, OverlayFragmentHandle_t iFragment, bool bDisp ) = 0;
-	virtual void	RenderOverlays( int nSortGroup ) = 0;
+	virtual void	RenderOverlays( IMatRenderContext *pRenderContext, int nSortGroup ) = 0;
 
 	// Sets the client renderable for an overlay's material proxy to bind to
 	virtual void	SetOverlayBindProxy( int iOverlayID, void *pBindProxy ) = 0;
+
+	virtual void	UpdateOverlayRenderLevels( int nCPULevel, int nGPULevel ) = 0;
+	virtual void	RenderAllUnlitOverlays( IMatRenderContext *pRenderContext, int nSortGroup ) = 0;
 };
 
 

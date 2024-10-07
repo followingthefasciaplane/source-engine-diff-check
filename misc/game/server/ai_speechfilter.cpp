@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: An entity that can be used to control speech behaviour for a group
 //			of NPCs.
@@ -175,7 +175,7 @@ void CAI_SpeechFilter::PopulateSubjectList( bool purge )
 //-----------------------------------------------------------------------------
 void CAI_SpeechFilter::OnEntityCreated( CBaseEntity *pEntity )
 {
-	if ( !m_bDisabled && ( pEntity->NameMatches( m_iszSubject ) || pEntity->ClassMatches( m_iszSubject ) ) )
+	if ( !m_bDisabled && pEntity->NameMatches( m_iszSubject ) || pEntity->ClassMatches( m_iszSubject ) )
 	{
 #ifndef CSTRIKE_DLL
 		CAI_PlayerAlly *pAlly = dynamic_cast<CAI_PlayerAlly *>(pEntity);

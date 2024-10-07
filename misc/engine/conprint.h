@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -11,6 +11,6 @@
 #pragma once
 #endif
 
-void Con_SafePrintf (PRINTF_FORMAT_STRING const char *fmt, ...);
+void Con_SafePrintf (const char *fmt, ...);
 
 #endif // CONPRINT_H

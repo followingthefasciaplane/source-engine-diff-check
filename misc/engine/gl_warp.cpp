@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright (c) 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -28,6 +28,7 @@ static ConVar	r_drawskybox(  "r_drawskybox", "1", FCVAR_CHEAT	);
 
 extern ConVar		mat_loadtextures;
 static IMaterial	*skyboxMaterials[6] = { NULL, NULL, NULL, NULL, NULL, NULL };
+static char			currentloadedsky[ 128 ] = "";
 
 // 1 = s, 2 = t, 3 = 2048
 int	st_to_vec[6][3] =
@@ -91,7 +92,8 @@ void R_UnloadSkys( void )
 			skyboxMaterials[ i ]->DecrementReferenceCount();
 			skyboxMaterials[ i ] = NULL;
 		}
-	}	
+	}
+	currentloadedsky[0] = 0;
 }
 
 //-----------------------------------------------------------------------------
@@ -104,22 +106,11 @@ bool R_LoadNamedSkys( const char *skyname )
 	char		name[ MAX_OSPATH ];
 	IMaterial	*skies[ 6 ];
 	bool		success = true;
-	const char	*skyboxsuffix[ 6 ] = { "rt", "bk", "lf", "ft", "up", "dn" };
+	char		*skyboxsuffix[ 6 ] = { "rt", "bk", "lf", "ft", "up", "dn" };
 
-	bool bUseDx8Skyboxes = ( g_pMaterialSystemHardwareConfig->GetDXSupportLevel() < 90 );
 	for ( int i = 0; i < 6; i++ )
 	{
 		skies[i] = NULL;
-		if ( bUseDx8Skyboxes )
-		{
-			Q_snprintf( name, sizeof( name ), "skybox/%s_dx80%s", skyname, skyboxsuffix[i] );
-			skies[i] = materials->FindMaterial( name, TEXTURE_GROUP_SKYBOX, false );
-			if( IsErrorMaterial( skies[i] ) )
-			{
-				skies[i] = NULL;
-			}
-		}
-
 		if ( skies[i] == NULL )
 		{
 			Q_snprintf( name, sizeof( name ), "skybox/%s%s", skyname, skyboxsuffix[i] );
@@ -161,45 +152,41 @@ bool R_LoadNamedSkys( const char *skyname )
 //-----------------------------------------------------------------------------
 void R_LoadSkys( void )
 {
+	const char *pDefault = "sky_urb01";
 	bool success = true;
 
-	char requestedsky[ 128 ];
-
-	ConVarRef skyname( "sv_skyname" );
-	if ( skyname.IsValid() )
-	{
-		Q_strncpy( requestedsky, skyname.GetString(), sizeof( requestedsky ) );
-	}
-	else
+	static ConVarRef skyname( "sv_skyname" );
+	if ( !skyname.IsValid() )
 	{
 		ConDMsg( "Unable to find skyname ConVar!!!\n" );
 		return;
 	}
 
+	if ( !stricmp( skyname.GetString(), currentloadedsky ) )
+	{
+		// We already loaded this sky!
+		return;
+	}
+
 	// See if user's sky will work
-	if ( !R_LoadNamedSkys( requestedsky ) )
+	if ( !R_LoadNamedSkys( skyname.GetString() ) )
 	{
 		// Assume failure
 		success = false;
 
-		// See if user requested other than the default
-		if ( Q_stricmp( requestedsky, "sky_urb01" ) )
+		// Try loading the default (if not already requested)
+		if ( Q_stricmp( skyname.GetString(), pDefault ) && R_LoadNamedSkys( pDefault ) )
 		{
-			// Try the default
-			skyname.SetValue( "sky_urb01" );
-
-			// See if we could load that one now
-			if ( R_LoadNamedSkys( skyname.GetString() ) )
-			{
-				ConDMsg( "Unable to load sky %s, but successfully loaded %s\n", requestedsky, skyname.GetString() );
-				success = true;
-			}
+			ConDMsg( "Unable to load sky %s, but successfully loaded %s\n", skyname.GetString(), pDefault );
+			skyname.SetValue( pDefault );
+			success = true;
 		}
 	}
 
+	Q_strncpy( currentloadedsky, skyname.GetString(), sizeof( currentloadedsky ) );
 	if ( !success )
 	{
-		ConDMsg( "Unable to load sky %s\n", requestedsky );
+		ConDMsg( "Unable to load sky %s\n", skyname.GetString() );
 	}
 }
 
@@ -213,7 +200,8 @@ void MakeSkyVec( float s, float t, int axis, float zFar, Vector& position, Vecto
 	int			j, k;
 	float		width;
 
-	width = zFar * SQRT3INV;
+	static float flScale = SQRT3INV;
+	width = zFar * flScale;
 
 	if ( s < -1 )
 		s = -1;
@@ -242,6 +230,10 @@ void MakeSkyVec( float s, float t, int axis, float zFar, Vector& position, Vecto
 	s = (s+1)*0.5;
 	t = (t+1)*0.5;
 
+	// AV - I'm commenting this out since our skyboxes aren't 512x512 and we don't
+	//      modify the textures to deal with the border seam fixup correctly.
+	//      The code below was causing seams in the skyboxes.
+	/*
 	if (s < 1.0/512)
 		s = 1.0/512;
 	else if (s > 511.0/512)
@@ -250,6 +242,7 @@ void MakeSkyVec( float s, float t, int axis, float zFar, Vector& position, Vecto
 		t = 1.0/512;
 	else if (t > 511.0/512)
 		t = 511.0/512;
+	*/
 
 	t = 1.0 - t;
 	VectorCopy( v, position );
@@ -264,7 +257,6 @@ void MakeSkyVec( float s, float t, int axis, float zFar, Vector& position, Vecto
 void R_DrawSkyBox( float zFar, int nDrawFlags /*= 0x3F*/  )
 {
 	VPROF("R_DrawSkyBox");
-	tmZoneFiltered( TELEMETRY_LEVEL0, 50, TMZF_NONE, "%s %x", __FUNCTION__, nDrawFlags );
 
 	int		i;
 	Vector	normal;
@@ -273,6 +265,9 @@ void R_DrawSkyBox( float zFar, int nDrawFlags /*= 0x3F*/  )
 	{
 		return;
 	}
+
+	// Check whether the skybox textures have changed
+	R_LoadSkys();
 
 	CMatRenderContextPtr pRenderContext( materials );
 
@@ -313,8 +308,10 @@ void R_DrawSkyBox( float zFar, int nDrawFlags /*= 0x3F*/  )
 		// Normals are reversed so looking at face dots to 1.0, looking away from is -1.0
 		// Reject backfacing surfaces on the inside of the cube to avoid binding their texture
 		// Assuming a 90 fov looking at face is 0 degrees, so reject at 107
-		if ( DotProduct( CurrentViewForward(), normal ) < -0.29289f )
-			continue;
+
+		// AV - Disabling this since it doesn't work in L4D and doesn't really buy us any perf
+		//if ( DotProduct( CurrentViewForward(), normal ) < -0.29289f )
+		//	continue;
 
 		Vector positionArray[4];
 		Vector2D texCoordArray[4];
@@ -328,13 +325,8 @@ void R_DrawSkyBox( float zFar, int nDrawFlags /*= 0x3F*/  )
 			MakeSkyVec( 1.0f, -1.0f, i, zFar, positionArray[3], texCoordArray[3] );
 
 			IMesh* pMesh = pRenderContext->GetDynamicMesh();
-
 			CMeshBuilder meshBuilder;
-			meshBuilder.Begin( pMesh, MATERIAL_TRIANGLES, 4, 6 );
-
-			// meshbuilder Begin can fail if dynamic mesh is not available (eg, alt-tabbed away)
-			if ( meshBuilder.BaseVertexData() == NULL )
-				continue;
+			meshBuilder.Begin( pMesh, MATERIAL_QUADS, 1 );
 
 			for (int j = 0; j < 4; ++j)
 			{
@@ -342,8 +334,6 @@ void R_DrawSkyBox( float zFar, int nDrawFlags /*= 0x3F*/  )
 				meshBuilder.TexCoord2fv( 0, texCoordArray[j].Base() );
 				meshBuilder.AdvanceVertex();
 			}
-			CIndexBuilder &indexBuilder = meshBuilder;
-			indexBuilder.FastQuad( 0 );
 		
 			meshBuilder.End();
 			pMesh->Draw();

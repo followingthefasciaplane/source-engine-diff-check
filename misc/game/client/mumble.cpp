@@ -153,7 +153,7 @@ void CMumbleSystem::PostRender()
 
 	if ( g_pMumbleMemory->uiVersion != 2 )
 	{
-		V_wcscpy_safe( g_pMumbleMemory->name, L"Source engine: " );
+		V_wcscpy_safe( g_pMumbleMemory->name, L"Source: " );
 		wchar_t wcsGameDir[MAX_PATH];
 		Q_UTF8ToUnicode( COM_GetModDirectory(), wcsGameDir, sizeof(wcsGameDir) );
 		V_wcscat_safe( g_pMumbleMemory->name, wcsGameDir );
@@ -164,13 +164,22 @@ void CMumbleSystem::PostRender()
 
 	g_pMumbleMemory->uiTick++;
 
-	Vector vecOriginPlayer, vecOriginCamera = MainViewOrigin();
-	QAngle anglesPlayer, anglesCamera = MainViewAngles();
+	Vector vecOriginPlayer, vecOriginCamera = MainViewOrigin( 0 );
+	QAngle anglesPlayer, anglesCamera = MainViewAngles( 0 );
 
 	C_BasePlayer *pPlayer = C_BasePlayer::GetLocalPlayer();
 	if ( pPlayer )
 	{
-		vecOriginPlayer = pPlayer->EyePosition();
+		bool bIsOnTeam = pPlayer->GetTeamNumber() == TEAM_TERRORIST || pPlayer->GetTeamNumber() == TEAM_CT;
+		if ( pPlayer->IsAlive() && bIsOnTeam )
+		{
+			vecOriginPlayer = pPlayer->EyePosition();
+		}
+		else
+		{
+			// a zero player origin disables positional audio
+			vecOriginPlayer = vec3_origin;
+		}
 		anglesPlayer = pPlayer->GetAbsAngles();
 	}
 	else

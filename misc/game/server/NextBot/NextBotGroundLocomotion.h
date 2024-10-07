@@ -1,4 +1,3 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
 // NextBotGroundLocomotion.h
 // Basic ground-based movement for NextBotCombatCharacters
 // Author: Michael Booth, February 2009

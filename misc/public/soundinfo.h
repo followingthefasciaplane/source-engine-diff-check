@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright (c) 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -16,6 +16,7 @@
 #include "soundflags.h"
 #include "coordsize.h"
 #include "mathlib/vector.h"
+#include "netmessages.h"
 
 
 #define WRITE_DELTA_UINT( name, length )	\
@@ -68,37 +69,50 @@
 #define SOUND_DELAY_OFFSET					(0.100f)
 
 #pragma pack(4)
+// the full float time for now.
+#define SEND_SOUND_TIME 1
+
 //-----------------------------------------------------------------------------
 struct SoundInfo_t
 {
+	Vector			vOrigin;
+	Vector			vDirection;
+	Vector			vListenerOrigin;
+	const char		*pszName;		// UNDONE: Make this a FilenameHandle_t to avoid bugs with arrays of these
+	float			fVolume;
+	float			fDelay;
+	float			fTickTime;			// delay is encoded relative to this tick, fix up if packet is delayed
 	int				nSequenceNumber;
 	int				nEntityIndex;
 	int				nChannel;
-	const char		*pszName;		// UNDONE: Make this a FilenameHandle_t to avoid bugs with arrays of these
-	Vector			vOrigin;
-	Vector			vDirection;
-	float			fVolume;
-	soundlevel_t	Soundlevel;
-	bool			bLooping;
 	int				nPitch;
-	int				nSpecialDSP;
-	Vector			vListenerOrigin;
 	int				nFlags;
-	int 			nSoundNum;
-	float			fDelay;
+	unsigned int 	nSoundNum;
+	int				nSpeakerEntity;
+	int				nRandomSeed;
+	soundlevel_t	Soundlevel;
 	bool			bIsSentence;
 	bool			bIsAmbient;
-	int				nSpeakerEntity;
+	bool			bLooping;
+
 	
 	//---------------------------------
 	
-	SoundInfo_t()
+	enum SoundInfoInit_t
 	{
-		SetDefault();
+		SOUNDINFO_SETDEFAULT,
+		SOUNDINFO_NO_SETDEFAULT,
+	};
+	SoundInfo_t( SoundInfoInit_t Init = SOUNDINFO_SETDEFAULT )
+	{
+		if( Init == SOUNDINFO_SETDEFAULT )
+		{
+			SetDefault();
+		}
 	}
 
 	void Set(int newEntity, int newChannel, const char *pszNewName, const Vector &newOrigin, const Vector& newDirection, 
-			float newVolume, soundlevel_t newSoundLevel, bool newLooping, int newPitch, const Vector &vecListenerOrigin, int speakerentity )
+			float newVolume, soundlevel_t newSoundLevel, bool newLooping, int newPitch, const Vector &vecListenerOrigin, int speakerentity, int nSeed )
 	{
 		nEntityIndex = newEntity;
 		nChannel = newChannel;
@@ -111,15 +125,16 @@ struct SoundInfo_t
 		nPitch = newPitch;
 		vListenerOrigin = vecListenerOrigin;
 		nSpeakerEntity = speakerentity;
+		nRandomSeed = nSeed;
 	}
 
 	void SetDefault()
 	{
 		fDelay = DEFAULT_SOUND_PACKET_DELAY;
+		fTickTime = 0;
 		fVolume = DEFAULT_SOUND_PACKET_VOLUME;
 		Soundlevel = SNDLVL_NORM;
 		nPitch = DEFAULT_SOUND_PACKET_PITCH;
-		nSpecialDSP = 0;
 
 		nEntityIndex = 0;
 		nSpeakerEntity = -1;
@@ -127,6 +142,7 @@ struct SoundInfo_t
 		nSoundNum = 0;
 		nFlags = 0;
 		nSequenceNumber = 0;
+		nRandomSeed = 0;
 
 		pszName = NULL;
 	
@@ -144,7 +160,6 @@ struct SoundInfo_t
 		fVolume = 0;
 		Soundlevel = SNDLVL_NONE;
 		nPitch = PITCH_NORM;
-		nSpecialDSP = 0;
 		pszName = NULL;
 		fDelay = 0.0f;
 		nSequenceNumber = 0;
@@ -154,221 +169,132 @@ struct SoundInfo_t
 	}
 
 	// this cries for Send/RecvTables:
-	void WriteDelta( SoundInfo_t *delta, bf_write &buffer)
+	void WriteDelta( const SoundInfo_t *delta, CSVCMsg_Sounds& Msg, float finalTickTime )
 	{
-		if ( nEntityIndex == delta->nEntityIndex )
+#define WRITE_DELTA_FIELD( _name, _protobufname)	\
+	if( delta->_name != _name ) pSoundData->set_ ## _protobufname( _name );
+#define WRITE_DELTA_FIELD_SCALED( _name, _protobufname, _scaled_val )	\
+	if( delta->_name != _name ) pSoundData->set_ ## _protobufname( _scaled_val );
+
+		SoundInfo_t	defaultSound( SOUNDINFO_NO_SETDEFAULT );
+		CSVCMsg_Sounds::sounddata_t *pSoundData = Msg.add_sounds();
+
+		if( !delta )
 		{
-			buffer.WriteOneBit( 0 );
+			defaultSound.SetDefault();
+			delta = &defaultSound;
+		}
+
+		WRITE_DELTA_FIELD( nEntityIndex, entity_index );
+
+		WRITE_DELTA_FIELD( nFlags, flags );
+
+		// Scriptable sounds are written as a hash, uses full 32 bits
+		if( nFlags & SND_IS_SCRIPTHANDLE )
+		{
+			WRITE_DELTA_FIELD( nSoundNum, sound_num_handle );
 		}
 		else
 		{
-			buffer.WriteOneBit( 1 );
-		
-			if ( nEntityIndex <= 31)
-			{
-				buffer.WriteOneBit( 1 );
-				buffer.WriteUBitLong( nEntityIndex, 5 );
-			}
-			else
-			{
-				buffer.WriteOneBit( 0 );
-				buffer.WriteUBitLong( nEntityIndex, MAX_EDICT_BITS );
-			}
+			WRITE_DELTA_FIELD( nSoundNum, sound_num );
 		}
 
-		WRITE_DELTA_UINT( nSoundNum, MAX_SOUND_INDEX_BITS );
+		WRITE_DELTA_FIELD( nChannel, channel );
 
-		WRITE_DELTA_UINT( nFlags, SND_FLAG_BITS_ENCODE );
-
-		WRITE_DELTA_UINT( nChannel, 3 );
-
-		buffer.WriteOneBit( bIsAmbient?1:0 );
-		buffer.WriteOneBit( bIsSentence?1:0 ); // NOTE: SND_STOP behavior is different depending on this flag
+		WRITE_DELTA_FIELD( bIsAmbient, is_ambient );
+		WRITE_DELTA_FIELD( bIsSentence, is_sentence ); // NOTE: SND_STOP behavior is different depending on this flag
 
 		if ( nFlags != SND_STOP )
 		{
-			if ( nSequenceNumber == delta->nSequenceNumber )
+			WRITE_DELTA_FIELD_SCALED( nSequenceNumber, sequence_number, ( nSequenceNumber & SOUND_SEQNUMBER_MASK ) )
+
+				WRITE_DELTA_FIELD_SCALED( fVolume, volume, ( int )( fVolume * 127.0f ) );
+
+			WRITE_DELTA_FIELD( Soundlevel, sound_level );
+
+			WRITE_DELTA_FIELD( nPitch, pitch );
+
+			WRITE_DELTA_FIELD( nRandomSeed, random_seed );
+
+			float delayValue = fDelay;
+			if ( ( nFlags & SND_DELAY ) && ( fTickTime != finalTickTime ) )
 			{
-				// didn't change, most often case
-				buffer.WriteOneBit( 1 );
+				delayValue += fTickTime - finalTickTime;
 			}
-			else if ( nSequenceNumber == (delta->nSequenceNumber+1) )
+			if ( delayValue != delta->fDelay )
 			{
-				// increased by one
-				buffer.WriteOneBit( 0 );
-				buffer.WriteOneBit( 1 );
-			}
-			else
-			{
-				// send full seqnr
-				buffer.WriteUBitLong( 0, 2 ); // 2 zero bits
-				buffer.WriteUBitLong( nSequenceNumber, SOUND_SEQNUMBER_BITS ); 
-			}
-						
-			if ( fVolume == delta->fVolume )
-			{
-				buffer.WriteOneBit( 0 );
-			}
-			else
-			{
-				buffer.WriteOneBit( 1 );
-				buffer.WriteUBitLong( (unsigned int)(fVolume*127.0f), 7 );
-			}
-
-			WRITE_DELTA_UINT( Soundlevel, MAX_SNDLVL_BITS );
-
-			WRITE_DELTA_UINT( nPitch, 8 );
-
-			WRITE_DELTA_UINT( nSpecialDSP, 8 );
-
-			if ( fDelay == delta->fDelay )
-			{
-				buffer.WriteOneBit( 0 );
-			}
-			else
-			{
-				buffer.WriteOneBit( 1 );
-
-				// skipahead works in 10 ms increments
-				// bias results so that we only incur the precision loss on relatively large skipaheads
-				fDelay += SOUND_DELAY_OFFSET;
-
-				// Convert to msecs
-				int iDelay = fDelay * 1000.0f;
-
-				iDelay = clamp( iDelay, (int)(-10 * MAX_SOUND_DELAY_MSEC), (int)(MAX_SOUND_DELAY_MSEC) );
-
-				if ( iDelay < 0 )
-				{
-					iDelay /=10;	
-				}
-				
-				buffer.WriteSBitLong( iDelay , MAX_SOUND_DELAY_MSEC_ENCODE_BITS );
+				pSoundData->set_delay_value( delayValue );
 			}
 
 			// don't transmit sounds with high precision
-			WRITE_DELTA_SINT_SCALE( vOrigin.x, 8.0f, COORD_INTEGER_BITS - 2 );
-			WRITE_DELTA_SINT_SCALE( vOrigin.y, 8.0f, COORD_INTEGER_BITS - 2  );
-			WRITE_DELTA_SINT_SCALE( vOrigin.z, 8.0f, COORD_INTEGER_BITS - 2 );
+			WRITE_DELTA_FIELD_SCALED( vOrigin.x, origin_x, ( int )( vOrigin.x * ( 1.0f / 8.0f ) ) );
+			WRITE_DELTA_FIELD_SCALED( vOrigin.y, origin_y, ( int )( vOrigin.y * ( 1.0f / 8.0f ) ) );
+			WRITE_DELTA_FIELD_SCALED( vOrigin.z, origin_z, ( int )( vOrigin.z * ( 1.0f / 8.0f ) ) );
 
-			WRITE_DELTA_SINT( nSpeakerEntity, MAX_EDICT_BITS + 1 );
+			WRITE_DELTA_FIELD( nSpeakerEntity, speaker_entity );
 		}
 		else
 		{
 			ClearStopFields();
 		}
+
+#undef WRITE_DELTA_FIELD
+#undef WRITE_DELTA_FIELD_SCALED
 	};
 
-	void ReadDelta( SoundInfo_t *delta, bf_read &buffer, int nProtoVersion )
+	void ReadDelta( const SoundInfo_t *delta, const CSVCMsg_Sounds::sounddata_t& SoundData)
 	{
-		if ( !buffer.ReadOneBit() )
+#define READ_DELTA_FIELD( _name, _protobufname ) \
+	_name = ( SoundData.has_ ## _protobufname() ) ? SoundData._protobufname() : delta->_name;
+#define READ_DELTA_FIELD_SCALED( _name, _protobufname, _scale ) \
+	_name = ( SoundData.has_ ## _protobufname() ) ? ( SoundData._protobufname() * ( _scale ) ) : delta->_name;
+
+		READ_DELTA_FIELD( nEntityIndex, entity_index );
+
+		READ_DELTA_FIELD( nFlags, flags );
+
+		// Scriptable sounds are written as a hash, uses full 32 bits
+		if( nFlags & SND_IS_SCRIPTHANDLE )
 		{
-			nEntityIndex = delta->nEntityIndex;
+			READ_DELTA_FIELD( nSoundNum, sound_num_handle );
 		}
 		else
 		{
-			if ( buffer.ReadOneBit() )
-			{
-				nEntityIndex = buffer.ReadUBitLong( 5 );
-			}
-			else
-			{
-				nEntityIndex = buffer.ReadUBitLong( MAX_EDICT_BITS );
-			}
+			READ_DELTA_FIELD( nSoundNum, sound_num );
 		}
 
-		if ( nProtoVersion > 22 )
-		{	
-			READ_DELTA_UINT( nSoundNum, MAX_SOUND_INDEX_BITS );
-		}
-		else
-		{
-			READ_DELTA_UINT( nSoundNum, 13 );
-		}
+		READ_DELTA_FIELD( nChannel, channel );
 
-		if ( nProtoVersion > 18 )
-		{
-			READ_DELTA_UINT( nFlags, SND_FLAG_BITS_ENCODE );
-		}
-		else
-		{
-			// There was 9 flag bits for version 18 and below (prior to Halloween 2011)
-			READ_DELTA_UINT( nFlags, 9 );
-		}
-
-		READ_DELTA_UINT( nChannel, 3 );
-
-		bIsAmbient = buffer.ReadOneBit() != 0;
-		bIsSentence = buffer.ReadOneBit() != 0; // NOTE: SND_STOP behavior is different depending on this flag
+		READ_DELTA_FIELD( bIsAmbient, is_ambient );
+		READ_DELTA_FIELD( bIsSentence, is_sentence ); // NOTE: SND_STOP behavior is different depending on this flag
 
 		if ( nFlags != SND_STOP )
 		{
-			if ( buffer.ReadOneBit() != 0 )
-			{
-				nSequenceNumber = delta->nSequenceNumber;
-			}
-			else if ( buffer.ReadOneBit() != 0 )
-			{
-				nSequenceNumber = delta->nSequenceNumber + 1;
-			}
-			else
-			{
-				nSequenceNumber = buffer.ReadUBitLong( SOUND_SEQNUMBER_BITS );
-			}
-				
-			if ( buffer.ReadOneBit() != 0 )
-			{
-				fVolume = (float)buffer.ReadUBitLong( 7 )/127.0f;
-			}
-			else
-			{
-				fVolume = delta->fVolume;
-			}
+			READ_DELTA_FIELD( nSequenceNumber, sequence_number );
 
-			if ( buffer.ReadOneBit() != 0 )
-			{
-				Soundlevel = (soundlevel_t)buffer.ReadUBitLong( MAX_SNDLVL_BITS );
-			}
-			else
-			{
-				Soundlevel = delta->Soundlevel;
-			}
+			READ_DELTA_FIELD_SCALED( fVolume, volume, ( 1.0f / 127.0f ) );
 
-			READ_DELTA_UINT( nPitch, 8 );
+			Soundlevel = ( soundlevel_t )( SoundData.has_sound_level() ? SoundData.sound_level() : delta->Soundlevel );
 
-			if ( nProtoVersion > 21 )
-			{
-				// These bit weren't written in version 19 and below
-				READ_DELTA_UINT( nSpecialDSP, 8 );
-			}
+			READ_DELTA_FIELD( nPitch, pitch );
 
-			if ( buffer.ReadOneBit() != 0 )
-			{
-				// Up to 4096 msec delay
-				fDelay = (float)buffer.ReadSBitLong( MAX_SOUND_DELAY_MSEC_ENCODE_BITS ) / 1000.0f; ;
-				
-				if ( fDelay < 0 )
-				{
-					fDelay *= 10.0f;
-				}
-				// bias results so that we only incur the precision loss on relatively large skipaheads
-				fDelay -= SOUND_DELAY_OFFSET;
-			}
-			else
-			{
-				fDelay = delta->fDelay;
-			}
+			READ_DELTA_FIELD( nRandomSeed, random_seed );
 
-			READ_DELTA_SINT_SCALE( vOrigin.x, 8.0f, COORD_INTEGER_BITS - 2 );
-			READ_DELTA_SINT_SCALE( vOrigin.y, 8.0f, COORD_INTEGER_BITS - 2 );
-			READ_DELTA_SINT_SCALE( vOrigin.z, 8.0f, COORD_INTEGER_BITS - 2 );
+			READ_DELTA_FIELD( fDelay, delay_value );
 
-			READ_DELTA_SINT( nSpeakerEntity, MAX_EDICT_BITS + 1 );
+			READ_DELTA_FIELD_SCALED( vOrigin.x, origin_x, 8.0f );
+			READ_DELTA_FIELD_SCALED( vOrigin.y, origin_y, 8.0f );
+			READ_DELTA_FIELD_SCALED( vOrigin.z, origin_z, 8.0f );
+
+			READ_DELTA_FIELD( nSpeakerEntity, speaker_entity );
 		}
 		else
 		{
 			ClearStopFields();
 		}
+
+#undef READ_DELTA_FIELD
+#undef READ_DELTA_FIELD_SCALED
 	}
 };
 
@@ -389,6 +315,10 @@ struct SpatializationInfo_t
 	Vector				*pOrigin;
 	QAngle				*pAngles;
 	float				*pflRadius;
+
+	CUtlVector< Vector > *m_pUtlVecMultiOrigins;
+	CUtlVector< QAngle > *m_pUtlVecMultiAngles;
+
 };
 #pragma pack()
 

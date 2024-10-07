@@ -54,6 +54,7 @@ public:
 	bool isSelected (int index) const;
 	const char *getItemText (int index) const;
 	void *getItemData (int index) const;
+	int getTopIndex () const;
 
 private:
 	// NOT IMPLEMENTED

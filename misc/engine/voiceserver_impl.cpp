@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: This module implements the IVoiceServer interface.
 //
@@ -39,6 +39,12 @@ public:
 
 		CGameClient *cl = sv.Client(iSender);
 			
+		ConVarRef voice_verbose( "voice_verbose" );
+		if ( voice_verbose.GetBool() && ( !!cl->m_VoiceStreams.Get( iReceiver ) != !!bListen ) )
+		{
+			Msg( "* CVoiceServer::SetClientListening:  %s m_VoiceStreams from %s (%s) to %s (%s)\n", bListen ? "Enable" : "Disable", cl->GetClientName(), cl->GetNetChannel() ? cl->GetNetChannel()->GetAddress() : "null", sv.Client(iReceiver)->GetClientName(), sv.Client(iReceiver)->GetNetChannel() ? sv.Client(iReceiver)->GetNetChannel()->GetAddress() : "null" );
+		}
+
 		cl->m_VoiceStreams.Set( iReceiver, bListen?1:0 );
 
 		return true;

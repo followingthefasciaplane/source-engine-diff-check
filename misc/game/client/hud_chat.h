@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -18,7 +18,7 @@ class CHudChat : public CBaseHudChat
 	DECLARE_CLASS_SIMPLE( CHudChat, CBaseHudChat );
 
 public:
-	CHudChat( const char *pElementName );
+	explicit CHudChat( const char *pElementName );
 
 	virtual void	Init( void );
 

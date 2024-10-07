@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2008, Valve Corporation, All rights reserved. =====//
 //
 // A list of DmeBoneWeight elements, replacing QC's $WeightList
 //
@@ -34,9 +34,10 @@ class CDmeBoneMask : public CDmeMdlList
 public:
 	virtual CDmAttribute *GetListAttr() { return m_BoneWeights.GetAttribute(); }
 
-private:
+	// Does a case-insensitive search for the specified bone name and returns the weight if it exists or 1.0f if it doesn't
+	float GetBoneWeight( const char *pszBoneName );
+
 	CDmaElementArray< CDmeBoneWeight > m_BoneWeights;
-	CDmaVar< bool > m_bDefault;
 
 };
 

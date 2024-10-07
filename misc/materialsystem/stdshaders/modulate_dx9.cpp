@@ -1,10 +1,11 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
 //=====================================================================================//
 
 #include "BaseVSShader.h"
+#include "convar.h"
 
 #include "unlitgeneric_vs20.inc"
 #include "modulate_ps20.inc"
@@ -12,10 +13,17 @@
 
 #include "cpp_shader_constant_register_map.h"
 
+#if !defined( _X360 ) && !defined( _PS3 )
+	#include "modulate_ps30.inc"
+	#include "unlitgeneric_vs30.inc"
+#endif
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 #include "cloak_blended_pass_helper.h"
+
+static ConVar mat_displacementmap( "mat_displacementmap", "1", FCVAR_CHEAT );
+
 
 DEFINE_FALLBACK_SHADER( Modulate, Modulate_DX9 )
 
@@ -35,12 +43,6 @@ BEGIN_VS_SHADER( Modulate_DX9,
 
 	SHADER_FALLBACK
 	{
-		if ( !(g_pHardwareConfig->SupportsPixelShaders_2_0() && g_pHardwareConfig->SupportsVertexShaders_2_0()) ||
-			(g_pHardwareConfig->GetDXSupportLevel() < 90) )
-		{
-			return "Modulate_DX8";
-		}
-
 		return 0;
 	}
 
@@ -101,7 +103,7 @@ BEGIN_VS_SHADER( Modulate_DX9,
 	{
 		if (params[BASETEXTURE]->IsDefined())
 		{
-			LoadTexture( BASETEXTURE );
+			LoadTexture( BASETEXTURE, TEXTUREFLAGS_SRGB );
 		}
 
 		// Cloak Pass
@@ -161,7 +163,7 @@ BEGIN_VS_SHADER( Modulate_DX9,
 				if( params[BASETEXTURE]->IsTexture() )
 				{
 					pShaderShadow->EnableTexture( SHADER_SAMPLER0, true );
-			
+					pShaderShadow->EnableSRGBRead( SHADER_SAMPLER0, true );
 					numTexCoords = 1;
 				}
 
@@ -183,20 +185,39 @@ BEGIN_VS_SHADER( Modulate_DX9,
 
 				pShaderShadow->VertexShaderVertexFormat( flags, numTexCoords, NULL, userDataSize );
 
-				DECLARE_STATIC_VERTEX_SHADER( unlitgeneric_vs20 );
-				SET_STATIC_VERTEX_SHADER_COMBO( VERTEXCOLOR, bVertexColorOrAlpha ? 1 : 0  );
-				SET_STATIC_VERTEX_SHADER( unlitgeneric_vs20 );
-
-				if( g_pHardwareConfig->SupportsPixelShaders_2_b() )
+#if !defined( _X360 ) && !defined( _PS3 )
+				if ( !g_pHardwareConfig->HasFastVertexTextures() )
+#endif
 				{
-					DECLARE_STATIC_PIXEL_SHADER( modulate_ps20b );
-					SET_STATIC_PIXEL_SHADER( modulate_ps20b );
+					DECLARE_STATIC_VERTEX_SHADER( unlitgeneric_vs20 );
+					SET_STATIC_VERTEX_SHADER_COMBO( VERTEXCOLOR, bVertexColorOrAlpha ? 1 : 0 );
+					SET_STATIC_VERTEX_SHADER( unlitgeneric_vs20 );
+
+					if( g_pHardwareConfig->SupportsPixelShaders_2_b() )
+					{
+						DECLARE_STATIC_PIXEL_SHADER( modulate_ps20b );
+						SET_STATIC_PIXEL_SHADER( modulate_ps20b );
+					}
+					else
+					{
+						DECLARE_STATIC_PIXEL_SHADER( modulate_ps20 );
+						SET_STATIC_PIXEL_SHADER( modulate_ps20 );
+					}
 				}
+#if !defined( _X360 ) && !defined( _PS3 )
 				else
 				{
-					DECLARE_STATIC_PIXEL_SHADER( modulate_ps20 );
-					SET_STATIC_PIXEL_SHADER( modulate_ps20 );
+					SET_FLAGS2( MATERIAL_VAR2_USES_VERTEXID );
+					SET_FLAGS2( MATERIAL_VAR2_SUPPORTS_TESSELLATION );
+
+					DECLARE_STATIC_VERTEX_SHADER( unlitgeneric_vs30 );
+					SET_STATIC_VERTEX_SHADER_COMBO( VERTEXCOLOR, bVertexColorOrAlpha ? 1 : 0 );
+					SET_STATIC_VERTEX_SHADER( unlitgeneric_vs30 );
+
+					DECLARE_STATIC_PIXEL_SHADER( modulate_ps30 );
+					SET_STATIC_PIXEL_SHADER( modulate_ps30 );
 				}
+#endif
 
 				// We need to fog to *white* regardless of overbrighting...
 				if( bMod2X )
@@ -209,17 +230,21 @@ BEGIN_VS_SHADER( Modulate_DX9,
 				}
 
 				pShaderShadow->EnableAlphaWrites( bWriteZ && bFullyOpaque );
+
+				PI_BeginCommandBuffer();
+
+				// set constant color for modulation
+				PI_SetModulationVertexShaderDynamicState();
+
+				PI_EndCommandBuffer();
 			}
 			DYNAMIC_STATE
 			{
 				if( params[BASETEXTURE]->IsTexture() )
 				{
-					BindTexture( SHADER_SAMPLER0, BASETEXTURE, FRAME );
+					BindTexture( SHADER_SAMPLER0, TEXTURE_BINDFLAGS_SRGBREAD, BASETEXTURE, FRAME );
 					SetVertexShaderTextureTransform( VERTEX_SHADER_SHADER_SPECIFIC_CONST_0, BASETEXTURETRANSFORM );
 				}
-
-				// set constant color for modulation
-				SetModulationVertexShaderDynamicState();
 
 				// We need to fog to *white* regardless of overbrighting...
 				if( bMod2X )
@@ -243,25 +268,65 @@ BEGIN_VS_SHADER( Modulate_DX9,
 				float vVertexColor[4] = { bVertexColorOrAlpha ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f };
 				pShaderAPI->SetVertexShaderConstant( VERTEX_SHADER_SHADER_SPECIFIC_CONST_6, vVertexColor, 1 );
 
-				DECLARE_DYNAMIC_VERTEX_SHADER( unlitgeneric_vs20 );
-				SET_DYNAMIC_VERTEX_SHADER_COMBO( DOWATERFOG, pShaderAPI->GetSceneFogMode() == MATERIAL_FOG_LINEAR_BELOW_FOG_Z );
-				SET_DYNAMIC_VERTEX_SHADER_COMBO( SKINNING, pShaderAPI->GetCurrentNumBones() > 0 );
-				SET_DYNAMIC_VERTEX_SHADER_COMBO( COMPRESSED_VERTS, (int)vertexCompression );
-				SET_DYNAMIC_VERTEX_SHADER( unlitgeneric_vs20 );
-
-				if( g_pHardwareConfig->SupportsPixelShaders_2_b() )
+#if !defined( _X360 ) && !defined( _PS3 )
+				if ( !g_pHardwareConfig->HasFastVertexTextures() )
+#endif
 				{
-					DECLARE_DYNAMIC_PIXEL_SHADER( modulate_ps20b );
-					SET_DYNAMIC_PIXEL_SHADER_COMBO( PIXELFOGTYPE, pShaderAPI->GetPixelFogCombo() );
-					SET_DYNAMIC_PIXEL_SHADER_COMBO( WRITE_DEPTH_TO_DESTALPHA, bWriteZ && bFullyOpaque && pShaderAPI->ShouldWriteDepthToDestAlpha() );
-					SET_DYNAMIC_PIXEL_SHADER( modulate_ps20b );
+					DECLARE_DYNAMIC_VERTEX_SHADER( unlitgeneric_vs20 );
+					SET_DYNAMIC_VERTEX_SHADER_COMBO( SKINNING, pShaderAPI->GetCurrentNumBones() > 0 );
+					SET_DYNAMIC_VERTEX_SHADER_COMBO( COMPRESSED_VERTS, (int)vertexCompression );
+					SET_DYNAMIC_VERTEX_SHADER_COMBO( TESSELLATION, 0 );
+					SET_DYNAMIC_VERTEX_SHADER( unlitgeneric_vs20 );
+
+					if( g_pHardwareConfig->SupportsPixelShaders_2_b() )
+					{
+						DECLARE_DYNAMIC_PIXEL_SHADER( modulate_ps20b );
+						SET_DYNAMIC_PIXEL_SHADER_COMBO( WRITE_DEPTH_TO_DESTALPHA, bWriteZ && bFullyOpaque && pShaderAPI->ShouldWriteDepthToDestAlpha() );
+						SET_DYNAMIC_PIXEL_SHADER( modulate_ps20b );
+					}
+					else
+					{
+						DECLARE_DYNAMIC_PIXEL_SHADER( modulate_ps20 );
+						SET_DYNAMIC_PIXEL_SHADER( modulate_ps20 );
+					}
 				}
+#if !defined( _X360 ) && !defined( _PS3 )
 				else
 				{
-					DECLARE_DYNAMIC_PIXEL_SHADER( modulate_ps20 );
-					SET_DYNAMIC_PIXEL_SHADER_COMBO( PIXELFOGTYPE, pShaderAPI->GetPixelFogCombo() );
-					SET_DYNAMIC_PIXEL_SHADER( modulate_ps20 );
+					TessellationMode_t nTessellationMode = pShaderAPI->GetTessellationMode();
+					if ( nTessellationMode != TESSELLATION_MODE_DISABLED )
+					{
+						pShaderAPI->BindStandardVertexTexture( SHADER_VERTEXTEXTURE_SAMPLER1, TEXTURE_SUBDIVISION_PATCHES );
+
+						bool bHasDisplacement = false; // TODO
+						float vSubDDimensions[4] = { 1.0f/pShaderAPI->GetSubDHeight(), bHasDisplacement && mat_displacementmap.GetBool() ? 1.0f : 0.0f, 0.0f, 0.0f };
+						pShaderAPI->SetVertexShaderConstant( VERTEX_SHADER_SHADER_SPECIFIC_CONST_8, vSubDDimensions );
+
+// JasonM - revisit this later...requires plumbing in a separate vertex texture param type??
+//						bool bHasDisplacement = (info.m_nDisplacementMap != -1) && params[info.m_nDisplacementMap]->IsTexture();
+//						if( bHasDisplacement )
+//						{
+//							pShader->BindVertexTexture( SHADER_VERTEXTEXTURE_SAMPLER2, info.m_nDisplacementMap );
+//						}
+//						else
+//						{
+//							pShaderAPI->BindStandardVertexTexture( SHADER_VERTEXTEXTURE_SAMPLER2, VERTEX_TEXTURE_BLACK );
+//						}
+					}
+
+					DECLARE_DYNAMIC_VERTEX_SHADER( unlitgeneric_vs30 );
+					SET_DYNAMIC_VERTEX_SHADER_COMBO( SKINNING, pShaderAPI->GetCurrentNumBones() > 0 );
+					SET_DYNAMIC_VERTEX_SHADER_COMBO( COMPRESSED_VERTS, (int)vertexCompression );
+					SET_DYNAMIC_VERTEX_SHADER_COMBO( TESSELLATION, nTessellationMode );
+					SET_DYNAMIC_VERTEX_SHADER( unlitgeneric_vs30 );
+
+					DECLARE_DYNAMIC_PIXEL_SHADER( modulate_ps30 );
+
+					SET_DYNAMIC_PIXEL_SHADER_COMBO( WRITE_DEPTH_TO_DESTALPHA, bWriteZ && bFullyOpaque && pShaderAPI->ShouldWriteDepthToDestAlpha() );
+					SET_DYNAMIC_PIXEL_SHADER( modulate_ps30 );
 				}
+#endif
+				
 			}
 			Draw();
 		}

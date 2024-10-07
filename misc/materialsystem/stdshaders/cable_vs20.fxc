@@ -1,4 +1,4 @@
-// DYNAMIC: "DOWATERFOG"	"0..1"
+#include "common_fog_vs_fxc.h"
 
 #include "common_vs_fxc.h"
 
@@ -26,9 +26,7 @@ struct VS_OUTPUT
 
 	float4 directionalLightColor : COLOR0;
 
-	float4 fogFactorW	: COLOR1;
-
-#if !defined( _X360 )    
+#if !defined( _X360 ) && !defined( SHADER_MODEL_VS_3_0 )
 	float  fog		: FOG;
 #endif
 };
@@ -40,15 +38,11 @@ VS_OUTPUT main( const VS_INPUT v )
 
 	float3 worldPos;
 	worldPos = mul( v.vPos, cModel[0] );
-	float4 vProjPos = mul( float4( worldPos, 1 ), cViewProj );
-	o.vProjPos = vProjPos;
-	vProjPos.z = dot( float4( worldPos, 1 ), cViewProjZ );
+	o.vProjPos = mul( float4( worldPos, 1 ), cViewProj );
+	o.worldPos_projPosZ = float4( worldPos.xyz, o.vProjPos.z );
 
-	o.worldPos_projPosZ = float4( worldPos.xyz, vProjPos.z );
-
-	o.fogFactorW = CalcFog( worldPos, vProjPos, g_FogType );
-#if !defined( _X360 )
-	o.fog = o.fogFactorW;
+#if !defined( _X360 ) && !defined( SHADER_MODEL_VS_3_0 )
+	o.fog = CalcFixedFunctionFog( worldPos, g_FogType );
 #endif
 
 	//------------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright 1996-2007, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: tracks VB allocations (and compressed/uncompressed vertex memory usage)
 //
@@ -11,6 +11,9 @@
 #include "tier1/utlstack.h"
 
 #include "materialsystem/ivballoctracker.h"
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
 
 
 //-----------------------------------------------------------------------------
@@ -95,7 +98,7 @@ public:
 #if ENABLE_VB_ALLOC_TRACKER
 
 public:
-	CVBAllocTracker() : m_bSuperSpew( false ) { m_MeshAllocatorName[0] = 0; }
+	CVBAllocTracker();
 
 private:
 
@@ -147,7 +150,9 @@ private:
 
 // FIXME: do this in a better way:
 static const ElementData positionElement	= { VERTEX_ELEMENT_POSITION,		12, 12,  8, "POSITION    "	}; // (UNDONE: need vertex shader to scale, may cause cracking w/ static props)
-static const ElementData normalElement		= { VERTEX_ELEMENT_NORMAL,			12,  4,  4, "NORMAL      "	}; // (UNDONE: PC (2x16-byte Ravi method) or 360 (D3DDECLTYPE_HEND3N))
+static const ElementData position4DElement	= { VERTEX_ELEMENT_POSITION4D,		16, 16,  8, "POSITION4D  "	}; //  Not really a position as used by SubD path
+static const ElementData normalElement		= { VERTEX_ELEMENT_NORMAL,			12,  4,  4, "NORMAL      "	}; // (UNDONE: PC (2x16-byte Raphael method) or 360 (D3DDECLTYPE_HEND3N))
+static const ElementData normal4DElement	= { VERTEX_ELEMENT_NORMAL4D,		16, 16,  8, "NORMAL4D    "	}; //  Not really a normal as used by SubD path
 static const ElementData colorElement		= { VERTEX_ELEMENT_COLOR,			 4,  4,  4, "COLOR       "	}; // (already minimal)
 static const ElementData specularElement	= { VERTEX_ELEMENT_SPECULAR,		 4,  4,  4, "SPECULAR    "	}; // (already minimal)
 static const ElementData tangentSElement	= { VERTEX_ELEMENT_TANGENT_S,		12, 12,  4, "TANGENT_S   "	}; // (all-but-unused)
@@ -162,9 +167,9 @@ static const ElementData userData1Element	= { VERTEX_ELEMENT_USERDATA1,		 4,  4,
 static const ElementData userData2Element	= { VERTEX_ELEMENT_USERDATA2,		 8,  8,  4, "USERDATA2   "	}; // (unused)
 static const ElementData userData3Element	= { VERTEX_ELEMENT_USERDATA3,		12, 12,  4, "USERDATA3   "	}; // (unused)
 #if ( COMPRESSED_NORMALS_TYPE == COMPRESSED_NORMALS_SEPARATETANGENTS_SHORT2 )
-static const ElementData userData4Element	= { VERTEX_ELEMENT_USERDATA4,		16,  4,  4, "USERDATA4   "	}; // (UNDONE: PC (2x16-byte Ravi method) or 360 (D3DDECLTYPE_HEND3N))
+static const ElementData userData4Element	= { VERTEX_ELEMENT_USERDATA4,		16,  4,  4, "USERDATA4   "	}; // (UNDONE: PC (2x16-byte Raphael method) or 360 (D3DDECLTYPE_HEND3N))
 #else // ( COMPRESSED_NORMALS_TYPE == COMPRESSED_NORMALS_COMBINEDTANGENTS_UBYTE4 )
-static const ElementData userData4Element	= { VERTEX_ELEMENT_USERDATA4,		16,  0,  0, "USERDATA4   "	}; // (UNDONE: PC (2x16-byte Ravi method) or 360 (D3DDECLTYPE_HEND3N))
+static const ElementData userData4Element	= { VERTEX_ELEMENT_USERDATA4,		16,  0,  0, "USERDATA4   "	}; // (UNDONE: PC (2x16-byte Raphael method) or 360 (D3DDECLTYPE_HEND3N))
 #endif
 static const ElementData texCoord1D0Element	= { VERTEX_ELEMENT_TEXCOORD1D_0,	 4,  4,  4, "TEXCOORD1D_0"	}; // (not worth compressing)
 static const ElementData texCoord1D1Element	= { VERTEX_ELEMENT_TEXCOORD1D_1,	 4,  4,  4, "TEXCOORD1D_1"	}; // (not worth compressing)
@@ -198,21 +203,23 @@ static const ElementData texCoord4D4Element	= { VERTEX_ELEMENT_TEXCOORD4D_4,	16,
 static const ElementData texCoord4D5Element	= { VERTEX_ELEMENT_TEXCOORD4D_5,	16, 16,  8, "TEXCOORD4D_5"	}; // FIXME: used how much? (UNDONE: need vertex shader to take scale, account for clamping)
 static const ElementData texCoord4D6Element	= { VERTEX_ELEMENT_TEXCOORD4D_6,	16, 16,  8, "TEXCOORD4D_6"	}; // FIXME: used how much? (UNDONE: need vertex shader to take scale, account for clamping)
 static const ElementData texCoord4D7Element	= { VERTEX_ELEMENT_TEXCOORD4D_7,	16, 16,  8, "TEXCOORD4D_7"	}; // FIXME: used how much? (UNDONE: need vertex shader to take scale, account for clamping)
-static const ElementData elementTable[ VERTEX_ELEMENT_NUMELEMENTS ] = {	positionElement,
-																		normalElement,
-																		colorElement,
-																		specularElement,
-																		tangentSElement,
-																		tangentTElement,
-																		wrinkleElement,
-																		boneIndexElement,
-																		boneWeight1Element, boneWeight2Element, boneWeight3Element, boneWeight4Element,
-																		userData1Element,   userData2Element,   userData3Element,   userData4Element,
-																		texCoord1D0Element, texCoord1D1Element, texCoord1D2Element, texCoord1D3Element, texCoord1D4Element, texCoord1D5Element, texCoord1D6Element, texCoord1D7Element,
-																		texCoord2D0Element, texCoord2D1Element, texCoord2D2Element, texCoord2D3Element, texCoord2D4Element, texCoord2D5Element, texCoord2D6Element, texCoord2D7Element,
-																		texCoord3D0Element, texCoord3D1Element, texCoord3D2Element, texCoord3D3Element, texCoord3D4Element, texCoord3D5Element, texCoord3D6Element, texCoord3D7Element,
-																		texCoord4D0Element, texCoord4D1Element, texCoord4D2Element, texCoord4D3Element, texCoord4D4Element, texCoord4D5Element, texCoord4D6Element, texCoord4D7Element,
-																		};
+static const ElementData elementTable[] = {	positionElement,
+											position4DElement,
+											normalElement,
+											normal4DElement,
+											colorElement,
+											specularElement,
+											tangentSElement,
+											tangentTElement,
+											wrinkleElement,
+											boneIndexElement,
+											boneWeight1Element, boneWeight2Element, boneWeight3Element, boneWeight4Element,
+											userData1Element,   userData2Element,   userData3Element,   userData4Element,
+											texCoord1D0Element, texCoord1D1Element, texCoord1D2Element, texCoord1D3Element, texCoord1D4Element, texCoord1D5Element, texCoord1D6Element, texCoord1D7Element,
+											texCoord2D0Element, texCoord2D1Element, texCoord2D2Element, texCoord2D3Element, texCoord2D4Element, texCoord2D5Element, texCoord2D6Element, texCoord2D7Element,
+											texCoord3D0Element, texCoord3D1Element, texCoord3D2Element, texCoord3D3Element, texCoord3D4Element, texCoord3D5Element, texCoord3D6Element, texCoord3D7Element,
+											texCoord4D0Element, texCoord4D1Element, texCoord4D2Element, texCoord4D3Element, texCoord4D4Element, texCoord4D5Element, texCoord4D6Element, texCoord4D7Element,
+											};
 
 static ConVar mem_vballocspew( "mem_vballocspew", "0", FCVAR_CHEAT, "How often to spew vertex buffer allocation stats - 1: every alloc, 2+: every 2+ allocs, 0: off" );
 
@@ -222,9 +229,9 @@ static ConVar mem_vballocspew( "mem_vballocspew", "0", FCVAR_CHEAT, "How often t
 // Singleton instance exposed to the engine
 //-----------------------------------------------------------------------------
 
-CVBAllocTracker g_VBAllocTrackerShaderAPI;
+static CVBAllocTracker s_VBAllocTracker;
 EXPOSE_SINGLE_INTERFACE_GLOBALVAR( CVBAllocTracker, IVBAllocTracker, 
-						VB_ALLOC_TRACKER_INTERFACE_VERSION, g_VBAllocTrackerShaderAPI );
+						VB_ALLOC_TRACKER_INTERFACE_VERSION, s_VBAllocTracker );
 
 //-----------------------------------------------------------------------------
 //
@@ -234,10 +241,18 @@ EXPOSE_SINGLE_INTERFACE_GLOBALVAR( CVBAllocTracker, IVBAllocTracker,
 
 #if ENABLE_VB_ALLOC_TRACKER
 
+
+CVBAllocTracker::CVBAllocTracker()
+{
+	COMPILE_TIME_ASSERT( VERTEX_ELEMENT_NUMELEMENTS == ARRAYSIZE( elementTable ) );
+	m_bSuperSpew = false;
+	m_MeshAllocatorName[0] = 0;
+}
+
 UtlHashFixedHandle_t CVBAllocTracker::TrackAlloc( void * buffer, int bufferSize, VertexFormat_t fmt, int numVerts, short allocatorHash )
 {
 	AllocData newData( buffer, bufferSize, fmt, numVerts, allocatorHash );
-	UtlHashFixedHandle_t handle = m_VBAllocTable.Insert( (int)buffer, newData );
+	UtlHashFixedHandle_t handle = m_VBAllocTable.Insert( (intp)buffer, newData );
 	if ( handle == m_VBAllocTable.InvalidHandle() )
 	{
 		Warning( "[VBMEM] VBMemAllocTable hash collision (grow table).\n" );
@@ -247,7 +262,7 @@ UtlHashFixedHandle_t CVBAllocTracker::TrackAlloc( void * buffer, int bufferSize,
 
 bool CVBAllocTracker::KillAlloc( void * buffer, int & bufferSize, VertexFormat_t & fmt, int & numVerts, short & allocatorHash )
 {
-	UtlHashFixedHandle_t handle = m_VBAllocTable.Find( (int)buffer );
+	UtlHashFixedHandle_t handle = m_VBAllocTable.Find( (intp)buffer );
 	if ( handle != m_VBAllocTable.InvalidHandle() )
 	{
 		AllocData & data = m_VBAllocTable.Element( handle );
@@ -391,8 +406,8 @@ VertexElementMap_t CVBAllocTracker::ComputeElementMap( VertexFormat_t fmt, int v
 		int nCoordSize = TexCoordSize( i, fmt );
 		if ( nCoordSize > 0 )
 		{
-			Assert( i < 4 );
-			if ( i < 4 )
+			Assert( nCoordSize <= 4 );
+			if ( nCoordSize <= 4 )
 			{
 				map |= LSB << ( texCoordElements[ nCoordSize - 1 ] + i );
 			}
@@ -734,7 +749,6 @@ bool CVBAllocTracker::TrackMeshAllocations( const char * allocatorName )
 
 	if ( allocatorName )
 	{
-		Assert( m_MeshAllocatorName[0] == 0 );
 		V_strncpy( m_MeshAllocatorName, allocatorName, MAX_ALLOCATOR_NAME_SIZE );
 	}
 	else
@@ -755,7 +769,7 @@ static void CC_DumpVBMemAllocs()
 #if ( ENABLE_VB_ALLOC_TRACKER == 0 )
 	Warning( "ENABLE_VB_ALLOC_TRACKER must be 1 to enable VB mem alloc tracking\n");
 #else
-	g_VBAllocTrackerShaderAPI.DumpVBAllocs();
+	s_VBAllocTracker.DumpVBAllocs();
 #endif
 }
 

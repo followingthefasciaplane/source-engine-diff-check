@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright (c) 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -8,7 +8,7 @@
 #define DISABLE_PROTECTED_THINGS
 #include "togl/rendermechanism.h"
 #include "shaderdevicebase.h"
-#include "tier1/KeyValues.h"
+#include "tier1/keyvalues.h"
 #include "tier1/convar.h"
 #include "tier1/utlbuffer.h"
 #include "tier0/icommandline.h"
@@ -19,20 +19,31 @@
 #include "shaderapibase.h"
 #include "shaderapi/ishadershadow.h"
 #include "shaderapi_global.h"
+#include "videocfg/videocfg.h"
+#include "vjobs_interface.h"
 #include "winutils.h"
 
 #ifdef _X360
 #include "xbox/xbox_win32stubs.h"
 #endif
 
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
+
 //-----------------------------------------------------------------------------
 // Globals
 //-----------------------------------------------------------------------------
-IShaderUtil* g_pShaderUtil;		// The main shader utility interface
 CShaderDeviceBase *g_pShaderDevice;
-CShaderDeviceMgrBase *g_pShaderDeviceMgr;
 CShaderAPIBase *g_pShaderAPI;
+CShaderDeviceMgrBase *g_pShaderDeviceMgr;
 IShaderShadow *g_pShaderShadow;
+#if !defined( _PS3 ) && !defined( _OSX )
+IShaderUtil* g_pShaderUtil;		// The main shader utility interface
+IVJobs * g_pVJobs;
+#else
+extern IVJobs * g_pVJobs;
+#endif
 
 bool g_bUseShaderMutex = false;	// Shader mutex globals
 bool g_bShaderAccessDisallowed;
@@ -72,22 +83,13 @@ static void InitShaderAPICVars( )
 //-----------------------------------------------------------------------------
 // Read dx support levels
 //-----------------------------------------------------------------------------
-#if defined( DX_TO_GL_ABSTRACTION )
-	#if defined( OSX )
-		// OSX
-		#define SUPPORT_CFG_FILE "dxsupport_mac.cfg"
-		// TODO: make this different for Mac?
-		#define SUPPORT_CFG_OVERRIDE_FILE "dxsupport_override.cfg"
-	#else
-		// Linux/Win GL
-		#define SUPPORT_CFG_FILE "dxsupport_linux.cfg"
-		// TODO: make this different for Linux?
-		#define SUPPORT_CFG_OVERRIDE_FILE "dxsupport_override.cfg"
-	#endif
+#if defined( PLATFORM_POSIX ) && !defined( _PS3 )
+#define SUPPORT_CFG_FILE "dxsupport_mac.cfg"
+// TODO: make this different for Mac?
+#define SUPPORT_CFG_OVERRIDE_FILE "dxsupport_override.cfg"
 #else
-	// D3D
-	#define SUPPORT_CFG_FILE "dxsupport.cfg"
-	#define SUPPORT_CFG_OVERRIDE_FILE "dxsupport_override.cfg"
+#define SUPPORT_CFG_FILE "dxsupport.cfg"
+#define SUPPORT_CFG_OVERRIDE_FILE "dxsupport_override.cfg"
 #endif
 
 
@@ -97,6 +99,9 @@ static void InitShaderAPICVars( )
 CShaderDeviceMgrBase::CShaderDeviceMgrBase()
 {
 	m_pDXSupport = NULL;
+#if defined( _PS3 ) || defined( _OSX )
+	g_pShaderDeviceMgr = this;
+#endif
 }
 
 CShaderDeviceMgrBase::~CShaderDeviceMgrBase()
@@ -137,7 +142,7 @@ bool CShaderDeviceMgrBase::Connect( CreateInterfaceFn factory )
 {
 	LOCK_SHADERAPI();
 
-	Assert( !g_pShaderDeviceMgr );
+	Assert( IsPS3() || IsOSX() || !g_pShaderDeviceMgr );
 
 	s_TempFactory = factory;
 
@@ -146,7 +151,13 @@ bool CShaderDeviceMgrBase::Connect( CreateInterfaceFn factory )
 	ConnectTier1Libraries( &actualFactory, 1 );
 	InitShaderAPICVars();
 	ConnectTier2Libraries( &actualFactory, 1 );
-	g_pShaderUtil = (IShaderUtil*)ShaderDeviceFactory( SHADER_UTIL_INTERFACE_VERSION, NULL );
+#if !defined( _PS3 ) && !defined( _OSX )
+	if ( !g_pShaderUtil )
+		g_pShaderUtil = (IShaderUtil*)ShaderDeviceFactory( SHADER_UTIL_INTERFACE_VERSION, NULL );
+#endif
+	if ( !g_pVJobs )
+		g_pVJobs = (IVJobs *)ShaderDeviceFactory( VJOBS_INTERFACE_VERSION, NULL );
+	
 	g_pShaderDeviceMgr = this;
 
 	s_TempFactory = NULL;
@@ -166,8 +177,10 @@ void CShaderDeviceMgrBase::Disconnect()
 {
 	LOCK_SHADERAPI();
 
+#if !defined( _PS3 ) && !defined( _OSX )
 	g_pShaderDeviceMgr = NULL;
 	g_pShaderUtil = NULL;
+#endif
 	DisconnectTier2Libraries();
 	ConVar_Unregister();
 	DisconnectTier1Libraries();
@@ -428,100 +441,6 @@ KeyValues *CShaderDeviceMgrBase::FindVidMemSpecificConfig( KeyValues *pKeyValues
 //-----------------------------------------------------------------------------
 // Methods related to reading DX support levels given particular devices
 //-----------------------------------------------------------------------------
-
-
-//-----------------------------------------------------------------------------
-// Reads in the dxsupport.cfg keyvalues
-//-----------------------------------------------------------------------------
-static void OverrideValues_R( KeyValues *pDest, KeyValues *pSrc )
-{
-	// Any same-named values get overridden in pDest.
-	for ( KeyValues *pSrcValue=pSrc->GetFirstValue(); pSrcValue; pSrcValue=pSrcValue->GetNextValue() )
-	{
-		// Shouldn't be a container for more keys.
-		Assert( pSrcValue->GetDataType() != KeyValues::TYPE_NONE );
-		AddKey( pDest, pSrcValue );
-	}
-
-	// Recurse.
-	for ( KeyValues *pSrcDir=pSrc->GetFirstTrueSubKey(); pSrcDir; pSrcDir=pSrcDir->GetNextTrueSubKey() )
-	{
-		Assert( pSrcDir->GetDataType() == KeyValues::TYPE_NONE );
-
-		KeyValues *pDestDir = pDest->FindKey( pSrcDir->GetName() );
-		if ( pDestDir && pDestDir->GetDataType() == KeyValues::TYPE_NONE )
-		{
-			OverrideValues_R( pDestDir, pSrcDir );
-		}
-	}
-}
-									   
-static KeyValues * FindMatchingGroup( KeyValues *pSrc, KeyValues *pMatch )
-{
-	KeyValues *pMatchSubKey = pMatch->FindKey( "name" );
-	bool bHasSubKey = ( pMatchSubKey && ( pMatchSubKey->GetDataType() != KeyValues::TYPE_NONE ) );
-	const char *name = bHasSubKey ? pMatchSubKey->GetString() : NULL;
-	int nMatchVendorID = ReadHexValue( pMatch, "VendorID" );
-	int nMatchMinDeviceID = ReadHexValue( pMatch, "MinDeviceID" );
-	int nMatchMaxDeviceID = ReadHexValue( pMatch, "MaxDeviceID" );
-
-	KeyValues *pSrcGroup = NULL;
-	for ( pSrcGroup = pSrc->GetFirstTrueSubKey(); pSrcGroup; pSrcGroup = pSrcGroup->GetNextTrueSubKey() )
-	{
-		if ( name )
-		{
-			KeyValues *pSrcGroupName = pSrcGroup->FindKey( "name" );
-			Assert( pSrcGroupName );
-			Assert( pSrcGroupName->GetDataType() != KeyValues::TYPE_NONE );
-			if ( Q_stricmp( pSrcGroupName->GetString(), name ) )
-				continue;
-		}
-
-		if ( nMatchVendorID >= 0 )
-		{
-			int nVendorID = ReadHexValue( pSrcGroup, "VendorID" );
-			if ( nMatchVendorID != nVendorID )
-				continue;
-		}
-
-		if ( nMatchMinDeviceID >= 0 && nMatchMaxDeviceID >= 0 )
-		{
-			int nMinDeviceID = ReadHexValue( pSrcGroup, "MinDeviceID" );
-			int nMaxDeviceID = ReadHexValue( pSrcGroup, "MaxDeviceID" );
-			if ( nMinDeviceID < 0 || nMaxDeviceID < 0 )
-				continue;
-
-			if ( nMatchMinDeviceID > nMinDeviceID || nMatchMaxDeviceID < nMaxDeviceID )
-				continue;
-		}
-
-		return pSrcGroup;
-	}
-	return NULL;
-}
-
-static void OverrideKeyValues( KeyValues *pDst, KeyValues *pSrc )
-{
-	KeyValues *pSrcGroup = NULL;
-	for ( pSrcGroup = pSrc->GetFirstTrueSubKey(); pSrcGroup; pSrcGroup = pSrcGroup->GetNextTrueSubKey() )
-	{
-		// Match each group in pSrc to one in pDst containing the same "name" value:
-		KeyValues * pDstGroup = FindMatchingGroup( pDst, pSrcGroup );
-		//Assert( pDstGroup );
-		if ( pDstGroup )
-		{
-			OverrideValues_R( pDstGroup, pSrcGroup );
-		}
-	}
-
-	//	if( CommandLine()->FindParm( "-debugdxsupport" ) )
-	//	{
-	//		CUtlBuffer tmpBuf;
-	//		pDst->RecursiveSaveToFile( tmpBuf, 0 );
-	//		g_pFullFileSystem->WriteFile( "gary.txt", NULL, tmpBuf );
-	//	}
-}
-
 KeyValues *CShaderDeviceMgrBase::ReadDXSupportKeyValues()
 {
 	if ( CommandLine()->CheckParm( "-ignoredxsupportcfg" ) )
@@ -533,9 +452,9 @@ KeyValues *CShaderDeviceMgrBase::ReadDXSupportKeyValues()
 	KeyValues *pCfg = new KeyValues( "dxsupport" );
 
 	const char *pPathID = "EXECUTABLE_PATH";
-	if ( IsX360() && g_pFullFileSystem->GetDVDMode() == DVDMODE_STRICT )
+	if ( IsX360() && g_pFullFileSystem->GetDVDMode() != DVDMODE_OFF )
 	{
-		// 360 dvd optimzation, expect it inside the platform zip
+		// 360 dvd optimization, expect it inside the platform zip
 		pPathID = "PLATFORM";
 	}
 
@@ -546,23 +465,9 @@ KeyValues *CShaderDeviceMgrBase::ReadDXSupportKeyValues()
 		return NULL;
 	}
 
-	char pTempPath[1024];
-	if ( g_pFullFileSystem->GetSearchPath( "GAME", false, pTempPath, sizeof(pTempPath) ) > 1 )
-	{
-		// Is there a mod-specific override file?
-		KeyValues *pOverride = new KeyValues( "dxsupport_override" );
-		if ( pOverride->LoadFromFile( g_pFullFileSystem, SUPPORT_CFG_OVERRIDE_FILE, "GAME" ) )
-		{
-			OverrideKeyValues( pCfg, pOverride );
-		}
-
-		pOverride->deleteThis();
-	}
-
 	m_pDXSupport = pCfg;
 	return pCfg;
 }
-
 
 
 //-----------------------------------------------------------------------------
@@ -580,26 +485,25 @@ void CShaderDeviceMgrBase::ReadDXSupportLevels( HardwareCaps_t &caps )
 	{
 		// First, set the max dx level
 		int nMaxDXSupportLevel = 0;
-		ReadInt( pDeviceKeyValues, "MaxDXLevel", 0, &nMaxDXSupportLevel );
+		ReadInt( pDeviceKeyValues, "setting.MaxDXLevel", 0, &nMaxDXSupportLevel );
 		if ( nMaxDXSupportLevel != 0 )
 		{
 			caps.m_nMaxDXSupportLevel = nMaxDXSupportLevel;
 		}
 
+		int nMinDXSupportLevel = 0;
+		ReadInt( pDeviceKeyValues, "setting.MinDXLevel", 0, &nMinDXSupportLevel );
+		if ( nMinDXSupportLevel != 0 && nMinDXSupportLevel <= caps.m_nMaxDXSupportLevel )
+		{
+			caps.m_nMinDXSupportLevel = nMinDXSupportLevel;
+		}
+
 		// Next, set the preferred dx level
 		int nDXSupportLevel = 0;
-		ReadInt( pDeviceKeyValues, "DXLevel", 0, &nDXSupportLevel );
+		ReadInt( pDeviceKeyValues, "setting.DXLevel", 0, &nDXSupportLevel );
 		if ( nDXSupportLevel != 0 )
 		{
 			caps.m_nDXSupportLevel = nDXSupportLevel;
-			// Don't slam up the dxlevel level to 92 on DX10 cards in OpenGL Linux/Win mode (otherwise Intel will get dxlevel 92 when we want 90)
-			if ( !( IsOpenGL() && ( IsLinux() || IsWindows() ) ) )
-			{
-				if ( caps.m_bDX10Card )
-				{
-					caps.m_nDXSupportLevel = 92;
-				}
-			}
 		}
 		else
 		{
@@ -612,27 +516,53 @@ void CShaderDeviceMgrBase::ReadDXSupportLevels( HardwareCaps_t &caps )
 //-----------------------------------------------------------------------------
 // Loads the hardware caps, for cases in which the D3D caps lie or where we need to augment the caps
 //-----------------------------------------------------------------------------
+
+#ifdef OSX
+ConVar mat_osx_csm_enabled( "mat_osx_csm_enabled", "1", FCVAR_DEVELOPMENTONLY, "" );
+#endif
+
 void CShaderDeviceMgrBase::LoadHardwareCaps( KeyValues *pGroup, HardwareCaps_t &caps )
 {
 	if( !pGroup )
 		return;
 
+#ifndef _PS3
 	// don't just blanket kill clip planes on POSIX, only shoot them down if we're running ARB, or asked for nouserclipplanes.
 	//FIXME need to take into account the caps bit that GLM can now provide, so NV can use normal clipping and ATI can fall back to fastclip.
-	
 	if ( CommandLine()->FindParm("-arbmode") || CommandLine()->CheckParm( "-nouserclip" ) )
 	{
 		caps.m_UseFastClipping = true;
 	}
 	else
 	{
-		caps.m_UseFastClipping = ReadBool( pGroup, "NoUserClipPlanes", caps.m_UseFastClipping );
+		caps.m_UseFastClipping = ReadBool( pGroup, "setting.NoUserClipPlanes", caps.m_UseFastClipping );
 	}
+#endif
 
-	caps.m_bNeedsATICentroidHack = ReadBool( pGroup, "CentroidHack", caps.m_bNeedsATICentroidHack );
-	caps.m_bDisableShaderOptimizations = ReadBool( pGroup, "DisableShaderOptimizations", caps.m_bDisableShaderOptimizations );
+	caps.m_bNeedsATICentroidHack = ReadBool( pGroup, "setting.CentroidHack", caps.m_bNeedsATICentroidHack );
+	caps.m_bDisableShaderOptimizations = ReadBool( pGroup, "setting.DisableShaderOptimizations", caps.m_bDisableShaderOptimizations );
+	caps.m_bPreferZPrepass = ReadBool( pGroup, "setting.PreferZPrepass", caps.m_bPreferZPrepass );
+	caps.m_bSuppressPixelShaderCentroidHackFixup = ReadBool( pGroup, "setting.SuppressPixelShaderCentroidHackFixup", caps.m_bSuppressPixelShaderCentroidHackFixup );
+	caps.m_bPreferTexturesInHWMemory = ReadBool( pGroup, "setting.PreferTexturesInHWMemory", caps.m_bPreferTexturesInHWMemory );
+	caps.m_bPreferHardwareSync = ReadBool( pGroup, "setting.PreferHardwareSync", caps.m_bPreferHardwareSync );
+	caps.m_bUnsupported = ReadBool( pGroup, "setting.Unsupported", caps.m_bUnsupported );
+	
+	// dxsupport can only kill CSM support, not forcefully enable it.
+	if ( !ReadBool( pGroup, "setting.SupportsCascadedShadowMapping", true ) )
+	{
+#ifdef OSX
+		// Set convar mat_osx_csm_enabled to 0 and do not touch caps.m_bSupportsCascadedShadowMapping (as CS:GO always had
+		// the caps set to true, therefore code path where the caps is false haven't been tested and might not be safe)
+		mat_osx_csm_enabled.SetValue( 0 );
+#else
+		caps.m_bSupportsCascadedShadowMapping = false;
+#endif
+	}
+	
+	int nCSMQuality = CSMQUALITY_VERY_LOW;
+	ReadInt( pGroup, "setting.CSMQuality", 0, &nCSMQuality );
+	caps.m_nCSMQuality = static_cast<uint8>( clamp( nCSMQuality, 0, CSMQUALITY_TOTAL_MODES - 1 ) );
 }
-
 
 
 //-----------------------------------------------------------------------------
@@ -696,117 +626,135 @@ void CShaderDeviceMgrBase::LoadConfig( KeyValues *pKeyValues, KeyValues *pConfig
 //-----------------------------------------------------------------------------
 static unsigned long GetRam()
 {
+#if defined(PLATFORM_WINDOWS)
+	MEMORYSTATUSEX statex;
+	statex.dwLength = sizeof( MEMORYSTATUSEX );
+	GlobalMemoryStatusEx( &statex );
+	if ( statex.ullAvailPhys < statex.ullAvailVirtual )
+	{
+		return ( unsigned long )( statex.ullAvailPhys / ( 1024 * 1024 ) );
+	}
+	return ( unsigned long )( statex.ullAvailVirtual / ( 1024 * 1024 ) );
+#else
 	MEMORYSTATUS stat;
+	stat.dwLength = sizeof( MEMORYSTATUS );
 	GlobalMemoryStatus( &stat );
-	
-	char buf[256];
-	V_snprintf( buf, sizeof( buf ), "GlobalMemoryStatus: %llu\n", (uint64)(stat.dwTotalPhys) );
-	Plat_DebugString( buf );
-
-	return (stat.dwTotalPhys / (1024 * 1024));
+	return ( unsigned long )( stat.dwTotalPhys / ( 1024 * 1024 ) );
+#endif
 }
 
+//-----------------------------------------------------------------------------
+// Purpose: Gets the recommended video configuration.
+// Called from: 
+// 1. Called from gameui.dll->OptionsSubVideo.cpp->COptionsSubVideoAdvancedDlg to fill in the video options panel.
+// 2. Called from gameui.dll->OptionsSubVideo.cpp->MarkDefaultSettingsAsRecommended when action is "Reset To Defaults"
+//-----------------------------------------------------------------------------
+bool CShaderDeviceMgrBase::GetRecommendedVideoConfig( int nAdapter, int nVendorID, int nDeviceID, KeyValues *pConfiguration ) 
+{
+	if ( IsX360() )
+	{
+		// this is not compatible with xbox
+		return false;
+	}
+
+	LOCK_SHADERAPI();
+
+	VidMatConfigData_t configData;
+#ifdef POSIX
+	V_strcpy_safe( configData.szFileName, "cfg/moddefaults_mac.txt" );
+#else
+	V_strcpy_safe( configData.szFileName, "cfg\\moddefaults.txt" );
+#endif
+	V_strcpy_safe( configData.szPathID, "MOD" );
+	configData.pConfigKeys = pConfiguration;
+	configData.nVendorID = nVendorID;
+	configData.nDeviceID = nDeviceID;
+	configData.nSystemMemory = GetRam();
+	int nTextureMemorySize = GetVidMemBytes( nAdapter );
+	configData.nVideoMemory = nTextureMemorySize / ( 1024 * 1024 );
+	configData.bIsVideo = true;
+	configData.nDXLevel = g_pHardwareConfig->GetMaxDXSupportLevel();
+	GetDesktopResolution( &configData.nPhysicalScreenWidth, &configData.nPhysicalScreenHeight, nAdapter );
+
+	int nModeCount = GetModeCount( nAdapter );
+	configData.displayModes.SetCount( nModeCount );
+	for ( int i = 0; i < nModeCount; ++i )
+	{
+		GetModeInfo( &configData.displayModes[i], nAdapter, i );
+	}
+	
+#if !defined( _X360 )
+	// Call into the video.cfg file to setup the video config cvars.
+	RecommendedConfig( configData );
+
+	// Update the convars.
+	UpdateVideoConfigConVars( configData.pConfigKeys );
+#endif
+
+	return true;
+//#endif
+}
 
 //-----------------------------------------------------------------------------
-// Gets the recommended configuration associated with a particular dx level
+// Purpose: Gets the recommended video configuration.
+// Called from: 
+// 3. Used by materialsystem.dll->cmaterialsystem.cpp->GenerateConfigFromConfigKeyValues to fill in material system data (MaterialSystem_Config_t)
+// 4. Used by materialsystem.dll->cmaterialsystem.cpp->WriteConfigurationInfoToConVars to write the material system data into ConVars
 //-----------------------------------------------------------------------------
 bool CShaderDeviceMgrBase::GetRecommendedConfigurationInfo( int nAdapter, int nDXLevel, int nVendorID, int nDeviceID, KeyValues *pConfiguration ) 
 {
+	if ( IsX360() )
+	{
+		// this is not compatible with xbox
+		return false;
+	}
+
 	LOCK_SHADERAPI();
 
-	const HardwareCaps_t& caps = GetHardwareCaps( nAdapter );
-	if ( nDXLevel == 0 )
-	{ 
-		nDXLevel = caps.m_nDXSupportLevel;
-	}
-	nDXLevel = GetClosestActualDXLevel( nDXLevel );
-	if ( nDXLevel > caps.m_nMaxDXSupportLevel )
-		return false;
-
-	KeyValues *pCfg = ReadDXSupportKeyValues();
-	if ( !pCfg )
-		return true;
-
-	// Look for a dxlevel specific line
-	KeyValues *pDxLevelKeyValues = FindDXLevelSpecificConfig( pCfg, nDXLevel );
-	// Look for a vendor specific line for a given dxlevel.
-	KeyValues *pDXLevelAndVendorKeyValue = FindDXLevelAndVendorSpecificConfig( pCfg, nDXLevel, nVendorID );
-	// Next, override with device-specific overrides
-	KeyValues *pCardKeyValues = FindCardSpecificConfig( pCfg, nVendorID, nDeviceID );
-
-	// Apply 
-	if ( pCardKeyValues && ReadHexValue( pCardKeyValues, "MinDeviceID" ) == 0 && ReadHexValue( pCardKeyValues, "MaxDeviceID" ) == 0xffff )
-	{
-		// The card specific case is a catch all for device ids, so run it before running the dxlevel and card specific stuff.
-		LoadConfig( pDxLevelKeyValues, pConfiguration );
-		LoadConfig( pCardKeyValues, pConfiguration );
-		LoadConfig( pDXLevelAndVendorKeyValue, pConfiguration );
-	}
-	else
-	{
-		// The card specific case is a small range of cards, so run it last to override all other configs.
-		LoadConfig( pDxLevelKeyValues, pConfiguration );
-		// don't run this one since we have a specific config for this card.
-		//		LoadConfig( pDXLevelAndVendorKeyValue, pConfiguration );
-		LoadConfig( pCardKeyValues, pConfiguration );
-	}
-
-	// Next, override with cpu-speed based overrides
-	const CPUInformation& pi = *GetCPUInformation();
-	int nCPUSpeedMhz = (int)(pi.m_Speed / 1000000.0f);
-		
-	bool bAMD = Q_stristr( pi.m_szProcessorID, "amd" ) != NULL;
-	
-	char buf[256];
-	V_snprintf( buf, sizeof( buf ), "CShaderDeviceMgrBase::GetRecommendedConfigurationInfo: CPU speed: %d MHz, Processor: %s\n", nCPUSpeedMhz, pi.m_szProcessorID );
-	Plat_DebugString( buf );
-
-	KeyValues *pCPUKeyValues = FindCPUSpecificConfig( pCfg, nCPUSpeedMhz, bAMD );
-	LoadConfig( pCPUKeyValues, pConfiguration );
-
-	// override with system memory-size based overrides
-	int nSystemMB = GetRam();
-	DevMsg( "%d MB of system RAM\n", nSystemMB );
-	KeyValues *pMemoryKeyValues = FindMemorySpecificConfig( pCfg, nSystemMB );
-	LoadConfig( pMemoryKeyValues, pConfiguration );
-
-	// override with texture memory-size based overrides
+	VidMatConfigData_t configData;
+#ifdef OSX
+	V_strcpy_safe( configData.szFileName, "../bin/dxsupport_mac.cfg" );
+#elif LINUX
+	V_strcpy_safe( configData.szFileName, "../bin/dxsupport.cfg" );
+#else
+	V_strcpy_safe( configData.szFileName, "..\\bin\\dxsupport.cfg" );
+#endif
+	V_strcpy_safe( configData.szPathID, "GAME" );
+	configData.pConfigKeys = pConfiguration;
+	configData.nVendorID = nVendorID;
+	configData.nDeviceID = nDeviceID;
+	configData.nSystemMemory = GetRam();
 	int nTextureMemorySize = GetVidMemBytes( nAdapter );
-	int vidMemMB = nTextureMemorySize / ( 1024 * 1024 );
-	KeyValues *pVidMemKeyValues = FindVidMemSpecificConfig( pCfg, vidMemMB );
-	if ( pVidMemKeyValues && nTextureMemorySize > 0 )
-	{
-		if ( CommandLine()->FindParm( "-debugdxsupport" ) )
-		{
-			CUtlBuffer tmpBuf;
-			pVidMemKeyValues->RecursiveSaveToFile( tmpBuf, 0 );
-			Warning( "pVidMemKeyValues\n%s\n", ( const char * )tmpBuf.Base() );
-		}
-		KeyValues *pMatPicmipKeyValue = pVidMemKeyValues->FindKey( "ConVar.mat_picmip", false );
+	configData.nVideoMemory = nTextureMemorySize / ( 1024 * 1024 );
+	configData.bIsVideo = false;
+	configData.nDXLevel = g_pHardwareConfig->GetMaxDXSupportLevel();
+	GetDesktopResolution( &configData.nPhysicalScreenWidth, &configData.nPhysicalScreenHeight, nAdapter );
 
-		// FIXME: Man, is this brutal. If it wasn't 1 day till orange box ship, I'd do something in dxsupport maybe
-		if ( pMatPicmipKeyValue && ( ( nDXLevel == caps.m_nMaxDXSupportLevel ) || ( vidMemMB < 100 ) ) )
-		{
-			KeyValues *pConfigMatPicMip = pConfiguration->FindKey( "ConVar.mat_picmip", false );
-			int newPicMip = pMatPicmipKeyValue->GetInt();
-			int oldPicMip = pConfigMatPicMip ? pConfigMatPicMip->GetInt() : 0;
-			pConfiguration->SetInt( "ConVar.mat_picmip", max( newPicMip, oldPicMip ) );
-		}
+	int nModeCount = GetModeCount( nAdapter );
+	configData.displayModes.SetCount( nModeCount );
+	for ( int i = 0; i < nModeCount; ++i )
+	{
+		GetModeInfo( &configData.displayModes[i], nAdapter, i );
 	}
 
-	// Hack to slam the mat_dxlevel ConVar to match the requested dxlevel
-	pConfiguration->SetInt( "ConVar.mat_dxlevel", nDXLevel );
-
-	if ( CommandLine()->FindParm( "-debugdxsupport" ) )
-	{
-		CUtlBuffer tmpBuf;
-		pConfiguration->RecursiveSaveToFile( tmpBuf, 0 );
-		Warning( "final config:\n%s\n", ( const char * )tmpBuf.Base() );
-	}
+#if !defined( _X360 ) && !defined( _PS3 )
+	// Call into the video.cfg file to setup the video config cvars.
+	RecommendedConfig( configData );
+#endif
 
 	return true;
 }
 
+//-----------------------------------------------------------------------------
+// Gets recommended congifuration for a particular adapter at a particular dx level
+//-----------------------------------------------------------------------------
+bool CShaderDeviceMgrBase::GetRecommendedVideoConfig( int nAdapter, KeyValues *pCongifuration )
+{
+	Assert( nAdapter >= 0 && nAdapter <= GetAdapterCount() );
+	MaterialAdapterInfo_t info;
+	GetAdapterInfo( nAdapter, info );
+	return GetRecommendedVideoConfig( nAdapter, info.m_VendorID, info.m_DeviceID, pCongifuration );
+}
 
 //-----------------------------------------------------------------------------
 // Gets recommended congifuration for a particular adapter at a particular dx level
@@ -825,29 +773,18 @@ bool CShaderDeviceMgrBase::GetRecommendedConfigurationInfo( int nAdapter, int nD
 //-----------------------------------------------------------------------------
 int CShaderDeviceMgrBase::GetClosestActualDXLevel( int nDxLevel ) const
 {
-	if ( nDxLevel < ABSOLUTE_MINIMUM_DXLEVEL ) 
-		return ABSOLUTE_MINIMUM_DXLEVEL;
-
-	if ( nDxLevel == 80 )
-		return 80;
-	if ( nDxLevel <= 89 )
-		return 81;
-
-	if ( IsOpenGL() )
-	{
-		return ( nDxLevel <= 90 ) ? 90 : 92;
-	}
-
-	if ( nDxLevel <= 94 )
-		return 90;
-
-	if ( IsX360() && nDxLevel <= 98 )
+	if ( IsX360() )
 		return 98;
-	if ( nDxLevel <= 99 )
+	
+	if ( nDxLevel < 92 )
+		return 90;
+	if ( nDxLevel < 95 )
+		return 92;
+	if ( nDxLevel < 100 )
 		return 95;
+    
 	return 100;
 }
-
 
 //-----------------------------------------------------------------------------
 // Mode change callback
@@ -865,15 +802,57 @@ void CShaderDeviceMgrBase::RemoveModeChangeCallback( ShaderModeChangeCallbackFun
 	m_ModeChangeCallbacks.FindAndRemove( func );
 }
 
-void CShaderDeviceMgrBase::InvokeModeChangeCallbacks()
+void CShaderDeviceMgrBase::InvokeModeChangeCallbacks( int screenWidth, int screenHeight )
 {
 	int nCount = m_ModeChangeCallbacks.Count();
 	for ( int i = 0; i < nCount; ++i )
 	{
 		m_ModeChangeCallbacks[i]();
 	}
+
+	nCount = m_DeviceDependentObjects.Count();
+	for ( int i = 0; i < nCount; ++i )
+	{
+		m_DeviceDependentObjects[i]->ScreenSizeChanged( screenWidth, screenHeight );
+	}
 }
 
+void CShaderDeviceMgrBase::AddDeviceDependentObject( IShaderDeviceDependentObject *pObject )
+{
+	if ( pObject )
+	{
+		LOCK_SHADERAPI();
+		Assert( pObject && m_DeviceDependentObjects.Find( pObject ) < 0 );
+		m_DeviceDependentObjects.AddToTail( pObject );
+	}
+}
+
+void CShaderDeviceMgrBase::RemoveDeviceDependentObject( IShaderDeviceDependentObject *pObject )
+{
+	if ( pObject )
+	{
+		LOCK_SHADERAPI();
+		m_DeviceDependentObjects.FindAndRemove( pObject );
+	}
+}
+
+void CShaderDeviceMgrBase::InvokeDeviceLostNotifications( void )
+{
+	int nCount = m_DeviceDependentObjects.Count();
+	for ( int i = 0; i < nCount; ++i )
+	{
+		m_DeviceDependentObjects[i]->DeviceLost();
+	}
+}
+
+void CShaderDeviceMgrBase::InvokeDeviceResetNotifications( IDirect3DDevice9 *pDevice, D3DPRESENT_PARAMETERS *pPresentParameters, void *pHWnd )
+{
+	int nCount = m_DeviceDependentObjects.Count();
+	for ( int i = 0; i < nCount; ++i )
+	{
+		m_DeviceDependentObjects[i]->DeviceReset( ( void * )pDevice, ( void * )pPresentParameters, pHWnd );
+	}
+}
 
 //-----------------------------------------------------------------------------
 // Factory to return from SetMode

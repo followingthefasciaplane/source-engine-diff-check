@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright (c) 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose:
 //
@@ -15,21 +15,25 @@
 #include <time.h>
 #endif
 
-#ifndef _XBOX
-#undef min
-#undef max
-#pragma warning(push)
-#include <set>
-#pragma warning(pop)
-#endif
+// #ifndef _GAMECONSOLE
+// #ifdef POSIX
+// #undef min
+// #undef max
+// #endif
+// #pragma warning(push)
+// #include <set>
+// #pragma warning(pop)
+// #endif
 
 #ifdef _WIN32
 #pragma once
 #endif
 
-// the include <set> monkey's with the MAX() define, unbreak it
-#undef MINMAX_H
-#include "minmax.h"
+// #ifdef POSIX
+// // the include <set> monkey's with the max() define, unbreak it
+// #undef MINMAX_H
+// #include "minmax.h"
+// #endif
 
 #include "ai_playerally.h"
 
@@ -240,13 +244,8 @@ protected:
 	//---------------------------------
 
 	DECLARE_DATADESC();
-#ifndef _XBOX
+
 	DEFINE_CUSTOM_AI;
-#else
-public:
-	DEFINE_CUSTOM_AI;
-private:
-#endif
 };
 
 #include "tier0/memdbgoff.h"

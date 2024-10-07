@@ -1,13 +1,13 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
 // $NoKeywords: $
-//=============================================================================//
+//===========================================================================//
 
 #include "cbase.h"
 #include "networkstringtable_clientdll.h"
-#include <KeyValues.h>
+#include <keyvalues.h>
 #include "panelmetaclassmgr.h"
 #include <vgui_controls/Controls.h>
 #include "mathlib/vmatrix.h"
@@ -21,13 +21,17 @@
 #include "in_buttons.h"
 #include <vgui/MouseCode.h>
 #include "materialsystem/imesh.h"
-#include "clienteffectprecachesystem.h"
+#include "precache_register.h"
 #include "c_vguiscreen.h"
 #include "iclientmode.h"
 #include "vgui_bitmapbutton.h"
 #include "vgui_bitmappanel.h"
 #include "filesystem.h"
 #include "iinput.h"
+#include "inputsystem/iinputsystem.h"
+#include "inputsystem/iinputstacksystem.h"
+#include "engine/ivdebugoverlay.h"
+#include "iviewrender.h"
 
 #include <vgui/IInputInternal.h>
 extern vgui::IInputInternal *g_InputInternal;
@@ -38,16 +42,52 @@ extern vgui::IInputInternal *g_InputInternal;
 #define VGUI_SCREEN_MODE_RADIUS	80
 
 //Precache the materials
-CLIENTEFFECT_REGISTER_BEGIN( PrecacheEffectVGuiScreen )
-CLIENTEFFECT_MATERIAL( "engine/writez" )
-CLIENTEFFECT_REGISTER_END()
+PRECACHE_REGISTER_BEGIN( GLOBAL, PrecacheEffectVGuiScreen )
+PRECACHE( MATERIAL, "engine/writez" )
+PRECACHE_REGISTER_END()
+
+ConVar cl_showVGUIAttachments( "cl_showVGUIAttachments", "0", FCVAR_DEVELOPMENTONLY, "Shows the base attachment location of the vgui widget" );
+
+// ----------------------------------------------------------------------------- //
+// This is a cache of preloaded keyvalues.
+// ----------------------------------------------------------------------------- // 
+
+CUtlDict<KeyValues*, int> g_KeyValuesCache;
+
+KeyValues* CacheKeyValuesForFile( const char *pFilename )
+{
+	MEM_ALLOC_CREDIT();
+	int i = g_KeyValuesCache.Find( pFilename );
+	if ( i == g_KeyValuesCache.InvalidIndex() )
+	{
+		KeyValues *rDat = new KeyValues( pFilename );
+		rDat->LoadFromFile( filesystem, pFilename, NULL );
+		g_KeyValuesCache.Insert( pFilename, rDat );
+		return rDat;		
+	}
+	else
+	{
+		return g_KeyValuesCache[i];
+	}
+}
+
+void ClearKeyValuesCache()
+{
+	MEM_ALLOC_CREDIT();
+	for ( int i=g_KeyValuesCache.First(); i != g_KeyValuesCache.InvalidIndex(); i=g_KeyValuesCache.Next( i ) )
+	{
+		g_KeyValuesCache[i]->deleteThis();
+	}
+	g_KeyValuesCache.Purge();
+}
+
 
 IMPLEMENT_CLIENTCLASS_DT(C_VGuiScreen, DT_VGuiScreen, CVGuiScreen)
 	RecvPropFloat( RECVINFO(m_flWidth) ),
 	RecvPropFloat( RECVINFO(m_flHeight) ),
 	RecvPropInt( RECVINFO(m_fScreenFlags) ),
 	RecvPropInt( RECVINFO(m_nPanelName) ),
-	RecvPropInt( RECVINFO(m_nAttachmentIndex) ),
+	RecvPropIntWithMinusOneFlag( RECVINFO(m_nAttachmentIndex) ),
 	RecvPropInt( RECVINFO(m_nOverlayMaterial) ),
 	RecvPropEHandle( RECVINFO(m_hPlayerOwner) ),
 END_RECV_TABLE()
@@ -94,6 +134,9 @@ void C_VGuiScreen::OnDataChanged( DataUpdateType_t type )
 		m_nButtonState = 0;
 	}
 
+	RenderWithViewModels( IsAttachedToViewModel() );
+	OnTranslucencyTypeChanged();
+
 	// Set up the overlay material
 	if (m_nOldOverlayMaterial != m_nOverlayMaterial)
 	{
@@ -111,7 +154,7 @@ void C_VGuiScreen::OnDataChanged( DataUpdateType_t type )
 	}
 }
 
-void FormatViewModelAttachment( Vector &vOrigin, bool bInverse );
+void FormatViewModelAttachment( C_BasePlayer *pPlayer, Vector &vOrigin, bool bInverse );
 
 //-----------------------------------------------------------------------------
 // Returns the attachment render origin + origin
@@ -125,11 +168,25 @@ void C_VGuiScreen::GetAimEntOrigin( IClientEntity *pAttachedTo, Vector *pOrigin,
 			C_BaseAnimating::AutoAllowBoneAccess boneaccess( true, true );
 			pEnt->GetAttachment( m_nAttachmentIndex, *pOrigin, *pAngles );
 		}
+
+#if defined ( CSTRIKE15 )
 		
+		// For some reason FormatViewModelAttachment is causing bad transforms on the attachment position.
+		// We will probably need to fix this for split screen support.
+		// If we add back in split screen support to the game, throw an assert here.
+		AssertMsg( MAX_SPLITSCREEN_PLAYERS == 1, "FormatViewModelAttachment must be fixed and reenabled for proper split screen support." ); 
+
+#else
+
 		if ( IsAttachedToViewModel() )
 		{
-			FormatViewModelAttachment( *pOrigin, true );
+			C_BasePlayer *pOwner = ToBasePlayer( ((C_BaseViewModel *)pEnt)->GetOwner() );
+			Assert( pOwner );
+			FormatViewModelAttachment( pOwner, *pOrigin, true );
 		}
+
+#endif
+
 	}
 	else
 	{
@@ -145,7 +202,17 @@ void C_VGuiScreen::CreateVguiScreen( const char *pTypeName )
 	// Clear out any old screens.
 	DestroyVguiScreen();
 
+#if defined ( CSTRIKE15 )
+	
+	// Asserts were firing for screens because they had EFL_USE_PARTITION_WHEN_NOT_SOLID but no physics data.
+	SetSolid( SOLID_NONE );
+	RemoveEFlags( EFL_USE_PARTITION_WHEN_NOT_SOLID );
+
+#else
+	
 	AddEFlags( EFL_USE_PARTITION_WHEN_NOT_SOLID );
+
+#endif
 
 	// Create the new screen...
 	VGuiScreenInitData_t initData( this );
@@ -167,6 +234,12 @@ void C_VGuiScreen::CreateVguiScreen( const char *pTypeName )
 void C_VGuiScreen::DestroyVguiScreen( )
 {
 	m_PanelWrapper.Deactivate();
+}
+
+
+int C_VGuiScreen::GetScreenFlags( void ) const
+{
+	return m_fScreenFlags;
 }
 
 
@@ -205,18 +278,6 @@ void C_VGuiScreen::SetAcceptsInput( bool acceptsinput )
 	m_bAcceptsInput = acceptsinput;
 }
 
-
-//-----------------------------------------------------------------------------
-// Purpose: 
-// Output : RenderGroup_t
-//-----------------------------------------------------------------------------
-RenderGroup_t C_VGuiScreen::GetRenderGroup()
-{
-	if ( IsAttachedToViewModel() )
-		return RENDER_GROUP_VIEW_MODEL_TRANSLUCENT;
-
-	return BaseClass::GetRenderGroup();
-}
 
 //-----------------------------------------------------------------------------
 // Are we only visible to teammates?
@@ -300,7 +361,7 @@ void ScreenToWorld( int mousex, int mousey, float fov,
 	float dist;
 	Vector vpn, vup, vright;
 
-	float scaled_fov = ScaleFOVByWidthRatio( fov, engine->GetScreenAspectRatio() * 0.75f );
+	float scaled_fov = ScaleFOVByWidthRatio( fov, engine->GetScreenAspectRatio( ScreenWidth(), ScreenHeight() ) * 0.75f );
 
 	c_x = ScreenWidth() / 2;
 	c_y = ScreenHeight() / 2;
@@ -327,6 +388,8 @@ void ScreenToWorld( int mousex, int mousey, float fov,
 //-----------------------------------------------------------------------------
 void C_VGuiScreen::ClientThink( void )
 {
+	// InputContextHandle_t hContext = engine->GetInputContext( ENGINE_INPUT_CONTEXT_GAME );
+
 	int nButtonsChanged = m_nOldButtonState ^ m_nButtonState;
 
 	m_nOldButtonState = m_nButtonState;
@@ -374,8 +437,12 @@ void C_VGuiScreen::ClientThink( void )
 	if ( ((u < 0) || (v < 0) || (u > 1) || (v > 1)) && !m_bLoseThinkNextFrame)
 		return;
 
+	// g_pInputStackSystem->SetCursorVisible( hContext, true );
+	// g_pInputStackSystem->SetCursorIcon( hContext, g_pInputSystem->GetStandardCursor( INPUT_CURSOR_HAND )  );
+
 	// This will cause our panel to grab all input!
-	g_pClientMode->ActivateInGameVGuiContext( pPanel );
+	ACTIVE_SPLITSCREEN_PLAYER_GUARD_VGUI( pLocalPlayer->index );
+	GetClientMode()->ActivateInGameVGuiContext( pPanel );
 
 	// Convert (u,v) into (px,py)
 	int px = (int)(u * m_nPixelWidth + 0.5f);
@@ -389,7 +456,7 @@ void C_VGuiScreen::ClientThink( void )
 		m_nOldPy = py;
 	}
 
-	if (m_nButtonPressed & IN_ATTACK)
+	if ( m_nButtonPressed & IN_ATTACK || m_nButtonPressed & IN_USE )
 	{
 		g_InputInternal->SetMouseCodeState( MOUSE_LEFT, vgui::BUTTON_PRESSED );
 		g_InputInternal->InternalMousePressed(MOUSE_LEFT);
@@ -399,7 +466,7 @@ void C_VGuiScreen::ClientThink( void )
 		g_InputInternal->SetMouseCodeState( MOUSE_RIGHT, vgui::BUTTON_PRESSED );
 		g_InputInternal->InternalMousePressed( MOUSE_RIGHT );
 	}
-	if ( (m_nButtonReleased & IN_ATTACK) || m_bLoseThinkNextFrame) // for a button release on loosing focus
+	if ( (m_nButtonReleased & IN_ATTACK) || ( m_nButtonReleased & IN_USE ) || m_bLoseThinkNextFrame) // for a button release on loosing focus
 	{
 		g_InputInternal->SetMouseCodeState( MOUSE_LEFT, vgui::BUTTON_RELEASED );
 		g_InputInternal->InternalMouseReleased( MOUSE_LEFT );
@@ -416,7 +483,7 @@ void C_VGuiScreen::ClientThink( void )
 		SetNextClientThink( CLIENT_THINK_NEVER );
 	}
 
-	g_pClientMode->DeactivateInGameVGuiContext( );
+	GetClientMode()->DeactivateInGameVGuiContext();
 }
 
 
@@ -474,10 +541,7 @@ bool C_VGuiScreen::IsBackfacing( const Vector &viewOrigin )
 //-----------------------------------------------------------------------------
 void C_VGuiScreen::ComputePanelToWorld()
 {
-	// The origin is at the upper-left corner of the screen
-	Vector vecOrigin, vecUR, vecLL;
-	ComputeEdges( &vecOrigin, &vecUR, &vecLL );
-	m_PanelToWorld.SetupMatrixOrgAngles( vecOrigin, GetAbsAngles() );
+	m_PanelToWorld.SetupMatrixOrgAngles( GetAbsOrigin(), GetAbsAngles() );
 }
 
 
@@ -527,12 +591,21 @@ void C_VGuiScreen::DrawScreenOverlay()
 //-----------------------------------------------------------------------------
 // Draws the panel using a 3D transform...
 //-----------------------------------------------------------------------------
-int	C_VGuiScreen::DrawModel( int flags )
+int	C_VGuiScreen::DrawModel( int flags, const RenderableInstance_t &instance )
 {
 	vgui::Panel *pPanel = m_PanelWrapper.GetPanel();
-	if (!pPanel || !IsActive())
+	if (!pPanel)
 		return 0;
+
+	pPanel->SetEnabled( IsActive() );
 	
+	if (!IsActive())
+		return 0;
+
+	// Don't bother drawing in the shadow map
+	if ( flags & DF_SHADOW_DEPTH_MAP )
+		return 0;
+
 	// Don't bother drawing stuff not visible to me...
 	C_BasePlayer *pLocalPlayer = C_BasePlayer::GetLocalPlayer();
 	if (!pLocalPlayer || !IsVisibleToTeam(pLocalPlayer->GetTeamNumber()) )
@@ -550,6 +623,40 @@ int	C_VGuiScreen::DrawModel( int flags )
 	// Recompute the panel-to-world center
 	// FIXME: Can this be cached off?
 	ComputePanelToWorld();
+
+
+	if ( cl_showVGUIAttachments.GetBool() )
+	{
+		// Attachment debug code.
+		C_BaseEntity *pEnt = GetMoveParent()->GetBaseEntity();
+		if (pEnt && (m_nAttachmentIndex > 0))
+		{
+			studiohdr_t *pStudioHdr = modelinfo->GetStudiomodel( pEnt->GetModel() );
+			for ( int i = 1; i <= pStudioHdr->GetNumAttachments(); i++ )
+			{
+				Vector vecPos;
+				QAngle angles;
+				Vector vecForward, vecRight, vecUp;
+				char tempstr[256];
+
+				C_BaseAnimating::AutoAllowBoneAccess boneaccess( true, true );
+				//pEnt->GetAttachment( m_nAttachmentIndex, *pOrigin, *pAngles );
+				bool baseVGuiTransform = ( m_nAttachmentIndex == i );
+				pEnt->GetAttachment( i, vecPos, angles );
+		
+				AngleVectors(angles, &vecForward, &vecRight, &vecUp );
+				// Red - forward, green - right, blue - up
+				NDebugOverlay::Line( vecPos, vecPos + ( vecForward * 4.0f ), 255, 0, 0, true, 0.05f );
+				NDebugOverlay::Line( vecPos, vecPos + ( vecRight * 4.0f ), 0, 255, 0, true, 0.05f );
+				NDebugOverlay::Line( vecPos, vecPos + ( vecUp * 4.0f ), 0, 0, 255, true, 0.05f );
+			
+				Q_snprintf( tempstr, sizeof(tempstr), " %c %s (%d)", baseVGuiTransform ? '*' : '<', pStudioHdr->pAttachment(i-1).pszName(), i );
+				NDebugOverlay::Text( vecPos, tempstr, true, 0.05f );
+			}
+		}
+	}
+
+
 
 	g_pMatSystemSurface->DrawPanelIn3DSpace( pPanel->GetVPanel(), m_PanelToWorld, 
 		m_nPixelWidth, m_nPixelHeight, m_flWidth, m_flHeight );
@@ -574,10 +681,11 @@ bool C_VGuiScreen::IsVisibleToPlayer( C_BasePlayer *pViewingPlayer )
 	return true;
 }
 
-bool C_VGuiScreen::IsTransparent( void )
+RenderableTranslucencyType_t C_VGuiScreen::ComputeTranslucencyType( void )
 {
-	return (m_fScreenFlags & VGUI_SCREEN_TRANSPARENT) != 0;
+	return ( (m_fScreenFlags & VGUI_SCREEN_TRANSPARENT) != 0 ) ? RENDERABLE_IS_TRANSLUCENT : RENDERABLE_IS_OPAQUE;
 }
+
 
 //-----------------------------------------------------------------------------
 // Purpose: Sometimes we only want a specific player to be able to input to a panel
@@ -645,7 +753,7 @@ C_VGuiScreen *CVGuiScreenEnumerator::GetVGuiScreen( int index )
 //-----------------------------------------------------------------------------
 C_BaseEntity *FindNearbyVguiScreen( const Vector &viewPosition, const QAngle &viewAngle, int nTeam )
 {
-	if ( IsX360() )
+	if ( IsGameConsole() )
 	{
 		// X360TBD: Turn this on if feature actually used
 		return NULL;
@@ -781,7 +889,8 @@ bool CVGuiScreenPanel::Init( KeyValues* pKeyValues, VGuiScreenInitData_t* pInitD
 	const char *pResFile = pKeyValues->GetString( "resfile" );
 	if (pResFile[0] != 0)
 	{
-		LoadControlSettings( pResFile, NULL, NULL );
+		KeyValues *pCachedKeyValues = CacheKeyValuesForFile( pResFile );
+		LoadControlSettings( pResFile, NULL, pCachedKeyValues );
 	}
 
 	// Dimensions in pixels
@@ -799,7 +908,7 @@ bool CVGuiScreenPanel::Init( KeyValues* pKeyValues, VGuiScreenInitData_t* pInitD
 		C_VGuiScreen *screen = dynamic_cast< C_VGuiScreen * >( pInitData->m_pEntity );
 		if ( screen )
 		{
-			bool acceptsInput = pKeyValues->GetInt( "acceptsinput", 1 ) ? true : false;
+			bool acceptsInput = pKeyValues->GetBool( "acceptsinput", true );
 			screen->SetAcceptsInput( acceptsInput );
 		}
 	}
@@ -812,12 +921,12 @@ bool CVGuiScreenPanel::Init( KeyValues* pKeyValues, VGuiScreenInitData_t* pInitD
 vgui::Panel *CVGuiScreenPanel::CreateControlByName(const char *controlName)
 {
 	// Check the panel metaclass manager to make these controls...
-	if (!Q_strncmp(controlName, "MaterialImage", 20))
+	if ( StringHasPrefixCaseSensitive( controlName, "MaterialImage" ) )
 	{
 		return new CBitmapPanel(NULL, "BitmapPanel");
 	}
 
-	if (!Q_strncmp(controlName, "MaterialButton", 20))
+	if ( StringHasPrefixCaseSensitive( controlName, "MaterialButton" ) )
 	{
 		return new CBitmapButton(NULL, "BitmapButton", "");
 	}

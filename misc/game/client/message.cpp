@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -11,16 +11,16 @@
 // implementation of CHudMessage class
 //
 #include "cbase.h"
-#include "hudelement.h"
+
+#include "message.h"
+
+#include "client_textmessage.h"
 #include "hud_macros.h"
-#include "itextmessage.h"
 #include "iclientmode.h"
 #include "vgui_controls/Controls.h"
-#include "vgui_controls/Panel.h"
 #include "vgui/ILocalize.h"
 #include "vgui/IScheme.h"
 #include "vgui/ISurface.h"
-#include "client_textmessage.h"
 #include "VGuiMatSurface/IMatSystemSurface.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
@@ -28,7 +28,6 @@
 
 #include <ctype.h>
 
-using namespace vgui;
 
 #define NETWORK_MESSAGE1 "__NETMESSAGE__1"
 #define NETWORK_MESSAGE2 "__NETMESSAGE__2"
@@ -43,126 +42,19 @@ using namespace vgui;
 
 static const char *s_NetworkMessageNames[MAX_NETMESSAGE] = { NETWORK_MESSAGE1, NETWORK_MESSAGE2, NETWORK_MESSAGE3, NETWORK_MESSAGE4, NETWORK_MESSAGE5, NETWORK_MESSAGE6 };
 
-const int maxHUDMessages = 16;
-struct message_parms_t
-{
-	client_textmessage_t	*pMessage;
-	float	time;
-	int x, y;
-	int	totalWidth, totalHeight;
-	int width;
-	int lines;
-	int lineLength;
-	int length;
-	int r, g, b;
-	int text;
-	int fadeBlend;
-	float charTime;
-	float fadeTime;
-	const char *vguiFontName;
-	vgui::HFont	font;
-};
-
-//
-//-----------------------------------------------------
-//
-
-class CHudMessage: public CHudElement, public vgui::Panel, public ITextMessage 
-{
-	DECLARE_CLASS_SIMPLE( CHudMessage, vgui::Panel );
-public:
-
-	enum
-	{
-		TYPE_UNKNOWN = 0,
-		TYPE_POSITION,
-		TYPE_CHARACTER,
-		TYPE_FONT,
-	};
-
-	struct message_t
-	{
-		vgui::HFont	font;
-		short		x, y;
-		wchar_t		ch;
-		byte		type;
-		byte		r, g, b, a;
-	};
-
-	CHudMessage( const char *pElementName );
-	~CHudMessage();
-
-	void Init( void );
-	void VidInit( void );
-	bool ShouldDraw( void );
-	virtual void Paint();
-	void MsgFunc_HudText(bf_read &msg);
-	void MsgFunc_GameTitle(bf_read &msg);
-	void MsgFunc_HudMsg(bf_read &msg);
-
-	float FadeBlend( float fadein, float fadeout, float hold, float localTime );
-	int	XPosition( float x, int width, int lineWidth );
-	int YPosition( float y, int height );
-
-	void MessageAdd( const char *pName );
-	void MessageDrawScan( client_textmessage_t *pMessage, float time );
-	void MessageScanStart( void );
-	void MessageScanNextChar( void );
-	void Reset( void );
-
-	virtual void ApplySchemeSettings( IScheme *scheme );
-
-	void SetFont( HScheme scheme, const char *pFontName );
-
-public: // ITextMessage
-	virtual void		SetPosition( int x, int y );
-	virtual void		AddChar( int r, int g, int b, int a, wchar_t ch );
-
-	virtual void		GetLength( int *wide, int *tall, const char *string );
-	virtual int			GetFontInfo( FONTABC *pABCs, vgui::HFont hFont );
-
-	virtual void		SetFont( vgui::HFont hCustomFont );
-	virtual void		SetDefaultFont( void );
-
-private:
-
-	message_t			*AllocMessage( void );
-	void				ResetCharacters( void );
-	void				PaintCharacters();
-	virtual void		GetTextExtents( int *wide, int *tall, const char *string );
-
-
-	client_textmessage_t		*m_pMessages[maxHUDMessages];
-	float						m_startTime[maxHUDMessages];
-	message_parms_t				m_parms;
-	float						m_gameTitleTime;
-	client_textmessage_t		*m_pGameTitle;
-	bool						m_bHaveMessage;
-
-	CHudTexture *m_iconTitleLife;
-	CHudTexture *m_iconTitleHalf;
-
-	vgui::HFont					m_hFont;
-	vgui::HFont					m_hDefaultFont;
-	CUtlVector< message_t >		m_Messages;
-};
 
 //-----------------------------------------------------------------------------
 // Purpose: 
 //-----------------------------------------------------------------------------
 void DispatchHudText( const char *pszText )
 {
-	CHudMessage *pHudMessage = (CHudMessage *)GET_HUDELEMENT( CHudMessage );
-	if ( pHudMessage )
+	if ( pszText == NULL )
 	{
-		if ( pszText == NULL )
-		{
-			pHudMessage->Reset();
-		}
-		else
-		{
-			pHudMessage->MessageAdd( pszText );
-		}
+		(GET_HUDELEMENT( CHudMessage ))->Reset();
+	}
+	else
+	{
+		(GET_HUDELEMENT( CHudMessage ))->MessageAdd( pszText );
 	}
 }
 
@@ -183,9 +75,12 @@ ITextMessage *textmessage = NULL;
 CHudMessage::CHudMessage( const char *pElementName ) :
 	CHudElement( pElementName ), BaseClass( NULL, "HudMessage" )
 {
-	vgui::Panel *pParent = g_pClientMode->GetViewport();
+	vgui::Panel *pParent = GetClientMode()->GetViewport();
 	SetParent( pParent );
-	textmessage = this;
+	if( textmessage == NULL ) //HACKHACK: Fixes center print text in when MAX_SPLITSCREEN_PLAYERS is greater than 1
+	{
+		textmessage = this;
+	}
 	m_hFont = g_hFontTrebuchet24;
 	m_hDefaultFont = m_hFont;
 	// Clear memory out
@@ -221,8 +116,8 @@ void CHudMessage::Init(void)
 //-----------------------------------------------------------------------------
 void CHudMessage::VidInit( void )
 {
-	m_iconTitleHalf = gHUD.GetIcon( "title_half" );
-	m_iconTitleLife = gHUD.GetIcon( "title_life" );
+	m_iconTitleHalf = HudIcons().GetIcon( "title_half" );
+	m_iconTitleLife = HudIcons().GetIcon( "title_life" );
 };
 
 
@@ -399,7 +294,11 @@ void CHudMessage::SetFont( HScheme scheme, const char *pFontName )
 
 	if ( pScheme )
 	{
-		vgui::HFont font = pScheme->GetFont( pFontName );
+		bool bProportional = false;
+#ifdef PORTAL2
+		bProportional = true;
+#endif
+		vgui::HFont font = pScheme->GetFont( pFontName, bProportional );
 		textmessage->SetFont( font );
 		m_parms.font = font;
 	}
@@ -452,8 +351,11 @@ void CHudMessage::MessageScanStart( void )
 	if ( m_parms.vguiFontName != NULL && 
 		m_parms.vguiFontName[ 0 ] )
 	{
-
+#ifdef PORTAL2
+		SetFont( vgui::scheme()->GetScheme( "basemodui_scheme" ), m_parms.vguiFontName );
+#else
 		SetFont( vgui::scheme()->GetDefaultScheme(), m_parms.vguiFontName );
+#endif
 	}
 }
 
@@ -471,9 +373,9 @@ void CHudMessage::MessageDrawScan( client_textmessage_t *pMessage, float time )
 		// strip off any trailing newlines
 		int len = Q_strlen( pMessage->pMessage );
 		int tempLen = len + 2;
-		char *localString = (char *)_alloca( tempLen );
+		char *localString = (char *)stackalloc( tempLen );
 		Q_strncpy( localString, pMessage->pMessage, tempLen );
-		if (V_iscntrl(localString[len - 1]))
+		if (len > 0 && V_iscntrl(localString[len - 1]))
 		{
 			localString[len - 1] = 0;
 		}
@@ -497,7 +399,22 @@ void CHudMessage::MessageDrawScan( client_textmessage_t *pMessage, float time )
 	m_parms.totalWidth = 0;
 	m_parms.vguiFontName = pMessage->pVGuiSchemeFontName;
 
-	m_parms.font = g_hFontTrebuchet24;
+	if ( m_parms.font == 0 )
+	{
+		if ( m_parms.vguiFontName != NULL && 
+			m_parms.vguiFontName[ 0 ] )
+		{
+#ifdef PORTAL2
+			SetFont( vgui::scheme()->GetScheme( "basemodui_scheme" ), m_parms.vguiFontName );
+#else
+			SetFont( vgui::scheme()->GetDefaultScheme(), m_parms.vguiFontName );
+#endif
+		}
+		else
+		{
+			m_parms.font = g_hFontTrebuchet24;
+		}
+	}
 
 	while ( *pText )
 	{
@@ -772,12 +689,10 @@ void CHudMessage::MessageAdd( const char *pName )
 //-----------------------------------------------------------------------------
 // Purpose: 
 //-----------------------------------------------------------------------------
-void CHudMessage::MsgFunc_HudText( bf_read &msg )
+bool CHudMessage::MsgFunc_HudText(const CCSUsrMsg_HudText &msg)
 {
-	char szString[2048];
-	msg.ReadString( szString, sizeof(szString) );
-
-	MessageAdd( szString );
+	MessageAdd( msg.text().c_str() );
+	return true;
 }
 
 #include "ivieweffects.h"
@@ -786,7 +701,7 @@ void CHudMessage::MsgFunc_HudText( bf_read &msg )
 //-----------------------------------------------------------------------------
 // Purpose: 
 //-----------------------------------------------------------------------------
-void CHudMessage::MsgFunc_GameTitle( bf_read &msg )
+bool CHudMessage::MsgFunc_GameTitle(const CCSUsrMsg_GameTitle &msg)
 {
 	m_pGameTitle = TextMessageGet( "GAMETITLE" );
 	if ( m_pGameTitle != NULL )
@@ -807,14 +722,20 @@ void CHudMessage::MsgFunc_GameTitle( bf_read &msg )
 		sf.duration = (float)(1<<SCREENFADE_FRACBITS) * 5.0f;
 		sf.holdTime = (float)(1<<SCREENFADE_FRACBITS) * 1.0f;
 		sf.fadeFlags = FFADE_IN | FFADE_PURGE;
-		vieweffects->Fade( sf );
+		FOR_EACH_VALID_SPLITSCREEN_PLAYER( hh )
+		{
+			ACTIVE_SPLITSCREEN_PLAYER_GUARD( hh );
+			GetViewEffects()->Fade( sf );
+		}
 
 		Msg( "%i gametitle fade\n", gpGlobals->framecount );
 	}
+
+	return true;
 }
 
 
-void CHudMessage::MsgFunc_HudMsg(bf_read &msg)
+bool CHudMessage::MsgFunc_HudMsg(const CCSUsrMsg_HudMsg &msg)
 {
 // Position command $position x y 
 // x & y are from 0 to 1 to be screen resolution independent
@@ -830,39 +751,56 @@ void CHudMessage::MsgFunc_HudMsg(bf_read &msg)
 // $fadeout (message fade out time)
 // $holdtime (stay on the screen for this long)
 
-	int channel = msg.ReadByte() % MAX_NETMESSAGE;	// Pick the buffer
+	int channel = msg.channel() % MAX_NETMESSAGE;	// Pick the buffer
 	
 	client_textmessage_t *pNetMessage = TextMessageGet( s_NetworkMessageNames[ channel ] );
 	
 	if ( !pNetMessage || !pNetMessage->pMessage )
-		return;
+		return true;
 
-	pNetMessage->x = msg.ReadFloat();
-	pNetMessage->y = msg.ReadFloat();
+	pNetMessage->x = msg.pos().x();
+	pNetMessage->y = msg.pos().y();
 
-	pNetMessage->r1 = msg.ReadByte();
-	pNetMessage->g1 = msg.ReadByte();
-	pNetMessage->b1 = msg.ReadByte();
-	pNetMessage->a1 = msg.ReadByte();
+	pNetMessage->r1 = msg.clr1().r();
+	pNetMessage->g1 = msg.clr1().g();
+	pNetMessage->b1 = msg.clr1().b();
+	pNetMessage->a1 = msg.clr1().a();
 
-	pNetMessage->r2 = msg.ReadByte();
-	pNetMessage->g2 = msg.ReadByte();
-	pNetMessage->b2 = msg.ReadByte();
-	pNetMessage->a2 = msg.ReadByte();
+	pNetMessage->r2 = msg.clr2().r();
+	pNetMessage->g2 = msg.clr2().g();
+	pNetMessage->b2 = msg.clr2().b();
+	pNetMessage->a2 = msg.clr2().a();
 
-	pNetMessage->effect = msg.ReadByte();
+	pNetMessage->effect = msg.effect();
 
-	pNetMessage->fadein = msg.ReadFloat();
-	pNetMessage->fadeout = msg.ReadFloat();
-	pNetMessage->holdtime = msg.ReadFloat();
-	pNetMessage->fxtime	= msg.ReadFloat();
+	pNetMessage->fadein = msg.fade_in_time();
+	pNetMessage->fadeout = msg.fade_out_time();
+	pNetMessage->holdtime = msg.hold_time();
+	pNetMessage->fxtime	= msg.fx_time();
 
+#ifdef PORTAL2
+	// hack to make the chapter title channel define the font size in Portal 2
+	if ( channel == 2 || channel == 3 )
+	{
+		const char *pFontName;
+		if ( channel == 2 )
+			pFontName = "InGameChapterTitle";
+		else
+			pFontName = "InGameChapterSubtitle";	
+			
+		pNetMessage->pVGuiSchemeFontName = pFontName;	
+	}
+
+#endif
+	
 	pNetMessage->pName = s_NetworkMessageNames[ channel ];
 
 	// see tmessage.cpp why 512
-	msg.ReadString( (char*)pNetMessage->pMessage, 512 );
+	Q_strncpy( (char*)pNetMessage->pMessage, msg.text().c_str(), 512 );
 
 	MessageAdd( pNetMessage->pName );
+
+	return true;
 }
 
 //-----------------------------------------------------------------------------

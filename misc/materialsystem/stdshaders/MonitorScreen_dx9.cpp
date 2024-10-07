@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -52,22 +52,7 @@ BEGIN_VS_SHADER( MonitorScreen_DX9,
 	SHADER_FALLBACK
 	{
 		if( params && !params[BASETEXTURE]->IsDefined() )
-		{
-			if( IS_FLAG_DEFINED( MATERIAL_VAR_MODEL ) )
-			{
-				return "VertexLitGeneric_DX6";
-			}
-			else
-			{
-				return "LightmappedGeneric_DX6";
-			}
-		}
-
-		if ( !(g_pHardwareConfig->SupportsPixelShaders_2_0() && g_pHardwareConfig->SupportsVertexShaders_2_0()) ||
-			(g_pHardwareConfig->GetDXSupportLevel() < 90) )
-		{
-			return "MonitorScreen_DX8";
-		}		
+			return "LightmappedGeneric";
 
 		return 0;
 	}
@@ -149,20 +134,22 @@ BEGIN_VS_SHADER( MonitorScreen_DX9,
 			DefaultFog();
 
 			pShaderShadow->EnableAlphaWrites( bFullyOpaque );
+			PI_BeginCommandBuffer();
+			PI_SetModulationVertexShaderDynamicState();
+			PI_EndCommandBuffer();
 		}
 		DYNAMIC_STATE
 		{
-			BindTexture( SHADER_SAMPLER0, BASETEXTURE, FRAME );
+			BindTexture( SHADER_SAMPLER0, TEXTURE_BINDFLAGS_SRGBREAD, BASETEXTURE, FRAME );
 			if( bHasTexture2 )
 			{
-				BindTexture( SHADER_SAMPLER1, TEXTURE2, FRAME2 );
+				BindTexture( SHADER_SAMPLER1, TEXTURE_BINDFLAGS_SRGBREAD, TEXTURE2, FRAME2 );
 				SetVertexShaderTextureTransform( VERTEX_SHADER_SHADER_SPECIFIC_CONST_2, TEXTURE2TRANSFORM );
 			}
 			SetVertexShaderTextureTransform( VERTEX_SHADER_SHADER_SPECIFIC_CONST_0, BASETEXTURETRANSFORM );
 			SetPixelShaderConstant( 1, CONTRAST );
 			SetPixelShaderConstant( 2, SATURATION );
 			SetPixelShaderConstant( 3, TINT );
-			SetModulationVertexShaderDynamicState();
 
 			pShaderAPI->SetPixelShaderFogParams( PSREG_FOG_PARAMS );
 
@@ -173,22 +160,20 @@ BEGIN_VS_SHADER( MonitorScreen_DX9,
 
 
 			DECLARE_DYNAMIC_VERTEX_SHADER( unlittwotexture_vs20 );
-			SET_DYNAMIC_VERTEX_SHADER_COMBO( DOWATERFOG, pShaderAPI->GetSceneFogMode() == MATERIAL_FOG_LINEAR_BELOW_FOG_Z );
 			SET_DYNAMIC_VERTEX_SHADER_COMBO( SKINNING, pShaderAPI->GetCurrentNumBones() > 0 );
 			SET_DYNAMIC_VERTEX_SHADER_COMBO( COMPRESSED_VERTS, (int)vertexCompression );
+			SET_DYNAMIC_VERTEX_SHADER_COMBO( WORLD_NORMAL, 0 );
 			SET_DYNAMIC_VERTEX_SHADER( unlittwotexture_vs20 );
 
 			if( g_pHardwareConfig->SupportsPixelShaders_2_b() )
 			{
 				DECLARE_DYNAMIC_PIXEL_SHADER( monitorscreen_ps20b );
-				SET_DYNAMIC_PIXEL_SHADER_COMBO( PIXELFOGTYPE, pShaderAPI->GetPixelFogCombo() );
 				SET_DYNAMIC_PIXEL_SHADER_COMBO( WRITE_DEPTH_TO_DESTALPHA, bFullyOpaque && pShaderAPI->ShouldWriteDepthToDestAlpha() );
 				SET_DYNAMIC_PIXEL_SHADER( monitorscreen_ps20b );
 			}
 			else
 			{
 				DECLARE_DYNAMIC_PIXEL_SHADER( monitorscreen_ps20 );
-				SET_DYNAMIC_PIXEL_SHADER_COMBO( PIXELFOGTYPE, pShaderAPI->GetPixelFogCombo() );
 				SET_DYNAMIC_PIXEL_SHADER( monitorscreen_ps20 );
 			}
 		}

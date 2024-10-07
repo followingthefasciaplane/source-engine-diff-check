@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -10,6 +10,10 @@
 #include "screenspaceeffect_vs20.inc"
 #include "floatcombine_autoexpose_ps20.inc"
 #include "floatcombine_autoexpose_ps20b.inc"
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
 
 BEGIN_VS_SHADER( floatcombine_autoexpose, "Help for floatcombine_autoexpose" )
 	BEGIN_SHADER_PARAMS
@@ -45,12 +49,6 @@ BEGIN_VS_SHADER( floatcombine_autoexpose, "Help for floatcombine_autoexpose" )
 	
 	SHADER_FALLBACK
 	{
-		// Requires DX9 + above
-		if ( g_pHardwareConfig->GetDXSupportLevel() < 90 )
-		{
-			Assert( 0 );
-			return "Wireframe";
-		}
 		return 0;
 	}
 
@@ -101,9 +99,9 @@ BEGIN_VS_SHADER( floatcombine_autoexpose, "Help for floatcombine_autoexpose" )
 			pShaderAPI->SetPixelShaderConstant( 0, c0, 1 );
 			pShaderAPI->SetPixelShaderConstant( 1, c1, 1 );
 			pShaderAPI->SetPixelShaderConstant( 2, c2, 1 );
-			BindTexture( SHADER_SAMPLER0, BASETEXTURE, -1 );
-			BindTexture( SHADER_SAMPLER1, BLOOMTEXTURE, -1 );
-			BindTexture( SHADER_SAMPLER2, EXPOSURE_TEXTURE, -1 );
+			BindTexture( SHADER_SAMPLER0, TEXTURE_BINDFLAGS_NONE, BASETEXTURE, -1 );
+			BindTexture( SHADER_SAMPLER1, TEXTURE_BINDFLAGS_NONE, BLOOMTEXTURE, -1 );
+			BindTexture( SHADER_SAMPLER2, TEXTURE_BINDFLAGS_NONE, EXPOSURE_TEXTURE, -1 );
 			DECLARE_DYNAMIC_VERTEX_SHADER( screenspaceeffect_vs20 );
 			SET_DYNAMIC_VERTEX_SHADER( screenspaceeffect_vs20 );
 

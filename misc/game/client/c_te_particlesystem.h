@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -92,8 +92,8 @@ public:
 	virtual void SimulateParticles( CParticleSimulateIterator *pIterator );
 
 private:
-					CTEParticleRenderer( const char *pDebugName );
-					CTEParticleRenderer( const CTEParticleRenderer & ); // not defined, not accessible
+	explicit		CTEParticleRenderer( const char *pDebugName );
+					CTEParticleRenderer( const CTEParticleRenderer & ); // = delete; not defined, not accessible
 
 	int				m_nActiveParticles;
 	float			m_ParticleSize;

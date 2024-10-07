@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Spawn, think, and use functions for common brush entities.
 //
@@ -12,7 +12,7 @@
 #include "engine/IEngineSound.h"
 #include "globals.h"
 #include "filters.h"
-
+						 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
@@ -426,8 +426,12 @@ protected:
 
 	float GetNextMoveInterval() const;
 
+	// If our euler angle is starting to get too big, normalize it
+	void NormalizeAngleIfNeeded();
+
 	// Input handlers
 	void InputSetSpeed( inputdata_t &inputdata );
+	void InputGetSpeed( inputdata_t &inputdata );
 	void InputStart( inputdata_t &inputdata );
 	void InputStop( inputdata_t &inputdata );
 	void InputStartForward( inputdata_t &inputdata );
@@ -451,6 +455,9 @@ protected:
 	bool m_bStopAtStartPos;
 
 	bool m_bSolidBsp;				// Brush is SOLID_BSP
+
+	//outputs
+	COutputFloat m_OnGetSpeed;	// Used for polling the speed value.
 
 public:
 	Vector m_vecClientOrigin;
@@ -485,6 +492,7 @@ BEGIN_DATADESC( CFuncRotating )
 
 	// Inputs
 	DEFINE_INPUTFUNC( FIELD_FLOAT, "SetSpeed", InputSetSpeed ),
+	DEFINE_INPUTFUNC( FIELD_VOID, "GetSpeed", InputGetSpeed ),
 	DEFINE_INPUTFUNC( FIELD_VOID, "Start", InputStart ),
 	DEFINE_INPUTFUNC( FIELD_VOID, "Stop", InputStop ),
 	DEFINE_INPUTFUNC( FIELD_VOID, "Toggle", InputToggle ),
@@ -493,15 +501,16 @@ BEGIN_DATADESC( CFuncRotating )
 	DEFINE_INPUTFUNC( FIELD_VOID, "StartBackward", InputStartBackward ),
 	DEFINE_INPUTFUNC( FIELD_VOID, "StopAtStartPos", InputStopAtStartPos ),
 
+	// Outputs
+	DEFINE_OUTPUT(m_OnGetSpeed, "OnGetSpeed"),
+
 END_DATADESC()
 
 extern void SendProxy_Origin( const SendProp *pProp, const void *pStruct, const void *pData, DVariant *pOut, int iElement, int objectID );
 void SendProxy_FuncRotatingOrigin( const SendProp *pProp, const void *pStruct, const void *pData, DVariant *pOut, int iElement, int objectID )
 {
-#ifdef TF_DLL
 	CFuncRotating *entity = (CFuncRotating*)pStruct;
 	Assert( entity );
-
 	if ( entity->HasSpawnFlags(SF_BRUSH_ROTATE_CLIENTSIDE) )
 	{
 		const Vector *v = &entity->m_vecClientOrigin;
@@ -510,42 +519,23 @@ void SendProxy_FuncRotatingOrigin( const SendProp *pProp, const void *pStruct, c
 		pOut->m_Vector[ 2 ] = v->z;
 		return;
 	}
-#endif
 
 	SendProxy_Origin( pProp, pStruct, pData, pOut, iElement, objectID );
 }
 
-/*
-extern void SendProxy_Angles( const SendProp *pProp, const void *pStruct, const void *pData, DVariant *pOut, int iElement, int objectID );
-void SendProxy_FuncRotatingAngles( const SendProp *pProp, const void *pStruct, const void *pData, DVariant *pOut, int iElement, int objectID )
-{
-	CFuncRotating *entity = (CFuncRotating*)pStruct;
-	Assert( entity );
-	if ( entity->HasSpawnFlags(SF_BRUSH_ROTATE_CLIENTSIDE) )
-	{
-		const QAngle *a = &entity->m_vecClientAngles;
-		pOut->m_Vector[ 0 ] = anglemod( a->x );
-		pOut->m_Vector[ 1 ] = anglemod( a->y );
-		pOut->m_Vector[ 2 ] = anglemod( a->z );
-		return;
-	}
-
-	SendProxy_Angles( pProp, pStruct, pData, pOut, iElement, objectID );
-}
-*/
 void SendProxy_FuncRotatingAngle( const SendProp *pProp, const void *pStruct, const void *pData, DVariant *pOut, int iElement, int objectID)
 {
+	vec_t const *qa = (vec_t *)pData;
+
+#ifdef TF_DLL
 	CFuncRotating *entity = (CFuncRotating*)pStruct;
 	Assert( entity );
 
-	vec_t const *qa = (vec_t *)pData;
 	vec_t const *ea = entity->GetLocalAngles().Base();
-	NOTE_UNUSED(ea);
-	// Assert its actually an index into m_angRotation if not this won't work
 
+	// Assert its actually an index into m_angRotation if not this won't work
 	Assert( (uintp)qa >= (uintp)ea && (uintp)qa < (uintp)ea + sizeof( QAngle ));
 
-#ifdef TF_DLL
 	if ( entity->HasSpawnFlags(SF_BRUSH_ROTATE_CLIENTSIDE) )
 	{
 		const QAngle *a = &entity->m_vecClientAngles;
@@ -567,7 +557,6 @@ void SendProxy_FuncRotatingSimulationTime( const SendProp *pProp, const void *pS
 #ifdef TF_DLL
 	CFuncRotating *entity = (CFuncRotating*)pStruct;
 	Assert( entity );
-
 	if ( entity->HasSpawnFlags(SF_BRUSH_ROTATE_CLIENTSIDE) )
 	{
 		pOut->m_Int = 0;
@@ -605,7 +594,7 @@ bool CFuncRotating::KeyValue( const char *szKeyName, const char *szValue )
 	else if (FStrEq(szKeyName, "Volume"))
 	{
 		m_flVolume = atof(szValue) / 10.0;
-		m_flVolume = clamp(m_flVolume, 0.0f, 1.0f);
+		m_flVolume = clamp(m_flVolume, 0.0, 1.0f);
 	}
 	else
 	{ 
@@ -621,7 +610,7 @@ bool CFuncRotating::KeyValue( const char *szKeyName, const char *szValue )
 //-----------------------------------------------------------------------------
 void CFuncRotating::Spawn( )
 {
-#ifdef TF_DLL
+#if defined(TF_DLL)
 	AddSpawnFlags( SF_BRUSH_ROTATE_CLIENTSIDE );
 #endif
 
@@ -723,6 +712,11 @@ void CFuncRotating::Spawn( )
 		SetThink( &CFuncRotating::SUB_CallUseToggle );
 		SetNextThink( gpGlobals->curtime + .2 );	// leave a magic delay for client to start up
 	}
+	else
+	{
+		SetThink( &CFuncRotating::NormalizeAngleIfNeeded );
+		SetNextThink( gpGlobals->curtime + .2 );
+	}
 
 	//
 	// Can this brush inflict pain?
@@ -811,17 +805,12 @@ void CFuncRotating::HurtTouch ( CBaseEntity *pOther )
 	// calculate damage based on rotation speed
 	m_flBlockDamage = GetLocalAngularVelocity().Length() / 10;
 
-#ifdef HL1_DLL
-	if( m_flBlockDamage > 0 )
-#endif
-	{
-		pOther->TakeDamage( CTakeDamageInfo( this, this, m_flBlockDamage, DMG_CRUSH ) );
-	
-		Vector vecNewVelocity = pOther->GetAbsOrigin() - WorldSpaceCenter();
-		VectorNormalize(vecNewVelocity);
-		vecNewVelocity *= m_flBlockDamage;
-		pOther->SetAbsVelocity( vecNewVelocity );
-	}
+	pOther->TakeDamage( CTakeDamageInfo( this, this, m_flBlockDamage, DMG_CRUSH ) );
+
+	Vector vecNewVelocity = pOther->GetAbsOrigin() - WorldSpaceCenter();
+	VectorNormalize(vecNewVelocity);
+	vecNewVelocity *= m_flBlockDamage;
+	pOther->SetAbsVelocity( vecNewVelocity );
 }
 
 
@@ -839,11 +828,11 @@ void CFuncRotating::RampPitchVol( void )
 	// Calc volume and pitch as % of maximum vol and pitch.
 	//
 	float fpct = fabs(m_flSpeed) / m_flMaxSpeed;
-	float fvol = clamp(m_flVolume * fpct, 0.f, 1.f);			  // slowdown volume ramps down to 0
+	float fvol = clamp(m_flVolume * fpct, 0, 1);			  // slowdown volume ramps down to 0
 
 	float fpitch = FANPITCHMIN + (FANPITCHMAX - FANPITCHMIN) * fpct;	
 	
-	int pitch = clamp(FastFloatToSmallInt(fpitch), 0, 255);
+	int pitch = clamp(fpitch, 0, 255);
 	if (pitch == PITCH_NORM)
 	{
 		pitch = PITCH_NORM - 1;
@@ -852,8 +841,7 @@ void CFuncRotating::RampPitchVol( void )
 	//
 	// Update the fan's volume and pitch.
 	//
-	CPASAttenuationFilter filter( GetAbsOrigin(), m_flAttenuation );
-	filter.MakeReliable();
+	CBroadcastRecipientFilter filter;
 
 	EmitSound_t ep;
 	ep.m_nChannel = CHAN_STATIC;
@@ -878,6 +866,42 @@ float CFuncRotating::GetNextMoveInterval() const
 	}
 	return 0.1f;
 }
+
+//-----------------------------------------------------------------------------
+// Purpose: stop our rotation value from becoming too large
+//-----------------------------------------------------------------------------
+void CFuncRotating::NormalizeAngleIfNeeded()
+{
+	// entity max angle is 1000 rotations, so we'll renormalize after ~200.
+	// note that we expect this to be a multiple of 360
+	static const float kMaxAngle = 200 * 360.0f;
+	
+	// check our rotation for normalization every 15-30 seconds.
+	static const float kTimeToRenormalize = 15.0f;
+
+	// check angle
+	QAngle angle = GetLocalAngles();
+	bool ok = true;
+	if ( angle.x > kMaxAngle )  { ok = false; angle.x -= kMaxAngle; }
+	if ( angle.x < -kMaxAngle ) { ok = false; angle.x += kMaxAngle; }
+	if ( angle.y > kMaxAngle )  { ok = false; angle.y -= kMaxAngle; }
+	if ( angle.y < -kMaxAngle ) { ok = false; angle.y += kMaxAngle; }
+	if ( angle.z > kMaxAngle )  { ok = false; angle.z -= kMaxAngle; }
+	if ( angle.z < -kMaxAngle ) { ok = false; angle.z += kMaxAngle; }
+
+	// if we changed it, update with new values
+	if ( !ok )
+	{
+		// Disable interpolation on this entity for 1 frame (so it doesn't 'spin backwards 100 times')
+		AddEffects( EF_NOINTERP );
+		SetLocalAngles( angle );
+	}
+
+	// think at semi-random intervals so func rotatings don't all stack up on the same tick
+	SetThink( &CFuncRotating::NormalizeAngleIfNeeded );
+	SetNextThink( gpGlobals->curtime + RandomFloat( kTimeToRenormalize, kTimeToRenormalize * 2.0f ) );
+}
+
 
 //-----------------------------------------------------------------------------
 // Purpose: Sets the current speed to the given value and manages the sound effects.
@@ -937,8 +961,7 @@ void CFuncRotating::UpdateSpeed( float flNewSpeed )
 	if ( ( flOldSpeed == 0 ) && ( m_flSpeed != 0 ) )
 	{
 		// Starting to move - emit the sound.
-		CPASAttenuationFilter filter( GetAbsOrigin(), m_flAttenuation );
-		filter.MakeReliable();
+		CBroadcastRecipientFilter filter;
 	
 		EmitSound_t ep;
 		ep.m_nChannel = CHAN_STATIC;
@@ -1236,6 +1259,10 @@ void CFuncRotating::RotatingUse( CBaseEntity *pActivator, CBaseEntity *pCaller, 
 	{
 		SetTargetSpeed( m_flMaxSpeed );
 	}
+
+	// start renormalization thinker
+	SetThink( &CFuncRotating::NormalizeAngleIfNeeded );
+	SetNextThink( gpGlobals->curtime + 0.2f );
 }
 
 
@@ -1260,9 +1287,19 @@ void CFuncRotating::InputSetSpeed( inputdata_t &inputdata )
 	float flSpeed = inputdata.value.Float();
 	m_bReversed = flSpeed < 0 ? true : false;
 	flSpeed = fabs(flSpeed);
-	SetTargetSpeed( clamp( flSpeed, 0.f, 1.f ) * m_flMaxSpeed );
+	SetTargetSpeed( clamp( flSpeed, 0, 1 ) * m_flMaxSpeed );
 }
 
+//-----------------------------------------------------------------------------
+//-----------------------------------------------------------------------------
+void CFuncRotating::InputGetSpeed( inputdata_t &inputdata )
+{
+	float flOutValue = m_flSpeed;
+	if ( flOutValue < 0 )
+		flOutValue *= -1;
+
+	m_OnGetSpeed.Set( flOutValue, inputdata.pActivator, inputdata.pCaller );
+}
 
 //-----------------------------------------------------------------------------
 // Purpose: Input handler to start the rotator spinning.
@@ -1337,10 +1374,7 @@ void CFuncRotating::InputToggle( inputdata_t &inputdata )
 //-----------------------------------------------------------------------------
 void CFuncRotating::Blocked( CBaseEntity *pOther )
 {
-#ifdef HL1_DLL
-	if( m_flBlockDamage > 0 )
-#endif
-		pOther->TakeDamage( CTakeDamageInfo( this, this, m_flBlockDamage, DMG_CRUSH ) );
+	pOther->TakeDamage( CTakeDamageInfo( this, this, m_flBlockDamage, DMG_CRUSH ) );
 }
 
 
@@ -1439,6 +1473,9 @@ bool CFuncVPhysicsClip::EntityPassesFilter( CBaseEntity *pOther )
 
 	if ( pFilter )
 		return pFilter->PassesFilter( this, pOther );
+
+	if ( !pOther->VPhysicsGetObject() )
+		return false;
 
 	if ( pOther->GetMoveType() == MOVETYPE_VPHYSICS && pOther->VPhysicsGetObject()->IsMoveable() )
 		return true;

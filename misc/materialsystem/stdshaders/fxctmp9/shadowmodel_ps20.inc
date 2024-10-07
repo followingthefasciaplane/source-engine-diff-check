@@ -1,8 +1,10 @@
+// ALL SKIP STATEMENTS THAT AFFECT THIS SHADER!!!
 #include "shaderlib/cshader.h"
 class shadowmodel_ps20_Static_Index
 {
 public:
-	shadowmodel_ps20_Static_Index( )
+	// CONSTRUCTOR
+	shadowmodel_ps20_Static_Index( IShaderShadow *pShaderShadow, IMaterialVar **params )
 	{
 	}
 	int GetIndex()
@@ -18,7 +20,8 @@ public:
 class shadowmodel_ps20_Dynamic_Index
 {
 public:
-	shadowmodel_ps20_Dynamic_Index()
+	// CONSTRUCTOR
+	shadowmodel_ps20_Dynamic_Index( IShaderDynamicAPI *pShaderAPI )
 	{
 	}
 	int GetIndex()
@@ -31,3 +34,18 @@ public:
 	}
 };
 #define shaderDynamicTest_shadowmodel_ps20 0
+static const ShaderComboSemantics_t shadowmodel_ps20_combos =
+{
+	"shadowmodel_ps20", NULL, 0, NULL, 0 
+};
+
+class ConstructMe_shadowmodel_ps20
+{
+public:
+	ConstructMe_shadowmodel_ps20()
+	{
+		GetShaderDLL()->AddShaderComboInformation( &shadowmodel_ps20_combos );
+	}
+};
+
+static ConstructMe_shadowmodel_ps20 s_ConstructMe_shadowmodel_ps20;

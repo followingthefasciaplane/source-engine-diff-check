@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2008, Valve Corporation, All rights reserved. =====//
 //
 // A list of DmeBoneWeight elements, replacing QC's $WeightList
 //
@@ -25,7 +25,8 @@ IMPLEMENT_ELEMENT_FACTORY( DmeBoneMaskList, CDmeBoneMaskList );
 //-----------------------------------------------------------------------------
 void CDmeBoneMaskList::OnConstruction()
 {
-	m_BoneMasks.Init( this, "boneMasks" );
+	m_eDefaultBoneMask.Init( this, "defaultBoneMask" );
+	m_BoneMaskList.Init( this, "boneMaskList" );
 }
 
 

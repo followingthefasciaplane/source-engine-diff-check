@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright (c) 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -140,25 +140,16 @@ bool CMixerControls::GetValue_Float(Control iControl, float &value)
 		}
 		case MicVolume:
 		{
-			OSStatus theError = noErr;
-			for ( int iChannel = 0; iChannel < 3; iChannel++ )
-			{
-				// scan the channel list until you find a channel set to non-zero, then use that
-				Float32 theVolume = 0;
-				UInt32 theSize = sizeof(Float32);
-				AudioObjectPropertyAddress theAddress = { kAudioDevicePropertyVolumeScalar,	kAudioDevicePropertyScopeInput, iChannel };
-
-				theError = AudioObjectGetPropertyData(m_theDefaultDeviceID,
-															   &theAddress,
-															   0,
-															   NULL,
-															   &theSize,
-															   &theVolume);
-				value = theVolume;
-				if ( theError == noErr && theVolume != 0.0f )
-					break;
-			}
-			
+			Float32 theVolume = 0;
+			UInt32 theVolumeSize = sizeof(Float32);
+			OSStatus theError = paramErr;
+			theError = AudioDeviceGetProperty( m_theDefaultDeviceID,
+											  1,
+											  TRUE,
+											  kAudioDevicePropertyVolumeScalar,
+											  &theVolumeSize,
+											  &theVolume);
+			value = theVolume;
 			return theError == noErr;
 		}
 			
@@ -166,15 +157,14 @@ bool CMixerControls::GetValue_Float(Control iControl, float &value)
 			// Mic playback muting. You usually want this set to false, otherwise the sound card echoes whatever you say into the mic.
 		{
 			Float32 theMute = 0;
-			UInt32 theSize = sizeof(Float32);
-			AudioObjectPropertyAddress theAddress = { kAudioDevicePropertyMute,	kAudioDevicePropertyScopeInput,	1 };
-			
-			OSStatus theError = AudioObjectGetPropertyData(m_theDefaultDeviceID,
-														   &theAddress,
-														   0,
-														   NULL,
-														   &theSize,
-														   &theMute);
+			UInt32 theMuteSize = sizeof(Float32);
+			OSStatus theError = paramErr;
+			theError = AudioDeviceGetProperty( m_theDefaultDeviceID,
+											  0,
+											  TRUE,
+											  kAudioDevicePropertyMute,
+											  &theMuteSize,
+											  &theMute);
 			value = theMute;
 			return theError == noErr;
 		}		
@@ -196,9 +186,6 @@ bool CMixerControls::SetValue_Float(Control iControl, float value)
 		}
 		case MicVolume:
 		{
-			if ( value <= 0.0 )
-				return false; // don't let the volume be set to zero
-			
 			Float32 theVolume = value;
 			UInt32 size = sizeof(Float32);
 			Boolean	canset	= false;

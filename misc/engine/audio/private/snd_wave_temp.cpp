@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright � 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Create an output wave stream.  Used to record audio for in-engine movies or
 // mixer debugging.
@@ -15,7 +15,7 @@ extern IFileSystem *g_pFileSystem;
 extern bool COM_CopyFile( const char *netpath, const char *cachepath );
 
 // Create a wave file
-void WaveCreateTmpFile( const char *filename, int rate, int bits, int nChannels )
+void WaveCreateTmpFile( const char *filename, int rate, int bits, int channels )
 {
 	char tmpfilename[MAX_PATH];
 	Q_StripExtension( filename, tmpfilename, sizeof( tmpfilename ) );
@@ -35,12 +35,12 @@ void WaveCreateTmpFile( const char *filename, int rate, int bits, int nChannels 
 	g_pFileSystem->Write( &chunkid, sizeof(int), file );
 
 	// create a 16-bit PCM stereo output file
-	PCMWAVEFORMAT fmt = { { 0 } };
+	PCMWAVEFORMAT fmt = { 0 };
 	fmt.wf.wFormatTag = LittleWord( (short)WAVE_FORMAT_PCM );
-	fmt.wf.nChannels = LittleWord( (short)nChannels );
+	fmt.wf.nChannels = LittleWord( (short)channels );
 	fmt.wf.nSamplesPerSec = LittleDWord( rate );
-	fmt.wf.nAvgBytesPerSec = LittleDWord( rate * bits * nChannels / 8 );
-	fmt.wf.nBlockAlign = LittleWord( (short)( 2 * nChannels) );
+	fmt.wf.nAvgBytesPerSec = LittleDWord( rate * bits * channels / 8 );
+	fmt.wf.nBlockAlign = LittleWord( (short)( 2 * channels ) );
 	fmt.wBitsPerSample = LittleWord( (short)bits );
 
 	chunkid = LittleLong( WAVE_FMT );
@@ -70,9 +70,9 @@ void WaveAppendTmpFile( const char *filename, void *pBuffer, int sampleBits, int
 
 	g_pFileSystem->Seek( file, 0, FILESYSTEM_SEEK_TAIL );
 
-	if ( IsX360() && sampleBits == 16 )
+	if ( IsGameConsole() && sampleBits == 16 )
 	{
-		short *pSwapped = (short * )_alloca( numSamples * sampleBits/8 );
+		short *pSwapped = (short * )stackalloc( numSamples * sampleBits/8 );
 		for ( int i=0; i<numSamples; i++ )
 		{
 			pSwapped[i] = LittleShort( ((short*)pBuffer)[i] );

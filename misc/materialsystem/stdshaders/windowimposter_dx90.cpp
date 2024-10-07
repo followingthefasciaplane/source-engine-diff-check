@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -32,9 +32,6 @@ BEGIN_VS_SHADER( WindowImposter_DX90,
 
 	SHADER_FALLBACK
 	{
-		if ( g_pHardwareConfig->GetDXSupportLevel() < 90)
-			return "WindowImposter_DX80";
-
 		return NULL;
 	}
 
@@ -71,23 +68,23 @@ BEGIN_VS_SHADER( WindowImposter_DX90,
 			pShaderShadow->BlendFunc( SHADER_BLEND_SRC_ALPHA, SHADER_BLEND_ONE_MINUS_SRC_ALPHA );
 			pShaderShadow->EnableDepthWrites( false );
 			FogToFogColor();
+			PI_BeginCommandBuffer();
+			PI_SetModulationVertexShaderDynamicState();
+			PI_EndCommandBuffer();
 		}
 		DYNAMIC_STATE
 		{
 			DECLARE_DYNAMIC_VERTEX_SHADER( windowimposter_vs20 );
-			SET_DYNAMIC_VERTEX_SHADER_COMBO( DOWATERFOG, pShaderAPI->GetSceneFogMode() == MATERIAL_FOG_LINEAR_BELOW_FOG_Z );
 			SET_DYNAMIC_VERTEX_SHADER( windowimposter_vs20 );
 
 			if( g_pHardwareConfig->SupportsPixelShaders_2_b() )
 			{
 				DECLARE_DYNAMIC_PIXEL_SHADER( windowimposter_ps20b );
-				SET_DYNAMIC_PIXEL_SHADER_COMBO( PIXELFOGTYPE, pShaderAPI->GetPixelFogCombo() );
 				SET_DYNAMIC_PIXEL_SHADER( windowimposter_ps20b );
 			}
 			else
 			{
 				DECLARE_DYNAMIC_PIXEL_SHADER( windowimposter_ps20 );
-				SET_DYNAMIC_PIXEL_SHADER_COMBO( PIXELFOGTYPE, pShaderAPI->GetPixelFogCombo() );
 				SET_DYNAMIC_PIXEL_SHADER( windowimposter_ps20 );
 			}
 
@@ -98,8 +95,7 @@ BEGIN_VS_SHADER( WindowImposter_DX90,
 			vEyePos_SpecExponent[3] = 0.0f;
 			pShaderAPI->SetPixelShaderConstant( PSREG_EYEPOS_SPEC_EXPONENT, vEyePos_SpecExponent, 1 );
 
-			BindTexture( SHADER_SAMPLER0, ENVMAP, -1 );
-			SetModulationVertexShaderDynamicState();
+			BindTexture( SHADER_SAMPLER0, TEXTURE_BINDFLAGS_NONE, ENVMAP, -1 );
 		}
 		Draw();
 	}

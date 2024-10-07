@@ -1,3 +1,6 @@
+// ALL SKIP STATEMENTS THAT AFFECT THIS SHADER!!!
+// ( $MORPHING || $SKINNING || $COMPRESSED_VERTS ) && $TESSELLATION
+// defined $LIGHTING_PREVIEW && defined $FASTPATH && $LIGHTING_PREVIEW && $FASTPATH
 #include "shaderlib/cshader.h"
 class depthwrite_vs30_Static_Index
 {
@@ -17,9 +20,32 @@ public:
 	}
 	void SetONLY_PROJECT_POSITION( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 0 );
 		m_nONLY_PROJECT_POSITION = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bONLY_PROJECT_POSITION = true;
+#endif
+	}
+private:
+	int m_nTREESWAY;
+#ifdef _DEBUG
+	bool m_bTREESWAY;
+#endif
+public:
+	void SetTREESWAY( int i )
+	{
+		Assert( i >= 0 && i <= 2 );
+		m_nTREESWAY = i;
+#ifdef _DEBUG
+		m_bTREESWAY = true;
+#endif
+	}
+	void SetTREESWAY( bool i )
+	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 2 );
+		m_nTREESWAY = i ? 1 : 0;
+#ifdef _DEBUG
+		m_bTREESWAY = true;
 #endif
 	}
 private:
@@ -38,18 +64,24 @@ public:
 	}
 	void SetCOLOR_DEPTH( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nCOLOR_DEPTH = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bCOLOR_DEPTH = true;
 #endif
 	}
 public:
-	depthwrite_vs30_Static_Index( )
+	// CONSTRUCTOR
+	depthwrite_vs30_Static_Index( IShaderShadow *pShaderShadow, IMaterialVar **params )
 	{
 #ifdef _DEBUG
 		m_bONLY_PROJECT_POSITION = false;
 #endif // _DEBUG
 		m_nONLY_PROJECT_POSITION = 0;
+#ifdef _DEBUG
+		m_bTREESWAY = false;
+#endif // _DEBUG
+		m_nTREESWAY = 0;
 #ifdef _DEBUG
 		m_bCOLOR_DEPTH = false;
 #endif // _DEBUG
@@ -60,13 +92,13 @@ public:
 		// Asserts to make sure that we aren't using any skipped combinations.
 		// Asserts to make sure that we are setting all of the combination vars.
 #ifdef _DEBUG
-		bool bAllStaticVarsDefined = m_bONLY_PROJECT_POSITION && m_bCOLOR_DEPTH;
+		bool bAllStaticVarsDefined = m_bONLY_PROJECT_POSITION && m_bTREESWAY && m_bCOLOR_DEPTH;
 		Assert( bAllStaticVarsDefined );
 #endif // _DEBUG
-		return ( 8 * m_nONLY_PROJECT_POSITION ) + ( 8 * m_nCOLOR_DEPTH ) + 0;
+		return ( 4 * m_nONLY_PROJECT_POSITION ) + ( 4 * m_nTREESWAY ) + ( 12 * m_nCOLOR_DEPTH ) + 0;
 	}
 };
-#define shaderStaticTest_depthwrite_vs30 vsh_forgot_to_set_static_ONLY_PROJECT_POSITION + vsh_forgot_to_set_static_COLOR_DEPTH + 0
+#define shaderStaticTest_depthwrite_vs30 vsh_forgot_to_set_static_ONLY_PROJECT_POSITION + vsh_forgot_to_set_static_TREESWAY + vsh_forgot_to_set_static_COLOR_DEPTH + 0
 class depthwrite_vs30_Dynamic_Index
 {
 private:
@@ -85,6 +117,7 @@ public:
 	}
 	void SetCOMPRESSED_VERTS( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nCOMPRESSED_VERTS = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bCOMPRESSED_VERTS = true;
@@ -106,6 +139,7 @@ public:
 	}
 	void SetSKINNING( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nSKINNING = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bSKINNING = true;
@@ -119,7 +153,7 @@ private:
 public:
 	void SetMORPHING( int i )
 	{
-		Assert( i >= 0 && i <= 1 );
+		Assert( i >= 0 && i <= 0 );
 		m_nMORPHING = i;
 #ifdef _DEBUG
 		m_bMORPHING = true;
@@ -127,13 +161,37 @@ public:
 	}
 	void SetMORPHING( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 0 );
 		m_nMORPHING = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bMORPHING = true;
 #endif
 	}
+private:
+	int m_nTESSELLATION;
+#ifdef _DEBUG
+	bool m_bTESSELLATION;
+#endif
 public:
-	depthwrite_vs30_Dynamic_Index()
+	void SetTESSELLATION( int i )
+	{
+		Assert( i >= 0 && i <= 0 );
+		m_nTESSELLATION = i;
+#ifdef _DEBUG
+		m_bTESSELLATION = true;
+#endif
+	}
+	void SetTESSELLATION( bool i )
+	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 0 );
+		m_nTESSELLATION = i ? 1 : 0;
+#ifdef _DEBUG
+		m_bTESSELLATION = true;
+#endif
+	}
+public:
+	// CONSTRUCTOR
+	depthwrite_vs30_Dynamic_Index( IShaderDynamicAPI *pShaderAPI )
 	{
 #ifdef _DEBUG
 		m_bCOMPRESSED_VERTS = false;
@@ -144,19 +202,53 @@ public:
 #endif // _DEBUG
 		m_nSKINNING = 0;
 #ifdef _DEBUG
-		m_bMORPHING = false;
+		m_bMORPHING = true;
 #endif // _DEBUG
-		m_nMORPHING = 0;
+		m_nMORPHING = false ;
+#ifdef _DEBUG
+		m_bTESSELLATION = false;
+#endif // _DEBUG
+		m_nTESSELLATION = 0;
 	}
 	int GetIndex()
 	{
 		// Asserts to make sure that we aren't using any skipped combinations.
 		// Asserts to make sure that we are setting all of the combination vars.
 #ifdef _DEBUG
-		bool bAllDynamicVarsDefined = m_bCOMPRESSED_VERTS && m_bSKINNING && m_bMORPHING;
+		bool bAllDynamicVarsDefined = m_bCOMPRESSED_VERTS && m_bSKINNING && m_bMORPHING && m_bTESSELLATION;
 		Assert( bAllDynamicVarsDefined );
 #endif // _DEBUG
-		return ( 1 * m_nCOMPRESSED_VERTS ) + ( 2 * m_nSKINNING ) + ( 4 * m_nMORPHING ) + 0;
+		return ( 1 * m_nCOMPRESSED_VERTS ) + ( 2 * m_nSKINNING ) + ( 4 * m_nMORPHING ) + ( 4 * m_nTESSELLATION ) + 0;
 	}
 };
-#define shaderDynamicTest_depthwrite_vs30 vsh_forgot_to_set_dynamic_COMPRESSED_VERTS + vsh_forgot_to_set_dynamic_SKINNING + vsh_forgot_to_set_dynamic_MORPHING + 0
+#define shaderDynamicTest_depthwrite_vs30 vsh_forgot_to_set_dynamic_COMPRESSED_VERTS + vsh_forgot_to_set_dynamic_SKINNING + vsh_forgot_to_set_dynamic_TESSELLATION + 0
+
+static const ShaderComboInformation_t s_DynamicComboArray_depthwrite_vs30[4] = 
+{
+	{ "COMPRESSED_VERTS", 0, 1 },
+	{ "SKINNING", 0, 1 },
+	{ "MORPHING", 0, 0 },
+	{ "TESSELLATION", 0, 0 },
+};
+
+static const ShaderComboInformation_t s_StaticComboArray_depthwrite_vs30[3] = 
+{
+	{ "ONLY_PROJECT_POSITION", 0, 0 },
+	{ "TREESWAY", 0, 2 },
+	{ "COLOR_DEPTH", 0, 1 },
+};
+static const ShaderComboSemantics_t depthwrite_vs30_combos =
+{
+	"depthwrite_vs30", s_DynamicComboArray_depthwrite_vs30, 4, s_StaticComboArray_depthwrite_vs30, 3 
+};
+
+class ConstructMe_depthwrite_vs30
+{
+public:
+	ConstructMe_depthwrite_vs30()
+	{
+		GetShaderDLL()->AddShaderComboInformation( &depthwrite_vs30_combos );
+	}
+};
+
+static ConstructMe_depthwrite_vs30 s_ConstructMe_depthwrite_vs30;

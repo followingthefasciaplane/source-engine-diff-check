@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Clones a physics object by use of shadows
 //
@@ -13,7 +13,7 @@
 #endif
 
 #include "vphysics_interface.h"
-#include "baseentity.h"
+#include "BaseEntity.h"
 #include "baseanimating.h"
 
 class CPhysicsShadowClone;
@@ -121,6 +121,16 @@ public:
 	static void FullSyncAllClones( void );
 
 	static CUtlVector<CPhysicsShadowClone *> const &g_ShadowCloneList;
+
+	friend void DrawDebugOverlayForShadowClone( CPhysicsShadowClone *pClone );
+
+	//only really necessary to call for entities that create custom collideables.
+	static void NotifyDestroy( IPhysicsObject *pDestroyingPhys, CBaseEntity *pOwningEntity = NULL ); //passing in the original owner entity just makes the search faster
+	static void NotifyDestroy( CPhysCollide *pDestroyingCollide, CBaseEntity *pOwningEntity = NULL ); //passing in the original owner entity just makes the search faster
+
+private:
+	void DestroyClonedPhys( IPhysicsObject *pPhys );
+	void DestroyClonedCollideable( CPhysCollide *pCollide );
 };
 
 

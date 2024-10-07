@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -40,6 +40,7 @@ class CMoveData
 public:
 	bool			m_bFirstRunOfFunctions : 1;
 	bool			m_bGameCodeMovedPlayer : 1;
+	bool			m_bNoAirControl : 1;
 
 	EntityHandle_t	m_nPlayerHandle;	// edict index on server, client entity handle on client
 
@@ -49,7 +50,6 @@ public:
 	int				m_nButtons;			// Attack buttons.
 	int				m_nOldButtons;		// From host_client->oldbuttons;
 	float			m_flForwardMove;
-	float			m_flOldForwardMove;
 	float			m_flSideMove;
 	float			m_flUpMove;
 	
@@ -58,8 +58,10 @@ public:
 
 	// Variables from the player edict (sv_player) or entvars on the client.
 	// These are copied in here before calling and copied out after calling.
-	Vector			m_vecVelocity;		// edict::velocity		// Current movement direction.
-	QAngle			m_vecAngles;		// edict::angles
+	Vector			m_vecVelocity;			// edict::velocity		// Current movement direction.
+	Vector			m_vecTrailingVelocity;
+	float			m_flTrailingVelocityTime;
+	QAngle			m_vecAngles;			// edict::angles
 	QAngle			m_vecOldAngles;
 	
 // Output only
@@ -72,6 +74,7 @@ public:
 	float			m_flConstraintRadius;
 	float			m_flConstraintWidth;
 	float			m_flConstraintSpeedFactor;
+	bool			m_bConstraintPastRadius;		///< If no, do no constraining past Radius.  If yes, cap them to SpeedFactor past radius
 
 	void			SetAbsOrigin( const Vector &vec );
 	const Vector	&GetAbsOrigin() const;
@@ -114,16 +117,22 @@ public:
 	virtual			~IGameMovement( void ) {}
 	
 	// Process the current movement command
-	virtual void	ProcessMovement( CBasePlayer *pPlayer, CMoveData *pMove ) = 0;		
+	virtual void	ProcessMovement( CBasePlayer *pPlayer, CMoveData *pMove ) = 0;
+	virtual void	Reset( void ) = 0;
 	virtual void	StartTrackPredictionErrors( CBasePlayer *pPlayer ) = 0;
 	virtual void	FinishTrackPredictionErrors( CBasePlayer *pPlayer ) = 0;
 	virtual void	DiffPrint( PRINTF_FORMAT_STRING char const *fmt, ... ) = 0;
 
 	// Allows other parts of the engine to find out the normal and ducked player bbox sizes
-	virtual Vector	GetPlayerMins( bool ducked ) const = 0;
-	virtual Vector	GetPlayerMaxs( bool ducked ) const = 0;
-	virtual Vector  GetPlayerViewOffset( bool ducked ) const = 0;
+	virtual Vector const&	GetPlayerMins( bool ducked ) const = 0;
+	virtual Vector const&	GetPlayerMaxs( bool ducked ) const = 0;
+	virtual Vector const&   GetPlayerViewOffset( bool ducked ) const = 0;
 
+	virtual bool		IsMovingPlayerStuck( void ) const = 0;
+	virtual CBasePlayer *GetMovingPlayer( void ) const = 0;
+	virtual void		UnblockPusher( CBasePlayer *pPlayer, CBaseEntity *pPusher ) = 0;
+
+	virtual void SetupMovementBounds( CMoveData *pMove ) = 0;
 };
 
 

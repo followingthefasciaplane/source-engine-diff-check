@@ -1,4 +1,4 @@
-//	DYNAMIC: "DOWATERFOG"				"0..1"
+#include "common_fog_vs_fxc.h"
 
 #include "common_vs_fxc.h"
 
@@ -28,7 +28,6 @@ struct VS_OUTPUT
 	float2 lightmapCoord			: TEXCOORD2;
 	float2 macrosCoord				: TEXCOORD3;
 	float4 color					: COLOR0;
-	float4 fogFactorW				: COLOR1;
 };
 
 VS_OUTPUT main( const VS_INPUT v )
@@ -38,12 +37,11 @@ VS_OUTPUT main( const VS_INPUT v )
 	float3 worldNormal, worldPos;
 	float2 texCoord;
 	worldPos = mul( v.vPos, cModel[0] );
-	float4 vProjPos = mul( float4( worldPos, 1 ), cViewProj );
+	float4 projPos = mul( float4( worldPos, 1 ), cViewProj );
 	o.projPos = projPos;
-	vProjPos.z = dot( float4( worldPos, 1 ), cViewProjZ );
-	o.fogFactorW = CalcFog( worldPos, vProjPos, g_FogType );
+	o.fogFactorsYZW = CalcFog( worldPos, projPos, g_FogType );
 #if !defined( _X360 )
-	o.fog = o.fogFactorW;
+	o.fog = o.fogFactorsYZW;
 #endif
 	o.color = v.vColor;
 

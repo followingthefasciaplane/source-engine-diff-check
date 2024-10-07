@@ -1,44 +1,24 @@
+// ALL SKIP STATEMENTS THAT AFFECT THIS SHADER!!!
+// defined $PIXELFOGTYPE && defined $WRITEWATERFOGTODESTALPHA && ( $PIXELFOGTYPE != 1 ) && $WRITEWATERFOGTODESTALPHA
+// defined $LIGHTING_PREVIEW && defined $FASTPATHENVMAPTINT && $LIGHTING_PREVIEW && $FASTPATHENVMAPTINT
+// defined $LIGHTING_PREVIEW && defined $FASTPATHENVMAPCONTRAST && $LIGHTING_PREVIEW && $FASTPATHENVMAPCONTRAST
+// defined $LIGHTING_PREVIEW && defined $FASTPATH && $LIGHTING_PREVIEW && $FASTPATH
+// ($FLASHLIGHT || $FLASHLIGHTSHADOWS) && $LIGHTING_PREVIEW
 #include "shaderlib/cshader.h"
 class sky_ps20b_Static_Index
 {
-private:
-	int m_nCONVERT_TO_SRGB;
-#ifdef _DEBUG
-	bool m_bCONVERT_TO_SRGB;
-#endif
 public:
-	void SetCONVERT_TO_SRGB( int i )
+	// CONSTRUCTOR
+	sky_ps20b_Static_Index( IShaderShadow *pShaderShadow, IMaterialVar **params )
 	{
-		Assert( i >= 0 && i <= 1 );
-		m_nCONVERT_TO_SRGB = i;
-#ifdef _DEBUG
-		m_bCONVERT_TO_SRGB = true;
-#endif
-	}
-	void SetCONVERT_TO_SRGB( bool i )
-	{
-		m_nCONVERT_TO_SRGB = i ? 1 : 0;
-#ifdef _DEBUG
-		m_bCONVERT_TO_SRGB = true;
-#endif
-	}
-public:
-	sky_ps20b_Static_Index( )
-	{
-#ifdef _DEBUG
-		m_bCONVERT_TO_SRGB = true;
-#endif // _DEBUG
-		m_nCONVERT_TO_SRGB =  g_pHardwareConfig->NeedsShaderSRGBConversion();
 	}
 	int GetIndex()
 	{
 		// Asserts to make sure that we aren't using any skipped combinations.
 		// Asserts to make sure that we are setting all of the combination vars.
 #ifdef _DEBUG
-		bool bAllStaticVarsDefined = m_bCONVERT_TO_SRGB;
-		Assert( bAllStaticVarsDefined );
 #endif // _DEBUG
-		return ( 2 * m_nCONVERT_TO_SRGB ) + 0;
+		return 0;
 	}
 };
 #define shaderStaticTest_sky_ps20b 0
@@ -60,13 +40,15 @@ public:
 	}
 	void SetWRITE_DEPTH_TO_DESTALPHA( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nWRITE_DEPTH_TO_DESTALPHA = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bWRITE_DEPTH_TO_DESTALPHA = true;
 #endif
 	}
 public:
-	sky_ps20b_Dynamic_Index()
+	// CONSTRUCTOR
+	sky_ps20b_Dynamic_Index( IShaderDynamicAPI *pShaderAPI )
 	{
 #ifdef _DEBUG
 		m_bWRITE_DEPTH_TO_DESTALPHA = false;
@@ -85,3 +67,23 @@ public:
 	}
 };
 #define shaderDynamicTest_sky_ps20b psh_forgot_to_set_dynamic_WRITE_DEPTH_TO_DESTALPHA + 0
+
+static const ShaderComboInformation_t s_DynamicComboArray_sky_ps20b[1] = 
+{
+	{ "WRITE_DEPTH_TO_DESTALPHA", 0, 1 },
+};
+static const ShaderComboSemantics_t sky_ps20b_combos =
+{
+	"sky_ps20b", s_DynamicComboArray_sky_ps20b, 1, NULL, 0 
+};
+
+class ConstructMe_sky_ps20b
+{
+public:
+	ConstructMe_sky_ps20b()
+	{
+		GetShaderDLL()->AddShaderComboInformation( &sky_ps20b_combos );
+	}
+};
+
+static ConstructMe_sky_ps20b s_ConstructMe_sky_ps20b;

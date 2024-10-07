@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright (c) 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -6,7 +6,7 @@
 // $NoKeywords: $
 //=============================================================================//
 
-#include "shaderlib/cshader.h"
+#include "shaderlib/CShader.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -51,11 +51,11 @@ BEGIN_SHADER( DecalModulate_dx6,
 			// which shouldn't change the contents of the framebuffer much.
 			if( pShaderAPI->InFlashlightMode() )
 			{
-				pShaderAPI->BindStandardTexture( SHADER_SAMPLER0, TEXTURE_GREY );
+				pShaderAPI->BindStandardTexture( SHADER_SAMPLER0, false, TEXTURE_GREY );
 			}
 			else
 			{
-				BindTexture( SHADER_SAMPLER0, BASETEXTURE, FRAME );
+				BindTexture( SHADER_SAMPLER0, false, BASETEXTURE, FRAME );
 			}
 		}
 		Draw( );

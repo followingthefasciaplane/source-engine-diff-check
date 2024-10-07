@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ====
 //
 // A message forwarder. Fires an OnTrigger output when triggered, and can be
 // disabled to prevent forwarding outputs.
@@ -140,22 +140,31 @@ void CLogicRelay::InputToggle( inputdata_t &inputdata )
 //-----------------------------------------------------------------------------
 void CLogicRelay::InputTrigger( inputdata_t &inputdata )
 {
-	if ((!m_bDisabled) && (!m_bWaitForRefire))
+	if (!m_bDisabled)
 	{
-		m_OnTrigger.FireOutput( inputdata.pActivator, this );
-		
-		if (m_spawnflags & SF_REMOVE_ON_FIRE)
+		if (!m_bWaitForRefire)
 		{
-			UTIL_Remove(this);
+			m_OnTrigger.FireOutput( inputdata.pActivator, this );
+			
+			if (m_spawnflags & SF_REMOVE_ON_FIRE)
+			{
+				UTIL_Remove(this);
+			}
+			else if (!(m_spawnflags & SF_ALLOW_FAST_RETRIGGER))
+			{
+				//
+				// Disable the relay so that it cannot be refired until after the last output
+				// has been fired and post an input to re-enable ourselves.
+				//
+				m_bWaitForRefire = true;
+				g_EventQueue.AddEvent(this, "EnableRefire", m_OnTrigger.GetMaxDelay() + 0.001, this, this);
+			}
 		}
-		else if (!(m_spawnflags & SF_ALLOW_FAST_RETRIGGER))
+		else
 		{
-			//
-			// Disable the relay so that it cannot be refired until after the last output
-			// has been fired and post an input to re-enable ourselves.
-			//
-			m_bWaitForRefire = true;
-			g_EventQueue.AddEvent(this, "EnableRefire", m_OnTrigger.GetMaxDelay() + 0.001, this, this);
+			Warning( "*************************************************************************************************\n" );
+			Warning( "*** ERROR: logic_relay %s has been triggered but is awaiting refire. OUTPUTS WILL NOT BE FIRED!!!\n", GetDebugName() );
+			Warning( "*************************************************************************************************\n\n" );
 		}
 	}
 }

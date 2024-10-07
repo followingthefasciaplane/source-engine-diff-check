@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: Dialog used to edit properties of a particle system definition
 //
@@ -11,7 +11,7 @@
 #pragma once
 #endif
 
-#include "vgui_controls/Frame.h"
+#include "vgui_controls/frame.h"
 
 
 //-----------------------------------------------------------------------------

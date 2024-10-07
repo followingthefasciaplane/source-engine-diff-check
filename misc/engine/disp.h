@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -199,6 +199,10 @@ public:
 		int iNodeBitIndex, unsigned short decalHandle, CDispDecalBase *pDispDecal );
 
 private:
+	// Initializes node AABB tree
+	void UpdateNodeBoundingBoxes();
+	void UpdateNodeBoundingBoxes_R( CVertIndex const &nodeIndex, int iNodeBitIndex, int iLevel );
+
 	// Two functions for adding decals
 	void TestAddDecalTri( int iIndexStart, unsigned short decalHandle, CDispDecal *pDispDecal );
 	void TestAddDecalTri( int iIndexStart, unsigned short decalHandle, CDispShadowDecal *pDispDecal );
@@ -228,6 +232,12 @@ private:
 	// Used by SetupDecalNodeIntersect
 	bool SetupDecalNodeIntersect_R( CVertIndex const &nodeIndex, int iNodeBitIndex, 
 		CDispDecalBase *pDispDecal, ShadowInfo_t const* pInfo, int iLevel, CDecalNodeSetupCache* pCache );
+
+	// Used for hierarchical culling of nodes against shadow frustum
+	void FindNodesInShadowFrustum( const Frustum_t& frustum, unsigned short* pNodeArray, int* pNumNodes, int iNodeBit, int iLevel );
+	
+	// Used for clipping and adding all tris in a number of nodes to a shadow decal
+	void AddNodeTrisToDecal( CDispShadowDecal *pDispDecal, unsigned short decalHandle, unsigned short* pNodeIndices, int nNumIndices );
 
 
 // Vertex/index data access.
@@ -393,6 +403,6 @@ inline int CDispInfo::VertIndex( CVertIndex const &vert ) const
 
 
 void DispInfo_BatchDecals( CDispInfo **pVisibleDisps, int nVisibleDisps );
-void DispInfo_DrawDecals( CDispInfo **pVisibleDisps, int nVisibleDisps );
+void DispInfo_DrawDecals( class IMatRenderContext *pRenderContex, CDispInfo **pVisibleDisps, int nVisibleDisps );
 
 #endif // DISPINFO_H

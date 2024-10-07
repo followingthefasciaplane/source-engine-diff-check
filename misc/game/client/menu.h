@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -24,18 +24,20 @@ class CHudMenu : public CHudElement, public vgui::Panel
 {
 	DECLARE_CLASS_SIMPLE( CHudMenu, vgui::Panel );
 public:
-	CHudMenu( const char *pElementName );
+	explicit CHudMenu( const char *pElementName );
 	void Init( void );
 	void VidInit( void );
 	void Reset( void );
 	virtual bool ShouldDraw( void );
-	void MsgFunc_ShowMenu( bf_read &msg );
+	bool MsgFunc_ShowMenu( const CCSUsrMsg_ShowMenu &msg );
 	void HideMenu( void );
 	void ShowMenu( const char * menuName, int keySlot );
 	void ShowMenu_KeyValueItems( KeyValues *pKV );
 
 	bool IsMenuOpen( void );
 	void SelectMenuItem( int menu_item );
+
+	CUserMessageBinder m_UMCMsgShowMenu;
 
 private:
 	virtual void OnThink();
@@ -63,7 +65,6 @@ private:
 	bool			m_bMenuDisplayed;
 	int				m_bitsValidSlots;
 	float			m_flShutoffTime;
-	int				m_fWaitingForMore;
 	int				m_nSelectedItem;
 	bool			m_bMenuTakesInput;
 

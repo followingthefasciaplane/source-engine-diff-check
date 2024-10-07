@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright 1996-2004, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -70,107 +70,8 @@ void OutputDebugStringA( const char *pchMsg ) { fprintf( stderr, pchMsg ); fflus
 #if defined( _MSC_VER ) && ( _MSC_VER >= 1900 ) && defined( PLATFORM_64BITS )
 //the VS2105 longjmp() seems to freak out jumping back into a coroutine (just like linux if _FORTIFY_SOURCE is defined)
 // I can't find an analogy to _FORTIFY_SOURCE for MSVC at the moment, so I wrote a quick assembly to longjmp() without any safety checks
-extern "C" NORETURN void Coroutine_LongJmp_Unchecked( jmp_buf buffer, int nResult );
+extern "C" void Coroutine_LongJmp_Unchecked(jmp_buf buffer, int nResult);
 #define Coroutine_longjmp Coroutine_LongJmp_Unchecked
-
-#ifdef  _WIN64
-#define Q_offsetof(s,m)   (size_t)( (ptrdiff_t)&reinterpret_cast<const volatile char&>((((s *)0)->m)) )
-#else
-#define Q_offsetof(s,m)   (size_t)&reinterpret_cast<const volatile char&>((((s *)0)->m))
-#endif
-#define SIZEOF_MEMBER( className, memberName ) sizeof( ((className*)nullptr)->memberName )
-
-
-#define Validate_Jump_Buffer( _Member ) COMPILE_TIME_ASSERT( (Q_offsetof( _JUMP_BUFFER, _Member ) == Q_offsetof( _Duplicate_JUMP_BUFFER, _Member )) && (SIZEOF_MEMBER( _JUMP_BUFFER, _Member ) == SIZEOF_MEMBER( _Duplicate_JUMP_BUFFER, _Member )) )
-
-	//validate that the structure in assembly matches what the crt setjmp thinks it is
-#	if defined( PLATFORM_64BITS )
-		struct _Duplicate_JUMP_BUFFER
-		{
-			unsigned __int64 Frame;
-			unsigned __int64 Rbx;
-			unsigned __int64 Rsp;
-			unsigned __int64 Rbp;
-			unsigned __int64 Rsi;
-			unsigned __int64 Rdi;
-			unsigned __int64 R12;
-			unsigned __int64 R13;
-			unsigned __int64 R14;
-			unsigned __int64 R15;
-			unsigned __int64 Rip;
-			unsigned long MxCsr;
-			unsigned short FpCsr;
-			unsigned short Spare;
-
-			SETJMP_FLOAT128 Xmm6;
-			SETJMP_FLOAT128 Xmm7;
-			SETJMP_FLOAT128 Xmm8;
-			SETJMP_FLOAT128 Xmm9;
-			SETJMP_FLOAT128 Xmm10;
-			SETJMP_FLOAT128 Xmm11;
-			SETJMP_FLOAT128 Xmm12;
-			SETJMP_FLOAT128 Xmm13;
-			SETJMP_FLOAT128 Xmm14;
-			SETJMP_FLOAT128 Xmm15;
-		};
-
-		COMPILE_TIME_ASSERT( sizeof( _JUMP_BUFFER ) == sizeof( _Duplicate_JUMP_BUFFER ) );
-		Validate_Jump_Buffer( Frame );
-		Validate_Jump_Buffer( Rbx );
-		Validate_Jump_Buffer( Rsp );
-		Validate_Jump_Buffer( Rbp );
-		Validate_Jump_Buffer( Rsi );
-		Validate_Jump_Buffer( Rdi );
-		Validate_Jump_Buffer( R12 );
-		Validate_Jump_Buffer( R13 );
-		Validate_Jump_Buffer( R14 );
-		Validate_Jump_Buffer( R15 );
-		Validate_Jump_Buffer( Rip );
-		Validate_Jump_Buffer( MxCsr );
-		Validate_Jump_Buffer( FpCsr );
-		Validate_Jump_Buffer( Spare );
-
-		Validate_Jump_Buffer( Xmm6 );
-		Validate_Jump_Buffer( Xmm7 );
-		Validate_Jump_Buffer( Xmm8 );
-		Validate_Jump_Buffer( Xmm9 );
-		Validate_Jump_Buffer( Xmm10 );
-		Validate_Jump_Buffer( Xmm11 );
-		Validate_Jump_Buffer( Xmm12 );
-		Validate_Jump_Buffer( Xmm13 );
-		Validate_Jump_Buffer( Xmm14 );
-		Validate_Jump_Buffer( Xmm15 );
-#	else
-		struct _Duplicate_JUMP_BUFFER
-		{
-			unsigned long Ebp;
-			unsigned long Ebx;
-			unsigned long Edi;
-			unsigned long Esi;
-			unsigned long Esp;
-			unsigned long Eip;
-			unsigned long Registration;
-			unsigned long TryLevel;
-			unsigned long Cookie;
-			unsigned long UnwindFunc;
-			unsigned long UnwindData[6];
-		};
-
-		COMPILE_TIME_ASSERT( sizeof( _JUMP_BUFFER ) == sizeof( _Duplicate_JUMP_BUFFER ) );
-
-		Validate_Jump_Buffer( Ebp );
-		Validate_Jump_Buffer( Ebx );
-		Validate_Jump_Buffer( Edi );
-		Validate_Jump_Buffer( Esi );
-		Validate_Jump_Buffer( Esp );
-		Validate_Jump_Buffer( Eip );
-		Validate_Jump_Buffer( Registration );
-		Validate_Jump_Buffer( TryLevel );
-		Validate_Jump_Buffer( Cookie );
-		Validate_Jump_Buffer( UnwindFunc );
-		Validate_Jump_Buffer( UnwindData[6] );
-#	endif
-
 #else
 #define Coroutine_longjmp longjmp
 #endif
@@ -185,7 +86,29 @@ extern "C" NORETURN void Coroutine_LongJmp_Unchecked( jmp_buf buffer, int nResul
 #define RW_MEMORY_BARRIER /* _ReadWriteBarrier() */
 #endif
 
+#if defined(VALGRIND_HINTING)
+#include <valgrind/valgrind.h>
+#include <valgrind/memcheck.h>
+#define MARK_AS_STACK(start,len) VALGRIND_STACK_REGISTER(start,start+len); \
+	CoroutineDbgMsg(  "STACK_REGISTER() [%x - %x] (%x)\n", start, start+len, len ); \
+	VALGRIND_MAKE_MEM_DEFINED(start,len); \
+	CoroutineDbgMsg(  "MAKE_MEM_DEFINED() [%x - %x] (%x)\n", start, start+len, len );
+#define UNMARK_AS_STACK(id,start,len) 
+// VALGRIND_STACK_DEREGISTER(id); 
+// VALGRIND_MAKE_MEM_UNDEFINED(start,len)
+#else
+#define MARK_AS_STACK(start,len) 0 
+#define UNMARK_AS_STACK(id,start,len)
+#endif
 
+// it *feels* like we should need barriers around our setjmp/longjmp calls, and the memcpy's
+// to make sure the optimizer doesn't reorder us across register load/stores, so I've put them
+// in what seem like the appropriate spots, but we seem to run ok without them, so...
+#ifdef GNUC
+#define RW_MEMORY_BARRIER /* __sync_synchronize() */
+#else
+#define RW_MEMORY_BARRIER /* _ReadWriteBarrier() */
+#endif
 
 // return values from setjmp()
 static const int k_iSetJmpStateSaved = 0x00;
@@ -203,15 +126,9 @@ static const int k_cubCoroutineStackGap = (64 * 1024);
 static const int k_cubCoroutineStackGapSmall = 64;	
 #endif
 
-// Warning size for allocated stacks
-#ifdef _DEBUG
-// In debug builds, we'll end up with much more stack usage in some scenarios that isn't representative of release
-// builds.  We should still warn if we're going way above what we could expect the optimizer to save us from, but the
-// warning is more salient in release.
-static const int k_cubMaxCoroutineStackSize = (48 * 1024);
-#else
+// cap the size of allocated stacks
 static const int k_cubMaxCoroutineStackSize = (32 * 1024);
-#endif // defined( _DEBUG )
+
 
 #ifdef _WIN64
 extern "C" byte *GetStackPtr64();
@@ -220,14 +137,7 @@ extern "C" byte *GetStackPtr64();
 #ifdef WIN32
 #define GetStackPtr( pStackPtr )	byte *pStackPtr;	__asm mov pStackPtr, esp	
 #elif defined(GNUC)
-// Apple's version of gcc/g++ doesn't return the expected value using the intrinsic, so 
-// do it the old fashioned way - this will also use asm on linux (since we don't compile
-// with llvm/clang there) but that seems fine.
-#if defined(__llvm__) || defined(__clang__)
 #define GetStackPtr( pStackPtr )	byte *pStackPtr = (byte*)__builtin_frame_address(0)
-#else
-#define GetStackPtr( pStackPtr )	register byte *pStackPtr __asm__( "esp" )
-#endif
 #elif defined(__SNC__)
 #define GetStackPtr( pStackPtr )	byte *pStackPtr = (byte*)__builtin_frame_address(0)
 #else
@@ -261,6 +171,7 @@ public:
 		m_pSavedStack = NULL;
 		m_pStackHigh = m_pStackLow = NULL;
 		m_cubSavedStack = 0;
+		m_nStackId = 0;
 		m_pFunc = NULL;
 		m_pchName = "(none)";
 		m_iJumpCode = 0;
@@ -270,6 +181,8 @@ public:
 #endif
 #ifdef _M_X64
 		m_nAlignmentBytes = CalcAlignOffset( m_rgubRegisters );
+#else
+		memset( &m_Registers, 0, sizeof( m_Registers ) );
 #endif	
 #if defined( VPROF_ENABLED )
 		m_pVProfNodeScope = NULL;
@@ -328,7 +241,7 @@ public:
 			GetStackPtr( pStack );
 			if ( pStack >= m_pStackLow && pStack <= m_pStackHigh )
 			{
-				CoroutineDbgMsg( g_fmtstr.sprintf( "Restoring stack over ESP (%x, %x, %x)\n", pStack, m_pStackLow, m_pStackHigh ) );
+				CoroutineDbgMsg( g_fmtstr.sprintf( "Restoring stack over ESP (%p, %p, %p)\n", pStack, m_pStackLow, m_pStackHigh ) );
 				AssertMsg3( false, "Restoring stack over ESP (%p, %p, %p)\n", pStack, m_pStackLow, m_pStackHigh );
 			}
 
@@ -341,6 +254,7 @@ public:
 			
 			RW_MEMORY_BARRIER;
 			memcpy( m_pStackLow, m_pSavedStack, m_cubSavedStack );
+			pThis->m_nStackId = MARK_AS_STACK( pThis->m_pStackLow, pThis->m_cubSavedStack );
 
 			// WARNING: The stack has been replaced.. do not use previous stack variables or this
 
@@ -381,7 +295,7 @@ public:
 						false, 
 						g_VProfCurrentProfile.GetBudgetGroupFlags( pThis->m_vecProfNodeStack[i]->GetBudgetGroupID() ) 
 					);
-				}
+			}
 			}
 
 			pThis->m_vecProfNodeStack.Purge();
@@ -399,7 +313,7 @@ public:
 
 
 		GetStackPtr( pLocal );
-    
+
 		m_pStackLow = pLocal;
 		m_cubSavedStack = (m_pStackHigh - m_pStackLow);
 		m_pSavedStack = (byte *)PvAlloc( m_cubSavedStack );
@@ -418,7 +332,7 @@ public:
 			m_vecProfNodeStack.AddToTail( pCurNode );
 			g_VProfCurrentProfile.ExitScope();
 			pCurNode = g_VProfCurrentProfile.GetCurrentNode();
-		}
+		} 
 
 		m_pVProfNodeScope = NULL;
 #endif
@@ -426,6 +340,7 @@ public:
 		RW_MEMORY_BARRIER;
 		// save the stack in the newly allocated slot
 		memcpy( m_pSavedStack, m_pStackLow, m_cubSavedStack );
+		UNMARK_AS_STACK( m_nStackId, m_pStackLow, m_cubSavedStack );
 
 #ifdef CHECK_STACK_CORRUPTION
 		MD5Init( &m_md5 );
@@ -454,6 +369,7 @@ public:
 	byte *m_pStackLow;		// low point on the stack we plan on saving (stack ptr when we yield)
 	byte *m_pSavedStack;	// pointer to the saved stack (allocated on heap)
 	int m_cubSavedStack;	// amount of data on stack
+	int m_nStackId;
 	const char *m_pchName;
 	int m_iJumpCode;
 	const char *m_pchDebugMsg;
@@ -585,8 +501,8 @@ private:
 	CUtlVector<HCoroutine> m_VecCoroutineStack;
 };
 
-CThreadLocalPtr< CCoroutineMgr > g_ThreadLocalCoroutineMgr;
-
+CTHREADLOCALPTR( CCoroutineMgr ) g_ThreadLocalCoroutineMgr;
+//GenericThreadLocals::CThreadLocalPtr< CCoroutineMgr > 
 CUtlVector< CCoroutineMgr * > g_VecPCoroutineMgr;
 CThreadMutex g_ThreadMutexCoroutineMgr;
 
@@ -610,7 +526,7 @@ void Coroutine_ReleaseThreadMemory()
 {
 	AUTO_LOCK( g_ThreadMutexCoroutineMgr );
 
-	if ( g_ThreadLocalCoroutineMgr != NULL )
+	if ( g_ThreadLocalCoroutineMgr != static_cast<const void*>( nullptr ) )
 	{
 		int iCoroutineMgr = g_VecPCoroutineMgr.Find( g_ThreadLocalCoroutineMgr );
 		delete g_VecPCoroutineMgr[iCoroutineMgr];
@@ -701,7 +617,7 @@ bool Internal_Coroutine_Continue( HCoroutine hCoroutine, const char *pchDebugMsg
 				}
 				coroutinePrev.SaveStack();
 				CoroutineDbgMsg( g_fmtstr.sprintf( "SaveStack() %s#%x [%x - %x]\n", coroutinePrev.m_pchName, coroutinePrev.m_hCoroutine, coroutinePrev.m_pStackLow, coroutinePrev.m_pStackHigh ) );
-			}			
+			}
 
 			// If the coroutine's stack is close enough to where we are on the stack, we need to push ourselves
 			// down past it, so that the memcpy() doesn't screw up the RestoreStack->memcpy call chain.
@@ -929,9 +845,9 @@ void Coroutine_YieldToMain()
 			}
 			else
 			{
-				// If we were loaded only to debug, call a break
-				DebuggerBreakIfDebugging();
-			}
+			// If we were loaded only to debug, call a break
+			DebuggerBreakIfDebugging();
+		}
 
 			// Now IMMEDIATELY yield back to the main thread
 		}
@@ -963,8 +879,6 @@ void Coroutine_YieldToMain()
 		// Our stack may have been mucked with, can't use local vars anymore!
 		RW_MEMORY_BARRIER;
 		Coroutine_longjmp( GCoroutineMgr().GetPreviouslyActiveCoroutine().GetRegisters(), k_iSetJmpContinue );
-
-		UNREACHABLE();
 	}
 	else
 	{
@@ -990,10 +904,9 @@ void Coroutine_Finish()
 	RW_MEMORY_BARRIER;
 	// go back to the main thread, signaling that we're done
 	Coroutine_longjmp( GCoroutineMgr().GetPreviouslyActiveCoroutine().GetRegisters(), k_iSetJmpDone );
-
-	UNREACHABLE();
 }
 
+#ifdef STEAM
 //-----------------------------------------------------------------------------
 // Purpose: Coroutine that spawns another coroutine
 //-----------------------------------------------------------------------------
@@ -1121,7 +1034,7 @@ bool Coroutine_Test()
 
 	return true;
 }
-
+#endif
 
 //-----------------------------------------------------------------------------
 // Purpose: returns approximate stack depth of current coroutine.  

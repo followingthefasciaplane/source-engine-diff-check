@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -33,8 +33,6 @@ public:
 
 	// Sets text to draw over the window
 	void	SetOverlayText( const char *pText );
-
-	void	ReleaseLayoffTexture();
 
 private:
 	vgui::DHANDLE< CMiniViewportPropertyPage >	m_hPage;

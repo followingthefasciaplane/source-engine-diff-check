@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -9,6 +9,10 @@
 #include <vgui/ISurface.h>
 #include "tier0/vprof.h"
 #include "materialsystem/imaterialsystem.h"
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
 
 static ConVar budget_peaks_window( "budget_peaks_window", "30", FCVAR_ARCHIVE, "number of frames to look at when figuring out peak frametimes" );
 static ConVar budget_averages_window( "budget_averages_window", "30", FCVAR_ARCHIVE, "number of frames to look at when figuring out average frametimes" );

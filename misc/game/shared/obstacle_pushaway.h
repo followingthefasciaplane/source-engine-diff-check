@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -22,9 +22,7 @@ bool IsPushAwayEntity( CBaseEntity *pEnt );
 bool IsPushableEntity( CBaseEntity *pEnt );
 
 //--------------------------------------------------------------------------------------------------------------
-#ifndef CLIENT_DLL
 bool IsBreakableEntity( CBaseEntity *pEnt );
-#endif // !CLIENT_DLL
 
 //--------------------------------------------------------------------------------------------------------------
 class CPushAwayEnumerator : public IPartitionEnumerator

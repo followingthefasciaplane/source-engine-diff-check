@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -22,7 +22,7 @@
 #include <vgui_controls/PropertyPage.h>
 #include <vgui_controls/PropertyDialog.h>
 #include <vgui_controls/PropertySheet.h>
-#include "tier1/CommandBuffer.h"
+#include "tier1/commandbuffer.h"
 #include "tier1/tier1.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
@@ -59,7 +59,7 @@ public:
 
 	virtual void OnCommand( const char *command )
 	{
-		Cbuf_AddText( va( "%s\n", (char *)command ) );
+		Cbuf_AddText( Cbuf_GetCurrentPlayer(), va( "%s\n", (char *)command ) );
 	}
 
 	virtual void OnTick( void )
@@ -83,7 +83,7 @@ public:
 	{
 		if ( m_pVar )
 		{
-			Cbuf_AddText( va( "%s %d\n", m_pVar->GetName(), !m_pVar->GetInt() ) );
+			Cbuf_AddText( Cbuf_GetCurrentPlayer(), va( "%s %d\n", m_pVar->GetName(), !m_pVar->GetInt() ) );
 		}
 	}
 
@@ -293,13 +293,10 @@ public:
 		}
 	
 		GetPropertySheet()->SetTabWidth(72);
-		SetPos( videomode->GetModeStereoWidth() - GetWide() - 10 , 10 );
+		SetPos( videomode->GetModeWidth() - GetWide() - 10 , 10 );
 		SetVisible( true );
 
-		if ( g_pFullFileSystem->FileExists( "resource/DebugOptionsPanel.res" ) )
-		{
-			LoadControlSettings( "resource/DebugOptionsPanel.res" );
-		}
+		LoadControlSettings( "resource\\DebugOptionsPanel.res" );
 	}
 
 	void	Init( KeyValues *kv );
@@ -336,7 +333,7 @@ CDebugSystemPanel::CDebugSystemPanel( Panel *parent, const char *panelName )
 	: BaseClass( parent, panelName )
 {
 
-	SetBounds( 0, 0, videomode->GetModeStereoWidth(), videomode->GetModeStereoHeight() );
+	SetBounds( 0, 0, videomode->GetModeWidth(), videomode->GetModeHeight() );
 
 	// Show arrow cursor while in this mode
 	SetCursor( vgui::dc_arrow );
@@ -379,7 +376,7 @@ void CDebugSystemPanel::OnCommand( const char *command )
 	}
 	else if ( !Q_strcasecmp( command, "quit" ) )
 	{
-		Cbuf_AddText( "quit\n" );
+		Cbuf_AddText( Cbuf_GetCurrentPlayer(), "quit\n" );
 	}
 
 	BaseClass::OnCommand( command );

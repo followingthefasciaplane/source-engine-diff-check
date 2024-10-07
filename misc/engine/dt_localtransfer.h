@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -14,6 +14,13 @@
 
 #include "dt_send.h"
 #include "dt_recv.h"
+#include "dt.h"
+
+
+// We have at most MAX_CHANGE_OFFSETS indices in an edict.
+// We need 3 entries because of SPROP_IS_A_VECTOR_ELEM (in which case we could generate 3 props for each offset).
+// Then we need 2 entries because we store up to 2 SendProp indices for each offset in PropIndicesCollection_t.
+#define MAX_PROP_OFFSET_TO_INDICES_RESULTS (MAX_CHANGE_OFFSETS * 3 * PROP_INDICES_COLLECTION_NUM_INDICES)
 
 
 class CBaseEdict;
@@ -40,6 +47,15 @@ void LocalTransfer_TransferEntity(
 	bool bNewlyCreated,
 	bool bJustEnteredPVS,
 	int objectID );
+
+// This returns at most MAX_PROP_OFFSET_TO_INDICES_RESULTS results into pOut, so make sure it has at least that much room.
+int MapPropOffsetsToIndices( 
+	const CBaseEdict *pEdict,
+	CSendTablePrecalc *pPrecalc, 
+	const unsigned short *pOffsets,
+	unsigned short nOffsets,
+	unsigned short *pOut );
+
 
 // Call this after packing all the entities in a frame.
 void PrintPartialChangeEntsList();

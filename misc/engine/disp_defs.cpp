@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -30,7 +30,6 @@ int g_CoreDispNeighborOrientationMap[4][4] =
 // Global variables.
 // ---------------------------------------------------------------------- //
 
-CUtlVector<unsigned char>	g_DispLMAlpha;
 CUtlVector<unsigned char, CHunkMemory<unsigned char> >	g_DispLightmapSamplePositions;
 CUtlVector<CDispGroup*>		g_DispGroups;
 

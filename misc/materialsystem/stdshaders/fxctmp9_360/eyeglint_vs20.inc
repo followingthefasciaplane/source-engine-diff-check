@@ -1,8 +1,11 @@
+// ALL SKIP STATEMENTS THAT AFFECT THIS SHADER!!!
+// defined $LIGHTING_PREVIEW && defined $FASTPATH && $LIGHTING_PREVIEW && $FASTPATH
 #include "shaderlib/cshader.h"
 class eyeglint_vs20_Static_Index
 {
 public:
-	eyeglint_vs20_Static_Index( )
+	// CONSTRUCTOR
+	eyeglint_vs20_Static_Index( IShaderShadow *pShaderShadow, IMaterialVar **params )
 	{
 	}
 	int GetIndex()
@@ -18,7 +21,8 @@ public:
 class eyeglint_vs20_Dynamic_Index
 {
 public:
-	eyeglint_vs20_Dynamic_Index()
+	// CONSTRUCTOR
+	eyeglint_vs20_Dynamic_Index( IShaderDynamicAPI *pShaderAPI )
 	{
 	}
 	int GetIndex()
@@ -31,3 +35,18 @@ public:
 	}
 };
 #define shaderDynamicTest_eyeglint_vs20 0
+static const ShaderComboSemantics_t eyeglint_vs20_combos =
+{
+	"eyeglint_vs20", NULL, 0, NULL, 0 
+};
+
+class ConstructMe_eyeglint_vs20
+{
+public:
+	ConstructMe_eyeglint_vs20()
+	{
+		GetShaderDLL()->AddShaderComboInformation( &eyeglint_vs20_combos );
+	}
+};
+
+static ConstructMe_eyeglint_vs20 s_ConstructMe_eyeglint_vs20;

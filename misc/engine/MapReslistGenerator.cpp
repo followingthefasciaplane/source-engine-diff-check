@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -45,9 +45,10 @@ void MapReslistGenerator_Usage()
 	Msg( "  [ -usereslistfile filename ] -- get map list from specified file, default is to build for maps/*.bsp\n" );
 	Msg( "  [ -startmap mapname ] -- restart generation at specified map (after crash, implies resume)\n" );
 	Msg( "  [ -condebug ] -- prepend console.log entries with mapname or engine if not in a map\n" );
-	Msg( "  [ +map mapname ] -- generate reslists for specified map and exit after that map\n" );
+	Msg( "  [ -reslistmap mapname ] -- generate reslists for specified map and exit after that map\n" );
 	Msg( "  [ -rebuildaudio ] -- force rebuild of _other_rebuild.cache (metacache) file at exit\n" );
 	Msg( "  [ -forever ] -- when you get to the end of the maplist, start over from the top\n" );
+	Msg( "  [ -stringtables ] -- force rebuild of the .bsp's stringtable dictionary\n" );
 	Msg( "  [ -reslistdir ] -- default is 'reslists', use this to override\n" );
 	Msg( "  [ -startstage nnn ] -- when running from script file, this starts at specified stage\n" );
 	Msg( "  [ -collate ] -- skip everything, just merge the reslist from temp folders to the final folder again\n" );
@@ -73,6 +74,11 @@ void MapReslistGenerator_Init()
 	if ( CommandLine()->FindParm( "-trackdeletions" ) )
 	{
 		MapReslistGenerator().EnableDeletionsTracking();
+	}
+
+	if ( CommandLine()->FindParm( "-autoquit" ) )
+	{
+		MapReslistGenerator().SetAutoQuit( true );
 	}
 }
 
@@ -112,13 +118,12 @@ CMapReslistGenerator::CMapReslistGenerator() :
 	m_bUsingMapList = false;
 	m_bTrackingDeletions = false;
 	m_bLoggingEnabled = false;
+	m_bCreatingForXbox = false;
 	m_iCurrentMap = 0;
 	m_flNextMapRunTime = 0.0f;
-	m_iFrameCountdownToRunningNextMap = 0;
 	m_szPrefix[0] = '\0';
 	m_szLevelName[0] = '\0';
 	m_iPauseTimeBetweenMaps = PAUSE_TIME_BETWEEN_MAPS;
-	m_iPauseFramesBetweenMaps = PAUSE_FRAMES_BETWEEN_MAPS;
 	m_bRestartOnTransition = false;
 	m_bLogToEngineList = true;
 	m_sResListDir = "reslists";
@@ -134,14 +139,24 @@ void CMapReslistGenerator::BuildMapList()
 	if ( !IsEnabled() )
 		return;
 
-	MapReslistGenerator_Usage();
+	if ( CommandLine()->FindParm( "+map" ) != 0 )
+	{
+		// This entire module is broken in about N different ways.
+		// The scripting features have heavily rotted, plus tie in with stringtables (which gets confused with multiple restarts).
+		// The whole thing barely works. I am narrowing it to work in exactly the one remaining way necesary for shipping.
+		Error( "CMapReslistGenerator Incompatible with normal map loading. Use -reslistmap" );
+	}
+
+	Msg( "********************\n" );
+	Msg( "Building Reslists\n" );
+	Msg( "********************\n" );
 
 	// Get the maplist file, if any
 	const char *pMapFile = NULL;
 	CommandLine()->CheckParm( "-usereslistfile", &pMapFile );
 
-	// +map argument precludes using a maplist file
-	bool bUseMap = CommandLine()->FindParm("+map") != 0;
+	// -reslistmap argument precludes using a maplist file
+	bool bUseMap = CommandLine()->FindParm( "-reslistmap" ) != 0;
 	bool bUseMapListFile = bUseMap ? false : CommandLine()->FindParm("-usereslistfile") != 0;
 
 	// Build the map list
@@ -155,14 +170,12 @@ bool BuildGeneralMapList( CUtlVector<maplist_map_t> *aMaps, bool bUseMapListFile
 {
 	if ( !bUseMapListFile )
 	{
-		// If the user passed in a +map parameter, just use that single map
+		// If the user passed in a -reslistmap parameter, just use that single map
 		char const *pMapName = NULL;
-		if ( CommandLine()->CheckParm( "+map", &pMapName ) && pMapName )
+		if ( CommandLine()->CheckParm( "-reslistmap", &pMapName ) && pMapName )
 		{
 			// ensure validity
-			char szMapFile[64] = { 0 };
-			V_snprintf( szMapFile, sizeof( szMapFile ), "maps/%s.bsp", pMapName );
-			if (g_pVEngineServer->IsMapValid( szMapFile ))
+			if (g_pVEngineServer->IsMapValid(pMapName))
 			{
 				// add to list
 				maplist_map_t newMap;
@@ -170,7 +183,7 @@ bool BuildGeneralMapList( CUtlVector<maplist_map_t> *aMaps, bool bUseMapListFile
 				aMaps->AddToTail( newMap );
 			}
 
-			CommandLine()->RemoveParm( "+map" );
+			CommandLine()->RemoveParm( "-reslistmap" );
 		}
 		else
 		{
@@ -200,9 +213,7 @@ bool BuildGeneralMapList( CUtlVector<maplist_map_t> *aMaps, bool bUseMapListFile
 				findfn = Sys_FindNext( NULL, 0  );
 
 				// ensure validity
-				char szMapFile[64] = { 0 };
-				V_snprintf( szMapFile, sizeof( szMapFile ), "maps/%s.bsp", sz );
-				if (!g_pVEngineServer->IsMapValid( szMapFile ))
+				if (!g_pVEngineServer->IsMapValid(sz))
 					continue;
 
 				// add to list
@@ -245,9 +256,7 @@ bool BuildGeneralMapList( CUtlVector<maplist_map_t> *aMaps, bool bUseMapListFile
 							Q_strncpy(szMap, com_token, sizeof(szMap));
 
 							// ensure validity
-							char szMapFile[64] = { 0 };
-							V_snprintf( szMapFile, sizeof( szMapFile ), "maps/%s.bsp", szMap );
-							if (!g_pVEngineServer->IsMapValid( szMapFile ))
+							if (!g_pVEngineServer->IsMapValid(szMap))
 								continue;
 
 							// Any more tokens on this line?
@@ -386,11 +395,12 @@ void CMapReslistGenerator::LogToEngineReslist( char const *pLine )
 //-----------------------------------------------------------------------------
 void CMapReslistGenerator::EnableReslistGeneration( bool usemaplistfile )
 {
-	//hackhack !!!! This is a work-around until CS precaches things on level start, not player spawn
-	if ( !Q_stricmp( "cstrike", GetCurrentMod() ))
+	// hackhack !!!! This is a work-around until CS precaches things on level start, not player spawn 
+	if ( !Q_stricmp( "cstrike", GetCurrentMod() ) || !Q_stricmp( "csgo", GetCurrentMod() ) )
 	{
-		m_iPauseTimeBetweenMaps = PAUSE_TIME_BETWEEN_MAPS * 3;
-		m_iPauseFramesBetweenMaps = PAUSE_FRAMES_BETWEEN_MAPS * 3;
+		// the CS UI basically broke this, all sorts of waiting for team selection player input in UI
+		// 5 for the loading map screen, 10 for team selection, 15 for loading in general.
+		m_iPauseTimeBetweenMaps = 5 + 10 + 15;
 	}
 
 	m_bUsingMapList = usemaplistfile;
@@ -411,6 +421,8 @@ void CMapReslistGenerator::EnableReslistGeneration( bool usemaplistfile )
 			m_sResListDir = szDir;
 		}
 	}
+
+	m_bCreatingForXbox = CommandLine()->FindParm( "-xboxreslist" ) != 0;
 
 	// create file to dump out to
 	g_pFileSystem->CreateDirHierarchy( m_sResListDir.String() , "DEFAULT_WRITE_PATH" );
@@ -435,9 +447,9 @@ void CMapReslistGenerator::EnableReslistGeneration( bool usemaplistfile )
 //-----------------------------------------------------------------------------
 void CMapReslistGenerator::StartReslistGeneration()
 {
+	// wait for the main menu to stabilize then start the first map loading
 	m_iCurrentMap = 0;
-	m_iFrameCountdownToRunningNextMap = m_iPauseFramesBetweenMaps;
-	m_flNextMapRunTime = Sys_FloatTime() + m_iPauseTimeBetweenMaps;
+	m_flNextMapRunTime = Sys_FloatTime() + 10;
 }
 
 //-----------------------------------------------------------------------------
@@ -447,6 +459,11 @@ void CMapReslistGenerator::StartReslistGeneration()
 void CMapReslistGenerator::SetPrefix( char const *mapname )
 {
 	Q_snprintf( m_szPrefix, sizeof( m_szPrefix ), "%s:  ", mapname );
+}
+
+void CMapReslistGenerator::OnLevelShutdown()
+{
+	m_bLogToEngineList = true;
 }
 
 //-----------------------------------------------------------------------------
@@ -469,16 +486,23 @@ char const *CMapReslistGenerator::LogPrefix()
 //-----------------------------------------------------------------------------
 void CMapReslistGenerator::OnLevelLoadStart(const char *levelName)
 {
+	// prepare for map logging
+	m_bLogToEngineList = false;
+	V_strncpy( m_szLevelName, levelName, sizeof( m_szLevelName ) );
+
 	if ( !IsEnabled() )
+	{
+		char basename[ MAX_PATH ];
+		Q_FileBase( levelName, basename, sizeof( basename ) );
+		Q_strlower( basename );
+		SetPrefix( basename );
 		return;
+	}
 
 	// reset the duplication list
 	m_AlreadyWrittenFileNames.RemoveAll();
 
-	// prepare for map logging
-	m_bLogToEngineList = false;
 	m_MapLog.RemoveAll();
-	V_strncpy( m_szLevelName, levelName, sizeof( m_szLevelName ) );
 
 	// add in the bsp file to the list, and its node graph
 	char path[MAX_PATH];
@@ -509,11 +533,14 @@ void CMapReslistGenerator::OnLevelLoadEnd()
 
 void CMapReslistGenerator::OnPlayerSpawn()
 {
+}
+
+void CMapReslistGenerator::OnFullyConnected()
+{
 	if ( !IsEnabled() )
 		return;
 
 	// initiate the next level
-	m_iFrameCountdownToRunningNextMap = m_iPauseFramesBetweenMaps;
 	m_flNextMapRunTime = Sys_FloatTime() + m_iPauseTimeBetweenMaps;
 }
 
@@ -536,7 +563,7 @@ char const *CMapReslistGenerator::GetResListDirectory() const
 
 void CMapReslistGenerator::DoQuit()
 {
-	Cbuf_AddText( "quit\n" );
+	Cbuf_AddText( Cbuf_GetCurrentPlayer(), "quit\n" );
 	// remove the logging
 	g_pFileSystem->RemoveLoggingFunc(&FileSystemLoggingFunc);
 	m_bLogToEngineList = true;
@@ -557,9 +584,6 @@ void CMapReslistGenerator::RunFrame()
 		return;
 	}
 
-	if ( --m_iFrameCountdownToRunningNextMap > 0 )
-		return;
-
 	if ( m_flNextMapRunTime && m_flNextMapRunTime < Sys_FloatTime() )
 	{
 		// about to transition or terminate, emit the current map log
@@ -567,12 +591,12 @@ void CMapReslistGenerator::RunFrame()
 
 		if ( m_Maps.IsValidIndex( m_iCurrentMap ) )
 		{
+			// will start counting again after the level loads
 			m_flNextMapRunTime = 0.0f;
-			m_iFrameCountdownToRunningNextMap = 0;
 
 			if ( !m_bRestartOnTransition )
 			{
-				Cbuf_AddText( va( "map %s\n", m_Maps[m_iCurrentMap].name ) );
+				Cbuf_AddText( Cbuf_GetCurrentPlayer(), va( "map %s\n", m_Maps[m_iCurrentMap].name ) );
 
 				SetPrefix( m_Maps[m_iCurrentMap].name );
 
@@ -621,7 +645,7 @@ void CMapReslistGenerator::OnModelPrecached(const char *relativePathFileName)
 		// it's a materials file, make sure that it starts in the materials directory, and we get the .vtf
 		char file[_MAX_PATH];
 
-		if (!Q_strnicmp(relativePathFileName, "materials", strlen("materials")))
+		if ( StringHasPrefix( relativePathFileName, "materials" ) )
 		{
 			Q_strncpy(file, relativePathFileName, sizeof(file));
 		}
@@ -659,7 +683,7 @@ void CMapReslistGenerator::OnSoundPrecached(const char *relativePathFileName)
 
 	// prepend the sound/ directory if necessary
 	char file[_MAX_PATH];
-	if (!Q_strnicmp(relativePathFileName, "sound", strlen("sound")))
+	if ( StringHasPrefix( relativePathFileName, "sound" ) )
 	{
 		Q_strncpy(file, relativePathFileName, sizeof(file));
 	}
@@ -725,11 +749,7 @@ void CMapReslistGenerator::OnResourcePrecachedFullPath(const char *fullPathFileN
 		OnResourcePrecachedFullPath(file);
 		Q_strncpy(ext, ".ani", 10);
 		OnResourcePrecachedFullPath(file);
-		Q_strncpy(ext, ".dx80.vtx", 10);
-		OnResourcePrecachedFullPath(file);
 		Q_strncpy(ext, ".dx90.vtx", 10);
-		OnResourcePrecachedFullPath(file);
-		Q_strncpy(ext, ".sw.vtx", 10);
 		OnResourcePrecachedFullPath(file);
 		Q_strncpy(ext, ".phy", 10);
 		OnResourcePrecachedFullPath(file);
@@ -777,14 +797,17 @@ void CMapReslistGenerator::WriteMapLog()
 	char path[_MAX_PATH];
 	Q_snprintf( path, sizeof( path ), "%s\\%s.lst", m_sResListDir.String(), m_szLevelName );
 	FileHandle_t fh = g_pFileSystem->Open( path, "wt", "DEFAULT_WRITE_PATH" );
-	for ( int i = m_MapLog.FirstInorder(); i != m_MapLog.InvalidIndex(); i = m_MapLog.NextInorder( i ) )
+	if ( FILESYSTEM_INVALID_HANDLE != fh )
 	{
-		const char *pLine = m_MapLog[i].String();
-		g_pFileSystem->Write( "\"", 1, fh );
-		g_pFileSystem->Write( pLine, Q_strlen( pLine ), fh );
-		g_pFileSystem->Write( "\"\n", 2, fh );
+		for ( int i = m_MapLog.FirstInorder(); i != m_MapLog.InvalidIndex(); i = m_MapLog.NextInorder( i ) )
+		{
+			const char *pLine = m_MapLog[i].String();
+			g_pFileSystem->Write( "\"", 1, fh );
+			g_pFileSystem->Write( pLine, Q_strlen( pLine ), fh );
+			g_pFileSystem->Write( "\"\n", 2, fh );
+		}
+		g_pFileSystem->Close( fh );
 	}
-	g_pFileSystem->Close( fh );
 }
 
 //-----------------------------------------------------------------------------
@@ -1007,4 +1030,7 @@ void CMapReslistGenerator::SpewTrackedDeletionsLog()
 	g_pFileSystem->Close( hUndeleteFile );
 }
 
-	
+bool CMapReslistGenerator::IsCreatingForXbox()
+{
+	return IsEnabled() && m_bCreatingForXbox;
+}	

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -14,12 +14,17 @@
 #include "tier0/vprof.h"
 #include "utllinkedlist.h"
 #include "ivrenderview.h"
+#include "tier0/cache_hints.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
 static ConVar	r_novis( "r_novis","0", FCVAR_CHEAT	, "Turn off the PVS." );
 static ConVar	r_lockpvs( "r_lockpvs", "0", FCVAR_CHEAT, "Lock the PVS so you can fly around and inspect what is being drawn." );
+
+static ConVar	r_portal_use_pvs_optimization( "r_portal_use_pvs_optimization", "1", 0, "Enables an optimization that allows portals to be culled when outside of the PVS." );
+
+bool g_bNoClipEnabled = false;
 
 // ----------------------------------------------------------------------
 // Renderer interface to vis
@@ -103,22 +108,22 @@ static void VisMark_Cached( const VisCacheEntry &cache, const worldbrushdata_t &
 	count = cache.leaflist.Count();
 	const unsigned short * RESTRICT pSrc = cache.leaflist.Base();
 
-#if _X360
+#if defined( _X360 ) || defined( _PS3 )
 	const int offsetLeaf = offsetof(mleaf_t, visframe);
 	const int offsetNode = offsetof(mnode_t, visframe);
 #endif
 
 	while ( count >= 8 )
 	{
-#if _X360
-		__dcbt( offsetLeaf, (void *)(worldbrush.leafs + pSrc[0]) );
-		__dcbt( offsetLeaf, (void *)(worldbrush.leafs + pSrc[1]) );
-		__dcbt( offsetLeaf, (void *)(worldbrush.leafs + pSrc[2]) );
-		__dcbt( offsetLeaf, (void *)(worldbrush.leafs + pSrc[3]) );
-		__dcbt( offsetLeaf, (void *)(worldbrush.leafs + pSrc[4]) );
-		__dcbt( offsetLeaf, (void *)(worldbrush.leafs + pSrc[5]) );
-		__dcbt( offsetLeaf, (void *)(worldbrush.leafs + pSrc[6]) );
-		__dcbt( offsetLeaf, (void *)(worldbrush.leafs + pSrc[7]) );
+#if defined( _X360 ) || defined( _PS3 )
+		PREFETCH_128( (void *)(worldbrush.leafs + pSrc[0]), offsetLeaf );
+		PREFETCH_128( (void *)(worldbrush.leafs + pSrc[1]), offsetLeaf );
+		PREFETCH_128( (void *)(worldbrush.leafs + pSrc[2]), offsetLeaf );
+		PREFETCH_128( (void *)(worldbrush.leafs + pSrc[3]), offsetLeaf );
+		PREFETCH_128( (void *)(worldbrush.leafs + pSrc[4]), offsetLeaf );
+		PREFETCH_128( (void *)(worldbrush.leafs + pSrc[5]), offsetLeaf );
+		PREFETCH_128( (void *)(worldbrush.leafs + pSrc[6]), offsetLeaf );
+		PREFETCH_128( (void *)(worldbrush.leafs + pSrc[7]), offsetLeaf );
 #endif
 		worldbrush.leafs[pSrc[0]].visframe = visframe;
 		worldbrush.leafs[pSrc[1]].visframe = visframe;
@@ -143,15 +148,15 @@ static void VisMark_Cached( const VisCacheEntry &cache, const worldbrushdata_t &
 
 	while ( count >= 8 )
 	{
-#if _X360
-		__dcbt( offsetNode, (void *)(worldbrush.nodes + pSrc[0]) );
-		__dcbt( offsetNode, (void *)(worldbrush.nodes + pSrc[1]) );
-		__dcbt( offsetNode, (void *)(worldbrush.nodes + pSrc[2]) );
-		__dcbt( offsetNode, (void *)(worldbrush.nodes + pSrc[3]) );
-		__dcbt( offsetNode, (void *)(worldbrush.nodes + pSrc[4]) );
-		__dcbt( offsetNode, (void *)(worldbrush.nodes + pSrc[5]) );
-		__dcbt( offsetNode, (void *)(worldbrush.nodes + pSrc[6]) );
-		__dcbt( offsetNode, (void *)(worldbrush.nodes + pSrc[7]) );
+#if defined( _X360 ) || defined( _PS3 )
+		PREFETCH_128( (void *)(worldbrush.nodes + pSrc[0]), offsetNode );
+		PREFETCH_128( (void *)(worldbrush.nodes + pSrc[1]), offsetNode );
+		PREFETCH_128( (void *)(worldbrush.nodes + pSrc[2]), offsetNode );
+		PREFETCH_128( (void *)(worldbrush.nodes + pSrc[3]), offsetNode );
+		PREFETCH_128( (void *)(worldbrush.nodes + pSrc[4]), offsetNode );
+		PREFETCH_128( (void *)(worldbrush.nodes + pSrc[5]), offsetNode );
+		PREFETCH_128( (void *)(worldbrush.nodes + pSrc[6]), offsetNode );
+		PREFETCH_128( (void *)(worldbrush.nodes + pSrc[7]), offsetNode );
 #endif
 		worldbrush.nodes[pSrc[0]].visframe = visframe;
 		worldbrush.nodes[pSrc[1]].visframe = visframe;
@@ -272,7 +277,14 @@ void Map_VisMark( bool forcenovis, model_t *worldmodel )
 	{
 		vis.rgVisClusters[ i ].oldviewcluster = vis.rgVisClusters[ i ].viewcluster;
 		// Outside world?
-		if ( vis.rgVisClusters[ i ].viewcluster == -1 )
+		//
+		// When using the Portal2 visibility optimization, it is possible that one or more of the
+		// vis origins will be outside of the world.  We should still try and compute visibility
+		// from all of the clusters which are valid instead of flagging everything as visible by default.
+		//
+		// When noclip is enabled, we can't use this optimization because we're outside of the world 
+		// and yet we want to be able to see everything.
+		if ( vis.rgVisClusters[ i ].viewcluster == -1 && ( !r_portal_use_pvs_optimization.GetBool() || g_bNoClipEnabled ) )
 		{
 			outsideWorld = true;
 			break;
@@ -368,7 +380,7 @@ void Map_VisSetup( model_t *worldmodel, int visorigincount, const Vector origins
 	assert( visorigincount <= MAX_VIS_LEAVES );
 
 	// Don't crash if the client .dll tries to do something weird/dumb
-	vis.nClusters = min( visorigincount, MAX_VIS_LEAVES );
+	vis.nClusters = MIN( visorigincount, MAX_VIS_LEAVES );
 	vis.bForceFullSky = false;
 	vis.bSkyVisible = false;
 	returnFlags = 0;

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: Console commands for debugging and manipulating NPCs.
 //
@@ -14,13 +14,12 @@
 #include "ai_networkmanager.h"
 #include "ndebugoverlay.h"
 #include "datacache/imdlcache.h"
+#include "ai_addon.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
-extern CAI_Node*	FindPickerAINode( CBasePlayer* pPlayer, NodeType_e nNodeType );
 extern void			SetDebugBits( CBasePlayer* pPlayer, const char *name, int bit );
-extern CBaseEntity *FindPickerEntity( CBasePlayer *pPlayer );
 
 extern bool g_bAIDisabledByUser;
 
@@ -28,23 +27,56 @@ extern bool g_bAIDisabledByUser;
 //------------------------------------------------------------------------------
 // Purpose: Disables all NPCs
 //------------------------------------------------------------------------------
+void EnableAI()
+{
+	CAI_BaseNPC::m_nDebugBits &= ~bits_debugDisableAI;
+	DevMsg("AI Enabled.\n");
+	g_bAIDisabledByUser = false;
+}
+
+void DisableAI()
+{
+#ifdef PORTAL2
+	return;
+#endif // PORTAL2
+
+	CAI_BaseNPC::m_nDebugBits |= bits_debugDisableAI;
+	DevMsg("AI Disabled.\n");
+	g_bAIDisabledByUser = true;
+}
+
 void CC_AI_Disable( void )
 {
 	if (CAI_BaseNPC::m_nDebugBits & bits_debugDisableAI)
 	{
-		CAI_BaseNPC::m_nDebugBits &= ~bits_debugDisableAI;
-		DevMsg("AI Enabled.\n");
+		EnableAI();
 	}
 	else
 	{
-		CAI_BaseNPC::m_nDebugBits |= bits_debugDisableAI;
-		DevMsg("AI Disabled.\n");
-		g_bAIDisabledByUser = true;
+		DisableAI();
 	}
 
 	CBaseEntity::m_nDebugPlayer = UTIL_GetCommandClientIndex();
 }
 static ConCommand ai_disable("ai_disable", CC_AI_Disable, "Bi-passes all AI logic routines and puts all NPCs into their idle animations.  Can be used to get NPCs out of your way and to test effect of AI logic routines on frame rate", FCVAR_CHEAT);
+
+
+CON_COMMAND_F( ai_setenabled, "Like ai_disable but you manually specify the state (with a 0 or 1) instead of toggling it.", FCVAR_CHEAT )
+{
+	if ( args.ArgC() < 2 )
+	{
+		Warning( "ai_setenabled <0 or 1>\n" );
+		return;
+	}
+
+	if ( args[1][0] == '0' )
+		DisableAI();
+	else
+		EnableAI();
+
+	CBaseEntity::m_nDebugPlayer = UTIL_GetCommandClientIndex();
+}
+
 
 //------------------------------------------------------------------------------
 // Purpose: Show hint nodes
@@ -76,7 +108,7 @@ void CC_AI_ShowHull( const CCommand &args )
 	g_pAINetworkManager->GetEditOps()->SetDebugBits("BigNet",bits_debugOverlayHulls);
 	CBaseEntity::m_nDebugPlayer = UTIL_GetCommandClientIndex();
 }
-static ConCommand ai_show_hull("ai_show_hull", CC_AI_ShowHull, "Displays the allowed hulls between each node for the currently selected hull type.  Hulls are color code as follows:\n\tGreen		- ground movement \n\tBlue		- jumping movement\n\tCyan		- flying movement\n\tMagenta	- climbing movement\n\tArguments: 	-none-", FCVAR_CHEAT);
+static ConCommand ai_show_hull("ai_show_hull", CC_AI_ShowHull, "Displays the allowed hulls between each node for the currently selected hull type.  Hulls are color code as follows:\n\tGreen		- ground movement \n\tBlue		- jumping movement\n\tCyan		- flying movement\n\t\n\tYellow		- crawling movement\n\tMagenta	- climbing movement\n\tArguments: 	-none-", FCVAR_CHEAT);
 
 //------------------------------------------------------------------------------
 // Purpose: Show node connections with lines
@@ -94,7 +126,7 @@ void CC_AI_ShowConnect( const CCommand &args )
 	CBaseEntity::m_nDebugPlayer = UTIL_GetCommandClientIndex();
 
 }
-static ConCommand ai_show_connect("ai_show_connect", CC_AI_ShowConnect, "Displays the allowed connections between each node for the currently selected hull type.  Hulls are color code as follows:\n\tGreen		- ground movement \n\tBlue		- jumping movement\n\tCyan		- flying movement\n\tMagenta	- climbing movement\n\tRed		- connection disabled", FCVAR_CHEAT);
+static ConCommand ai_show_connect("ai_show_connect", CC_AI_ShowConnect, "Displays the allowed connections between each node for the currently selected hull type.  Hulls are color code as follows:\n\tGreen		- ground movement \n\tBlue		- jumping movement\n\tCyan		- flying movement\n\t\n\tYellow		- crawling movement\n\tMagenta	- climbing movement\n\tRed		- connection disabled", FCVAR_CHEAT);
 
 //------------------------------------------------------------------------------
 // Purpose: Show node connections with lines
@@ -113,7 +145,7 @@ void CC_AI_ShowJumpConnect( const CCommand &args )
 	CBaseEntity::m_nDebugPlayer = UTIL_GetCommandClientIndex();
 
 }
-static ConCommand ai_show_connect_jump("ai_show_connect_jump", CC_AI_ShowJumpConnect, "Displays the allowed connections between each node for the currently selected hull type.  Hulls are color code as follows:\n\tGreen		- ground movement \n\tBlue		- jumping movement\n\tCyan		- flying movement\n\tMagenta	- climbing movement\n\tRed		- connection disabled", FCVAR_CHEAT);
+static ConCommand ai_show_connect_jump("ai_show_connect_jump", CC_AI_ShowJumpConnect, "Displays the allowed connections between each node for the currently selected hull type.  Hulls are color code as follows:\n\tGreen		- ground movement \n\tBlue		- jumping movement\n\tCyan		- flying movement\n\t\n\tYellow		- crawling movement\n\tMagenta	- climbing movement\n\tRed		- connection disabled", FCVAR_CHEAT);
 
 //------------------------------------------------------------------------------
 // Purpose: Show node connections with lines
@@ -132,7 +164,26 @@ void CC_AI_ShowFlyConnect( const CCommand &args )
 	CBaseEntity::m_nDebugPlayer = UTIL_GetCommandClientIndex();
 
 }
-static ConCommand ai_show_connect_fly("ai_show_connect_fly", CC_AI_ShowFlyConnect, "Displays the allowed connections between each node for the currently selected hull type.  Hulls are color code as follows:\n\tGreen		- ground movement \n\tBlue		- jumping movement\n\tCyan		- flying movement\n\tMagenta	- climbing movement\n\tRed		- connection disabled", FCVAR_CHEAT);
+static ConCommand ai_show_connect_fly("ai_show_connect_fly", CC_AI_ShowFlyConnect, "Displays the allowed connections between each node for the currently selected hull type.  Hulls are color code as follows:\n\tGreen		- ground movement \n\tBlue		- jumping movement\n\tCyan		- flying movement\n\t\n\tYellow		- crawling movement\n\tMagenta	- climbing movement\n\tRed		- connection disabled", FCVAR_CHEAT);
+
+//------------------------------------------------------------------------------
+// Purpose: Show node connections with lines
+//------------------------------------------------------------------------------
+void CC_AI_ShowCrawlConnect( const CCommand &args )
+{
+	// Eventually this will be done by name when mulitple
+	// networks are used, but for now have one big AINet
+	//static char entName[256];	
+	//Q_strncpy( entName, args[1],sizeof(entName) );
+	if ( !g_pAINetworkManager )
+		return;
+
+	g_pAINetworkManager->GetEditOps()->SetDebugBits("BigNet",bits_debugOverlayConnections);
+	g_pAINetworkManager->GetEditOps()->SetDebugBits("BigNet",bits_debugOverlayCrawlConnections);
+	CBaseEntity::m_nDebugPlayer = UTIL_GetCommandClientIndex();
+
+}
+static ConCommand ai_show_connect_crawl("ai_show_connect_crawl", CC_AI_ShowCrawlConnect, "Displays the allowed connections between each node for the currently selected hull type.  Hulls are color code as follows:\n\tGreen		- ground movement \n\tBlue		- jumping movement\n\tCyan		- flying movement\n\tYellow		- crawling movement\n\tMagenta	- climbing movement\n\tRed		- connection disabled", FCVAR_CHEAT);
 
 //------------------------------------------------------------------------------
 // Purpose: Draw a grid on the screen (good for laying down nodes)
@@ -207,7 +258,7 @@ void CC_AI_Hull( const CCommand &args )
 	if ( !args[1] || !args[1][0] )
 	{		
 		// No arg means the entity under the crosshair.
-		pEnt = FindPickerEntity( UTIL_GetCommandClient() );
+		pEnt = UTIL_GetCommandClient() ? UTIL_GetCommandClient()->FindPickerEntity() : NULL;
 		if ( !pEnt )
 		{
 			DevMsg( "No entity under the crosshair.\n" );
@@ -273,7 +324,7 @@ void CC_AI_Nodes( const CCommand &args )
 static ConCommand ai_nodes("ai_nodes", CC_AI_Nodes, "Toggles node display.  First call displays the nodes for the given network as green objects.  Second call  displays the nodes and their IDs.  Nodes are color coded as follows:\n\tGreen		- ground node\n\tCyan		- air node\n\tMagenta	- climb node\n\tGrey		- node not available for selected hull size\n\tOrange 	- node currently locked", FCVAR_CHEAT);
 
 
-CON_COMMAND(ai_show_node, "Highlight the specified node")
+CON_COMMAND_F( ai_show_node, "Highlight the specified node", FCVAR_CHEAT )
 {
 	if ( args.ArgC() > 1 )
 	{
@@ -295,12 +346,12 @@ void CC_AI_ShowVisibility( const CCommand &args )
 	// networks are used, but for now have one big AINet
 	// static char entName[256];	
 	//Q_strncpy( entName, args[1],sizeof(entName) );
-	if ( !g_pAINetworkManager )
+	if ( !g_pAINetworkManager || !UTIL_GetCommandClient() )
 		return;
 
 	g_pAINetworkManager->GetEditOps()->SetDebugBits("BigNet",bits_debugOverlayVisibility);
 
-	CAI_Node* pAINode = FindPickerAINode(UTIL_GetCommandClient(), NODE_ANY);
+	CAI_Node* pAINode = UTIL_GetCommandClient()->FindPickerAINode( NODE_ANY );
 	if (pAINode != NULL)
 	{
 		g_pAINetworkManager->GetEditOps()->m_iVisibilityNode = pAINode->GetId();
@@ -321,7 +372,7 @@ static ConCommand ai_show_visibility("ai_show_visibility", CC_AI_ShowVisibility,
 //------------------------------------------------------------------------------
 void CC_AI_GraphConnect( const CCommand &args )
 {
-	if ( !g_pAINetworkManager )
+	if ( !g_pAINetworkManager || !UTIL_GetCommandClient() )
 		return;
 
 	// Eventually this will be done by name when mulitple
@@ -329,7 +380,7 @@ void CC_AI_GraphConnect( const CCommand &args )
 	//static char entName[256];	
 	//Q_strncpy( entName, args[1],sizeof(entName) );
 	g_pAINetworkManager->GetEditOps()->SetDebugBits("BigNet",bits_debugOverlayGraphConnect);
-	CAI_Node* pAINode = FindPickerAINode(UTIL_GetCommandClient(), NODE_ANY);
+	CAI_Node* pAINode = UTIL_GetCommandClient()->FindPickerAINode( NODE_ANY );
 	if (pAINode != NULL)
 	{
 		g_pAINetworkManager->GetEditOps()->m_iGConnectivityNode = pAINode->GetId();
@@ -399,6 +450,7 @@ void CC_NPC_Create( const CCommand &args )
 
 	bool allowPrecache = CBaseEntity::IsPrecacheAllowed();
 	CBaseEntity::SetAllowPrecache( true );
+	Vector vecAddonSpawn; // coordinates of the NPC, which is the position to spawn the addon
 
 	// Try to create entity
 	CAI_BaseNPC *baseNPC = dynamic_cast< CAI_BaseNPC * >( CreateEntityByName(args[1]) );
@@ -433,15 +485,17 @@ void CC_NPC_Create( const CCommand &args )
 				// Raise the end position a little up off the floor, place the npc and drop him down
 				tr.endpos.z += 12;
 				baseNPC->Teleport( &tr.endpos, NULL, NULL );
-				UTIL_DropToFloor( baseNPC, MASK_NPCSOLID );
+				UTIL_DropToFloor( baseNPC, baseNPC->GetAITraceMask() );
 			}
 
 			// Now check that this is a valid location for the new npc to be
 			Vector	vUpBit = baseNPC->GetAbsOrigin();
 			vUpBit.z += 1;
 
+			vecAddonSpawn = vUpBit; // save the spawn position of the NPC in case we need it for addon spawning
+
 			AI_TraceHull( baseNPC->GetAbsOrigin(), vUpBit, baseNPC->GetHullMins(), baseNPC->GetHullMaxs(), 
-				MASK_NPCSOLID, baseNPC, COLLISION_GROUP_NONE, &tr );
+				baseNPC->GetAITraceMask(), baseNPC, COLLISION_GROUP_NONE, &tr );
 			if ( tr.startsolid || (tr.fraction < 1.0) )
 			{
 				baseNPC->SUB_Remove();
@@ -451,10 +505,33 @@ void CC_NPC_Create( const CCommand &args )
 		}
 
 		baseNPC->Activate();
+
+		// since the NPC was successfully spawned lets see if we need to attach an addon
+		if ( args.ArgC() >= 4 )
+		{
+			CBaseEntity *pItem = (CBaseEntity *)CreateEntityByName( args[3] );
+			if ( pItem )
+			{
+				pItem->SetAbsOrigin( vecAddonSpawn );
+
+				//  name the addon if the user specified a fourth parameter
+				if ( args.ArgC() >= 5 )
+				{
+					pItem->KeyValue( "targetname", args[4] );
+				};
+
+				pItem->Spawn();
+
+				// install the addon
+				assert_cast< CAI_AddOn *>( pItem )->Install( baseNPC );
+			}
+		}
 	}
+
+
 	CBaseEntity::SetAllowPrecache( allowPrecache );
 }
-static ConCommand npc_create("npc_create", CC_NPC_Create, "Creates an NPC of the given type where the player is looking (if the given NPC can actually stand at that location).  Note that this only works for npc classes that are already in the world.  You can not create an entity that doesn't have an instance in the level.\n\tArguments:	{npc_class_name}", FCVAR_CHEAT);
+static ConCommand npc_create("npc_create", CC_NPC_Create, "Creates an NPC of the given type where the player is looking (if the given NPC can actually stand at that location).  \n\tArguments:	[npc_class_name] [name of npc (optional) ] [addon type (optional) ] [name of addon (optional) ]", FCVAR_CHEAT);
 
 
 //------------------------------------------------------------------------------
@@ -500,7 +577,7 @@ void CC_NPC_Create_Aimed( const CCommand &args )
 				// Raise the end position a little up off the floor, place the npc and drop him down
 				tr.endpos.z += 12;
 				baseNPC->Teleport( &tr.endpos, &angles, NULL );
-				UTIL_DropToFloor( baseNPC, MASK_NPCSOLID );
+				UTIL_DropToFloor( baseNPC, baseNPC->GetAITraceMask() );
 			}
 
 			// Now check that this is a valid location for the new npc to be
@@ -508,7 +585,7 @@ void CC_NPC_Create_Aimed( const CCommand &args )
 			vUpBit.z += 1;
 
 			AI_TraceHull( baseNPC->GetAbsOrigin(), vUpBit, baseNPC->GetHullMins(), baseNPC->GetHullMaxs(), 
-				MASK_NPCSOLID, baseNPC, COLLISION_GROUP_NONE, &tr );
+				baseNPC->GetAITraceMask(), baseNPC, COLLISION_GROUP_NONE, &tr );
 			if ( tr.startsolid || (tr.fraction < 1.0) )
 			{
 				baseNPC->SUB_Remove();
@@ -574,7 +651,7 @@ void CC_NPC_Freeze( const CCommand &args )
 			//	
 			// No selected NPCs, look for the NPC under the crosshair.
 			//
-			CBaseEntity *pEntity = FindPickerEntity( UTIL_GetCommandClient() );
+			CBaseEntity *pEntity = UTIL_GetCommandClient() ? UTIL_GetCommandClient()->FindPickerEntity() : NULL;
 			if ( pEntity )
 			{
 				CAI_BaseNPC *pNPC = pEntity->MyNPCPointer();
@@ -592,9 +669,67 @@ void CC_NPC_Freeze( const CCommand &args )
 }
 static ConCommand npc_freeze("npc_freeze", CC_NPC_Freeze, "Selected NPC(s) will freeze in place (or unfreeze). If there are no selected NPCs, uses the NPC under the crosshair.\n\tArguments:	-none-", FCVAR_CHEAT);
 
+//------------------------------------------------------------------------------
+// Purpose: Freeze or unfreeze the selected NPCs. If no NPCs are selected, the
+//			NPC under the crosshair is frozen/unfrozen.
+//------------------------------------------------------------------------------
+void CC_NPC_Set_Freeze( const CCommand &args )
+{
+	//	
+	// No NPC was specified, try to freeze selected NPCs.
+	//
+	bool bFound = false;
+	bool bFreeze = ( atoi( args[1] ) != 0 );
+	
+	CAI_BaseNPC *npc = gEntList.NextEntByClass( (CAI_BaseNPC *)NULL );
+	while (npc)
+	{
+		if (npc->m_debugOverlays & OVERLAY_NPC_SELECTED_BIT) 
+		{
+			bFound = true;
+			if ( bFreeze )
+			{
+				npc->Freeze();
+			}
+			else
+			{
+				npc->Unfreeze();
+			}
+		}
+		npc = gEntList.NextEntByClass(npc);
+	}
+
+	if (!bFound)
+	{
+		//	
+		// No selected NPCs, look for the NPC under the crosshair.
+		//
+		CBaseEntity *pEntity = UTIL_GetCommandClient() ? UTIL_GetCommandClient()->FindPickerEntity() : NULL;
+		if ( pEntity )
+		{
+			CAI_BaseNPC *pNPC = pEntity->MyNPCPointer();
+			if (pNPC)
+			{
+				if ( bFreeze )
+				{
+					npc->Freeze();
+				}
+				else
+				{
+					npc->Unfreeze();
+				}
+			}
+		}
+	}
+}
+static ConCommand npc_set_freeze("npc_set_freeze", CC_NPC_Set_Freeze, "Selected NPC(s) will freeze in place (or unfreeze). If there are no selected NPCs, uses the NPC under the crosshair.\n\tArguments:	-none-", FCVAR_CHEAT);
+
 
 CON_COMMAND( npc_freeze_unselected, "Freeze all NPCs not selected" )
 {
+	if ( !UTIL_IsCommandIssuedByServerAdmin() )
+		return;
+
 	CAI_BaseNPC *pNPC = gEntList.NextEntByClass( (CAI_BaseNPC *)NULL );
 
 	while (pNPC)
@@ -607,13 +742,37 @@ CON_COMMAND( npc_freeze_unselected, "Freeze all NPCs not selected" )
 	}
 }
 
+CON_COMMAND( npc_set_freeze_unselected, "Freeze all NPCs not selected" )
+{
+	if ( !UTIL_IsCommandIssuedByServerAdmin() )
+		return;
+
+	CAI_BaseNPC *pNPC = gEntList.NextEntByClass( (CAI_BaseNPC *)NULL );
+
+	while (pNPC)
+	{
+		if (!(pNPC->m_debugOverlays & OVERLAY_NPC_SELECTED_BIT))
+		{
+			if ( atoi( args[1] ) != 0 )
+			{
+				pNPC->Freeze();
+			}
+			else
+			{
+				pNPC->Unfreeze();
+			}
+		}
+		pNPC = gEntList.NextEntByClass(pNPC);
+	}
+}
+
 //------------------------------------------------------------------------------
 CON_COMMAND(npc_thinknow, "Trigger NPC to think")
 {
 	if ( !UTIL_IsCommandIssuedByServerAdmin() )
 		return;
 
-	CBaseEntity *pEntity = FindPickerEntity( UTIL_GetCommandClient() );
+	CBaseEntity *pEntity = UTIL_GetCommandClient() ? UTIL_GetCommandClient()->FindPickerEntity() : NULL;
 	if ( pEntity )
 	{
 		CAI_BaseNPC *pNPC = pEntity->MyNPCPointer();
@@ -818,7 +977,7 @@ CON_COMMAND( npc_heal, "Heals the target back to full health" )
 	if ( !UTIL_IsCommandIssuedByServerAdmin() )
 		return;
 
-	CBaseEntity *pEntity = FindPickerEntity( UTIL_GetCommandClient() );
+	CBaseEntity *pEntity = UTIL_GetCommandClient() ? UTIL_GetCommandClient()->FindPickerEntity() : NULL;
 	if ( pEntity )
 	{
 		CAI_BaseNPC *pNPC = pEntity->MyNPCPointer();
@@ -834,7 +993,7 @@ CON_COMMAND( npc_ammo_deplete, "Subtracts half of the target's ammo" )
 	if ( !UTIL_IsCommandIssuedByServerAdmin() )
 		return;
 
-	CBaseEntity *pEntity = FindPickerEntity( UTIL_GetCommandClient() );
+	CBaseEntity *pEntity = UTIL_GetCommandClient() ? UTIL_GetCommandClient()->FindPickerEntity() : NULL;
 	if ( pEntity )
 	{
 		CAI_BaseNPC *pNPC = pEntity->MyNPCPointer();

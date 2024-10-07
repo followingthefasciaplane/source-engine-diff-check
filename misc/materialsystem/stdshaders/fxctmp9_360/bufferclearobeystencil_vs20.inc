@@ -1,3 +1,5 @@
+// ALL SKIP STATEMENTS THAT AFFECT THIS SHADER!!!
+// defined $LIGHTING_PREVIEW && defined $FASTPATH && $LIGHTING_PREVIEW && $FASTPATH
 #include "shaderlib/cshader.h"
 class bufferclearobeystencil_vs20_Static_Index
 {
@@ -17,13 +19,15 @@ public:
 	}
 	void SetUSESCOLOR( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nUSESCOLOR = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bUSESCOLOR = true;
 #endif
 	}
 public:
-	bufferclearobeystencil_vs20_Static_Index( )
+	// CONSTRUCTOR
+	bufferclearobeystencil_vs20_Static_Index( IShaderShadow *pShaderShadow, IMaterialVar **params )
 	{
 #ifdef _DEBUG
 		m_bUSESCOLOR = false;
@@ -45,7 +49,8 @@ public:
 class bufferclearobeystencil_vs20_Dynamic_Index
 {
 public:
-	bufferclearobeystencil_vs20_Dynamic_Index()
+	// CONSTRUCTOR
+	bufferclearobeystencil_vs20_Dynamic_Index( IShaderDynamicAPI *pShaderAPI )
 	{
 	}
 	int GetIndex()
@@ -58,3 +63,23 @@ public:
 	}
 };
 #define shaderDynamicTest_bufferclearobeystencil_vs20 0
+
+static const ShaderComboInformation_t s_StaticComboArray_bufferclearobeystencil_vs20[1] = 
+{
+	{ "USESCOLOR", 0, 1 },
+};
+static const ShaderComboSemantics_t bufferclearobeystencil_vs20_combos =
+{
+	"bufferclearobeystencil_vs20", NULL, 0, s_StaticComboArray_bufferclearobeystencil_vs20, 1 
+};
+
+class ConstructMe_bufferclearobeystencil_vs20
+{
+public:
+	ConstructMe_bufferclearobeystencil_vs20()
+	{
+		GetShaderDLL()->AddShaderComboInformation( &bufferclearobeystencil_vs20_combos );
+	}
+};
+
+static ConstructMe_bufferclearobeystencil_vs20 s_ConstructMe_bufferclearobeystencil_vs20;

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -6,7 +6,7 @@
 //=============================================================================//
 #include "cbase.h"
 #include "functionproxy.h"
-#include <KeyValues.h>
+#include <keyvalues.h>
 #include "materialsystem/imaterialvar.h"
 #include "materialsystem/imaterial.h"
 #include "iclientrenderable.h"
@@ -138,6 +138,11 @@ bool CResultProxy::Init( IMaterial *pMaterial, KeyValues *pKeyValues )
 	if( !foundVar )
 		return false;
 
+	if ( !Q_stricmp( pResult, "$alpha" ) )
+	{
+		pMaterial->SetMaterialVarFlag( MATERIAL_VAR_ALPHA_MODIFIED_BY_PROXY, true );
+	}
+
 	return true;
 }
 
@@ -170,10 +175,24 @@ void CResultProxy::SetFloatResult( float result )
 	}
 }
 
+void CResultProxy::SetVecResult( float x, float y, float z, float w )
+{
+	if (m_pResult->GetType() == MATERIAL_VAR_TYPE_VECTOR)
+	{		
+		float v[4] = { x, y, z, w };
+		int vecSize = m_pResult->VectorSize();
+		m_pResult->SetVecValue( v, vecSize );
+	}
+	else
+	{
+		m_pResult->SetFloatValue( x );
+	}
+}
+
 C_BaseEntity *CResultProxy::BindArgToEntity( void *pArg )
 {
 	IClientRenderable *pRend = (IClientRenderable *)pArg;
-	return pRend ? pRend->GetIClientUnknown()->GetBaseEntity() : NULL;
+	return pRend->GetIClientUnknown()->GetBaseEntity();
 }
 
 IMaterial *CResultProxy::GetMaterial()

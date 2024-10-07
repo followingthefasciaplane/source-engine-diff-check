@@ -10,7 +10,7 @@ struct PS_INPUT
 	float2 grainTexCoord	: TEXCOORD0;
 };
  
-float4 main( PS_INPUT i ) : COLOR
+HALF4 main( PS_INPUT i ) : COLOR
 {
    float4 noise = dot( tex2D( FilmDustSampler, i.grainTexCoord ), vChannelSelect );
 

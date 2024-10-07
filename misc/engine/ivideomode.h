@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright  1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -35,13 +35,13 @@ public:
 	virtual void			DrawStartupGraphic() = 0;
 
 	// Creates the game window, plays the startup movie, starts up the material system
-	virtual bool			CreateGameWindow( int nWidth, int nHeight, bool bWindowed ) = 0;
+	virtual bool			CreateGameWindow( int nWidth, int nHeight, bool bWindowed, bool bNoWindowBorder ) = 0;
 
 	// Sets the game window in editor mode
 	virtual void			SetGameWindow( void *hWnd ) = 0;
 
 	// Sets the video mode, and re-sizes the window
-	virtual bool			SetMode( int nWidth, int nHeight, bool bWindowed ) = 0;
+	virtual bool			SetMode( int nWidth, int nHeight, bool bWindowed, bool bNoWindowBorder ) = 0;
 
 	// Returns the fullscreen modes for the adapter the game was started on
 	virtual int				GetModeCount( void ) = 0;
@@ -64,19 +64,7 @@ public:
 	virtual int				GetModeWidth() const = 0;
 	virtual int				GetModeHeight() const = 0;
 	virtual	bool			IsWindowedMode() const = 0;
-
-	// Returns the video mode width + height for a single stereo display.
-	// if the game isn't running in side by side stereo, this is the same
-	// as GetModeWidth and GetModeHeight
-	virtual int				GetModeStereoWidth() const = 0;
-	virtual int				GetModeStereoHeight() const = 0;
-
-	// Returns the size of full screen UI. This might be wider than a single
-	// eye on displays like the Oculus Rift where a single eye is very narrow.
-	// if the game isn't running in side by side stereo, this is the same
-	// as GetModeWidth and GetModeHeight
-	virtual int				GetModeUIWidth() const = 0;
-	virtual int				GetModeUIHeight() const = 0;
+	virtual	bool			NoWindowBorder() const = 0;
 
 	// Returns the subrect to draw the client view into.
 	// Coordinates are measured relative to the drawable region of the window
@@ -93,22 +81,22 @@ public:
 	// Takes snapshots
 	virtual void			TakeSnapshotJPEG( const char *pFileName, int quality ) = 0;
 	virtual bool			TakeSnapshotJPEGToBuffer( CUtlBuffer& buf, int quality ) = 0;
-
-	virtual void			ReadScreenPixels( int x, int y, int w, int h, void *pBuffer, ImageFormat format ) = 0;
 };
 
 
 //-----------------------------------------------------------------------------
 // Utilities for virtual screen coordinates
 //-----------------------------------------------------------------------------
-#define XRES(x)	( x  * ( ( float )videomode->GetModeStereoWidth() / 640.0 ) )
-#define YRES(y)	( y  * ( ( float )videomode->GetModeStereoHeight() / 480.0 ) )
+#define XRES(x)	( x  * ( ( float )videomode->GetModeWidth() / 640.0 ) )
+#define YRES(y)	( y  * ( ( float )videomode->GetModeHeight() / 480.0 ) )
 
 
 //-----------------------------------------------------------------------------
 // Singleton accessor 
 //-----------------------------------------------------------------------------
+#if !defined( DEDICATED )
 extern IVideoMode *videomode;
+#endif
 
 
 //-----------------------------------------------------------------------------

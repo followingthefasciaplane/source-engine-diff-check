@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose:	Some little utility drawing methods
 //
@@ -14,7 +14,7 @@
 #endif
 
 class IMaterial;
-IMaterial	*GL_LoadMaterial( const char *pName, const char *pTextureGroupName );
+IMaterial	*GL_LoadMaterial( const char *pName, const char *pTextureGroupName, bool bPrecache = false );
 void		GL_UnloadMaterial( IMaterial *pMaterial );
 
 #endif			// DRAW_H

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright (c) 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -12,6 +12,10 @@
 #include "debugmrttexture_ps20b.inc"
 #include "debugmrttexture_vs20.inc"
 
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
+
 BEGIN_VS_SHADER_FLAGS( DebugMRTTexture, "Help for DebugMRTTexture", SHADER_NOT_EDITABLE )
 
 	BEGIN_SHADER_PARAMS
@@ -20,10 +24,6 @@ BEGIN_VS_SHADER_FLAGS( DebugMRTTexture, "Help for DebugMRTTexture", SHADER_NOT_E
 
 	SHADER_FALLBACK
 	{
-//		if( g_pHardwareConfig->GetDXSupportLevel() < 90 )
-//		{
-//			return "UnlitGeneric_DX8";
-//		}
 		return 0;
 	}
 
@@ -64,7 +64,7 @@ BEGIN_VS_SHADER_FLAGS( DebugMRTTexture, "Help for DebugMRTTexture", SHADER_NOT_E
 		}
 		DYNAMIC_STATE
 		{
-			BindTexture( SHADER_SAMPLER0, BASETEXTURE, FRAME );
+			BindTexture( SHADER_SAMPLER0, TEXTURE_BINDFLAGS_NONE, BASETEXTURE, FRAME );
 
 			DECLARE_DYNAMIC_VERTEX_SHADER( debugmrttexture_vs20 );
 			SET_DYNAMIC_VERTEX_SHADER( debugmrttexture_vs20 );

@@ -1,4 +1,4 @@
-//	DYNAMIC: "DOWATERFOG"			"0..1"
+#include "common_fog_vs_fxc.h"
 #include "common_vs_fxc.h"
  
 static const int  g_FogType			= DOWATERFOG;
@@ -7,17 +7,18 @@ struct VS_INPUT
 {
 	float4 vPos				: POSITION;
 	float4 vTexCoord0		: TEXCOORD0;
+	float4 colorAlpha		: COLOR;					// Used only for vertex alpha currently.
 };
 
 struct VS_OUTPUT
 {
     float4 projPos					: POSITION;			// Projection-space position	
-#if !defined( _X360 )
+#if !defined( _X360 ) && !defined( SHADER_MODEL_VS_3_0 )
 	float  fog						: FOG;
 #endif
-	HALF2 baseTexCoord				: TEXCOORD0;		// Base texture coordinate
+	float2 baseTexCoord				: TEXCOORD0;		// Base texture coordinate
 	float4 worldPos_projPosZ		: TEXCOORD1;		// Necessary for water fog dest alpha
-	float4 fogFactorW				: COLOR1;
+	float flAlpha					: TEXCOORD2;		
 };
 
 VS_OUTPUT main( const VS_INPUT v )
@@ -27,18 +28,26 @@ VS_OUTPUT main( const VS_INPUT v )
 	float4 projPos;
 	float3 worldPos;
 
-	projPos = mul( float4( v.vPos.xyz, 1 ), cModelViewProj );
+	// Need to use SkinPosition() to guarantee consistency with other shaders on X360. 
+	// The function uses [isolate] properly and simply does a mul4x3 if skinning is set to 'false'.
+	SkinPosition( false, float4( v.vPos.xyz, 1 ), 0, 0, worldPos );
+	projPos = mul( float4( worldPos, 1 ), cViewProj );
+
+#ifdef _PS3
+	// Account for OpenGL's flipped y coordinate and expanded z range [-1,1] instead of [0,1]
+	projPos.y = -projPos.y;
+	projPos.z = 2.0f * projPos.z - projPos.w;
+#endif // _PS3
+
 	o.projPos = projPos;
 
-	worldPos = mul( float4( v.vPos.xyz, 1 ), cModel[0] );
-
-	o.fogFactorW.w = CalcFog( worldPos, projPos, g_FogType );
-#if !defined( _X360 )	
-	o.fog = o.fogFactorW.w;
+#if !defined( _X360 ) && !defined( SHADER_MODEL_VS_3_0 )
+	o.fog = CalcFixedFunctionFog( worldPos, g_FogType );
 #endif
 
 	o.worldPos_projPosZ = float4( worldPos, projPos.z );
-	o.baseTexCoord.xy = v.vTexCoord0;
+	o.baseTexCoord.xy = v.vTexCoord0.xy;
+	o.flAlpha = v.colorAlpha.a;
 	return o;
 }
 

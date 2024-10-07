@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -89,6 +89,5 @@ extern PropTypeFns g_PropTypeFns[DPT_NUMSendPropTypes];
 // This is used for comparing packed buffers. Just extracts the raw bits for the 
 // data and returns the number of bits used to encode the data.
 int	DecodeBits( DecodeInfo *pInfo, unsigned char *pOut );
-
 
 #endif // DATATABLE_ENCODE_H

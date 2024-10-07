@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =======
 //
 // A class representing a material
 //
@@ -10,7 +10,10 @@
 #pragma once
 #endif
 
+
+// Valve includes
 #include "datamodel/dmelement.h"
+#include "materialsystem/materialsystemutil.h"
 
 
 //-----------------------------------------------------------------------------
@@ -34,8 +37,9 @@ public:
 	virtual void Resolve();
 
 private:
-	IMaterial *m_pMTL;
+	CMaterialReference m_mtlRef;
 	CDmaString m_mtlName;
 };
+
 
 #endif // DMEMATERIAL_H

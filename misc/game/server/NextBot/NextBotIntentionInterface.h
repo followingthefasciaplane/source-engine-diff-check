@@ -1,7 +1,7 @@
 // NextBotIntentionInterface.h
 // Interface for intentional thinking
 // Author: Michael Booth, April 2005
-//========= Copyright Valve Corporation, All rights reserved. ============//
+// Copyright (c) 2005 Turtle Rock Studios, Inc. - All Rights Reserved
 
 #ifndef _NEXT_BOT_INTENTION_INTERFACE_H_
 #define _NEXT_BOT_INTENTION_INTERFACE_H_
@@ -82,7 +82,6 @@ public:
 	virtual QueryResultType			ShouldPickUp( const INextBot *me, CBaseEntity *item ) const;		// if the desired item was available right now, should we pick it up?
 	virtual QueryResultType			ShouldHurry( const INextBot *me ) const;							// are we in a hurry?
 	virtual QueryResultType			ShouldRetreat( const INextBot *me ) const;							// is it time to retreat?
-	virtual QueryResultType			ShouldAttack( const INextBot *me, const CKnownEntity *them ) const;	// should we attack "them"?
 	virtual QueryResultType			IsHindrance( const INextBot *me, CBaseEntity *blocker ) const;		// return true if we should wait for 'blocker' that is across our path somewhere up ahead.
 	virtual Vector					SelectTargetPoint( const INextBot *me, const CBaseCombatCharacter *subject ) const;		// given a subject, return the world space position we should aim at
 	virtual QueryResultType			IsPositionAllowed( const INextBot *me, const Vector &pos ) const;	// is the a place we can be?
@@ -141,25 +140,6 @@ inline QueryResultType IIntention::ShouldRetreat( const INextBot *me ) const
 		{
 			// return the response of the first responder that gives a definitive answer
 			QueryResultType result = query->ShouldRetreat( me );
-			if ( result != ANSWER_UNDEFINED )
-			{
-				return result;
-			}
-		}
-	}	
-	return ANSWER_UNDEFINED;
-}
-
-
-inline QueryResultType IIntention::ShouldAttack( const INextBot *me, const CKnownEntity *them ) const
-{
-	for ( INextBotEventResponder *sub = FirstContainedResponder(); sub; sub = NextContainedResponder( sub ) )
-	{
-		const IContextualQuery *query = dynamic_cast< const IContextualQuery * >( sub );
-		if ( query )
-		{
-			// return the response of the first responder that gives a definitive answer
-			QueryResultType result = query->ShouldAttack( me, them );
 			if ( result != ANSWER_UNDEFINED )
 			{
 				return result;

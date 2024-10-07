@@ -40,8 +40,10 @@ $Project "vaudio_celt"
 
 	$Folder	"Link Libraries"
 	{
-		$File "source/libcelt/libcelt.lib" [$WIN32]
-		$File "source/osx/libcelt.a" [$OSXALL]
-		$File "source/linux/libcelt.a" [$LINUX]
+		$File "source/libcelt$PLATSUBDIR/libcelt.lib" [$WINDOWS]
+		$File "source/osx/libcelt.a" [$OSX32]
+		$File "source/osx/libcelt64.a" [$OSX64]
+		$File "source/linux/libcelt.a" [$LINUX32]
+		$File "source/linux/libcelt64.a" [$LINUX64]
 	}
 }

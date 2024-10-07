@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =====//
 //
 // Dme version of a list of body groups. Each body group contains a list
 // of LOD lists which are the various options to switch in for that part of the body

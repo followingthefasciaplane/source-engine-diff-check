@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -12,10 +12,14 @@
 #include "sv_main.h"
 #include "server.h"
 #include "MapReslistGenerator.h"
-#include "tier0/vcrmode.h"
+#include "tier2/socketcreator.h"
 #if defined( _X360 )
 #include "xbox/xbox_console.h"
 #endif
+#include "toolframework/itoolframework.h"
+#include "netconsole.h"
+#include "host_cmd.h"
+
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -26,13 +30,14 @@
 #define	MAXPRINTMSG	1024
 #endif
 
+DEFINE_LOGGING_CHANNEL_NO_TAGS( LOG_CONSOLE, "Console" );
+
 bool con_debuglog = false;
 bool con_initialized = false;
 bool con_debuglogmapprefixed = false;
 
-CThreadFastMutex g_AsyncNotifyTextMutex;
-
 static ConVar con_timestamp( "con_timestamp", "0", 0, "Prefix console.log entries with timestamps" );
+extern ConVar cl_hideserverip;
 
 // In order to avoid excessive opening and closing of the console log file
 // we wrap it in an object and keep the handle open. This is necessary
@@ -66,32 +71,12 @@ ConsoleLogManager& GetConsoleLogManager()
 	return object;
 }
 
-void ConsoleLogFileCallback( IConVar *var, const char *pOldValue, float flOldValue )
+void ConsoleLogFileCallback(IConVar *var, const char *pOldValue, float flOldValue )
 {
-	ConVarRef con_logfile( var->GetName() );
-	const char *logFile = con_logfile.GetString();
+	ConVarRef ref( var->GetName() );
+	const char *logFile = ref.GetString();
 	// close any existing file, because we have changed the name
 	GetConsoleLogManager().CloseFileIfOpen();
-
-	// validate the path and the .log/.txt extensions
-	if ( !COM_IsValidPath( logFile ) || !COM_IsValidLogFilename( logFile ) )
-	{
-		ConMsg( "invalid log filename\n" );
-		con_logfile.SetValue( "console.log" );
-		return;
-	}
-	else
-	{
-		const char *extension = Q_GetFileExtension( logFile );
-		if ( !extension || ( Q_strcasecmp( extension, "log" ) && Q_strcasecmp( extension, "txt" ) ) )
-		{
-			char szTemp[MAX_PATH];
-			V_sprintf_safe( szTemp, "%s.log", logFile );
-			con_logfile.SetValue( szTemp );
-			return;
-		}
-	}
-	
 	if ( !COM_IsValidPath( logFile ) )
 	{
 		con_debuglog = CommandLine()->FindParm( "-condebug" ) != 0;
@@ -102,29 +87,31 @@ void ConsoleLogFileCallback( IConVar *var, const char *pOldValue, float flOldVal
 	}
 }
 
-ConVar con_logfile( "con_logfile", "", 0, "Console output gets written to this file", false, 0.0f, false, 0.0f, ConsoleLogFileCallback );
+ConVar con_logfile( "con_logfile", "", FCVAR_RELEASE, "Console output gets written to this file", false, 0.0f, false, 0.0f, ConsoleLogFileCallback );
 
 static const char *GetTimestampString( void )
 {
 	static char string[128];
 	tm today;
-	VCRHook_LocalTime( &today );
+	Plat_GetLocalTime( &today );
 	Q_snprintf( string, sizeof( string ), "%02i/%02i/%04i - %02i:%02i:%02i",
 		today.tm_mon+1, today.tm_mday, 1900 + today.tm_year,
 		today.tm_hour, today.tm_min, today.tm_sec );
 	return string;
 }
 
-#ifndef SWDS
 
+
+
+#ifndef DEDICATED
 static ConVar con_trace( "con_trace", "0", FCVAR_MATERIAL_SYSTEM_THREAD, "Print console text to low level printout." );
 static ConVar con_notifytime( "con_notifytime","8", FCVAR_MATERIAL_SYSTEM_THREAD, "How long to display recent console text to the upper part of the game window" );
 static ConVar con_times("contimes", "8", FCVAR_MATERIAL_SYSTEM_THREAD, "Number of console lines to overlay for debugging." );
-static ConVar con_drawnotify( "con_drawnotify", "1", 0, "Disables drawing of notification area (for taking screenshots)." );
+static ConVar con_drawnotify( "con_drawnotify", IsGameConsole() ? "0" : "1", 0, "Disables drawing of notification area (for taking screenshots)." );
 static ConVar con_enable("con_enable", "0", FCVAR_ARCHIVE, "Allows the console to be activated.");
-static ConVar con_filter_enable ( "con_filter_enable","0", FCVAR_MATERIAL_SYSTEM_THREAD, "Filters console output based on the setting of con_filter_text. 1 filters completely, 2 displays filtered text brighter than other text." );
-static ConVar con_filter_text ( "con_filter_text","", FCVAR_MATERIAL_SYSTEM_THREAD, "Text with which to filter console spew. Set con_filter_enable 1 or 2 to activate." );
-static ConVar con_filter_text_out ( "con_filter_text_out","", FCVAR_MATERIAL_SYSTEM_THREAD, "Text with which to filter OUT of console spew. Set con_filter_enable 1 or 2 to activate." );
+static ConVar con_filter_enable ( "con_filter_enable","0", FCVAR_MATERIAL_SYSTEM_THREAD | FCVAR_RELEASE, "Filters console output based on the setting of con_filter_text. 1 filters completely, 2 displays filtered text brighter than other text." );
+static ConVar con_filter_text ( "con_filter_text","", FCVAR_MATERIAL_SYSTEM_THREAD | FCVAR_RELEASE, "Text with which to filter console spew. Set con_filter_enable 1 or 2 to activate." );
+static ConVar con_filter_text_out ( "con_filter_text_out","", FCVAR_MATERIAL_SYSTEM_THREAD | FCVAR_RELEASE, "Text with which to filter OUT of console spew. Set con_filter_enable 1 or 2 to activate." );
 
 
 
@@ -159,7 +146,7 @@ public:
 	int				ProcessNotifyLines( int &left, int &top, int &right, int &bottom, bool bDraw );
 
 	// Draw helpers
-	virtual int		DrawText( vgui::HFont font, int x, int y, wchar_t *data );
+	void			DrawText( vgui::HFont font, int x, int y, wchar_t *data );
 
 	virtual bool	ShouldDraw( void );
 
@@ -167,7 +154,7 @@ public:
 	void			Con_NXPrintf( const struct con_nprint_s *info, const char *msg );
 
 	void			AddToNotify( const Color& clr, char const *msg );
-	void			ClearNotify();
+	void			ClearNofify();
 
 private:
 	// Console font
@@ -181,7 +168,7 @@ private:
 		wchar_t		text[MAX_NOTIFY_TEXT_LINE];
 	};
 
-	CCopyableUtlVector< CNotifyText >	m_NotifyText;
+	CUtlVector< CNotifyText >	m_NotifyText;
 
 	enum
 	{
@@ -223,6 +210,12 @@ void Con_HideConsole_f( void )
 	}
 }
 
+static bool Con_ConsoleAllowed( void )
+{
+	static bool s_bAllowed = !CommandLine()->CheckParm( "-noconsole" ) && !CommandLine()->FindParm( "-perfectworld" ); // disallow for perfect world
+	return s_bAllowed;
+}
+
 /*
 ================
 Con_ShowConsole_f
@@ -235,12 +228,11 @@ void Con_ShowConsole_f( void )
 
 	if ( vgui::input()->GetAppModalSurface() )
 	{
-		// If a dialog has modal, it probably has grabbed keyboard focus, so showing
-		// the console would be a bad idea.
 		return;
 	}
 
-	if ( !g_ClientDLL->ShouldAllowConsole() )
+	// Allow the app to disable the console from the command-line, for demos.
+	if ( !Con_ConsoleAllowed() )
 		return;
 
 	// make sure we're allowed to see the console
@@ -249,10 +241,15 @@ void Con_ShowConsole_f( void )
 		// show the console
 		EngineVGui()->ShowConsole();
 
+		// [jason] Do not call this for CS:GO, since our loading screen is in Scaleform.  Additionally, this can
+		//	 cause a hang us during the load process since it prematurely fires OnEngineLevelLoadingFinished
+#if !defined( CSTRIKE15 )
 		// remove any loading screen
 		SCR_EndLoadingPlaque();
+#endif
 	}
 }
+
 
 //-----------------------------------------------------------------------------
 // Purpose: toggles the console
@@ -265,9 +262,6 @@ void Con_ToggleConsole_f( void )
 	if (EngineVGui()->IsConsoleVisible())
 	{
 		Con_HideConsole_f();
-
-		// If we hide the console, we also hide the game UI
-		EngineVGui()->HideGameUI();
 	}
 	else
 	{
@@ -286,7 +280,283 @@ void Con_Clear_f( void )
 	EngineVGui()->ClearConsole();
 	Con_ClearNotify();
 }
-						
+
+static void LogFunction_PrintUsage()
+{
+	Log_Msg( LOG_CONSOLE, 
+		"Log Function Help: \n"
+		"    log_level <channel specifiers> <level>\n"
+		"    log_color <channel specifiers> <hex color>\n"
+		"    log_flags <channel specifiers> <+/-flag>\n"
+		"All functions are case insensitive.\n"
+		"\n"
+		"A channel specifier is either:\n"
+		"1) tag specifiers: +/-tag1 +/-tag2 ...      // Narrows down to channels with & without given tags.\n"
+		"2) channel names: name1 name2 ...           // Lists channels by name.\n"
+		"\n"
+		"level: all, warning, error, off             // Spews anything at or above the specified level.\n"
+		"                                            // 'off' turns all spew off, 'all' turns all spew on.\n"
+		"hex color: RRGGBBAA                         // A hexadecimal color value in the order RGBA.\n"
+		"flag: <+/->DoNotEcho                        // Enable/disable a flag to turn off echoing to the console.\n"
+		"      <+/->ConsoleOnly                      // Enable/disable a flag to send text only to the console.\n"
+		"e.g.\n"
+		"    log_level +console -developer warning   // Sets minimum spew level of channels with the tag\n"
+		"                                            // 'console' but without the tag 'developer' to 'warning'.\n"
+		"\n"
+		"    log_color renderdebug bsp FFC08040      // Sets the 'renderdebug' and 'bsp' channels to the RGBA color (64, 128, 192, 255).\n"
+		"\n"
+		"    log_flags +developer +donotecho         // Turns on the LCF_DO_NOT_ECHO flag for all channels with the 'developer' tag.\n"
+		"\n" );
+};
+
+typedef bool (*LogFunctionActionFunc)( const CLoggingSystem::LoggingChannel_t *pChannel, const char *pParameter );
+
+static void Con_LogFunctionHelper( const CCommand &args, LogFunctionActionFunc callbackFunction )
+{
+	int nArgs = args.ArgC();
+	if ( nArgs < 3 )
+	{
+		LogFunction_PrintUsage();
+		return;
+	}
+
+	const char *pParameter = args.ArgV()[nArgs - 1];
+
+	struct ChannelSpecifier_t
+	{
+		const char *m_pSpecifier; // Points to tag or channel name
+		bool m_bIsTag; // True for a tag specifier, false for a channel name
+		bool m_bInclude; // If bIsTag is true, then bInclude is true for '+' and false for '-'.
+	};
+
+	const int nMaxSpecifiers = 16;
+	int nSpecifierCount = nArgs - 2;
+	if ( nSpecifierCount > nMaxSpecifiers )
+	{
+		Log_Warning( LOG_CONSOLE, "Too many channel specifiers (max: %d).\n", nMaxSpecifiers );
+		LogFunction_PrintUsage();
+		return;
+	}
+
+	ChannelSpecifier_t channelSpecifier[nMaxSpecifiers];
+	for ( int nArg = 1; nArg < ( nArgs - 1 ); ++ nArg )
+	{
+		const char *pSpecifier = args.ArgV()[nArg];
+		Assert( pSpecifier[0] != '\0' );
+
+		if ( pSpecifier[0] == '+' )
+		{
+			channelSpecifier[nArg - 1].m_pSpecifier = pSpecifier + 1;
+			channelSpecifier[nArg - 1].m_bIsTag = true;
+			channelSpecifier[nArg - 1].m_bInclude = true;
+		}
+		else if ( pSpecifier[0] == '-' )
+		{
+			channelSpecifier[nArg - 1].m_pSpecifier = pSpecifier + 1;
+			channelSpecifier[nArg - 1].m_bIsTag = true;
+			channelSpecifier[nArg - 1].m_bInclude = false;
+		}
+		else
+		{
+			channelSpecifier[nArg - 1].m_pSpecifier = pSpecifier;
+			channelSpecifier[nArg - 1].m_bIsTag = false;
+		}
+		if ( nArg > 1 )
+		{
+			if ( channelSpecifier[nArg - 1].m_bIsTag != channelSpecifier[nArg - 2].m_bIsTag )
+			{
+				Log_Warning( LOG_CONSOLE, "Cannot mix and match tag specifiers with channel name specifiers.\n" );
+				LogFunction_PrintUsage();
+				return;
+			}
+		}
+	}
+
+	bool bUsingTags = channelSpecifier[0].m_bIsTag;
+	for ( LoggingChannelID_t channelID = LoggingSystem_GetFirstChannelID(); channelID != INVALID_LOGGING_CHANNEL_ID; channelID = LoggingSystem_GetNextChannelID( channelID ) )
+	{
+		const CLoggingSystem::LoggingChannel_t *pLoggingChannel = LoggingSystem_GetChannel( channelID );
+		int nSpecifier;
+		for ( nSpecifier = 0; nSpecifier < nSpecifierCount; ++ nSpecifier )
+		{
+			if ( bUsingTags )
+			{
+				bool bHasTag = pLoggingChannel->HasTag( channelSpecifier[nSpecifier].m_pSpecifier );
+				if ( channelSpecifier[nSpecifier].m_bInclude != bHasTag )
+				{
+					// Channel has a prohibited tag or channel lacks a required tag
+					break;
+				}
+			}
+			else
+			{
+				if ( Q_stricmp( channelSpecifier[nSpecifier].m_pSpecifier, pLoggingChannel->m_Name ) == 0 )
+				{
+					// Found the channel
+					break;
+				}
+			}
+		}
+		bool bReachedEnd = ( nSpecifier == nSpecifierCount );
+		// If using tags, reaching the end means to include this channel.
+		// If using channel names, reaching the end means no match was found.
+		if ( bReachedEnd == bUsingTags )
+		{	
+			if ( !callbackFunction( pLoggingChannel, pParameter ) )
+			{
+				LogFunction_PrintUsage();
+				return;
+			}
+		}
+	}
+}
+
+static bool Con_LogLevelCallback( const CLoggingSystem::LoggingChannel_t *pChannel, const char *pParameter )
+{
+	LoggingSeverity_t minSeverity;
+	if ( Q_stricmp( pParameter, "all" ) == 0 )
+	{
+		minSeverity = LS_MESSAGE;
+	}
+	else if ( Q_stricmp( pParameter, "warning" ) == 0 )
+	{
+		minSeverity = LS_WARNING;
+	}
+	else if ( Q_stricmp( pParameter, "error" ) == 0 )
+	{
+		minSeverity = LS_ERROR;
+	}
+	else if ( Q_stricmp( pParameter, "off" ) == 0 )
+	{
+		minSeverity = LS_HIGHEST_SEVERITY;
+	}
+	else
+	{
+		Log_Warning( LOG_CONSOLE, "Unrecognized severity: %s.\n", pParameter );
+		return false;
+	}
+
+	Log_Msg( LOG_CONSOLE, "Setting channel '%s' minimum spew level to '%s'.\n", pChannel->m_Name, pParameter );
+	LoggingSystem_SetChannelSpewLevel( pChannel->m_ID, minSeverity );
+	return true;
+}
+
+static bool Con_LogColorCallback( const CLoggingSystem::LoggingChannel_t *pChannel, const char *pParameter )
+{
+	int color;
+	Q_hextobinary( pParameter, 8, ( byte * )&color, sizeof( color ) );
+	Log_Msg( LOG_CONSOLE, "Setting channel '%s' color to %08X.\n", pChannel->m_Name, SwapDWord( color ) );
+	LoggingSystem_SetChannelColor( pChannel->m_ID, color );
+	return true;
+}
+
+static bool Con_LogFlagsCallback( const CLoggingSystem::LoggingChannel_t *pChannel, const char *pParameter )
+{
+	bool bEnable;
+	if ( pParameter[0] == '+' )
+	{
+		bEnable = true;
+	}
+	else if ( pParameter[0] == '-' )
+	{
+		bEnable = false;
+	}
+	else
+	{
+		Log_Warning( LOG_CONSOLE, "First character of flag specifier must be + or -.\n" );
+		return false;
+	}
+
+	const char *pFlag = pParameter + 1;
+	LoggingChannelFlags_t flag;
+	if ( Q_stricmp( pFlag, "donotecho" ) == 0 )
+	{
+		flag = LCF_DO_NOT_ECHO;
+	}
+	else if ( Q_stricmp( pFlag, "consoleonly" ) == 0 )
+	{
+		flag = LCF_CONSOLE_ONLY;
+	}
+	else
+	{
+		Log_Warning( LOG_CONSOLE, "Unrecognized flag: %s.\n", pFlag );
+		return false;
+	}
+
+	LoggingChannelFlags_t currentFlags = LoggingSystem_GetChannelFlags( pChannel->m_ID );
+	if ( bEnable )
+	{
+		currentFlags = ( LoggingChannelFlags_t )( ( int )currentFlags | flag );
+	}
+	else
+	{
+		currentFlags = ( LoggingChannelFlags_t )( ( int )currentFlags & ( ~flag ) );
+	}
+	
+	Log_Msg( LOG_CONSOLE, "Enabling flag '%s' on channel '%s'.\n", pFlag, pChannel->m_Name );
+	LoggingSystem_SetChannelFlags( pChannel->m_ID, currentFlags );
+	return true;
+}
+
+void Con_LogLevel_f( const CCommand &args )
+{
+	Con_LogFunctionHelper( args, Con_LogLevelCallback );
+}
+
+void Con_LogColor_f( const CCommand &args )
+{
+	Con_LogFunctionHelper( args, Con_LogColorCallback );
+}
+
+void Con_LogFlags_f( const CCommand &args )
+{
+	Con_LogFunctionHelper( args, Con_LogFlagsCallback );
+}
+
+void Con_LogDumpChannels_f()
+{
+	Log_Msg( LOG_CONSOLE, "%-4s    %-32s    %-10s    %-10s    %-32s    %-32s\n", "ID", "Channel Name", "Severity", "Color", "Flags", "Tags" );
+	Log_Msg( LOG_CONSOLE, "----------------------------------------------------------------------------------------------------------------------------------------------------\n" );
+
+	int nChannelCount = LoggingSystem_GetChannelCount();
+	for ( int i = 0; i < nChannelCount; ++ i )
+	{
+		const CLoggingSystem::LoggingChannel_t *pChannel = LoggingSystem_GetChannel( i );
+		
+		const char *pSeverity;
+		if ( pChannel->m_MinimumSeverity >= LS_HIGHEST_SEVERITY ) pSeverity = "off";
+		else if ( pChannel->m_MinimumSeverity >= LS_ERROR ) pSeverity = "error";
+		else if ( pChannel->m_MinimumSeverity >= LS_WARNING ) pSeverity = "warning";
+		else pSeverity = "all";
+		
+		Log_Msg( LOG_CONSOLE, "%-4d    %-32s    %-10s    0x%08X    ", i, pChannel->m_Name, pSeverity, SwapDWord( *( int *)&pChannel->m_SpewColor ) );
+		
+		const int nMaxLen = 2048;
+		char buf[nMaxLen];
+		buf[0] = '\0';
+		if ( pChannel->m_Flags & LCF_CONSOLE_ONLY )
+		{
+			Q_strncat( buf, "[ConsoleOnly]", nMaxLen );
+		}
+		if ( pChannel->m_Flags & LCF_DO_NOT_ECHO )
+		{
+			Q_strncat( buf, "[DoNotEcho]", nMaxLen );
+		}
+		Log_Msg( LOG_CONSOLE, "%-32s    ", buf );
+			
+		buf[0] = '\0';
+		CLoggingSystem::LoggingTag_t *pTag = pChannel->m_pFirstTag;
+		while ( pTag != NULL )
+		{
+			Q_strncat( buf, "[", nMaxLen );
+			Q_strncat( buf, pTag->m_pTagName, nMaxLen );
+			Q_strncat( buf, "]", nMaxLen );
+			pTag = pTag->m_pNextTag;
+		}
+		Log_Msg( LOG_CONSOLE, "%-32s\n", buf );
+	}
+}
+
 /*
 ================
 Con_ClearNotify
@@ -296,11 +566,21 @@ void Con_ClearNotify (void)
 {
 	if ( g_pConPanel )
 	{
-		g_pConPanel->ClearNotify();
+		g_pConPanel->ClearNofify();
 	}
 }
+#endif // DEDICATED
 
-#endif // SWDS												
+//--------------------------------------------------------------------------------
+// Purpose: handle any console stuff that needs to run frequently such as accepting on sockets
+//--------------------------------------------------------------------------------
+void Con_RunFrame( void )
+{
+#if SUPPORT_NET_CONSOLE
+	if ( g_pNetConsoleMgr )
+		g_pNetConsoleMgr->RunFrame();
+#endif
+}
 
 
 ConsoleLogManager::ConsoleLogManager()
@@ -357,7 +637,7 @@ void ConsoleLogManager::CloseFileIfOpen()
 const char *ConsoleLogManager::GetConsoleLogFilename() const
 {
 	const char *logFile = con_logfile.GetString();
-	if ( !COM_IsValidPath( logFile ) || !COM_IsValidLogFilename( logFile ) )
+	if ( !COM_IsValidPath( logFile ) )
 	{
 		return "console.log";
 	}
@@ -375,18 +655,10 @@ void Con_Init (void)
 #ifdef DEDICATED
 	con_debuglog = false; // the dedicated server's console will handle this
 	con_debuglogmapprefixed = false;
-
-	// Check -consolelog arg and set con_logfile if it's present. This gets some messages logged
-	//  that we would otherwise miss due to con_logfile being set in the .cfg file.
-	const char *filename = NULL;
-	if ( CommandLine()->CheckParm( "-consolelog", &filename ) && filename && filename[ 0 ] )
-	{
-		con_logfile.SetValue( filename );
-	}
 #else
 	bool bRPTClient = ( CommandLine()->FindParm( "-rpt" ) != 0 );
 	con_debuglog = bRPTClient || ( CommandLine()->FindParm( "-condebug" ) != 0 );
-	con_debuglogmapprefixed = CommandLine()->FindParm( "-makereslists" ) != 0;
+	con_debuglogmapprefixed = CommandLine()->FindParm( "-makereslists" ) != 0 || CommandLine()->FindParm( "-mapname" ) != 0;
 	if ( con_debuglog )
 	{
 		con_logfile.SetValue( "console.log" );
@@ -407,6 +679,10 @@ Con_Shutdown
 */
 void Con_Shutdown (void)
 {
+#if SUPPORT_NET_CONSOLE
+	if ( g_pNetConsoleMgr )
+		delete g_pNetConsoleMgr;
+#endif
 	con_initialized = false;
 }
 
@@ -457,7 +733,7 @@ void Con_DebugLog( const char *fmt, ...)
 				g_pFileSystem->Write( timestamp, strlen( timestamp ), fh );
 				g_pFileSystem->Write( ": ", 2, fh );
 			}
-			needTimestamp = V_stristr( data, "\n" ) != 0;   
+			needTimestamp = V_stristr( data, "\n" ) ? true : false;   
 		}
 
 		g_pFileSystem->Write( data, strlen(data), fh );
@@ -469,7 +745,7 @@ void Con_DebugLog( const char *fmt, ...)
 
 static bool g_fIsDebugPrint = false;
 
-#ifndef SWDS
+#ifndef DEDICATED
 /*
 ================
 Con_Printf
@@ -479,14 +755,22 @@ Handles cursor positioning, line wrapping, etc
 */
 static bool g_fColorPrintf = false;
 static bool g_bInColorPrint = false;
-extern CThreadLocalInt<> g_bInSpew;
+#ifdef _PS3
+#include "tls_ps3.h"
+#define g_bInSpew GetTLSGlobals()->bEngineConsoleIsInSpew
+#else
+extern CTHREADLOCALINT g_bInSpew;
+#endif
 
 void Con_Printf( const char *fmt, ... );
 
-extern ConVar spew_consolelog_to_debugstring;
-
 void Con_ColorPrint( const Color& clr, char const *msg )
 {
+	bool convisible = Con_IsVisible();
+	bool indeveloper = ( developer.GetInt() > 0 );
+	bool debugprint = g_fIsDebugPrint;
+
+	SendStringToNetConsoles( msg );
 	if ( IsPC() )
 	{
 		if ( g_bInColorPrint )
@@ -529,7 +813,7 @@ void Con_ColorPrint( const Color& clr, char const *msg )
 		g_bInColorPrint = true;
 
 		// also echo to debugging console
-		if ( Plat_IsInDebugSession() && !con_trace.GetInt() && !spew_consolelog_to_debugstring.GetBool() )
+		if ( Plat_IsInDebugSession() && !con_trace.GetInt() )
 		{
 			Sys_OutputDebugString(msg);
 		}
@@ -539,10 +823,6 @@ void Con_ColorPrint( const Color& clr, char const *msg )
 			g_bInColorPrint = false;
 			return;		// no graphics mode
 		}
-
-		bool convisible = Con_IsVisible();
-		bool indeveloper = ( developer.GetInt() > 0 );
-		bool debugprint = g_fIsDebugPrint;
 
 		if ( g_fColorPrintf )
 		{
@@ -554,7 +834,7 @@ void Con_ColorPrint( const Color& clr, char const *msg )
 			if ( g_fIsDebugPrint )
 			{
 				// Don't spew debug stuff to actual console once in game, unless console isn't up
-				if ( !cl.IsActive() || !convisible )
+				if ( !GetBaseLocalClient().IsActive() || !convisible )
 				{
 					g_pCVar->ConsoleDPrintf( "%s", msg );
 				}
@@ -571,16 +851,17 @@ void Con_ColorPrint( const Color& clr, char const *msg )
 			Msg( "%s", msg );
 		}
 
-		// Only write to notify if it's non-debug or we are running with developer set > 0
-		// Buf it it's debug then make sure we don't have the console down
-		if ( ( !debugprint || indeveloper ) && !( debugprint && convisible ) )
-		{
-			if ( g_pConPanel )
-			{
-				g_pConPanel->AddToNotify( clr, msg );
-			}
-		}
 		g_bInColorPrint = false;
+	}
+	
+	// Only write to notify if it's non-debug or we are running with developer set > 0
+	// Buf it it's debug then make sure we don't have the console down
+	if ( ( !debugprint || indeveloper ) && !( debugprint && convisible ) )
+	{
+		if ( g_pConPanel )
+		{
+			g_pConPanel->AddToNotify( clr, msg );
+		}
 	}
 
 #if defined( _X360 )
@@ -603,6 +884,10 @@ void Con_ColorPrint( const Color& clr, char const *msg )
 	*pTo = '\0';
 
 	XBX_DebugString( XMAKECOLOR(r,g,b), buffer );
+#endif
+
+#if defined( _PS3 )
+	Sys_OutputDebugString( msg );
 #endif
 }
 #endif
@@ -638,7 +923,7 @@ void Con_Print( const char *msg )
 		return;
 	}
 
-#ifdef SWDS
+#ifdef DEDICATED
 	Msg( "%s", msg );
 #else
 	if ( sv.IsDedicated() )
@@ -667,21 +952,12 @@ void Con_Printf( const char *fmt, ... )
 	Q_vsnprintf( msg, sizeof( msg ), fmt, argptr );
 	va_end( argptr );
 
-#ifndef NO_VCR
-	// Normally, we shouldn't need to write this data to the file, but it can help catch
-	// out-of-sync errors earlier.
-	if ( vcr_verbose.GetInt() )
-	{
-		VCRGenericString( "Con_Printf", msg );
-	}
-#endif
-
 	if ( !HandleRedirectAndDebugLog( msg ) )
 	{
 		return;
 	}
 
-#ifdef SWDS
+#ifdef DEDICATED
 	Msg( "%s", msg );
 #else
 	if ( sv.IsDedicated() )
@@ -700,7 +976,7 @@ void Con_Printf( const char *fmt, ... )
 #endif
 }
 
-#ifndef SWDS
+#ifndef DEDICATED
 //-----------------------------------------------------------------------------
 // Purpose: 
 // Input  : clr - 
@@ -711,12 +987,13 @@ void Con_ColorPrintf( const Color& clr, const char *fmt, ... )
 {
 	va_list		argptr;
 	char		msg[MAXPRINTMSG];
+	static bool	inupdate;
 
 	va_start (argptr,fmt);
 	Q_vsnprintf (msg,sizeof( msg ), fmt,argptr);
 	va_end (argptr);
 
-	AUTO_LOCK( g_AsyncNotifyTextMutex );
+	LOCAL_THREAD_LOCK();
 	if ( !HandleRedirectAndDebugLog( msg ) )
 	{
 		return;
@@ -746,7 +1023,7 @@ void Con_DPrintf (const char *fmt, ...)
 	
 	g_fIsDebugPrint = true;
 
-#ifdef SWDS
+#ifdef DEDICATED
 	DevMsg( "%s", msg );
 #else
 	if ( sv.IsDedicated() )
@@ -780,20 +1057,20 @@ void Con_SafePrintf (const char *fmt, ...)
 	Q_vsnprintf(msg,sizeof( msg ), fmt,argptr);
 	va_end (argptr);
 
-#ifndef SWDS
-	bool		temp;
+#ifndef DEDICATED
+	bool			temp;
 	temp = scr_disabled_for_loading;
 	scr_disabled_for_loading = true;
 #endif
 	g_fIsDebugPrint = true;
 	Con_Printf ("%s", msg);
 	g_fIsDebugPrint = false;
-#ifndef SWDS
+#ifndef DEDICATED
 	scr_disabled_for_loading = temp;
 #endif
 }
 
-#ifndef SWDS
+#ifndef DEDICATED
 bool Con_IsVisible()
 {
 	return (EngineVGui()->IsConsoleVisible());	
@@ -808,7 +1085,11 @@ void Con_NPrintf( int idx, const char *fmt, ... )
     Q_vsnprintf( outtext, sizeof( outtext ), fmt, argptr);
     va_end(argptr);
 
-	if ( IsPC() )
+	if ( IsPC() 
+#ifndef _CERT
+		|| IsGameConsole()
+#endif // !_CERT
+		)
 	{
 		g_pConPanel->Con_NPrintf( idx, outtext );
 	}
@@ -827,13 +1108,21 @@ void Con_NXPrintf( const struct con_nprint_s *info, const char *fmt, ... )
     Q_vsnprintf( outtext, sizeof( outtext ), fmt, argptr);
     va_end(argptr);
 
-	if ( IsPC() )
+	if ( IsPC() 
+#ifndef _CERT
+		|| IsGameConsole()
+#endif // !_CERT
+		)
 	{
 		g_pConPanel->Con_NXPrintf( info, outtext );
 	}
 	else
 	{
+		// xbox doesn't use notify printing
 		Con_Printf( outtext );
+		// enforce a terminal CR, which PC callers don't specify
+		// ensure vxconsole ouptut is formatted as expected (more often than not)
+		Con_Printf( "\n" );
 	}
 }
 
@@ -844,11 +1133,10 @@ void Con_NXPrintf( const struct con_nprint_s *info, const char *fmt, ... )
 CConPanel::CConPanel( vgui::Panel *parent ) : CBasePanel( parent, "CConPanel" )
 {
 	// Full screen assumed
-	SetSize( videomode->GetModeStereoWidth(), videomode->GetModeStereoHeight() );
+	SetSize( videomode->GetModeWidth(), videomode->GetModeHeight() );
 	SetPos( 0, 0 );
 	SetVisible( true );
-	SetMouseInputEnabled( false );
-	SetKeyBoardInputEnabled( false );
+	SetCursor( 0 );
 
 	da_default_color[0] = 1.0;
 	da_default_color[1] = 1.0;
@@ -873,9 +1161,9 @@ void CConPanel::Con_NPrintf( int idx, const char *msg )
 		return;
 
 #ifdef WIN32
-    _snwprintf( da_notify[idx].szNotify, sizeof( da_notify[idx].szNotify ) / sizeof( wchar_t ) - 1, L"%S", msg );
+    Q_snwprintf( da_notify[idx].szNotify, sizeof( da_notify[idx].szNotify ) / sizeof( wchar_t ) - 1, L"%S", msg );
 #else
-    _snwprintf( da_notify[idx].szNotify, sizeof( da_notify[idx].szNotify ) / sizeof( wchar_t ) - 1, L"%s", msg );
+    Q_snwprintf( da_notify[idx].szNotify, sizeof( da_notify[idx].szNotify ) / sizeof( wchar_t ) - 1, L"%s", msg );
 #endif
 	da_notify[idx].szNotify[ sizeof( da_notify[idx].szNotify ) / sizeof( wchar_t ) - 1 ] = L'\0';
 
@@ -895,9 +1183,9 @@ void CConPanel::Con_NXPrintf( const struct con_nprint_s *info, const char *msg )
 		return;
 
 #ifdef WIN32
-	_snwprintf( da_notify[info->index].szNotify, sizeof( da_notify[info->index].szNotify ) / sizeof( wchar_t ) - 1, L"%S", msg );
+	Q_snwprintf( da_notify[info->index].szNotify, sizeof( da_notify[info->index].szNotify ) / sizeof( wchar_t ) - 1, L"%S", msg );
 #else
-	_snwprintf( da_notify[info->index].szNotify, sizeof( da_notify[info->index].szNotify ) / sizeof( wchar_t ) - 1, L"%s", msg );
+	Q_snwprintf( da_notify[info->index].szNotify, sizeof( da_notify[info->index].szNotify ) / sizeof( wchar_t ) - 1, L"%s", msg );
 #endif
 	da_notify[info->index].szNotify[ sizeof( da_notify[info->index].szNotify ) / sizeof( wchar_t ) - 1 ] = L'\0';
 
@@ -937,6 +1225,10 @@ void CConPanel::AddToNotify( const Color& clr, char const *msg )
 	if ( !developer.GetBool() )
 		return;
 
+	// If console is not allowed, then don't do the notify area
+	if ( !Con_ConsoleAllowed() )
+		return;
+
 	// skip any special characters
 	if ( msg[0] == 1 || 
 		 msg[0] == 2 )
@@ -947,9 +1239,6 @@ void CConPanel::AddToNotify( const Color& clr, char const *msg )
 	// Nothing left
 	if ( !msg[0] )
 		return;
-
-	// Protect against background modifications to m_NotifyText.
-	AUTO_LOCK( g_AsyncNotifyTextMutex );
 
 	CNotifyText *current = NULL;
 
@@ -1014,11 +1303,8 @@ void CConPanel::AddToNotify( const Color& clr, char const *msg )
 //-----------------------------------------------------------------------------
 // Purpose: 
 //-----------------------------------------------------------------------------
-void CConPanel::ClearNotify()
+void CConPanel::ClearNofify()
 {
-	// Protect against background modifications to m_NotifyText.
-	AUTO_LOCK( g_AsyncNotifyTextMutex );
-
 	m_NotifyText.RemoveAll();
 }
 
@@ -1026,23 +1312,29 @@ void CConPanel::ApplySchemeSettings( vgui::IScheme *pScheme )
 {
 	BaseClass::ApplySchemeSettings( pScheme );
 
-	// Console font
-	m_hFont = pScheme->GetFont( "DefaultSmallDropShadow", false );
-	m_hFontFixed = pScheme->GetFont( "DefaultFixedDropShadow", false );
+	if ( IsGameConsole() )
+	{
+		// This is one of the few fonts we have loaded in shipping console builds
+		m_hFont = pScheme->GetFont( "DebugFixed", false );
+		m_hFontFixed = pScheme->GetFont( "DebugFixed", false );
+	}
+	else
+	{
+		m_hFont = pScheme->GetFont( "DefaultSmallDropShadow", false );
+		m_hFontFixed = pScheme->GetFont( "DefaultFixedDropShadow", false );
+	}
 }
 
-int CConPanel::DrawText( vgui::HFont font, int x, int y, wchar_t *data )
+void CConPanel::DrawText( vgui::HFont font, int x, int y, wchar_t *data )
 {
-	int len = DrawColoredText( font,
-	                           x,
-	                           y,
-	                           255,
-	                           255,
-	                           255,
-	                           255,
-	                           data );
-
-	return len;
+	DrawColoredText( font, 
+		x, 
+		y, 
+		255, 
+		255,
+		255, 
+		255, 
+		data );
 }
 
 
@@ -1062,8 +1354,10 @@ bool CConPanel::ShouldDraw()
 	// and if the launcher isn't active
 	if ( !Con_IsVisible() )
 	{
-		// Protect against background modifications to m_NotifyText.
-		AUTO_LOCK( g_AsyncNotifyTextMutex );
+		// [jason-HPE] This block is thread unsafe: modifications to the size
+		//	 of m_NotifyText can cause invalid vector accesses because we cache
+		//	 the size of the vector at the start of the loop.
+		LOCAL_THREAD_LOCK();
 
 		int i;
 		int c = m_NotifyText.Count();
@@ -1098,6 +1392,12 @@ void CConPanel::DrawNotify( void )
 	int x = 8;
 	int y = 5;
 
+	if ( IsGameConsole() )
+	{
+		x += videomode->GetModeWidth() / 20;
+		y += videomode->GetModeHeight() / 20;
+	}
+
 	if ( !m_hFontFixed )
 		return;
 
@@ -1111,28 +1411,30 @@ void CConPanel::DrawNotify( void )
 		return;
 	}
 
+	if ( toolframework->InToolMode() && !toolframework->ShouldGameRenderView() )
+	{
+		return;
+	}
+
+	if ( !con_drawnotify.GetBool() )
+	{
+		return;
+	}
+
 	vgui::surface()->DrawSetTextFont( m_hFontFixed );
 
 	int fontTall = vgui::surface()->GetFontTall( m_hFontFixed ) + 1;
 
-	// Protect against background modifications to m_NotifyText.
-	// DEADLOCK WARNING: Cannot call DrawColoredText while holding g_AsyncNotifyTextMutex or
-	// deadlock can occur while MatQueue0 holds material system lock and attempts to add text
-	// to m_NotifyText.
-	CUtlVector< CNotifyText > textToDraw;
-	{
-		AUTO_LOCK( g_AsyncNotifyTextMutex );
-		textToDraw = m_NotifyText;
-	}
+	Color clr;
 
-	int c = textToDraw.Count();
+	int c = m_NotifyText.Count();
 	for ( int i = 0; i < c; i++ )
 	{
-		CNotifyText *notify = &textToDraw[ i ];
+		CNotifyText *notify = &m_NotifyText[ i ];
 
 		float timeleft = notify->liferemaining;
 	
-		Color clr = notify->clr;
+		clr = notify->clr;
 
 		if ( timeleft < .5f )
 		{
@@ -1152,7 +1454,15 @@ void CConPanel::DrawNotify( void )
 
 		DrawColoredText( m_hFontFixed, x, y, clr[0], clr[1], clr[2], clr[3], notify->text );
 
-		y += fontTall;
+		if ( IsX360() )
+		{
+			// For some reason the fontTall value on 360 is about twice as high as it should be
+			y += 12;
+		}
+		else
+		{
+			y += fontTall;
+		}
 	}
 }
 
@@ -1195,6 +1505,20 @@ int CConPanel::ProcessNotifyLines( int &left, int &top, int &right, int &bottom,
 	int count = 0;
 	int y = 20;
 
+	int nXMargin = IsGameConsole() ? videomode->GetModeWidth() / 20 : 10;
+	int nYMargin = IsGameConsole() ? videomode->GetModeHeight() / 20 : 20;
+	int nFontTall;
+
+	if ( IsX360() )
+	{
+		// For some reason the fontTall value on 360 is about twice as high as it should be
+		nFontTall = 12;
+	}
+	else
+	{
+		nFontTall = vgui::surface()->GetFontTall( m_hFontFixed ) + 1;
+	}
+
 	for ( int i = 0; i < MAX_DBG_NOTIFY; i++ )
 	{
 		if ( realtime < da_notify[i].expire || da_notify[i].expire == -1 )
@@ -1210,16 +1534,14 @@ int CConPanel::ProcessNotifyLines( int &left, int &top, int &right, int &bottom,
 
 			vgui::HFont font = da_notify[i].fixed_width_font ? m_hFontFixed : m_hFont ;
 
-			int fontTall = vgui::surface()->GetFontTall( m_hFontFixed ) + 1;
-
 			len = DrawTextLen( font, da_notify[i].szNotify );
-			x = videomode->GetModeStereoWidth() - 10 - len;
+			x = videomode->GetModeWidth() - nXMargin - len;
 
-			if ( y + fontTall > videomode->GetModeStereoHeight() - 20 )
+			if ( y + nFontTall > videomode->GetModeHeight() - nYMargin )
 				return count;
 
 			count++;
-			y = 20 + 10 * i;
+			int y = nYMargin + nFontTall * i;
 
 			if ( bDraw )
 			{
@@ -1234,13 +1556,13 @@ int CConPanel::ProcessNotifyLines( int &left, int &top, int &right, int &bottom,
 			if ( da_notify[i].szNotify[0] )
 			{
 				// Extend the bounds.
-				left = min( left, x );
-				top = min( top, y );
-				right = max( right, x+len );
-				bottom = max( bottom, y+fontTall );
+				left = MIN( left, x );
+				top = MIN( top, y );
+				right = MAX( right, x+len );
+				bottom = MAX( bottom, y+nFontTall );
 			}
 
-			y += fontTall;
+			y += nFontTall;
 		}
 	}
 
@@ -1254,11 +1576,6 @@ int CConPanel::ProcessNotifyLines( int &left, int &top, int &right, int &bottom,
 void CConPanel::Paint()
 {
 	VPROF( "CConPanel::Paint" );
-
-#if !defined( SWDS ) && !defined( DEDICATED )
-	if ( IsPC() && !g_ClientDLL->ShouldDrawDropdownConsole() )
-		return;
-#endif
 	
 	DrawDebugAreas();
 
@@ -1270,12 +1587,14 @@ void CConPanel::Paint()
 //-----------------------------------------------------------------------------
 void CConPanel::PaintBackground()
 {
+	// Rendering this information is not interesting and gives away server IP when streaming
+#if 0
 	if ( !Con_IsVisible() )
 		return;
 
 	int wide = GetWide();
 	char ver[ 100 ];
-	Q_snprintf(ver, sizeof( ver ), "Source Engine %i (build %d)", PROTOCOL_VERSION, build_number() );
+	Q_snprintf(ver, sizeof( ver ), "Source Engine %i (build %d)", GetHostVersion(), build_number() );
 	wchar_t unicode[ 200 ];
 	g_pVGuiLocalize->ConvertANSIToUnicode( ver, unicode, sizeof( unicode ) );
 
@@ -1283,24 +1602,25 @@ void CConPanel::PaintBackground()
 	int x = wide - DrawTextLen( m_hFont, unicode ) - 2;
 	DrawText( m_hFont, x, 0, unicode );
 
-	if ( cl.IsActive() )
+	if ( GetBaseLocalClient().IsActive() )
 	{
-		if ( cl.m_NetChannel->IsLoopback() )
+		if ( GetBaseLocalClient().m_NetChannel->IsLoopback() || cl_hideserverip.GetInt()>0 )
 		{
-			Q_snprintf(ver, sizeof( ver ), "Map '%s'", cl.m_szLevelBaseName );
+			Q_snprintf(ver, sizeof( ver ), "Map '%s'", GetBaseLocalClient().m_szLevelNameShort );
 		}
 		else
 		{
-			Q_snprintf(ver, sizeof( ver ), "Server '%s' Map '%s'", cl.m_NetChannel->GetRemoteAddress().ToString(), cl.m_szLevelBaseName );
+			Q_snprintf(ver, sizeof( ver ), "Server '%s' Map '%s'", GetBaseLocalClient().m_NetChannel->GetAddress(), GetBaseLocalClient().m_szLevelNameShort );
 		}
-		wchar_t wUnicode[ 200 ];
-		g_pVGuiLocalize->ConvertANSIToUnicode( ver, wUnicode, sizeof( wUnicode ) );
+		wchar_t unicode[ 200 ];
+		g_pVGuiLocalize->ConvertANSIToUnicode( ver, unicode, sizeof( unicode ) );
 
 		int tall = vgui::surface()->GetFontTall( m_hFont );
 
-		x = wide - DrawTextLen( m_hFont, wUnicode ) - 2;
-		DrawText( m_hFont, x, tall + 1, wUnicode );
+		int x = wide - DrawTextLen( m_hFont, unicode ) - 2;
+		DrawText( m_hFont, x, tall + 1, unicode );
 	}
+#endif
 }
 
 //-----------------------------------------------------------------------------
@@ -1327,4 +1647,9 @@ static ConCommand hideconsole("hideconsole", Con_HideConsole_f, "Hide the consol
 static ConCommand showconsole("showconsole", Con_ShowConsole_f, "Show the console.", FCVAR_DONTRECORD );
 static ConCommand clear("clear", Con_Clear_f, "Clear all console output.", FCVAR_DONTRECORD );
 
-#endif // SWDS
+static ConCommand log_dumpchannels( "log_dumpchannels", Con_LogDumpChannels_f, "Dumps information about all logging channels.", FCVAR_DONTRECORD );
+static ConCommand log_level( "log_level", Con_LogLevel_f, "Set the spew level of a logging channel.", FCVAR_DONTRECORD );
+static ConCommand log_color( "log_color", Con_LogColor_f, "Set the color of a logging channel.", FCVAR_DONTRECORD );
+static ConCommand log_flags( "log_flags", Con_LogFlags_f, "Set the flags on a logging channel.", FCVAR_DONTRECORD );
+
+#endif // DEDICATED

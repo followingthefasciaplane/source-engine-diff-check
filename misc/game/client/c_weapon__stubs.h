@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright (c) 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -22,9 +22,9 @@
 
 
 #define STUB_WEAPON_CLASS( entityName, className, baseClassName )	\
-	class C_##className : public baseClassName					\
+	class C_##className : public baseClassName						\
 	{																\
-		DECLARE_CLASS( C_##className, baseClassName );							\
+		DECLARE_CLASS( C_##className, baseClassName );				\
 	public:															\
 		DECLARE_PREDICTABLE();										\
 		DECLARE_CLIENTCLASS();										\
@@ -32,8 +32,8 @@
 	private:														\
 		C_##className( const C_##className & );						\
 	};																\
-	STUB_WEAPON_CLASS_IMPLEMENT( entityName, C_##className );		\
 	IMPLEMENT_CLIENTCLASS_DT( C_##className, DT_##className, C##className )	\
-	END_RECV_TABLE()
+	END_RECV_TABLE()												\
+	STUB_WEAPON_CLASS_IMPLEMENT( entityName, C_##className );
 
 #endif // C_WEAPON__STUBS_H

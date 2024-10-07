@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -15,7 +15,6 @@
 #include "datamodel/dmattribute.h"
 #include "datamodel/dmattributevar.h"
 #include "datamodel/dmehandle.h"
-#include "movieobjects/timeutils.h"
 
 
 //-----------------------------------------------------------------------------
@@ -33,7 +32,6 @@ enum DmeClipSkipFlag_t;
 //-----------------------------------------------------------------------------
 #define DMETRACKGROUP_DEFAULT_NAME "default"
 
-
 //-----------------------------------------------------------------------------
 // A track group
 //-----------------------------------------------------------------------------
@@ -47,7 +45,6 @@ public:
 
 	// Owning clip
 	CDmeClip *GetOwnerClip();
-	void SetOwnerClip( CDmeClip *pClip );
 
 	// track helper methods
 	void AddTrack( CDmeTrack *track );
@@ -93,9 +90,9 @@ public:
 	void SetMinimized( bool bLocked );
 	bool IsMinimized() const;
 
-	// Track group display size
-	void SetDisplaySize( int nDisplaySize );
-	int GetDisplaySize() const;
+	// Track vertical display scale
+	void SetDisplayScale( float flDisplayScale );
+	float GetDisplayScale() const;
 
 	// Creates the film track group [for internal use only]
 	CDmeTrack *CreateFilmTrack();
@@ -119,15 +116,19 @@ public:
 	int GetSubClipCount() const;
 	void GetSubClips( CDmeClip **ppClips );
 
+	bool GetForceMultiTrack() const;
+	void SetForceMultiTrack( bool bForce );
+
 private:
 	CDmaElementArray< CDmeTrack > m_Tracks;
 	CDmaVar<bool> m_bIsVisible;
 	CDmaVar<bool> m_bMinimized;
 	CDmaVar< bool >	m_bMute;
 	CDmaVar< float > m_Volume;
-	CDmaVar<int> m_nDisplaySize;
+	CDmaVar< float > m_flDisplayScale;
+	// Forces film clip to use the "multitrack" (stacking) layout logic
+	CDmaVar< bool > m_bForceMultiTrack; 
 
-	DmElementHandle_t m_hOwner;
 	int m_nMaxTrackCount;
 };
 
@@ -178,18 +179,17 @@ inline bool CDmeTrackGroup::IsMinimized() const
 	return m_bMinimized;
 }
 
-
 //-----------------------------------------------------------------------------
-// Track group display size
+// Track group vertical display scale
 //-----------------------------------------------------------------------------
-inline void CDmeTrackGroup::SetDisplaySize( int nDisplaySize )
+inline void CDmeTrackGroup::SetDisplayScale( float flDisplayScale )
 {
-	m_nDisplaySize = nDisplaySize;
+	m_flDisplayScale = flDisplayScale;
 }
 
-inline int CDmeTrackGroup::GetDisplaySize() const
+inline float CDmeTrackGroup::GetDisplayScale() const
 {
-	return m_nDisplaySize;
+	return m_flDisplayScale;
 }
 	
 

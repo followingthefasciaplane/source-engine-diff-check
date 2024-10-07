@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright (c) 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Defines and structures for the BSP file format.
 //
@@ -13,27 +13,28 @@
 #include "mathlib/mathlib.h"
 #endif
 
+#include "mathlib/vector4d.h"
 #include "datamap.h"
 #include "mathlib/bumpvects.h"
 #include "mathlib/compressed_light_cube.h"
+#include "datalinker_interface.h"
 
 // little-endian "VBSP"
 #define IDBSPHEADER	(('P'<<24)+('S'<<16)+('B'<<8)+'V')		
 
 // MINBSPVERSION is the minimum acceptable version.  The engine will load MINBSPVERSION through BSPVERSION
 #define MINBSPVERSION 19
-#define BSPVERSION 20
+#define BSPVERSION 21
 
 
-// This needs to match the value in gl_lightmap.h
-// Need to dynamically allocate the weights and light values in radial_t to make this variable.
-#define MAX_BRUSH_LIGHTMAP_DIM_WITHOUT_BORDER 32
 // This is one more than what vbsp cuts for to allow for rounding errors
 #define MAX_BRUSH_LIGHTMAP_DIM_INCLUDING_BORDER	35
+// Need to dynamically allocate the weights and light values in radial_t to make this variable.
+#define MAX_BRUSH_LIGHTMAP_DIM_WITHOUT_BORDER ( MAX_BRUSH_LIGHTMAP_DIM_INCLUDING_BORDER - 3 )
 
 // We can have larger lightmaps on displacements
-#define MAX_DISP_LIGHTMAP_DIM_WITHOUT_BORDER	125
 #define MAX_DISP_LIGHTMAP_DIM_INCLUDING_BORDER	128
+#define MAX_DISP_LIGHTMAP_DIM_WITHOUT_BORDER ( MAX_DISP_LIGHTMAP_DIM_INCLUDING_BORDER - 3 )
 
 
 // This is the actual max.. (change if you change the brush lightmap dim or disp lightmap dim
@@ -59,21 +60,21 @@
 // 16 bit short limits
 #define	MAX_MAP_MODELS					1024
 #define	MAX_MAP_BRUSHES					8192
-#define	MAX_MAP_ENTITIES				8192
+#define	MAX_MAP_ENTITIES				20480 // bumped from 16384
 #define	MAX_MAP_TEXINFO					12288
 #define MAX_MAP_TEXDATA					2048
-#define MAX_MAP_DISPINFO				2048
+#define MAX_MAP_DISPINFO				32768
 #define MAX_MAP_DISP_VERTS				( MAX_MAP_DISPINFO * ((1<<MAX_MAP_DISP_POWER)+1) * ((1<<MAX_MAP_DISP_POWER)+1) )
 #define MAX_MAP_DISP_TRIS				( (1 << MAX_MAP_DISP_POWER) * (1 << MAX_MAP_DISP_POWER) * 2 )
 #define MAX_DISPVERTS					NUM_DISP_POWER_VERTS( MAX_MAP_DISP_POWER )
 #define MAX_DISPTRIS					NUM_DISP_POWER_TRIS( MAX_MAP_DISP_POWER )
-#define	MAX_MAP_AREAS					256
+#define	MAX_MAP_AREAS					1024
 #define MAX_MAP_AREA_BYTES				(MAX_MAP_AREAS/8)
 #define	MAX_MAP_AREAPORTALS				1024
 // Planes come in pairs, thus an even number.
 #define	MAX_MAP_PLANES					65536
 #define	MAX_MAP_NODES					65536
-#define	MAX_MAP_BRUSHSIDES				65536
+#define	MAX_MAP_BRUSHSIDES				65536 
 #define	MAX_MAP_LEAFS					65536
 #define	MAX_MAP_VERTS					65536
 #define MAX_MAP_VERTNORMALS				256000
@@ -92,7 +93,7 @@
 #define	MAX_MAP_TEXTURES				1024
 #define MAX_MAP_WORLDLIGHTS				8192
 #define MAX_MAP_CUBEMAPSAMPLES			1024
-#define MAX_MAP_OVERLAYS				512 
+#define MAX_MAP_OVERLAYS				1024 
 #define MAX_MAP_WATEROVERLAYS			16384
 #define MAX_MAP_TEXDATA_STRING_DATA		256000
 #define MAX_MAP_TEXDATA_STRING_TABLE	65536
@@ -300,10 +301,11 @@ enum
 	LUMP_BRUSHSIDES					= 19,	// *
 	LUMP_AREAS						= 20,	// *
 	LUMP_AREAPORTALS				= 21,	// *
-	LUMP_UNUSED0					= 22,
-	LUMP_UNUSED1					= 23,
-	LUMP_UNUSED2					= 24,
-	LUMP_UNUSED3					= 25,
+	LUMP_FACEBRUSHES				= 22,	// * Index of the brush each face came from
+	LUMP_FACEBRUSHLIST				= 23,	// *
+	LUMP_UNUSED1					= 24,	// *
+	LUMP_UNUSED2					= 25,	// *
+
 	LUMP_DISPINFO					= 26,
 	LUMP_ORIGINALFACES				= 27,
 	LUMP_PHYSDISP					= 28,
@@ -338,7 +340,7 @@ enum
 	LUMP_LEAFMINDISTTOWATER			= 46,
 	LUMP_FACE_MACRO_TEXTURE_INFO	= 47,
 	LUMP_DISP_TRIS					= 48,
-	LUMP_PHYSCOLLIDESURFACE			= 49,	// deprecated.  We no longer use win32-specific havok compression on terrain
+	LUMP_PROP_BLOB					= 49,	// static prop triangle & string data
 	LUMP_WATEROVERLAYS              = 50,
 	LUMP_LEAF_AMBIENT_INDEX_HDR		= 51,	// index of LUMP_LEAF_AMBIENT_LIGHTING_HDR
 	LUMP_LEAF_AMBIENT_INDEX         = 52,	// index of LUMP_LEAF_AMBIENT_LIGHTING
@@ -353,6 +355,9 @@ enum
 	LUMP_FACES_HDR					= 58,	// HDR maps may have different face data.
 	LUMP_MAP_FLAGS                  = 59,   // extended level-wide flags. not present in all levels
 	LUMP_OVERLAY_FADES				= 60,	// Fade distances for overlays
+	LUMP_OVERLAY_SYSTEM_LEVELS		= 61,	// System level settings (min/max CPU & GPU to render this overlay) 
+	LUMP_PHYSLEVEL                  = 62,
+	LUMP_DISP_MULTIBLEND			= 63,	// Displacement multiblend info
 };
 
 
@@ -364,6 +369,7 @@ enum
 	LUMP_OCCLUSION_VERSION         = 2,
 	LUMP_LEAFS_VERSION			   = 1,
 	LUMP_LEAF_AMBIENT_LIGHTING_VERSION = 1,
+	LUMP_WORLDLIGHTS_VERSION	   = 1
 };
 
 
@@ -376,17 +382,14 @@ struct lump_t
 	DECLARE_BYTESWAP_DATADESC();
 	int		fileofs, filelen;
 	int		version;		// default to zero
-	// this field was char fourCC[4] previously, but was unused, favoring the LUMP IDs above instead. It has been
-	// repurposed for compression.  0 implies the lump is not compressed.
-	int		uncompressedSize; // default to zero
+	char	fourCC[4];		// default to ( char )0, ( char )0, ( char )0, ( char )0
 };
 
-
-struct dheader_t
+struct BSPHeader_t
 {
 	DECLARE_BYTESWAP_DATADESC();
 	int			ident;
-	int			version;
+	int			m_nVersion;	
 	lump_t		lumps[HEADER_LUMPS];
 	int			mapRevision;				// the map's revision (iteration, version) number (added BSPVERSION 6)
 };
@@ -394,6 +397,11 @@ struct dheader_t
 // level feature flags
 #define LVLFLAGS_BAKED_STATIC_PROP_LIGHTING_NONHDR 0x00000001	// was processed by vrad with -staticproplighting, no hdr data
 #define LVLFLAGS_BAKED_STATIC_PROP_LIGHTING_HDR    0x00000002   // was processed by vrad with -staticproplighting, in hdr
+#define LVLFLAGS_LIGHTMAP_ALPHA                    0x00000004   // indicates that lightmap alpha data is interleved in the lighting lump
+#define LVLFLAGS_BAKED_STATIC_PROP_LIGHTING_3      0x00000008   // was processed by vrad with -staticproplighting3
+#define LVLFLAGS_LIGHTMAP_ALPHA_3                  0x00000010   // indicates that 3 sets of lightmap alpha data are interleved in the lighting lump
+#define LVLFLAGS_BAKED_STATIC_PROP_LIGHTING_3_NO_SUN  0x00000020// indicates that vertexlitgeneric static prop lighting does not contain direct sunlight in lighting vertex stream
+#define LVLFLAGS_LIGHTSTYLES_WITH_CSM			   0x00000040   // indicates that lightstyles now compatible with CSMs
 
 struct dflagslump_t
 {
@@ -421,7 +429,7 @@ struct dgamelumpheader_t
 // This is expected to be a four-CC code ('lump')
 typedef int GameLumpId_t;
 
-// game lump is compressed, filelen reflects original size
+// 360 only: game lump is compressed, filelen reflects original size
 // use next entry fileofs to determine actual disk lump compressed size
 // compression stage ensures a terminal null dictionary entry
 #define GAMELUMPFLAG_COMPRESSED	0x0001
@@ -456,12 +464,80 @@ struct dphysmodel_t
 	int			solidCount;
 };
 
+
+struct dphyslevelpolytope_t
+{
+	DECLARE_BYTESWAP_DATADESC()
+		
+};
+
+
+struct DiskPhysics2Polytope_t
+{
+	DECLARE_BYTESWAP_DATADESC();
+	int32 offsetPolytope; // this is the offset to the serialized data of this polytope
+	int32 offsetInertia;
+};
+
+struct DiskPhysics2LevelMesh_t
+{
+	DECLARE_BYTESWAP_DATADESC();
+	DataLinker::Offset_t<void> polymesh; // this is polysoup in data version 0xC0000002, and polytope in 0xC0000001
+	int32 flags;
+
+	enum { FLAG_RESERVED = 1, FLAG_FORCE_POLYSOUP = 1 << 1, FLAG_FORCE_POLYTOPE = 1 << 2 }; 
+};
+
+struct dphyslevelV0_t
+{
+	DECLARE_BYTESWAP_DATADESC()
+	enum {DATA_VERSION_WITH_DISPLACEMENT = 0xC0000001};
+	enum {DATA_VERSION = 0xC0000002};
+	int32 toolVersion; // increment this for backward-compatible data changes (changes that the old code can read without problems)
+	int32 dataVersion; // change this for backward-incompatible changes
+	int32 sizeofDiskPhysics2LevelMesh;
+	int32 buildTime;
+	DataLinker::OffsetAndSize_t<DiskPhysics2LevelMesh_t> levelMeshes;
+	DataLinker::Offset_t<void> polysoup;
+	DataLinker::Offset_t<void> mopp;
+	DataLinker::Offset_t<void> displacementMesh;
+	DataLinker::Offset_t<void> staticProps; // serialized polysoup
+	DataLinker::OffsetAndSize_t<DiskPhysics2LevelMesh_t> levelWaterMeshes;
+	DataLinker::OffsetAndSize_t< DiskPhysics2LevelMesh_t > levelCModels; // the entities that belong to bsp, implementing features from old physics
+	DataLinker::OffsetAndSize_t< DataLinker::Offset_t<char> > levelStaticModels;
+	int32 nReserved2[8];
+};
+
+
 // contains the binary blob for each displacement surface's virtual hull
 struct dphysdisp_t
 {
 	DECLARE_BYTESWAP_DATADESC()
 	unsigned short numDisplacements;
 	//unsigned short dataSize[numDisplacements];
+};
+
+struct dprophull_t
+{
+	DECLARE_BYTESWAP_DATADESC();
+	int m_nVertCount;
+	int m_nVertStart;
+	int m_nSurfaceProp;
+	unsigned int m_nContents;
+};
+
+struct dprophulltris_t
+{
+	DECLARE_BYTESWAP_DATADESC();
+	int m_nIndexStart;
+	int m_nIndexCount;
+};
+
+struct dpropcollision_t
+{
+	DECLARE_BYTESWAP_DATADESC();
+	int m_nHullCount;
+	int m_nHullStart;
 };
 
 struct dvertex_t
@@ -626,7 +702,8 @@ public:
 #define DISPTRI_TAG_BUILDABLE		(1<<2)
 #define DISPTRI_FLAG_SURFPROP1		(1<<3)
 #define DISPTRI_FLAG_SURFPROP2		(1<<4)
-#define DISPTRI_TAG_REMOVE			(1<<5)
+#define DISPTRI_FLAG_SURFPROP3		(1<<5)
+#define DISPTRI_FLAG_SURFPROP4		(1<<6)
 
 class CDispTri
 {
@@ -634,6 +711,23 @@ public:
 	DECLARE_BYTESWAP_DATADESC();
 	unsigned short m_uiTags;		// Displacement triangle tags.
 };
+
+#define MAX_MULTIBLEND_CHANNELS		4
+
+class CDispMultiBlend
+{
+public:
+	DECLARE_BYTESWAP_DATADESC();
+
+	Vector4D	m_vMultiBlend;
+	Vector4D	m_vAlphaBlend;
+	Vector		m_vMultiBlendColors[ MAX_MULTIBLEND_CHANNELS ];
+};
+
+#define DISP_MULTIBLEND_PROP_THRESHOLD	2.0f
+
+#define DISP_INFO_FLAG_HAS_MULTIBLEND	0x40000000
+#define DISP_INFO_FLAG_MAGIC			0x80000000
 
 class ddispinfo_t
 {
@@ -663,7 +757,7 @@ public:
 	CDispCornerNeighbors	m_CornerNeighbors[4];	// Indexed by CORNER_ defines.
 
 	enum unnamed { ALLOWEDVERTS_SIZE = PAD_NUMBER( MAX_DISPVERTS, 32 ) / 32 };
-	unsigned long	m_AllowedVerts[ALLOWEDVERTS_SIZE];	// This is built based on the layout and sizes of our neighbors
+	unsigned int	m_AllowedVerts[ALLOWEDVERTS_SIZE];	// This is built based on the layout and sizes of our neighbors
 														// and tells us which vertices are allowed to be active.
 };
 
@@ -785,14 +879,25 @@ struct dfaceid_t
 	unsigned short	hammerfaceid;
 };
 
+struct dfacebrushlist_t
+{
+	DECLARE_BYTESWAP_DATADESC();
+	unsigned short	m_nFaceBrushCount;		// number of brushes that contributed a side to this face
+	unsigned short	m_nFaceBrushStart;		// first brush. NOTE: if m_nFaceBrushCount is 1, this is a brush index!
+};
 
-// NOTE: Only 7-bits stored!!!
+
+// NOTE: Only 7-bits stored on disk!!!
 #define LEAF_FLAGS_SKY			0x01		// This leaf has 3D sky in its PVS
 #define LEAF_FLAGS_RADIAL		0x02		// This leaf culled away some portals due to radial vis
 #define LEAF_FLAGS_SKY2D		0x04		// This leaf has 2D sky in its PVS
+#define LEAF_FLAGS_CONTAINS_DETAILOBJECTS 0x08				// this leaf has at least one detail object in it (set by loader).
 
 #if defined( _X360 )
 #pragma bitfield_order( push, lsb_to_msb )
+#elif defined( _PS3 )
+#pragma ms_struct on
+#pragma reverse_bitfields on
 #endif
 #pragma warning( disable:4201 )	// C4201: nonstandard extension used: nameless struct/union
 struct dleaf_version_0_t
@@ -851,6 +956,9 @@ struct dleaf_t
 #pragma warning( default:4201 )	// C4201: nonstandard extension used: nameless struct/union
 #if defined( _X360 )
 #pragma bitfield_order( pop )
+#elif defined( _PS3 )
+#pragma ms_struct off
+#pragma reverse_bitfields off
 #endif
 
 // each leaf contains N samples of the ambient lighting
@@ -880,7 +988,8 @@ struct dbrushside_t
 	unsigned short	planenum;		// facing out of the leaf
 	short			texinfo;
 	short			dispinfo;		// displacement info (BSPVERSION 7)
-	short			bevel;			// is the side a bevel plane? (BSPVERSION 7)
+	byte			bevel;			// is the side a bevel plane? (BSPVERSION 7)
+	byte			thin;			// is a thin side?
 };
 
 struct dbrush_t
@@ -963,7 +1072,31 @@ enum emittype_t
 
 // Flags for dworldlight_t::flags
 #define DWL_FLAGS_INAMBIENTCUBE		0x0001	// This says that the light was put into the per-leaf ambient cubes.
+#define DWL_FLAGS_CASTENTITYSHADOWS	0x0002	// This says that the light will cast shadows from entities
 
+// Old version of the worldlight struct, used for backward compatibility loading.
+struct dworldlight_version0_t
+{
+	DECLARE_BYTESWAP_DATADESC();
+	Vector		origin;
+	Vector		intensity;
+	Vector		normal;			// for surfaces and spotlights
+	int			cluster;
+	emittype_t	type;
+	int			style;
+	float		stopdot;		// start of penumbra for emit_spotlight
+	float		stopdot2;		// end of penumbra for emit_spotlight
+	float		exponent;		// 
+	float		radius;			// cutoff distance
+	// falloff for emit_spotlight + emit_point: 
+	// 1 / (constant_attn + linear_attn * dist + quadratic_attn * dist^2)
+	float		constant_attn;	
+	float		linear_attn;
+	float		quadratic_attn;
+	int			flags;			// Uses a combination of the DWL_FLAGS_ defines.
+	int			texinfo;		// 
+	int			owner;			// entity that this light it relative to
+};
 
 struct dworldlight_t
 {
@@ -971,6 +1104,7 @@ struct dworldlight_t
 	Vector		origin;
 	Vector		intensity;
 	Vector		normal;			// for surfaces and spotlights
+	Vector		shadow_cast_offset;	// gets added to the light origin when this light is used as a shadow caster (only if DWL_FLAGS_CASTENTITYSHADOWS flag is set)
 	int			cluster;
 	emittype_t	type;
     int			style;
@@ -1031,6 +1165,7 @@ public:
 
 inline void doverlay_t::SetFaceCount( unsigned short count )
 {
+	Assert( (count & OVERLAY_RENDER_ORDER_MASK) == 0 );
 	m_nFaceCountAndRenderOrder &= OVERLAY_RENDER_ORDER_MASK;
 	m_nFaceCountAndRenderOrder |= (count & ~OVERLAY_RENDER_ORDER_MASK);
 }
@@ -1042,6 +1177,7 @@ inline unsigned short doverlay_t::GetFaceCount() const
 
 inline void doverlay_t::SetRenderOrder( unsigned short order )
 {
+	Assert( order < OVERLAY_NUM_RENDER_ORDERS );
 	m_nFaceCountAndRenderOrder &= ~OVERLAY_RENDER_ORDER_MASK;
 	m_nFaceCountAndRenderOrder |= (order << (16 - OVERLAY_RENDER_ORDER_NUM_BITS));	// leave 2 bits for render order.
 }
@@ -1058,6 +1194,17 @@ struct doverlayfade_t
 
 	float flFadeDistMinSq;
 	float flFadeDistMaxSq;
+};
+
+
+struct doverlaysystemlevel_t
+{
+	DECLARE_BYTESWAP_DATADESC();
+
+	unsigned char nMinCPULevel;
+	unsigned char nMaxCPULevel;
+	unsigned char nMinGPULevel;
+	unsigned char nMaxGPULevel;
 };
 
 
@@ -1093,6 +1240,7 @@ public:
 
 inline void dwateroverlay_t::SetFaceCount( unsigned short count )
 {
+	Assert( (count & WATEROVERLAY_RENDER_ORDER_MASK) == 0 );
 	m_nFaceCountAndRenderOrder &= WATEROVERLAY_RENDER_ORDER_MASK;
 	m_nFaceCountAndRenderOrder |= (count & ~WATEROVERLAY_RENDER_ORDER_MASK);
 }
@@ -1104,6 +1252,7 @@ inline unsigned short dwateroverlay_t::GetFaceCount() const
 
 inline void dwateroverlay_t::SetRenderOrder( unsigned short order )
 {
+	Assert( order < WATEROVERLAY_NUM_RENDER_ORDERS );
 	m_nFaceCountAndRenderOrder &= ~WATEROVERLAY_RENDER_ORDER_MASK;
 	m_nFaceCountAndRenderOrder |= ( order << ( 16 - WATEROVERLAY_RENDER_ORDER_NUM_BITS ) );	// leave 2 bits for render order.
 }

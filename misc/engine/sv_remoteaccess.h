@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: Handles all the functions for implementing remote access to the engine
 //
@@ -44,6 +44,8 @@ public:
 
 	void UploadScreenshot( const char *pFileName );
 
+	void RemoteBug( const char *pBugPath );
+
 private:
 	void RespondString( ra_listener_id listener, int requestID, const char *pString );
 	void RequestValue( ra_listener_id listener, int requestID, const char *variable );
@@ -82,6 +84,7 @@ private:
 	ra_listener_id				m_NextListenerID;
 
 	int m_nScreenshotListener;
+	int m_nBugListener;
 	int m_iBytesSent;
 	int m_iBytesReceived;
 	ra_listener_id				m_AdminUIID;

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -40,7 +40,7 @@
 #include "tier0/icommandline.h"
 #include "dmxloader/dmxelement.h"
 #include "dmxloader/dmxloader.h"
-#include "bitmap/float_bm.h"
+#include "bitmap/floatbitmap.h"
 #include "tier2/tier2.h"
 #include "../utils/common/bsplib.h"
 #include "ibsppack.h"
@@ -50,7 +50,6 @@
 
 // putting this here so that it is replicated to the client.dll and materialsystem.dll
 ConVar dynamic_tonemap( "mat_dynamic_tonemapping", "1", FCVAR_CHEAT );
-ConVar building_cubemaps( "building_cubemaps", "0" );
 ConVar reload_materials( "reload_materials", "0" );
 ConVar r_DrawBeams( "r_DrawBeams", "1", FCVAR_CHEAT, "0=Off, 1=Normal, 2=Wireframe" );
 
@@ -61,7 +60,7 @@ static const char *facingName[6] = { "rt", "lf", "bk", "ft", "up", "dn" };
 //-----------------------------------------------------------------------------
 // Load, unload vtex 
 //-----------------------------------------------------------------------------
-IVTex* VTex_Load( CSysModule** pModule )
+static IVTex* VTex_Load( CSysModule** pModule )
 {
 	// load the vtex dll
 	IVTex *pIVTex = NULL;
@@ -83,7 +82,7 @@ IVTex* VTex_Load( CSysModule** pModule )
 	return pIVTex;
 }
 
-void VTex_Unload( CSysModule *pModule )
+static void VTex_Unload( CSysModule *pModule )
 {
 	FileSystem_UnloadModule( pModule );
 }
@@ -95,7 +94,7 @@ void VTex_Unload( CSysModule *pModule )
 static void TakeCubemapSnapshot( const Vector &origin, const char *pFileNameBase, int screenBufSize,
 						 int tgaSize, bool bPFM )
 {
-	if ( IsX360() )
+	if ( IsGameConsole() )
 		return;
 
 	if ( g_LostVideoMemory )
@@ -157,17 +156,17 @@ static void TakeCubemapSnapshot( const Vector &origin, const char *pFileNameBase
 	// Clearing just the viewport doesn't seem to work properly.
 	nFlags |= VIEW_CLEAR_FULL_TARGET;
 	
-	static float angle0[6]={0,0,0,0,-90,90};
-	static float angle1[6]={0,180,90,270,0,0};
-	static CubeMapFaceIndex_t face_idx[6]={CUBEMAP_FACE_RIGHT,CUBEMAP_FACE_LEFT,
-										CUBEMAP_FACE_BACK,CUBEMAP_FACE_FRONT,
-										CUBEMAP_FACE_UP,CUBEMAP_FACE_DOWN};
-	static int engine_cubemap_idx_to_fbm_idx[6]={4,3,0,2,5,1};
+	static float angle0[6]={0, 0, 0, 0, - 90, 90};
+	static float angle1[6]={0, 180, 90, 270, 0, 0};
+	static CubeMapFaceIndex_t face_idx[6]={CUBEMAP_FACE_RIGHT, CUBEMAP_FACE_LEFT,
+										CUBEMAP_FACE_BACK, CUBEMAP_FACE_FRONT,
+										CUBEMAP_FACE_UP, CUBEMAP_FACE_DOWN};
+	static int engine_cubemap_idx_to_fbm_idx[6]={4, 3, 0, 2, 5, 1};
 
 	if (bPFM)
 	{
 		FloatCubeMap_t Envmap(tgaSize, tgaSize);
-		for(int side=0;side<6;side++)
+		for( int side = 0; side < 6; side++ )
 		{
 			view.angles[0] = angle0[side];
 			view.angles[1] = angle1[side];
@@ -177,19 +176,18 @@ static void TakeCubemapSnapshot( const Vector &origin, const char *pFileNameBase
 			view.origin = origin;
 			if (g_pMaterialSystemHardwareConfig->GetHDRType() == HDR_TYPE_INTEGER)
 			{
-				FloatBitMap_t &hdr_map=Envmap.face_maps[engine_cubemap_idx_to_fbm_idx[side]];
-				hdr_map.Clear(0,0,0,1);
+				FloatBitMap_t &hdr_map = Envmap.face_maps[engine_cubemap_idx_to_fbm_idx[side]];
+				hdr_map.Clear( 0, 0, 0, 1 );
 				// we are going to need to render multiple exposures
-				float exposure=16.0;
-				bool bOverExposedTexels=true;
-				while( bOverExposedTexels && (exposure>0.05))
+				float exposure = 16.0;
+				bool bOverExposedTexels = true;
+				while( bOverExposedTexels && ( exposure > 0.05 ))
 				{
-					mat_force_tonemap_scale.SetValue(0.0f);
-					pRenderContext->ResetToneMappingScale( exposure );
+					mat_force_tonemap_scale.SetValue( exposure );
 					g_ClientDLL->RenderView( view, nFlags, 0 );
-					uint8 *pImage = new uint8[ screenBufSize * screenBufSize * 4 ];
-					uint8 *pImage1 = new uint8[ tgaSize * tgaSize * 4 ];
-					
+					uint8 * pImage = new uint8[ screenBufSize * screenBufSize * 4 ];
+					uint8 * pImage1 = new uint8[ tgaSize * tgaSize * 4 ];
+
 					// Get Bits from the material system
 					pRenderContext->ReadPixels( 0, 0, screenBufSize, screenBufSize,
 												 pImage, IMAGE_FORMAT_RGBA8888 );
@@ -204,33 +202,34 @@ static void TakeCubemapSnapshot( const Vector &origin, const char *pFileNameBase
 					info.m_flSrcGamma = 1.0f;
 					info.m_flDestGamma = 1.0f;
 
-					if( !ImageLoader::ResampleRGBA8888( info ) )
+					if( ! ImageLoader::ResampleRGBA8888( info ) )
 					{
 						Sys_Error( "Can't resample\n" );
 					}
-					FloatBitMap_t ldr_map(tgaSize,tgaSize);
-					for(int x1=0;x1<tgaSize;x1++)
-						for(int y1=0;y1<tgaSize;y1++)
-							for(int c=0;c<3;c++)
-								ldr_map.Pixel(x1,y1,c)=pImage1[c+4*(x1+tgaSize*y1)]*(1/255.0);
+					FloatBitMap_t ldr_map( tgaSize, tgaSize );
+					for( int x1 = 0; x1 < tgaSize; x1++ )
+						for( int y1 = 0; y1 < tgaSize; y1++ )
+							for( int c = 0; c < 3; c++ )
+								ldr_map.Pixel( x1, y1, 0, c ) = pImage1[c + 4 * ( x1 + tgaSize * y1 )]* ( 1 / 255.0 );
 					delete[] pImage;
 					delete[] pImage1;
-					ldr_map.RaiseToPower(2.2);				// gamma to linear
-					float scale=1.0/exposure;
-					bOverExposedTexels=false;
-					for(int x=0;x<hdr_map.Width;x++)
-						for(int y=0;y<hdr_map.Height;y++)
-							for(int c=0;c<3;c++)
+					ldr_map.RaiseToPower( 2.2 );				// gamma to linear
+					float scale = 1.0 / exposure;
+					bOverExposedTexels = false;
+					for( int x = 0; x < hdr_map.NumCols(); x++ )
+						for( int y = 0; y < hdr_map.NumRows(); y++ )
+							for( int c = 0; c < 3; c++ )
 							{
-								float texel=ldr_map.Pixel(x,y,c);
-								if (texel>0.98)
-									bOverExposedTexels=true;
-								texel*=scale;
-								hdr_map.Pixel(x,y,c)=max(hdr_map.Pixel(x,y,c),texel);
+								float texel = ldr_map.Pixel( x, y, 0, c );
+								if ( texel > 0.98 )
+									bOverExposedTexels = true;
+								texel *= scale;
+								hdr_map.Pixel( x, y, 0, c ) = MAX( hdr_map.Pixel( x, y, 0, c ), texel );
 							}
-					exposure*=0.75;
+					exposure *= 0.75;
 					materials->SwapBuffers();
 				}
+				mat_force_tonemap_scale.SetValue( 0.0f );
 				Q_snprintf( name, sizeof( name ), "%s%s%s", pFileNameBase, facingName[side],pExtension );
 //				hdr_map.WritePFM(name);
 			}
@@ -292,7 +291,7 @@ static void TakeCubemapSnapshot( const Vector &origin, const char *pFileNameBase
 //-----------------------------------------------------------------------------
 void* CubemapsFSFactory( const char *pName, int *pReturnCode )
 {
-	if ( IsX360() )
+	if ( IsGameConsole() )
 		return NULL;
 
 	if ( Q_stricmp( pName, FILESYSTEM_INTERFACE_VERSION ) == 0 )
@@ -302,14 +301,46 @@ void* CubemapsFSFactory( const char *pName, int *pReturnCode )
 }
 
 
+class CCubemapCollection
+{
+public:
+	bool Add( char const *szCubemapFile );
+	void Purge() { m_arrEntries.RemoveAll(); }
+
+protected:
+	CUtlSymbolTable m_arrEntries;
+};
+
+//
+// Adds a cubemap to the unique list of cubemaps,
+// returns true when added a new unique cubemap,
+// or false if the cubemap has already been added before.
+//
+bool CCubemapCollection::Add( char const *szCubemapFile )
+{
+	if ( m_arrEntries.Find( szCubemapFile ) != CUtlSymbol() )
+	{
+		return false;
+	}
+	else
+	{
+		m_arrEntries.AddString( szCubemapFile );
+		return true;
+	}
+}
+
+
 //-----------------------------------------------------------------------------
 // Generates a cubemap .vtf from .TGA snapshots
 //-----------------------------------------------------------------------------
 static void BuildSingleCubemap( const char *pVTFName, const Vector &vecOrigin,
-	int nSize, bool bHDR, const char *pGameDir, IVTex *ivt )
+	int nSize, bool bHDR, const char *pGameDir, IVTex *ivt, CCubemapCollection *pCC )
 {
-	if ( IsX360() )
+	if ( IsGameConsole() )
 		return;
+
+	if ( pCC && !pCC->Add( pVTFName ) )
+		return; // Already compiled
 
 	int nScreenBufSize = 4 * nSize;
 	TakeCubemapSnapshot( vecOrigin, pVTFName, nScreenBufSize, nSize, bHDR );
@@ -334,6 +365,7 @@ static void BuildSingleCubemap( const char *pVTFName, const Vector &vecOrigin,
 		char *argv[64];
 		int iArg = 0;
 		argv[iArg++] = "";
+		argv[iArg++] = "-oldcubepath";		// Process one file per face (new authoring path uses one file per cubemap)
 		argv[iArg++] = "-quiet";
 		argv[iArg++] = "-UseStandardError";	// These are only here for the -currently released- version of vtex.dll.
 		argv[iArg++] = "-WarningsAsErrors";
@@ -354,14 +386,14 @@ static void BuildSingleCubemap( const char *pVTFName, const Vector &vecOrigin,
 }
 
 
-#if !defined( SWDS )
+#if !defined( DEDICATED )
 
 //-----------------------------------------------------------------------------
 // Grab six views for environment mapping tests
 //-----------------------------------------------------------------------------
 CON_COMMAND( envmap, "" )
 {
-	if ( IsX360() )
+	if ( IsGameConsole() )
 		return;
 
 	char	base[ 256 ];
@@ -377,7 +409,7 @@ CON_COMMAND( envmap, "" )
 	}
 
 	int strLen = strlen( base ) + strlen( "cubemap_screenshots/" ) + 1;
-	char *str = ( char * )_alloca( strLen );
+	char *str = ( char * )stackalloc( strLen );
 	Q_snprintf( str, strLen, "cubemap_screenshots/%s", base );
 	g_pFileSystem->CreateDirHierarchy( "cubemap_screenshots", "DEFAULT_WRITE_PATH" );
 
@@ -426,6 +458,8 @@ static void WriteLightProbe( const char *pBasePath, const LightingState_t& state
 	{
 		CDmxElement* pLight = CreateDmxElement( "DmeElement" );
 		lights.AddToTail( pLight );
+
+		CDmxElementModifyScope modify( pLight );
 
 		const dworldlight_t &wl = *state.locallight[i];
 
@@ -486,7 +520,7 @@ CON_COMMAND( lightprobe,
 	"Creates a cubemap and a file indicating the local lighting in a subdirectory called 'materials/lightprobes'\n."
 	"The lightprobe command requires you specify a base file name.\n" )
 {
-	if ( IsX360() )
+	if ( IsGameConsole() )
 		return;
 
 	if ( args.ArgC() < 2 ) 
@@ -528,18 +562,18 @@ CON_COMMAND( lightprobe,
 		Q_snprintf( pTemp2, sizeof(pTemp2), "materialsrc/lightprobes/%s_hdr", args[1] );
 
 		GetModContentSubdirectory( pTemp2, pMaterialSrcPath, sizeof(pMaterialSrcPath) );
-		BuildSingleCubemap( pMaterialSrcPath, MainViewOrigin(), nTGASize, true, pGameDir, pIVTex );
+		BuildSingleCubemap( pMaterialSrcPath, MainViewOrigin(), nTGASize, true, pGameDir, pIVTex, NULL );
 	}
 
 	GetModContentSubdirectory( pTemp, pMaterialSrcPath, sizeof(pMaterialSrcPath) );
-	BuildSingleCubemap( pMaterialSrcPath, MainViewOrigin(), nTGASize, false, pGameDir, pIVTex );
+	BuildSingleCubemap( pMaterialSrcPath, MainViewOrigin(), nTGASize, false, pGameDir, pIVTex, NULL );
 
 	VTex_Unload( pModule );
 
 	// Get the lighting at the point
 	LightingState_t lightingState;
 	LightcacheGetDynamic_Stats stats;
-	LightcacheGetDynamic( MainViewOrigin(), lightingState, stats );
+	LightcacheGetDynamic( MainViewOrigin(), lightingState, stats, NULL );
 
 	Q_snprintf( pBasePath, sizeof(pBasePath), "materials/lightprobes/%s", args[1] );
 	WriteLightProbe( pBasePath, lightingState, bHDR );
@@ -548,47 +582,52 @@ CON_COMMAND( lightprobe,
 
 static bool LoadSrcVTFFiles( IVTFTexture *pSrcVTFTextures[6], const char *pSkyboxBaseName )
 {
-	if ( IsX360() )
-		return false;
-
-	int i;
-	for( i = 0; i < 6; i++ )
+	if ( IsGameConsole() )
 	{
-		// !!! FIXME: This needs to open the vmt (or some other method) to find the correct LDR or HDR set of skybox textures! Look in vbsp\cubemap.cpp!
-		char srcVTFFileName[1024];
-		Q_snprintf( srcVTFFileName, sizeof( srcVTFFileName ), "materials/skybox/%s%s.vtf", pSkyboxBaseName, facingName[i] );
-
-		CUtlBuffer buf;
-		if ( !g_pFileSystem->ReadFile( srcVTFFileName, NULL, buf ) )
-			return false;
-
-		pSrcVTFTextures[i] = CreateVTFTexture();
-		if (!pSrcVTFTextures[i]->Unserialize(buf))
-		{
-			Warning("*** Error unserializing skybox texture: %s\n", pSkyboxBaseName );
-			return false;
-		}
-
-		// NOTE: texture[0] is a side texture that could be 1/2 height, so allow this and also allow 4x4 faces
-		if ( ( ( pSrcVTFTextures[i]->Width() != pSrcVTFTextures[0]->Width() ) && ( pSrcVTFTextures[i]->Width() != 4 ) ) ||
-			 ( ( pSrcVTFTextures[i]->Height() != pSrcVTFTextures[0]->Height() ) && ( pSrcVTFTextures[i]->Height() != pSrcVTFTextures[0]->Height()*2 )  && ( pSrcVTFTextures[i]->Height() != 4 ) ) ||
-			 ( pSrcVTFTextures[i]->Flags() != pSrcVTFTextures[0]->Flags() ) )
-		{
-			Warning("*** Error: Skybox vtf files for %s weren't compiled with the same size texture and/or same flags!\n", pSkyboxBaseName );
-			return false;
-		}
+		return false;
 	}
+	else
+	{
+		int i;
+		for( i = 0; i < 6; i++ )
+		{
+			// !!! FIXME: This needs to open the vmt (or some other method) to find the correct LDR or HDR set of skybox textures! Look in vbsp\cubemap.cpp!
+			char srcVTFFileName[1024];
+			Q_snprintf( srcVTFFileName, sizeof( srcVTFFileName ), "materials/skybox/%s%s.vtf", pSkyboxBaseName, facingName[i] );
 
-	return true;
+			CUtlBuffer buf;
+			if ( !g_pFileSystem->ReadFile( srcVTFFileName, NULL, buf ) )
+				return false;
+
+			pSrcVTFTextures[i] = CreateVTFTexture();
+			if (!pSrcVTFTextures[i]->Unserialize(buf))
+			{
+				Warning("*** Error unserializing skybox texture: %s\n", pSkyboxBaseName );
+				return false;
+			}
+
+			// NOTE: texture[0] is a side texture that could be 1/2 height, so allow this and also allow 4x4 faces
+			if ( ( ( pSrcVTFTextures[i]->Width() != pSrcVTFTextures[0]->Width() ) && ( pSrcVTFTextures[i]->Width() != 4 ) ) ||
+				 ( ( pSrcVTFTextures[i]->Height() != pSrcVTFTextures[0]->Height() ) && ( pSrcVTFTextures[i]->Height() != pSrcVTFTextures[0]->Height()*2 )  && ( pSrcVTFTextures[i]->Height() != 4 ) ) ||
+				 ( pSrcVTFTextures[i]->Flags() != pSrcVTFTextures[0]->Flags() ) )
+			{
+				Warning("*** Error: Skybox vtf files for %s weren't compiled with the same size texture and/or same flags!\n", pSkyboxBaseName );
+				return false;
+			}
+		}
+
+		return true;
+	}
 }
 
 #define DEFAULT_CUBEMAP_SIZE 32
 
 void Cubemap_CreateDefaultCubemap( const char *pMapName, IBSPPack *iBSPPack )
 {
-	if ( IsX360() )
+	if ( IsGameConsole() )
 		return;
 
+#ifndef _GAMECONSOLE
 	// NOTE: This implementation depends on the fact that all VTF files contain
 	// all mipmap levels
 	ConVarRef skyboxBaseNameConVar( "sv_skyname" );
@@ -647,8 +686,8 @@ void Cubemap_CreateDefaultCubemap( const char *pMapName, IBSPPack *iBSPPack )
 				if ( ( pSrcVTFTextures[iFace]->Width() == 4 ) && ( pSrcVTFTextures[iFace]->Height() == 4 ) ) // If texture is 4x4 square
 				{
 					// Force mip level 2 to get the 1x1 face
-					pSrcBits = pSrcVTFTextures[iFace]->ImageData( iFrame, 0, 2 );
-					iSrcMipSize = pSrcVTFTextures[iFace]->ComputeMipSize( 2 );
+					unsigned char *pSrcBits = pSrcVTFTextures[iFace]->ImageData( iFrame, 0, 2 );
+					int iSrcMipSize = pSrcVTFTextures[iFace]->ComputeMipSize( 2 );
 
 					// Replicate 1x1 mip level across entire face
 					//memset( pDstBits, 0, iSize ); 
@@ -765,32 +804,38 @@ void Cubemap_CreateDefaultCubemap( const char *pMapName, IBSPPack *iBSPPack )
 		DestroyVTFTexture( pSrcVTFTextures[i] );
 	}
 	DestroyVTFTexture( pDstCubemap );
-}
+#endif
+}	
 
-static void AddSampleToBSPFile( bool bHDR, mcubemapsample_t *pSample, const char *matDir, IBSPPack *iBSPPack )
+static void AddSampleToBSPFile( bool bHDR, mcubemapsample_t *pSample, const char *matDir, IBSPPack *iBSPPack, CCubemapCollection *pCC )
 {
-	if ( IsX360() )
+	if ( IsGameConsole() )
 		return;
 
-	char textureName[MAX_PATH] = { 0 };
-	const char *pHDRExtension = "";
-	if( bHDR )
+	char inputTextureName[512] = {};
+	const char *pHDRSuffix = bHDR ? "_hdr" : "";
+	Q_snprintf( inputTextureName, sizeof( inputTextureName ), "%s/c%d_%d_%d%s.vtf", matDir, ( int )pSample->origin[0], 
+		( int )pSample->origin[1], ( int )pSample->origin[2], pHDRSuffix );
+
+	if ( pCC && !pCC->Add( inputTextureName ) )
+		return; // Already added earlier
+
+	char localPath[1024] = {};
+	if ( !g_pFileSystem->RelativePathToFullPath( inputTextureName, "DEFAULT_WRITE_PATH", localPath, sizeof( localPath ) ) || !*localPath )
 	{
-		pHDRExtension = ".hdr";
-	}
-	Q_snprintf( textureName, sizeof( textureName ), "%s/c%d_%d_%d%s.vtf", matDir, ( int )pSample->origin[0],
-	            ( int )pSample->origin[1], ( int )pSample->origin[2], pHDRExtension );
-	char localPath[MAX_PATH] = { 0 };
-	if ( !g_pFileSystem->RelativePathToFullPath_safe( textureName, "DEFAULT_WRITE_PATH", localPath ) || !*localPath )
-	{
-		Warning("vtex failed to compile cubemap!\n");
+		Warning( "vtex failed to compile cubemap '%s'!\n", inputTextureName );
 	}
 	else
 	{
+		// Rename the cubemap for storage in the BPS ( "blah_hdr.vtf" -> "blah.hdr.vtf" )
+		char outputTextureName[512];
+		const char *pHDRExtension = bHDR ? ".hdr" : "";
+		Q_snprintf( outputTextureName, sizeof( outputTextureName ), "%s/c%d_%d_%d%s.vtf", matDir, ( int )pSample->origin[0], 
+			( int )pSample->origin[1], ( int )pSample->origin[2], pHDRExtension );
 		Q_FixSlashes( localPath );
-		iBSPPack->AddFileToPack( textureName, localPath );
+		iBSPPack->AddFileToPack( outputTextureName, localPath );
 	}
-	g_pFileSystem->RemoveFile( textureName, "DEFAULT_WRITE_PATH" );
+	g_pFileSystem->RemoveFile( inputTextureName, "DEFAULT_WRITE_PATH" );
 }
 
 
@@ -814,6 +859,19 @@ static int nOldBloomDisable = 0;
 static int originaldrawMRMModelsVal = 1; 
 void R_BuildCubemapSamples_PreBuild()
 {
+	if ( IsGameConsole() )
+		return;
+
+	FORCE_DEFAULT_SPLITSCREEN_PLAYER_GUARD;
+
+	// Make sure that the file is writable before building cubemaps.
+	Assert( g_pFileSystem->FileExists( GetBaseLocalClient().m_szLevelName, "GAME" ) );
+	if( !g_pFileSystem->IsFileWritable( GetBaseLocalClient().m_szLevelName, "GAME" ) )
+	{
+		Warning( "%s is not writable!!!  Check it out before running buildcubemaps.\n", GetBaseLocalClient().m_szLevelName );
+		return;
+	}
+
 	// disable the mouse so that it won't be recentered all the bloody time.
 	ConVarRef cl_mouseenable( "cl_mouseenable" );
 	if( cl_mouseenable.IsValid() )
@@ -837,11 +895,11 @@ void R_BuildCubemapSamples_PreBuild()
 		mat_drawwater.SetValue( 0 );
 	} 
 	nSaveLightStyle = -1;
-	ConVarRef r_lightstyleRef( "r_lightstyle" );
-	if ( r_lightstyleRef.IsValid() )
+	ConVarRef r_lightstyle( "r_lightstyle" );
+	if ( r_lightstyle.IsValid() )
 	{
-		nSaveLightStyle = r_lightstyleRef.GetInt();
-		r_lightstyleRef.SetValue( 0 );
+		nSaveLightStyle = r_lightstyle.GetInt();
+		r_lightstyle.SetValue( 0 );
 		R_RedownloadAllLightmaps();
 	}
 
@@ -868,7 +926,11 @@ void R_BuildCubemapSamples_PreBuild()
 //		r_drawtranslucentrenderables->SetValue( 0 );
 //	}
 
-	building_cubemaps.SetValue( 1 );
+	static ConVarRef building_cubemaps( "building_cubemaps" );
+	if ( building_cubemaps.IsValid() )
+	{
+		building_cubemaps.SetValue( 1 );
+	}
 	
 	ConVarRef r_portalsopenall( "r_portalsopenall" );
 	if( r_portalsopenall.IsValid() )
@@ -924,10 +986,10 @@ void R_BuildCubemapSamples_PostBuild()
 		mat_fastspecular.SetValue( "0" );
 	}
 
-	ConVarRef r_lightstyleRef( "r_lightstyle" );
-	if( r_lightstyleRef.IsValid() )
+	ConVarRef r_lightstyle( "r_lightstyle" );
+	if( r_lightstyle.IsValid() )
 	{
-		r_lightstyleRef.SetValue( nSaveLightStyle );
+		r_lightstyle.SetValue( nSaveLightStyle );
 		R_RedownloadAllLightmaps();
 	}
 
@@ -954,22 +1016,27 @@ void R_BuildCubemapSamples_PostBuild()
 	{ 
 		drawMRMModelsCVar.SetValue( originaldrawMRMModelsVal );
 	}
-	building_cubemaps.SetValue( 0 );
+
+	static ConVarRef building_cubemaps( "building_cubemaps" );
+	if ( building_cubemaps.IsValid() )
+	{
+		building_cubemaps.SetValue( 0 );
+	}
 
 }
 void R_BuildCubemapSamples( int numIterations )
 {
-	if ( IsX360() )
+	if ( IsGameConsole() )
 		return;
 
 	// Make sure that the file is writable before building cubemaps.
-	Assert( g_pFileSystem->FileExists( cl.m_szLevelFileName, "GAME" ) );
-	if( !g_pFileSystem->IsFileWritable( cl.m_szLevelFileName, "GAME" ) )
+	Assert( g_pFileSystem->FileExists( GetBaseLocalClient().m_szLevelName, "GAME" ) );
+	if( !g_pFileSystem->IsFileWritable( GetBaseLocalClient().m_szLevelName, "GAME" ) )
 	{
-		Warning( "%s is not writable!!!  Check it out before running buildcubemaps.\n", cl.m_szLevelFileName );
+		Warning( "%s is not writable!!!  Check it out before running buildcubemaps.\n", GetBaseLocalClient().m_szLevelName );
 		return;
 	}
-
+	
 	R_BuildCubemapSamples_PreBuild();
 
 	int bounce;
@@ -984,16 +1051,35 @@ void R_BuildCubemapSamples( int numIterations )
 			mat_fastspecular.SetValue( "1" );
 		}
 		UpdateMaterialSystemConfig();
-
+		
+		char	mapName[ 256 ];
 		IClientEntity *world = entitylist->GetClientEntity( 0 );
 
-		if( !world || !world->GetModel() )
+		if( world && world->GetModel() )
+		{
+			const model_t *pModel = world->GetModel();
+			const char *pModelName = modelloader->GetName( pModel );
+			
+			// This handles the case where you have a map in a directory under maps. 
+			// We need to keep everything after "maps/" so it looks for the BSP file in the right place.
+			if ( Q_stristr( pModelName, "maps/" ) == pModelName ||
+				Q_stristr( pModelName, "maps\\" ) == pModelName )
+			{
+				Q_strncpy( mapName, &pModelName[5], sizeof( mapName ) );
+				Q_StripExtension( mapName, mapName, sizeof( mapName ) );
+			}
+			else
+			{
+				Q_FileBase( pModelName, mapName, sizeof( mapName ) );
+			}
+		}
+		else
 		{
 			ConDMsg( "R_BuildCubemapSamples: No map loaded!\n" );
 			R_BuildCubemapSamples_PostBuild(); 
 			return;
 		}
-
+		
 		int oldDrawMRMModelsVal = 1;
 		ConVarRef drawMRMModelsCVar( "r_drawothermodels" );
 		if( drawMRMModelsCVar.IsValid() )
@@ -1009,22 +1095,22 @@ void R_BuildCubemapSamples( int numIterations )
 		IVTex *ivt = VTex_Load( &pModule );
 		if ( !ivt )
 			return;
-
+		
 		char matDir[MAX_PATH];
-		Q_snprintf( matDir, sizeof(matDir), "materials/maps/%s", cl.m_szLevelBaseName );
+		Q_snprintf( matDir, sizeof(matDir), "materials/maps/%s", mapName );
 		g_pFileSystem->CreateDirHierarchy( matDir, "DEFAULT_WRITE_PATH" );
 
 		char pTemp[MAX_PATH];
-		Q_snprintf( pTemp, sizeof(pTemp), "materialsrc/maps/%s", cl.m_szLevelBaseName );
+		Q_snprintf( pTemp, sizeof(pTemp), "materialsrc/maps/%s", mapName );
 
 		char pMaterialSrcDir[MAX_PATH];
 		GetModContentSubdirectory( pTemp, pMaterialSrcDir, sizeof(pMaterialSrcDir) );
 
 		g_pFileSystem->CreateDirHierarchy( pMaterialSrcDir, NULL );
-
+		
 		char gameDir[MAX_OSPATH];
 		COM_GetGameDir( gameDir, sizeof( gameDir ) );
-
+		
 		model_t *pWorldModel = ( model_t *)world->GetModel();
 		int i;
 		for( i = 0; i < pWorldModel->brush.pShared->m_nCubemapSamples; i++ )
@@ -1037,12 +1123,14 @@ void R_BuildCubemapSamples( int numIterations )
 			{
 				Warning( "Cube map buffer size %d x %d is bigger than screen!\nRun at a higher resolution! or reduce your cubemap resolution (needs 4X)\n", screenBufSize, screenBufSize );
 				// BUGBUG: We'll leak DLLs/handles if we break out here, but this should be infrequent.
-				R_BuildCubemapSamples_PostBuild();
+				R_BuildCubemapSamples_PostBuild(); 
 				return;
 			}
 		}
 
 		bool bSupportsHDR = g_pMaterialSystemHardwareConfig->GetHDRType() != HDR_TYPE_NONE;
+
+		CCubemapCollection uniqueCubemaps;
 
 		for( i = 0; i < pWorldModel->brush.pShared->m_nCubemapSamples; i++ )
 		{
@@ -1050,13 +1138,15 @@ void R_BuildCubemapSamples( int numIterations )
 			mcubemapsample_t  *pCubemapSample = &pWorldModel->brush.pShared->m_pCubemapSamples[i];
 
 			char pVTFName[ MAX_PATH ];
-			Q_snprintf( pVTFName, sizeof( pVTFName ), "%s/c%d_%d_%d", pMaterialSrcDir, 
+			const char *pHDRSuffix = bSupportsHDR ? "_hdr" : "";
+			Q_snprintf( pVTFName, sizeof( pVTFName ), "%s/c%d_%d_%d%s", pMaterialSrcDir, 
 				( int )pCubemapSample->origin[0], ( int )pCubemapSample->origin[1],	
-				( int )pCubemapSample->origin[2] );
+				( int )pCubemapSample->origin[2], pHDRSuffix );
 
 			int nTgaSize = ( pCubemapSample->size == 0 ) ? mat_envmaptgasize.GetInt() : 1 << ( pCubemapSample->size-1 );
-			BuildSingleCubemap( pVTFName, pCubemapSample->origin, nTgaSize, bSupportsHDR, gameDir, ivt );
+			BuildSingleCubemap( pVTFName, pCubemapSample->origin, nTgaSize, bSupportsHDR, gameDir, ivt, &uniqueCubemaps );
 		}
+		uniqueCubemaps.Purge(); // Finished compiling cubemaps
 
 		ActivateLightSprites( bOldLightSpritesActive );
 
@@ -1076,41 +1166,46 @@ void R_BuildCubemapSamples( int numIterations )
 		if( !iBSPPack )
 		{
 			ConMsg( "Can't load bsppack.dll\n" );
-			R_BuildCubemapSamples_PostBuild();
+			R_BuildCubemapSamples_PostBuild(); 
 			return;
 		}
 
-		iBSPPack->SetHDRMode( g_pMaterialSystemHardwareConfig->GetHDRType() != HDR_TYPE_NONE );
+		iBSPPack->SetHDRMode( bSupportsHDR );
 
-		iBSPPack->LoadBSPFile( g_pFileSystem, cl.m_szLevelFileName );
-
+		char mapPath[1024];
+		Q_snprintf( mapPath, sizeof( mapPath ), "maps/%s.bsp", mapName );
+		iBSPPack->LoadBSPFile( g_pFileSystem, mapPath );
+		
 		// Cram the textures into the bsp.
-		Q_snprintf( matDir, sizeof(matDir), "materials/maps/%s", cl.m_szLevelBaseName );
+		Q_snprintf( matDir, sizeof(matDir), "materials/maps/%s", mapName );
+
 		for ( i=0 ; i < pWorldModel->brush.pShared->m_nCubemapSamples ; i++ )
 		{
 			mcubemapsample_t *pSample = &pWorldModel->brush.pShared->m_pCubemapSamples[i];
-			AddSampleToBSPFile( bSupportsHDR, pSample, matDir, iBSPPack );
+			AddSampleToBSPFile( bSupportsHDR, pSample, matDir, iBSPPack, &uniqueCubemaps );
 		}
-		Cubemap_CreateDefaultCubemap( cl.m_szLevelBaseName, iBSPPack );
+		uniqueCubemaps.Purge(); // Finished adding cubemaps to BSP file
 
-		// Resolve levelfilename to absolute to ensure we are writing the exact file we loaded and not preferentially to
-		// DEFAULT_WRITE_PATH
-		char szAbsFile[MAX_PATH] = { 0 };
-		g_pFullFileSystem->RelativePathToFullPath( cl.m_szLevelFileName, NULL, szAbsFile, sizeof( szAbsFile ) );
-		if ( !*szAbsFile )
-		{
-			ConMsg( "Failed to resolve absolute path of map: %s\n", cl.m_szLevelFileName );
-			R_BuildCubemapSamples_PostBuild();
-			return;
-		}
-		iBSPPack->WriteBSPFile( szAbsFile );
+		Cubemap_CreateDefaultCubemap( mapName, iBSPPack );
+		
+		iBSPPack->WriteBSPFile( mapPath );
 		iBSPPack->ClearPackFile();
 		FileSystem_UnloadModule( pModule );
 
-		Cbuf_AddText( "restart setpos\n" );
+		if ( Host_IsSinglePlayerGame() )
+		{
+			// use restart setpos to back to the same point in the same map
+			Cbuf_AddText( Cbuf_GetCurrentPlayer(), "restart setpos\n" );
+		}
+		else
+		{
+			// can't use restart in a multiplayer game, so just load the map in listen server mode.
+			// FIXME: Could add a setpos x y z setang a b c to end of the map command to reset the location, but l4d stomps it with a spawn point. 
+			Cbuf_AddText( Cbuf_GetCurrentPlayer(), va( "map %s\n", mapName ) );
+		}
 	}
 
-	R_BuildCubemapSamples_PostBuild();
+	R_BuildCubemapSamples_PostBuild(); 
 
 	UpdateMaterialSystemConfig();
 
@@ -1118,7 +1213,7 @@ void R_BuildCubemapSamples( int numIterations )
 	reload_materials.SetValue( 1 );
 }
 
-#if !defined( _X360 )
+#if !defined( DEDICATED ) && !defined( _GAMECONSOLE )
 CON_COMMAND( buildcubemaps, "Rebuild cubemaps." )
 {
 	extern void V_RenderVGuiOnly();
@@ -1141,6 +1236,6 @@ CON_COMMAND( buildcubemaps, "Rebuild cubemaps." )
 	}
 	Host_AllowQueuedMaterialSystem(bAllow);
 }
-#endif // SWDS
+#endif // DEDICATED
 
 #endif

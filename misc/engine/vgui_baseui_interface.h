@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: Defines the interface that the GameUI dll exports
 //
@@ -24,17 +24,24 @@
 //-----------------------------------------------------------------------------
 class IMatSystemSurface;
 class Color;
+class IGameUI;
+class KeyValues;
 struct InputEvent_t;
+FORWARD_DECLARE_HANDLE( InputContextHandle_t );
+
+IGameUI* GetGameUI( void );
 
 
 //-----------------------------------------------------------------------------
 // Global singleton interfaces related to VGUI 
 //-----------------------------------------------------------------------------
-extern IMatSystemSurface *g_pMatSystemSurface;
 
 // enumeration of level loading progress bar spots
 enum LevelLoadingProgress_e
 {
+	PROGRESS_INVALID = -2,
+	PROGRESS_DEFAULT = -1,
+
 	PROGRESS_NONE,
 	PROGRESS_CHANGELEVEL,
 	PROGRESS_SPAWNSERVER,
@@ -57,7 +64,9 @@ enum LevelLoadingProgress_e
 	PROGRESS_SENDCLIENTINFO,
 	PROGRESS_SENDSIGNONDATA,
 	PROGRESS_SIGNONSPAWN,
+	PROGRESS_CREATEENTITIES,
 	PROGRESS_FULLYCONNECTED,
+	PROGRESS_PRECACHELIGHTING,
 	PROGRESS_READYTOPLAY,
 	PROGRESS_HIGHESTITEM,	// must be last item in list
 };
@@ -98,48 +107,46 @@ public:
 	virtual void HideDebugSystem() = 0;
 
 	// level loading
-	virtual void OnLevelLoadingStarted() = 0;
+	virtual void OnLevelLoadingStarted( const char *levelName, bool bLocalServer ) = 0;
 	virtual void OnLevelLoadingFinished() = 0;
 	virtual void NotifyOfServerConnect(const char *game, int IP, int connectionPort, int queryPort) = 0;
 	virtual void NotifyOfServerDisconnect() = 0;
 	virtual void EnabledProgressBarForNextLoad() = 0;
-	virtual void UpdateProgressBar(LevelLoadingProgress_e progress) = 0;
+	virtual void UpdateProgressBar(LevelLoadingProgress_e progress, bool showDialog = true ) = 0;
 	virtual void UpdateCustomProgressBar( float progress, const wchar_t *desc ) = 0;
 	virtual void StartCustomProgress() = 0;
 	virtual void FinishCustomProgress() = 0;
+	virtual void UpdateSecondaryProgressBarWithFile( float progress, const char *pDesc, int nBytesTotal ) = 0;
+	virtual void UpdateSecondaryProgressBar( float progress, const wchar_t *desc ) = 0;
 	virtual void ShowErrorMessage() = 0;
+	virtual void HideLoadingPlaque() = 0;
+	virtual void StartLoadingScreenForCommand( const char* command ) = 0;
+	virtual void StartLoadingScreenForKeyValues( KeyValues* keyValues ) = 0;
 
 	// Should pause?
 	virtual bool ShouldPause() = 0;
 	virtual void SetGameDLLPanelsVisible( bool show ) = 0;
-	virtual void ShowNewGameDialog( int chapter ) = 0;
+	// Allows the level loading progress to show map-specific info
+	virtual void SetProgressLevelName( const char *levelName ) = 0;
 
 	virtual void Simulate() = 0;
 
 	virtual void SetNotAllowedToHideGameUI( bool bNotAllowedToHide ) = 0;
 	virtual void SetNotAllowedToShowGameUI( bool bNotAllowedToShow ) = 0;
 
-	// Xbox 360
-	virtual void SessionNotification( const int notification, const int param = 0 ) = 0;
-	virtual void SystemNotification( const int notification ) = 0;
-	virtual void ShowMessageDialog( const uint nType, vgui::Panel *pOwner = NULL ) = 0;
-	virtual void UpdatePlayerInfo( uint64 nPlayerId, const char *pName, int nTeam, byte cVoiceState, int nPlayersNeeded, bool bHost ) = 0;
-	virtual void SessionSearchResult( int searchIdx, void *pHostData, XSESSION_SEARCHRESULT *pResult, int ping ) = 0;
-	virtual void OnCreditsFinished( void ) = 0;
+	virtual void NeedConnectionProblemWaitScreen() = 0;
+	virtual void ShowPasswordUI( char const *pchCurrentPW ) = 0;
+	virtual void OnToolModeChanged( bool bGameMode ) = 0;
 
-	// Storage device validation:
-	//		returns true right away if storage device has been previously selected.
-	//		otherwise returns false and will set the variable pointed by pStorageDeviceValidated to 1
-	//				  once the storage device is selected by user.
-	virtual bool ValidateStorageDevice( int *pStorageDeviceValidated ) = 0;
+	virtual InputContextHandle_t GetGameUIInputContext() = 0;
 
-	virtual void ConfirmQuit( void ) = 0;
+	virtual bool IsPlayingFullScreenVideo() = 0;
 };
 
 // Purpose: singleton accessor
+#ifndef DEDICATED
 extern IEngineVGuiInternal *EngineVGui();
+#endif
 
-// Purpose: Play a sound
-void VGui_PlaySound(const char *pFileName);
 
 #endif // VGUI_BASEUI_INTERFACE_H

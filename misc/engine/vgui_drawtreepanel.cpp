@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -11,9 +11,6 @@
 #include <vgui_controls/EditablePanel.h>
 #include <vgui_controls/Frame.h>
 #include <vgui_controls/CheckButton.h>
-#include <vgui_controls/Button.h>
-#include <vgui/IInput.h>
-#include "../vgui2/src/VPanel.h"
 #include "convar.h"
 #include "tier0/vprof.h"
 #include "vgui_baseui_interface.h"
@@ -21,6 +18,8 @@
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
+
+using namespace vgui;
 
 bool g_bForceRefresh = true;
 
@@ -40,6 +39,7 @@ static ConVar vgui_drawtree_panelalpha( "vgui_drawtree_panelalpha", "0", 0, "Sho
 static ConVar vgui_drawtree_render_order( "vgui_drawtree_render_order", "0", 0, "List the vgui_drawtree panels in render order.", ChangeCallback_RefreshDrawTree );
 static ConVar vgui_drawtree_bounds( "vgui_drawtree_bounds", "0", 0, "Show panel bounds.", ChangeCallback_RefreshDrawTree );
 static ConVar vgui_drawtree_draw_selected( "vgui_drawtree_draw_selected", "0", 0, "Highlight the selected panel", ChangeCallback_RefreshDrawTree );
+static ConVar vgui_drawtree_scheme( "vgui_drawtree_scheme", "0", 0, "Show scheme file for each panel", ChangeCallback_RefreshDrawTree );
 extern ConVar vgui_drawfocus;
 
 
@@ -55,23 +55,23 @@ ConCommand vgui_drawtree_on( "+vgui_drawtree", vgui_drawtree_on_f );
 ConCommand vgui_drawtree_off( "-vgui_drawtree", vgui_drawtree_off_f );
 
 
-extern CUtlVector< vgui::VPANEL > g_FocusPanelList;
-extern vgui::VPanelHandle g_DrawTreeSelectedPanel;
+extern CUtlVector< VPANEL > g_FocusPanelList;
+extern VPanelHandle g_DrawTreeSelectedPanel;
 
 
-class CVGuiTree : public vgui::TreeView
+class CVGuiTree : public TreeView
 {
 public:
-	typedef vgui::TreeView BaseClass;	
+	typedef TreeView BaseClass;	
 
 
-	CVGuiTree( vgui::Panel *parent, const char *pName ) : 
+	CVGuiTree( Panel *parent, const char *pName ) : 
 		BaseClass( parent, pName )
 	{
 		
 	}
 
-	virtual void ApplySchemeSettings( vgui::IScheme *pScheme )
+	virtual void ApplySchemeSettings( IScheme *pScheme )
 	{
 		BaseClass::ApplySchemeSettings( pScheme );
 
@@ -82,12 +82,12 @@ public:
 };
 
 
-class CDrawTreeFrame : public vgui::Frame
+class CDrawTreeFrame : public Frame
 {
 public:
-	DECLARE_CLASS_SIMPLE( CDrawTreeFrame, vgui::Frame );
+	DECLARE_CLASS_SIMPLE( CDrawTreeFrame, Frame );
 	
-	CDrawTreeFrame( vgui::Panel *parent, const char *pName ) : 
+	CDrawTreeFrame( Panel *parent, const char *pName ) : 
 		BaseClass( parent, pName )
 	{
 		// Init the frame.
@@ -95,55 +95,53 @@ public:
 		SetMenuButtonVisible( false );
 		
 		// Create the tree control itself.
-		m_pTree = vgui::SETUP_PANEL( new CVGuiTree( this, "Tree view" ) );
+		m_pTree = SETUP_PANEL( new CVGuiTree( this, "Tree view" ) );
 		m_pTree->SetVisible( true );
 
 		// Init the buttons.
-		m_pShowVisible = vgui::SETUP_PANEL( new CConVarCheckButton( this, "show visible", "Show Visible" ) );
+		m_pShowVisible = SETUP_PANEL( new CConVarCheckButton( this, "show visible", "Show Visible" ) );
 		m_pShowVisible->SetVisible( true );
 		m_pShowVisible->SetConVar( &vgui_drawtree_visible );
 
-		m_pShowHidden = vgui::SETUP_PANEL( new CConVarCheckButton( this, "show hidden", "Show Hidden" ) );
+		m_pShowHidden = SETUP_PANEL( new CConVarCheckButton( this, "show hidden", "Show Hidden" ) );
 		m_pShowHidden->SetVisible( true );
 		m_pShowHidden->SetConVar( &vgui_drawtree_hidden );
 
-		m_pPopupsOnly = vgui::SETUP_PANEL( new CConVarCheckButton( this, "popups only", "Popups Only" ) );
+		m_pPopupsOnly = SETUP_PANEL( new CConVarCheckButton( this, "popups only", "Popups Only" ) );
 		m_pPopupsOnly->SetVisible( true );
 		m_pPopupsOnly->SetConVar( &vgui_drawtree_popupsonly );
 
-		m_pDrawFocus = vgui::SETUP_PANEL( new CConVarCheckButton( this, "draw focus", "Highlight MouseOver" ) );
+		m_pDrawFocus = SETUP_PANEL( new CConVarCheckButton( this, "draw focus", "Highlight MouseOver" ) );
 		m_pDrawFocus->SetVisible( true );
 		m_pDrawFocus->SetConVar( &vgui_drawfocus );
 
-		m_pFreeze = vgui::SETUP_PANEL( new CConVarCheckButton( this, "freeze option", "Freeze" ) );
+		m_pFreeze = SETUP_PANEL( new CConVarCheckButton( this, "freeze option", "Freeze" ) );
 		m_pFreeze->SetVisible( true );
 		m_pFreeze->SetConVar( &vgui_drawtree_freeze );
 
-		m_pShowPanelPtr = vgui::SETUP_PANEL( new CConVarCheckButton( this, "panel ptr option", "Show Addresses" ) );
+		m_pShowPanelPtr = SETUP_PANEL( new CConVarCheckButton( this, "panel ptr option", "Show Addresses" ) );
 		m_pShowPanelPtr->SetVisible( true );
 		m_pShowPanelPtr->SetConVar( &vgui_drawtree_panelptr );
 
-		m_pShowPanelAlpha = vgui::SETUP_PANEL( new CConVarCheckButton( this, "panel alpha option", "Show Alpha" ) );
+		m_pShowPanelAlpha = SETUP_PANEL( new CConVarCheckButton( this, "panel alpha option", "Show Alpha" ) );
 		m_pShowPanelAlpha->SetVisible( true );
 		m_pShowPanelAlpha->SetConVar( &vgui_drawtree_panelalpha );
 
-		m_pRenderOrder = vgui::SETUP_PANEL( new CConVarCheckButton( this, "render order option", "In Render Order" ) );
+		m_pRenderOrder = SETUP_PANEL( new CConVarCheckButton( this, "render order option", "In Render Order" ) );
 		m_pRenderOrder->SetVisible( true );
 		m_pRenderOrder->SetConVar( &vgui_drawtree_render_order );
 
-		m_pShowBounds = vgui::SETUP_PANEL( new CConVarCheckButton( this, "show panel bounds", "Show Panel Bounds" ) );
+		m_pShowBounds = SETUP_PANEL( new CConVarCheckButton( this, "show panel bounds", "Show Panel Bounds" ) );
 		m_pShowBounds->SetVisible( true );
 		m_pShowBounds->SetConVar( &vgui_drawtree_bounds );
 
-		m_pHighlightSelected = vgui::SETUP_PANEL( new CConVarCheckButton( this, "highlight selected", "Highlight Selected" ) );
+		m_pHighlightSelected = SETUP_PANEL( new CConVarCheckButton( this, "highlight selected", "Highlight Selected" ) );
 		m_pHighlightSelected->SetVisible( true );
 		m_pHighlightSelected->SetConVar( &vgui_drawtree_draw_selected );
 
-		m_pPerformLayoutBtn = vgui::SETUP_PANEL( new vgui::Button( this, "performlayout", "Perform Layout (Highlighted)", this, "performlayout" ) );
-		m_pPerformLayoutBtn->SetVisible( true );
-		
-		m_pReloadSchemeBtn = vgui::SETUP_PANEL( new vgui::Button( this, "reloadscheme", "Reload Scheme (Highlighted)", this, "reloadscheme" ) );
-		m_pReloadSchemeBtn->SetVisible( true );
+		m_pShowScheme = SETUP_PANEL( new CConVarCheckButton( this, "show scheme", "Show Scheme" ) );
+		m_pShowScheme->SetVisible( true );
+		m_pShowScheme->SetConVar( &vgui_drawtree_scheme );
 		
 		int r,g,b,a;
 		GetBgColor().GetColor( r, g, b, a );
@@ -182,6 +180,12 @@ public:
 		m_pShowBounds->SetWide( w/2 );
 		yOffset += m_pShowBounds->GetTall();
 
+		m_pShowScheme->SetPos( x, yOffset );
+		m_pShowScheme->SetWide( w/2 );
+		yOffset += m_pShowScheme->GetTall();
+
+		m_pTree->SetBounds( x, yOffset, w, t - (yOffset - y) );
+
 		// Next column..
 		yOffset = y;
 
@@ -204,43 +208,6 @@ public:
 		m_pHighlightSelected->SetPos( x + w/2, yOffset );
 		m_pHighlightSelected->SetWide( w/2 );
 		yOffset += m_pHighlightSelected->GetTall();
-
-		// buttons
-
-		m_pPerformLayoutBtn->SetPos( x , yOffset );
-		m_pPerformLayoutBtn->SizeToContents();
-		m_pPerformLayoutBtn->SetWide( w );
-		yOffset += m_pPerformLayoutBtn->GetTall();
-
-		m_pReloadSchemeBtn->SetPos( x , yOffset );
-		m_pReloadSchemeBtn->SizeToContents();
-		m_pReloadSchemeBtn->SetWide( w );
-		yOffset += m_pReloadSchemeBtn->GetTall();
-
-		// the tree control
-		m_pTree->SetBounds( x, yOffset, w, t - (yOffset - y) );
-	}
-
-	virtual void OnCommand( const char *command )
-	{
-		if ( !Q_stricmp( command, "performlayout" ) )
-		{
-			if ( g_DrawTreeSelectedPanel )
-			{
-				vgui::ipanel()->SendMessage( g_DrawTreeSelectedPanel, new KeyValues("Command", "command", "performlayout"), GetVPanel() );
-			}
-		}
-		else if ( !Q_stricmp( command, "reloadscheme" ) )
-		{
-			if ( g_DrawTreeSelectedPanel )
-			{
-				vgui::ipanel()->SendMessage( g_DrawTreeSelectedPanel, new KeyValues("Command", "command", "reloadscheme"), GetVPanel() );
-			}
-		}
-		else
-		{
-			BaseClass::OnCommand( command );
-		}
 	}
 
 	MESSAGE_FUNC( OnItemSelected, "TreeViewItemSelected" )
@@ -268,7 +235,7 @@ public:
 
 			if ( data )
 			{
-				g_DrawTreeSelectedPanel = (data) ? (vgui::VPANEL)data->GetInt( "PanelPtr", 0 ) : 0;
+				g_DrawTreeSelectedPanel = (data) ? (VPANEL)data->GetInt( "PanelPtr", 0 ) : 0;
 			}
 			else
 			{
@@ -286,24 +253,6 @@ public:
 		// you will sometimes end up on a different panel or on garbage.
 	}
 
-	virtual void OnThink() OVERRIDE
-	{
-		BaseClass::OnThink();
-
-		vgui::VPANEL focus = 0;
-		if ( vgui::input() )
-		{
-			focus = vgui::input()->GetFocus();
-		}
-
-		MoveToFront();
-
-		if ( vgui::input() && focus )
-		{
-			OnRequestFocus(focus, NULL);
-		}
-	}
-
 public:
 	CVGuiTree *m_pTree;	
 	CConVarCheckButton *m_pShowVisible;
@@ -316,8 +265,7 @@ public:
 	CConVarCheckButton *m_pDrawFocus;
 	CConVarCheckButton *m_pShowBounds;
 	CConVarCheckButton *m_pHighlightSelected;
-	vgui::Button	   *m_pPerformLayoutBtn;
-	vgui::Button	   *m_pReloadSchemeBtn;
+	CConVarCheckButton *m_pShowScheme;
 };
 
 
@@ -325,14 +273,14 @@ CDrawTreeFrame *g_pDrawTreeFrame = 0;
 
 
 void VGui_RecursivePrintTree( 
-	vgui::VPANEL current, 
+	VPANEL current, 
 	KeyValues *pCurrentParent,
 	int popupDepthCounter )
 {
 	if ( !current )
 		return;
 
-	vgui::IPanel *ipanel = vgui::ipanel();
+	IPanel *ipanel = vgui::ipanel();
 
 	if ( !vgui_drawtree_visible.GetInt() && ipanel->IsVisible( current ) )
 		return;
@@ -345,53 +293,71 @@ void VGui_RecursivePrintTree(
 	KeyValues *pVal = pCurrentParent->CreateNewKey();
 		
 	// Bind data to pVal.
-	char name[1024];
+	CUtlString name;
+
 	const char *pInputName = ipanel->GetName( current );
-	if ( pInputName && pInputName[0] != 0 )
-		Q_snprintf( name, sizeof( name ), "%s", pInputName );
-	else
-		Q_snprintf( name, sizeof( name ), "%s", "(no name)" );
+
+	name = ( pInputName && *pInputName ) ? pInputName : "(no name)";
 
 	if ( ipanel->IsMouseInputEnabled( current ) )
 	{
-		Q_strncat( name, ", +m", sizeof( name ), COPY_ALL_CHARACTERS );
+		name += ", +m";
 	}
 
 	if ( ipanel->IsKeyBoardInputEnabled( current ) )
 	{
-		Q_strncat( name, ", +k", sizeof( name ), COPY_ALL_CHARACTERS );
+		name += ", +k";
 	}
 
-	if ( vgui_drawtree_bounds.GetBool() )
+	int dtb = vgui_drawtree_bounds.GetInt();
+	if ( dtb > 0 )
 	{
-		int x, y, w, h;
-		vgui::ipanel()->GetPos( current, x, y );
-		vgui::ipanel()->GetSize( current, w, h );
-		char b[ 128 ];
-		Q_snprintf( b, sizeof( b ), "[%-4i %-4i %-4i %-4i]", x, y, w, h );
+		name += ", ";
 
-		Q_strncat( name, ", ", sizeof( name ), COPY_ALL_CHARACTERS );
-		Q_strncat( name, b, sizeof( name ), COPY_ALL_CHARACTERS );
+		int x, y, w, h;
+		ipanel->GetSize( current, w, h );
+		if ( dtb == 1 )
+		{
+			ipanel->GetPos( current, x, y );
+			name += CFmtStr( "[%-4i %-4i %-4i %-4i]", x, y, w, h );
+		}
+		else
+		{
+			ipanel->GetAbsPos( current, x, y );
+			name += CFmtStr( "abs [%d][%-4i %-4i %-4i %-4i]", ipanel->GetMessageContextId( current ), x, y, w, h );
+		}
 	}
 
-	char str[1024];
-	if ( vgui_drawtree_panelptr.GetInt() )
-		Q_snprintf( str, sizeof( str ), "%s - [0x%x]", name, current );
-	else if (vgui_drawtree_panelalpha.GetInt() )
+	if ( vgui_drawtree_panelptr.GetBool() )
+	{
+		name += CFmtStr( " - [0x%x]", current );
+	}
+	
+	if (vgui_drawtree_panelalpha.GetBool() )
 	{
 		KeyValues *kv = new KeyValues("alpha");
-		vgui::ipanel()->RequestInfo(current, kv);
-		Q_snprintf( str, sizeof( str ), "%s - [%d]", name, kv->GetInt("alpha") );
+		ipanel->RequestInfo( current, kv );
+		name += CFmtStr( " - [%d]", kv->GetInt("alpha") );
 		kv->deleteThis();
 	}
-	else
-		Q_snprintf( str, sizeof( str ), "%s", name );
 
-	pVal->SetString( "Text", str );
+	if ( vgui_drawtree_scheme.GetBool() )
+	{
+		HScheme hScheme = ipanel->GetScheme( current );
+		if ( hScheme )
+		{
+			IScheme *pScheme = scheme()->GetIScheme( hScheme );
+			if ( pScheme )
+			{
+				name += CFmtStr( " [%s - %s]", pScheme->GetName(), pScheme->GetFileName() );
+			}
+		}
+	}
+
+	pVal->SetString( "Text", name.String() );
 	pVal->SetInt( "PanelPtr", current );
 
 	pNewParent = pVal;
-
 	
 	// Don't recurse past the tree itself because the tree control uses a panel for each
 	// panel inside itself, and it'll infinitely create panels.
@@ -402,19 +368,19 @@ void VGui_RecursivePrintTree(
 	int count = ipanel->GetChildCount( current );
 	for ( int i = 0; i < count ; i++ )
 	{
-		vgui::VPANEL panel = ipanel->GetChild( current, i );
+		VPANEL panel = ipanel->GetChild( current, i );
 		VGui_RecursivePrintTree( panel, pNewParent, popupDepthCounter-1 );
 	}
 }
 
 
 bool UpdateItemState(
-	vgui::TreeView *pTree, 
+	TreeView *pTree, 
 	int iChildItemId, 
 	KeyValues *pSub )
 {
 	bool bRet = false;
-	vgui::IPanel *ipanel = vgui::ipanel();
+	IPanel *ipanel = vgui::ipanel();
 
 	KeyValues *pItemData = pTree->GetItemData( iChildItemId );
 	if ( pItemData->GetInt( "PanelPtr" ) != pSub->GetInt( "PanelPtr" ) ||
@@ -425,7 +391,7 @@ bool UpdateItemState(
 	}
 
 	// Ok, this is a new panel.
-	vgui::VPANEL vPanel = pSub->GetInt( "PanelPtr" );
+	VPANEL vPanel = pSub->GetInt( "PanelPtr" );
 
 	int iBaseColor[3] = { 255, 255, 255 };
 	if ( ipanel->IsPopup( vPanel ) )
@@ -450,7 +416,7 @@ bool UpdateItemState(
 
 
 void IncrementalUpdateTree( 
-	vgui::TreeView *pTree, 
+	TreeView *pTree, 
 	KeyValues *pValues )
 {
 	if ( !g_bForceRefresh && vgui_drawtree_freeze.GetInt() )
@@ -470,7 +436,7 @@ void IncrementalUpdateTree(
 }
 
 
-bool WillPanelBeVisible( vgui::VPANEL hPanel )
+bool WillPanelBeVisible( VPANEL hPanel )
 {
 	while ( hPanel )
 	{
@@ -486,10 +452,10 @@ bool WillPanelBeVisible( vgui::VPANEL hPanel )
 void VGui_AddPopupsToKeyValues( KeyValues *pCurrentParent )
 {
 	// 'twould be nice if we could get the Panel* from the VPANEL, but we can't.
-	int count = vgui::surface()->GetPopupCount();
+	int count = surface()->GetPopupCount();
 	for ( int i=0; i < count; i++ )
 	{
-		vgui::VPANEL vPopup = vgui::surface()->GetPopup( i );
+		VPANEL vPopup = surface()->GetPopup( i );
 		if ( vgui_drawtree_hidden.GetInt() || WillPanelBeVisible( vPopup ) )
 		{
 			VGui_RecursivePrintTree( 
@@ -508,7 +474,7 @@ void VGui_FillKeyValues( KeyValues *pCurrentParent )
 
 	// Figure out the root panel to start at. 
 	// If they specified a name for a root panel, then use that one.
-	vgui::VPANEL hBase = vgui::surface()->GetEmbeddedPanel();
+	VPANEL hBase = surface()->GetEmbeddedPanel();
 
 	if ( vgui_drawtree_popupsonly.GetInt() )
 	{
@@ -537,7 +503,7 @@ void VGui_DrawHierarchy( void )
 {
 	VPROF( "VGui_DrawHierarchy" );
 
-	if ( IsX360() )
+	if ( IsGameConsole() )
 		return;
 
 	if ( vgui_drawtree.GetInt() <= 0 )
@@ -562,11 +528,11 @@ void VGui_DrawHierarchy( void )
 }
 
 
-void VGui_CreateDrawTreePanel( vgui::Panel *parent )
+void VGui_CreateDrawTreePanel( Panel *parent )
 {
 	int widths = 300;
 	
-	g_pDrawTreeFrame = vgui::SETUP_PANEL( new CDrawTreeFrame( parent, "DrawTreeFrame" ) );
+	g_pDrawTreeFrame = SETUP_PANEL( new CDrawTreeFrame( parent, "DrawTreeFrame" ) );
 	g_pDrawTreeFrame->SetVisible( false );
 	g_pDrawTreeFrame->SetBounds( parent->GetWide() - widths, 0, widths, parent->GetTall() - 10 );
 	

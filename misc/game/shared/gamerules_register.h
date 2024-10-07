@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -20,11 +20,6 @@
 #define REGISTER_GAMERULES_CLASS( className ) \
 	void MAKE_NAME_UNIQUE(__CreateGameRules_)##className() { new className; } \
 	static CGameRulesRegister __g_GameRulesRegister_##className( #className, MAKE_NAME_UNIQUE(__CreateGameRules_)##className );
-#endif
-
-#ifdef _XBOX
-// force symbol expansion
-#define REGISTER_GAMERULES_CLASS2( className ) REGISTER_GAMERULES_CLASS( className )
 #endif
 
 class CGameRulesRegister
@@ -54,7 +49,7 @@ private:
 
 	// The client forwards this call so the game rules manager can create the appropriate
 	// game rules class.
-	void InstallStringTableCallback_GameRules();
+	void InstallStringTableCallback_GameRules( const char *tableName );
 
 #else
 

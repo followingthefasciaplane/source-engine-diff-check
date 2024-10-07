@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -38,7 +38,7 @@ public:
 class CDustEffect : public CParticleEffect
 {
 public:
-	CDustEffect( const char *pDebugName ) : CParticleEffect( pDebugName ) {}
+	explicit CDustEffect( const char *pDebugName ) : CParticleEffect( pDebugName ) {}
 
 	virtual void RenderParticles( CParticleRenderIterator *pIterator );
 	virtual void SimulateParticles( CParticleSimulateIterator *pIterator );
@@ -90,7 +90,7 @@ public:
 	int				m_DistMax;
 
 	float			m_FallSpeed;	// extra 'gravity'
-
+	bool			m_bAffectedByWind;
 
 public:
 

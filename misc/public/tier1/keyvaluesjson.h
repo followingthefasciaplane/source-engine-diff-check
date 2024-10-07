@@ -11,7 +11,7 @@
 #pragma once
 #endif
 
-#include "KeyValues.h"
+#include "keyvalues.h"
 
 class CUtlBuffer;
 

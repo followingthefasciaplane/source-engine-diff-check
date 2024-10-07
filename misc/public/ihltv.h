@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -18,7 +18,11 @@
 class IServer;
 class IHLTVDirector;
 class IGameEvent;
+class CGameInfo;
 struct netadr_s;
+
+#define HLTV_REPLAY_ENABLED 1
+
 
 //-----------------------------------------------------------------------------
 // Interface the HLTV module exposes to the engine
@@ -28,6 +32,7 @@ struct netadr_s;
 class IHLTVServer : public IBaseInterface
 {
 public:
+
 	virtual	~IHLTVServer() {}
 
 	virtual	IServer	*GetBaseServer( void ) = 0; // get HLTV base server interface
@@ -43,6 +48,11 @@ public:
 	virtual bool	IsDemoPlayback( void ) = 0; // true if this is a HLTV demo
 
 	virtual void	BroadcastEvent(IGameEvent *event) = 0; // send a director command to all specs
+
+	virtual bool		IsRecording() = 0;
+	virtual const char* GetRecordingDemoFilename() = 0;
+	virtual void		StartAutoRecording() = 0;
+	virtual void		StopRecording( const CGameInfo *pGameInfo = NULL ) = 0;
 };
 
 #endif

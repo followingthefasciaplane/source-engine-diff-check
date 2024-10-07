@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2003, Valve LLC, All rights reserved. ============
 //
 // Purpose: 
 //
@@ -12,17 +12,38 @@
 
 #include "econ_item_view.h"
 #include "game_item_schema.h"
+#include "game/shared/econ/iecon_item_system.h"
 
 //==================================================================================
 // ITEM SYSTEM
 //==================================================================================
 
+#define INVALID_ITEM_INDEX			-1
+
 #define GC_MOTD_CACHE_FILE			"cfg/motd_entries.txt"
 
+// The item system parses and creates a list of item classes from the item_classes.txt file.
+
 //-----------------------------------------------------------------------------
-// Purpose:
+// Criteria used by the system to generate a random attribute
+struct randomattributecriteria_t
+{
+	randomattributecriteria_t()
+	{
+		entityType = AE_MAX_TYPES;
+		iAttributeLevel = 0;
+		pItem = NULL;
+	}
+
+	entityquality_t		entityType;
+	int					iAttributeLevel;
+	CEconItemView		*pItem;
+};
+
 //-----------------------------------------------------------------------------
-class CEconItemSystem
+// Purpose: Container for all the static item definitions in the item data files
+//-----------------------------------------------------------------------------
+class CEconItemSystem : public IEconItemSystem
 {
 public:
 	CEconItemSystem( void );
@@ -33,32 +54,38 @@ public:
 	void		Shutdown( void );
 
 	// Return the static item data for the specified item index
-	GameItemDefinition_t *GetStaticDataForItemByDefIndex( item_definition_index_t iItemDefIndex ) 
+	const GameItemDefinition_t *GetStaticDataForItemByDefIndex( item_definition_index_t iItemDefIndex ) const
 	{
-		return (GameItemDefinition_t *)m_itemSchema.GetItemDefinition( iItemDefIndex );
+		return static_cast< const GameItemDefinition_t* >( m_itemSchema.GetItemDefinition( iItemDefIndex ) );
 	}
-	CEconItemDefinition *GetStaticDataForItemByName( const char *pszDefName ) 
+	const CEconItemDefinition *GetStaticDataForItemByName( const char *pszDefName ) const 
 	{ 
 		return m_itemSchema.GetItemDefinitionByName( pszDefName );
 	}
-	CEconItemAttributeDefinition *GetStaticDataForAttributeByDefIndex( attrib_definition_index_t iAttribDefinitionIndex ) 
+	const CEconItemAttributeDefinition *GetStaticDataForAttributeByDefIndex( attrib_definition_index_t iAttribDefinitionIndex ) const
 	{ 
 		return m_itemSchema.GetAttributeDefinition( iAttribDefinitionIndex );
 	}
-	CEconItemAttributeDefinition *GetStaticDataForAttributeByName( const char *pszDefName ) 
+	const CEconItemAttributeDefinition *GetStaticDataForAttributeByName( const char *pszDefName ) const
 	{ 
 		return m_itemSchema.GetAttributeDefinitionByName( pszDefName );
 	}
 
 	// Select and return a random item's definition index matching the specified criteria
-	item_definition_index_t	GenerateRandomItem( CItemSelectionCriteria *pCriteria, entityquality_t *outEntityQuality );
+	int	GenerateRandomItem( CItemSelectionCriteria *pCriteria, entityquality_t *outEntityQuality );
 
 	// Select and return the base item definition index for a class's load-out slot 
 	// Note: baseitemcriteria_t is game-specific and/or may not exist!
-	virtual item_definition_index_t GenerateBaseItem( struct baseitemcriteria_t *pCriteria ) { return INVALID_ITEM_DEF_INDEX; }
+	virtual int GenerateBaseItem( struct baseitemcriteria_t *pCriteria ) { return INVALID_ITEM_INDEX; }
 
 	// Return a random item quality
 	entityquality_t GetRandomQualityForItem( bool bPreventUnique = false );
+
+	// Generate an attribute of the specified definition
+	CEconItemAttribute *GenerateAttribute( attrib_definition_index_t iAttributeDefinition, float flValue );
+
+	// Generate an attribute by name. Used for debugging.
+	CEconItemAttribute *GenerateAttribute( const char *pszName, float flValue );
 
 	// Decrypt the item files and return the keyvalue
 	bool	DecryptItemFiles( KeyValues *pKV, const char *pName );		
@@ -69,6 +96,12 @@ public:
 	void		ReloadWhitelist( void );
 
 	void		ResetAttribStringCache( void );
+
+	// Public interface.
+	virtual IEconItemSchema* GetItemSchemaInterface() { return GetItemSchema(); }
+	virtual void RequestReservedItemDefinitionList() {};
+	virtual void ReserveItemDefinition( uint32 nDefIndex, const char* pszUserName ) {};
+	virtual void ReleaseItemDefReservation( uint32 nDefIndex, const char* pszUserName ) {};
 
 protected:
 	// Read the specified item schema file. Init the item schema with the contents
@@ -82,5 +115,24 @@ private:
 };
 
 CEconItemSystem *ItemSystem( void );
+
+// CGCFetchWebResource
+class CGCFetchWebResource : public GCSDK::CGCClientJob
+{
+public:
+	CGCFetchWebResource( GCSDK::CGCClient *pClient, CUtlString strName, CUtlString strURL, bool bForceSkipCache = false, KeyValues *pkvGETParams = NULL );
+	virtual ~CGCFetchWebResource();
+
+	bool BYieldingRunGCJob();
+	void OnHTTPCompleted( HTTPRequestCompleted_t *arg, bool bFailed );
+
+private:
+	CUtlString m_strName;
+	CUtlString m_strURL;
+	bool m_bForceSkipCache;
+	bool m_bHTTPCompleted;
+	KeyValues *m_pkvGETParams;
+	CCallResult< CGCFetchWebResource, HTTPRequestCompleted_t > callback;
+};
 
 #endif // ECON_ITEM_SYSTEM_H

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -13,6 +13,93 @@
 #include "tier1/utlbuffer.h"
 #include "tier1/tier1.h"
 
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
+
+class CProcess;
+
+class CProcessPipeRead : public IPipeRead
+{
+// IPipeRead overrides.
+public:
+	virtual int GetNumBytesAvailable();
+	virtual void ReadAvailable( CUtlString &sStr, int nMaxBytes );
+	virtual void ReadAvailable( CUtlBuffer *pOutBuffer, int nMaxBytes );
+	virtual void Read( CUtlString &sStr, int nMaxBytes );
+	virtual void ReadLine( CUtlString &sStr );
+
+public:
+	bool IsValid() const;
+
+	// This reads in whatever data is available in the pipe and caches it.
+	void CacheOutput();
+
+	// Returns true when there is data in m_hRead, false otherwise.
+	bool WaitForOutput();
+
+	int GetActualProcessOutputSize();
+	int GetProcessOutput( void *pBuf, int nBytes );
+	int GetActualProcessOutput( void *pBuf, int nBufLen );
+
+public:
+	CProcess *m_pProcess;
+
+	HANDLE m_hRead;	// Comes from ProcessInfo_t::m_hChildStdoutRd or m_hChildStderrRd.
+	
+	// This is stored if they wait for the process to exit. Even though they haven't read the data yet,
+	// they can still call ReadAvailable() or GetNumBytesAvailable() on stdio after the process was terminated.
+	CUtlBuffer m_CachedOutput;
+};
+
+
+struct ProcessInfo_t
+{
+	HANDLE m_hChildStdinRd;
+	HANDLE m_hChildStdinWr;
+	
+	HANDLE m_hChildStdoutRd;
+	HANDLE m_hChildStdoutWr;
+
+	HANDLE m_hChildStderrRd;
+	HANDLE m_hChildStderrWr;
+
+	HANDLE m_hProcess;
+	CUtlString m_CommandLine;
+	int m_fFlags;	// PROCESSSTART_xxx.
+};
+
+class CProcessUtils;
+
+class CProcess : public IProcess
+{
+public:
+	CProcess( CProcessUtils *pProcessUtils, const ProcessInfo_t &info );
+
+// IProcess overrides.
+public:
+	virtual void Release();
+	virtual void Abort();
+	virtual bool IsComplete();
+	virtual int WaitUntilComplete();
+
+	virtual int WriteStdin( char *pBuf, int nBufLen );
+	virtual IPipeRead* GetStdout();
+	virtual IPipeRead* GetStderr();
+
+	virtual int GetExitCode();
+
+public:
+	ProcessInfo_t m_Info;
+
+	CProcessPipeRead m_StdoutRead;
+	CProcessPipeRead m_StderrRead;
+
+	CProcessUtils *m_pProcessUtils;
+	intp m_nProcessesIndex;	// Index into CProcessUtils::m_Processes.
+};
+
+
 //-----------------------------------------------------------------------------
 // At the moment, we can only run one process at a time 
 //-----------------------------------------------------------------------------
@@ -21,52 +108,26 @@ class CProcessUtils : public CTier1AppSystem< IProcessUtils >
 	typedef CTier1AppSystem< IProcessUtils > BaseClass;
 
 public:
-	CProcessUtils() : BaseClass( false ) {}
+	CProcessUtils() {}
 
 	// Inherited from IAppSystem
 	virtual InitReturnVal_t Init();
 	virtual void Shutdown();
 
 	// Inherited from IProcessUtils
-	virtual ProcessHandle_t StartProcess( const char *pCommandLine, bool bConnectStdPipes );
-	virtual ProcessHandle_t StartProcess( int argc, const char **argv, bool bConnectStdPipes );
-	virtual void CloseProcess( ProcessHandle_t hProcess );
-	virtual void AbortProcess( ProcessHandle_t hProcess );
-	virtual bool IsProcessComplete( ProcessHandle_t hProcess );
-	virtual void WaitUntilProcessCompletes( ProcessHandle_t hProcess );
-	virtual int SendProcessInput( ProcessHandle_t hProcess, char *pBuf, int nBufLen );
-	virtual int GetProcessOutputSize( ProcessHandle_t hProcess );
-	virtual int GetProcessOutput( ProcessHandle_t hProcess, char *pBuf, int nBufLen );
-	virtual int GetProcessExitCode( ProcessHandle_t hProcess );
+	virtual IProcess* StartProcess( const char *pCommandLine, int fFlags, const char *pWorkingDir );
+	virtual IProcess* StartProcess( int argc, const char **argv, int fFlags, const char *pWorkingDir );
+	virtual int SimpleRunProcess( const char *pCommandLine, const char *pWorkingDir, CUtlString *pStdout );
+
+public:
+	void OnProcessDelete( CProcess *pProcess );
 
 private:
-	struct ProcessInfo_t
-	{
-		HANDLE m_hChildStdinRd;
-		HANDLE m_hChildStdinWr;
-		HANDLE m_hChildStdoutRd;
-		HANDLE m_hChildStdoutWr;
-		HANDLE m_hChildStderrWr;
-		HANDLE m_hProcess;
-		CUtlString m_CommandLine;
-		CUtlBuffer m_ProcessOutput;
-	};
-
-	// Returns the last error that occurred
-	char *GetErrorString( char *pBuf, int nBufLen );
 
 	// creates the process, adds it to the list and writes the windows HANDLE into info.m_hProcess
-	ProcessHandle_t CreateProcess( ProcessInfo_t &info, bool bConnectStdPipes );
+	CProcess* CreateProcess( ProcessInfo_t &info, int fFlags, const char *pWorkingDir );
 
-	// Shuts down the process handle
-	void ShutdownProcess( ProcessHandle_t hProcess );
-
-	// Methods used to read	output back from a process
-	int GetActualProcessOutputSize( ProcessHandle_t hProcess );
-	int GetActualProcessOutput( ProcessHandle_t hProcess, char *pBuf, int nBufLen );
-
-	CUtlFixedLinkedList< ProcessInfo_t >	m_Processes;
-	ProcessHandle_t m_hCurrentProcess;
+	CUtlFixedLinkedList< CProcess* >	m_Processes;
 	bool m_bInitialized;
 };
 
@@ -79,36 +140,9 @@ EXPOSE_SINGLE_INTERFACE_GLOBALVAR( CProcessUtils, IProcessUtils, PROCESS_UTILS_I
 
 
 //-----------------------------------------------------------------------------
-// Initialize, shutdown process system
-//-----------------------------------------------------------------------------
-InitReturnVal_t CProcessUtils::Init()
-{
-	InitReturnVal_t nRetVal = BaseClass::Init();
-	if ( nRetVal != INIT_OK )
-		return nRetVal;
-
-	m_bInitialized = true;
-	m_hCurrentProcess = PROCESS_HANDLE_INVALID;
-	return INIT_OK;
-}
-
-void CProcessUtils::Shutdown()
-{
-	Assert( m_bInitialized );
-	Assert( m_Processes.Count() == 0 );
-	if ( m_Processes.Count() != 0 )
-	{
-		AbortProcess( m_hCurrentProcess );
-	}
-	m_bInitialized = false;
-	return BaseClass::Shutdown();
-}
-
-
-//-----------------------------------------------------------------------------
 // Returns the last error that occurred
 //-----------------------------------------------------------------------------
-char *CProcessUtils::GetErrorString( char *pBuf, int nBufLen )
+char *GetErrorString( char *pBuf, int nBufLen )
 {
 	FormatMessage( FORMAT_MESSAGE_FROM_SYSTEM, NULL, GetLastError(), 0, pBuf, nBufLen, NULL );
 	char *p = strchr(pBuf, '\r');	// get rid of \r\n
@@ -120,328 +154,295 @@ char *CProcessUtils::GetErrorString( char *pBuf, int nBufLen )
 }
 
 
-ProcessHandle_t CProcessUtils::CreateProcess( ProcessInfo_t &info, bool bConnectStdPipes )
+// ------------------------------------------------------------------------------------- //
+// CProcessPipeRead implementation.
+// ------------------------------------------------------------------------------------- //
+
+bool CProcessPipeRead::IsValid() const
 {
-	STARTUPINFO si;
-	memset(&si, 0, sizeof si);
-	si.cb = sizeof(si);
-	if ( bConnectStdPipes )
-	{
-		si.dwFlags = STARTF_USESTDHANDLES;
-		si.hStdInput = info.m_hChildStdinRd;
-		si.hStdError = info.m_hChildStderrWr;
-		si.hStdOutput = info.m_hChildStdoutWr;
-	}
-
-	PROCESS_INFORMATION pi;
-	if ( ::CreateProcess( NULL, info.m_CommandLine.GetForModify(), NULL, NULL, TRUE, DETACHED_PROCESS, NULL, NULL, &si, &pi ) )
-	{
-		info.m_hProcess = pi.hProcess;
-		m_hCurrentProcess = m_Processes.AddToTail( info );
-		return m_hCurrentProcess;
-	}
-
-	char buf[ 512 ];
-	Warning( "Could not execute the command:\n   %s\n"
-		"Windows gave the error message:\n   \"%s\"\n",
-		info.m_CommandLine.Get(), GetErrorString( buf, sizeof(buf) ) );
-
-	return PROCESS_HANDLE_INVALID;
+	return m_hRead != INVALID_HANDLE_VALUE;
 }
 
-//-----------------------------------------------------------------------------
-// Options for compilation
-//-----------------------------------------------------------------------------
-ProcessHandle_t CProcessUtils::StartProcess( const char *pCommandLine, bool bConnectStdPipes )
+int CProcessPipeRead::GetNumBytesAvailable()
 {
-	Assert( m_bInitialized );
+	return GetActualProcessOutputSize() + m_CachedOutput.TellPut();
+}
 
-	// NOTE: For the moment, we can only run one process at a time
-	// although in the future, I expect to have a process queue.
-	if ( m_hCurrentProcess != PROCESS_HANDLE_INVALID )
+void CProcessPipeRead::ReadAvailable( CUtlString &sStr, int32 nMaxBytes )
+{
+	int nBytesAvailable = GetNumBytesAvailable();
+	nBytesAvailable = MIN( nBytesAvailable, nMaxBytes );
+
+	sStr.SetLength( nBytesAvailable );	// If nBytesAvailable != 0, this auto allocates an extra byte for the null terminator.
+	if ( nBytesAvailable > 0 )
 	{
-		WaitUntilProcessCompletes( m_hCurrentProcess ); 
+		char *pOut = sStr.Get();
+		int nBytesGotten = GetProcessOutput( pOut, nBytesAvailable );
+		Assert( nBytesGotten == nBytesAvailable );
+
+		// Null-terminate it.
+		pOut[nBytesGotten] = 0;
 	}
+}
 
-	ProcessInfo_t info;
-	info.m_CommandLine = pCommandLine;
+void CProcessPipeRead::ReadAvailable( CUtlBuffer *pOutBuffer, int nMaxBytes )
+{
+	int nBytesAvailable = GetNumBytesAvailable();
+	nBytesAvailable = MIN( nBytesAvailable, nMaxBytes );
 
-	if ( !bConnectStdPipes )
+	if ( nBytesAvailable > 0 )
 	{
-		info.m_hChildStderrWr = INVALID_HANDLE_VALUE;
-		info.m_hChildStdinRd = info.m_hChildStdinWr = INVALID_HANDLE_VALUE;
-		info.m_hChildStdoutRd = info.m_hChildStdoutWr = INVALID_HANDLE_VALUE;
+		char *pOut = (char*)pOutBuffer->AccessForDirectRead(nBytesAvailable+1);
+		int nBytesGotten = GetProcessOutput( pOut, nBytesAvailable );
+		Assert( nBytesGotten == nBytesAvailable );
 
-		return CreateProcess( info, false );
+		// Null-terminate it.
+		pOut[nBytesGotten] = 0;
 	}
+}
 
-    SECURITY_ATTRIBUTES saAttr; 
 
-    // Set the bInheritHandle flag so pipe handles are inherited.
-	saAttr.nLength = sizeof(SECURITY_ATTRIBUTES); 
-    saAttr.bInheritHandle = TRUE; 
-    saAttr.lpSecurityDescriptor = NULL; 
- 
-    // Create a pipe for the child's STDOUT. 
-    if ( CreatePipe( &info.m_hChildStdoutRd, &info.m_hChildStdoutWr, &saAttr, 0 ) )
+
+void CProcessPipeRead::Read( CUtlString &sStr, int32 nBytes )
+{
+	sStr.SetLength( 0 );
+
+	int nBytesLeftToRead = nBytes;
+	while ( nBytesLeftToRead > 0 )
 	{
-		if ( CreatePipe( &info.m_hChildStdinRd, &info.m_hChildStdinWr, &saAttr, 0 ) )
+		int nAvail = GetNumBytesAvailable();
+		if ( nAvail == 0 )
 		{
-			if ( DuplicateHandle( GetCurrentProcess(), info.m_hChildStdoutWr, GetCurrentProcess(), 
-				&info.m_hChildStderrWr, 0, TRUE, DUPLICATE_SAME_ACCESS ) )
+			if ( m_pProcess->IsComplete() )
 			{
-//				_setmode( info.m_hChildStdoutRd, _O_TEXT );
-//				_setmode( info.m_hChildStdoutWr, _O_TEXT );
-//				_setmode( info.m_hChildStderrWr, _O_TEXT );
-
-				ProcessHandle_t hProcess = CreateProcess( info, true );
-				if ( hProcess != PROCESS_HANDLE_INVALID )
-					return hProcess;
-
-				CloseHandle( info.m_hChildStderrWr );
+				return;
 			}
-			CloseHandle( info.m_hChildStdinRd );
-			CloseHandle( info.m_hChildStdinWr );
+			else
+			{
+				WaitForOutput();
+				continue;
+			}
 		}
-		CloseHandle( info.m_hChildStdoutRd );
-		CloseHandle( info.m_hChildStdoutWr );
+
+		int nToRead = MIN( nBytesLeftToRead, nAvail );
+
+		// Read as much as we need and add it to the string.
+		CUtlString sTemp;
+		ReadAvailable( sTemp, nToRead );
+		Assert( sTemp.Length() == nToRead );
+		sStr += sTemp;
+
+		nBytesLeftToRead -= nToRead;
 	}
-	return PROCESS_HANDLE_INVALID;
 }
 
-
-//-----------------------------------------------------------------------------
-// Start up a process
-//-----------------------------------------------------------------------------
-ProcessHandle_t CProcessUtils::StartProcess( int argc, const char **argv, bool bConnectStdPipes )
+void CProcessPipeRead::ReadLine( CUtlString &sStr )
 {
-	CUtlString commandLine;
-	for ( int i = 0; i < argc; ++i )
+	sStr.SetLength( 0 );
+	while ( 1 )
 	{
-		commandLine += argv[i];
-		if ( i != argc-1 )
+		// Wait for output if there's nothing left in our cached output.
+		if ( m_CachedOutput.GetBytesRemaining() == 0 && !WaitForOutput() )
+			return;
+
+		CacheOutput();
+
+		char *pStr = (char*)m_CachedOutput.PeekGet();
+		int nBytes = m_CachedOutput.GetBytesRemaining();
+		
+		// No more stuff available and the process is dead?
+		if ( nBytes == 0 && m_pProcess->IsComplete() )
+			break;
+
+		int i;
+		for ( i=0; i < nBytes; i++ )
 		{
-			commandLine += " ";
+			if ( pStr[i] == '\n' )
+				break;
+		}
+
+		if ( i < nBytes )
+		{
+			// We hit a line ending.
+			int nBytesToRead = i;
+			if ( nBytesToRead > 0 && pStr[nBytesToRead-1] == '\r' )
+				--nBytesToRead;
+
+			CUtlString sTemp;
+			sTemp.SetDirect( pStr, nBytesToRead );
+			sStr += sTemp;
+
+			m_CachedOutput.SeekGet( CUtlBuffer::SEEK_CURRENT, i+1 );	// Use i here because it'll be at the \n, not the \r\n.
+			if ( m_CachedOutput.GetBytesRemaining() == 0 )
+				m_CachedOutput.Purge();
+
+			return;
 		}
 	}
-	return StartProcess( commandLine.Get(), bConnectStdPipes );
+}
+
+bool CProcessPipeRead::WaitForOutput()
+{
+	if ( m_hRead == INVALID_HANDLE_VALUE )
+	{
+		Assert( false );
+		return false;
+	}
+
+	while ( GetActualProcessOutputSize() == 0 )
+	{
+		if ( m_pProcess->IsComplete() )
+			return false;
+		else
+			ThreadSleep( 1 );
+	}
+
+	return true;
+}
+
+void CProcessPipeRead::CacheOutput()
+{
+	int nBytes = GetActualProcessOutputSize();
+	if ( nBytes == 0 )
+		return;
+
+	int nPut = m_CachedOutput.TellPut();
+	m_CachedOutput.EnsureCapacity( nPut + nBytes );
+	
+	int nBytesRead = GetActualProcessOutput( (char*)m_CachedOutput.PeekPut(), nBytes );
+	Assert( nBytesRead == nBytes );
+
+	m_CachedOutput.SeekPut( CUtlBuffer::SEEK_HEAD, nPut + nBytesRead );
+}
+
+//-----------------------------------------------------------------------------
+// Methods used to read	output back from a process
+//-----------------------------------------------------------------------------
+int CProcessPipeRead::GetActualProcessOutputSize()
+{
+	if ( m_hRead == INVALID_HANDLE_VALUE )
+	{
+		Assert( false );
+		return 0;
+	}
+
+	DWORD dwCount = 0;
+	if ( !PeekNamedPipe( m_hRead, NULL, NULL, NULL, &dwCount, NULL ) )
+	{
+		char buf[ 512 ];
+		Warning( "Could not read from pipe associated with command %s\n"
+			"Windows gave the error message:\n   \"%s\"\n",
+			m_pProcess->m_Info.m_CommandLine.Get(), GetErrorString( buf, sizeof(buf) ) );
+		return 0;
+	}
+
+	return (int)dwCount;
+}
+
+int CProcessPipeRead::GetProcessOutput( void *pBuf, int nBytes )
+{
+	int nCachedBytes = MIN( nBytes, m_CachedOutput.TellPut() );
+	int nPipeBytes = nBytes - nCachedBytes;
+
+	// Read from the cached buffer.
+	m_CachedOutput.Get( pBuf, nCachedBytes );
+	if ( m_CachedOutput.GetBytesRemaining() == 0 )
+	{
+		m_CachedOutput.Purge();
+	}
+
+	// Read from the pipe.
+	int nPipedBytesRead = GetActualProcessOutput( (char*)pBuf + nCachedBytes, nPipeBytes );
+	return nCachedBytes + nPipedBytesRead;
+}
+
+int CProcessPipeRead::GetActualProcessOutput( void *pBuf, int nBufLen )
+{
+	if ( m_hRead == INVALID_HANDLE_VALUE )
+	{
+		Assert( false );
+		return 0;
+	}
+
+	// ReadFile can deadlock in a blaze of awesomeness if you ask for 0 bytes.
+	if ( nBufLen == 0 )
+		return 0;
+
+	DWORD nBytesRead = 0;
+	BOOL bSuccess = ReadFile( m_hRead, pBuf, nBufLen, &nBytesRead, NULL );
+
+	if ( bSuccess )
+	{
+		// ReadFile -should- block until it gets the number of bytes requested OR until
+		// the process is complete. So if it didn't return the # of bytes requested,
+		// then make sure the process is complete.
+		if ( (int)nBytesRead != nBufLen )
+		{
+			Assert( m_pProcess->IsComplete() );
+		}
+	}
+	else
+	{
+		Assert( false );
+	}
+
+	return (int)nBytesRead;
 }
 
 
-//-----------------------------------------------------------------------------
-// Shuts down the process handle
-//-----------------------------------------------------------------------------
-void CProcessUtils::ShutdownProcess( ProcessHandle_t hProcess )
+// ------------------------------------------------------------------------------------- //
+// CProcess implementation.
+// ------------------------------------------------------------------------------------- //
+
+CProcess::CProcess( CProcessUtils *pProcessUtils, const ProcessInfo_t &info )
 {
-	ProcessInfo_t& info = m_Processes[hProcess];
+	m_pProcessUtils = pProcessUtils;
+	m_Info = info;
+	
+	m_StdoutRead.m_pProcess = this;
+	m_StdoutRead.m_hRead = info.m_hChildStdoutRd;
+
+	m_StderrRead.m_pProcess = this;
+	m_StderrRead.m_hRead = info.m_hChildStderrRd;
+}
+
+
+void CProcess::Release()
+{
+	if ( !( m_Info.m_fFlags & STARTPROCESS_NOAUTOKILL ) )
+	{
+		Abort();
+	}
+
+	ProcessInfo_t& info = m_Info;
+	CloseHandle( info.m_hChildStderrRd );
 	CloseHandle( info.m_hChildStderrWr );
 	CloseHandle( info.m_hChildStdinRd );
 	CloseHandle( info.m_hChildStdinWr );
 	CloseHandle( info.m_hChildStdoutRd );
 	CloseHandle( info.m_hChildStdoutWr );
 
-	m_Processes.Remove( hProcess );
+	m_pProcessUtils->OnProcessDelete( this );
+	delete this;
 }
 
-
-//-----------------------------------------------------------------------------
-// Closes the process
-//-----------------------------------------------------------------------------
-void CProcessUtils::CloseProcess( ProcessHandle_t hProcess )
+void CProcess::Abort()
 {
-	Assert( m_bInitialized );
-	if ( hProcess != PROCESS_HANDLE_INVALID )
+	if ( !IsComplete() )
 	{
-		WaitUntilProcessCompletes( hProcess );
-		ShutdownProcess( hProcess );
+		TerminateProcess( m_Info.m_hProcess, 1 );
 	}
 }
 
-
-//-----------------------------------------------------------------------------
-// Aborts the process
-//-----------------------------------------------------------------------------
-void CProcessUtils::AbortProcess( ProcessHandle_t hProcess )
+bool CProcess::IsComplete()
 {
-	Assert( m_bInitialized );
-	if ( hProcess != PROCESS_HANDLE_INVALID )
-	{
-		if ( !IsProcessComplete( hProcess ) )
-		{
-			ProcessInfo_t& info = m_Processes[hProcess];
-			TerminateProcess( info.m_hProcess, 1 );
-		}
-		ShutdownProcess( hProcess );
-	}
-}
-
-
-//-----------------------------------------------------------------------------
-// Returns true if the process is complete
-//-----------------------------------------------------------------------------
-bool CProcessUtils::IsProcessComplete( ProcessHandle_t hProcess )
-{
-	Assert( m_bInitialized );
-	Assert( hProcess != PROCESS_HANDLE_INVALID );
-	if ( m_hCurrentProcess != hProcess )
-		return true;
-
-	HANDLE h = m_Processes[hProcess].m_hProcess;
+	HANDLE h = m_Info.m_hProcess;
 	return ( WaitForSingleObject( h, 0 ) != WAIT_TIMEOUT );
 }
 
-
-//-----------------------------------------------------------------------------
-// Methods used to write input into a process
-//-----------------------------------------------------------------------------
-int CProcessUtils::SendProcessInput( ProcessHandle_t hProcess, char *pBuf, int nBufLen )
+int CProcess::WaitUntilComplete()
 {
-	// Unimplemented yet
-	Assert( 0 );
-	return 0;
-}
-
-
-//-----------------------------------------------------------------------------
-// Methods used to read	output back from a process
-//-----------------------------------------------------------------------------
-int CProcessUtils::GetActualProcessOutputSize( ProcessHandle_t hProcess )
-{
-	Assert( hProcess != PROCESS_HANDLE_INVALID );
-
-	ProcessInfo_t& info = m_Processes[ hProcess ];
-	if ( info.m_hChildStdoutRd == INVALID_HANDLE_VALUE )
-		return 0;
-
-	DWORD dwCount = 0;
-	if ( !PeekNamedPipe( info.m_hChildStdoutRd, NULL, NULL, NULL, &dwCount, NULL ) )
-	{
-		char buf[ 512 ];
-		Warning( "Could not read from pipe associated with command %s\n"
-			"Windows gave the error message:\n   \"%s\"\n",
-			info.m_CommandLine.Get(), GetErrorString( buf, sizeof(buf) ) );
-		return 0;
-	}
-
-	// Add 1 for auto-NULL termination
-	return ( dwCount > 0 ) ? (int)dwCount + 1 : 0;
-}
-
-int CProcessUtils::GetActualProcessOutput( ProcessHandle_t hProcess, char *pBuf, int nBufLen )
-{
-	ProcessInfo_t& info = m_Processes[ hProcess ];
-	if ( info.m_hChildStdoutRd == INVALID_HANDLE_VALUE )
-		return 0;
-
-	DWORD dwCount = 0;
-	DWORD dwRead = 0;
-
-	// FIXME: Is there a way of making pipes be text mode so we don't get /n/rs back?
-	char *pTempBuf = (char*)_alloca( nBufLen );
-	if ( !PeekNamedPipe( info.m_hChildStdoutRd, NULL, NULL, NULL, &dwCount, NULL ) )
-	{
-		char buf[ 512 ];
-		Warning( "Could not read from pipe associated with command %s\n"
-			"Windows gave the error message:\n   \"%s\"\n",
-			info.m_CommandLine.Get(), GetErrorString( buf, sizeof(buf) ) );
-		return 0;
-	}
-
-	dwCount = min( dwCount, (DWORD)nBufLen - 1 );
-	ReadFile( info.m_hChildStdoutRd, pTempBuf, dwCount, &dwRead, NULL);
-	
-	// Convert /n/r -> /n
-	int nActualCountRead = 0;
-	for ( unsigned int i = 0; i < dwRead; ++i )
-	{
-		char c = pTempBuf[i];
-		if ( c == '\r' )
-		{
-			if ( ( i+1 < dwRead ) && ( pTempBuf[i+1] == '\n' ) )
-			{
-				pBuf[nActualCountRead++] = '\n';
-				++i;
-				continue;
-			}
-		}
-
-		pBuf[nActualCountRead++] = c;
-	}
-
-	return nActualCountRead;
-}
-
-
-int CProcessUtils::GetProcessOutputSize( ProcessHandle_t hProcess )
-{
-	Assert( m_bInitialized );
-	if ( hProcess == PROCESS_HANDLE_INVALID )
-		return 0;
-
-	return GetActualProcessOutputSize( hProcess ) + m_Processes[hProcess].m_ProcessOutput.TellPut();
-}
-
-
-int CProcessUtils::GetProcessOutput( ProcessHandle_t hProcess, char *pBuf, int nBufLen )
-{
-	Assert( m_bInitialized );
-
-	if ( hProcess == PROCESS_HANDLE_INVALID )
-		return 0;
-
-	ProcessInfo_t &info = m_Processes[hProcess];
-	int nCachedBytes = info.m_ProcessOutput.TellPut();
-	int nBytesRead = 0;
-	if ( nCachedBytes )
-	{
-		nBytesRead = min( nBufLen-1, nCachedBytes );
-		info.m_ProcessOutput.Get( pBuf, nBytesRead );
-		pBuf[ nBytesRead ] = 0;
-		nBufLen -= nBytesRead;
-		pBuf += nBytesRead;
-		if ( info.m_ProcessOutput.GetBytesRemaining() == 0 )
-		{
-			info.m_ProcessOutput.Purge();
-		}
-
-		if ( nBufLen <= 1 )
-			return nBytesRead;
-	}
-
-	// Auto-NULL terminate
-	int nActualCountRead = GetActualProcessOutput( hProcess, pBuf, nBufLen );
-	pBuf[nActualCountRead] = 0;
-	return nActualCountRead + nBytesRead + 1;
-}
-
-
-//-----------------------------------------------------------------------------
-// Returns the exit code for the process. Doesn't work unless the process is complete
-//-----------------------------------------------------------------------------
-int CProcessUtils::GetProcessExitCode( ProcessHandle_t hProcess )
-{
-	Assert( m_bInitialized );
-	ProcessInfo_t &info = m_Processes[hProcess];
-	DWORD nExitCode;
-	BOOL bOk = GetExitCodeProcess( info.m_hProcess, &nExitCode );
-	if ( !bOk || nExitCode == STILL_ACTIVE )
-		return -1;
-	return nExitCode;
-}
-
-
-//-----------------------------------------------------------------------------
-// Waits until a process is complete
-//-----------------------------------------------------------------------------
-void CProcessUtils::WaitUntilProcessCompletes( ProcessHandle_t hProcess )
-{
-	Assert( m_bInitialized );
-
-	// For the moment, we can only run one process at a time
-	if ( ( hProcess == PROCESS_HANDLE_INVALID ) || ( m_hCurrentProcess != hProcess ) )
-		return;
-
-	ProcessInfo_t &info = m_Processes[ hProcess ];
+	ProcessInfo_t &info = m_Info;
 
 	if ( info.m_hChildStdoutRd == INVALID_HANDLE_VALUE )
 	{
@@ -453,21 +454,256 @@ void CProcessUtils::WaitUntilProcessCompletes( ProcessHandle_t hProcess )
 		// if the pipe buffer is empty. Therefore, waiting INFINITE is not
 		// possible here. We must queue up messages received to allow the 
 		// process to continue
-		while ( WaitForSingleObject( info.m_hProcess, 100 ) == WAIT_TIMEOUT )
+		while ( WaitForSingleObject( info.m_hProcess, 50 ) == WAIT_TIMEOUT )
 		{
-			int nLen = GetActualProcessOutputSize( hProcess );
-			if ( nLen > 0 )
-			{
-				int nPut = info.m_ProcessOutput.TellPut();
-				info.m_ProcessOutput.EnsureCapacity( nPut + nLen );
-				int nBytesRead = GetActualProcessOutput( hProcess, (char*)info.m_ProcessOutput.PeekPut(), nLen );
-				info.m_ProcessOutput.SeekPut( CUtlBuffer::SEEK_HEAD, nPut + nBytesRead );
-			}
+			m_StdoutRead.CacheOutput();
+			if ( m_StderrRead.IsValid() )
+				m_StderrRead.CacheOutput();
 		}
 	}
 
-	m_hCurrentProcess = PROCESS_HANDLE_INVALID;
+	return GetExitCode();
 }
 
+int CProcess::WriteStdin( char *pBuf, int nBufLen )
+{
+	ProcessInfo_t& info = m_Info;
+	if ( info.m_hChildStdinWr == INVALID_HANDLE_VALUE )
+	{
+		Assert( false );
+		return 0;
+	}
+
+	DWORD nBytesWritten = 0;
+	if ( WriteFile( info.m_hChildStdinWr, pBuf, nBufLen, &nBytesWritten, NULL ) )
+		return (int)nBytesWritten;
+	else
+		return 0;
+}
+
+IPipeRead* CProcess::GetStdout()
+{
+	return &m_StdoutRead;
+}
+
+IPipeRead* CProcess::GetStderr()
+{
+	return &m_StderrRead;
+}
+
+int CProcess::GetExitCode()
+{
+	ProcessInfo_t &info = m_Info;
+	DWORD nExitCode;
+	BOOL bOk = GetExitCodeProcess( info.m_hProcess, &nExitCode );
+	if ( !bOk || nExitCode == STILL_ACTIVE )
+		return -1;
+	
+	return nExitCode;
+}
+
+
+//-----------------------------------------------------------------------------
+// Initialize, shutdown process system
+//-----------------------------------------------------------------------------
+InitReturnVal_t CProcessUtils::Init()
+{
+	InitReturnVal_t nRetVal = BaseClass::Init();
+	if ( nRetVal != INIT_OK )
+		return nRetVal;
+
+	m_bInitialized = true;
+	return INIT_OK;
+}
+
+void CProcessUtils::Shutdown()
+{
+	Assert( m_bInitialized );
+	Assert( m_Processes.Count() == 0 );
+	
+	// Delete any lingering processes.
+	while ( m_Processes.Count() > 0 )
+	{
+		m_Processes[ m_Processes.Head() ]->Release();
+	}
+
+	m_bInitialized = false;
+	return BaseClass::Shutdown();
+}
+
+
+void CProcessUtils::OnProcessDelete( CProcess *pProcess )
+{
+	m_Processes.Remove( pProcess->m_nProcessesIndex );
+}
+
+CProcess *CProcessUtils::CreateProcess( ProcessInfo_t &info, int fFlags, const char *pWorkingDir )
+{
+	STARTUPINFO si;
+	memset(&si, 0, sizeof si);
+	si.cb = sizeof(si);
+	if ( fFlags & STARTPROCESS_CONNECTSTDPIPES )
+	{
+		si.dwFlags = STARTF_USESTDHANDLES;
+		si.hStdInput = info.m_hChildStdinRd;
+		si.hStdError = info.m_hChildStderrWr;
+		si.hStdOutput = info.m_hChildStdoutWr;
+	}
+
+	DWORD dwCreateProcessFlags = 0;
+	if ( !( fFlags & STARTPROCESS_SHARE_CONSOLE ) )
+	{
+		dwCreateProcessFlags |= DETACHED_PROCESS;
+	}
+
+	PROCESS_INFORMATION pi;
+	if ( ::CreateProcess( NULL, info.m_CommandLine.Get(), NULL, NULL, TRUE, dwCreateProcessFlags, NULL, pWorkingDir, &si, &pi ) )
+	{
+		info.m_hProcess = pi.hProcess;
+
+		CProcess *pProcess = new CProcess( this, info );
+		
+		pProcess->m_nProcessesIndex = m_Processes.AddToTail( pProcess );
+		return pProcess;
+	}
+
+	char buf[ 512 ];
+	Warning( "Could not execute the command:\n   %s\n"
+		"Windows gave the error message:\n   \"%s\"\n",
+		info.m_CommandLine.Get(), GetErrorString( buf, sizeof(buf) ) );
+
+	return NULL;
+}
+
+//-----------------------------------------------------------------------------
+// Options for compilation
+//-----------------------------------------------------------------------------
+IProcess* CProcessUtils::StartProcess( const char *pCommandLine, int fFlags, const char *pWorkingDir )
+{
+	Assert( m_bInitialized );
+
+	ProcessInfo_t info;
+	info.m_CommandLine = pCommandLine;
+
+	if ( !(fFlags & STARTPROCESS_CONNECTSTDPIPES) )
+	{
+		info.m_hChildStderrRd = info.m_hChildStderrWr = INVALID_HANDLE_VALUE;
+		info.m_hChildStdinRd = info.m_hChildStdinWr = INVALID_HANDLE_VALUE;
+		info.m_hChildStdoutRd = info.m_hChildStdoutWr = INVALID_HANDLE_VALUE;
+
+		return CreateProcess( info, fFlags, pWorkingDir );
+	}
+
+    SECURITY_ATTRIBUTES saAttr; 
+
+    // Set the bInheritHandle flag so pipe handles are inherited.
+	saAttr.nLength = sizeof(SECURITY_ATTRIBUTES); 
+    saAttr.bInheritHandle = TRUE; 
+    saAttr.lpSecurityDescriptor = NULL; 
+
+
+	DWORD nPipeSize = 0; // default size
+
+	if ( fFlags & STARTPROCESS_FATPIPES )
+	{
+		nPipeSize = 1024*1024;
+	}
+
+    // Create a pipe for the child's STDOUT. 
+    if ( CreatePipe( &info.m_hChildStdoutRd, &info.m_hChildStdoutWr, &saAttr, nPipeSize ) )
+	{
+		if ( CreatePipe( &info.m_hChildStdinRd, &info.m_hChildStdinWr, &saAttr, nPipeSize ) )
+		{
+			BOOL bSuccess = false;
+			if ( fFlags & STARTPROCESS_SEPARATE_STDERR )
+			{
+				bSuccess = CreatePipe( &info.m_hChildStderrRd, &info.m_hChildStderrWr, &saAttr, nPipeSize );
+			}
+			else
+			{
+				bSuccess = DuplicateHandle( GetCurrentProcess(), info.m_hChildStdoutWr, GetCurrentProcess(), 
+					&info.m_hChildStderrWr, 0, TRUE, DUPLICATE_SAME_ACCESS );
+
+				info.m_hChildStderrRd = INVALID_HANDLE_VALUE;
+			}
+
+			if ( bSuccess )
+			{
+				IProcess *pProcess = CreateProcess( info, fFlags, pWorkingDir );
+				if ( pProcess )
+					return pProcess;
+
+				CloseHandle( info.m_hChildStderrRd );
+				CloseHandle( info.m_hChildStderrWr );
+			}
+			CloseHandle( info.m_hChildStdinRd );
+			CloseHandle( info.m_hChildStdinWr );
+		}
+		CloseHandle( info.m_hChildStdoutRd );
+		CloseHandle( info.m_hChildStdoutWr );
+	}
+	return NULL;
+}
+
+
+//-----------------------------------------------------------------------------
+// Start up a process
+//-----------------------------------------------------------------------------
+IProcess* CProcessUtils::StartProcess( int argc, const char **argv, int fFlags, const char *pWorkingDir )
+{
+	CUtlString commandLine;
+	for ( int i = 0; i < argc; ++i )
+	{
+		commandLine += argv[i];
+		if ( i != argc-1 )
+		{
+			commandLine += " ";
+		}
+	}
+	return StartProcess( commandLine.Get(), fFlags, pWorkingDir );
+}
+
+
+int CProcessUtils::SimpleRunProcess( const char *pCommandLine, const char *pWorkingDir, CUtlString *pStdout )
+{
+	int nFlags = 0;
+	if ( pStdout )
+		nFlags |= STARTPROCESS_CONNECTSTDPIPES;
+
+	IProcess *pProcess = StartProcess( pCommandLine, nFlags, pWorkingDir );
+	if ( !pProcess )
+		return -1;
+
+	int nExitCode = pProcess->WaitUntilComplete();
+	if ( pStdout )
+	{
+		pProcess->GetStdout()->Read( *pStdout );
+	}
+	
+	pProcess->Release();
+	return nExitCode;
+}
+
+
+// Translate '\r\n' to '\n'.
+void TranslateLinefeedsToUnix( char *pBuffer )
+{
+	char *pOut = pBuffer;
+	while ( *pBuffer )
+	{
+		if ( pBuffer[0] == '\r' && pBuffer[1] == '\n' )
+		{
+			*pOut = '\n';
+			++pBuffer;
+		}
+		else
+		{
+			*pOut = *pBuffer;
+		}
+		++pBuffer;
+		++pOut;
+	}
+	*pOut = 0;
+}
 
 

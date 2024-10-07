@@ -1,13 +1,11 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//======Copyright 1996-2006, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
 // methods for muti-core dx9 threading
 //===========================================================================//
 
-#ifdef D3D_ASYNC_SUPPORTED
-
-#include "glmgr/dxabstract.h"
+#include "togl/rendermechanism.h"
 #include "utlsymbol.h"
 #include "utlvector.h"
 #include "utldict.h"
@@ -22,7 +20,7 @@
 #include "shaderapidx8.h"
 #include "materialsystem/IShader.h"
 #include "utllinkedlist.h"
-#include "IShaderSystem.h"
+#include "materialsystem/ishadersystem.h"
 #include "tier0/fasttimer.h"
 #include <stdlib.h>
 #include "convar.h"
@@ -108,16 +106,10 @@ FixedWorkQueue<PushBuffer *, N_PUSH_BUFFERS> PBQueue;
 
 
 
-#ifdef WIN32
-void __cdecl OurThreadInit( void * ourthis )
-#else
-unsigned int OurThreadInit( void * ourthis )
-#endif
+uintp OurThreadInit( void * ourthis )
 {
 	(( D3DDeviceWrapper *) ourthis )->RunThread();
-#ifndef WIN32
 	return 0;
-#endif
 }
 
 void D3DDeviceWrapper::RunThread( void )
@@ -199,9 +191,10 @@ void D3DDeviceWrapper::SetASyncMode( bool onoff )
 			memset( RememberedPointerHistory,0,sizeof(RememberedPointerHistory) );
 			SetThreadAffinityMask(GetCurrentThread(), 1);
 #ifdef WIN32
-			m_pASyncThreadHandle = _beginthread( OurThreadInit, 128*1024, this );
+			m_pASyncThreadHandle = CreateSimpleThread( OurThreadInit, this, 128*1024 );
 #else
-			m_pASyncThreadHandle = (uintptr_t)CreateSimpleThread( OurThreadInit, this, 128*1024 );
+#warning "D3DDeviceWrapper::SetASyncMode might need a beginthread version"
+			Assert( !"Impl D3DDeviceWrapper::SetASyncMode" );
 #endif
 		}
 	}
@@ -264,6 +257,27 @@ void D3DDeviceWrapper::SubmitIfNotBusy( void )
 		SubmitPushBufferAndGetANewOne();
 }
 
+void D3DDeviceWrapper::UpdateStereoTexture( IDirect3DTexture9 *pTex, bool devLost, bool *pStereoActiveThisFrame )
+{
+#if ( IS_WINDOWS_PC ) && !NO_STEREO_D3D9
+	Assert( m_pStereoTexUpdater );
+	if ( m_pStereoTexUpdater )
+	{
+		if ( pStereoActiveThisFrame != NULL )
+		{
+			*pStereoActiveThisFrame = m_pStereoTexUpdater->IsStereoActive();
+		}
+
+		// We always want to call this so it can deal with a lost device
+		m_pStereoTexUpdater->UpdateStereoTexture( Dx9Device(), pTex, devLost );
+	}
+#else
+	if ( pStereoActiveThisFrame != NULL )
+	{
+		*pStereoActiveThisFrame = false;
+	}
+#endif
+}
 
 void D3DDeviceWrapper::Synchronize( void )
 {
@@ -430,7 +444,7 @@ void D3DDeviceWrapper::HandleAsynchronousUnLockVBCommand( uint32 const *dptr )
 		Assert( ! lb.m_pPushBuffer );
 		if ( locked_data )
 			memcpy( locked_data, lb.m_pMallocedMemory, unlock_size );
-		delete[] ((uint8 *) lb.m_pMallocedMemory);
+		delete[] lb.m_pMallocedMemory;
 	}
 	// now, actually unlock
 	RememberLockedPointer( vb, NULL );
@@ -473,7 +487,7 @@ void D3DDeviceWrapper::HandleAsynchronousUnLockIBCommand( uint32 const *dptr )
 		Assert( ! lb.m_pPushBuffer );
 		if ( locked_data )
 			memcpy( locked_data, lb.m_pMallocedMemory, unlock_size );
-		delete[] ((uint8 *) lb.m_pMallocedMemory);
+		delete[] lb.m_pMallocedMemory;
 	}
 	// now, actually unlock
 	RememberLockedPointer( ib, NULL );
@@ -527,23 +541,56 @@ void D3DDeviceWrapper::ExecutePushBuffer( PushBuffer const* pb)
 				break;
 			}
 
+#ifdef DX_TO_GL_ABSTRACTION
+			case PBCMD_SET_RENDERSTATEINLINE:
+			{
+				VPROF_BUFFER_PLAYBACK( "SET_RENDERSTATEINLINE" );
+				Dx9Device()->SetRenderStateInline( (D3DRENDERSTATETYPE)dptr[1], dptr[2] );
+				dptr += 3;
+				break;
+			}
+
+			case PBCMD_SET_SAMPLER_STATES:
+			{
+				VPROF_BUFFER_PLAYBACK( "SET_SAMPLER_STATES" );
+				Dx9Device()->SetSamplerStates( dptr[1], dptr[2], dptr[3], dptr[4], dptr[5], dptr[6], dptr[7] );
+				dptr += 8;
+				break;
+			}
+#endif
+
 			case PBCMD_DRAWPRIM:
 			{
 				VPROF_BUFFER_PLAYBACK( "DRAWPRIM" );
-				
-				tmZone( TELEMETRY_LEVEL2, TMZF_NONE, "Dx9Device()->DrawPrimitive" );
-				
 				Dx9Device()->DrawPrimitive( (D3DPRIMITIVETYPE) dptr[1], dptr[2], dptr[3] );
 				dptr+=4;
 				break;
 			}
 
+#ifndef DX_TO_GL_ABSTRACTION
+			case PBCMD_DRAWPRIMUP_RESZ:
+			{
+				VPROF_BUFFER_PLAYBACK( "DRAWPRIMUP_RESZ" );
+
+				struct sPoints
+				{
+					FLOAT       pos[3];
+				};
+				sPoints verts[1];
+
+				verts[0].pos[0] = 0.0f;
+				verts[0].pos[1] = 0.0f;
+				verts[0].pos[2] = 0.0f;
+
+				Dx9Device()->DrawPrimitiveUP( D3DPT_POINTLIST, 1, verts, sizeof( sPoints ) );
+				dptr++;
+				break;
+			}
+#endif
+
 			case PBCMD_DRAWINDEXEDPRIM:
 			{
 				VPROF_BUFFER_PLAYBACK( "DRAWINDEXEDPRIM" );
-				
-				tmZone( TELEMETRY_LEVEL2, TMZF_NONE, "Dx9Device()->DrawIndexedPrimitive" );
-
 				Dx9Device()->DrawIndexedPrimitive( (D3DPRIMITIVETYPE) dptr[1], dptr[2], dptr[3],
 												   dptr[4], dptr[5], dptr[6]);
 				dptr+=7;
@@ -663,6 +710,35 @@ void D3DDeviceWrapper::ExecutePushBuffer( PushBuffer const* pb)
 				dptr += 1+N_DWORDS_IN_PTR;
 				break;
 			}
+
+#ifdef DX_TO_GL_ABSTRACTION
+			case PBCMD_UNLOCK_ACTAULSIZE_VB:
+			{
+				VPROF_BUFFER_PLAYBACK( "UNLOCK_ACTUALSIZE_VB" );
+				IDirect3DVertexBuffer9 *p = (IDirect3DVertexBuffer9 *)FetchPtr( dptr + 1 );
+				p->UnlockActualSize( dptr[2] );
+				dptr += 1 + N_DWORDS_IN_PTR + 1;
+				break;
+			}
+
+			case PBCMD_UNLOCK_ACTAULSIZE_IB:
+			{
+				VPROF_BUFFER_PLAYBACK( "UNLOCK_ACTUALSIZE_IB" );
+				IDirect3DIndexBuffer9 *p = (IDirect3DIndexBuffer9 *)FetchPtr( dptr + 1 );
+				p->UnlockActualSize( dptr[2] );
+				dptr += 1 + N_DWORDS_IN_PTR + 1;
+				break;
+			}
+
+			case PBCMD_SET_MAX_USED_VERTEX_SHADER_CONSTANTS_HINT:
+			{
+				VPROF_BUFFER_PLAYBACK( "SET_MAX_USED_VERTEX_SHADER_CONSTANTS_HINT" );
+				Dx9Device()->SetMaxUsedVertexShaderConstantsHint( dptr[1] );
+				dptr += 2;
+				break;
+			}
+#endif
+
 			case PBCMD_SET_VERTEX_SHADER_CONSTANT:
 			{
 				VPROF_BUFFER_PLAYBACK( "SET_VERTEX_SHADER_CONSTANT" );
@@ -783,7 +859,36 @@ void D3DDeviceWrapper::ExecutePushBuffer( PushBuffer const* pb)
 			}
 			break;
 			
-			
+#ifndef DX_TO_GL_ABSTRACTION
+			case PBCMD_STRETCHRECT_NVAPI:
+			{
+				VPROF_BUFFER_PLAYBACK( "STRETCHRECTNVAPI" );
+				TM_ZONE( TELEMETRY_LEVEL1, TMZF_NONE, "NvAPI_D3D9_StretchRectEx_async" );
+
+				dptr++;
+				IDirect3DResource9 *pSourceResource = (IDirect3DResource9 *)FetchPtr( dptr );
+				dptr += N_DWORDS_IN_PTR;
+				RECT const *pSourceRect = 0;
+				if ( *(dptr++) )
+					pSourceRect = (RECT const *)dptr;
+				dptr += N_DWORDS( RECT );
+				IDirect3DResource9 *pDestResource = (IDirect3DResource9 *)FetchPtr( dptr );
+				dptr += N_DWORDS_IN_PTR;
+				RECT const *pDestRect = 0;
+				if ( *(dptr++) )
+					pDestRect = (RECT const *)dptr;
+				dptr += N_DWORDS( RECT );
+				D3DTEXTUREFILTERTYPE Filter = (D3DTEXTUREFILTERTYPE)*(dptr++);
+
+				NvAPI_D3D9_StretchRectEx( Dx9Device(), 
+										  pSourceResource, pSourceRect,
+										  pDestResource, pDestRect,
+										  Filter );
+				pSourceResource->Release();
+			}
+			break;
+#endif
+
 			case PBCMD_PRESENT:
 			{
 				VPROF_BUFFER_PLAYBACK( "PRESENT" );
@@ -801,9 +906,6 @@ void D3DDeviceWrapper::ExecutePushBuffer( PushBuffer const* pb)
 				if ( *(dptr++) )
 					pDirtyRegion= (RGNDATA const *) dptr;
 				dptr+=N_DWORDS( RGNDATA );
-
-				tmZone( TELEMETRY_LEVEL1, TMZF_NONE, "!D3DPresent" );
-
 				Dx9Device()->Present( pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion );
 				break;
 			}
@@ -816,10 +918,26 @@ void D3DDeviceWrapper::ExecutePushBuffer( PushBuffer const* pb)
 				dptr += sizeof( RECT );
 				Dx9Device()->SetScissorRect( pRect );
 			}
+
+#ifdef DX_TO_GL_ABSTRACTION
+			case PBCMD_ACQUIRE_THREAD_OWNERSHIP:
+			{
+				VPROF_BUFFER_PLAYBACK( "ACQUIRE_THREAD_OWNERSHIP" );
+				Dx9Device()->AcquireThreadOwnership();
+				dptr++;
+				break;
+			}
+
+			case PBCMD_RELEASE_THREAD_OWNERSHIP:
+			{
+				VPROF_BUFFER_PLAYBACK( "PBCMD_RELEASE_THREAD_OWNERSHIP" );
+				Dx9Device()->ReleaseThreadOwnership();
+				dptr++;
+				break;
+			}
+#endif
 		}
 	}
 }
 
 #endif
-
-#endif // D3D_ASYNC_SUPPORTED

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -82,8 +82,8 @@ public:
 	void			ShiftAllClips( DmeTime_t dt );
 
 	// A version that works only on film clips
-	void			ShiftAllFilmClipsAfter ( CDmeClip *pClip, DmeTime_t dt, bool bShiftClip = false );
-	void			ShiftAllFilmClipsBefore( CDmeClip *pClip, DmeTime_t dt, bool bShiftClip = false );
+	void			ShiftAllFilmClipsAfter ( CDmeClip *pClip, DmeTime_t dt, bool bShiftClip = false, bool bSortClips = true );
+	void			ShiftAllFilmClipsBefore( CDmeClip *pClip, DmeTime_t dt, bool bShiftClip = false, bool bSortClips = true );
 
 	// Sorts all children so they ascend in time
 	void			SortClipsByStartTime( );
@@ -123,6 +123,10 @@ public:
 	// Fills all gaps in a film track with slugs
 	void			FillAllGapsWithSlugs( const char *pSlugName, DmeTime_t startTime, DmeTime_t endTime );
 
+	// Track vertical display scale
+	void SetDisplayScale( float flDisplayScale );
+	float GetDisplayScale() const;
+
 private:
 	class CSuppressAutoFixup
 	{
@@ -157,6 +161,8 @@ private:
 	CDmaVar< bool >	m_Synched;
 	CDmaVar< int >	m_ClipType;
 
+	CDmaVar< float > m_flDisplayScale;
+
 	CUtlFlags< unsigned char > m_Flags;
 	DmElementHandle_t m_hOwner;
 
@@ -181,6 +187,19 @@ inline bool CDmeTrack::IsNonoverlapping() const
 inline bool CDmeTrack::IsFilmTrack() const
 {
 	return m_ClipType == DMECLIP_FILM;
+}
+
+//-----------------------------------------------------------------------------
+// Track vertical display scale
+//-----------------------------------------------------------------------------
+inline void CDmeTrack::SetDisplayScale( float flDisplayScale )
+{
+	m_flDisplayScale = flDisplayScale;
+}
+
+inline float CDmeTrack::GetDisplayScale() const
+{
+	return m_flDisplayScale;
 }
 
 //-----------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -10,8 +10,38 @@
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
-static ConVar scene_print( "scene_print", "0", FCVAR_REPLICATED, "When playing back a scene, print timing and event info to console." );
+ConVar scene_print( "scene_print", "0", FCVAR_REPLICATED, "When playing back a scene, print timing and event info to console." );
 ConVar scene_clientflex( "scene_clientflex", "1", FCVAR_REPLICATED, "Do client side flex animation." );
+
+
+CSceneEventInfo::CSceneEventInfo()
+	:
+m_pEvent( 0 ),
+m_pScene( 0 ),
+m_pActor( 0 ),
+m_hSceneEntity( INVALID_EHANDLE ),
+m_bStarted( false ),
+m_iLayer( -1 ),
+m_iPriority( 0 ),
+m_nSequence( 0 ),
+m_bIsGesture( false ),
+m_flWeight( 0.0f ),
+m_hTarget(),
+m_bIsMoving( false ),
+m_bHasArrived( false ),
+m_flInitialYaw( 0.0f ),
+m_flTargetYaw( 0.0f ),
+m_flFacingYaw( 0.0f ),
+m_nType( 0 ),
+m_flNext( 0.0f ),
+m_bClientSide( false ),
+m_pExpHdr( NULL )
+{
+}
+
+CSceneEventInfo::~CSceneEventInfo()
+{
+}
 
 //-----------------------------------------------------------------------------
 // Purpose: 
@@ -65,7 +95,7 @@ bool CSceneTokenProcessor::GetToken( bool crossline )
 {
 	// NOTE: crossline is ignored here, may need to implement if needed
 	m_pBuffer = engine->ParseFile( m_pBuffer, m_szToken, sizeof( m_szToken ) );
-	if ( m_szToken[0] )
+	if ( 0 <= (int)strlen( m_szToken ) )
 		return true;
 	return false;
 }

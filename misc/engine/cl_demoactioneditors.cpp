@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -424,11 +424,11 @@ void CBaseActionScreenFadeStartDialog::Init( void )
 
 	float duration = f->duration * (1.0f/(float)(1<<SCREENFADE_FRACBITS));
 	float holdTime = f->holdTime * (1.0f/(float)(1<<SCREENFADE_FRACBITS));
-	int fadein = f->fadeFlags & FFADE_IN;
-	int fadeout = f->fadeFlags & FFADE_OUT;
-	int fademodulate = f->fadeFlags & FFADE_MODULATE;
-	int fadestayout = f->fadeFlags & FFADE_STAYOUT;
-	int fadepurge = f->fadeFlags & FFADE_PURGE;
+	bool fadein = ( f->fadeFlags & FFADE_IN ) ? true : false;
+	bool fadeout = ( f->fadeFlags & FFADE_OUT ) ? true : false;
+	bool fademodulate = ( f->fadeFlags & FFADE_MODULATE ) ? true : false;
+	bool fadestayout = ( f->fadeFlags & FFADE_STAYOUT ) ? true : false;
+	bool fadepurge = ( f->fadeFlags & FFADE_PURGE ) ? true : false;
 	int r = f->r;
 	int g = f->g;
 	int b = f->b;
@@ -437,11 +437,11 @@ void CBaseActionScreenFadeStartDialog::Init( void )
 	m_pDuration->SetText( va( "%.3f", duration ) );
 	m_pHoldTime->SetText( va( "%.3f", holdTime ) );
 	m_pColor->SetText( va( "%i %i %i %i", r, g, b, a ) );
-	m_pFFADE_IN->SetSelected( fadein != 0 );
-	m_pFFADE_OUT->SetSelected( fadeout != 0 );
-	m_pFFADE_MODULATE->SetSelected( fademodulate != 0 );
-	m_pFFADE_STAYOUT->SetSelected( fadestayout != 0 );
-	m_pFFADE_PURGE->SetSelected( fadepurge != 0 );
+	m_pFFADE_IN->SetSelected( fadein );
+	m_pFFADE_OUT->SetSelected( fadeout );
+	m_pFFADE_MODULATE->SetSelected( fademodulate );
+	m_pFFADE_STAYOUT->SetSelected( fadestayout );
+	m_pFFADE_PURGE->SetSelected( fadepurge );
 
 }
 
@@ -458,11 +458,11 @@ bool CBaseActionScreenFadeStartDialog::OnSaveChanges( void )
 
 	float duration = f->duration * (1.0f/(float)(1<<SCREENFADE_FRACBITS));
 	float holdTime = f->holdTime * (1.0f/(float)(1<<SCREENFADE_FRACBITS));
-	bool fadein = f->fadeFlags & FFADE_IN;
-	bool fadeout = ( f->fadeFlags & FFADE_OUT ) != 0;
-	bool fademodulate = ( f->fadeFlags & FFADE_MODULATE ) != 0;
-	bool fadestayout = ( f->fadeFlags & FFADE_STAYOUT ) != 0;
-	bool fadepurge = ( f->fadeFlags & FFADE_PURGE ) != 0;
+	bool fadein = ( f->fadeFlags & FFADE_IN ) ? true : false;
+	bool fadeout = ( f->fadeFlags & FFADE_OUT ) ? true : false;
+	bool fademodulate = ( f->fadeFlags & FFADE_MODULATE ) ? true : false;
+	bool fadestayout = ( f->fadeFlags & FFADE_STAYOUT ) ? true : false;
+	bool fadepurge = ( f->fadeFlags & FFADE_PURGE ) ? true : false;
 	int r = f->r;
 	int g = f->g;
 	int b = f->b;
@@ -1056,7 +1056,7 @@ void CBaseActionPlaySoundStartDialog::OnFileSelected( char const *fullpath )
 	Q_FixSlashes( relativepath );
 
 	char *soundname = relativepath;
-	if ( !Q_strnicmp( relativepath, "sound\\", strlen( "sound\\" ) ) )
+	if ( StringHasPrefix( relativepath, "sound\\" ) )
 	{
 		soundname += strlen( "sound\\" );
 	}
@@ -1076,6 +1076,7 @@ void CBaseActionPlaySoundStartDialog::OnCommand( char const *command )
 		if ( !m_hFileOpenDialog.Get() )
 		{
 			m_hFileOpenDialog = new vgui::FileOpenDialog( this, "Choose .wav file", true );
+			m_hFileOpenDialog->SetDeleteSelfOnClose( false );
 		}
 		if ( m_hFileOpenDialog )
 		{

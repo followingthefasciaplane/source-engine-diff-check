@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright (c), Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Code for the CEconGameAccount object
 //
@@ -12,9 +12,6 @@
 using namespace GCSDK;
 
 #ifdef GC_DLL
-//---------------------------------------------------------------------------------
-// Purpose: 
-//---------------------------------------------------------------------------------
 IMPLEMENT_CLASS_MEMPOOL( CEconGameServerAccount, 100, UTLMEMORYPOOL_GROW_SLOW );
 
 void GameServerAccount_GenerateIdentityToken( char* pIdentityToken, uint32 unMaxChars )
@@ -30,10 +27,6 @@ void GameServerAccount_GenerateIdentityToken( char* pIdentityToken, uint32 unMax
 	pIdentityToken[unMaxChars - 1] = 0;
 }
 
-//---------------------------------------------------------------------------------
-// Purpose: Selective account-level data for game servers
-//---------------------------------------------------------------------------------
-IMPLEMENT_CLASS_MEMPOOL( CEconGameAccountForGameServers, 10 * 1000, UTLMEMORYPOOL_GROW_SLOW );
 #endif
 
 // memdbgon must be the last include file in a .cpp file!!!

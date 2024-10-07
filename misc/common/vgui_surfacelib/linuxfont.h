@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -28,7 +28,7 @@ public:
 	~CLinuxFont();
 
 	// creates the font from windows.  returns false if font does not exist in the OS.
-	virtual bool CreateFromMemory(const char *windowsFontName, void *data, int size, int tall, int weight, int blur, int scanlines, int flags);
+	virtual bool Create(const char *windowsFontName, int tall, int weight, int blur, int scanlines, int flags);
 
 	// writes the char into the specified 32bpp texture
 	virtual void GetCharRGBA( wchar_t ch, int rgbaWide, int rgbaTall, unsigned char *rgba);
@@ -40,9 +40,6 @@ public:
 	virtual bool IsValid();
 
 	// gets the abc widths for a character
-	//  A spacing is the distance to add to the current position before drawing the character glyph.
-	//  B spacing is the width of the drawn portion of the glyph.
-	//  C spacing is the distance to add to the current position to provide white space to the right of the glyph.
 	virtual void GetCharABCWidths(int ch, int &a, int &b, int &c);
 
 	// set the font to be the one to currently draw with in the gdi
@@ -50,9 +47,6 @@ public:
 
 	// returns the height of the font, in pixels
 	virtual int GetHeight();
-
-	// returns the requested height of the font.
-	virtual int GetHeightRequested();
 
 	// returns the ascent of the font, in pixels (ascent=units above the base line)
 	virtual int GetAscent();
@@ -68,12 +62,9 @@ public:
 	
 	// gets the name of this font
 	const char *GetName() { return m_szName.String(); }
-	const char *GetFamilyName() { return m_face ? m_face->family_name : NULL; }
 
 	// gets the weight of the font
 	virtual int GetWeight() { return m_iWeight; }
-	
-	bool HasChar(wchar_t wch);
 
 	// gets the width of ch given its position around before and after chars
 	virtual void GetKernedCharWidth( wchar_t ch, wchar_t chBefore, wchar_t chAfter, float &wide, float &abcA, float &abcC );
@@ -82,46 +73,49 @@ public:
 	void Validate( CValidator &validator, char *pchName );
 #endif
 
-	// Given a font name from windows, match it to the filename and return that.
-	static char *GetFontFileName(const char *windowsFontName, int flags);
+	virtual bool CreateFromMemory(const char *windowsFontName, void *data, int size, int tall, int weight, int blur, int scanlines, int flags);
 
 
 protected:
-	CUtlString m_szName;
-	int m_iTall;
-	int m_iWeight;
-	int m_iFlags;
-	bool m_bAntiAliased;
-	bool m_bRotary;
-	bool m_bAdditive;
-	int m_iDropShadowOffset;
-	bool m_bUnderlined;
-	int m_iOutlineSize;
+        CUtlString m_szName;
+        int m_iTall;
+        int m_iWeight;
+        int m_iFlags;
+        bool m_bAntiAliased;
+        bool m_bRotary;
+        bool m_bAdditive;
+        int m_iDropShadowOffset;
+        bool m_bUnderlined;
+        int m_iOutlineSize;
 
-	int m_iHeight;
-	int m_iHeightRequested;
-	int m_iMaxCharWidth;
-	int m_iAscent;
+        int m_iHeight;
+        int m_iMaxCharWidth;
+        int m_iAscent;
 
-	int m_iScanLines;
-	int m_iBlur;
-
+        int m_iScanLines;
+        int m_iBlur;
+        float *m_pGaussianDistribution;
+        
 private:
-	static void CreateFontList();
-	// abc widths
-	struct abc_t
-	{
-		short b;
-		char a;
-		char c;
-	};
+	void InitMetrics();
 
-	// cache for storing asian abc widths (since it's too big too just store them all)
-	struct abc_cache_t
-	{
-		wchar_t wch;
-		abc_t abc;
-	};
+
+
+	static void CreateFontList();
+        // abc widths
+        struct abc_t
+        {
+                short b;
+                char a;
+                char c;
+        };
+
+        // cache for storing asian abc widths (since it's too big too just store them all)
+        struct abc_cache_t
+        {
+                wchar_t wch;
+                abc_t abc;
+        };
 
 	
 	CUtlRBTree<abc_cache_t, unsigned short> m_ExtendedABCWidthsCache;
@@ -131,21 +125,26 @@ private:
 	struct kernedSize
 	{
 		float wide;
+		// float abcA; //$ Not yet used...
+		// float abcC;	// 
 	};
 	
 	struct kerned_abc_cache_t
 	{
 		wchar_t wch;
 		wchar_t wchBefore;
-		wchar_t wchAfter; 
+		wchar_t wchAfter;
 		kernedSize abc;
 	};
 	
 	CUtlRBTree<kerned_abc_cache_t, unsigned short> m_ExtendedKernedABCWidthsCache;
 	static bool ExtendedKernedABCWidthsCacheLessFunc(const kerned_abc_cache_t &lhs, const kerned_abc_cache_t &rhs);
 
-	bool m_faceValid;
-	FT_Face m_face;
+	
+	int m_rgiBitmapSize[2];
+	unsigned char *m_pBuf;	// pointer to buffer for use when generated bitmap versions of a texture
+	
+	FT_Face face;
 
 	struct font_name_entry
 	{
@@ -166,4 +165,4 @@ private:
 	static bool ms_bSetFriendlyNameCacheLessFunc;
 };
 
-#endif // LINUXFONT_H
+#endif // OSXFONT_H

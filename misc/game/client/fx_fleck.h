@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -43,7 +43,7 @@ class CFleckParticles : public CSimpleEmitter
 {
 public:
 
-							CFleckParticles( const char *pDebugName );
+	explicit 				CFleckParticles( const char *pDebugName );
 							~CFleckParticles();
 	static CSmartPtr<CFleckParticles> Create( const char *pDebugName, const Vector &vCenter, const Vector &extents );
 

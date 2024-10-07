@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -60,11 +60,14 @@ public:
 	// returns true if reslist generation is enabled
 	bool		IsEnabled()			{ return m_bLoggingEnabled; }
 	bool		IsLoggingToMap()	{ return m_bLoggingEnabled && !m_bLogToEngineList; }
+	bool		IsCreatingForXbox();
 
 	// call to mark level load/end
 	void		OnLevelLoadStart(const char *levelName);
 	void		OnLevelLoadEnd();
+	void		OnLevelShutdown();
 	void		OnPlayerSpawn();
+	void		OnFullyConnected();
 
 	// call to mark resources as being precached
 	void		OnResourcePrecached(const char *relativePathFileName);
@@ -96,6 +99,7 @@ private:
 	bool		m_bLoggingEnabled;
 	bool		m_bUsingMapList;
 	bool		m_bRestartOnTransition;
+	bool		m_bCreatingForXbox;
 	// true for engine, false for map
 	bool		m_bLogToEngineList;
 	bool		m_bAutoQuit;
@@ -104,13 +108,11 @@ private:
 	CUtlVector<maplist_map_t> m_Maps;
 	int m_iCurrentMap;
 	float m_flNextMapRunTime;
-	int m_iFrameCountdownToRunningNextMap;
 	CUtlSymbolTable m_AlreadyWrittenFileNames;
 	int m_iPauseTimeBetweenMaps;
-	int m_iPauseFramesBetweenMaps;
 
 	char		m_szPrefix[64];
-	char		m_szLevelName[64];
+	char		m_szLevelName[MAX_PATH];
 
 	CUtlSymbolTable m_DeletionList;
 	CUtlRBTree< CUtlSymbol > m_DeletionListWarnings;

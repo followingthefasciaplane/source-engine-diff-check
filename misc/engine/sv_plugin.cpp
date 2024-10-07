@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -12,13 +12,17 @@
 #include "filesystem_engine.h"
 #include "eiface.h"
 #include "sys.h"
-#include "client.h"
 #include "sys_dll.h"
 #include "pr_edict.h"
 #include "networkstringtable.h"
 #include "networkstringtableserver.h"
-#include "tier0/etwprof.h"
+#include "matchmaking/imatchframework.h"
 
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
+
+extern IMatchFramework *g_pMatchFramework;
 extern CreateInterfaceFn g_AppSystemFactory;
 extern CSysModule *g_GameDLL;
 
@@ -33,17 +37,17 @@ static int g_iQueryCvarCookie = 1;
 QueryCvarCookie_t SendCvarValueQueryToClient( IClient *client, const char *pCvarName, bool bPluginQuery )
 {
 	// Send a message to the client asking for the value.
-	SVC_GetCvarValue msg;
-	msg.m_iCookie = g_iQueryCvarCookie++;
-	msg.m_szCvarName = pCvarName;
+	CSVCMsg_GetCvarValue_t msg;
+	msg.set_cookie( g_iQueryCvarCookie++ );
+	msg.set_cvar_name( pCvarName );
 
 	// If the query came from the game DLL instead of from a plugin, then we negate the cookie
 	// so it knows who to callback on when the value arrives back from the client.
 	if ( !bPluginQuery )
-		msg.m_iCookie = -msg.m_iCookie;
-	
+		msg.set_cookie( -msg.cookie() );
+
 	client->SendNetMsg( msg );
-	return msg.m_iCookie;
+	return msg.cookie();
 }
 
 
@@ -91,7 +95,16 @@ bool CPlugin::Load( const char *fileName )
 	// Linux doesn't check signatures, so in that case disable plugins on the client completely unless -insecure is specified
 	if ( !sv.IsDedicated() && Host_IsSecureServerAllowed() )
 		return false;
+#else
+	if ( !sv.IsDedicated() && Host_IsSecureServerAllowed() )
+	{
+		if ( CommandLine()->FindParm( "-LoadPluginsForClient" ) )
+			Host_DisallowSecureServers();
+		else
+			return false;
+	}
 #endif
+
 	// Only allow unsigned plugins in -insecure mode
 	if ( !Host_AllowLoadModule( fixedFileName, "GAME", false ) )
 		return false;
@@ -102,21 +115,25 @@ bool CPlugin::Load( const char *fileName )
 		CreateInterfaceFn pluginFactory = Sys_GetFactory( m_pPluginModule );
 		if ( pluginFactory )
 		{
-			m_iPluginInterfaceVersion = 3;
-			m_bDisable = true;
-			m_pPlugin = (IServerPluginCallbacks *)pluginFactory( INTERFACEVERSION_ISERVERPLUGINCALLBACKS, NULL );
+			m_iPluginInterfaceVersion = 4;
+			m_pPlugin = ( IServerPluginCallbacks * ) pluginFactory( INTERFACEVERSION_ISERVERPLUGINCALLBACKS, NULL );
 			if ( !m_pPlugin )
 			{
-				m_iPluginInterfaceVersion = 2;
-				m_pPlugin = (IServerPluginCallbacks *)pluginFactory( INTERFACEVERSION_ISERVERPLUGINCALLBACKS_VERSION_2, NULL );
+				m_iPluginInterfaceVersion = 3;
+				m_pPlugin = ( IServerPluginCallbacks * ) pluginFactory( INTERFACEVERSION_ISERVERPLUGINCALLBACKS_VERSION_3, NULL );
 				if ( !m_pPlugin )
 				{
-					m_iPluginInterfaceVersion = 1;
-					m_pPlugin = (IServerPluginCallbacks *)pluginFactory( INTERFACEVERSION_ISERVERPLUGINCALLBACKS_VERSION_1, NULL );
+					m_iPluginInterfaceVersion = 2;
+					m_pPlugin = ( IServerPluginCallbacks * ) pluginFactory( INTERFACEVERSION_ISERVERPLUGINCALLBACKS_VERSION_2, NULL );
 					if ( !m_pPlugin )
-					{				
-						Warning( "Could not get IServerPluginCallbacks interface from plugin \"%s\"", fileName );
-						return false;
+					{
+						m_iPluginInterfaceVersion = 1;
+						m_pPlugin = ( IServerPluginCallbacks * ) pluginFactory( INTERFACEVERSION_ISERVERPLUGINCALLBACKS_VERSION_1, NULL );
+						if ( !m_pPlugin )
+						{
+							Warning( "Could not get IServerPluginCallbacks interface from plugin \"%s\"", fileName );
+							return false;
+						}
 					}
 				}
 			}
@@ -129,7 +146,6 @@ bool CPlugin::Load( const char *fileName )
 				return false;
 			}
 			SetName( m_pPlugin->GetPluginDescription() );
-			m_bDisable = false;
 		}
 	}
 	else
@@ -137,7 +153,6 @@ bool CPlugin::Load( const char *fileName )
 		Warning( "Unable to load plugin \"%s\"\n", fileName );
 		return false;
 	}
-
 	return true;
 }
 
@@ -151,7 +166,6 @@ void CPlugin::Unload()
 		m_pPlugin->Unload();
 	}
 	m_pPlugin = NULL;
-	m_bDisable = true;
 
 	g_pFileSystem->UnloadModule( m_pPluginModule );
 	m_pPluginModule = NULL;
@@ -367,18 +381,6 @@ void CServerPlugin::PrintDetails()
 
 // helper macro to stop this being typed for every passthrough
 #define FORALL_PLUGINS	for( int i = 0; i < m_Plugins.Count(); i++ ) 
-#define CALL_PLUGIN_IF_ENABLED(call) \
-	do { \
-		CPlugin *plugin = m_Plugins[i]; \
-		if ( ! plugin->IsDisabled() ) \
-		{ \
-			IServerPluginCallbacks *callbacks = plugin->GetCallback(); \
-			if ( callbacks ) \
-			{ \
-				callbacks-> call ; \
-			} \
-		} \
-	} while (0)
 
 
 extern CNetworkStringTableContainer *networkStringTableContainerServer;
@@ -389,12 +391,14 @@ void CServerPlugin::LevelInit(	char const *pMapName,
 								char const *pMapEntities, char const *pOldLevel, 
 								char const *pLandmarkName, bool loadGame, bool background )
 {
-	CETWScope timer( "CServerPlugin::LevelInit" );
 
 	MDLCACHE_COARSE_LOCK_(g_pMDLCache);
 	FORALL_PLUGINS
 	{
-		CALL_PLUGIN_IF_ENABLED( LevelInit( pMapName ) );
+		if ( ! m_Plugins[i]->IsDisabled() )
+		{
+			m_Plugins[i]->GetCallback()->LevelInit( pMapName );
+		}
 	}
 
 	bool bPrevState = networkStringTableContainerServer->Lock( false );
@@ -408,7 +412,10 @@ void CServerPlugin::ServerActivate( edict_t *pEdictList, int edictCount, int cli
 	MDLCACHE_COARSE_LOCK_(g_pMDLCache);
 	FORALL_PLUGINS
 	{
-		CALL_PLUGIN_IF_ENABLED( ServerActivate( pEdictList, edictCount, clientMax ) );
+		if ( ! m_Plugins[i]->IsDisabled() )
+		{
+			m_Plugins[i]->GetCallback()->ServerActivate( pEdictList, edictCount, clientMax );
+		}
 	}
 
 	serverGameDLL->ServerActivate( pEdictList, edictCount, clientMax );
@@ -418,7 +425,10 @@ void CServerPlugin::GameFrame( bool simulating )
 {
 	FORALL_PLUGINS
 	{
-		CALL_PLUGIN_IF_ENABLED( GameFrame( simulating ) );
+		if ( ! m_Plugins[i]->IsDisabled() )
+		{
+			m_Plugins[i]->GetCallback()->GameFrame( simulating );
+		}
 	}
 
 	serverGameDLL->GameFrame( simulating );
@@ -429,7 +439,10 @@ void CServerPlugin::LevelShutdown( void )
 	MDLCACHE_COARSE_LOCK_(g_pMDLCache);
 	FORALL_PLUGINS
 	{
-		CALL_PLUGIN_IF_ENABLED( LevelShutdown() );
+		if ( ! m_Plugins[i]->IsDisabled() )
+		{
+			m_Plugins[i]->GetCallback()->LevelShutdown();
+		}
 	}
 
 	serverGameDLL->LevelShutdown();
@@ -440,17 +453,36 @@ void CServerPlugin::ClientActive( edict_t *pEntity, bool bLoadGame )
 {
 	FORALL_PLUGINS
 	{
-		CALL_PLUGIN_IF_ENABLED( ClientActive( pEntity ) );
+		if ( ! m_Plugins[i]->IsDisabled() )
+		{
+			m_Plugins[i]->GetCallback()->ClientActive( pEntity );
+		}
 	}
 
 	serverGameClients->ClientActive( pEntity, bLoadGame );
+}
+
+void CServerPlugin::ClientFullyConnect( edict_t *pEntity )
+{
+	FORALL_PLUGINS
+	{
+		if ( ! m_Plugins[i]->IsDisabled() )
+		{
+			m_Plugins[i]->GetCallback()->ClientFullyConnect( pEntity );
+		}
+	}
+
+	serverGameClients->ClientFullyConnect( pEntity );
 }
 
 void CServerPlugin::ClientDisconnect( edict_t *pEntity )
 {
 	FORALL_PLUGINS
 	{
-		CALL_PLUGIN_IF_ENABLED( ClientDisconnect( pEntity ) );
+		if ( ! m_Plugins[i]->IsDisabled() )
+		{
+			m_Plugins[i]->GetCallback()->ClientDisconnect( pEntity );
+		}
 	}
 
 	serverGameClients->ClientDisconnect( pEntity );
@@ -460,7 +492,10 @@ void CServerPlugin::ClientPutInServer( edict_t *pEntity, char const *playername 
 {
 	FORALL_PLUGINS
 	{
-		CALL_PLUGIN_IF_ENABLED( ClientPutInServer( pEntity, playername ) );
+		if ( ! m_Plugins[i]->IsDisabled() )
+		{
+			m_Plugins[i]->GetCallback()->ClientPutInServer( pEntity, playername );
+		}
 	}
 
 	serverGameClients->ClientPutInServer( pEntity, playername );
@@ -470,7 +505,10 @@ void CServerPlugin::SetCommandClient( int index )
 {
 	FORALL_PLUGINS
 	{
-		CALL_PLUGIN_IF_ENABLED( SetCommandClient( index ) );
+		if ( ! m_Plugins[i]->IsDisabled() )
+		{
+			m_Plugins[i]->GetCallback()->SetCommandClient( index );
+		}
 	}
 
 	serverGameClients->SetCommandClient( index );
@@ -480,7 +518,10 @@ void CServerPlugin::ClientSettingsChanged( edict_t *pEdict )
 {
 	FORALL_PLUGINS
 	{
-		CALL_PLUGIN_IF_ENABLED( ClientSettingsChanged( pEdict ) );
+		if ( ! m_Plugins[i]->IsDisabled() )
+		{
+			m_Plugins[i]->GetCallback()->ClientSettingsChanged( pEdict );
+		}
 	}
 
 	serverGameClients->ClientSettingsChanged( pEdict );
@@ -603,6 +644,59 @@ void CServerPlugin::OnEdictFreed( const edict_t *edict )
 		}
 	}
 }
+bool CServerPlugin::BNetworkCryptKeyCheckRequired( uint32 unFromIP, uint16 usFromPort, uint32 unAccountIdProvidedByClient,
+	bool bClientWantsToUseCryptKey )
+{
+	FORALL_PLUGINS
+	{
+		CPlugin *p = m_Plugins[ i ];
+		if ( !p->IsDisabled() )
+		{
+			// BNetworkCryptKeyCheckRequired was added in version 4 of this interface.
+			if ( p->GetPluginInterfaceVersion() >= 4 )
+			{
+				if ( p->GetCallback()->BNetworkCryptKeyCheckRequired( unFromIP, usFromPort, unAccountIdProvidedByClient,
+					bClientWantsToUseCryptKey ) )
+					return true;
+			}
+		}
+	}
+
+	// Default implementation will require a certificate only if client insists on using one
+	return bClientWantsToUseCryptKey;
+}
+bool CServerPlugin::BNetworkCryptKeyValidate( uint32 unFromIP, uint16 usFromPort, uint32 unAccountIdProvidedByClient,
+	int nEncryptionKeyIndexFromClient, int numEncryptedBytesFromClient, byte *pbEncryptedBufferFromClient,
+	byte *pbPlainTextKeyForNetchan )
+{
+	FORALL_PLUGINS
+	{
+		CPlugin *p = m_Plugins[ i ];
+		if ( !p->IsDisabled() )
+		{
+			// BNetworkCryptKeyValidate was added in version 4 of this interface.
+			if ( p->GetPluginInterfaceVersion() >= 4 )
+			{
+				if ( p->GetCallback()->BNetworkCryptKeyValidate( unFromIP, usFromPort, unAccountIdProvidedByClient,
+					nEncryptionKeyIndexFromClient, numEncryptedBytesFromClient, pbEncryptedBufferFromClient,
+					pbPlainTextKeyForNetchan ) )
+					return true;
+			}
+		}
+	}
+
+	//
+	// Example plugin implementation:
+	//
+//	byte arrPlainTextClientEncryptionKey[ 16 ] = {
+//		0x01, 0x02, 0x03, 0x04, 0x15, 0x16, 0x17, 0x00,
+//		0x10, 0x20, 0x30, 0x40, 0xA8, 0xB8, 0xC8, 0x00
+//	};
+//	V_memcpy( pbPlainTextKeyForNetchan, arrPlainTextClientEncryptionKey, 16 );
+//	return true;
+
+	return false;
+}
 //---------------------------------------------------------------------------------
 // Purpose: creates a VGUI menu on a clients screen
 //---------------------------------------------------------------------------------
@@ -641,7 +735,14 @@ void  CServerPlugin::CreateMessage( edict_t *pEntity, DIALOG_TYPE type, KeyValue
 	
 	IClient *client = sv.Client(clientnum-1);
 
-	SVC_Menu menu( type, data );
+	CUtlBuffer buf;
+	CSVCMsg_Menu_t menu;
+
+	data->WriteAsBinary( buf );
+
+	menu.set_dialog_type( type );
+	menu.set_menu_key_values( buf.Base(), buf.TellPut() );
+
 	client->SendNetMsg( menu );
 }
 
@@ -712,29 +813,18 @@ CON_COMMAND( plugin_unpause_all, "unpauses all disabled plugins" )
 
 CON_COMMAND( plugin_load, "plugin_load <filename> : loads a plugin" )
 {
-	if ( sv.IsDedicated() && sv.IsActive() )
+	if ( args.ArgC() < 2 )
 	{
-		ConMsg( "plugin_load : cannot load a plugin while running a map\n" );
-	}
-	else if ( !sv.IsDedicated() && cl.IsConnected() )
-	{
-		ConMsg( "plugin_load : cannot load a plugin while connected to a server\n" );
+		Warning( "plugin_load <filename>\n" );
 	}
 	else
 	{
-		if ( args.ArgC() < 2 )
+		if ( !g_pServerPluginHandler->LoadPlugin( args[1] ) )
 		{
-			Warning( "plugin_load <filename>\n" );
+			Warning( "Unable to load plugin \"%s\"\n", args[1] );
+			return;
 		}
-		else
-		{
-			if ( !g_pServerPluginHandler->LoadPlugin( args[1] ) )
-			{
-				Warning( "Unable to load plugin \"%s\"\n", args[1] );
-				return;
-			}
-			ConMsg( "Loaded plugin \"%s\"\n", args[1] );
-		}
+		ConMsg( "Loaded plugin \"%s\"\n", args[1] );
 	}
 }
 

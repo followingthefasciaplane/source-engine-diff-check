@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -68,7 +68,7 @@ public:
 class CSPVertList
 {
 public:
-				CSPVertList( int nVerts = 0 );
+				explicit CSPVertList( int nVerts = 0 );
 				CSPVertList(CSPVert const *pVerts, int nVerts);
 				CSPVertList(Vector const *pVerts, int nVerts, CSPColor vColor=CSPColor(1,1,1) );
 
@@ -225,8 +225,8 @@ public:
 class CScratchPadAutoRelease
 {
 public:
-			CScratchPadAutoRelease( IScratchPad3D *pPad )	{ m_pPad = pPad; }
-			~CScratchPadAutoRelease()						{ if( m_pPad ) m_pPad->Release(); }
+	explicit CScratchPadAutoRelease( IScratchPad3D *pPad )	{ m_pPad = pPad; }
+	~CScratchPadAutoRelease()								{ if( m_pPad ) m_pPad->Release(); }
 
 	IScratchPad3D *m_pPad;
 };

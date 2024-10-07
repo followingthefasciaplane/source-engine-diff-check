@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -7,11 +7,30 @@
 
 
 #include "audio_pch.h"
-#include "voice_mixer_controls.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
+#ifdef _PS3
+
+#include "voice_mixer_controls.h"
+
+IMixerControls* g_pMixerControls = NULL;
+void InitMixerControls()
+{
+	if ( !g_pMixerControls )
+	{
+		Warning( "InitMixerControls is not implemented on PS3\n" );
+	}
+}
+
+void ShutdownMixerControls()
+{
+	delete g_pMixerControls;
+	g_pMixerControls = NULL;
+}
+
+#else
 
 // NOTE: Vista deprecated these APIs
 // Under vista these settings are per-session (not persistent)
@@ -21,6 +40,9 @@
 // we should revisit this and move to the new API.
 // http://msdn.microsoft.com/en-us/library/aa964574(VS.85).aspx
 
+ConVar voice_mixer_mute("voice_mixer_mute", "0", FCVAR_ARCHIVE);
+ConVar voice_mixer_boost("voice_mixer_boost", "0", FCVAR_ARCHIVE);
+ConVar voice_mixer_volume("voice_mixer_volume", "1.0", FCVAR_ARCHIVE);
 
 class CMixerControls : public IMixerControls
 {
@@ -205,6 +227,21 @@ bool CMixerControls::Init()
 		Term();
 		return false;
 	}
+	
+	if ( m_ControlInfos[MicBoost].m_bFound )
+	{
+		SetControlOption_Bool(m_ControlInfos[MicBoost].m_dwControlID, m_ControlInfos[MicBoost].m_cMultipleItems, voice_mixer_boost.GetBool());
+	}
+	if ( m_ControlInfos[MicMute].m_bFound )
+	{
+		SetControlOption_Bool(m_ControlInfos[MicMute].m_dwControlID, m_ControlInfos[MicMute].m_cMultipleItems, voice_mixer_mute.GetBool());
+	}
+
+	if ( m_ControlInfos[MicVolume].m_bFound )
+	{
+		DWORD dwValue = (DWORD)(voice_mixer_volume.GetFloat() * 65535.0f);
+		SetControlOption_Unsigned(m_ControlInfos[MicVolume].m_dwControlID, m_ControlInfos[MicVolume].m_cMultipleItems, dwValue);
+	}
 
 	return true;
 }
@@ -227,21 +264,25 @@ bool CMixerControls::GetValue_Float( Control iControl, float &flValue )
 	if( iControl < 0 || iControl >= NumControls || !m_ControlInfos[iControl].m_bFound )
 		return false;
 
-	if(iControl == MicBoost || iControl == MicMute)
+	switch( iControl )
 	{
-		bool bValue = false;
-		bool ret = GetControlOption_Bool(m_ControlInfos[iControl].m_dwControlID, m_ControlInfos[iControl].m_cMultipleItems, bValue);
-		flValue = (float)bValue;
-		return ret;
-	}
-	else if(iControl == MicVolume)
-	{
-		DWORD dwValue = (DWORD)0;
-		if(GetControlOption_Unsigned(m_ControlInfos[iControl].m_dwControlID, m_ControlInfos[iControl].m_cMultipleItems, dwValue))
+	case MicBoost:
 		{
-			flValue = dwValue / 65535.0f;
+			bool bValue = voice_mixer_boost.GetBool();
+			flValue = (float)bValue;
 			return true;
 		}
+		break;
+	case MicMute:
+		{
+			bool bValue = voice_mixer_mute.GetBool();
+			flValue = (float)bValue;
+			return true;
+		}
+		break;
+	case MicVolume:
+		flValue= voice_mixer_volume.GetFloat();
+		return true;
 	}
 
 	return false;
@@ -253,13 +294,21 @@ bool CMixerControls::SetValue_Float(Control iControl, float flValue )
 	if(iControl < 0 || iControl >= NumControls || !m_ControlInfos[iControl].m_bFound)
 		return false;
 
-	if(iControl == MicBoost || iControl == MicMute)
+	if ( iControl == MicBoost )
 	{
 		bool bValue = !!flValue;
+		voice_mixer_boost.SetValue( bValue );
+		return SetControlOption_Bool(m_ControlInfos[iControl].m_dwControlID, m_ControlInfos[iControl].m_cMultipleItems, bValue);
+	}
+	if(iControl == MicMute)
+	{
+		bool bValue = !!flValue;
+		voice_mixer_mute.SetValue( bValue );
 		return SetControlOption_Bool(m_ControlInfos[iControl].m_dwControlID, m_ControlInfos[iControl].m_cMultipleItems, bValue);
 	}
 	else if(iControl == MicVolume)
 	{
+		voice_mixer_volume.SetValue( flValue );
 		DWORD dwValue = (DWORD)(flValue * 65535.0f);
 		return SetControlOption_Unsigned(m_ControlInfos[iControl].m_dwControlID, m_ControlInfos[iControl].m_cMultipleItems, dwValue);
 	}
@@ -501,3 +550,4 @@ void ShutdownMixerControls()
 	g_pMixerControls = NULL;
 }
 
+#endif

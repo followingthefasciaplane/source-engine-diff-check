@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -198,13 +198,13 @@ void CTextureBudgetPanel::SendConfigDataToBase()
 	data.m_Height = texture_budget_panel_height.GetInt();
 
 	// Shift it..
-	if ( data.m_xCoord + data.m_Width > videomode->GetModeStereoWidth() )
+	if ( data.m_xCoord + data.m_Width > videomode->GetModeWidth() )
 	{
-		data.m_xCoord = videomode->GetModeStereoWidth() - data.m_Width;
+		data.m_xCoord = videomode->GetModeWidth() - data.m_Width;
 	}
-	if ( data.m_yCoord + data.m_Height > videomode->GetModeStereoHeight() )
+	if ( data.m_yCoord + data.m_Height > videomode->GetModeHeight() )
 	{
-		data.m_yCoord = videomode->GetModeStereoHeight() - data.m_Height;
+		data.m_yCoord = videomode->GetModeHeight() - data.m_Height;
 	}
 
 	// Send the config data to the base class.
@@ -264,7 +264,7 @@ void CTextureBudgetPanel::SnapshotTextureHistory()
 			int value = pProf->GetCounterValue( i ) / 1024;
 			
 			m_SumOfValues += value;
-			m_MaxValue = max( m_MaxValue, value );
+			m_MaxValue = MAX( m_MaxValue, value );
 		}
 	}
 	

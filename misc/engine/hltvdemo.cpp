@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -13,7 +13,6 @@
 #include "hltvserver.h"
 #include "demo.h"
 #include "host_cmd.h"
-#include "proto_version.h"
 #include "demofile/demoformat.h"
 #include "filesystem_engine.h"
 #include "net.h"
@@ -33,7 +32,7 @@ extern CNetworkStringTableContainer *networkStringTableContainerServer;
 // Construction/Destruction
 //////////////////////////////////////////////////////////////////////
 
-CHLTVDemoRecorder::CHLTVDemoRecorder()
+CHLTVDemoRecorder::CHLTVDemoRecorder(CHLTVServer *pHltvServer) :hltv( pHltvServer )
 {
 	m_bIsRecording = false;
 }
@@ -47,11 +46,31 @@ void CHLTVDemoRecorder::StartAutoRecording()
 {
 	char fileName[MAX_OSPATH];
 
-	tm today; VCRHook_LocalTime( &today );
+	struct tm today;
+	Plat_GetLocalTime( &today );
 
-	Q_snprintf( fileName, sizeof(fileName), "auto-%04i%02i%02i-%02i%02i-%s.dem", 
-		1900 + today.tm_year, today.tm_mon+1, today.tm_mday, 
-		today.tm_hour, today.tm_min, hltv->GetMapName() ); 
+	Q_snprintf( fileName, sizeof(fileName), "%sauto%d-%04i%02i%02i-%02i%02i%02i-%u-%s-%s.dem",
+		( serverGameDLL && serverGameDLL->IsValveDS() ) ? "replays/" : "",
+		hltv->GetInstanceIndex(),
+		1900 + today.tm_year, today.tm_mon + 1, today.tm_mday,
+		today.tm_hour, today.tm_min, today.tm_sec,
+		RandomInt( 1, INT_MAX - 1 ),
+		hltv->GetMapName(), host_name.GetString() ); 
+
+	// replace any bad characters that might be in the host name
+	int nLen = Q_strlen( fileName );
+	for ( int i = 9; i < nLen; i++ )
+	{
+		if ( fileName[i] >= 'a' && fileName[i] <= 'z' )
+			continue;
+		if ( fileName[i] >= 'A' && fileName[i] <= 'Z' )
+			continue;
+		if ( fileName[i] >= '0' && fileName[i] <= '9' )
+			continue;
+		if ( fileName[i] == '_' || fileName[i] == '-' || fileName[i] == '.' )
+			continue;
+		fileName[i] = '_';
+	}
 
 	StartRecording( fileName, false );
 }
@@ -67,7 +86,7 @@ void CHLTVDemoRecorder::StartRecording( const char *filename, bool bContinuously
 		return;
 	}
 
-	ConMsg ("Recording SourceTV demo to %s...\n", filename);
+	ConMsg ("Recording GOTV demo to %s...\n", filename);
 
 	demoheader_t *dh = &m_DemoFile.m_DemoHeader;
 
@@ -76,7 +95,7 @@ void CHLTVDemoRecorder::StartRecording( const char *filename, bool bContinuously
 
 	Q_strncpy( dh->demofilestamp, DEMO_HEADER_ID, sizeof(dh->demofilestamp) );
 	dh->demoprotocol = DEMO_PROTOCOL;
-	dh->networkprotocol = PROTOCOL_VERSION;
+	dh->networkprotocol = GetHostVersion();
 
 	Q_strncpy( dh->mapname, hltv->GetMapName(), sizeof( dh->mapname ) );
 
@@ -86,23 +105,22 @@ void CHLTVDemoRecorder::StartRecording( const char *filename, bool bContinuously
 
 	Q_strncpy( dh->servername, host_name.GetString(), sizeof( dh->servername ) );
 
-	Q_strncpy( dh->clientname, "SourceTV Demo", sizeof( dh->servername ) );
+	Q_strncpy( dh->clientname, "GOTV Demo", sizeof( dh->servername ) );
 
-	// write demo file header info
+	// Write demo file header info.  This is mostly to allocate space in the output file,
+	// the final demo header will be written when we finish recording.
 	m_DemoFile.WriteDemoHeader();
-	
-	dh->signonlength = WriteSignonData(); // demoheader will be written when demo is closed
 
-	m_nFrameCount = 0;
-
-	m_nStartTick = host_tickcount;
-
-	// Demo playback should read this as an incoming message.
-	// Write the client's realtime value out so we can synchronize the reads.
-	m_DemoFile.WriteCmdHeader( dem_synctick, 0 );
+	// We keep these identical so that GetRecordingTick() returns 0 until at least the first
+	// frame is recorded.
+	//
+	// -1 here is really a sentinel value so that we can detect when the first tick is written
+	// and do some bookkeeping at a safe point there.  See HasRecordingActuallyStarted()
+	m_nStartTick = -1;
+	m_nLastWrittenTick = -1;
 
 	m_bIsRecording = true;
-
+	m_nFrameCount = 0;
 	m_SequenceInfo = 1;
 	m_nDeltaTick = -1;
 }
@@ -112,13 +130,13 @@ bool CHLTVDemoRecorder::IsRecording()
 	return m_bIsRecording;
 }
 
-void CHLTVDemoRecorder::StopRecording()
+void CHLTVDemoRecorder::StopRecording( const CGameInfo *pGameInfo )
 {
 	if ( !m_bIsRecording )
 		return;
 
 	// Demo playback should read this as an incoming message.
-	m_DemoFile.WriteCmdHeader( dem_stop, GetRecordingTick() );
+	m_DemoFile.WriteCmdHeader( dem_stop, GetRecordingTick(), 0 );
 
 	// update demo header info
 	m_DemoFile.m_DemoHeader.playback_ticks = GetRecordingTick();
@@ -139,103 +157,99 @@ void CHLTVDemoRecorder::StopRecording()
 		m_MessageData.StartWriting( NULL, 0 );
 	}
 	
-	ConMsg("Completed SourceTV demo \"%s\", recording time %.1f\n",
+	ConMsg("Completed GOTV demo \"%s\", recording time %.1f\n",
 		m_DemoFile.m_szFileName,
 		m_DemoFile.m_DemoHeader.playback_time );
 }
 
-CDemoFile *CHLTVDemoRecorder::GetDemoFile()
-{
-	return &m_DemoFile;
-}
-
-
 int CHLTVDemoRecorder::GetRecordingTick( void )
 {
-	return host_tickcount - m_nStartTick;
+	return m_nLastWrittenTick - m_nStartTick;
 }
-
-
 
 void CHLTVDemoRecorder::WriteServerInfo()
 {
-	ALIGN4 byte		buffer[ NET_MAX_PAYLOAD ] ALIGN4_POST;
-	bf_write	msg( "CHLTVDemoRecorder::WriteServerInfo", buffer, sizeof( buffer ) );
+	Assert( HasRecordingActuallyStarted() );
 
-	SVC_ServerInfo serverinfo;	// create serverinfo message
+	byte		buffer[ NET_MAX_PAYLOAD ];
+	bf_write	msg( "CHLTVDemoRecorder::WriteServerInfo", buffer, sizeof( buffer ) );
 
 	// on the master demos are using sv object, on relays hltv
 	CBaseServer *pServer = hltv->IsMasterProxy()?(CBaseServer*)(&sv):(CBaseServer*)(hltv);
-	
+
+	CSVCMsg_ServerInfo_t serverinfo;
 	hltv->FillServerInfo( serverinfo ); // fill rest of info message
-	
 	serverinfo.WriteToBuffer( msg );
 
 	// send first tick
-	NET_Tick signonTick( m_nSignonTick, 0, 0 );
+	CNETMsg_Tick_t signonTick( m_nStartTick, 0, 0, 0 );
 	signonTick.WriteToBuffer( msg );
 
-	// write stringtable baselines
-
-#ifndef SHARED_NET_STRING_TABLES
-	pServer->m_StringTables->WriteBaselines( msg );
-#endif
-	
 	// Write replicated ConVars to non-listen server clients only
-	NET_SetConVar convars;
-
+	CNETMsg_SetConVar_t convars;
+	
 	// build a list of all replicated convars
-	Host_BuildConVarUpdateMessage( &convars, FCVAR_REPLICATED, true );
-
+	Host_BuildConVarUpdateMessage( convars.mutable_convars(), FCVAR_REPLICATED, true );
 	if ( hltv->IsMasterProxy() )
 	{
 		// for SourceTV server demos write set "tv_transmitall 1" even
 		// if it's off for the real broadcast
-		NET_SetConVar::cvar_t acvar;
-		Q_strncpy( acvar.name, "tv_transmitall", MAX_OSPATH );
-		Q_strncpy( acvar.value, "1", MAX_OSPATH );
-		convars.m_ConVars.AddToTail( acvar );
+		convars.AddToTail( "tv_transmitall", "1" );
+		hltv->FixupConvars( convars );
 	}
 
 	// write convars to demo
 	convars.WriteToBuffer( msg );
-	
+
+	// write stringtable baselines
+#ifndef SHARED_NET_STRING_TABLES
+	hltv->m_StringTables->WriteBaselines( pServer->GetMapName(), msg );
+#endif
+
 	// send signon state
-	NET_SignonState signonMsg( SIGNONSTATE_NEW, pServer->GetSpawnCount() );
+	CNETMsg_SignonState_t signonMsg( SIGNONSTATE_NEW, pServer->GetSpawnCount() );
 	signonMsg.WriteToBuffer( msg );
 
 	WriteMessages( dem_signon, msg );
 }
 
+void CHLTVDemoRecorder::RecordPlayerAvatar( const CNETMsg_PlayerAvatarData_t* hltvPlayerAvatar )
+{
+	// If we haven't actually 'signed on' yet, don't record; we'll capture this in our signon data
+	if ( !HasRecordingActuallyStarted() )
+		return;
+
+	// If we are already recording then append this player's avatar data into the demo
+	byte		buffer[NET_MAX_PAYLOAD];
+	bf_write	bfWrite( "CHLTVDemo::NETMsg_PlayerAvatarData", buffer, sizeof( buffer ) );
+	hltvPlayerAvatar->WriteToBuffer( bfWrite );
+	WriteMessages( dem_signon, bfWrite );
+}
+
 void CHLTVDemoRecorder::RecordCommand( const char *cmdstring )
 {
-	if ( !IsRecording() )
+	if ( !HasRecordingActuallyStarted() )
 		return;
 
 	if ( !cmdstring || !cmdstring[0] )
 		return;
 
-	m_DemoFile.WriteConsoleCommand( cmdstring, GetRecordingTick() );
+	m_DemoFile.WriteConsoleCommand( cmdstring, GetRecordingTick(), 0 );
 }
 
 void CHLTVDemoRecorder::RecordServerClasses( ServerClass *pClasses )
 {
-	char *pBigBuffer;
+	// We should be in the middle of recording the sign-on state at this point
+	// which means we will have a valid nStartTick.
+	//
+	// This assert is to make sure that this doesn't randomly get called via
+	// IDemoRecorder; in that case we should probably just return.
+	Assert( HasRecordingActuallyStarted() );
+
+	// to big for stack
 	CUtlBuffer bigBuff;
-
-	int buffSize = 256*1024;
-	if ( !IsX360() )
-	{
-		pBigBuffer = (char*)stackalloc( buffSize );
-	}
-	else
-	{
-		// keep temp large allocations off of stack
-		bigBuff.EnsureCapacity( buffSize );
-		pBigBuffer = (char*)bigBuff.Base();
-	}
-
-	bf_write buf( pBigBuffer, buffSize );
+	bigBuff.EnsureCapacity( DEMO_RECORD_BUFFER_SIZE );
+	bf_write buf( bigBuff.Base(), DEMO_RECORD_BUFFER_SIZE );
 
 	// Send SendTable info.
 	DataTable_WriteSendTablesBuffer( pClasses, &buf );
@@ -243,84 +257,88 @@ void CHLTVDemoRecorder::RecordServerClasses( ServerClass *pClasses )
 	// Send class descriptions.
 	DataTable_WriteClassInfosBuffer( pClasses, &buf );
 
+	if ( buf.GetNumBitsLeft() <= 0 )
+	{
+		Sys_Error( "unable to record server classes\n" );
+	}
+
 	// Now write the buffer into the demo file
 	m_DemoFile.WriteNetworkDataTables( &buf, GetRecordingTick() );
 }
 
+void CHLTVDemoRecorder::RecordCustomData( int iCallbackIndex, const void *pData, size_t iDataLength )
+{
+	if ( !HasRecordingActuallyStarted() )
+		return;
+
+	m_DemoFile.WriteCustomData( iCallbackIndex, pData, iDataLength, GetRecordingTick() );
+}
+
 void CHLTVDemoRecorder::RecordStringTables()
 {
+	Assert( HasRecordingActuallyStarted() );
 
-	// !KLUDGE! It would be nice if the bit buffer could write into a stream
-	// with the power to grow itself.  But it can't.  Hence this really bad
-	// kludge
-	void *data = NULL;
-	int dataLen = 512 * 1024;
-	while ( dataLen <= DEMO_FILE_MAX_STRINGTABLE_SIZE )
-	{
-		data = realloc( data, dataLen );
-		bf_write buf( data, dataLen );
-		buf.SetDebugName("CHLTVDemoRecorder_StringTables");
-		buf.SetAssertOnOverflow( false ); // Doesn't turn off all the spew / asserts, but turns off one
-		networkStringTableContainerServer->WriteStringTables( buf );
+	void *data = malloc( DEMO_RECORD_BUFFER_SIZE );
+	bf_write buf( data, DEMO_RECORD_BUFFER_SIZE );
 
-		// Did we fit?
-		if ( !buf.IsOverflowed() )
-		{
+	networkStringTableContainerServer->WriteStringTables( buf );
 
-			// Now write the buffer into the demo file
-			m_DemoFile.WriteStringTables( &buf, GetRecordingTick() );
-			break;
-		}
+	// Now write the buffer into the demo file
+	m_DemoFile.WriteStringTables( &buf, GetRecordingTick() );
 
-		// Didn't fit.  Try doubling the size of the buffer
-		dataLen *= 2;
-	}
-
-	if ( dataLen > DEMO_FILE_MAX_STRINGTABLE_SIZE )
-	{
-		Warning( "Failed to RecordStringTables. Trying to record string table that's bigger than max string table size\n" );
-	}
-
-	free(data);
+	free( data );
 }
 
 int CHLTVDemoRecorder::WriteSignonData()
 {
+	Assert( HasRecordingActuallyStarted() );
+
 	int start = m_DemoFile.GetCurPos( false );
 
 	// on the master demos are using sv object, on relays hltv
 	CBaseServer *pServer = hltv->IsMasterProxy()?(CBaseServer*)(&sv):(CBaseServer*)(hltv);
-
-	m_nSignonTick = pServer->m_nTickCount;		
 
 	WriteServerInfo();
 
 	RecordServerClasses( serverGameDLL->GetAllServerClasses() );
 	RecordStringTables();
 
-	ALIGN4 byte		buffer[ NET_MAX_PAYLOAD ] ALIGN4_POST;
+	byte		buffer[ NET_MAX_PAYLOAD ];
 	bf_write	msg( "CHLTVDemo::WriteSignonData", buffer, sizeof( buffer ) );
 
 	// use your class infos, CRC is correct
-	SVC_ClassInfo classmsg( true, pServer->serverclasses );
+	// use your class infos, CRC is correct
+	CSVCMsg_ClassInfo_t classmsg;
+	classmsg.set_create_on_client( true );
 	classmsg.WriteToBuffer( msg );
 
 	// Write the regular signon now
 	msg.WriteBits( hltv->m_Signon.GetData(), hltv->m_Signon.GetNumBitsWritten() );
 
 	// write new state
-	NET_SignonState signonMsg1( SIGNONSTATE_PRESPAWN, pServer->GetSpawnCount() );
+	CNETMsg_SignonState_t signonMsg1( SIGNONSTATE_PRESPAWN, pServer->GetSpawnCount() ); 
 	signonMsg1.WriteToBuffer( msg );
 
 	WriteMessages( dem_signon, msg ); 
 	msg.Reset();
 
+	// Dump all accumulated avatar data messages into signon portion of the demo file
+	FOR_EACH_MAP_FAST( hltv->m_mapPlayerAvatarData, iData )
+	{
+		CNETMsg_PlayerAvatarData_t &msgPlayerAvatarData = * hltv->m_mapPlayerAvatarData.Element( iData );
+		msgPlayerAvatarData.WriteToBuffer( msg );
+		WriteMessages( dem_signon, msg );
+		msg.Reset();
+	}
+
 	// set view entity
-	SVC_SetView viewent( hltv->m_nViewEntity );
+	// set view entity
+	CSVCMsg_SetView_t viewent;
+	viewent.set_entity_index( hltv->m_nViewEntity );
 	viewent.WriteToBuffer( msg );
 
 	// Spawned into server, not fully active, though
-	NET_SignonState signonMsg2( SIGNONSTATE_SPAWN, pServer->GetSpawnCount() );
+	CNETMsg_SignonState_t signonMsg2( SIGNONSTATE_SPAWN, pServer->GetSpawnCount() );
 	signonMsg2.WriteToBuffer( msg );
 
 	WriteMessages( dem_signon, msg ); 
@@ -329,14 +347,36 @@ int CHLTVDemoRecorder::WriteSignonData()
 }
 
 
-void CHLTVDemoRecorder::WriteFrame( CHLTVFrame *pFrame )
+void CHLTVDemoRecorder::WriteFrame( CHLTVFrame *pFrame, bf_write *additionaldata )
 {
-	ALIGN4 byte		buffer[ NET_MAX_PAYLOAD ] ALIGN4_POST;
+	Assert( hltv->IsMasterProxy() ); // this works only on the master since we use sv.
+	Assert( pFrame->tick_count >= 0 );
+
+	byte		buffer[ NET_MAX_PAYLOAD ];
 	bf_write	msg( "CHLTVDemo::RecordFrame", buffer, sizeof( buffer ) );
 
-	assert( hltv->IsMasterProxy() ); // this works only on the master since we use sv.
+	// Handle first frame of demo recording here
+	if ( m_nStartTick == -1 )
+	{
+		// Synchronize start tick with frame.
+		//
+		// THIS IS THE POINT WHERE HasRecordingActuallyStarted() STARTS TO RETURN "true"!
+		//
+		// WriteSignonData() relies on this being the correct value for the server, matching
+		// the string tables timestamp in the HLTV server
+		m_nStartTick = pFrame->tick_count;
 
-	//first write reliable data
+		// Write out the current state of string tables, etc.
+		m_DemoFile.m_DemoHeader.signonlength = WriteSignonData();
+
+		// Demo playback should read this as an incoming message.
+		// Write the client's realtime value out so we can synchronize the reads.
+		m_DemoFile.WriteCmdHeader( dem_synctick, 0, 0 );
+	}
+
+	m_nLastWrittenTick = pFrame->tick_count;
+
+ 	//first write reliable data
 	bf_write *data = &pFrame->m_Messages[HLTV_BUFFER_RELIABLE];
 	if ( data->GetNumBitsWritten() )
 		msg.WriteBits( data->GetBasePointer(), data->GetNumBitsWritten() );
@@ -344,24 +384,31 @@ void CHLTVDemoRecorder::WriteFrame( CHLTVFrame *pFrame )
 	//now send snapshot data
 
 	// send tick time
-	NET_Tick tickmsg( pFrame->tick_count, host_frametime_unbounded, host_frametime_stddeviation );
+	CNETMsg_Tick_t tickmsg( pFrame->tick_count, host_frameendtime_computationduration, host_frametime_stddeviation, host_framestarttime_stddeviation );
 	tickmsg.WriteToBuffer( msg );
 
 
 #ifndef SHARED_NET_STRING_TABLES
 	// Update shared client/server string tables. Must be done before sending entities
-	sv.m_StringTables->WriteUpdateMessage( NULL, max( m_nSignonTick, m_nDeltaTick ), msg );
+	hltv->m_StringTables->WriteUpdateMessage( NULL, MAX( m_nStartTick, m_nDeltaTick ), msg );
 #endif
 
 	// get delta frame
 	CClientFrame *deltaFrame = hltv->GetClientFrame( m_nDeltaTick ); // NULL if delta_tick is not found or -1
 	
 	// send entity update, delta compressed if deltaFrame != NULL
-	sv.WriteDeltaEntities( hltv->m_MasterClient, pFrame, deltaFrame, msg );
+	CSVCMsg_PacketEntities_t packetmsg;
+	sv.WriteDeltaEntities( hltv->m_MasterClient, pFrame, deltaFrame, packetmsg );
+	packetmsg.WriteToBuffer( msg );
 
 	// send all unreliable temp ents between last and current frame
+	CSVCMsg_TempEntities_t tempentsmsg;
 	CFrameSnapshot * fromSnapshot = deltaFrame?deltaFrame->GetSnapshot():NULL;
-	sv.WriteTempEntities( hltv->m_MasterClient, pFrame->GetSnapshot(), fromSnapshot, msg, 255 );
+	sv.WriteTempEntities( hltv->m_MasterClient, pFrame->GetSnapshot(), fromSnapshot, tempentsmsg, 255 );
+	if ( tempentsmsg.num_entries() )
+	{
+		tempentsmsg.WriteToBuffer( msg );
+	}
 
 	// write sound data
 	data = &pFrame->m_Messages[HLTV_BUFFER_SOUNDS];
@@ -378,6 +425,11 @@ void CHLTVDemoRecorder::WriteFrame( CHLTVFrame *pFrame )
 	if ( data->GetNumBitsWritten() )
 		msg.WriteBits( data->GetBasePointer(), data->GetNumBitsWritten()  );
 
+	if ( additionaldata && additionaldata->GetNumBitsWritten() )
+	{
+		msg.WriteBits( additionaldata->GetBasePointer(), additionaldata->GetNumBitsWritten() );
+	}
+
 	// update delta tick just like fakeclients do
 	m_nDeltaTick = pFrame->tick_count;
 
@@ -387,6 +439,8 @@ void CHLTVDemoRecorder::WriteFrame( CHLTVFrame *pFrame )
 
 void CHLTVDemoRecorder::WriteMessages( unsigned char cmd, bf_write &message )
 {
+	Assert( HasRecordingActuallyStarted() );
+
 	int len = message.GetNumBytesWritten();
 
 	if (len <= 0)
@@ -396,7 +450,8 @@ void CHLTVDemoRecorder::WriteMessages( unsigned char cmd, bf_write &message )
 	int nRemainingBits = message.GetNumBitsWritten() % 8;
 	if ( nRemainingBits > 0 &&  nRemainingBits <= (8-NETMSG_TYPE_BITS) )
 	{
-		message.WriteUBitLong( net_NOP, NETMSG_TYPE_BITS );
+		CNETMsg_NOP_t nop;
+		nop.WriteToBuffer( message );
 	}
 
 	Assert( len < NET_MAX_MESSAGE );
@@ -411,7 +466,7 @@ void CHLTVDemoRecorder::WriteMessages( unsigned char cmd, bf_write &message )
 	}
 
 	// write command & time
-	m_DemoFile.WriteCmdHeader( cmd, GetRecordingTick() ); 
+	m_DemoFile.WriteCmdHeader( cmd, GetRecordingTick(), 0 ); 
 	
 	// write NULL democmdinfo just to keep same format as client demos
 	democmdinfo_t info;
@@ -427,12 +482,15 @@ void CHLTVDemoRecorder::WriteMessages( unsigned char cmd, bf_write &message )
 	
 	if ( tv_debug.GetInt() > 1 )
 	{
-		Msg( "Writing SourceTV demo message %i bytes at file pos %i\n", len, m_DemoFile.GetCurPos( false ) );
+		Msg( "Writing GOTV demo message %i bytes at file pos %i\n", len, m_DemoFile.GetCurPos( false ) );
 	}
 }
 
 void CHLTVDemoRecorder::RecordMessages(bf_read &data, int bits)
 {
+	if ( !HasRecordingActuallyStarted() )
+		return;
+
 	// create buffer if not there yet
 	if ( m_MessageData.GetBasePointer() == NULL )
 	{
@@ -448,6 +506,9 @@ void CHLTVDemoRecorder::RecordMessages(bf_read &data, int bits)
 
 void CHLTVDemoRecorder::RecordPacket()
 {
+	if ( !HasRecordingActuallyStarted() )
+		return;
+
 	if( m_MessageData.GetBasePointer() )
 	{
 		WriteMessages( dem_packet, m_MessageData );

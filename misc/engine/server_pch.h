@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2007, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -32,6 +32,7 @@
 #include "vox.h"
 #include "EngineSoundInternal.h"
 #include "checksum_engine.h"
+#include "master.h"
 #include "host.h"
 #include "keys.h"
 #include "vengineserver_impl.h"
@@ -39,9 +40,8 @@
 #include "eiface.h"
 #include "filesystem.h"
 #include "filesystem_engine.h"
-#include "KeyValues.h"
+#include "keyvalues.h"
 #include "console.h"
-#include "proto_version.h"
 #include "proto_oob.h"
 #include "edict.h"
 #include "server_class.h"

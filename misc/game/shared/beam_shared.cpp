@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Implements visual effects entities: sprites, beams, bubbles, etc.
 //
@@ -21,11 +21,7 @@
 #include "iclientmode.h"
 #include "viewrender.h"
 #include "view.h"
-
-#ifdef PORTAL
-	#include "c_prop_portal.h"
-#endif //ifdef PORTAL
-
+#include "toolframework_client.h"
 #endif
 
 // memdbgon must be the last include file in a .cpp file!!!
@@ -34,17 +30,23 @@
 #define BEAM_DEFAULT_HALO_SCALE		10
 
 #if !defined( CLIENT_DLL )
-// Lightning target, just alias landmark
 
+//-----------------------------------------------------------------------------
+// info targets are like point entities except you can force them to spawn on the client
+//-----------------------------------------------------------------------------
 class CInfoTarget : public CPointEntity
 {
 public:
 	DECLARE_CLASS( CInfoTarget, CPointEntity );
 
 	void	Spawn( void );
+	virtual int UpdateTransmitState();
 };
 
-//info targets are like point entities except you can force them to spawn on the client
+
+//-----------------------------------------------------------------------------
+// Force transmission
+//-----------------------------------------------------------------------------
 void CInfoTarget::Spawn( void )
 {
 	BaseClass::Spawn();
@@ -54,6 +56,19 @@ void CInfoTarget::Spawn( void )
 		SetEFlags( EFL_FORCE_CHECK_TRANSMIT );
 	}
 }
+
+
+//-----------------------------------------------------------------------------
+// Purpose: Always transmitted to clients
+//-----------------------------------------------------------------------------
+int CInfoTarget::UpdateTransmitState()
+{
+	// Spawn flags 2 means we always transmit
+	if ( HasSpawnFlags(0x02) )
+		return SetTransmitState( FL_EDICT_ALWAYS );
+	return BaseClass::UpdateTransmitState();
+}
+
 
 LINK_ENTITY_TO_CLASS( info_target, CInfoTarget );
 #endif
@@ -79,6 +94,7 @@ bool IsStaticPointEntity( CBaseEntity *pEnt )
 
 #if defined( CLIENT_DLL )
 extern bool ComputeBeamEntPosition( CBaseEntity *pEnt, int nAttachment, bool bInterpretAttachmentIndexAsHitboxIndex, Vector& pt );
+extern void RecvProxy_ClrRender( const CRecvProxyData *pData, void *pStruct, void *pOut );
 
 void RecvProxy_Beam_ScrollSpeed( const CRecvProxyData *pData, void *pStruct, void *pOut )
 {
@@ -95,7 +111,7 @@ void RecvProxy_Beam_ScrollSpeed( const CRecvProxyData *pData, void *pStruct, voi
 	beam->m_fSpeed = val;
 }
 #else
-#if !defined( NO_ENTITY_PREDICTION )
+#if !defined( NO_ENTITY_PREDICTION ) && defined( USE_PREDICTABLEID )
 static void* SendProxy_SendPredictableId( const SendProp *pProp, const void *pStruct, const void *pVarData, CSendProxyRecipients *pRecipients, int objectID )
 {
 	CBaseEntity *pEntity = (CBaseEntity *)pStruct;
@@ -127,12 +143,11 @@ REGISTER_SEND_PROXY_NON_MODIFIED_POINTER( SendProxy_SendPredictableId );
 #endif
 #endif
 
-LINK_ENTITY_TO_CLASS( beam, CBeam );
-
 // This table encodes the CBeam data.
 IMPLEMENT_NETWORKCLASS_ALIASED( Beam, DT_Beam )
+LINK_ENTITY_TO_CLASS_ALIASED( beam, Beam );
 
-#if !defined( NO_ENTITY_PREDICTION )
+#if !defined( NO_ENTITY_PREDICTION ) && defined( USE_PREDICTABLEID )
 BEGIN_NETWORK_TABLE_NOBASE( CBeam, DT_BeamPredictableId )
 #if !defined( CLIENT_DLL )
 	SendPropPredictableId( SENDINFO( m_PredictableID ) ),
@@ -172,17 +187,14 @@ BEGIN_NETWORK_TABLE_NOBASE( CBeam, DT_Beam )
 	SendPropFloat	(SENDINFO(m_flFrameRate),	10, SPROP_ROUNDUP, -25.0f, 25.0f ),
 	SendPropFloat	(SENDINFO(m_flHDRColorScale),	0, SPROP_NOSCALE, 0.0f, 100.0f ),
 	SendPropFloat	(SENDINFO(m_flFrame),		20, SPROP_ROUNDDOWN | SPROP_CHANGES_OFTEN,	0.0f,   256.0f),
-	SendPropInt		(SENDINFO(m_clrRender),		32,	SPROP_UNSIGNED | SPROP_CHANGES_OFTEN ),
+	SendPropInt		(SENDINFO(m_clrRender),		32,	SPROP_UNSIGNED | SPROP_CHANGES_OFTEN, SendProxy_Color32ToInt32 ),
+	SendPropInt		(SENDINFO(m_nClipStyle), CBeam::kBEAMCLIPSTYLE_NUMBITS+1, SPROP_UNSIGNED ),
 	SendPropVector	(SENDINFO(m_vecEndPos),		-1,	SPROP_COORD ),
-#ifdef PORTAL
-	SendPropBool	(SENDINFO(m_bDrawInMainRender) ),
-	SendPropBool	(SENDINFO(m_bDrawInPortalRender) ),
-#endif
+
 	SendPropModelIndex(SENDINFO(m_nModelIndex) ),
 	SendPropVector (SENDINFO(m_vecOrigin), 19, SPROP_CHANGES_OFTEN,	MIN_COORD_INTEGER, MAX_COORD_INTEGER),
 	SendPropEHandle(SENDINFO_NAME(m_hMoveParent, moveparent) ),
-	SendPropInt		(SENDINFO(m_nMinDXLevel),	8,	SPROP_UNSIGNED ),
-#if !defined( NO_ENTITY_PREDICTION )
+#if !defined( NO_ENTITY_PREDICTION ) && defined( USE_PREDICTABLEID )
 	SendPropDataTable( "beampredictable_id", 0, &REFERENCE_SEND_TABLE( DT_BeamPredictableId ), SendProxy_SendPredictableId ),
 #endif
 
@@ -210,21 +222,18 @@ BEGIN_NETWORK_TABLE_NOBASE( CBeam, DT_Beam )
 	RecvPropFloat	(RECVINFO(m_fSpeed), 0, RecvProxy_Beam_ScrollSpeed ),
 	RecvPropFloat(RECVINFO(m_flFrameRate)),
 	RecvPropFloat(RECVINFO(m_flHDRColorScale)),
-	RecvPropInt(RECVINFO(m_clrRender)),
+	RecvPropInt(RECVINFO(m_clrRender), 0, RecvProxy_ClrRender ),
 	RecvPropInt(RECVINFO(m_nRenderFX)),
 	RecvPropInt(RECVINFO(m_nRenderMode)),
 	RecvPropFloat(RECVINFO(m_flFrame)),
+	RecvPropInt(RECVINFO(m_nClipStyle)),
 	RecvPropVector(RECVINFO(m_vecEndPos)),
-#ifdef PORTAL
-	RecvPropBool(RECVINFO(m_bDrawInMainRender) ),
-	RecvPropBool(RECVINFO(m_bDrawInPortalRender) ),
-#endif
+
 	RecvPropInt(RECVINFO(m_nModelIndex)),
-	RecvPropInt(RECVINFO(m_nMinDXLevel)),
 
 	RecvPropVector(RECVINFO_NAME(m_vecNetworkOrigin, m_vecOrigin)),
 	RecvPropInt( RECVINFO_NAME(m_hNetworkMoveParent, moveparent), 0, RecvProxy_IntToMoveParent ),
-#if !defined( NO_ENTITY_PREDICTION )
+#if !defined( NO_ENTITY_PREDICTION ) && defined( USE_PREDICTABLEID )
 	RecvPropDataTable( "beampredictable_id", 0, 0, &REFERENCE_RECV_TABLE( DT_BeamPredictableId ) ),
 #endif
 
@@ -239,7 +248,6 @@ BEGIN_DATADESC( CBeam )
 	DEFINE_FIELD( m_nNumBeamEnts, FIELD_INTEGER ),
 	DEFINE_ARRAY( m_hAttachEntity, FIELD_EHANDLE, MAX_BEAM_ENTS ),
 	DEFINE_ARRAY( m_nAttachIndex, FIELD_INTEGER, MAX_BEAM_ENTS ),
-	DEFINE_FIELD( m_nMinDXLevel, FIELD_INTEGER ),
 
 	DEFINE_FIELD( m_fWidth, FIELD_FLOAT ),
 	DEFINE_FIELD( m_fEndWidth, FIELD_FLOAT ),
@@ -261,11 +269,6 @@ BEGIN_DATADESC( CBeam )
 	DEFINE_FIELD( m_hEndEntity, FIELD_EHANDLE ),
 
 	DEFINE_KEYFIELD( m_nDissolveType, FIELD_INTEGER, "dissolvetype" ),
-
-#ifdef PORTAL
-	DEFINE_FIELD( m_bDrawInMainRender, FIELD_BOOLEAN ),
-	DEFINE_FIELD( m_bDrawInPortalRender, FIELD_BOOLEAN ),
-#endif
 
 	// Inputs
 	DEFINE_INPUTFUNC( FIELD_FLOAT, "Width", InputWidth ),
@@ -302,12 +305,7 @@ BEGIN_PREDICTION_DATA( CBeam )
 	DEFINE_PRED_FIELD( m_flFrameRate, FIELD_FLOAT, FTYPEDESC_INSENDTABLE ),
 	DEFINE_PRED_FIELD( m_flFrame, FIELD_FLOAT, FTYPEDESC_INSENDTABLE ),
 	DEFINE_PRED_FIELD( m_clrRender, FIELD_INTEGER, FTYPEDESC_INSENDTABLE ),
-	DEFINE_PRED_FIELD( m_nMinDXLevel, FIELD_INTEGER, FTYPEDESC_INSENDTABLE ),
 	DEFINE_PRED_FIELD_TOL( m_vecEndPos, FIELD_VECTOR, FTYPEDESC_INSENDTABLE, 0.125f ),
-#ifdef PORTAL
-	DEFINE_PRED_FIELD( m_bDrawInMainRender, FIELD_BOOLEAN, FTYPEDESC_INSENDTABLE ),
-	DEFINE_PRED_FIELD( m_bDrawInPortalRender, FIELD_BOOLEAN, FTYPEDESC_INSENDTABLE ),
-#endif
 	DEFINE_PRED_FIELD( m_nModelIndex, FIELD_INTEGER, FTYPEDESC_INSENDTABLE | FTYPEDESC_MODELINDEX ),
 	DEFINE_PRED_FIELD_TOL( m_vecOrigin, FIELD_VECTOR, FTYPEDESC_INSENDTABLE, 0.125f ),
 	
@@ -328,18 +326,13 @@ CBeam::CBeam( void )
 	m_vecEndPos.Init();
 #endif
 
-	m_nMinDXLevel = 0;
 	m_flHDRColorScale = 1.0f; // default value.
 
 #if !defined( CLIENT_DLL )
 	m_nDissolveType = -1;
 #else
 	m_queryHandleHalo = 0;
-#endif
-
-#ifdef PORTAL
-	m_bDrawInMainRender = true;
-	m_bDrawInPortalRender = true;
+	AddToEntityList(ENTITY_LIST_SIMULATE);
 #endif
 }
 
@@ -350,8 +343,8 @@ CBeam::CBeam( void )
 void CBeam::SetModel( const char *szModelName )
 {
 	int modelIndex = modelinfo->GetModelIndex( szModelName );
-	const model_t *pModel = modelinfo->GetModel( modelIndex );
-	if ( pModel && modelinfo->GetModelType( pModel ) != mod_sprite )
+	const model_t *model = modelinfo->GetModel( modelIndex );
+	if ( model && modelinfo->GetModelType( model ) != mod_sprite )
 	{
 		Msg( "Setting CBeam to non-sprite model %s\n", szModelName );
 	}
@@ -370,7 +363,8 @@ void CBeam::Spawn( void )
 	SetRenderMode( kRenderTransTexture );
 
 	// Opt out of all shadow routines
-	AddEffects( EF_NOSHADOW | EF_NORECEIVESHADOW );
+	// Beams are highly visible; always render these into reflection buffer even when using fast reflection
+	AddEffects( EF_NOSHADOW | EF_NORECEIVESHADOW | EF_MARKED_FOR_FAST_REFLECTION );
 
 	Precache( );
 }
@@ -423,7 +417,10 @@ void CBeam::SetStartEntity( CBaseEntity *pEntity )
 	m_hAttachEntity.Set( 0, pEntity );
 	SetOwnerEntity( pEntity );
 	RelinkBeam();
-	pEntity->AddEFlags( EFL_FORCE_CHECK_TRANSMIT );
+	if ( pEntity )
+	{
+		pEntity->AddEFlags( EFL_FORCE_CHECK_TRANSMIT );
+	}
 }
 
 void CBeam::SetEndEntity( CBaseEntity *pEntity ) 
@@ -432,7 +429,10 @@ void CBeam::SetEndEntity( CBaseEntity *pEntity )
 	m_hAttachEntity.Set( m_nNumBeamEnts-1, pEntity );
 	m_hEndEntity = pEntity;
 	RelinkBeam();
-	pEntity->AddEFlags( EFL_FORCE_CHECK_TRANSMIT );
+	if ( pEntity )
+	{
+		pEntity->AddEFlags( EFL_FORCE_CHECK_TRANSMIT );
+	}
 }
 
 
@@ -476,7 +476,7 @@ const Vector &CBeam::GetAbsStartPos( void ) const
 {
 	if ( GetType() == BEAM_ENTS && GetStartEntity() )
 	{
-		edict_t *pent =  engine->PEntityOfEntIndex( GetStartEntity() );
+		edict_t *pent =  INDEXENT( GetStartEntity() );
 		CBaseEntity *ent = CBaseEntity::Instance( pent );
 		if ( !ent )
 		{
@@ -492,7 +492,7 @@ const Vector &CBeam::GetAbsEndPos( void ) const
 {
 	if ( GetType() != BEAM_POINTS && GetType() != BEAM_HOSE && GetEndEntity() ) 
 	{
-		edict_t *pent =  engine->PEntityOfEntIndex( GetEndEntity() );
+		edict_t *pent = INDEXENT( GetEndEntity() );
 		CBaseEntity *ent = CBaseEntity::Instance( pent );
 		if ( ent )
 			return ent->GetAbsOrigin();
@@ -589,9 +589,12 @@ void CBeam::BeamInit( const char *pSpriteName, float width )
 	SetWidth( width );
 	SetEndWidth( width );
 	SetFadeLength( 0 );			// No fade
+
+	Spawn();
+
 	for (int i=0;i<MAX_BEAM_ENTS;i++)
 	{
-		m_hAttachEntity.Set( i, NULL );
+		m_hAttachEntity.Set( i, INVALID_EHANDLE );
 		m_nAttachIndex.Set( i, 0 );
 	}
 	m_nHaloIndex	= 0;
@@ -688,37 +691,12 @@ void CBeam::RelinkBeam( void )
 	// computed there seems way too big
 	Vector startPos = GetAbsStartPos(), endPos = GetAbsEndPos();
 
-	Vector vecAbsExtra1, vecAbsExtra2;
-	bool bUseExtraPoints = false;
-
-#ifdef PORTAL
-	CBaseEntity *pStartEntity = GetStartEntityPtr();
-	
-	CTraceFilterSkipClassname traceFilter( pStartEntity, "prop_energy_ball", COLLISION_GROUP_NONE );
-	
-	ITraceFilter *pEntityBeamTraceFilter = NULL;
-	if ( pStartEntity )
-		pEntityBeamTraceFilter = pStartEntity->GetBeamTraceFilter();
-
-	CTraceFilterChain traceFilterChain( &traceFilter, pEntityBeamTraceFilter );
-
-	bUseExtraPoints = UTIL_Portal_Trace_Beam( this, startPos, endPos, vecAbsExtra1, vecAbsExtra2, &traceFilterChain );
-#endif
-
 	// UNDONE: Should we do this to make the boxes smaller?
 	//SetAbsOrigin( startPos );
 
 	Vector vecBeamMin, vecBeamMax;
 	VectorMin( startPos, endPos, vecBeamMin );
 	VectorMax( startPos, endPos, vecBeamMax );
-
-	if ( bUseExtraPoints )
-	{
-		VectorMin( vecBeamMin, vecAbsExtra1, vecBeamMin );
-		VectorMin( vecBeamMin, vecAbsExtra2, vecBeamMin );
-		VectorMax( vecBeamMax, vecAbsExtra1, vecBeamMax );
-		VectorMax( vecBeamMax, vecAbsExtra2, vecBeamMax );
-	}
 
 	SetCollisionBounds( vecBeamMin - GetAbsOrigin(), vecBeamMax - GetAbsOrigin() );
 }
@@ -780,7 +758,6 @@ void CBeam::BeamDamage( trace_t *ptr )
 			VectorNormalize( dir );
 			int nDamageType = DMG_ENERGYBEAM;
 
-#ifndef HL1_DLL
 			if (m_nDissolveType == 0)
 			{
 				nDamageType = DMG_DISSOLVE;
@@ -789,7 +766,6 @@ void CBeam::BeamDamage( trace_t *ptr )
 			{
 				nDamageType = DMG_DISSOLVE | DMG_SHOCK; 
 			}
-#endif
 
 			CTakeDamageInfo info( this, this, m_flDamage * (gpGlobals->curtime - m_flFireTime), nDamageType );
 			CalculateMeleeDamageForce( &info, dir, ptr->endpos );
@@ -838,19 +814,19 @@ void CBeam::InputWidth( inputdata_t &inputdata )
 
 void CBeam::InputColorRedValue( inputdata_t &inputdata )
 {
-	int nNewColor = clamp( FastFloatToSmallInt(inputdata.value.Float()), 0, 255 );
+	int nNewColor = clamp( inputdata.value.Float(), 0, 255 );
 	SetColor( nNewColor, m_clrRender->g, m_clrRender->b );
 }
 
 void CBeam::InputColorGreenValue( inputdata_t &inputdata )
 {
-	int nNewColor =clamp( FastFloatToSmallInt(inputdata.value.Float()), 0, 255 );
+	int nNewColor = clamp( inputdata.value.Float(), 0, 255 );
 	SetColor( m_clrRender->r, nNewColor, m_clrRender->b );
 }
 
 void CBeam::InputColorBlueValue( inputdata_t &inputdata )
 {
-	int nNewColor = clamp( FastFloatToSmallInt(inputdata.value.Float()), 0, 255 );
+	int nNewColor = clamp( inputdata.value.Float(), 0, 255 );
 	SetColor( m_clrRender->r, m_clrRender->g, nNewColor );
 }
 
@@ -963,7 +939,7 @@ bool CBeam::OnPredictedEntityRemove( bool isbeingremoved, C_BaseEntity *predicte
 extern bool g_bRenderingScreenshot;
 extern ConVar r_drawviewmodel;
 
-int CBeam::DrawModel( int flags )
+int CBeam::DrawModel( int flags, const RenderableInstance_t &instance )
 {
 	if ( !m_bReadyToDraw )
 		return 0;
@@ -974,14 +950,6 @@ int CBeam::DrawModel( int flags )
 	if ( CurrentViewID() == VIEW_SHADOW_DEPTH_TEXTURE )
 		return 0;
 
-#ifdef PORTAL
-	if ( ( !g_pPortalRender->IsRenderingPortal() && !m_bDrawInMainRender ) || 
-		( g_pPortalRender->IsRenderingPortal() && !m_bDrawInPortalRender ) )
-	{
-		return 0;
-	}
-#endif //#ifdef PORTAL
-
 	// Tracker 16432:  If rendering a savegame screenshot don't draw beams 
 	//   who have viewmodels as their attached entity
 	if ( g_bRenderingScreenshot || !r_drawviewmodel.GetBool() )
@@ -989,7 +957,7 @@ int CBeam::DrawModel( int flags )
 		// If the beam is attached
 		for (int i=0;i<MAX_BEAM_ENTS;i++)
 		{
-			C_BaseViewModel *vm = dynamic_cast<C_BaseViewModel *>(m_hAttachEntity[i].Get());
+			C_BaseViewModel *vm = ToBaseViewModel(m_hAttachEntity[i].Get());
 			if ( vm )
 			{
 				return 0;
@@ -997,7 +965,7 @@ int CBeam::DrawModel( int flags )
 		}
 	}
 
-	beams->DrawBeam( this );
+	beams->DrawBeam( this, instance );
 	return 0;
 }
 
@@ -1014,12 +982,11 @@ void CBeam::OnDataChanged( DataUpdateType_t updateType )
 		C_BaseEntity *pEnt = m_hAttachEntity[i].Get();
 		if ( pEnt )
 		{
-			C_BaseCombatWeapon *pWpn = dynamic_cast<C_BaseCombatWeapon *>(pEnt);
-			if ( pWpn && pWpn->ShouldDrawUsingViewModel() )
+			C_BaseCombatWeapon *pWpn = pEnt->MyCombatWeaponPointer();
+			if ( pWpn && pWpn->IsCarriedByLocalPlayer() )
 			{
 				C_BasePlayer *player = ToBasePlayer( pWpn->GetOwner() );
 
-				// Use GetRenderedWeaponModel() instead?
 				C_BaseViewModel *pViewModel = player ? player->GetViewModel( 0 ) : NULL;
 				if ( pViewModel )
 				{
@@ -1034,45 +1001,39 @@ void CBeam::OnDataChanged( DataUpdateType_t updateType )
 	Vector mins, maxs;
 	ComputeBounds( mins, maxs );
 	SetCollisionBounds( mins, maxs );
+	AddToEntityList( ENTITY_LIST_SIMULATE );
 }
 
-bool CBeam::IsTransparent( void )
-{
-	return true;
-}
-
-bool CBeam::ShouldDraw()
-{
-	if ( m_nMinDXLevel != 0 )
-	{
-		if ( m_nMinDXLevel > g_pMaterialSystemHardwareConfig->GetDXSupportLevel() )
-			return false;
-	}
-	return BaseClass::ShouldDraw();
+RenderableTranslucencyType_t CBeam::ComputeTranslucencyType() 
+{ 
+	return RENDERABLE_IS_TRANSLUCENT; 
 }
 
 //-----------------------------------------------------------------------------
 // Purpose: Adds to beam entity list
 //-----------------------------------------------------------------------------
-void CBeam::AddEntity( void )
+bool CBeam::Simulate( void )
 {
+	bool bRet = false;
 	// If set to invisible, skip. Do this before resetting the entity pointer so it has 
 	// valid data to decide whether it's visible.
-	if ( !ShouldDraw() )
+	if ( ShouldDraw() )
 	{
-		return;
-	}
 
-	//FIXME: If we're hooked up to an attachment point, then recompute our bounds every frame
-	if ( m_hAttachEntity[0].Get() || m_hAttachEntity[1].Get() )
-	{
-		// Compute the bounds here...
-		Vector mins, maxs;
-		ComputeBounds( mins, maxs );
-		SetCollisionBounds( mins, maxs );
-	}
+		//FIXME: If we're hooked up to an attachment point, then recompute our bounds every frame
+		if ( m_hAttachEntity[0].Get() || m_hAttachEntity[1].Get() )
+		{
+			// Compute the bounds here...
+			Vector mins, maxs;
+			ComputeBounds( mins, maxs );
+			SetCollisionBounds( mins, maxs );
+			bRet = true;
+		}
 
-	MoveToLastReceivedPosition();
+		MoveToLastReceivedPosition();
+	}
+	BaseClass::Simulate();
+	return bRet;
 }
 
 //-----------------------------------------------------------------------------
@@ -1083,30 +1044,11 @@ void CBeam::ComputeBounds( Vector& mins, Vector& maxs )
 	Vector vecAbsStart = GetAbsStartPos();
 	Vector vecAbsEnd = GetAbsEndPos();
 
-	// May need extra points for creating the min/max bounds
-	bool bUseExtraPoints = false;
-	Vector vecAbsExtra1, vecAbsExtra2;
-
-#ifdef PORTAL
-	CBaseEntity *pStartEntity = GetStartEntityPtr();
-
-	CTraceFilterSkipClassname traceFilter( pStartEntity, "prop_energy_ball", COLLISION_GROUP_NONE );
-
-	ITraceFilter *pEntityBeamTraceFilter = NULL;
-	if ( pStartEntity )
-		pEntityBeamTraceFilter = pStartEntity->GetBeamTraceFilter();
-
-	CTraceFilterChain traceFilterChain( &traceFilter, pEntityBeamTraceFilter );
-
-	bUseExtraPoints = UTIL_Portal_Trace_Beam( this, vecAbsStart, vecAbsEnd, vecAbsExtra1, vecAbsExtra2, &traceFilterChain );
-#endif
-
 	switch( GetType() )
 	{
 	case BEAM_LASER:
 	case BEAM_ENTS:
 	case BEAM_SPLINE:
-	case BEAM_ENTPOINT:
 		{
 			// Compute the bounds here...
 			Vector attachmentPoint( 0, 0, 0 );
@@ -1158,7 +1100,6 @@ void CBeam::ComputeBounds( Vector& mins, Vector& maxs )
 			}
 		}
 		break;
-
 	case BEAM_POINTS:
 	default:
 		{
@@ -1179,14 +1120,6 @@ void CBeam::ComputeBounds( Vector& mins, Vector& maxs )
 		break;
 	}
 
-	if ( bUseExtraPoints )
-	{
-		mins = mins.Min( vecAbsExtra1 );
-		mins = mins.Min( vecAbsExtra2 );
-		maxs = maxs.Max( vecAbsExtra1 );
-		maxs = maxs.Max( vecAbsExtra2 );
-	}
-
 	// bloat the bounding box by the width of the beam
 	float rad = 0.5f * MAX( m_fWidth.Get(), m_fEndWidth.Get() );
 	Vector vecRad( rad, rad, rad );
@@ -1198,4 +1131,139 @@ void CBeam::ComputeBounds( Vector& mins, Vector& maxs )
 	mins -= vecAbsOrigin;
 	maxs -= vecAbsOrigin;
 }
+
+void CBeam::GetToolRecordingState( KeyValues *msg )
+{
+	BaseClass::GetToolRecordingState( msg );
+
+	Vector vTemp;
+
+	KeyValues *pKV = CIFM_EntityKeyValuesHandler_AutoRegister::FindOrCreateNonConformantKeyValues( msg );
+	pKV->SetString( CIFM_EntityKeyValuesHandler_AutoRegister::GetHandlerIDKeyString(), "C_Beam" );
+	
+	pKV->SetInt( "entIndex", (index != -1) ? index : GetRefEHandle().GetSerialNumber() ); //if the index is -1 (client entity), fall back on the serial number
+
+	
+	//pKV->SetInt( "beamType", m_nBeamType );
+	pKV->SetInt( "beamType", BEAM_POINTS ); //need to make sure we remove all dependancy on outside data.
+
+	pKV->SetInt( "beamEnts", m_nNumBeamEnts );
+	
+	vTemp = GetAbsStartPos();
+	pKV->SetFloat( "start_x", vTemp.x );
+	pKV->SetFloat( "start_y", vTemp.y );
+	pKV->SetFloat( "start_z", vTemp.z );
+
+	vTemp = GetAbsEndPos();
+	pKV->SetFloat( "end_x", vTemp.x );
+	pKV->SetFloat( "end_y", vTemp.y );
+	pKV->SetFloat( "end_z", vTemp.z );
+
+	pKV->SetInt( "ModelIndex", GetModelIndex() );
+	pKV->SetInt( "HaloIndex", m_nHaloIndex );
+	pKV->SetFloat( "HaloScale", m_fHaloScale );
+	pKV->SetFloat( "Width", GetWidth() );
+	pKV->SetFloat( "EndWidth", GetEndWidth() );
+	pKV->SetFloat( "FadeLength", GetFadeLength() );
+	pKV->SetFloat( "Noise", GetNoise() );
+	pKV->SetInt( "Brightness", GetRenderAlpha() );
+	pKV->SetFloat( "ScrollRate", GetScrollRate() );
+	pKV->SetInt( "beamFlags", GetBeamFlags() );
+
+	pKV->SetInt( "color_r", GetRenderColorR() );
+	pKV->SetInt( "color_g", GetRenderColorG() );
+	pKV->SetInt( "color_b", GetRenderColorB() );
+
+	pKV->SetFloat( "color_hdrscale", GetHDRColorScale() );
+
+	pKV->SetFloat( "startframe", m_fStartFrame );
+	pKV->SetFloat( "framerate", m_flFrameRate );
+}
+
+void CBeam::RestoreToToolRecordedState( KeyValues *pKV )
+{
+	Vector vTemp;
+	
+	SetType( pKV->GetInt( "beamType" ) );
+
+	m_nNumBeamEnts = pKV->GetInt( "beamEnts" );
+
+	vTemp.x = pKV->GetFloat( "start_x" );
+	vTemp.y = pKV->GetFloat( "start_y" );
+	vTemp.z = pKV->GetFloat( "start_z" );
+	SetAbsStartPos( vTemp );
+
+	vTemp.x = pKV->GetFloat( "end_x" );
+	vTemp.y = pKV->GetFloat( "end_y" );
+	vTemp.z = pKV->GetFloat( "end_z" );
+	SetAbsEndPos( vTemp );
+
+	SetModelIndex( pKV->GetInt( "ModelIndex" ) );
+	m_nHaloIndex = pKV->GetInt( "HaloIndex" );
+	m_fHaloScale = pKV->GetFloat( "HaloScale" );
+	SetWidth( pKV->GetFloat( "Width" ) );
+	SetEndWidth( pKV->GetFloat( "EndWidth" ) );
+	SetFadeLength( pKV->GetFloat( "FadeLength" ) );
+	SetNoise( pKV->GetFloat( "Noise" ) );
+	int iBrightness = pKV->GetInt( "Brightness", 255 );
+	iBrightness = MIN( iBrightness, 255 );
+	iBrightness = MAX( iBrightness, 0 );
+	SetRenderAlpha( (byte)iBrightness );
+	//pKV->GetFloat( "Brightness", 255 ); //<-----------------------------revisit
+	SetScrollRate( pKV->GetFloat( "ScrollRate" ) );
+	m_nBeamFlags = pKV->GetInt( "beamFlags" );
+
+
+	SetRenderColorR( (byte)pKV->GetInt( "color_r" ) );
+	SetRenderColorG( (byte)pKV->GetInt( "color_g" ) );
+	SetRenderColorB( (byte)pKV->GetInt( "color_b" ) );
+
+	SetHDRColorScale( pKV->GetFloat( "color_hdrscale" ) );
+
+	m_fStartFrame = pKV->GetFloat( "startframe" );
+	m_flFrameRate = pKV->GetFloat( "framerate" );
+
+	for (int i=0;i<MAX_BEAM_ENTS;i++)
+	{
+		m_hAttachEntity.Set( i, INVALID_EHANDLE );
+		m_nAttachIndex.Set( i, 0 );
+	}
+
+	SetSize( -Vector( 16384.0f, 16384.0f, 16384.0f ), Vector( 16384.0f, 16384.0f, 16384.0f ) );
+	m_VisibilityBits.SetAll();
+}
+
+class C_Beam_NonConformantDataHandler : public CIFM_EntityKeyValuesHandler_RecreateEntities
+{
+public:
+	C_Beam_NonConformantDataHandler( void ) 
+		: CIFM_EntityKeyValuesHandler_RecreateEntities( "C_Beam" )
+	{ }
+
+	virtual void *CreateInstance( void )
+	{
+		return new CBeam;
+	}
+
+	virtual void DestroyInstance( void *pEntity )
+	{
+		CBeam *pCastEntity = (CBeam *)pEntity;
+		clienttools->RemoveClientRenderable( pCastEntity );
+		delete pCastEntity;
+	}
+
+	virtual void HandleInstance( void *pEntity, KeyValues *pKeyValues )
+	{
+		CBeam *pCastEntity = (CBeam *)pEntity;
+		pCastEntity->RestoreToToolRecordedState( pKeyValues );
+		if( pCastEntity->RenderHandle() == INVALID_CLIENT_RENDER_HANDLE )
+		{
+			clienttools->AddClientRenderable( pCastEntity, false, RENDERABLE_IS_TRANSLUCENT );
+		}
+		clienttools->MarkClientRenderableDirty( pCastEntity );
+	}
+};
+
+static C_Beam_NonConformantDataHandler s_BeamEntityIFMHandler;
+
 #endif

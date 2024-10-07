@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2007, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: particle system code
 //
@@ -6,6 +6,10 @@
 
 #include "tier0/platform.h"
 #include "particles/particles.h"
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
 
 //-----------------------------------------------------------------------------
 // Forward declarations

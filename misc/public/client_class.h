@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -49,13 +49,14 @@ typedef IClientNetworkable*	(*CreateEventFn)();
 class ClientClass
 {
 public:
-	ClientClass( const char *pNetworkName, CreateClientClassFn createFn, CreateEventFn createEventFn, RecvTable *pRecvTable )
+	ClientClass( char *pNetworkName, CreateClientClassFn createFn, CreateEventFn createEventFn, RecvTable *pRecvTable )
 	{
 		m_pNetworkName	= pNetworkName;
 		m_pCreateFn		= createFn;
 		m_pCreateEventFn= createEventFn;
 		m_pRecvTable	= pRecvTable;
-		
+		m_pMapClassname = NULL;
+
 		// Link it in
 		m_pNext				= g_pClientClassHead;
 		g_pClientClassHead	= this;
@@ -69,10 +70,11 @@ public:
 public:
 	CreateClientClassFn		m_pCreateFn;
 	CreateEventFn			m_pCreateEventFn;	// Only called for event objects.
-	const char				*m_pNetworkName;
+	char					*m_pNetworkName;
 	RecvTable				*m_pRecvTable;
 	ClientClass				*m_pNext;
 	int						m_ClassID;	// Managed by the engine.
+	const char				*m_pMapClassname;
 };
 
 #define DECLARE_CLIENTCLASS() \

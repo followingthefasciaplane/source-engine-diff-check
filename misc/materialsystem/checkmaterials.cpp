@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========== Copyright © 2005, Valve Corporation, All rights reserved. ========
 //
 // Purpose:
 //
@@ -16,6 +16,10 @@
 void CheckMateralsInDirectoryRecursive( const char *pRoot, const char *pDirectory );
 #endif
 
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
+
 #ifdef _CHECK_MATERIALS_FOR_PROBLEMS
 
 //-----------------------------------------------------------------------------
@@ -23,7 +27,7 @@ void CheckMateralsInDirectoryRecursive( const char *pRoot, const char *pDirector
 //-----------------------------------------------------------------------------
 static bool DoesTextureUseAlpha( const char *pTextureName, const char *pMaterialName )
 {
-	if ( IsX360() )
+	if ( IsGameConsole() )
 	{
 		// not supporting
 		return false;
@@ -87,7 +91,7 @@ static bool DoesTextureUseNormal( const char *pTextureName, const char *pMateria
 	nSizeInBytes = 0;
 	bUsesAlpha = false;
 
-	if ( IsX360() )
+	if ( IsGameConsole() )
 	{
 		// not supporting
 		return false;

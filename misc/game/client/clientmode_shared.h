@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -15,6 +15,7 @@
 #include "iclientmode.h"
 #include "GameEventListener.h"
 #include <baseviewport.h>
+#include "usermessages.h"
 
 class CBaseHudChat;
 class CBaseHudWeaponSelection;
@@ -27,22 +28,11 @@ namespace vgui
 class Panel;
 }
 
-//=============================================================================
-// HPE_BEGIN:
-// [tj] Moved this from the .cpp file so derived classes could access it
-//=============================================================================
- 
 #define ACHIEVEMENT_ANNOUNCEMENT_MIN_TIME 10
- 
-//=============================================================================
-// HPE_END
-//=============================================================================
-
-class CReplayReminderPanel;
-
 #define USERID2PLAYER(i) ToBasePlayer( ClientEntityList().GetEnt( engine->GetPlayerForUserID( i ) ) )	
 
 extern IClientMode *GetClientModeNormal(); // must be implemented
+extern IClientMode *GetFullscreenClientMode();
 
 // This class implements client mode functionality common to HL2 and TF2.
 class ClientModeShared : public IClientMode, public CGameEventListener
@@ -63,19 +53,21 @@ public:
 	virtual void	LevelShutdown( void );
 
 	virtual void	Enable();
+	virtual void	EnableWithRootPanel( vgui::VPANEL pRoot );
 	virtual void	Disable();
-	virtual void	Layout();
+	virtual void	Layout( bool bForce = false );
 
-	virtual void	ReloadScheme( bool flushLowLevel );
+	virtual void	ReloadScheme( void );
+	virtual void	ReloadSchemeWithRoot( vgui::VPANEL pRoot );
 	virtual void	OverrideView( CViewSetup *pSetup );
+	virtual bool	OverrideRenderBounds( int &x, int &y, int &w, int &h, int &insetX, int &insetY ) { return false; }
+	virtual void	OverrideAudioState( AudioState_t *pAudioState ) { return; }
 	virtual bool	ShouldDrawDetailObjects( );
 	virtual bool	ShouldDrawEntity(C_BaseEntity *pEnt);
 	virtual bool	ShouldDrawLocalPlayer( C_BasePlayer *pPlayer );
 	virtual bool	ShouldDrawViewModel();
 	virtual bool	ShouldDrawParticles( );
 	virtual bool	ShouldDrawCrosshair( void );
-	virtual bool	ShouldBlackoutAroundHUD() OVERRIDE;
-	virtual HeadtrackMovementMode_t ShouldOverrideHeadtrackControl() OVERRIDE;
 	virtual void	AdjustEngineViewport( int& x, int& y, int& width, int& height );
 	virtual void	PreRender(CViewSetup *pSetup);
 	virtual void	PostRender();
@@ -83,6 +75,8 @@ public:
 	virtual void	ProcessInput(bool bActive);
 	virtual bool	CreateMove( float flInputSampleTime, CUserCmd *cmd );
 	virtual void	Update();
+	virtual void	SetBlurFade( float scale ) {}
+	virtual float	GetBlurFade( void ) { return 0.0f; }
 
 	// Input
 	virtual int		KeyInput( int down, ButtonCode_t keynum, const char *pszCurrentBinding );
@@ -99,6 +93,8 @@ public:
 	
 	virtual float	GetViewModelFOV( void );
 	virtual vgui::Panel* GetViewport() { return m_pViewport; }
+	virtual vgui::Panel *GetPanelFromViewport( const char *pchNamePath );
+
 	// Gets at the viewports vgui panel animation controller, if there is one...
 	virtual vgui::AnimationController *GetViewportAnimationController()
 		{ return m_pViewport->GetAnimationController(); }
@@ -109,53 +105,27 @@ public:
 
 	virtual int HandleSpectatorKeyInput( int down, ButtonCode_t keynum, const char *pszCurrentBinding );
 
-	virtual void	ComputeVguiResConditions( KeyValues *pkvConditions ) OVERRIDE;
+	virtual void InitChatHudElement( void );
+	virtual void InitWeaponSelectionHudElement( void );
 
-	//=============================================================================
-	// HPE_BEGIN:
-	// [menglish] Save server information shown to the client in a persistent place
-	//=============================================================================
-	 
-	virtual wchar_t* GetServerName() { return NULL; }
-	virtual void SetServerName(wchar_t* name) {}
-	virtual wchar_t* GetMapName() { return NULL; }
-	virtual void SetMapName(wchar_t* name) {}
-	 
-	//=============================================================================
-	// HPE_END
-	//=============================================================================
+	virtual wchar_t*	GetServerName( void ) { return NULL; }
+	virtual void		SetServerName( wchar_t *name ) {}
+	virtual wchar_t*	GetMapName( void ) { return NULL; }
+	virtual void		SetMapName( wchar_t *name ) {}
 
-	virtual bool	DoPostScreenSpaceEffects( const CViewSetup *pSetup );
+	virtual void	UpdateCameraManUIState( int iType, int nOptionalParam, uint64 xuid );
+	virtual void	ScoreboardOff( void );
+	virtual void	GraphPageChanged( void );
 
-	virtual void	DisplayReplayMessage( const char *pLocalizeName, float flDuration, bool bUrgent,
-										  const char *pSound, bool bDlg );
-
-	virtual bool	IsInfoPanelAllowed() OVERRIDE { return true; }
-	virtual void	InfoPanelDisplayed() OVERRIDE { }
-	virtual bool	IsHTMLInfoPanelAllowed() OVERRIDE { return true; }
-
-	bool	IsAnyPanelVisibleExceptScores() { return m_pViewport->IsAnyPanelVisibleExceptScores(); }
-	bool	IsPanelVisible( const char* panel ) { return m_pViewport->IsPanelVisible( panel ); }
-
-	virtual void			OnDemoRecordStart( char const* pDemoBaseName ) OVERRIDE {}
-	virtual void			OnDemoRecordStop() OVERRIDE {}
+	CUserMessageBinder m_UMCMsgVGUIMenu;
+	CUserMessageBinder m_UMCMsgRumble;
 
 protected:
 	CBaseViewport			*m_pViewport;
 
-	void			DisplayReplayReminder();
+	int			GetSplitScreenPlayerSlot() const;
 
 private:
-	virtual void	UpdateReplayMessages();
-
-	void			ClearReplayMessageList();
-
-#if defined( REPLAY_ENABLED )
-	float					m_flReplayStartRecordTime;
-	float					m_flReplayStopRecordTime;
-	CReplayReminderPanel	*m_pReplayReminderPanel;
-#endif
-
 	// Message mode handling
 	// All modes share a common chat interface
 	CBaseHudChat			*m_pChatElement;
@@ -163,6 +133,11 @@ private:
 	CBaseHudWeaponSelection *m_pWeaponSelection;
 	int						m_nRootSize[2];
 };
+
+
+bool ContainsBinding( const char *pszBindingString, const char *pszBinding, bool bSearchAliases = true );
+
+void SendCameraManUIStateChange( HltvUiType_t eventType, int nOptionalParam = 0 );
 
 #endif // CLIENTMODE_NORMAL_H
 

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright � 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -11,7 +11,7 @@
 #pragma once
 #endif
 
-#include <Color.h>
+#include <color.h>
 #include "tier1/utlvector.h"
 #include "vgui_controls/EditablePanel.h"
 #include "vgui_controls/Frame.h"
@@ -50,6 +50,35 @@ class CConsolePanel : public vgui::EditablePanel, public IConsoleDisplayFunc
 {
 	DECLARE_CLASS_SIMPLE( CConsolePanel, vgui::EditablePanel );
 
+private:
+	enum
+	{
+		MAX_HISTORY_ITEMS = 100,
+	};
+
+	enum eCompletionType
+	{
+		COMPLETE_TYPE_FORWARD,
+		COMPLETE_TYPE_REVERSE,
+		COMPLETE_TYPE_COMMON_STRING,
+	};
+
+	class CompletionItem
+	{
+	public:
+		CompletionItem( void );
+		CompletionItem( const CompletionItem& src );
+		CompletionItem& operator =( const CompletionItem& src );
+		~CompletionItem( void );
+		const char *GetItemText( void );
+		const char *GetCommand( void ) const;
+		const char *GetName() const;
+
+		bool			m_bIsCommand;
+		ConCommandBase	*m_pCommand;
+		CHistoryItem	*m_pText;
+	};
+
 public:
 	CConsolePanel( Panel *pParent, const char *pName, bool bStatusVersion );
 	~CConsolePanel();
@@ -72,40 +101,24 @@ public:
 	bool TextEntryHasFocus() const;
 	void TextEntryRequestFocus();
 
-
-
-private:
-	enum
+	static int __cdecl CompletionItemCompare( CompletionItem * const *i1, CompletionItem * const *i2 )
 	{
-		MAX_HISTORY_ITEMS = 100,
-	};
-
-	class CompletionItem
-	{
-	public:
-		CompletionItem( void );
-		CompletionItem( const CompletionItem& src );
-		CompletionItem& operator =( const CompletionItem& src );
-		~CompletionItem( void );
-		const char *GetItemText( void );
-		const char *GetCommand( void ) const;
-		const char *GetName() const;
-
-		bool			m_bIsCommand;
-		ConCommandBase	*m_pCommand;
-		CHistoryItem	*m_pText;
-	};
+		return strcmp( (*i1)->GetName(), (*i2)->GetName() );
+	}
 
 protected:
 	// methods
-	void OnAutoComplete(bool reverse);
+	void OnAutoComplete(eCompletionType completionType);
 	MESSAGE_FUNC_PTR( OnTextChanged, "TextChanged", panel );
 	void RebuildCompletionList(const char *partialText);
 	void UpdateCompletionListPosition();
+	bool GetCompletionItemText(char *pDest, int completionIndex, int maxLen);
 	MESSAGE_FUNC( CloseCompletionList, "CloseCompletionList" );
 	MESSAGE_FUNC_CHARPTR( OnMenuItemSelected, "CompletionCommand", command );
 	void ClearCompletionList();
 	void AddToHistory( const char *commandText, const char *extraText );
+	void UpdateEntryStyle();
+	bool CommandMatchesText(const char *command, const char *text, bool bCheckSubstrings);
 
 	// vgui overrides
 	virtual void PerformLayout();
@@ -159,8 +172,6 @@ public:
 	void ColorPrint( const Color& clr, const char *msg );
 	void Clear();
 	void DumpConsoleTextToFile();
-
-	virtual void OnKeyCodePressed( vgui::KeyCode code );
 
 protected:
 	CConsolePanel *m_pConsolePanel;

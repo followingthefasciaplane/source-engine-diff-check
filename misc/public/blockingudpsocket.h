@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -33,7 +33,9 @@ protected:
 	netadr_t			m_cserIP;
 	unsigned int		m_Socket;
 
-
+private:
+	CBlockingUDPSocket( const CBlockingUDPSocket& ); // = delete
+	CBlockingUDPSocket& operator= ( const CBlockingUDPSocket& ); // = delete
 };
 
 #endif // BLOCKINGUDPSOCKET_H

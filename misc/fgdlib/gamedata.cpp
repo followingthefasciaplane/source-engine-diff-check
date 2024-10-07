@@ -1,14 +1,17 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ====
 //
 //=============================================================================
 
+#ifndef POSIX
 #include <windows.h>
 #include <tier0/dbg.h>
 #include <io.h>
-#include <WorldSize.h>
-#include "fgdlib/GameData.h"
-#include "fgdlib/HelperInfo.h"
-#include "KeyValues.h"
+#endif
+
+#include "worldsize.h"
+#include "fgdlib/gamedata.h"
+#include "fgdlib/helperinfo.h"
+#include "keyvalues.h"
 #include "filesystem_tools.h"
 #include "tier1/strtools.h"
 #include "utlmap.h"
@@ -140,7 +143,7 @@ static bool DoGetToken(TokenReader &tr, char **ppszStore, int nSize, trtoken_t t
 //			error - 
 // Output : 
 //-----------------------------------------------------------------------------
-bool GDError(TokenReader &tr, const char *error, ...)
+bool GDError(TokenReader &tr, char *error, ...)
 {
 	char szBuf[128];
 	va_list vl;
@@ -238,11 +241,18 @@ bool GDGetTokenDynamic(TokenReader &tr, char **ppszStore, trtoken_t ttexpecting,
 //-----------------------------------------------------------------------------
 // Purpose: Constructor.
 //-----------------------------------------------------------------------------
-GameData::GameData(void)
+GameData::GameData(void) :
+	m_NodeRemap( DefLessFunc( int ) )
 {
 	m_nMaxMapCoord = 8192;
 	m_nMinMapCoord = -8192;
 	m_InstanceClass = NULL;
+
+	m_bGridNavActive = false;
+	m_nGridNavEdgeSize = 0;
+	m_nGridNavOffsetX = 0;
+	m_nGridNavOffsetY = 0;
+	m_nTraceHeight = 0;
 }
 
 
@@ -280,8 +290,10 @@ BOOL GameData::Load(const char *pszFilename)
 {
 	TokenReader tr;
 
+#ifndef POSIX
 	if(GetFileAttributes(pszFilename) == 0xffffffff)
 		return FALSE;
+#endif
 
 	if(!tr.Open(pszFilename))
 		return FALSE;
@@ -409,6 +421,14 @@ BOOL GameData::Load(const char *pszFilename)
 				tr.IgnoreTill(OPERATOR, "@");
 			}
 		}
+		else if (IsToken(szToken, "gridnav"))
+		{
+			if (!ParseGridNav(tr))
+			{
+				// Error in grid nav specifier, skip to next @ sign. 
+				tr.IgnoreTill(OPERATOR, "@");
+			}
+		}
 		else if ( IsToken( szToken, "materialexclusion" ) )
 		{
 			if ( !LoadFGDMaterialExclusions( tr ) )
@@ -480,14 +500,86 @@ bool GameData::ParseMapSize(TokenReader &tr)
 
 	if (nMin != nMax)
 	{
-		m_nMinMapCoord = min(nMin, nMax);
-		m_nMaxMapCoord = max(nMin, nMax);
+		m_nMinMapCoord = Min(nMin, nMax);
+		m_nMaxMapCoord = Max(nMin, nMax);
 	}
 
 	if (!GDSkipToken(tr, OPERATOR, ")"))
 	{
 		return false;
 	}
+
+	return true;
+}
+
+
+//-----------------------------------------------------------------------------
+// Purpose: Parses the "gridnav" specifier, which should be of the form:
+//
+//			gridnav(edgesize, offsetx, offsety, pickheight)
+//
+//			ex: gridnav(64, 0, 0, 1000)
+//
+// Input  : tr - 
+// Output : Returns true on success, false on failure.
+//-----------------------------------------------------------------------------
+bool GameData::ParseGridNav(TokenReader &tr)
+{
+	if (!GDSkipToken(tr, OPERATOR, "("))
+	{
+		return false;
+	}
+
+	char szToken[128];
+	if (!GDGetToken(tr, szToken, sizeof(szToken), INTEGER))
+	{
+		return false;
+	}
+	int nEdgeSize = atoi(szToken);	
+
+	if (!GDSkipToken(tr, OPERATOR, ","))
+	{
+		return false;
+	}
+
+	if (!GDGetToken(tr, szToken, sizeof(szToken), INTEGER))
+	{
+		return false;
+	}
+	int nOffsetX = atoi(szToken);
+
+	if (!GDSkipToken(tr, OPERATOR, ","))
+	{
+		return false;
+	}
+
+	if (!GDGetToken(tr, szToken, sizeof(szToken), INTEGER))
+	{
+		return false;
+	}
+	int nOffsetY = atoi(szToken);
+
+	if (!GDSkipToken(tr, OPERATOR, ","))
+	{
+		return false;
+	}
+
+	if (!GDGetToken(tr, szToken, sizeof(szToken), INTEGER))
+	{
+		return false;
+	}
+	int nTraceHeight = atoi(szToken);
+
+	if (!GDSkipToken(tr, OPERATOR, ")"))
+	{
+		return false;
+	}
+
+	m_bGridNavActive = true;
+	m_nGridNavEdgeSize = nEdgeSize;
+	m_nGridNavOffsetX = nOffsetX;
+	m_nGridNavOffsetY = nOffsetY;
+	m_nTraceHeight = nTraceHeight;
 
 	return true;
 }
@@ -514,6 +606,25 @@ GDclass *GameData::ClassForName(const char *pszName, int *piIndex)
 	}
 
 	return NULL;
+}
+
+
+void GameData::BeginInstancing( int nPass )
+{
+	m_nRemapStage = nPass;
+
+	switch( m_nRemapStage )
+	{
+		case 2:
+			m_nNextNodeID = 1;
+			break;
+	}
+}
+
+
+void GameData::BeginMapInstance( )
+{
+	m_NodeRemap.RemoveAll();
 }
 
 
@@ -586,6 +697,8 @@ enum tRemapOperation
 	REMAP_POSITION,
 	REMAP_ANGLE,
 	REMAP_ANGLE_NEGATIVE_PITCH,
+	REMAP_NODE,
+	REMAP_INSTANCE_VARIABLE,
 };
 
 
@@ -619,11 +732,17 @@ bool GameData::RemapKeyValue( const char *pszKey, const char *pszInValue, char *
 	{
 		RemapOperation.SetLessFunc( &CUtlType_LessThan );
 		RemapOperation.Insert( ivAngle, REMAP_ANGLE );
+		RemapOperation.Insert( ivStringInstanced, REMAP_NAME );
 		RemapOperation.Insert( ivTargetDest, REMAP_NAME );
 		RemapOperation.Insert( ivTargetSrc, REMAP_NAME );
+		RemapOperation.Insert( ivFilterClass, REMAP_NAME );
 		RemapOperation.Insert( ivOrigin, REMAP_POSITION );
+		RemapOperation.Insert( ivVecLine, REMAP_POSITION );
 		RemapOperation.Insert( ivAxis, REMAP_ANGLE );
 		RemapOperation.Insert( ivAngleNegativePitch, REMAP_ANGLE_NEGATIVE_PITCH );
+		RemapOperation.Insert( ivNodeDest, REMAP_NODE );
+		RemapOperation.Insert( ivNodeID, REMAP_NODE );
+		RemapOperation.Insert( ivInstanceVariable, REMAP_INSTANCE_VARIABLE );
 	}
 
 	if ( !m_InstanceClass )
@@ -649,6 +768,10 @@ bool GameData::RemapKeyValue( const char *pszKey, const char *pszInValue, char *
 	switch( RemapOperation[ KVRemapIndex ] )
 	{
 		case REMAP_NAME:
+			if ( m_nRemapStage != 1 )
+			{
+				return false;
+			}
 			if ( KVType != ivInstanceVariable )
 			{
 				RemapNameField( pszInValue, pszOutValue, NameFixup );
@@ -657,6 +780,10 @@ bool GameData::RemapKeyValue( const char *pszKey, const char *pszInValue, char *
 
 		case REMAP_POSITION:
 			{
+				if ( m_nRemapStage != 1 )
+				{
+					return false;
+				}
 				Vector	inPoint( 0.0f, 0.0f, 0.0f ), outPoint;
 
 				sscanf ( pszInValue, "%f %f %f", &inPoint.x, &inPoint.y, &inPoint.z );
@@ -664,8 +791,12 @@ bool GameData::RemapKeyValue( const char *pszKey, const char *pszInValue, char *
 				sprintf( pszOutValue, "%g %g %g", outPoint.x, outPoint.y, outPoint.z );
 			}
 			break;
-			
+
 		case REMAP_ANGLE:
+			if ( m_nRemapStage != 1 )
+			{
+				return false;
+			}
 			if ( m_InstanceAngle.x != 0.0f || m_InstanceAngle.y != 0.0f || m_InstanceAngle.z != 0.0f )
 			{
 				QAngle		inAngles( 0.0f, 0.0f, 0.0f ), outAngles;
@@ -682,6 +813,10 @@ bool GameData::RemapKeyValue( const char *pszKey, const char *pszInValue, char *
 			break;
 
 		case REMAP_ANGLE_NEGATIVE_PITCH:
+			if ( m_nRemapStage != 1 )
+			{
+				return false;
+			}
 			if ( m_InstanceAngle.x != 0.0f || m_InstanceAngle.y != 0.0f || m_InstanceAngle.z != 0.0f )
 			{
 				QAngle		inAngles( 0.0f, 0.0f, 0.0f ), outAngles;
@@ -696,6 +831,33 @@ bool GameData::RemapKeyValue( const char *pszKey, const char *pszInValue, char *
 
 				sprintf( pszOutValue, "%g", -outAngles.x );	// just the pitch
 			}
+			break;
+
+		case REMAP_NODE:
+			{
+				int	nFromNode = atoi( pszInValue );
+				int nToNode;
+				int nIndex = m_NodeRemap.Find( nFromNode );
+				if ( m_NodeRemap.IsValidIndex( nIndex ) == false )
+				{
+					nToNode = m_nNextNodeID;
+					m_nNextNodeID++;
+					m_NodeRemap.Insert( atoi( pszInValue ), nToNode );
+				}
+				else
+				{
+					nToNode = m_NodeRemap.Element( nIndex );
+				}
+				sprintf( pszOutValue, "%d", nToNode );
+			}
+			break;
+
+		case REMAP_INSTANCE_VARIABLE:
+			if ( m_nRemapStage != 1 )
+			{
+				return false;
+			}
+			RemapInstanceField( pszInValue, pszOutValue, NameFixup );
 			break;
 	}
 
@@ -715,8 +877,8 @@ bool GameData::RemapNameField( const char *pszInValue, char *pszOutValue, TNameF
 {
 	strcpy( pszOutValue, pszInValue );
 
-	if ( pszInValue[ 0 ] && pszInValue[ 0 ] != '@' )
-	{	// ! at the start of a value means it is global and should not be remaped
+	if ( pszInValue[ 0 ] && pszInValue[ 0 ] != '@' && pszInValue[ 0 ] != '!'  )
+	{	// ! or @ at the start of a value means it is global and should not be remapped
 		switch( NameFixup )
 		{
 			case NAME_FIXUP_PREFIX:
@@ -732,6 +894,43 @@ bool GameData::RemapNameField( const char *pszInValue, char *pszOutValue, TNameF
 	return ( strcmpi( pszInValue, pszOutValue ) != 0 );
 }
 
+//-----------------------------------------------------------------------------
+// Purpose: this function will attempt to remap a instance field.
+// Input  : pszInvalue - the original value
+// Output : returns true if the value changed
+//			pszOutValue - the new value if changed
+//-----------------------------------------------------------------------------
+bool GameData::RemapInstanceField( const char *pszInValue, char *pszOutValue, TNameFixup NameFixup )
+{
+	strcpy( pszOutValue, pszInValue );
+
+	const char *pszInEdit = strchr( pszInValue, ' ' );
+	char *pchOutEdit = strchr( pszOutValue, ' ' );
+
+	if ( pszInEdit && pchOutEdit )
+	{
+		pszInEdit++;
+		pchOutEdit++;
+
+		if ( pszInEdit[ 0 ] && pszInEdit[ 0 ] != '@' && pszInEdit[ 0 ] != '!' && 
+			 pszInEdit[ 0 ] != '-' && pszInEdit[ 0 ] != '.' && 
+			 !( pszInEdit[ 0 ] >= '0' && pszInEdit[ 0 ] <= '9' ) )
+		{	// ! or @ at the start of a value or a number means it is global and should not be remapped
+			switch( NameFixup )
+			{
+			case NAME_FIXUP_PREFIX:
+				sprintf( pchOutEdit, "%s-%s", m_InstancePrefix, pszInEdit );
+				break;
+
+			case NAME_FIXUP_POSTFIX:
+				sprintf( pchOutEdit, "%s-%s", pszInEdit, m_InstancePrefix );
+				break;
+			}
+		}
+	}
+
+	return ( strcmpi( pszInValue, pszOutValue ) != 0 );
+}
 
 //-----------------------------------------------------------------------------
 // Purpose: Gathers any FGD-defined material directory exclusions

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -15,6 +15,7 @@
 #include <vgui_controls/Button.h>
 
 #include <game/client/iviewport.h>
+#include "GameEventListener.h"
 
 #include <vgui/KeyCode.h>
 #include <utlvector.h>
@@ -30,7 +31,14 @@ class TeamFortressViewport;
 //-----------------------------------------------------------------------------
 // Purpose: Displays the team menu
 //-----------------------------------------------------------------------------
-class CTeamMenu : public vgui::Frame, public IViewPortPanel
+//=============================================================================
+// HPE_BEGIN:
+// [Forrest] Added CGameEventListener for hooking cs_match_end_restart.
+//=============================================================================
+class CTeamMenu : public vgui::Frame, public IViewPortPanel, public CGameEventListener
+//=============================================================================
+// HPE_END
+//=============================================================================
 {
 private:
 	DECLARE_CLASS_SIMPLE( CTeamMenu, vgui::Frame );
@@ -52,7 +60,17 @@ public:
   	virtual bool IsVisible() { return BaseClass::IsVisible(); }
 	virtual void SetParent( vgui::VPANEL parent ) { BaseClass::SetParent( parent ); }
 
-	virtual GameActionSet_t GetPreferredActionSet() { return GAME_ACTION_SET_IN_GAME_HUD; }
+	//=============================================================================
+	// HPE_BEGIN:
+	// [Forrest] For hooking cs_match_end_restart.
+	//=============================================================================
+	// IGameEventListener interface:
+	virtual void FireGameEvent( IGameEvent *event);
+	//=============================================================================
+	// HPE_END
+	//=============================================================================
+
+	virtual bool WantsBackgroundBlurred( void ) { return false; }
 
 public:
 	

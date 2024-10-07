@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -35,9 +35,18 @@
 #include "materialsystem/imaterialsystemhardwareconfig.h"
 #include "../utils/common/bsplib.h"
 #include "ibsppack.h"
+#include "vprof.h"
+#include "paint.h"
+
+#if defined(_PS3)
+#include "buildindices_PS3.h"
+#include "buildworldlists_PS3.h"
+#endif
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
+
+bool g_RendererInLevel = false;
 
 void Linefile_Read_f(void);
 
@@ -70,8 +79,8 @@ void R_TimeRefresh_f (void)
 	view.angles[2] = 0;
 	view.x = 0;
 	view.y = 0;
-	view.width = videomode->GetModeStereoWidth();
-	view.height = videomode->GetModeStereoHeight();
+	view.width = videomode->GetModeWidth();
+	view.height = videomode->GetModeHeight();
 	view.fov = 75;
 	view.fovViewmodel = 75;
 	view.m_flAspectRatio = 1.0f;
@@ -104,6 +113,7 @@ void R_TimeRefresh_f (void)
 ConCommand timerefresh("timerefresh", R_TimeRefresh_f, "Profile the renderer.", FCVAR_CHEAT );	
 ConCommand linefile("linefile", Linefile_Read_f, "Parses map leak data from .lin file", FCVAR_CHEAT );	
 
+
 //-----------------------------------------------------------------------------
 // Purpose: 
 //-----------------------------------------------------------------------------
@@ -116,6 +126,11 @@ void R_Init (void)
 	InitMathlib();
 
 	UpdateMaterialSystemConfig();
+
+#if defined( _PS3 )
+	g_pBuildIndicesJob->Init();
+	g_pBuildWorldListsJob->Init();
+#endif
 }
 
 //-----------------------------------------------------------------------------
@@ -132,7 +147,8 @@ void R_ResetLightStyles( void )
 {
 	for ( int i=0 ; i<256 ; i++ )
 	{
-		d_lightstylevalue[i] = 264;
+		// normal light value
+		d_lightstylevalue[i] = 264;		
 		d_lightstyleframe[i] = r_framecount;
 	}
 }
@@ -143,7 +159,7 @@ void R_RemoveAllDecalsFromAllModels();
 //-----------------------------------------------------------------------------
 // Purpose: 
 //-----------------------------------------------------------------------------
-CON_COMMAND_F( r_cleardecals, "Usage r_cleardecals <permanent>.", FCVAR_CLIENTCMD_CAN_EXECUTE | FCVAR_SERVER_CAN_EXECUTE  )
+CON_COMMAND_F( r_cleardecals, "Usage r_cleardecals <permanent>.", FCVAR_CLIENTCMD_CAN_EXECUTE  )
 {
 	if ( host_state.worldmodel  )
 	{
@@ -156,7 +172,7 @@ CON_COMMAND_F( r_cleardecals, "Usage r_cleardecals <permanent>.", FCVAR_CLIENTCM
 			}
 		}
 
-		R_DecalTerm( host_state.worldmodel->brush.pShared, bPermanent );
+		R_DecalTerm( host_state.worldmodel->brush.pShared, bPermanent, false );
 	}
 
 	R_RemoveAllDecalsFromAllModels();
@@ -168,9 +184,19 @@ CON_COMMAND_F( r_cleardecals, "Usage r_cleardecals <permanent>.", FCVAR_CLIENTCM
 //-----------------------------------------------------------------------------
 void R_LoadWorldGeometry( bool bDXChange )
 {
+	CUtlVector< uint32 > paintData;
+	if ( g_PaintManager.m_bShouldRegister )
+	{
+		g_PaintManager.GetPaintmapDataRLE( paintData );
+	}
+
 	// Recreate the sortinfo arrays ( ack, uses new/delete right now ) because doing it with Hunk_AllocName will
 	//  leak through every connect that doesn't wipe the hunk ( "reconnect" )
 	MaterialSystem_DestroySortinfo();
+
+
+	//register paint maps
+	MaterialSystem_RegisterPaintSurfaces();
 
 	MaterialSystem_RegisterLightmapSurfaces();
 
@@ -210,11 +236,18 @@ void R_LoadWorldGeometry( bool bDXChange )
 	// make sure and rebuild lightmaps when the level gets started.
 	GL_RebuildLightmaps();
 
+
 	if ( bDXChange )
 	{
 		R_BrushBatchInit();
 		R_DecalReSortMaterials();
 		OverlayMgr()->ReSortMaterials();
+	}
+
+	if ( g_PaintManager.m_bShouldRegister )
+	{
+		g_PaintManager.LoadPaintmapDataRLE( paintData );
+		paintData.Purge();
 	}
 }
 
@@ -229,6 +262,8 @@ void R_LevelInit( void )
 	ConDMsg( "Initializing renderer...\n" );
 
 	COM_TimestampedLog( "R_LevelInit: Start" );
+
+	VPROF_BUDGET( "R_LevelInit", VPROF_BUDGETGROUP_OTHER_NETWORKING );
 
 	Assert( g_ClientDLL );
 
@@ -251,7 +286,10 @@ void R_LevelInit( void )
 	// We've fully loaded the new level, unload any models that we don't care about any more
 	modelloader->UnloadUnreferencedModels();
 
-	if ( host_state.worldmodel->brush.pShared->numworldlights == 0 )
+	// INFESTED_DLL - Alien Swarm doesn't want fullbright turned on when there are no lights (since it uses dynamic lights and skips vrad)
+	static char gamedir[MAX_OSPATH];
+	Q_FileBase( com_gamedir, gamedir, sizeof( gamedir ) );
+	if ( host_state.worldmodel->brush.pShared->numworldlights == 0 && Q_stricmp( gamedir, "infested" ) )
 	{
 		ConDMsg( "Level unlit, setting 'mat_fullbright 1'\n" );
 		mat_fullbright.SetValue( 1 );
@@ -279,12 +317,8 @@ void R_LevelInit( void )
 	// Build the overlay fragments.
 	OverlayMgr()->CreateFragments();
 
-#ifdef _XBOX
-	extern void CompactTextureHeap();
-	CompactTextureHeap();
-#endif
-
 	COM_TimestampedLog( "R_LevelInit: Finish" );
+	g_RendererInLevel = true;
 }
 
 void R_LevelShutdown()
@@ -292,7 +326,7 @@ void R_LevelShutdown()
 	R_Surface_LevelShutdown();
 	R_Areaportal_LevelShutdown();
 	g_DispLightmapSamplePositions.Purge();
+
+	g_RendererInLevel = false;
 }
-
-
 

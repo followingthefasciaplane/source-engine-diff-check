@@ -1,10 +1,18 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
 // $NoKeywords: $
 //=============================================================================//
- 
+
+//#define LOG_DELTA_BITS_TO_FILE
+#ifdef LOG_DELTA_BITS_TO_FILE
+#undef fopen
+#endif
+
+#include "tier1/tokenset.h"
+
+#include <algorithm>
 #include <stdarg.h>
 #include "dt_send.h"
 #include "dt.h"
@@ -15,19 +23,91 @@
 #include "tier1/strtools.h"
 #include "tier0/dbg.h"
 #include "dt_stack.h"
+#include "filesystem_engine.h"
+#include "filesystem.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
-
 #define PROPINDEX_NUMBITS 12
-#define MAX_TOTAL_SENDTABLE_PROPS	(1 << PROPINDEX_NUMBITS)
+#define MAX_TOTAL_SENDTABLE_PROPS	( (1 << PROPINDEX_NUMBITS) - 1 ) // one value reserved for end marker
+#define PROPINDEX_END_MARKER ( ( 1 << PROPINDEX_NUMBITS ) - 1 )
 
 
 ConVar g_CV_DTWatchEnt( "dtwatchent", "-1", 0, "Watch this entities data table encoding." );
 ConVar g_CV_DTWatchVar( "dtwatchvar", "", 0, "Watch the named variable." );
 ConVar g_CV_DTWarning( "dtwarning", "0", 0, "Print data table warnings?" );
 ConVar g_CV_DTWatchClass( "dtwatchclass", "", 0, "Watch all fields encoded with this table." );
+ConVar g_CV_DTEncode( "dtwatchencode", "1", 0, "When watching show encode." );
+ConVar g_CV_DTDecode( "dtwatchdecode", "1", 0, "When watching show decode." );
+ConVar sv_new_delta_bits( "sv_new_delta_bits", "1" );
+
+
+#ifdef LOG_DELTA_BITS_TO_FILE
+
+class CDeltaBitsRun
+{
+public:
+	CUtlVector<int> m_Props;
+	CUtlVector<int> m_BitCounts;
+};
+
+CUtlVector<CDeltaBitsRun*> g_DeltaBitsRuns;
+CDeltaBitsRun *g_pDeltaBitsRun = NULL;
+
+inline void LogDeltaBitsStart()
+{
+	if ( g_pDeltaBitsRun )
+		Error( "LogDeltaBitsStart" );
+
+	g_pDeltaBitsRun = new CDeltaBitsRun;
+	g_DeltaBitsRuns.AddToTail( g_pDeltaBitsRun );
+}
+
+inline void LogDeltaBitsEnd()
+{
+	if ( !g_pDeltaBitsRun )
+		Error( "LogDeltaBitsEnd" );
+
+	g_pDeltaBitsRun = NULL;
+}
+
+inline void LogDeltaBitsEntry( int iProp, int nBits )
+{
+	g_pDeltaBitsRun->m_Props.AddToTail( iProp );
+	g_pDeltaBitsRun->m_BitCounts.AddToTail( nBits );
+}
+
+
+void FlushDeltaBitsTrackingData()
+{
+	FILE *fp = fopen( "c:\\deltabits.txt", "wt" );
+	fprintf( fp, "%d\n", g_DeltaBitsRuns.Count() );
+
+	for ( int i=0; i < g_DeltaBitsRuns.Count(); i++ )
+	{
+		CDeltaBitsRun *pRun = g_DeltaBitsRuns[i];
+
+		fprintf( fp, "%d ", pRun->m_Props.Count() );
+		for ( int z=0; z < pRun->m_Props.Count(); z++ )
+		{
+			fprintf( fp, "%d %d ", pRun->m_Props[z], pRun->m_BitCounts[z] );
+		}
+		fprintf( fp, "\n" );
+	}
+
+	fclose( fp );
+}
+
+#else
+
+inline void LogDeltaBitsStart() {}
+inline void LogDeltaBitsEnd() {}
+inline void LogDeltaBitsEntry( int iProp, int nBits ) {}
+void FlushDeltaBitsTrackingData() {}
+
+#endif
+
 
 
 
@@ -53,6 +133,208 @@ public:
 
 	unsigned char m_nPropProxies;
 };
+
+
+// ------------------------------------------------------------------------------------ //
+// CDeltaBitsWriter.
+// ------------------------------------------------------------------------------------ //
+
+static FORCEINLINE unsigned int ReadPropIndex( bf_read *pBuf, bool bNewScheme )
+{
+	if ( bNewScheme )
+	{
+		if ( pBuf->ReadOneBit() )
+		{
+			return pBuf->ReadUBitLong( 3 );
+		}
+	}
+
+	int ret = pBuf->ReadUBitLong( 7 );
+	switch( ret & ( 32 | 64 ) )
+	{
+		case 32:
+			ret = ( ret &~96 ) | ( pBuf->ReadUBitLong( 2 ) << 5 );
+			Assert( ret >= 32);
+			break;
+				
+		case 64:
+			ret = ( ret &~96 ) | ( pBuf->ReadUBitLong( 4 ) << 5 );
+			Assert( ret >= 128);
+			break;
+		case 96:
+			ret = ( ret &~96 ) | ( pBuf->ReadUBitLong( 7 ) << 5 );
+			Assert( ret >= 512);
+			break;
+	}
+
+	return ret;
+}
+
+FORCEINLINE void WritePropIndex( bf_write *pBuf, unsigned int n, bool bNewScheme )
+{
+	Assert( n < (1 << PROPINDEX_NUMBITS ) );
+	Assert( ( n & 0xfff ) == n );
+
+	if ( bNewScheme )
+	{
+		if ( n < 8 )
+		{
+			pBuf->WriteOneBit( 1 );
+			pBuf->WriteUBitLong( n, 3 );
+			return;
+		}
+		else
+		{
+			pBuf->WriteOneBit( 0 );
+		}
+	}
+
+	if ( n < 32 )
+		pBuf->WriteUBitLong( n, 7 );
+	else
+		if ( n < 128 )
+			pBuf->WriteUBitLong( ( n & 31 ) | 32 | ( ( n & ( 64 | 32 ) ) << 2 ), 9 );
+		else
+			if ( n < 512 )
+				pBuf->WriteUBitLong( ( n & 31 ) | 64 | ( ( n & ( 256 | 128 | 64 | 32 ) ) << 2 ), 11 );
+			else
+				pBuf->WriteUBitLong( ( n & 31 ) | 96 | 
+									 ( ( n & ( 2048 | 1024 | 512 | 256 | 128 | 64 | 32 ) ) << 2 ), 14 );
+}
+
+
+CDeltaBitsWriter::CDeltaBitsWriter( bf_write *pBuf )
+{
+	m_pBuf = pBuf;
+	m_iLastProp = -1;
+	LogDeltaBitsStart();
+	
+	//TODO: Get rid of this..
+	m_bUsingNewScheme = sv_new_delta_bits.GetBool();
+	if ( m_bUsingNewScheme )
+		pBuf->WriteOneBit( 1 );
+	else
+		pBuf->WriteOneBit( 0 );
+}
+
+
+CDeltaBitsWriter::~CDeltaBitsWriter()
+{
+	if ( m_pBuf )
+		Finish();
+}
+
+void CDeltaBitsWriter::Finish()
+{
+	m_pBuf->WriteOneBit( 0 );
+	::WritePropIndex( m_pBuf, PROPINDEX_END_MARKER, m_bUsingNewScheme );
+	LogDeltaBitsEnd();
+	m_pBuf = NULL;
+}
+
+void CDeltaBitsWriter::WritePropIndex( int iProp )
+{
+	int diff = iProp - m_iLastProp;
+	m_iLastProp = iProp;
+
+	Assert( iProp < MAX_DATATABLE_PROPS );
+	Assert( diff > 0 && diff < MAX_DATATABLE_PROPS );
+	--diff; // It's always at least 1 so subtract 1.
+
+	int startbit = m_pBuf->GetNumBitsWritten();
+
+	if ( m_bUsingNewScheme )
+	{
+		if ( diff == 0 )
+		{
+			m_pBuf->WriteOneBit( 1 );
+		}
+		else
+		{
+			m_pBuf->WriteOneBit( 0 );
+			::WritePropIndex( m_pBuf, diff, m_bUsingNewScheme );
+		}
+	}
+	else
+	{
+		::WritePropIndex( m_pBuf, diff, m_bUsingNewScheme );
+	}
+
+	int nBitsToEncode = m_pBuf->GetNumBitsWritten() - startbit;
+
+	LogDeltaBitsEntry( iProp, nBitsToEncode );
+}
+
+
+// ------------------------------------------------------------------------------------ //
+// CDeltaBitsReader.
+// ------------------------------------------------------------------------------------ //
+
+CDeltaBitsReader::CDeltaBitsReader( bf_read *pBuf ) : m_nLastFieldPathBits( 0 )
+{
+	m_pBuf = pBuf;
+	m_bFinished = false;
+	m_iLastProp = -1;
+	
+	if ( pBuf )
+		m_bUsingNewScheme = (pBuf->ReadOneBit() != 0);
+	else
+		m_bUsingNewScheme = false;
+}
+
+
+CDeltaBitsReader::~CDeltaBitsReader()
+{
+	// Make sure they read to the end unless they specifically said they don't care.
+	if ( m_pBuf )
+	{
+		Assert( m_bFinished );
+	}
+}
+
+int CDeltaBitsReader::GetFieldPathBits() const
+{
+	return m_nLastFieldPathBits;
+}
+
+int CDeltaBitsReader::ReadNextPropIndex()
+{
+	Assert( !m_bFinished );
+
+	if ( m_bUsingNewScheme )
+	{
+		if ( m_pBuf->ReadOneBit() )
+		{
+			m_iLastProp++;
+			m_nLastFieldPathBits = 1;
+			return m_iLastProp;
+		}
+	}
+
+	int nStartBit = m_pBuf->GetNumBitsRead();
+	int nRead = ReadPropIndex( m_pBuf, m_bUsingNewScheme );
+	m_nLastFieldPathBits = m_pBuf->GetNumBitsRead() - nStartBit;
+	if ( nRead == PROPINDEX_END_MARKER )
+	{
+		m_bFinished = true;
+		return -1;
+	}
+
+	int prop = 1 + nRead;
+	prop += m_iLastProp;
+	m_iLastProp = prop;
+
+	Assert( m_iLastProp < MAX_DATATABLE_PROPS );
+
+	return prop;
+}
+
+
+void CDeltaBitsReader::ForceFinished()
+{
+	m_bFinished = true;
+	m_pBuf = NULL;
+}
 
 
 // ----------------------------------------------------------------------------- //
@@ -279,7 +561,11 @@ void SendTable_BuildHierarchy(
 	pNode->m_pTable = pTable;
 	pNode->m_iFirstRecursiveProp = bhs->m_nProps;
 	
-	Assert( bhs->m_nPropProxies < 255 );
+	if ( bhs->m_nPropProxies >= 255 )
+	{
+		Error( "Exceeded max number of datatable proxies in SendTable_BuildHierarchy()" );
+	}
+
 	unsigned char curPropProxy = bhs->m_nPropProxies;
 	++bhs->m_nPropProxies;
 
@@ -312,33 +598,67 @@ void SendTable_BuildHierarchy(
 	pNode->m_nRecursiveProps = bhs->m_nProps - pNode->m_iFirstRecursiveProp;
 }
 
-void SendTable_SortByPriority(CBuildHierarchyStruct *bhs)
+static int __cdecl SendProp_SortPriorities( const byte *p1, const byte *p2 )
 {
-	int i, start = 0;
-
-	while( true )
-	{
-		for ( i = start; i < bhs->m_nProps; i++ )
-		{
-			const SendProp *p = bhs->m_pProps[i];
-			unsigned char c = bhs->m_PropProxyIndices[i];
-
-			if ( p->GetFlags() & SPROP_CHANGES_OFTEN )
-			{
-				bhs->m_pProps[i] = bhs->m_pProps[start];
-				bhs->m_PropProxyIndices[i] = bhs->m_PropProxyIndices[start];
-				bhs->m_pProps[start] = p;
-				bhs->m_PropProxyIndices[start] = c;
-				start++;
-				break;
-			}
-		}
-
-		if ( i == bhs->m_nProps )
-			return; 
-	}
+	return *p1 > *p2;
 }
 
+void SendTable_SortByPriority(CBuildHierarchyStruct *bhs)
+{
+	CUtlVector<byte> priorities;
+
+	// Build a list of priorities 
+
+	// Default entry for SPROP_CHANGES_OFTEN
+	priorities.AddToTail( SENDPROP_CHANGES_OFTEN_PRIORITY );
+
+	for ( int i = 0; i < bhs->m_nProps; i++ )
+	{
+		const SendProp *p = bhs->m_pProps[i];
+
+		if ( priorities.Find( p->GetPriority() ) < 0 )
+		{
+			priorities.AddToTail( p->GetPriority() );
+		}
+	}
+
+	// We're using this one because CUtlVector::Sort utilizes qsort, which has different behavior on Windows than on Linux
+	std::stable_sort( priorities.Base(), priorities.Base() + priorities.Count() );
+
+	int start = 0;
+
+	for ( int priorityIndex = 0; priorityIndex < priorities.Count(); ++priorityIndex )
+	{
+		byte priority = priorities[priorityIndex];
+		int i;
+	
+		while( true )
+		{
+			for ( i = start; i < bhs->m_nProps; i++ )
+			{
+				const SendProp *p = bhs->m_pProps[i];
+				unsigned char c = bhs->m_PropProxyIndices[i];
+
+				if ( p->GetPriority() == priority ||
+					 ( ( p->GetFlags() & SPROP_CHANGES_OFTEN ) && priority == SENDPROP_CHANGES_OFTEN_PRIORITY ) )
+				{
+					if ( i != start )
+					{
+						bhs->m_pProps[i] = bhs->m_pProps[start];
+						bhs->m_PropProxyIndices[i] = bhs->m_PropProxyIndices[start];
+						bhs->m_pProps[start] = p;
+						bhs->m_PropProxyIndices[start] = c;
+					}
+					start++;
+					break;
+				}
+			}
+	
+			if ( i == bhs->m_nProps )
+				break; 
+		}
+	}
+}
 
 void CalcPathLengths_R( CSendNode *pNode, CUtlVector<int> &pathLengths, int curPathLength, int &totalPathLengths )
 {
@@ -427,7 +747,7 @@ bool CSendTablePrecalc::SetupFlatPropertyArray()
 	SendTable_BuildHierarchy( GetRootNode(), pTable, &bhs );
 
 	SendTable_SortByPriority( &bhs );
-	
+
 	// Copy the SendProp pointers into the precalc.	
 	MEM_ALLOC_CREDIT();
 	m_Props.CopyArray( bhs.m_pProps, bhs.m_nProps );
@@ -442,6 +762,7 @@ bool CSendTablePrecalc::SetupFlatPropertyArray()
 	SetRecursiveProxyIndices_R( pTable, GetRootNode(), nProxyIndices );
 
 	SendTable_GenerateProxyPaths( this, nProxyIndices );
+
 	return true;
 }
 
@@ -457,22 +778,23 @@ bool AreBitArraysEqual(
 	void const *pvBits2,
 	int nBits ) 
 {
-	unsigned int const *pBits1 = (unsigned int const *)pvBits1;
-	unsigned int const *pBits2 = (unsigned int const *)pvBits2;
+	int i, nBytes, bit1, bit2;
 
-	// Compare words.
-	int nWords = nBits >> 5;
-	for ( int i = 0 ; i < nWords; ++i )
+	unsigned char const *pBits1 = (unsigned char*)pvBits1;
+	unsigned char const *pBits2 = (unsigned char*)pvBits2;
+
+	// Compare bytes.
+	nBytes = nBits >> 3;
+	if( memcmp( pBits1, pBits2, nBytes ) != 0 )
+		return false;
+
+	// Compare remaining bits.
+	for(i=nBytes << 3; i < nBits; i++)
 	{
-		if ( pBits1[i] != pBits2[i] )
+		bit1 = pBits1[i >> 3] & (1 << (i & 7));
+		bit2 = pBits2[i >> 3] & (1 << (i & 7));
+		if(bit1 != bit2)
 			return false;
-	}
-
-	if ( nBits & 31 )
-	{
-		// Compare remaining bits.
-		unsigned int mask = (1 << (nBits & 31)) - 1;
-		return ((pBits1[nWords] ^ pBits2[nWords]) & mask) == 0;
 	}
 
 	return true;
@@ -507,6 +829,40 @@ bool CompareBitArrays(
 // if the user wants to watch this property.
 bool ShouldWatchThisProp( const SendTable *pTable, int objectID, const char *pPropName )
 {
+	if ( !g_CV_DTEncode.GetBool() )
+	{
+		return false;
+	}
+
+	if(g_CV_DTWatchEnt.GetInt() != -1 &&
+		g_CV_DTWatchEnt.GetInt() == objectID)
+	{
+		const char *pStr = g_CV_DTWatchVar.GetString();
+		if ( pStr && pStr[0] != 0 )
+		{
+			return stricmp( pStr, pPropName ) == 0;
+		}
+		else
+		{
+			return true;
+		}
+	}
+
+	if ( g_CV_DTWatchClass.GetString()[ 0 ] && Q_stristr( pTable->GetName(), g_CV_DTWatchClass.GetString() ) )
+		return true;
+
+	return false;
+}
+
+// Looks at the DTWatchEnt and DTWatchProp console variables and returns true
+// if the user wants to watch this property.
+bool ShouldWatchThisProp( const RecvTable *pTable, int objectID, const char *pPropName )
+{
+	if ( !g_CV_DTDecode.GetBool() )
+	{
+		return false;
+	}
+
 	if(g_CV_DTWatchEnt.GetInt() != -1 &&
 		g_CV_DTWatchEnt.GetInt() == objectID)
 	{
@@ -558,7 +914,6 @@ void DataTable_Warning( const char *pInMessage, ... )
 
 	Warning( "DataTable warning: %s", msg );
 }
-
 
 
 

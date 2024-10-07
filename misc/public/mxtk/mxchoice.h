@@ -46,6 +46,8 @@ public:
 	int getItemCount () const;
 	int getSelectedIndex () const;
 
+	const char *getItemText (int index) const;
+
 private:
 	// NOT IMPLEMENTED
 	mxChoice (const mxChoice&);

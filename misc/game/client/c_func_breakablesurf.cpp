@@ -1,181 +1,32 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
 // $NoKeywords: $
 //
-//=============================================================================//
+//===========================================================================//
 #include "cbase.h"
+#include "materialsystem/imaterial.h"
+#include "imaterialproxydict.h"
 #include "particles_simple.h"
-#include "iviewrender.h"
 #include "proxyentity.h"
 #include "materialsystem/imaterialvar.h"
 #include "model_types.h"
 #include "engine/ivmodelinfo.h"
-#include "clienteffectprecachesystem.h"
+#include "c_physbox.h"
+#include "c_func_breakablesurf.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
-
-#define MAX_NUM_PANELS 16
-
-extern IVDebugOverlay *debugoverlay;
-
-
-enum WinSide_t 
-{
-	WIN_SIDE_BOTTOM,
-	WIN_SIDE_RIGHT,
-	WIN_SIDE_TOP,
-	WIN_SIDE_LEFT,
-};
-
-enum WinEdge_t 
-{
-	EDGE_NOT	= -1,		// No edge
-	EDGE_NONE,				/* No edge on both sides	/##\  */
-	EDGE_FULL,				// Edge on both sides		|##| 
-	EDGE_LEFT,				/* Edge is on left only		|##\  */
-	EDGE_RIGHT,				// Edge is on right only	/##|
-};
-
-#define STYLE_HIGHLIGHT = -1;
-
-#define NUM_EDGE_TYPES		4
-#define NUM_EDGE_STYLES		3
 
 
 //==================================================
 // C_BreakableSurface
 //==================================================
 
-//-----------------------------------------------------------------------------
-// All the information associated with a particular handle
-//-----------------------------------------------------------------------------
-struct Panel_t
-{
-	char			m_nWidth;
-	char			m_nHeight;
-	char			m_nSide;
-	char			m_nEdgeType;
-	char			m_nStyle;
-};
-
-struct EdgeTexture_t
-{
-	int					m_nRenderIndex;
-	int					m_nStyle;
-	CMaterialReference	m_pMaterialEdge;
-	CTextureReference	m_pMaterialEdgeTexture;
-};
-
 // Bits for m_nPanelBits
 #define BITS_PANEL_IS_SOLID		(1<<0)
 #define BITS_PANEL_IS_STALE		(1<<1)
-
-
-class C_BreakableSurface : public C_BaseEntity, public IBrushRenderer
-{
-public:
-	DECLARE_CLIENTCLASS();
-	DECLARE_CLASS( C_BreakableSurface, C_BaseEntity );
-	DECLARE_DATADESC();
-
-	int				m_nNumWide;
-	int				m_nNumHigh;
-	float			m_flPanelWidth;
-	float			m_flPanelHeight;
-	Vector			m_vNormal;
-	Vector			m_vCorner;
-	bool			m_bIsBroken;
-	int				m_nSurfaceType;
-
-						
-	// This is the texture we're going to use to multiply by the cracked base texture
-	ITexture*	m_pCurrentDetailTexture;
-
-	// Stores linked list of edges to render
-	CUtlLinkedList< Panel_t, unsigned short >		m_RenderList;
-
-
-	C_BreakableSurface();
-	~C_BreakableSurface();
-
-public:
-	void		InitMaterial(WinEdge_t nEdgeType, int nEdgeStyle, char const* pMaterialName);
-	virtual void		OnDataChanged( DataUpdateType_t updateType );
-	virtual void		OnPreDataChanged( DataUpdateType_t updateType );
-
-	bool		IsTransparent( void );
-	bool		HavePanel(int nWidth, int nHeight);
-	bool		RenderBrushModelSurface( IClientEntity* pBaseEntity, IBrushSurface* pBrushSurface ); 
-	int			DrawModel( int flags );
-	void		DrawSolidBlocks( IBrushSurface* pBrushSurface );
-
-	virtual void	OnRestore();
-
-	virtual bool	ShouldReceiveProjectedTextures( int flags );
-
-private:
-	// One bit per pane
-	CNetworkArray( bool, m_RawPanelBitVec, MAX_NUM_PANELS * MAX_NUM_PANELS );
-	bool m_PrevRawPanelBitVec[ MAX_NUM_PANELS * MAX_NUM_PANELS ];
-	
-	// 2 bits of flags and 2 bits of edge type
-	byte		m_nPanelBits[MAX_NUM_PANELS][MAX_NUM_PANELS];	//UNDONE: allocate this dynamically?
-	CMaterialReference	m_pMaterialBox;	
-	EdgeTexture_t	m_pSolid;
-	EdgeTexture_t	m_pEdge[NUM_EDGE_TYPES][NUM_EDGE_STYLES];
-
-	inline bool InLegalRange(int nWidth, int nHeight);
-	inline bool	IsPanelSolid(int nWidth, int nHeight);
-	inline bool	IsPanelStale(int nWidth, int nHeight);
-	inline void	SetPanelSolid(int nWidth, int nHeight, bool value);
-	inline void	SetPanelStale(int nWidth, int nHeight, bool value);
-
-	void		DrawOneEdge( IBrushSurface* pBrushSurface, IMesh* pMesh, 
-					CMeshBuilder *pMeshBuilder, const Vector &vStartPos,  
-					const Vector &vWStep, const Vector &vHstep, WinSide_t nEdge);
-	void		DrawOneHighlight( IBrushSurface* pBrushSurface, IMesh* pMesh, 
-					CMeshBuilder *pMeshBuilder, const Vector &vStartPos,  
-					const Vector &vWStep, const Vector &vHstep, WinSide_t nEdge);
-	void		DrawOneBlock(IBrushSurface* pBrushSurface, IMesh* pMesh, 
-					CMeshBuilder *pMeshBuilder, const Vector &vPosition, 
-					const Vector &vWidth, const Vector &vHeight);
-
-	void		DrawRenderList( IBrushSurface* pBrushSurface);
-	void		DrawRenderListHighlights( IBrushSurface* pBrushSurface );
-	int			FindRenderPanel(int nWidth, int nHeight, WinSide_t nSide);
-	void		AddToRenderList(int nWidth, int nHeight, WinSide_t nSide, WinEdge_t nEdgeType, int forceStyle);
-	int			FindFirstRenderTexture(WinEdge_t nEdgeType, int nStyle);
-
-	inline void SetStyleType( int w, int h, int type )
-	{
-		Assert( type < NUM_EDGE_STYLES );
-		Assert( type >= 0 );
-		// Clear old value
-		m_nPanelBits[ w ][ h ] &= 0xF0; // ( ~0x03 << 2 ); Left shifting a negative value has undefined behavior. Use the constant 0xF0 instead.
-		// Insert new value
-		m_nPanelBits[ w ][ h ] |= ( type << 2 );
-	}
-
-	inline int GetStyleType( int w, int h )
-	{
-		int value = m_nPanelBits[ w ][ h ];
-		value = ( value >> 2 ) & 0x03;
-		Assert( value < NUM_EDGE_STYLES );
-		return value;
-	}
-
-	// Gets at the cracked version of the material
-	void FindCrackedMaterial();
-
-	CMaterialReference	m_pCrackedMaterial;
-	CTextureReference	m_pMaterialBoxTexture;
-
-
-	void		UpdateEdgeType(int nWidth, int nHeight, int forceStyle = -1 );
-};
 
 BEGIN_DATADESC( C_BreakableSurface )
 
@@ -285,7 +136,7 @@ END_RECV_TABLE()
 //-----------------------------------------------------------------------------
 void C_BreakableSurface::FindCrackedMaterial()
 {
-	m_pCrackedMaterial = 0;
+	m_pCrackedMaterial.Init( NULL );
 
 	// First time we've seen it, get the material on the brush model
 	int materialCount = modelinfo->GetModelMaterialCount( const_cast<model_t*>(GetModel()) );
@@ -391,6 +242,9 @@ void C_BreakableSurface::OnDataChanged( DataUpdateType_t updateType )
 {
 	C_BaseEntity::OnDataChanged( updateType );
 
+	// FIXME: Slightly bogus, recomputation only necessary when m_bBroken changed
+	OnTranslucencyTypeChanged();
+
 	if ( updateType == DATA_UPDATE_CREATED )
 	{
 		// Get at the cracked material
@@ -494,22 +348,22 @@ void C_BreakableSurface::OnDataChanged( DataUpdateType_t updateType )
 	Q_memcpy( m_PrevRawPanelBitVec, m_RawPanelBitVec.Base(), sizeof( m_PrevRawPanelBitVec ) );
 }
 
-bool C_BreakableSurface::IsTransparent( void )
+RenderableTranslucencyType_t C_BreakableSurface::ComputeTranslucencyType( void )
 {
 	// Not an identity brush if it's broken
-	if (m_bIsBroken)
-		return true;
+	if ( m_bIsBroken )
+		return RENDERABLE_IS_TRANSLUCENT;
 
-	return C_BaseEntity::IsTransparent();
+	return BaseClass::ComputeTranslucencyType();
 }
-  
+
 
 //------------------------------------------------------------------------------
 // Purpose :
 // Input   :
 // Output  :
 //------------------------------------------------------------------------------
-int C_BreakableSurface::DrawModel( int flags )
+int C_BreakableSurface::DrawModel( int flags, const RenderableInstance_t &instance )
 {
 	if ( !m_bReadyToDraw )
 		return 0;
@@ -519,7 +373,7 @@ int C_BreakableSurface::DrawModel( int flags )
 		render->InstallBrushSurfaceRenderer( this );
 
 	// If it's broken, always draw it translucent
-	BaseClass::DrawModel( m_bIsBroken ? flags | STUDIO_TRANSPARENCY : flags );
+	BaseClass::DrawModel( m_bIsBroken ? flags | STUDIO_TRANSPARENCY : flags, instance );
 
 	// Remove our nonstandard brush surface renderer...
 	render->InstallBrushSurfaceRenderer( 0 );
@@ -557,7 +411,6 @@ void C_BreakableSurface::DrawRenderList(IBrushSurface* pBrushSurface)
 	vHeightStep *= m_flPanelHeight;
 
 	CMeshBuilder	pMeshBuilder;
-	IMesh*			pMesh			= NULL;
 	int				nCurStyle		= -1;
 	int				nCurEdgeType	= -1;
 	CMatRenderContextPtr pRenderContext( materials );
@@ -573,13 +426,13 @@ void C_BreakableSurface::DrawRenderList(IBrushSurface* pBrushSurface)
 			m_pCurrentDetailTexture = m_pEdge[nCurEdgeType][nCurStyle].m_pMaterialEdgeTexture;
 			pRenderContext->Flush(false);
 			pRenderContext->Bind(m_pCrackedMaterial, (IClientRenderable*)this);
-			pMesh = pRenderContext->GetDynamicMesh( );
 		}
 
 		Vector vRenderPos = m_vCorner + 
 							(m_RenderList[i].m_nWidth*vWidthStep)	+ 
 							(m_RenderList[i].m_nHeight*vHeightStep);
 
+		IMesh* pMesh = pRenderContext->GetDynamicMesh( );
 		DrawOneEdge(pBrushSurface, pMesh,&pMeshBuilder,vRenderPos,vWidthStep,vHeightStep,(WinSide_t)m_RenderList[i].m_nSide);
 	}
 }
@@ -602,22 +455,15 @@ void C_BreakableSurface::DrawRenderListHighlights(IBrushSurface* pBrushSurface)
 
 
 	CMeshBuilder	pMeshBuilder;
-	IMesh*			pMesh			= NULL;
 	int				nCurStyle		= -1;
 	int				nCurEdgeType	= -1;
 	CMatRenderContextPtr pRenderContext( materials );
 	for( unsigned short i = m_RenderList.Head(); i != m_RenderList.InvalidIndex(); i = m_RenderList.Next(i) )
 	{
-	
-		if (nCurStyle		!= m_RenderList[i].m_nStyle		||
-			nCurEdgeType	!= m_RenderList[i].m_nEdgeType	)
-		{
-			nCurStyle	 = m_RenderList[i].m_nStyle;
-			nCurEdgeType = m_RenderList[i].m_nEdgeType;
-			
-			IMaterial *pMat = m_pEdge[nCurEdgeType][nCurStyle].m_pMaterialEdge;
-			pMesh = pRenderContext->GetDynamicMesh( true, NULL, NULL, pMat );
-		}
+		nCurStyle	 = m_RenderList[i].m_nStyle;
+		nCurEdgeType = m_RenderList[i].m_nEdgeType;
+		IMaterial *pMat = m_pEdge[nCurEdgeType][nCurStyle].m_pMaterialEdge;
+		IMesh *pMesh = pRenderContext->GetDynamicMesh( true, NULL, NULL, pMat );
 
 		Vector vRenderPos = m_vCorner + 
 							(m_RenderList[i].m_nWidth*vWidthStep)	+ 
@@ -918,7 +764,6 @@ void C_BreakableSurface::DrawSolidBlocks(IBrushSurface* pBrushSurface)
 	// have a new material due to the new base texture
 	pRenderContext->Flush(false);
 	pRenderContext->Bind(m_pCrackedMaterial, (IClientRenderable*)this);
-	IMesh* pMesh = pRenderContext->GetDynamicMesh( );
 	CMeshBuilder pMeshBuilder;
 
 	// ---------------
@@ -948,6 +793,7 @@ void C_BreakableSurface::DrawSolidBlocks(IBrushSurface* pBrushSurface)
 			else if (nHCount > 0)
 			{
 				vCurPos = m_vCorner + vWidthStep*width + vHeightStep*(height-nHCount);
+				IMesh* pMesh = pRenderContext->GetDynamicMesh( );
 				DrawOneBlock(pBrushSurface, pMesh, &pMeshBuilder, vCurPos,vWidthStep,vHeightStep*nHCount);
 				nHCount = 0;
 			}
@@ -955,6 +801,7 @@ void C_BreakableSurface::DrawSolidBlocks(IBrushSurface* pBrushSurface)
 		if (nHCount)
 		{
 			vCurPos = m_vCorner + vWidthStep*width + vHeightStep*(height-nHCount);
+			IMesh* pMesh = pRenderContext->GetDynamicMesh( );
 			DrawOneBlock(pBrushSurface, pMesh, &pMeshBuilder, vCurPos,vWidthStep,vHeightStep*nHCount);
 		}
 	}
@@ -1280,21 +1127,6 @@ bool C_BreakableSurface::ShouldReceiveProjectedTextures( int flags )
 //------------------------------------------------------------------------------
 // A material proxy that resets the texture to use the original surface texture
 //------------------------------------------------------------------------------
-class CBreakableSurfaceProxy : public CEntityMaterialProxy
-{
-public:
-	CBreakableSurfaceProxy();
-	virtual ~CBreakableSurfaceProxy();
-	virtual bool Init( IMaterial *pMaterial, KeyValues *pKeyValues );
-	virtual void OnBind( C_BaseEntity *pC_BaseEntity );
-	virtual IMaterial *GetMaterial();
-
-private:
-	// get at the material whose texture we're going to steal
-	void AcquireSourceMaterial( C_BaseEntity* pEnt );
-
-	IMaterialVar* m_BaseTextureVar;
-};
 
 CBreakableSurfaceProxy::CBreakableSurfaceProxy()
 {
@@ -1333,4 +1165,4 @@ IMaterial *CBreakableSurfaceProxy::GetMaterial()
 	return m_BaseTextureVar->GetOwningMaterial();
 }
 
-EXPOSE_INTERFACE( CBreakableSurfaceProxy, IMaterialProxy, "BreakableSurface" IMATERIAL_PROXY_INTERFACE_VERSION );
+EXPOSE_MATERIAL_PROXY( CBreakableSurfaceProxy, BreakableSurface );

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright (c) 1996-2010, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -8,7 +8,6 @@
 //=============================================================================//
 
 // main precompiled header for client rendering code
-
 #include "const.h"
 #include "utlsymbol.h"
 #include "materialsystem/imesh.h"

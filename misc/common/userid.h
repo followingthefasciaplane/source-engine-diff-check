@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -11,11 +11,8 @@
 #pragma once
 #endif
 
-#include "strtools.h"
-#include "steam/steamclientpublic.h"
 #if !defined( INCLUDED_STEAM_STEAMUSERIDTYPES_H )
-#define INCLUDED_STEAM2_USERID_STRUCTS	
-#include "steamcommon.h"
+	#include "SteamCommon.h"
 #endif
 
 #define IDTYPE_WON		0
@@ -26,7 +23,13 @@
 typedef struct USERID_s
 {
 	int			idtype;
-	CSteamID steamid;
+
+	union
+	{
+		TSteamGlobalUserID	steamid;
+	} uid;
+
+//	unsigned int		clientip;
 } USERID_t;
 
 #endif // USERID_H

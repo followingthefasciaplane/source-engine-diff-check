@@ -42,6 +42,10 @@ damage. */
 #include "VoiceEncoder_Speex.h"
 #include <stdio.h>
 
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
+
 #define SAMPLERATE			8000	// get 8000 samples/sec
 #define RAW_FRAME_SIZE		160		// in 160 samples per frame
 
@@ -141,8 +145,8 @@ void VoiceEncoder_Speex::EncodeFrame(const char *pUncompressedBytes, char *pComp
 	speex_encode( m_EncoderState, input, &m_Bits );
 
 	/*Copy the bits to an array of char that can be written*/
-	int size = speex_bits_write(&m_Bits, pCompressed, ENCODED_FRAME_SIZE[m_Quality] );
-	NOTE_UNUSED( size );
+	int size;
+	size = speex_bits_write(&m_Bits, pCompressed, ENCODED_FRAME_SIZE[m_Quality] );
 
 	// char text[255];	_snprintf(text, 255, "outsize %i,", size ); OutputDebugStr( text );
 }
@@ -151,6 +155,17 @@ void VoiceEncoder_Speex::DecodeFrame(const char *pCompressed, char *pDecompresse
 {
 	float output[RAW_FRAME_SIZE];
 	short * out = (short*)pDecompressedBytes;
+
+	if (pCompressed == NULL)
+	{
+		for (int i=0;i<RAW_FRAME_SIZE;i++)
+		{
+			*out = (short)0;
+			out++;
+		}
+
+		return;
+	}
 
 	/*Copy the data into the bit-stream struct*/
 	speex_bits_read_from(&m_Bits, (char *)pCompressed, ENCODED_FRAME_SIZE[m_Quality] );

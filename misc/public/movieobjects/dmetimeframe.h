@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -11,7 +11,7 @@
 #endif
 
 #include "datamodel/dmelement.h"
-#include "movieobjects/timeutils.h"
+#include "datamodel/dmattributevar.h"
 
 
 //-----------------------------------------------------------------------------
@@ -50,9 +50,9 @@ public:
 	void SetTimeScale( float flScale, DmeTime_t scaleCenter, bool bChangeDuration );
 
 private:
-	CDmaVar< int > m_Start;
-	CDmaVar< int > m_Duration;
-	CDmaVar< int > m_Offset;
+	CDmaTime m_Start;
+	CDmaTime m_Duration;
+	CDmaTime m_Offset;
 	CDmaVar< float > m_Scale;
 };
 
@@ -62,17 +62,17 @@ private:
 //-----------------------------------------------------------------------------
 inline DmeTime_t CDmeTimeFrame::GetStartTime() const
 {
-	return DmeTime_t( m_Start );
+	return m_Start;
 }
 
 inline DmeTime_t CDmeTimeFrame::GetDuration() const
 {
-	return DmeTime_t( m_Duration );
+	return m_Duration;
 }
 
 inline DmeTime_t CDmeTimeFrame::GetTimeOffset() const
 {
-	return DmeTime_t( m_Offset );
+	return m_Offset;
 }
 
 inline float CDmeTimeFrame::GetTimeScale() const
@@ -80,20 +80,20 @@ inline float CDmeTimeFrame::GetTimeScale() const
 	return m_Scale;
 }
 
-inline void CDmeTimeFrame::SetStartTime( DmeTime_t flStartTime )
+inline void CDmeTimeFrame::SetStartTime( DmeTime_t startTime )
 {
-	m_Start = flStartTime.GetTenthsOfMS();
+	m_Start = startTime;
 }
 
-inline void CDmeTimeFrame::SetDuration( DmeTime_t flDuration )
+inline void CDmeTimeFrame::SetDuration( DmeTime_t duration )
 {
-	Assert( m_Duration >= 0 ); // if you want a reversed clip, set the timescale negative
-	m_Duration = flDuration.GetTenthsOfMS();
+	Assert( duration >= DMETIME_ZERO ); // if you want a reversed clip, set the timescale negative
+	m_Duration = MAX( DMETIME_ZERO, duration );
 }
 
-inline void CDmeTimeFrame::SetTimeOffset( DmeTime_t flOffset )
+inline void CDmeTimeFrame::SetTimeOffset( DmeTime_t offset )
 {
-	m_Offset = flOffset.GetTenthsOfMS();
+	m_Offset = offset;
 }
 
 inline void CDmeTimeFrame::SetTimeScale( float flScale )
@@ -107,22 +107,22 @@ inline void CDmeTimeFrame::SetTimeScale( float flScale )
 //-----------------------------------------------------------------------------
 inline DmeTime_t CDmeTimeFrame::ToChildMediaTime( DmeTime_t t, bool bClamp ) const
 {
-	t -= DmeTime_t( m_Start );
+	t -= m_Start;
 	if ( bClamp )
 	{
-		t.Clamp( DMETIME_ZERO, DmeTime_t( m_Duration ) );
+		t.Clamp( DMETIME_ZERO, m_Duration );
 	}
-	return ( t + DmeTime_t( m_Offset ) ) * m_Scale;
+	return ( t + m_Offset ) * m_Scale;
 }
 
 inline DmeTime_t CDmeTimeFrame::FromChildMediaTime( DmeTime_t t, bool bClamp ) const
 {
-	t = DmeTime_t( t ) / m_Scale - DmeTime_t( m_Offset );
+	t = t / m_Scale - m_Offset;
 	if ( bClamp )
 	{
-		t.Clamp( DMETIME_ZERO, DmeTime_t( m_Duration ) );
+		t.Clamp( DMETIME_ZERO, m_Duration );
 	}
-	return t + DmeTime_t( m_Start );
+	return t + m_Start;
 }
 
 inline DmeTime_t CDmeTimeFrame::ToChildMediaDuration( DmeTime_t dt ) const
@@ -137,14 +137,14 @@ inline DmeTime_t CDmeTimeFrame::FromChildMediaDuration( DmeTime_t dt ) const
 
 inline DmeTime_t CDmeTimeFrame::GetStartInChildMediaTime() const
 {
-	DmeTime_t time = DmeTime_t( m_Offset ) * m_Scale;
+	DmeTime_t time = m_Offset.Get() * m_Scale;
 	Assert( time == ToChildMediaTime( GetStartTime() ) );
 	return time;
 }
 
 inline DmeTime_t CDmeTimeFrame::GetEndInChildMediaTime() const
 {
-	DmeTime_t time = DmeTime_t( m_Offset + m_Duration ) * m_Scale;
+	DmeTime_t time = ( m_Offset.Get() + m_Duration.Get() ) * m_Scale;
 	Assert( time == ToChildMediaTime( GetStartTime() + GetDuration() ) );
 	return time;
 }

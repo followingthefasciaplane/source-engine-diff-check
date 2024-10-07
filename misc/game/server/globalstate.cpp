@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -131,7 +131,6 @@ public:
 		entity.name = m_nameList.AddString( pGlobalname );
 		entity.levelName = m_nameList.AddString( pMapName );
 		entity.state = state;
-		entity.counter = 0;
 
 		int index = GetIndex( m_nameList.String( entity.name ) );
 		if ( index >= 0 )
@@ -180,6 +179,24 @@ int GlobalEntity_AddToCounter( int globalIndex, int delta )
 	return gGlobalState.AddToCounter( globalIndex, delta );
 }
 
+void GlobalEntity_SetFlags( int globalIndex, int flags )
+{
+	// Flags are stored in counter var
+	gGlobalState.SetCounter( globalIndex, flags );
+}
+
+void GlobalEntity_AddFlags( int globalIndex, int flags )
+{
+	// Flags are stored in counter var
+	gGlobalState.SetCounter( globalIndex, gGlobalState.GetCounter( globalIndex ) | flags );
+}
+
+void GlobalEntity_RemoveFlags( int globalIndex, int flags )
+{
+	// Flags are stored in counter var
+	gGlobalState.SetCounter( globalIndex, gGlobalState.GetCounter( globalIndex ) & ~flags );
+}
+
 void GlobalEntity_EnableStateUpdates( bool bEnable )
 {
 	gGlobalState.EnableStateUpdates( bEnable );
@@ -211,6 +228,12 @@ int GlobalEntity_GetCounter( int globalIndex )
 	return gGlobalState.GetCounter( globalIndex );
 }
 
+int GlobalEntity_GetFlags( int globalIndex )
+{
+	// Flags are stored in counter var
+	return gGlobalState.GetCounter( globalIndex );
+}
+
 const char *GlobalEntity_GetMap( int globalIndex )
 {
 	return gGlobalState.GetMap( globalIndex );
@@ -238,7 +261,7 @@ CON_COMMAND(dump_globals, "Dump all global entities/states")
 //#ifdef _DEBUG
 void CGlobalState::DumpGlobals( void )
 {
-	static const char *estates[] = { "Off", "On", "Dead" };
+	static char *estates[] = { "Off", "On", "Dead" };
 
 	Msg( "-- Globals --\n" );
 	for ( int i = 0; i < m_list.Count(); i++ )

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -42,11 +42,12 @@ void R_AddDynamicLights( SurfaceHandle_t surfID, msurfacelighting_t *pLighting, 
 void R_BuildLightMap( struct dlight_t *pLights, class ICallQueue *pCallQueue, SurfaceHandle_t surfID, const matrix3x4_t& entityToWorld );
 void R_RedownloadAllLightmaps();
 void GL_RebuildLightmaps( void );
-void FASTCALL R_RenderDynamicLightmaps( dlight_t *pLights, ICallQueue *pCallQueue, SurfaceHandle_t surfID, const matrix3x4_t& entityToWorld );
 int R_AddLightmapPolyChain( SurfaceHandle_t surfID );
 int R_AddLightmapSurfaceChain( SurfaceHandle_t surfID );
 void R_SetLightmapBlendingMode( void );
+void R_CheckForLightmapUpdates( SurfaceHandle_t surfID, int nTransformIndex );
+void R_BuildLightmapUpdateList();
 
-extern Vector4D blocklights[NUM_BUMP_VECTS+1][ MAX_LIGHTMAP_DIM_INCLUDING_BORDER * MAX_LIGHTMAP_DIM_INCLUDING_BORDER ];
+extern ALIGN128 Vector4D blocklights[NUM_BUMP_VECTS+1][ MAX_LIGHTMAP_DIM_INCLUDING_BORDER * MAX_LIGHTMAP_DIM_INCLUDING_BORDER ];
 
 #endif // GL_LIGHTMAP_H

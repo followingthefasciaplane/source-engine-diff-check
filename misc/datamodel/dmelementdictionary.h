@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -72,7 +72,7 @@ private:
 	struct AttributeInfo_t
 	{
 		CDmAttribute *m_pAttribute;
-		int m_nType;	// AT_ELEMENT or AT_OBJECTID
+		int m_bId;
 		union
 		{
 			DmElementDictHandle_t m_hElement;
@@ -108,6 +108,7 @@ private:
 		}
 		static bool Compare( const DmIdPair_t& a, const DmIdPair_t& b )
 		{
+			// caveat emptor: this comparison facilitates searching by just 'from' ID, but also means that ( A -> B ) will match ( A -> C )
 			return IsUniqueIdEqual( a.m_oldId, b.m_oldId );
 		}
 	};

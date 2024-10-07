@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -9,13 +9,14 @@
 #include "vguitextwindow.h"
 #include <networkstringtabledefs.h>
 #include <cdll_client_int.h>
-#include <clientmode_shared.h>
+
+#include "inputsystem/iinputsystem.h"
 
 #include <vgui/IScheme.h>
 #include <vgui/ILocalize.h>
 #include <vgui/ISurface.h>
 #include <filesystem.h>
-#include <KeyValues.h>
+#include <keyvalues.h>
 #include <convar.h>
 #include <vgui_controls/ImageList.h>
 
@@ -24,8 +25,17 @@
 
 #include <game/client/iviewport.h>
 
+#include "cs_gamerules.h"
+
+#include "matchmaking/imatchframework.h"
+#include "tier1/netadr.h"
+
+#include "gametypes/igametypes.h"
+#include "gameui_interface.h"
+
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
+
 
 using namespace vgui;
 extern INetworkStringTable *g_pStringTableInfoPanel;
@@ -33,6 +43,8 @@ extern INetworkStringTable *g_pStringTableInfoPanel;
 #define TEMP_HTML_FILE	"textwindow_temp.html"
 
 ConVar cl_disablehtmlmotd( "cl_disablehtmlmotd", "0", FCVAR_ARCHIVE, "Disable HTML motds." );
+ConVar cl_motd_competitive_timeout( "cl_motd_competitive_timeout", "80", FCVAR_DEVELOPMENTONLY, "Competitive motd timeout in seconds." );
+extern ConVar sv_disable_motd;
 
 //=============================================================================
 // HPE_BEGIN:
@@ -42,13 +54,13 @@ ConVar cl_disablehtmlmotd( "cl_disablehtmlmotd", "0", FCVAR_ARCHIVE, "Disable HT
 //=============================================================================
 CON_COMMAND( showinfo, "Shows a info panel: <type> <title> <message> [<command number>]" )
 {
-	if ( !gViewPortInterface )
+	if ( !GetViewPortInterface() )
 		return;
 	
 	if ( args.ArgC() < 4 )
 		return;
 		
-	IViewPortPanel * panel = gViewPortInterface->FindPanelByName( PANEL_INFO );
+	IViewPortPanel * panel = GetViewPortInterface()->FindPanelByName( PANEL_INFO );
 
 	 if ( panel )
 	 {
@@ -62,7 +74,7 @@ CON_COMMAND( showinfo, "Shows a info panel: <type> <title> <message> [<command n
 
 		 panel->SetData( kv );
 
-		 gViewPortInterface->ShowPanel( panel, true );
+		 GetViewPortInterface()->ShowPanel( panel, true );
 
 		 kv->deleteThis();
 	 }
@@ -80,6 +92,12 @@ CON_COMMAND( showinfo, "Shows a info panel: <type> <title> <message> [<command n
 //-----------------------------------------------------------------------------
 CTextWindow::CTextWindow(IViewPort *pViewPort) : Frame(NULL, PANEL_INFO	)
 {
+	m_dblTimeExecutedExitCommand = 0;
+	m_bHasMotd = false;
+	m_uiTimestampStarted = 0;
+	m_uiTimestampInfoLabelUpdated = 0;
+	m_bForcingWindowCloseRegardlessOfTime = false;
+
 	// initialize dialog
 	m_pViewPort = pViewPort;
 
@@ -88,27 +106,41 @@ CTextWindow::CTextWindow(IViewPort *pViewPort) : Frame(NULL, PANEL_INFO	)
 	m_szTitle[0] = '\0';
 	m_szMessage[0] = '\0';
 	m_szMessageFallback[0] = '\0';
+	//=============================================================================
+	// HPE_BEGIN:
+	// [Forrest] Replaced text window command string with TEXTWINDOW_CMD enumeration
+	// of options.  Passing a command string is dangerous and allowed a server network
+	// message to run arbitrary commands on the client.
+	//=============================================================================
 	m_nExitCommand = TEXTWINDOW_CMD_NONE;
-	m_bShownURL = false;
-	m_bUnloadOnDismissal = false;
+	//=============================================================================
+	// HPE_END
+	//=============================================================================
 	
 	// load the new scheme early!!
 	SetScheme("ClientScheme");
 	SetMoveable(false);
 	SetSizeable(false);
 	SetProportional(true);
-
+	
 	// hide the system buttons
 	SetTitleBarVisible( false );
 
-	m_pTextMessage = new TextEntry( this, "TextMessage" );
+	m_pTextMessage = new TextEntry(this, "TextMessage");
+#if defined( ENABLE_CHROMEHTMLWINDOW )
 	m_pHTMLMessage = new CMOTDHTML( this,"HTMLMessage" );
+#else
+	m_pHTMLMessage = NULL;
+#endif
 	m_pTitleLabel  = new Label( this, "MessageTitle", "Message Title" );
+	m_pInfoLabelTicker = new Label( this, "InfoLabelTicker", " " );
 	m_pOK		   = new Button(this, "ok", "#PropertyDialog_OK");
 
 	m_pOK->SetCommand("okay");
 	m_pTextMessage->SetMultiline( true );
 	m_nContentType = TYPE_TEXT;
+
+	SetMouseInputEnabled( false );
 }
 
 //-----------------------------------------------------------------------------
@@ -118,7 +150,7 @@ void CTextWindow::ApplySchemeSettings( IScheme *pScheme )
 {
 	BaseClass::ApplySchemeSettings( pScheme );
 
-	LoadControlSettings("Resource/UI/TextWindow.res");
+		LoadControlSettings("Resource/UI/TextWindow.res");
 
 	Reset();
 }
@@ -128,72 +160,172 @@ void CTextWindow::ApplySchemeSettings( IScheme *pScheme )
 //-----------------------------------------------------------------------------
 CTextWindow::~CTextWindow()
 {
+	g_pInputSystem->SetSteamControllerMode( NULL, this );
+
 	// remove temp file again
 	g_pFullFileSystem->RemoveFile( TEMP_HTML_FILE, "DEFAULT_WRITE_PATH" );
 }
 
 void CTextWindow::Reset( void )
 {
+	g_pInputSystem->SetSteamControllerMode( NULL, this );
+
 	//=============================================================================
 	// HPE_BEGIN:
 	// [Forrest] Replace strange hard-coded default message with hard-coded error message.
 	//=============================================================================
-	V_strcpy_safe( m_szTitle, "Error loading info message." );
-	V_strcpy_safe( m_szMessage, "" );
-	V_strcpy_safe( m_szMessageFallback, "" );
+	Q_strcpy( m_szTitle, "Error loading info message." );
+	Q_strcpy( m_szMessage, "" );
+	Q_strcpy( m_szMessageFallback, "" );
 	//=============================================================================
 	// HPE_END
 	//=============================================================================
-
+	//=============================================================================
+	// HPE_BEGIN:
+	// [Forrest] Replaced text window command string with TEXTWINDOW_CMD enumeration
+	// of options.  Passing a command string is dangerous and allowed a server network
+	// message to run arbitrary commands on the client.
+	//=============================================================================
 	m_nExitCommand = TEXTWINDOW_CMD_NONE;
+	//=============================================================================
+	// HPE_END
+	//=============================================================================
 	m_nContentType = TYPE_TEXT;
-	m_bShownURL = false;
-	m_bUnloadOnDismissal = false;
+	m_bHasMotd = false;
 	Update();
 }
 
-void CTextWindow::ShowText( const char *text )
+void CTextWindow::ShowText( const char *text)
 {
 	m_pTextMessage->SetVisible( true );
 	m_pTextMessage->SetText( text );
 	m_pTextMessage->GotoTextStart();
+
+	m_bHasMotd = !!strlen(text);
 }
 
 void CTextWindow::ShowURL( const char *URL, bool bAllowUserToDisable )
 {
-	#ifdef _DEBUG
-		Msg( "CTextWindow::ShowURL( %s )\n", URL );
-	#endif
-
-	ClientModeShared *mode = ( ClientModeShared * )GetClientModeNormal();
-	if ( ( bAllowUserToDisable && cl_disablehtmlmotd.GetBool() ) || !mode->IsHTMLInfoPanelAllowed() )
+#if defined( ENABLE_CHROMEHTMLWINDOW )
+	if ( bAllowUserToDisable && cl_disablehtmlmotd.GetBool() && !GetNumSecondsRequiredByServer() )
 	{
-		Warning( "Blocking HTML info panel '%s'; Using plaintext instead.\n", URL );
-
 		// User has disabled HTML TextWindows. Show the fallback as text only.
 		if ( g_pStringTableInfoPanel )
 		{
-			int index = g_pStringTableInfoPanel->FindStringIndex( "motd_text" );
+			int index = g_pStringTableInfoPanel->FindStringIndex( m_szMessageFallback );
 			if ( index != ::INVALID_STRING_INDEX )
 			{
 				int length = 0;
 				const char *data = (const char *)g_pStringTableInfoPanel->GetStringUserData( index, &length );
 				if ( data && data[0] )
 				{
-					m_pHTMLMessage->SetVisible( false );
 					ShowText( data );
 				}
 			}
 		}
+
 		return;
-	} 
+	}
+
+	//
+	// Apply URL pattern replacements
+	//
+	char chUrlBufferAfterPatternReplacements[ 1024 ] = {0};
+	Q_strncpy( chUrlBufferAfterPatternReplacements, URL, sizeof( chUrlBufferAfterPatternReplacements ) );
+	CFmtStr fmtPattern;
+	CFmtStr fmtReplacement;
+
+	fmtPattern.Clear();			fmtPattern.AppendFormat( "%s", "%steamid%" );
+	fmtReplacement.Clear();		fmtReplacement.AppendFormat( "%llu", steamapicontext->SteamUser()->GetSteamID().ConvertToUint64() );
+	while ( char *pszReplace = strstr( chUrlBufferAfterPatternReplacements, fmtPattern.Access() ) )
+	{
+		size_t numBytes = Q_strlen( pszReplace + fmtPattern.Length() );
+		if ( pszReplace + fmtReplacement.Length() + numBytes + 1 >= &chUrlBufferAfterPatternReplacements[ sizeof( chUrlBufferAfterPatternReplacements ) ] )
+			break;
+		Q_memmove( pszReplace + fmtReplacement.Length(), pszReplace + fmtPattern.Length(), numBytes );
+		Q_memcpy( pszReplace, fmtReplacement.Access(), fmtReplacement.Length() );
+	}
+
+	fmtPattern.Clear();			fmtPattern.AppendFormat( "%s", "%map%" );
+	fmtReplacement.Clear();		fmtReplacement.AppendFormat( "%s", engine->GetLevelNameShort() );
+	while ( char *pszReplace = strstr( chUrlBufferAfterPatternReplacements, fmtPattern.Access() ) )
+	{
+		size_t numBytes = Q_strlen( pszReplace + fmtPattern.Length() );
+		if ( pszReplace + fmtReplacement.Length() + numBytes + 1 >= &chUrlBufferAfterPatternReplacements[ sizeof( chUrlBufferAfterPatternReplacements ) ] )
+			break;
+		Q_memmove( pszReplace + fmtReplacement.Length(), pszReplace + fmtPattern.Length(), numBytes );
+		Q_memcpy( pszReplace, fmtReplacement.Access(), fmtReplacement.Length() );
+	}
+
+	static ConVarRef game_mode( "game_mode" );
+	fmtPattern.Clear();			fmtPattern.AppendFormat( "%s", "%game_mode%" );
+	fmtReplacement.Clear();		fmtReplacement.AppendFormat( "%u", game_mode.GetInt() );
+	while ( char *pszReplace = strstr( chUrlBufferAfterPatternReplacements, fmtPattern.Access() ) )
+	{
+		size_t numBytes = Q_strlen( pszReplace + fmtPattern.Length() );
+		if ( pszReplace + fmtReplacement.Length() + numBytes + 1 >= &chUrlBufferAfterPatternReplacements[ sizeof( chUrlBufferAfterPatternReplacements ) ] )
+			break;
+		Q_memmove( pszReplace + fmtReplacement.Length(), pszReplace + fmtPattern.Length(), numBytes );
+		Q_memcpy( pszReplace, fmtReplacement.Access(), fmtReplacement.Length() );
+	}
+
+	static ConVarRef game_type( "game_type" );
+	fmtPattern.Clear();			fmtPattern.AppendFormat( "%s", "%game_type%" );
+	fmtReplacement.Clear();		fmtReplacement.AppendFormat( "%u", game_type.GetInt() );
+	while ( char *pszReplace = strstr( chUrlBufferAfterPatternReplacements, fmtPattern.Access() ) )
+	{
+		size_t numBytes = Q_strlen( pszReplace + fmtPattern.Length() );
+		if ( pszReplace + fmtReplacement.Length() + numBytes + 1 >= &chUrlBufferAfterPatternReplacements[ sizeof( chUrlBufferAfterPatternReplacements ) ] )
+			break;
+		Q_memmove( pszReplace + fmtReplacement.Length(), pszReplace + fmtPattern.Length(), numBytes );
+		Q_memcpy( pszReplace, fmtReplacement.Access(), fmtReplacement.Length() );
+	}
+
+	fmtPattern.Clear();			fmtPattern.AppendFormat( "%s", "%serveraddr%" );
+	fmtReplacement.Clear();		fmtReplacement.AppendFormat( "%s", ( g_pMatchFramework && g_pMatchFramework->GetMatchSession() ) ? netadr_t( g_pMatchFramework->GetMatchSession()->GetSessionSettings()->GetString( "server/adronline" ) ).ToString() : "0.0.0.0:0" );
+	while ( char *pszReplace = strstr( chUrlBufferAfterPatternReplacements, fmtPattern.Access() ) )
+	{
+		size_t numBytes = Q_strlen( pszReplace + fmtPattern.Length() );
+		if ( pszReplace + fmtReplacement.Length() + numBytes + 1 >= &chUrlBufferAfterPatternReplacements[ sizeof( chUrlBufferAfterPatternReplacements ) ] )
+			break;
+		Q_memmove( pszReplace + fmtReplacement.Length(), pszReplace + fmtPattern.Length(), numBytes );
+		Q_memcpy( pszReplace, fmtReplacement.Access(), fmtReplacement.Length() );
+	}
+
+	fmtPattern.Clear();			fmtPattern.AppendFormat( "%s", "%serverip%" );
+	fmtReplacement.Clear();		fmtReplacement.AppendFormat( "%s", ( g_pMatchFramework && g_pMatchFramework->GetMatchSession() ) ? netadr_t( g_pMatchFramework->GetMatchSession()->GetSessionSettings()->GetString( "server/adronline" ) ).ToString( true ) : "0.0.0.0" );
+	while ( char *pszReplace = strstr( chUrlBufferAfterPatternReplacements, fmtPattern.Access() ) )
+	{
+		size_t numBytes = Q_strlen( pszReplace + fmtPattern.Length() );
+		if ( pszReplace + fmtReplacement.Length() + numBytes + 1 >= &chUrlBufferAfterPatternReplacements[ sizeof( chUrlBufferAfterPatternReplacements ) ] )
+			break;
+		Q_memmove( pszReplace + fmtReplacement.Length(), pszReplace + fmtPattern.Length(), numBytes );
+		Q_memcpy( pszReplace, fmtReplacement.Access(), fmtReplacement.Length() );
+	}
+
+	fmtPattern.Clear();			fmtPattern.AppendFormat( "%s", "%serverport%" );
+	fmtReplacement.Clear();		fmtReplacement.AppendFormat( "%u", ( g_pMatchFramework && g_pMatchFramework->GetMatchSession() ) ? netadr_t( g_pMatchFramework->GetMatchSession()->GetSessionSettings()->GetString( "server/adronline" ) ).GetPort() : 0 );
+	while ( char *pszReplace = strstr( chUrlBufferAfterPatternReplacements, fmtPattern.Access() ) )
+	{
+		size_t numBytes = Q_strlen( pszReplace + fmtPattern.Length() );
+		if ( pszReplace + fmtReplacement.Length() + numBytes + 1 >= &chUrlBufferAfterPatternReplacements[ sizeof( chUrlBufferAfterPatternReplacements ) ] )
+			break;
+		Q_memmove( pszReplace + fmtReplacement.Length(), pszReplace + fmtPattern.Length(), numBytes );
+		Q_memcpy( pszReplace, fmtReplacement.Access(), fmtReplacement.Length() );
+	}
+
+	//
+	// Display the replaced URL
+	//
 
 	m_pHTMLMessage->SetVisible( true );
-	m_pHTMLMessage->OpenURL( URL, NULL );
-	m_bShownURL = true;
+	m_pHTMLMessage->OpenURL( chUrlBufferAfterPatternReplacements, NULL );
+
+	m_bHasMotd = 1;
+#endif
 }
 
-void CTextWindow::ShowIndex( const char *entry )
+void CTextWindow::ShowIndex( const char *entry)
 {
 	const char *data = NULL;
 	int length = 0;
@@ -210,7 +342,7 @@ void CTextWindow::ShowIndex( const char *entry )
 		return; // nothing to show
 
 	// is this a web URL ?
-	if ( !Q_strncmp( data, "http://", 7 ) || !Q_strncmp( data, "https://", 8 ) )
+	if ( StringHasPrefixCaseSensitive( data, "http://" ) )
 	{
 		ShowURL( data );
 		return;
@@ -238,6 +370,27 @@ void CTextWindow::ShowIndex( const char *entry )
 	ShowFile( TEMP_HTML_FILE );
 }
 
+void CTextWindow::ShowHtmlString(const char* data)
+{
+	int length = strlen(data);
+
+	// data is a HTML, we have to write to a file and then load the file
+	FileHandle_t hFile = g_pFullFileSystem->Open( TEMP_HTML_FILE, "wb", "DEFAULT_WRITE_PATH" );
+
+	if ( hFile == FILESYSTEM_INVALID_HANDLE )
+		return;
+
+	g_pFullFileSystem->Write( data, length, hFile );
+	g_pFullFileSystem->Close( hFile );
+
+	if ( g_pFullFileSystem->Size( TEMP_HTML_FILE ) != (unsigned int)length )
+		return; // something went wrong while writing
+
+	ShowFile( TEMP_HTML_FILE );
+
+
+}
+
 void CTextWindow::ShowFile( const char *filename )
 {
 	if  ( Q_stristr( filename, ".htm" ) || Q_stristr( filename, ".html" ) )
@@ -262,7 +415,7 @@ void CTextWindow::ShowFile( const char *filename )
 
 		char buffer[2048];
 			
-		int size = MIN( g_pFullFileSystem->Size( f ), sizeof(buffer)-1 ); // just allow 2KB
+		int size = min( g_pFullFileSystem->Size( f ), sizeof(buffer)-1 ); // just allow 2KB
 
 		g_pFullFileSystem->Read( buffer, size, f );
 		g_pFullFileSystem->Close( f );
@@ -279,8 +432,9 @@ void CTextWindow::Update( void )
 
 	m_pTitleLabel->SetText( m_szTitle );
 
-	if ( m_pHTMLMessage )
-		m_pHTMLMessage->SetVisible( false );
+#if defined( ENABLE_CHROMEHTMLWINDOW )
+	m_pHTMLMessage->SetVisible( false );
+#endif
 	m_pTextMessage->SetVisible( false );
 
 	if ( m_nContentType == TYPE_INDEX )
@@ -289,15 +443,14 @@ void CTextWindow::Update( void )
 	}
 	else if ( m_nContentType == TYPE_URL )
 	{
-		if ( !Q_strncmp( m_szMessage, "http://", 7 ) || !Q_strncmp( m_szMessage, "https://", 8 ) || !Q_stricmp( m_szMessage, "about:blank" ) )
+		// Only allow "http://" and "https://" URLs. Filter out other types. 
+		// "javascript:" URLs, for example, provide a way of executing arbitrary javascript on whatever page is currently loaded
+		if ( !( StringHasPrefix( m_szMessage, "http://" ) || StringHasPrefix( m_szMessage, "https://" ) || StringHasPrefix( m_szMessage, "about:blank" ) ) )
 		{
-			ShowURL( m_szMessage );
+			return;
 		}
-		else
-		{
-			// We should have trapped this at a higher level
-			Assert( !"URL protocol is missing or blocked" );
-		}
+
+		ShowURL( m_szMessage );
 	}
 	else if ( m_nContentType == TYPE_FILE )
 	{
@@ -313,9 +466,45 @@ void CTextWindow::Update( void )
 	}
 }
 
+int CTextWindow::GetNumSecondsRequiredByServer() const
+{
+	if ( !g_pGameTypes )
+		return 0;
+
+	int numSecondsRequired = g_pGameTypes->GetCurrentServerSettingInt( "sv_require_motd_seconds", 0 );
+	if ( numSecondsRequired < 0 )
+		return 0;
+
+	if ( numSecondsRequired > 35 )
+		numSecondsRequired = 35; // never allow > 35 second ads
+	return numSecondsRequired;
+}
+
+int CTextWindow::GetNumSecondsSponsorRequiredRemaining() const
+{
+	int numSecondsRemaining = 0;
+	if ( !m_bForcingWindowCloseRegardlessOfTime )
+	{
+		int numSecondsShownAlready = int( Plat_MSTime() - m_uiTimestampStarted ) / 1000;
+		int numSecondsRequired = GetNumSecondsRequiredByServer();
+
+		if ( ( numSecondsRequired > 0 ) && ( numSecondsShownAlready < numSecondsRequired ) )
+			numSecondsRemaining = ( numSecondsRequired - numSecondsShownAlready );
+	}
+
+	static ConVarRef cv_ignore_ui_activate_key( "ignore_ui_activate_key" );
+	if ( numSecondsRemaining != cv_ignore_ui_activate_key.GetInt() )
+		cv_ignore_ui_activate_key.SetValue( numSecondsRemaining );
+
+	return numSecondsRemaining;
+}
+
 void CTextWindow::OnCommand( const char *command )
 {
-	if (!Q_strcmp(command, "okay"))
+	if ( GetNumSecondsSponsorRequiredRemaining() > 0 )
+		return;
+
+	if ( !Q_strcmp( command, "okay" ) )
 	{
 		//=============================================================================
 		// HPE_BEGIN:
@@ -357,8 +546,8 @@ void CTextWindow::OnCommand( const char *command )
 				DevMsg("CTextWindow::OnCommand: unknown exit command value %i\n", m_nExitCommand );
 				break;
 		}
-
-		if ( pszCommand != NULL )
+		m_dblTimeExecutedExitCommand = Plat_FloatTime();
+		if ( ( pszCommand != NULL ) && !engine->IsDrawingLoadingImage() )	// don't execute commands while we are loading, we'll re-show MOTD after load finishes!
 		{
 			engine->ClientCmd_Unrestricted( pszCommand );
 		}
@@ -374,36 +563,107 @@ void CTextWindow::OnCommand( const char *command )
 
 void CTextWindow::OnKeyCodePressed( vgui::KeyCode code )
 {
-	if ( code == KEY_XBUTTON_A || code == KEY_XBUTTON_B || code == STEAMCONTROLLER_A || code == STEAMCONTROLLER_B )
+	switch ( GetBaseButtonCode( code ) )
 	{
+	case KEY_XBUTTON_B:
+	case KEY_XBUTTON_A:
+	case KEY_XBUTTON_START:
+	case KEY_XBUTTON_INACTIVE_START:
 		OnCommand( "okay" );
 		return;
 	}
-
-	BaseClass::OnKeyCodePressed(code);
+	BaseClass::OnKeyCodePressed( code );
 }
 
 void CTextWindow::SetData(KeyValues *data)
 {
-	SetData( data->GetInt( "type" ), data->GetString( "title" ), data->GetString( "msg" ), data->GetString( "msg_fallback" ), data->GetInt( "cmd" ), data->GetBool( "unload" ) );
+	//=============================================================================
+	// HPE_BEGIN:
+	// [Forrest] Replaced text window command string with TEXTWINDOW_CMD enumeration
+	// of options.  Passing a command string is dangerous and allowed a server network
+	// message to run arbitrary commands on the client.
+	//=============================================================================
+	SetData( data->GetInt( "type" ), data->GetString( "title" ), data->GetString( "msg" ), data->GetString( "msg_fallback" ), data->GetInt( "cmd" ) );
+	//=============================================================================
+	// HPE_END
+	//=============================================================================
 }
 
-void CTextWindow::SetData( int type, const char *title, const char *message, const char *message_fallback, int command, bool bUnload )
+//=============================================================================
+// HPE_BEGIN:
+// [Forrest] Replaced text window command string with TEXTWINDOW_CMD enumeration
+// of options.  Passing a command string is dangerous and allowed a server network
+// message to run arbitrary commands on the client.
+//=============================================================================
+void CTextWindow::SetData( int type, const char *title, const char *message, const char *message_fallback, int command )
 {
-	Q_strncpy(  m_szTitle, title, sizeof( m_szTitle ) );
+	Q_strncpy(  m_szTitle, "", sizeof( m_szTitle ) );
 	Q_strncpy(  m_szMessage, message, sizeof( m_szMessage ) );
 	Q_strncpy(  m_szMessageFallback, message_fallback, sizeof( m_szMessageFallback ) );
-
+	
 	m_nExitCommand = command;
 
 	m_nContentType = type;
-	m_bUnloadOnDismissal = bUnload;
 
 	Update();
 }
+//=============================================================================
+// HPE_END
+//=============================================================================
+
+//
+// Some HTML used to direct the browser control to a benign HTML file
+//
+
+static char sBrowserClose [] = 
+	"<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.01 Transitional//EN\" \"http://www.w3.org/TR/1999/REC-html401-19991224/loose.dtd\">"
+	"<html>"
+	"<head><title>CSGO MOTD</title>"
+	"<style type=\"text/css\">pre{font-family:Verdana,Tahoma;color:#FFFFFF;}body{background:#000000;margin-left:8px;margin-top:0px;}</style>"
+	"</head>"
+	"<body scroll=\"no\"><pre>You are playing Counter-Strike: Global Offensive</pre></body>"
+	"</html>";
+
+//
+// Hack to delay the display of the HTML window. Must revisit.
+// ShowPanel now only closes the panel. ShowPanel2 shows the panel.
+//
 
 void CTextWindow::ShowPanel( bool bShow )
 {
+	g_pInputSystem->SetSteamControllerMode( bShow ? "MenuControls" : NULL, this );
+
+	if (bShow) 
+		return;
+
+	if ( BaseClass::IsVisible() == bShow )
+		return;
+
+	m_pViewPort->ShowBackGround( bShow );
+
+	ShowHtmlString( sBrowserClose );
+	SetVisible( false );
+	SetMouseInputEnabled( false );
+	GetHud(0).EnableHud();
+
+	if ( !bShow && ( Plat_FloatTime() - m_dblTimeExecutedExitCommand > 1.0 ) )
+	{	// If something is trying to hide us and it's not because user clicked
+		// the OKAY button, then trigger the commands associated with OKAY button
+		m_bForcingWindowCloseRegardlessOfTime = true;
+		OnCommand( "okay" );
+	}
+
+	// reset motd
+	m_bHasMotd = false;
+}
+
+void CTextWindow::ShowPanel2( bool bShow )
+{
+	if ( (CSGameRules() && CSGameRules()->IsQueuedMatchmaking()) || sv_disable_motd.GetBool() )
+		bShow = false;
+
+	g_pInputSystem->SetSteamControllerMode( bShow ? "MenuControls" : NULL, this );
+
 	if ( BaseClass::IsVisible() == bShow )
 		return;
 
@@ -411,20 +671,109 @@ void CTextWindow::ShowPanel( bool bShow )
 
 	if ( bShow )
 	{
+		GetHud(0).DisableHud();
 		Activate();
+		SetVisible( true );
 		SetMouseInputEnabled( true );
+
+		if ( m_pInfoLabelTicker )
+		{
+			m_pInfoLabelTicker->SetVisible( false );
+			m_pInfoLabelTicker->SetText( L" " );
+		}
+
+		m_bForcingWindowCloseRegardlessOfTime = false;
+		m_uiTimestampStarted = Plat_MSTime();
+		if ( !m_uiTimestampStarted )
+			--m_uiTimestampStarted;
+		m_uiTimestampInfoLabelUpdated = m_uiTimestampStarted - 1000;
 	}
 	else
 	{
-		SetVisible( false );
-		SetMouseInputEnabled( false );
+		ShowPanel( false );
+	}
+}
 
-		if ( m_bUnloadOnDismissal && m_bShownURL && m_pHTMLMessage )
+void CTextWindow::PaintBackground()
+{
+	BaseClass::PaintBackground();
+
+	if ( m_uiTimestampStarted && IsVisible() &&
+		CSGameRules() && CSGameRules()->IsQueuedMatchmaking() &&
+		( int( Plat_MSTime() - m_uiTimestampStarted ) > 1000*cl_motd_competitive_timeout.GetInt() ) )
+	{
+		m_bForcingWindowCloseRegardlessOfTime = true;
+		m_uiTimestampStarted = 0;
+		OnCommand( "okay" );
+		return;
+	}
+
+	if ( m_pInfoLabelTicker )
+	{
+		// Tick the time that the MOTD has been visible
+		bool bVisible = false;
+		if ( IsVisible() )
 		{
-			m_pHTMLMessage->OpenURL( "about:blank", NULL );
-			m_bShownURL = false;
+			bVisible = true;
+
+			if ( Plat_MSTime() - m_uiTimestampInfoLabelUpdated >= 1000 )
+			{
+				wchar_t wchSecs[64] = {};
+				int numSecondsRemaining = GetNumSecondsSponsorRequiredRemaining();
+				if ( numSecondsRemaining > 0 )
+				{
+					V_snwprintf( wchSecs, Q_ARRAYSIZE( wchSecs ), L"%u", numSecondsRemaining );
+
+					wchar_t wchBufferText[256] = {};
+					if ( const wchar_t *pwszToken = g_pVGuiLocalize->Find( "#SFUI_MOTD_RegionalServerSponsor" ) )
+					{
+						g_pVGuiLocalize->ConstructString( wchBufferText, sizeof( wchBufferText ), pwszToken, 1, wchSecs );
+					}
+					m_pInfoLabelTicker->SetText( wchBufferText );
+				}
+				else
+				{
+					m_pInfoLabelTicker->SetText( L" " );
+					bVisible = false;
+				}
+				m_uiTimestampInfoLabelUpdated = Plat_MSTime();
+			}
+		}
+
+		if ( bVisible != m_pInfoLabelTicker->IsVisible() )
+		{
+			m_pInfoLabelTicker->SetVisible( bVisible );
 		}
 	}
+
+	if ( IsVisible() == false || GetAlpha() <= 0 )
+	{
+		m_bForcingWindowCloseRegardlessOfTime = true;
+		OnCommand( "okay" );
+	}
+}
+
+bool CTextWindow::HasMotd()
+{
+	if ( m_bHasMotd == false )
+	{
+		// User has disabled HTML TextWindows. Show the fallback as text only.
+		if ( g_pStringTableInfoPanel )
+		{
+			int index = g_pStringTableInfoPanel->FindStringIndex( m_szMessage );
+			if ( index != ::INVALID_STRING_INDEX )
+			{
+				int length = 0;
+				const char *data = ( const char * )g_pStringTableInfoPanel->GetStringUserData( index, &length );
+				if ( data && data[0] )
+				{
+					ShowText( data );
+				}
+			}
+		}
+	}
+
+	return m_bHasMotd;
 }
 
 bool CTextWindow::CMOTDHTML::OnStartRequest( const char *url, const char *target, const char *pchPostData, bool bIsRedirect )

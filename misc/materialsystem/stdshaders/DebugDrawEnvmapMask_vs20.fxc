@@ -31,6 +31,13 @@ VS_OUTPUT main( const VS_INPUT v )
 	o.projPos = projPos;
 	o.baseTexCoord.x = dot( v.vTexCoord0, cBaseTexCoordTransform[0] );
 	o.baseTexCoord.y = dot( v.vTexCoord0, cBaseTexCoordTransform[1] );
+	
+#ifdef _PS3
+	// Account for OpenGL's flipped y coordinate and expanded z range [-1,1] instead of [0,1]
+	o.projPos.y = -o.projPos.y;
+	o.projPos.z = 2.0f * o.projPos.z - o.projPos.w;
+#endif // _PS3
+
 	return o;
 }
 

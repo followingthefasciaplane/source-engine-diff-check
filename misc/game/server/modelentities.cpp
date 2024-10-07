@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -35,6 +35,8 @@ BEGIN_DATADESC( CFuncBrush )
 
 END_DATADESC()
 
+IMPLEMENT_SERVERCLASS_ST(CFuncBrush, DT_FuncBrush)
+END_SEND_TABLE()
 
 void CFuncBrush::Spawn( void )
 {
@@ -66,10 +68,22 @@ void CFuncBrush::Spawn( void )
 	}
 }
 
+void CFuncBrush::Activate( void )
+{
+	BaseClass::Activate();
+
+	IPhysicsObject *pPhysObject = VPhysicsGetObject();
+	if( pPhysObject )
+	{
+		pPhysObject->Wake();
+	}
+}
+
 //-----------------------------------------------------------------------------
 
 bool CFuncBrush::CreateVPhysics( void )
 {
+
 	// NOTE: Don't init this static.  It's pretty common for these to be constrained
 	// and dynamically parented.  Initing shadow avoids having to destroy the physics
 	// object later and lose the constraints.
@@ -77,7 +91,7 @@ bool CFuncBrush::CreateVPhysics( void )
 	if ( pPhys )
 	{
 		int contents = modelinfo->GetModelContents( GetModelIndex() );
-		if ( ! (contents & (MASK_SOLID|MASK_PLAYERSOLID|MASK_NPCSOLID)) )
+		if ( m_iDisabled || !(contents & (MASK_SOLID|MASK_PLAYERSOLID|MASK_NPCSOLID)) )
 		{
 			// leave the physics shadow there in case it has crap constrained to it
 			// but disable collisions with it
@@ -170,6 +184,16 @@ void CFuncBrush::TurnOff( void )
 	}
 
 	AddEffects( EF_NODRAW );
+
+	IPhysicsObject *pObject = VPhysicsGetObject();
+	if( pObject )
+	{
+		pObject->Wake();
+		pObject->EnableCollisions( false );
+	}
+
+	WakeRestingObjects();	
+
 	m_iDisabled = TRUE;
 }
 
@@ -188,10 +212,22 @@ void CFuncBrush::TurnOn( void )
 	}
 
 	RemoveEffects( EF_NODRAW );
+
+	IPhysicsObject *pObject = VPhysicsGetObject();
+	if( pObject )
+	{
+		pObject->EnableCollisions( true );
+		if( pObject->IsAsleep() )
+		{
+			pObject->Wake();
+		}		
+	}
+
+	m_iDisabled = FALSE;
 }
 
 
-bool CFuncBrush::IsOn( void ) const
+bool CFuncBrush::IsOn( void )
 {
 	return !IsEffectActive( EF_NODRAW );
 }

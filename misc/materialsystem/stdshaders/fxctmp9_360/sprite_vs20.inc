@@ -1,3 +1,7 @@
+// ALL SKIP STATEMENTS THAT AFFECT THIS SHADER!!!
+// ( $DOWATERFOG == 0 ) && ( $DOPIXELFOG && $HARDWAREFOGBLEND )
+// ( $DOWATERFOG == 0 ) && ( $HARDWAREFOGBLEND == 0 ) && ( $DOPIXELFOG == 0 )
+// defined $LIGHTING_PREVIEW && defined $FASTPATH && $LIGHTING_PREVIEW && $FASTPATH
 #include "shaderlib/cshader.h"
 class sprite_vs20_Static_Index
 {
@@ -17,6 +21,7 @@ public:
 	}
 	void SetVERTEXCOLOR( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nVERTEXCOLOR = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bVERTEXCOLOR = true;
@@ -38,13 +43,59 @@ public:
 	}
 	void SetSRGB( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nSRGB = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bSRGB = true;
 #endif
 	}
+private:
+	int m_nDOPIXELFOG;
+#ifdef _DEBUG
+	bool m_bDOPIXELFOG;
+#endif
 public:
-	sprite_vs20_Static_Index( )
+	void SetDOPIXELFOG( int i )
+	{
+		Assert( i >= 0 && i <= 1 );
+		m_nDOPIXELFOG = i;
+#ifdef _DEBUG
+		m_bDOPIXELFOG = true;
+#endif
+	}
+	void SetDOPIXELFOG( bool i )
+	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
+		m_nDOPIXELFOG = i ? 1 : 0;
+#ifdef _DEBUG
+		m_bDOPIXELFOG = true;
+#endif
+	}
+private:
+	int m_nHARDWAREFOGBLEND;
+#ifdef _DEBUG
+	bool m_bHARDWAREFOGBLEND;
+#endif
+public:
+	void SetHARDWAREFOGBLEND( int i )
+	{
+		Assert( i >= 0 && i <= 0 );
+		m_nHARDWAREFOGBLEND = i;
+#ifdef _DEBUG
+		m_bHARDWAREFOGBLEND = true;
+#endif
+	}
+	void SetHARDWAREFOGBLEND( bool i )
+	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 0 );
+		m_nHARDWAREFOGBLEND = i ? 1 : 0;
+#ifdef _DEBUG
+		m_bHARDWAREFOGBLEND = true;
+#endif
+	}
+public:
+	// CONSTRUCTOR
+	sprite_vs20_Static_Index( IShaderShadow *pShaderShadow, IMaterialVar **params )
 	{
 #ifdef _DEBUG
 		m_bVERTEXCOLOR = false;
@@ -54,16 +105,24 @@ public:
 		m_bSRGB = false;
 #endif // _DEBUG
 		m_nSRGB = 0;
+#ifdef _DEBUG
+		m_bDOPIXELFOG = true;
+#endif // _DEBUG
+		m_nDOPIXELFOG = g_pHardwareConfig->SupportsPixelShaders_2_b() ;
+#ifdef _DEBUG
+		m_bHARDWAREFOGBLEND = true;
+#endif // _DEBUG
+		m_nHARDWAREFOGBLEND = 0 ;
 	}
 	int GetIndex()
 	{
 		// Asserts to make sure that we aren't using any skipped combinations.
 		// Asserts to make sure that we are setting all of the combination vars.
 #ifdef _DEBUG
-		bool bAllStaticVarsDefined = m_bVERTEXCOLOR && m_bSRGB;
+		bool bAllStaticVarsDefined = m_bVERTEXCOLOR && m_bSRGB && m_bDOPIXELFOG && m_bHARDWAREFOGBLEND;
 		Assert( bAllStaticVarsDefined );
 #endif // _DEBUG
-		return ( 2 * m_nVERTEXCOLOR ) + ( 4 * m_nSRGB ) + 0;
+		return ( 2 * m_nVERTEXCOLOR ) + ( 4 * m_nSRGB ) + ( 8 * m_nDOPIXELFOG ) + ( 16 * m_nHARDWAREFOGBLEND ) + 0;
 	}
 };
 #define shaderStaticTest_sprite_vs20 vsh_forgot_to_set_static_VERTEXCOLOR + vsh_forgot_to_set_static_SRGB + 0
@@ -85,18 +144,20 @@ public:
 	}
 	void SetDOWATERFOG( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nDOWATERFOG = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bDOWATERFOG = true;
 #endif
 	}
 public:
-	sprite_vs20_Dynamic_Index()
+	// CONSTRUCTOR
+	sprite_vs20_Dynamic_Index( IShaderDynamicAPI *pShaderAPI )
 	{
 #ifdef _DEBUG
-		m_bDOWATERFOG = false;
+		m_bDOWATERFOG = true;
 #endif // _DEBUG
-		m_nDOWATERFOG = 0;
+		m_nDOWATERFOG = ( pShaderAPI->GetSceneFogMode() == MATERIAL_FOG_LINEAR_BELOW_FOG_Z ) ;
 	}
 	int GetIndex()
 	{
@@ -109,4 +170,32 @@ public:
 		return ( 1 * m_nDOWATERFOG ) + 0;
 	}
 };
-#define shaderDynamicTest_sprite_vs20 vsh_forgot_to_set_dynamic_DOWATERFOG + 0
+#define shaderDynamicTest_sprite_vs20 0
+
+static const ShaderComboInformation_t s_DynamicComboArray_sprite_vs20[1] = 
+{
+	{ "DOWATERFOG", 0, 1 },
+};
+
+static const ShaderComboInformation_t s_StaticComboArray_sprite_vs20[4] = 
+{
+	{ "VERTEXCOLOR", 0, 1 },
+	{ "SRGB", 0, 1 },
+	{ "DOPIXELFOG", 0, 1 },
+	{ "HARDWAREFOGBLEND", 0, 0 },
+};
+static const ShaderComboSemantics_t sprite_vs20_combos =
+{
+	"sprite_vs20", s_DynamicComboArray_sprite_vs20, 1, s_StaticComboArray_sprite_vs20, 4 
+};
+
+class ConstructMe_sprite_vs20
+{
+public:
+	ConstructMe_sprite_vs20()
+	{
+		GetShaderDLL()->AddShaderComboInformation( &sprite_vs20_combos );
+	}
+};
+
+static ConstructMe_sprite_vs20 s_ConstructMe_sprite_vs20;

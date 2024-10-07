@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -13,9 +13,8 @@
 #endif
 
 #include "tier1/utlvector.h"
-#include "tier1/utldict.h"
 #include "tier1/utlsymbol.h"
-#include <vgui/VGUI.h>
+#include <vgui/vgui.h>
 #include <vgui/Dar.h>
 #include <vgui/Cursor.h>
 #include <vgui/IScheme.h>
@@ -50,7 +49,7 @@ public:
 	virtual Panel *GetCurrentPanel();
 
 	// Load the control settings from file
-	virtual void LoadControlSettings(const char *controlResourceName, const char *pathID = NULL, KeyValues *pPreloadedKeyValues = NULL, KeyValues *pConditions = NULL );
+	virtual void LoadControlSettings(const char *controlResourceName, const char *pathID = NULL, KeyValues *pPreloadedKeyValues = NULL, KeyValues *pConditions = NULL);
 
 	// Reload the control settings from file
 	void ReloadControlSettings();
@@ -93,7 +92,8 @@ public:
 	// Get the resource file name used
 	virtual const char *GetResourceName(void) { return m_pResourceName; }
 
-	virtual void PanelAdded(Panel* panel);
+	void PanelAdded(Panel* panel);
+	void PanelRemoved(Panel *panel);
 
 	virtual bool MousePressed(MouseCode code,Panel* panel);
 	virtual bool MouseReleased(MouseCode code,Panel* panel);
@@ -126,9 +126,6 @@ public:
 
 	// conditional keys for selectively reading keyvalues
 	void ProcessConditionalKeys( KeyValues *pDat, KeyValues *pConditions );
-
-	static bool PrecacheResFile( const char* pszResFileName );
-	static void ClearResFileCache();
 
 protected:
 	virtual bool CursorMoved(int x, int y, Panel *panel);
@@ -174,8 +171,6 @@ private:
 	CUtlVector<CUtlSymbol> m_RegisteredControlSettingsFiles;
 
 	friend class Panel;
-
-	static CUtlDict< KeyValues* > m_dictCachedResFiles;
 };
 
 

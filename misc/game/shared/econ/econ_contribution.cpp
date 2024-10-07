@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright (c), Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Code for the CTFMapContribution object
 //

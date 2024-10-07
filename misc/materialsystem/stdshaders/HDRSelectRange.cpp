@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2004, Valve LLC, All rights reserved. ============
 //
 // Purpose: 
 //
@@ -10,6 +10,9 @@
 
 #include "HDRSelectRange_ps20.inc"
 #include "HDRSelectRange_ps20b.inc"
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
 
 
 BEGIN_VS_SHADER_FLAGS( HDRSelectRange, "Help for HDRSelectRange", SHADER_NOT_EDITABLE )
@@ -24,12 +27,6 @@ BEGIN_VS_SHADER_FLAGS( HDRSelectRange, "Help for HDRSelectRange", SHADER_NOT_EDI
 	
 	SHADER_FALLBACK
 	{
-		// Requires DX9 + above
-		if (!g_pHardwareConfig->SupportsVertexAndPixelShaders())
-		{
-			Assert( 0 );
-			return "Wireframe";
-		}
 		return 0;
 	}
 
@@ -63,7 +60,7 @@ BEGIN_VS_SHADER_FLAGS( HDRSelectRange, "Help for HDRSelectRange", SHADER_NOT_EDI
 
 		DYNAMIC_STATE
 		{
-			BindTexture( SHADER_SAMPLER0, SOURCEMRTRENDERTARGET, -1 );
+			BindTexture( SHADER_SAMPLER0, TEXTURE_BINDFLAGS_NONE, SOURCEMRTRENDERTARGET, -1 );
 			pShaderAPI->SetVertexShaderIndex( 0 );
 
 			if( g_pHardwareConfig->SupportsPixelShaders_2_b() )

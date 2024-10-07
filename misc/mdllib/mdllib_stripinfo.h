@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright c 1996-2007, Valve Corporation, All rights reserved. =======//
 //
 // Purpose: 
 //
@@ -23,6 +23,7 @@ class CMdlStripInfo : public IMdlStripInfo
 {
 public:
 	CMdlStripInfo();
+	~CMdlStripInfo() { m_ps3studioBatches.PurgeAndDeleteElements(); }
 
 	//
 	// Serialization
@@ -94,6 +95,8 @@ public:
 		MODE_UNINITIALIZED	= 0,
 		MODE_NO_CHANGE		= 1,
 		MODE_STRIP_LOD_1N	= 2,
+		MODE_PS3_PARTITIONS	= 3,
+		MODE_PS3_FORMAT_BASIC = 4,
 	};
 
 	//
@@ -104,6 +107,41 @@ public:
 	long m_lChecksumOld, m_lChecksumNew;
 	CGrowableBitVec m_vtxVerts;
 	CUtlSortVector< unsigned short, CLessSimple< unsigned short > > m_vtxIndices;
+
+	//
+	// PS3 partitioning data
+	//
+public:
+	struct Ps3studioPartition_t
+	{
+		CUtlVector< uint16 > m_arrLocalIndices;
+		CUtlVector< uint32 > m_arrVertOriginalIndices;
+		CUtlVector< uint32 > m_arrStripLocalOriginalIndices;
+		uint32 m_nIoBufferSize;
+
+		// -- not serialized in .vsi --
+		uint32 m_nEdgeDmaInputIdx;
+		uint32 m_nEdgeDmaInputVtx;
+		uint32 m_nEdgeDmaInputEnd;
+		// compressed idx information
+		uint8 *m_pEdgeCompressedIdx;
+		uint16 m_uiEdgeCompressedIdxDmaTagSize[2];
+		// compressed vtx information
+		uint8 *m_pEdgeCompressedVtx;
+		uint32 *m_pEdgeCompressedVtxFixedOffsets;
+		uint16 m_uiEdgeCompressedVtxDmaTagSize[3];
+		uint32 m_uiEdgeCompressedVtxFixedOffsetsSize;
+	};
+	struct Ps3studioBatch_t
+	{
+		CUtlVector< Ps3studioPartition_t * > m_arrPartitions;
+		uint32 m_uiModelIndexOffset;
+		uint32 m_uiVhvIndexOffset;
+
+		~Ps3studioBatch_t() { m_arrPartitions.PurgeAndDeleteElements(); }
+	};
+	CUtlVector< Ps3studioBatch_t * > m_ps3studioBatches;
+	CUtlVector< uint32 > m_ps3studioStripGroupHeaderBatchOffset;
 
 	//
 	// Mesh ranges fixup

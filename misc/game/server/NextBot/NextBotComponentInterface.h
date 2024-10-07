@@ -1,7 +1,7 @@
 // NextBotComponentInterface.h
 // Interface for all components
 // Author: Michael Booth, May 2006
-//========= Copyright Valve Corporation, All rights reserved. ============//
+// Copyright (c) 2006 Turtle Rock Studios, Inc. - All Rights Reserved
 
 #ifndef _NEXT_BOT_COMPONENT_INTERFACE_H_
 #define _NEXT_BOT_COMPONENT_INTERFACE_H_

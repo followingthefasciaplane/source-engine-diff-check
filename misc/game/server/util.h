@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright (c) 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Misc utility code.
 //
@@ -43,25 +43,16 @@ class IEntityFactory;
 	#define SETUP_EXTERNC(mapClassName)
 #endif
 
-//
-// How did I ever live without ASSERT?
-//
-#ifdef	DEBUG
-void DBG_AssertFunction(bool fExpr, const char* szExpr, const char* szFile, int szLine, const char* szMessage);
-#define ASSERT(f)		DBG_AssertFunction((bool)((f)!=0), #f, __FILE__, __LINE__, NULL)
-#define ASSERTSZ(f, sz)	DBG_AssertFunction((bool)((f)!=0), #f, __FILE__, __LINE__, sz)
-#else	// !DEBUG
-#define ASSERT(f)
-#define ASSERTSZ(f, sz)
-#endif	// !DEBUG
 
 #include "tier0/memdbgon.h"
+
 
 // entity creation
 // creates an entity that has not been linked to a classname
 template< class T >
 T *_CreateEntityTemplate( T *newEnt, const char *className )
 {
+	MEM_ALLOC_CREDIT_(MEM_ALLOC_CLASSNAME(T));
 	newEnt = new T; // this is the only place 'new' should be used!
 	newEnt->PostConstructor( className );
 	return newEnt;
@@ -69,26 +60,13 @@ T *_CreateEntityTemplate( T *newEnt, const char *className )
 
 #include "tier0/memdbgoff.h"
 
-CBaseEntity *CreateEntityByName( const char *className, int iForceEdictIndex );
 
-// creates an entity by name, and ensure it's correctness
-// does not spawn the entity
-// use the CREATE_ENTITY() macro which wraps this, instead of using it directly
-template< class T >
-T *_CreateEntity( T *newClass, const char *className )
+enum EUtilSayTextMessageType_t
 {
-	T *newEnt = dynamic_cast<T*>( CreateEntityByName(className, -1) );
-	if ( !newEnt )
-	{
-		Warning( "classname %s used to create wrong class type\n", className );
-		Assert(0);
-	}
-
-	return newEnt;
-}
-
-#define CREATE_ENTITY( newClass, className ) _CreateEntity( (newClass*)NULL, className )
-#define CREATE_UNSAVED_ENTITY( newClass, className ) _CreateEntityTemplate( (newClass*)NULL, className )
+	kEUtilSayTextMessageType_Default,		// default text
+	kEUtilSayTextMessageType_TeamonlyChat,	// teamonly chat
+	kEUtilSayTextMessageType_AllChat,		// all chat
+};
 
 
 // This is the glue that hooks .MAP entity class names to our CPP classes
@@ -153,18 +131,31 @@ public:
 //
 // Conversion among the three types of "entity", including identity-conversions.
 //
-inline int	  ENTINDEX( edict_t *pEdict)			
+extern CGlobalVars *gpGlobals;
+extern bool g_bIsLogging;
+
+inline int ENTINDEX( edict_t *pEdict )
 { 
-	int nResult = pEdict ? pEdict->m_EdictIndex : 0;
-	Assert( nResult == engine->IndexOfEdict(pEdict) );
-	return nResult;
+	if ( !pEdict ) 
+		return 0;
+	int edictIndex = pEdict - gpGlobals->pEdicts; 
+	Assert( edictIndex < MAX_EDICTS && edictIndex >= 0 );
+	return edictIndex;
 }
 
 int	  ENTINDEX( CBaseEntity *pEnt );
 
 inline edict_t* INDEXENT( int iEdictNum )		
-{ 
-	return engine->PEntityOfEntIndex(iEdictNum); 
+{
+	Assert(iEdictNum>=0 && iEdictNum < MAX_EDICTS);
+	if ( gpGlobals->pEdicts )
+	{
+		edict_t *pEdict = gpGlobals->pEdicts + iEdictNum;
+		if ( pEdict->IsFree() )
+			return NULL;
+		return pEdict;
+	}
+	return NULL;
 }
 
 // Testing the three types of "entity" for nullity
@@ -182,12 +173,10 @@ inline bool FNullEnt(const edict_t* pent)
 class CBaseEntity;
 class CBasePlayer;
 
-extern CGlobalVars *gpGlobals;
-
 // Misc useful
 inline bool FStrEq(const char *sz1, const char *sz2)
 {
-	return ( sz1 == sz2 || V_stricmp(sz1, sz2) == 0 );
+	return ( sz1 == sz2 || stricmp(sz1, sz2) == 0 );
 }
 
 #if 0
@@ -199,6 +188,8 @@ inline bool FStrEq( string_t str1, string_t str2 )
 	return str1 == str2;
 }
 #endif
+
+const char *nexttoken(char *token, const char *str, char sep);
 
 // Misc. Prototypes
 void		UTIL_SetSize			(CBaseEntity *pEnt, const Vector &vecMin, const Vector &vecMax);
@@ -220,7 +211,6 @@ float		UTIL_GetSimulationInterval();
 // NOTENOTE: Use UTIL_GetLocalPlayer instead of UTIL_PlayerByIndex IF you're in single player
 // and you want the player.
 CBasePlayer	*UTIL_PlayerByIndex( int playerIndex );
-CBasePlayer *UTIL_PlayerBySteamID( const CSteamID &steamID );
 
 // NOTENOTE: Use this instead of UTIL_PlayerByIndex IF you're in single player
 // and you want the player.
@@ -229,6 +219,27 @@ CBasePlayer* UTIL_GetLocalPlayer( void );
 
 // get the local player on a listen server
 CBasePlayer *UTIL_GetListenServerHost( void );
+
+// Convenience function so we don't have to make this check all over
+inline CBasePlayer * UTIL_GetLocalPlayerOrListenServerHost( void )
+{
+	if ( gpGlobals->maxClients > 1 )
+	{
+		if ( engine->IsDedicatedServer() )
+		{
+			return NULL;
+		}
+
+		return UTIL_GetListenServerHost();
+	}
+
+	return UTIL_GetLocalPlayer();
+}
+
+
+CBasePlayer* UTIL_PlayerByUserId( int userID );
+CBasePlayer* UTIL_PlayerByName( const char *name ); // not case sensitive
+CBasePlayer* UTIL_PlayerByAccountID( AccountID_t accountID );
 
 // Returns true if the command was issued by the listenserver host, or by the dedicated server, via rcon or the server console.
 // This is valid during ConCommand execution.
@@ -241,52 +252,28 @@ void		UTIL_GetPlayerConnectionInfo( int playerIndex, int& ping, int &packetloss 
 void		UTIL_SetClientVisibilityPVS( edict_t *pClient, const unsigned char *pvs, int pvssize );
 bool		UTIL_ClientPVSIsExpanded();
 
+#if defined ( PORTAL )
+void		UTIL_SetClientCheckPVS( edict_t *pClient, const unsigned char *pvs, int pvssize );
+#endif
+
 edict_t		*UTIL_FindClientInPVS( edict_t *pEdict );
 edict_t		*UTIL_FindClientInVisibilityPVS( edict_t *pEdict );
+
+edict_t		*UTIL_FindClientInPVSGuts(edict_t *pEdict, unsigned char *pvs, unsigned pvssize );
 
 // This is a version which finds any clients whose PVS intersects the box
 CBaseEntity *UTIL_FindClientInPVS( const Vector &vecBoxMins, const Vector &vecBoxMaxs );
 
 CBaseEntity *UTIL_EntitiesInPVS( CBaseEntity *pPVSEntity, CBaseEntity *pStartingEntity );
 
-//-----------------------------------------------------------------------------
-// class CFlaggedEntitiesEnum
-//-----------------------------------------------------------------------------
-// enumerate entities that match a set of edict flags into a static array
-class CFlaggedEntitiesEnum : public IPartitionEnumerator
-{
-public:
-	CFlaggedEntitiesEnum( CBaseEntity **pList, int listMax, int flagMask );
-
-	// This gets called	by the enumeration methods with each element
-	// that passes the test.
-	virtual IterationRetval_t EnumElement( IHandleEntity *pHandleEntity );
-	
-	int GetCount() { return m_count; }
-	bool AddToList( CBaseEntity *pEntity );
-	
-private:
-	CBaseEntity		**m_pList;
-	int				m_listMax;
-	int				m_flagMask;
-	int				m_count;
-};
-
 // Pass in an array of pointers and an array size, it fills the array and returns the number inserted
 int			UTIL_EntitiesInBox( const Vector &mins, const Vector &maxs, CFlaggedEntitiesEnum *pEnum  );
-int			UTIL_EntitiesAlongRay( const Ray_t &ray, CFlaggedEntitiesEnum *pEnum  );
 int			UTIL_EntitiesInSphere( const Vector &center, float radius, CFlaggedEntitiesEnum *pEnum  );
 
 inline int UTIL_EntitiesInBox( CBaseEntity **pList, int listMax, const Vector &mins, const Vector &maxs, int flagMask )
 {
 	CFlaggedEntitiesEnum boxEnum( pList, listMax, flagMask );
 	return UTIL_EntitiesInBox( mins, maxs, &boxEnum );
-}
-
-inline int UTIL_EntitiesAlongRay( CBaseEntity **pList, int listMax, const Ray_t &ray, int flagMask )
-{
-	CFlaggedEntitiesEnum rayEnum( pList, listMax, flagMask );
-	return UTIL_EntitiesAlongRay( ray, &rayEnum );
 }
 
 inline int UTIL_EntitiesInSphere( CBaseEntity **pList, int listMax, const Vector &center, float radius, int flagMask )
@@ -332,9 +319,10 @@ bool		UTIL_CheckBottom( CBaseEntity *pEntity, ITraceFilter *pTraceFilter, float 
 
 void		UTIL_SetOrigin			( CBaseEntity *entity, const Vector &vecOrigin, bool bFireTriggers = false );
 void		UTIL_EmitAmbientSound	( int entindex, const Vector &vecOrigin, const char *samp, float vol, soundlevel_t soundlevel, int fFlags, int pitch, float soundtime = 0.0f, float *duration = NULL );
-void		UTIL_ParticleEffect		( const Vector &vecOrigin, const Vector &vecDirection, ULONG ulColor, ULONG ulCount );
-void		UTIL_ScreenShake		( const Vector &center, float amplitude, float frequency, float duration, float radius, ShakeCommand_t eCommand, bool bAirShake=false );
+void		UTIL_ParticleEffect		( const Vector &vecOrigin, const Vector &vecDirection, uint32 ulColor, int ulCount );
+void		UTIL_ScreenShake		( const Vector &center, float amplitude, float frequency, float duration, float radius, ShakeCommand_t eCommand, bool bAirShake = false, CUtlVector<CBasePlayer *> *ignore = NULL );
 void		UTIL_ScreenShakeObject	( CBaseEntity *pEnt, const Vector &center, float amplitude, float frequency, float duration, float radius, ShakeCommand_t eCommand, bool bAirShake=false );
+void		UTIL_ScreenTilt			( const Vector &center, const QAngle &tiltAngle, float duration, float radius, float tiltTime, ShakeCommand_t eCommand, bool bEaseInOut );
 void		UTIL_ViewPunch			( const Vector &center, QAngle angPunch, float radius, bool bInAir );
 void		UTIL_ShowMessage		( const char *pString, CBasePlayer *pPlayer );
 void		UTIL_ShowMessageAll		( const char *pString );
@@ -348,9 +336,10 @@ int			UTIL_EntityInSolid( CBaseEntity *ent );
 bool		UTIL_IsMasterTriggered	(string_t sMaster, CBaseEntity *pActivator);
 void		UTIL_BloodStream( const Vector &origin, const Vector &direction, int color, int amount );
 void		UTIL_BloodSpray( const Vector &pos, const Vector &dir, int color, int amount, int flags );
+void		UTIL_BloodSprayPrecache();
 Vector		UTIL_RandomBloodVector( void );
-void		UTIL_ImpactTrace( trace_t *pTrace, int iDamageType, const char *pCustomImpactName = NULL );
-void		UTIL_PlayerDecalTrace( trace_t *pTrace, int playernum );
+void		UTIL_ImpactTrace( trace_t *pTrace, int iDamageType, char *pCustomImpactName = NULL );
+void		UTIL_PlayerDecalTrace( trace_t *pTrace, Vector const &right, int playernum );
 void		UTIL_Smoke( const Vector &origin, const float scale, const float framerate );
 void		UTIL_AxisStringToPointDir( Vector &start, Vector &dir, const char *pString );
 void		UTIL_AxisStringToPointPoint( Vector &start, Vector &end, const char *pString );
@@ -375,18 +364,14 @@ void UTIL_PointAtNamedEntity( CBaseEntity *pEnt, string_t strTarget );
 // Copy the pose parameter values from one entity to the other
 bool UTIL_TransferPoseParameters( CBaseEntity *pSourceEntity, CBaseEntity *pDestEntity );
 
-// Search for water transition along a vertical line
-float UTIL_WaterLevel( const Vector &position, float minz, float maxz );
-
-// Like UTIL_WaterLevel, but *way* less expensive.
-// I didn't replace UTIL_WaterLevel everywhere to avoid breaking anything.
-float UTIL_FindWaterSurface( const Vector &position, float minz, float maxz );
-
 void UTIL_Bubbles( const Vector& mins, const Vector& maxs, int count );
 void UTIL_BubbleTrail( const Vector& from, const Vector& to, int count );
 
 // allows precacheing of other entities
 void UTIL_PrecacheOther( const char *szClassname, const char *modelName = NULL );
+
+// Creates the netoworking baseline for this entity's serverclass if it doesn't yet exist in the engine's list.
+void UTIL_EnsureInstanceBaseline( const char *szClassname );
 
 // prints a message to each client
 void			UTIL_ClientPrintAll( int msg_dest, const char *msg_name, const char *param1 = NULL, const char *param2 = NULL, const char *param3 = NULL, const char *param4 = NULL );
@@ -404,9 +389,9 @@ void ClientPrint( CBasePlayer *player, int msg_dest, const char *msg_name, const
 
 // prints a message to the HUD say (chat)
 void		UTIL_SayText( const char *pText, CBasePlayer *pEntity );
-void		UTIL_SayTextAll( const char *pText, CBasePlayer *pEntity = NULL, bool bChat = false );
-void		UTIL_SayTextFilter( IRecipientFilter& filter, const char *pText, CBasePlayer *pEntity, bool bChat );
-void		UTIL_SayText2Filter( IRecipientFilter& filter, CBasePlayer *pEntity, bool bChat, const char *msg_name, const char *param1 = NULL, const char *param2 = NULL, const char *param3 = NULL, const char *param4 = NULL );
+void		UTIL_SayTextAll( const char *pText, CBasePlayer *pEntity = NULL, EUtilSayTextMessageType_t eMessageType = kEUtilSayTextMessageType_Default );
+void		UTIL_SayTextFilter( IRecipientFilter& filter, const char *pText, CBasePlayer *pEntity, EUtilSayTextMessageType_t eMessageType );
+void		UTIL_SayText2Filter( IRecipientFilter& filter, CBasePlayer *pEntity, EUtilSayTextMessageType_t eMessageType, const char *msg_name, const char *param1 = NULL, const char *param2 = NULL, const char *param3 = NULL, const char *param4 = NULL );
 
 byte		*UTIL_LoadFileForMe( const char *filename, int *pLength );
 void        UTIL_FreeFile( byte *buffer );
@@ -476,14 +461,24 @@ void			UTIL_LogPrintf( PRINTF_FORMAT_STRING const char *fmt, ... ) FMTFUNCTION( 
 // Sorta like FInViewCone, but for nonNPCs. 
 float UTIL_DotPoints ( const Vector &vecSrc, const Vector &vecCheck, const Vector &vecDir );
 
-void UTIL_StripToken( const char *pKey, char *pDest, int nDestLength );// for redundant keynames
+void UTIL_StripToken( const char *pKey, char *pDest );// for redundant keynames
 
 // Misc functions
 int BuildChangeList( levellist_t *pLevelList, int maxList );
 
 // computes gravity scale for an absolute gravity.  Pass the result into CBaseEntity::SetGravity()
 float UTIL_ScaleForGravity( float desiredGravity );
-
+//
+// How did I ever live without ASSERT?
+//
+#ifdef	DEBUG
+void DBG_AssertFunction(bool fExpr, const char* szExpr, const char* szFile, int szLine, const char* szMessage);
+#define ASSERT(f)		DBG_AssertFunction((bool)((f)!=0), #f, __FILE__, __LINE__, NULL)
+#define ASSERTSZ(f, sz)	DBG_AssertFunction((bool)((f)!=0), #f, __FILE__, __LINE__, sz)
+#else	// !DEBUG
+#define ASSERT(f)
+#define ASSERTSZ(f, sz)
+#endif	// !DEBUG
 
 
 //
@@ -504,12 +499,11 @@ float UTIL_ScaleForGravity( float desiredGravity );
 #define SF_BRUSH_ROTATE_BACKWARDS	2
 #define SF_BRUSH_ROTATE_Z_AXIS		4
 #define SF_BRUSH_ROTATE_X_AXIS		8
-#define SF_BRUSH_ROTATE_CLIENTSIDE	16
-
 
 #define SF_BRUSH_ROTATE_SMALLRADIUS	128
 #define SF_BRUSH_ROTATE_MEDIUMRADIUS 256
 #define SF_BRUSH_ROTATE_LARGERADIUS 512
+#define SF_BRUSH_ROTATE_CLIENTSIDE	1024
 
 #define PUSH_BLOCK_ONLY_X	1
 #define PUSH_BLOCK_ONLY_Y	2
@@ -611,11 +605,11 @@ bool UTIL_IsFacingWithinTolerance( CBaseEntity *pViewer, CBaseEntity *pTarget, f
 void UTIL_GetDebugColorForRelationship( int nRelationship, int &r, int &g, int &b );
 
 struct datamap_t;
-extern const char	*UTIL_FunctionToName( datamap_t *pMap, inputfunc_t *function );
+extern const char	*UTIL_FunctionToName( datamap_t *pMap, inputfunc_t pFunction );
+extern void UTIL_FunctionFromName( datamap_t *pMap, const char *pName, inputfunc_t *ppFunction );
 
 int UTIL_GetCommandClientIndex( void );
 CBasePlayer *UTIL_GetCommandClient( void );
-bool UTIL_GetModDir( char *lpszTextOut, unsigned int nSize );
 
 AngularImpulse WorldToLocalRotation( const VMatrix &localToWorld, const Vector &worldAxis, float rotation );
 void UTIL_WorldToParentSpace( CBaseEntity *pEntity, Vector &vecPosition, QAngle &vecAngles );
@@ -624,6 +618,22 @@ void UTIL_ParentToWorldSpace( CBaseEntity *pEntity, Vector &vecPosition, QAngle 
 void UTIL_ParentToWorldSpace( CBaseEntity *pEntity, Vector &vecPosition, Quaternion &quat );
 
 bool UTIL_LoadAndSpawnEntitiesFromScript( CUtlVector <CBaseEntity*> &entities, const char *pScriptFile, const char *pBlock, bool bActivate = true );
+
+// HudMessagePanel helpers
+void UTIL_MessageTextAll( const char *text, Color color = Color( 0, 0, 0, 0 ) );	// Send a HudMessagePanel string to clients
+void UTIL_MessageText( CBasePlayer *player, const char *text, Color color = Color( 0, 0, 0, 0 ) );	// Send a HudMessagePanel string to a client
+void UTIL_ResetMessageTextAll( void );												// Reset clients' HudMessagePanel
+void UTIL_ResetMessageText( CBasePlayer *player );									// Reset a client's HudMessagePanel
+
+void UTIL_SendClientCommandKVToPlayer( KeyValues *pKV, CBasePlayer *pPlayer = NULL );
+void UTIL_RecordAchievementEvent( const char *pszAchievementname, CBasePlayer *pPlayer = NULL );
+
+//--------------------------------------------------------------------------------------------------------
+/**
+ * Return true if ground is fairly level within the given radius around an entity
+ * Trace 4 vertical hull-quadrants and test their collisions and ground heights and normals
+ */
+bool UTIL_IsGroundLevel( float radius, const Vector &position, float hullHeight, int mask, const CBaseEntity *ignore, bool debugTraces = false );
 
 // Given a vector, clamps the scalar axes to MAX_COORD_FLOAT ranges from worldsize.h
 void UTIL_BoundToWorldSize( Vector *pVecPos );

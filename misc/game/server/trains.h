@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -28,6 +28,7 @@
 #define SF_TRACKTRAIN_HL1TRAIN					0x0080
 #define SF_TRACKTRAIN_USE_MAXSPEED_FOR_PITCH	0x0100
 #define SF_TRACKTRAIN_UNBLOCKABLE_BY_PLAYER		0x0200
+#define SF_TRACKTRAIN_ALLOWROLL					0x0400
 
 #define TRAIN_ACTIVE	0x80 
 #define TRAIN_NEW		0xc0
@@ -58,6 +59,7 @@ enum TrainOrientationType_t
 class CFuncTrackTrain : public CBaseEntity
 {
 	DECLARE_CLASS( CFuncTrackTrain, CBaseEntity );
+	DECLARE_ENT_SCRIPTDESC();
 	DECLARE_SERVERCLASS();
 
 public:
@@ -68,8 +70,6 @@ public:
 	void Precache( void );
 	void UpdateOnRemove();
 	void MoveDone();
-
-	virtual int OnTakeDamage( const CTakeDamageInfo &info );
 
 	void Blocked( CBaseEntity *pOther );
 	bool KeyValue( const char *szKeyName, const char *szValue );
@@ -96,10 +96,10 @@ public:
 	void SetDirForward( bool bForward );
 	void SetSpeed( float flSpeed, bool bAccel = false );
 	void Use( CBaseEntity *pActivator, CBaseEntity *pCaller, USE_TYPE useType, float value );
-	void SetSpeedDirAccel( float flNewSpeed );
 	
 	// Input handlers
 	void InputSetSpeed( inputdata_t &inputdata );
+	void InputSetMaxSpeed( inputdata_t &inputdata );
 	void InputSetSpeedDir( inputdata_t &inputdata );
 	void InputSetSpeedReal( inputdata_t &inputdata );
 	void InputStop( inputdata_t &inputdata );
@@ -109,17 +109,13 @@ public:
 	void InputStartBackward( inputdata_t &inputdata );
 	void InputToggle( inputdata_t &inputdata );
 	void InputSetSpeedDirAccel( inputdata_t &inputdata );
-	void InputTeleportToPathTrack( inputdata_t &inputdata );
-	void InputSetSpeedForwardModifier( inputdata_t &inputdata );
+	void InputMoveToPathNode( inputdata_t &inputdata );
+	void InputTeleportToPathNode( inputdata_t &inputdata );
 
+	void InputLockOrientation( inputdata_t &inputdata );
+	void InputUnlockOrientation( inputdata_t &inputdata );
+	
 	static CFuncTrackTrain *Instance( edict_t *pent );
-
-#ifdef TF_DLL
-	int UpdateTransmitState()
-	{
-		return SetTransmitState( FL_EDICT_ALWAYS );
-	}
-#endif
 
 	DECLARE_DATADESC();
 
@@ -132,10 +128,7 @@ public:
 	float GetDesiredSpeed() const { return m_flDesiredSpeed;}
 
 	virtual bool IsBaseTrain( void ) const { return true; }
-
-	void SetSpeedForwardModifier( float flModifier );
-	void SetBlockDamage( float flDamage ) { m_flBlockDamage = flDamage; }
-	void SetDamageChild( bool bDamageChild ) { m_bDamageChild = bDamageChild; }
+	Vector ScriptGetFuturePosition( float flSeconds, float flMinSpeed );
 
 private:
 
@@ -148,11 +141,6 @@ public:
 	CPathTrack	*m_ppath;
 	float		m_length;
 	
-#ifdef HL1_DLL	
-	bool		m_bOnTrackChange;		// we don't want to find a new node if we restore while 
-										// riding on a func_trackchange
-#endif
-
 private:
 
 	TrainVelocityType_t GetTrainVelocityType();
@@ -185,6 +173,8 @@ private:
 	string_t	m_iszSoundStart;			// Sound to play when starting to move.
 	string_t	m_iszSoundStop;				// Sound to play when stopping.
 
+	string_t	m_strPathTarget;			// Destination node 
+
 	float		m_flMoveSoundMinTime;		// The most often to play the move 'ping' sound (used at max speed)
 	float		m_flMoveSoundMaxTime;		// The least often to play the move 'ping' sound (used approaching zero speed)
 	float		m_flNextMoveSoundTime;
@@ -197,6 +187,7 @@ private:
 	bool		m_bSoundPlaying;
 
 	COutputEvent m_OnStart,m_OnNext; 
+	COutputEvent m_OnArrivedAtDestinationNode;
 
 	bool		m_bManualSpeedChanges;		// set when we want to send entity IO to govern speed and obey our TrainVelocityType_t
 	float		m_flDesiredSpeed;			// target speed, when m_bManualSpeedChanges is set
@@ -206,11 +197,6 @@ private:
 	bool		m_bAccelToSpeed;
 
 	float		m_flNextMPSoundTime;
-	
-	float		m_flSpeedForwardModifier;
-	float		m_flUnmodifiedDesiredSpeed;
-
-	bool		m_bDamageChild;
 };
 
 

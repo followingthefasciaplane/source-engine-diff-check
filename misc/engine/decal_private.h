@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -48,6 +48,7 @@ struct decal_t
 	unsigned short		m_iDecalPool;		// index into the decal pool.
 	short		flags;			// Decal flags  DECAL_*		!!!SAVED AS A BYTE (SEE HOST_CMD.C)
 	short		entityIndex;	// Entity this is attached to
+	int			m_nTickCreated; // tick on which the decal was created
 
 	// NOTE: The following variables are dynamic variables.
 	// We could put these into a separate array and reference them
@@ -72,6 +73,8 @@ struct decal_t
 #define FDECAL_PLAYERSPRAY			0x1000		// Decal is a player spray
 #define FDECAL_DISTANCESCALE		0x2000		// Decal is dynamically scaled based on distance.
 #define FDECAL_HASUPDATED			0x4000		// Decal has not been updated this frame yet
+#define FDECAL_IMMEDIATECLEANUP		0x8000		// Decal should be drawn for a single frame only, then cleaned up.
+
 
 // Max decal (see r_decal.cpp for initialization).
 extern int g_nMaxDecals;

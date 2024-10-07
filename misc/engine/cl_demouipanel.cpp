@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -10,7 +10,7 @@
 #include <vgui/ISystem.h>
 #include <vgui/ISurface.h>
 #include <vgui/IVGui.h>
-#include <KeyValues.h>
+#include <keyvalues.h>
 
 #include <vgui_controls/BuildGroup.h>
 #include <vgui_controls/Tooltip.h>
@@ -72,33 +72,27 @@ CDemoUIPanel::CDemoUIPanel( vgui::Panel *parent ) : vgui::Frame( parent, "DemoUI
 
 	m_pGoStart = new vgui::ToggleButton( this, "DemoGoStart", "Go Start" );
 	m_pGoEnd = new vgui::Button( this, "DemoGoEnd", "Go End" );
-	m_pFastForward = new vgui::Button( this, "DemoFastForward", "Fast Fwd" );
-	m_pFastBackward = new vgui::Button( this, "DemoFastBackward", "Fast Bwd" );
 	m_pPrevFrame =  new vgui::Button( this, "DemoPrevFrame", "Prev Frame" );
 	m_pNextFrame =  new vgui::Button( this, "DemoNextFrame", "Next Frame" );
 
-	m_pCurrentDemo = new vgui::Label( this, "DemoName", "" );
-
-	m_pProgress = new vgui::ProgressBar( this, "DemoProgress" );
-	m_pProgress->SetSegmentInfo( 2, 2 );
+	m_pProgress = new vgui::Slider( this, "DemoProgress" );
+	m_pProgress->SetRange( 0, 0 );
+	m_pProgress->SetValue( 0, false );
+	m_pProgress->AddActionSignalTarget( this );
+	m_pProgress->SetDragOnRepositionNob( true );
 
 	m_pProgressLabelFrame = new vgui::Label( this, "DemoProgressLabelFrame", "" );
 	m_pProgressLabelTime = new vgui::Label( this, "DemoProgressLabelTime", "" );
 
 	m_pSpeedScale = new vgui::Slider( this, "DemoSpeedScale" );
-	// 1000 == 10x %
-	m_pSpeedScale->SetRange( 0, 1000 );
+	// 0 = 0%, 500 = 100%, 1400 == 1000%
+	m_pSpeedScale->SetRange( 0, 1400 );
 	m_pSpeedScale->SetValue( 500 );
 	m_pSpeedScale->AddActionSignalTarget( this );
 
 	m_pSpeedScaleLabel = new vgui::Label( this, "SpeedScale", "" );
 
-	m_pGo = new vgui::Button( this, "DemoGo", "Go" );
-	m_pGotoTick = new vgui::TextEntry( this, "DemoGoToTick" );
-
 	vgui::ivgui()->AddTickSignal( GetVPanel(), 0 );
-
-	LoadControlSettings("Resource\\DemoUIPanel.res");
 
 	SetVisible( false );
 	SetSizeable( false );
@@ -115,6 +109,14 @@ CDemoUIPanel::CDemoUIPanel( vgui::Panel *parent ) : vgui::Frame( parent, "DemoUI
 //-----------------------------------------------------------------------------
 CDemoUIPanel::~CDemoUIPanel()
 {
+}
+
+void CDemoUIPanel::ApplySchemeSettings( vgui::IScheme *pScheme )
+{
+	BaseClass::ApplySchemeSettings( pScheme );
+
+	LoadControlSettings("Resource\\DemoUIPanel.res");
+	InvalidateLayout();
 }
 
 void CDemoUIPanel::GetCurrentView()
@@ -159,19 +161,12 @@ void CDemoUIPanel::OnTick()
 	m_pPlayPauseResume->SetEnabled( bIsPlaying );
 	m_pStop->SetEnabled( bIsPlaying );
 	m_pNextFrame->SetEnabled( bIsPlaying );
-	m_pFastForward->SetEnabled( bIsPlaying );
+	m_pPrevFrame->SetEnabled( bIsPlaying );
 	m_pGoStart->SetEnabled( bIsPlaying );
 	m_pGoEnd->SetEnabled( bIsPlaying );
-	m_pGo->SetEnabled( bIsPlaying );
 
-	bool bEnabled = bIsPlaying && false;
-		
-	// if player can go back in time
-	m_pFastBackward->SetEnabled( bEnabled );
-	m_pPrevFrame->SetEnabled( bEnabled );
-	
 	// set filename text
-	m_pCurrentDemo->SetText( demoaction->GetCurrentDemoFile() );
+	SetTitle( va( "Demo Playback - %s", demoaction->GetCurrentDemoFile() ), true );
 	bool bHasDemoFile = demoaction->GetCurrentDemoFile()[0] != 0;
 
 	// set play button text
@@ -191,20 +186,28 @@ void CDemoUIPanel::OnTick()
 	if ( bIsPlaying )
 	{
 		curtick = demoplayer->GetPlaybackTick();
-		totalticks = demoplayer->GetTotalTicks();
-		
+		totalticks = demoplayer->GetDemoStream()->GetTotalTicks();
+
 		fProgress = (float)curtick/(float)totalticks;
 		fProgress = clamp( fProgress, 0.0f, 1.0f );
 	}
-		
-	m_pProgress->SetProgress( fProgress );
-	m_pProgressLabelFrame->SetText( va( "Tick: %i / %i", curtick, totalticks ) );
+
+	if ( !m_pProgress->IsDragged() && !demoplayer->IsSkipping() )
+	{
+		m_pProgress->SetRange( 0, MAX( totalticks, 0 ) );
+		m_pProgress->SetValue( MIN( MAX( curtick, 0 ), totalticks ), false );
+		m_pProgressLabelFrame->SetText( va( "Tick: %i / %i", curtick, totalticks ) );
+	}
+	else
+	{
+		m_pProgressLabelFrame->SetText( va( "Tick: %i / %i", m_pProgress->GetValue(), totalticks ) );
+	}
+	//m_pProgress->SetProgress( fProgress );
+	//m_pProgressLabelFrame->SetText( va( "Tick: %i / %i", curtick, totalticks ) );
 
 	Q_strncpy( curtime, COM_FormatSeconds( host_state.interval_per_tick * curtick ), 32 );
 	Q_strncpy( totaltime, COM_FormatSeconds( host_state.interval_per_tick * totalticks ), 32 );
 	m_pProgressLabelTime->SetText( va( "Time: %s / %s", curtime, totaltime ) );
-
-	m_pFastForward->SetEnabled( demoplayer->IsPlayingBack() && !demoplayer->IsPlaybackPaused() );
 
 	float fScale = demoplayer->GetPlaybackTimeScale();
 
@@ -213,12 +216,44 @@ void CDemoUIPanel::OnTick()
 	m_pSpeedScaleLabel->SetText( va( "%.1f %%", fScale * 100.0f ) );
 }
 
+bool GoToImportantTickHelper( const char *pszEventName, bool bForward )
+{
+	const DemoImportantGameEvent_t *pGameEvent = demoplayer->GetImportantGameEvent( pszEventName );
+	if ( pGameEvent )
+	{
+		// start at our current location plus any offset given from the Important game event data
+		int nStartTick = demoplayer->GetPlaybackTick() + ( ( bForward ? pGameEvent->flSeekForwardOffset : -pGameEvent->flSeekBackwardOffset ) / host_state.interval_per_tick );
+		int nImportantTickIndex = bForward ? demoplayer->FindNextImportantTick( nStartTick, pszEventName ) : demoplayer->FindPreviousImportantTick( nStartTick, pszEventName );
+		if ( nImportantTickIndex != -1 )
+		{
+			const DemoImportantTick_t *pTick = demoplayer->GetImportantTick( nImportantTickIndex );
+			if ( pTick )
+			{
+				demoplayer->SkipToImportantTick( pTick );
+				return true;
+			}
+		}
+	}
+
+	return false;
+}
+
 // Command issued
 void CDemoUIPanel::OnCommand(const char *command)
 {
-	if ( !Q_strcasecmp( command, "stop" ) )
+	if ( !Q_strcasecmp( command, "uireload" ) )
 	{
-		Cbuf_AddText( "disconnect\n" );
+		LoadControlSettings("Resource\\DemoUIPanel.res");
+		InvalidateLayout(true);
+	}
+	else if ( !Q_strcasecmp( command, "gotostart" ) )
+	{
+		demoplayer->SkipToTick( 1, false, true );
+	}
+	else if ( !Q_strcasecmp( command, "prevframe" ) )
+	{
+		int nTicksPerFrame = ( demoplayer->GetDemoStream()->GetTicksPerFrame() ) + 1;
+		demoplayer->SkipToTick( -nTicksPerFrame, true, true );
 	}
 	else if ( !Q_strcasecmp( command, "play" ) )
 	{
@@ -227,20 +262,84 @@ void CDemoUIPanel::OnCommand(const char *command)
 			char cmd[ 256 ];
 			Q_snprintf( cmd, sizeof( cmd ), "playdemo %s\n", demoaction->GetCurrentDemoFile() );
 
-			Cbuf_AddText( cmd );
+			Cbuf_AddText( Cbuf_GetCurrentPlayer(), cmd );
 		}
 		else
 		{
-			Cbuf_AddText( !demoplayer->IsPlaybackPaused() ? "demo_pause\n" : "demo_resume\n" );
+			Cbuf_AddText( Cbuf_GetCurrentPlayer(), !demoplayer->IsPlaybackPaused() ? "demo_pause\n" : "demo_resume\n" );
+		}
+	}
+	else if ( !Q_strcasecmp( command, "nextframe" ) )
+	{
+		demoplayer->SkipToTick( 0, true, true );
+	}
+	else if ( !Q_strcasecmp( command, "gotoend" ) )
+	{
+		int nImportantTickIndex = demoplayer->FindPreviousImportantTick( demoplayer->GetDemoStream()->GetTotalTicks() + 1, "announce_phase_end" );
+		if ( nImportantTickIndex != -1 )
+		{
+			const DemoImportantTick_t *pTick = demoplayer->GetImportantTick( nImportantTickIndex );
+			if ( pTick )
+			{
+				demoplayer->SkipToTick( pTick->nPreviousTick, false, true );
+			}
+		}
+		else
+		{
+			Msg( "No phase end in this demo.\n" );
+		}
+	}
+	else if ( !Q_strcasecmp( command, "timescale_quarter" ) )
+	{
+		SetPlaybackScale( 0.25f );
+	}
+	else if ( !Q_strcasecmp( command, "timescale_half" ) )
+	{
+		SetPlaybackScale( 0.5f );
+	}
+	else if ( !Q_strcasecmp( command, "timescale_one" ) )
+	{
+		SetPlaybackScale( 1.0f );
+	}
+	else if ( !Q_strcasecmp( command, "timescale_2x" ) )
+	{
+		SetPlaybackScale( 2.0f );
+	}
+	else if ( !Q_strcasecmp( command, "timescale_4x" ) )
+	{
+		SetPlaybackScale( 4.0f );
+	}
+	else if ( !Q_strcasecmp( command, "nextround" ) )
+	{
+		if ( !GoToImportantTickHelper( "round_start", true ) )
+		{
+			Msg( "This is the last round in the demo.\n" );
+		}
+	}
+	else if ( !Q_strcasecmp( command, "previousround" ) )
+	{
+		if ( !GoToImportantTickHelper( "round_start", false ) )
+		{
+			Msg( "This is the first round in the demo.\n" );
+		}
+	}
+	else if ( !Q_strcasecmp( command, "nextdeath" ) )
+	{
+		if ( !GoToImportantTickHelper( "player_death", true ) )
+		{
+			Msg( "No more player deaths later in this demo.\n" );
+		}
+	}
+	else if ( !Q_strcasecmp( command, "prevdeath" ) )
+	{
+		if ( !GoToImportantTickHelper( "player_death", false ) )
+		{
+			Msg( "No more player deaths earlier in this demo.\n" );
 		}
 	}
 	else if ( !Q_strcasecmp( command, "load" ) )
 	{
 		OnLoad();
-	}
-	else if ( !Q_strcasecmp( command, "reload" ) )
-	{
-		Cbuf_AddText( "demo_gototick 0 0 1\n" );
 	}
 	else if ( !Q_strcasecmp( command, "edit" ) )
 	{
@@ -250,26 +349,13 @@ void CDemoUIPanel::OnCommand(const char *command)
 	{
 		OnSmooth();
 	}
-	else if ( !Q_strcasecmp( command, "nextframe" ) )
-	{
-		demoplayer->SkipToTick( 1, true, true );
-	}
-	else if ( !Q_strcasecmp( command, "gototick" ) )
-	{
-		char tick[ 32 ];
-		m_pGotoTick->GetText( tick, sizeof( tick ) );
-
-		char cmd[256];
-		Q_snprintf( cmd, sizeof(cmd), "demo_gototick %s 0 1\n", tick );
-
-		Cbuf_AddText( cmd );
-		
-		// demoplayer->PausePlayback( -1 );
-		// demoplayer->SkipToTick( Q_atoi(tick), false );
-	}
 	else if ( !Q_strcasecmp( command, "drive" ) )
 	{
 		GetCurrentView();
+	}
+	else if ( !Q_strcasecmp( command, "stop" ) )
+	{
+		Cbuf_AddText( Cbuf_GetCurrentPlayer(), "disconnect\n" );
 	}
 	else
 	{
@@ -281,15 +367,53 @@ void CDemoUIPanel::OnMessage(const KeyValues *params, VPANEL fromPanel)
 {
 	BaseClass::OnMessage( params, fromPanel );
 
-	if ( !Q_strcmp( "SliderMoved", params->GetName() ) )
+	//
+	// Speed scale
+	//
+	if ( fromPanel == m_pSpeedScale->GetVPanel() )
 	{
-		demoplayer->SetPlaybackTimeScale( GetPlaybackScale() );
+		if ( !Q_strcmp( "SliderMoved", params->GetName() ) )
+		{
+			demoplayer->SetPlaybackTimeScale( GetPlaybackScale() );
+		}
+	}
+
+	//
+	// Demo position
+	//
+	if ( fromPanel == m_pProgress->GetVPanel() )
+	{
+		if ( !Q_strcmp( "SliderDragStart", params->GetName() ) )
+		{
+			// Pause the demo when starting dragging around
+			if ( demoplayer->IsPlayingBack() && !demoplayer->IsPlaybackPaused() )
+			{
+				demoplayer->PausePlayback( -1.f );
+			}
+		}
+
+		if ( !Q_strcmp( "SliderDragEnd", params->GetName() ) )
+		{
+			if ( demoplayer->IsPlayingBack() )
+			{
+				int iNewTickPos = m_pProgress->GetValue();
+				int iDemoCurrentTickPos = demoplayer->GetPlaybackTick();
+
+				if ( iNewTickPos != iDemoCurrentTickPos )
+					Cbuf_AddText( Cbuf_GetCurrentPlayer(), va( "demo_gototick %d 0 1\n", iNewTickPos ) );
+			}
+		}
+
+		if ( !Q_strcmp( "SliderMoved", params->GetName() ) )
+		{
+			NULL;
+		}
 	}
 }
 
 void CDemoUIPanel::OnEdit()
 {
-	if ( m_hDemoEditor != 0 )
+	if ( m_hDemoEditor != NULL )
 	{
 		m_hDemoEditor->SetVisible( true );
 		m_hDemoEditor->MoveToFront();
@@ -302,7 +426,7 @@ void CDemoUIPanel::OnEdit()
 
 void CDemoUIPanel::OnSmooth()
 {
-	if ( m_hDemoSmoother != 0 )
+	if ( m_hDemoSmoother != NULL )
 	{
 		m_hDemoSmoother->SetVisible( true );
 		m_hDemoSmoother->MoveToFront();
@@ -318,8 +442,9 @@ void CDemoUIPanel::OnLoad()
 	if ( !m_hFileOpenDialog.Get() )
 	{
 		m_hFileOpenDialog = new FileOpenDialog( this, "Choose .dem file", true );
-		if ( m_hFileOpenDialog != 0 )
+		if ( m_hFileOpenDialog != NULL )
 		{
+			m_hFileOpenDialog->SetDeleteSelfOnClose( false );
 			m_hFileOpenDialog->AddFilter("*.dem", "Demo Files (*.dem)", true);
 		}
 	}
@@ -350,10 +475,10 @@ void CDemoUIPanel::OnFileSelected( char const *fullpath )
 	}
 
 	// It's a dem file
-	Cbuf_AddText( va( "playdemo %s\n", relativepath ) );
-	Cbuf_AddText( "demopauseafterinit\n" );
+	Cbuf_AddText( Cbuf_GetCurrentPlayer(), va( "playdemo %s\n", relativepath ) );
+	Cbuf_AddText( Cbuf_GetCurrentPlayer(), "demopauseafterinit\n" );
 
-	if ( m_hFileOpenDialog != 0 )
+	if ( m_hFileOpenDialog != NULL )
 	{
 		m_hFileOpenDialog->MarkForDeletion();
 	}
@@ -364,29 +489,14 @@ void CDemoUIPanel::OnFileSelected( char const *fullpath )
 //-----------------------------------------------------------------------------
 void CDemoUIPanel::OnVDMChanged( void )
 {
-	if ( m_hDemoEditor != 0 )
+	if ( m_hDemoEditor != NULL )
 	{
 		m_hDemoEditor->OnVDMChanged();
 	}
-	if ( m_hDemoSmoother != 0 )
+	if ( m_hDemoSmoother != NULL )
 	{
 		m_hDemoSmoother->OnVDMChanged();
 	}
-}
-
-//-----------------------------------------------------------------------------
-// Purpose: 
-// Output : Returns true on success, false on failure.
-//-----------------------------------------------------------------------------
-bool CDemoUIPanel::IsHoldingFastForward( void )
-{
-	if ( !m_pFastForward->IsVisible() )
-		return false;
-
-	if ( !m_pFastForward->IsEnabled() )
-		return false;
-
-	return m_pFastForward->IsSelected();
 }
 
 float CDemoUIPanel::GetPlaybackScale( void )
@@ -431,32 +541,35 @@ void CDemoUIPanel::SetPlaybackScale( float scale )
 //-----------------------------------------------------------------------------
 bool CDemoUIPanel::OverrideView( democmdinfo_t& info, int tick )
 {
+	ASSERT_LOCAL_PLAYER_RESOLVABLE();
+	int nSlot = GET_ACTIVE_SPLITSCREEN_SLOT();
+
 	if ( IsInDriveMode() )
 	{
 		// manual camera override, overrides anyting
 		HandleInput( vgui::input()->IsMouseDown( MOUSE_LEFT ) );
-				
-		info.viewOrigin = m_ViewOrigin;
-		info.viewAngles = m_ViewAngles;
-		info.localViewAngles = m_ViewAngles;
+
+		info.u[ nSlot ].viewOrigin = m_ViewOrigin;
+		info.u[ nSlot ].viewAngles = m_ViewAngles;
+		info.u[ nSlot ].localViewAngles = m_ViewAngles;
 
 		return true;
 	}
 
-	if ( m_hDemoSmoother != 0 )
+	if ( m_hDemoSmoother != NULL )
 	{
 		// demo smoother override
 		if ( m_hDemoSmoother->OverrideView( info, tick ) )
 		{
-			m_ViewOrigin = info.GetViewOrigin();
-			m_ViewAngles = info.GetViewAngles();
+			m_ViewOrigin = info.u[ nSlot ].GetViewOrigin();
+			m_ViewAngles = info.u[ nSlot ].GetViewAngles();
 			return true;
 		}
 	}
 
-	m_ViewOrigin = info.GetViewOrigin();
-	m_ViewAngles = info.GetViewAngles();
-	
+	m_ViewOrigin = info.u[ nSlot ].GetViewOrigin();
+	m_ViewAngles = info.u[ nSlot ].GetViewAngles();
+
 	return false;
 }
 
@@ -468,7 +581,7 @@ bool CDemoUIPanel::OverrideView( democmdinfo_t& info, int tick )
 //-----------------------------------------------------------------------------
 void CDemoUIPanel::DrawDebuggingInfo()
 {
-	if ( m_hDemoSmoother != 0 )
+	if ( m_hDemoSmoother != NULL )
 	{
 		m_hDemoSmoother->DrawDebuggingInfo( 1, 1 ); // MOTODO
 	}
@@ -592,7 +705,7 @@ static ConCommand demoui( "demoui", DemoUI_f, "Show/hide the demo player UI.", F
 
 
 
-
+#if 0
 //////////////////////////////////////////////////////////////////////////
 //
 // CDemoUIPanel2
@@ -614,7 +727,7 @@ void CDemoUIPanel2::Install( vgui::Panel *pParentBkgnd, vgui::Panel *pParentFgnd
 // Purpose: Basic help dialog
 //-----------------------------------------------------------------------------
 CDemoUIPanel2::CDemoUIPanel2( vgui::Panel *pParentBkgnd, vgui::Panel *pParentFgnd, bool bPutToForeground ) :
-	vgui::Frame( bPutToForeground ? pParentFgnd : pParentBkgnd, "DemoUIPanel2")
+vgui::Frame( bPutToForeground ? pParentFgnd : pParentBkgnd, "DemoUIPanel2")
 {
 	m_arrParents[0] = pParentBkgnd;
 	m_arrParents[1] = pParentFgnd;
@@ -628,8 +741,6 @@ CDemoUIPanel2::CDemoUIPanel2( vgui::Panel *pParentBkgnd, vgui::Panel *pParentFgn
 
 	m_pGoStart = new vgui::ToggleButton( this, "DemoGoStart", "Go Start" );
 	m_pGoEnd = new vgui::Button( this, "DemoGoEnd", "Go End" );
-	m_pFastForward = new vgui::Button( this, "DemoFastForward", "Fast Fwd" );
-	m_pFastBackward = new vgui::Button( this, "DemoFastBackward", "Fast Bwd" );
 	m_pPrevFrame =  new vgui::Button( this, "DemoPrevFrame", "Prev Frame" );
 	m_pNextFrame =  new vgui::Button( this, "DemoNextFrame", "Next Frame" );
 
@@ -643,8 +754,8 @@ CDemoUIPanel2::CDemoUIPanel2( vgui::Panel *pParentBkgnd, vgui::Panel *pParentFgn
 	m_pProgressLabelTime = new vgui::Label( this, "DemoProgressLabelTime", "" );
 
 	m_pSpeedScale = new vgui::Slider( this, "DemoSpeedScale" );
-	// 1000 == 10x %
-	m_pSpeedScale->SetRange( 0, 1000 );
+	// 0 = 0%, 500 = 100%, 1400 == 1000%
+	m_pSpeedScale->SetRange( 0, 1400 );
 	m_pSpeedScale->SetValue( 500 );
 	m_pSpeedScale->AddActionSignalTarget( this );
 	m_pSpeedScale->SetDragOnRepositionNob( true );
@@ -652,8 +763,6 @@ CDemoUIPanel2::CDemoUIPanel2( vgui::Panel *pParentBkgnd, vgui::Panel *pParentFgn
 	m_pSpeedScaleLabel = new vgui::Label( this, "SpeedScale", "" );
 
 	vgui::ivgui()->AddTickSignal( GetVPanel(), 0 );
-
-	LoadControlSettings("Resource\\DemoUIPanel2.res");
 
 	SetVisible( false );
 	SetSizeable( false );
@@ -665,6 +774,14 @@ CDemoUIPanel2::CDemoUIPanel2( vgui::Panel *pParentBkgnd, vgui::Panel *pParentFgn
 
 CDemoUIPanel2::~CDemoUIPanel2()
 {
+}
+
+void CDemoUIPanel2::ApplySchemeSettings( vgui::IScheme *pScheme )
+{
+	BaseClass::ApplySchemeSettings( pScheme );
+
+	LoadControlSettings("Resource\\DemoUIPanel2.res");
+	InvalidateLayout();
 }
 
 bool CDemoUIPanel2::IsInDriveMode()
@@ -701,15 +818,9 @@ void CDemoUIPanel2::OnTick()
 	m_pPlayPauseResume->SetEnabled( bIsPlaying );
 	m_pStop->SetEnabled( bIsPlaying );
 	m_pNextFrame->SetEnabled( bIsPlaying );
-	m_pFastForward->SetEnabled( bIsPlaying );
+	m_pPrevFrame->SetEnabled( bIsPlaying );
 	m_pGoStart->SetEnabled( bIsPlaying );
 	m_pGoEnd->SetEnabled( bIsPlaying );
-
-	bool bEnabled = bIsPlaying && false;
-
-	// if player can go back in time
-	m_pFastBackward->SetEnabled( bEnabled );
-	m_pPrevFrame->SetEnabled( bEnabled );
 
 	// set filename text
 	SetTitle( va( "Demo Playback - %s", demoaction->GetCurrentDemoFile() ), true );
@@ -732,7 +843,7 @@ void CDemoUIPanel2::OnTick()
 	if ( bIsPlaying )
 	{
 		curtick = demoplayer->GetPlaybackTick();
-		totalticks = demoplayer->GetTotalTicks();
+		totalticks = demoplayer->GetDemoStream()->GetTotalTicks();
 
 		fProgress = (float)curtick/(float)totalticks;
 		fProgress = clamp( fProgress, 0.0f, 1.0f );
@@ -740,8 +851,8 @@ void CDemoUIPanel2::OnTick()
 
 	if ( !m_pProgress->IsDragged() )
 	{
-		m_pProgress->SetRange( 0, max( totalticks, 0 ) );
-		m_pProgress->SetValue( min( max( curtick, 0 ), totalticks ), false );
+		m_pProgress->SetRange( 0, MAX( totalticks, 0 ) );
+		m_pProgress->SetValue( MIN( MAX( curtick, 0 ), totalticks ), false );
 		m_pProgressLabelFrame->SetText( va( "Tick: %i / %i", curtick, totalticks ) );
 	}
 	else
@@ -756,8 +867,6 @@ void CDemoUIPanel2::OnTick()
 	Q_strncpy( totaltime, COM_FormatSeconds( host_state.interval_per_tick * totalticks ), 32 );
 	m_pProgressLabelTime->SetText( va( "Time: %s / %s", curtime, totaltime ) );
 
-	m_pFastForward->SetEnabled( demoplayer->IsPlayingBack() && !demoplayer->IsPlaybackPaused() );
-
 	float fScale = demoplayer->GetPlaybackTimeScale();
 
 	SetPlaybackScale( fScale );  // set slider
@@ -770,13 +879,13 @@ void CDemoUIPanel2::OnCommand(const char *command)
 {
 	if ( !Q_strcasecmp( command, "stop" ) )
 	{
-		Cbuf_AddText( "disconnect\n" );
+		Cbuf_AddText( Cbuf_GetCurrentPlayer(), "disconnect\n" );
 	}
 	else if ( !Q_strcasecmp( command, "play" ) )
 	{
 		if ( !demoplayer->IsPlayingBack() )
 		{
-			demoplayer->StartPlayback( demoaction->GetCurrentDemoFile(), false );
+			demoplayer->StartPlayback( demoaction->GetCurrentDemoFile(), false, NULL );
 		}
 		else
 		{
@@ -789,11 +898,46 @@ void CDemoUIPanel2::OnCommand(const char *command)
 	}
 	else if ( !Q_strcasecmp( command, "reload" ) )
 	{
-		Cbuf_AddText( "demo_gototick 0 0 1\n" );
+		Cbuf_AddText( Cbuf_GetCurrentPlayer(), "demo_gototick 0 pause\n" );
 	}
 	else if ( !Q_strcasecmp( command, "nextframe" ) )
 	{
-		Cbuf_AddText( "demo_gototick 1 1 1\n" );
+		demoplayer->SkipToTick( 0, true, true );
+	}
+	else if ( !Q_strcasecmp( command, "prevframe" ) )
+	{
+		int nTicksPerFrame = ( demoplayer->GetDemoFile()->m_DemoHeader.playback_ticks / demoplayer->GetDemoFile()->m_DemoHeader.playback_frames ) + 1;
+		demoplayer->SkipToTick( -nTicksPerFrame, true, true );
+	}
+	else if ( !Q_strcasecmp( command, "gototick" ) )
+	{
+		char tick[ 32 ];
+		m_pGotoTick->GetText( tick, sizeof( tick ) );
+
+		char cmd[256];
+		Q_snprintf( cmd, sizeof(cmd), "demo_gototick %s 0 pause\n", tick );
+
+		Cbuf_AddText( Cbuf_GetCurrentPlayer(), cmd );
+
+		// demoplayer->PausePlayback( -1 );
+		// demoplayer->SkipToTick( Q_atoi(tick), false );
+	}
+	else if ( !Q_strcasecmp( command, "gotomatchend" ) )
+	{
+		int nImportantTickIndex = demoplayer->FindPreviousImportantTick( demoplayer->GetDemoStream()->GetTotalTicks() + 1, "announce_phase_end" );
+
+		if ( nImportantTickIndex != -1 )
+		{
+			const DemoImportantTick_t *pTick = demoplayer->GetImportantTick( nImportantTickIndex );
+			if ( pTick )
+			{
+				demoplayer->SkipToTick( pTick->nPreviousTick, false, true );
+			}
+		}
+		else
+		{
+			Msg( "No phase end in this demo.\n" );
+		}
 	}
 	else
 	{
@@ -832,11 +976,14 @@ void CDemoUIPanel2::OnMessage(const KeyValues *params, VPANEL fromPanel)
 
 		if ( !Q_strcmp( "SliderDragEnd", params->GetName() ) )
 		{
-			int iNewTickPos = m_pProgress->GetValue();
-			int iDemoCurrentTickPos = demoplayer->GetPlaybackTick();
-			
-			if ( iNewTickPos != iDemoCurrentTickPos )
-				Cbuf_AddText( va( "demo_gototick %d 0 1\n", iNewTickPos ) );
+			if ( demoplayer->IsPlayingBack() )
+			{
+				int iNewTickPos = m_pProgress->GetValue();
+				int iDemoCurrentTickPos = demoplayer->GetPlaybackTick();
+
+				if ( iNewTickPos != iDemoCurrentTickPos )
+					Cbuf_AddText( Cbuf_GetCurrentPlayer(), va( "demo_gototick %d 0 1\n", iNewTickPos ) );
+			}
 		}
 
 		if ( !Q_strcmp( "SliderMoved", params->GetName() ) )
@@ -851,8 +998,9 @@ void CDemoUIPanel2::OnLoad()
 	if ( !m_hFileOpenDialog.Get() )
 	{
 		m_hFileOpenDialog = new FileOpenDialog( this, "Choose .dem file", true );
-		if ( m_hFileOpenDialog != 0 )
+		if ( m_hFileOpenDialog != NULL )
 		{
+			m_hFileOpenDialog->SetDeleteSelfOnClose( false );
 			m_hFileOpenDialog->AddFilter("*.dem", "Demo Files (*.dem)", true);
 		}
 	}
@@ -883,10 +1031,10 @@ void CDemoUIPanel2::OnFileSelected( char const *fullpath )
 	}
 
 	// It's a dem file
-	Cbuf_AddText( va( "playdemo %s\n", relativepath ) );
-	Cbuf_AddText( "demopauseafterinit\n" );
+	Cbuf_AddText( Cbuf_GetCurrentPlayer(), va( "playdemo %s\n", relativepath ) );
+	Cbuf_AddText( Cbuf_GetCurrentPlayer(), "demopauseafterinit\n" );
 
-	if ( m_hFileOpenDialog != 0 )
+	if ( m_hFileOpenDialog != NULL )
 	{
 		m_hFileOpenDialog->MarkForDeletion();
 	}
@@ -895,17 +1043,6 @@ void CDemoUIPanel2::OnFileSelected( char const *fullpath )
 void CDemoUIPanel2::OnVDMChanged( void )
 {
 	NULL;
-}
-
-bool CDemoUIPanel2::IsHoldingFastForward( void )
-{
-	if ( !m_pFastForward->IsVisible() )
-		return false;
-
-	if ( !m_pFastForward->IsEnabled() )
-		return false;
-
-	return m_pFastForward->IsSelected();
 }
 
 float CDemoUIPanel2::GetPlaybackScale( void )
@@ -1028,4 +1165,4 @@ void DemoUI2_off()
 static ConCommand demoui2( "demoui2", DemoUI2_f, "Show/hide the advanced demo player UI (demoui2).", FCVAR_DONTRECORD );
 static ConCommand demoui2_on( "+demoui2", DemoUI2_on, "Bring the advanced demo player UI (demoui2) to foreground.", FCVAR_DONTRECORD );
 static ConCommand demoui2_off( "-demoui2", DemoUI2_off, "Send the advanced demo player UI (demoui2) to background.", FCVAR_DONTRECORD );
-
+#endif

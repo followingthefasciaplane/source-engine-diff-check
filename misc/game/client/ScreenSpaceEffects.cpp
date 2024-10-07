@@ -1,7 +1,6 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
 #include "cbase.h"
 
-#include "KeyValues.h"
+#include "keyvalues.h"
 #include "cdll_client_int.h"
 #include "view_scene.h"
 #include "viewrender.h"

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: Implmentation of IEngineTool callback interface
 //  Tool .dlls can call back through this interface to talk to the engine
@@ -31,12 +31,16 @@
 #include "ispatialpartitioninternal.h"
 #include "networkstringtableserver.h"
 #include "networkstringtable.h"
+#include "igame.h"
 #include "gl_rmain.h"
-#include "vprof_telemetry.h"
 
-#ifndef SWDS
+#ifndef DEDICATED
 #include "vgui_baseui_interface.h"
 #endif
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
 
 // External variables and APIs needed
 extern CSysModule *g_GameDLL;
@@ -52,6 +56,9 @@ void SV_ForceSend();
 
 extern ConVar host_framerate;
 
+void CL_StartMovie( const char *filename, int flags, int nWidth, int nHeight, float flFrameRate, int jpeg_quality );
+void CL_EndMovie();
+bool CL_IsRecordingMovie();
 void VGui_SetGameDLLPanelsVisible( bool show );
 float AudioSource_GetSoundDuration( char const *pName );
 
@@ -76,6 +83,9 @@ public:
 	virtual bool		IsTopmostTool( const IToolSystem *sys ) const;
  	virtual const IToolSystem *GetToolSystem( int index ) const;
 	virtual IToolSystem *GetTopmostTool();
+
+	// If module not already loaded, loads it and optionally switches to first tool in module.  Returns false if load failed or tool already loaded
+	virtual bool		LoadToolModule( char const *pToolModule, bool bSwitchToFirst );
 
 public:
 	// Retrieve factories from server.dll and client.dll to get at specific interfaces defined within
@@ -105,7 +115,7 @@ public:
 	virtual bool		IsGamePaused();
 	virtual void		SetGamePaused( bool paused );
 
-	virtual float		GetTimescale(); // Could do this via ConVar system, too
+	virtual float		GetTimescale(); // host_timescale ConVar multiplied by the game timescale
 	virtual void		SetTimescale( float scale );
 
 	// Real time is unscaled, but is updated once per frame
@@ -171,7 +181,9 @@ public:
 		int speakerentity = -1 );
 
 	virtual void	StopSoundByGuid( int guid );
+	virtual void	SetVolumeByGuid( int guid, float flVolume );
 	virtual bool	IsSoundStillPlaying( int guid );
+	virtual bool	GetSoundChannelVolume( const char* sound, float &flVolumeLeft, float &flVolumeRight ) { return false; }
 	virtual float	GetSoundDuration( int guid );
 	virtual void	ReloadSound( const char *pSample );
 	virtual void	StopAllSounds( );
@@ -192,7 +204,7 @@ public:
 	virtual void	StartMovieRecording( KeyValues *pMovieParams );
 	virtual void	EndMovieRecording();
 	virtual void	CancelMovieRecording();
-	virtual IVideoRecorder *GetActiveVideoRecorder();
+	virtual AVIHandle_t GetRecordingAVIHandle();
 
 	virtual void	StartRecordingVoiceToFile( const char *filename, const char *pPathID = 0 );
 	virtual void	StopRecordingVoiceToFile();
@@ -226,9 +238,17 @@ public:
 
 	virtual float		GetSoundDuration( const char *pszName );
 
+	virtual void		ValidateSoundCache( char const *pchSoundName );
+	virtual void		PrefetchSound( char const *pchSoundName );
+
+	virtual void* GetEngineHwnd();
+	virtual void		OnModeChanged( bool bGameMode );
 public:
 	// Methods of IEngineToolInternal
 	virtual void	SetIsInGame( bool bIsInGame );
+
+	virtual float	GetSoundElapsedTime( int guid );
+	virtual bool	GetPreventSound( void );
 
 private:
 	bool m_bIsInGame;
@@ -322,7 +342,7 @@ int CEngineTool::GetLightingConditions( const Vector &vecLightingOrigin, Vector 
 {
 	LightcacheGetDynamic_Stats stats;
 	LightingState_t state;
-	LightcacheGetDynamic( vecLightingOrigin, state, stats );
+	LightcacheGetDynamic( vecLightingOrigin, state, stats, NULL );
 	Assert( state.numlights >= 0 && state.numlights < MAXLOCALLIGHTS );
 	memcpy( pColors, state.r_boxcolor, sizeof(state.r_boxcolor) );
 
@@ -359,7 +379,7 @@ void CEngineTool::GetClientFactory( CreateInterfaceFn& factory )
 
 void CEngineTool::Command( const char *cmd )
 {
-	Cbuf_AddText( cmd );
+	Cbuf_AddText( Cbuf_GetCurrentPlayer(), cmd );
 }
 
 void CEngineTool::Execute()
@@ -372,7 +392,7 @@ const char *CEngineTool::GetCurrentMap()
 	if ( sv.IsDedicated() )
 		return "Dedicated Server";
 
-	if ( !cl.IsConnected() )
+	if ( !GetBaseLocalClient().IsConnected() )
 	{
 		if ( sv.IsLoading() )
 			return sv.GetMapName();
@@ -380,14 +400,14 @@ const char *CEngineTool::GetCurrentMap()
 		return "";
 	}
 
-	return cl.m_szLevelFileName;
+	return GetBaseLocalClient().m_szLevelName;
 }
 
 void CEngineTool::ChangeToMap( const char *mapname )
 {
 	if ( modelloader->Map_IsValid( mapname ) )
 	{
-		Cbuf_AddText( va( "map \"%s\"\n", mapname ) );
+		Cbuf_AddText( Cbuf_GetCurrentPlayer(), va( "map \"%s\"\n", mapname ) );
 	}
 }
 
@@ -400,6 +420,7 @@ bool CEngineTool::IsMapValid( const char *mapname )
 void CEngineTool::RenderView( CViewSetup &view, int nFlags, int whatToRender )
 {
 	// Call client
+	ACTIVE_SPLITSCREEN_PLAYER_GUARD( 0 );
 	g_ClientDLL->RenderView( view, nFlags, whatToRender );
 }
 
@@ -410,27 +431,27 @@ void CEngineTool::SetIsInGame( bool bIsInGame )
 
 bool CEngineTool::IsInGame()
 {
-	return m_bIsInGame && cl.IsConnected();
+	return m_bIsInGame && GetBaseLocalClient().IsConnected();
 }
 
 bool CEngineTool::IsConnected()
 {
-	return cl.IsConnected();
+	return GetBaseLocalClient().IsConnected();
 }
 
 int	 CEngineTool::GetMaxClients()
 {
-	return cl.m_nMaxClients;
+	return GetBaseLocalClient().m_nMaxClients;
 }
 
 bool CEngineTool::IsGamePaused()
 {
-	return cl.IsPaused();
+	return GetBaseLocalClient().IsPaused();
 }
 
 bool CEngineTool::IsConsoleVisible()
 {
-#ifdef SWDS
+#ifdef DEDICATED
 	return false;
 #else
 	return EngineVGui()->IsConsoleVisible();
@@ -444,7 +465,7 @@ void CEngineTool::SetGamePaused( bool paused )
 
 float CEngineTool::GetTimescale()
 {
-	return host_timescale.GetFloat();
+	return host_timescale.GetFloat() * sv.GetTimescale();
 }
 
 void CEngineTool::SetTimescale( float scale )
@@ -465,7 +486,7 @@ float CEngineTool::GetRealTime()
 
 float CEngineTool::GetRealFrameTime()
 {
-	return host_frametime;
+	return host_frametime_unscaled;
 }
 
 float CEngineTool::HostFrameTime()
@@ -622,6 +643,22 @@ const IToolSystem *CEngineTool::GetToolSystem( int index ) const
 	return toolframework->GetToolSystem( index );
 }
 
+// If module not already loaded, loads it and optionally switches to first tool in module.  Returns false if load failed or tool already loaded
+bool CEngineTool::LoadToolModule( char const *pToolModule, bool bSwitchToFirst )
+{
+	return toolframework->LoadToolModule( pToolModule, bSwitchToFirst );
+}
+
+void CEngineTool::ValidateSoundCache( char const *pchSoundName )
+{
+	S_ValidateSoundCache( pchSoundName );
+}
+
+void CEngineTool::PrefetchSound( char const *pchSoundName )
+{
+	S_PrefetchSound( pchSoundName, false );
+}
+
 int CEngineTool::StartSound( 
 	int iUserData,
 	bool staticsound,
@@ -654,7 +691,7 @@ int CEngineTool::StartSound(
 	params.fromserver = false;
 	params.delay = delay;
 	params.speakerentity = speakerentity;
-	params.suppressrecording = true;
+	params.bToolSound = true;
 
 	int guid = S_StartSound( params );
 
@@ -666,6 +703,11 @@ void CEngineTool::StopSoundByGuid( int guid )
 	S_StopSoundByGuid( guid );
 }
 
+void CEngineTool::SetVolumeByGuid( int guid, float flVolume )
+{
+	S_SetVolumeByGuid( guid, flVolume );
+}
+
 bool CEngineTool::IsSoundStillPlaying( int guid )
 {
 	return S_IsSoundStillPlaying( guid );
@@ -674,6 +716,15 @@ bool CEngineTool::IsSoundStillPlaying( int guid )
 float CEngineTool::GetSoundDuration( int guid )
 {
 	return S_SoundDurationByGuid( guid );
+}
+float CEngineTool::GetSoundElapsedTime( int guid )
+{
+	return S_GetElapsedTimeByGuid( guid );
+}
+
+void* CEngineTool::GetEngineHwnd()
+{
+	return game->GetMainWindow();
 }
 
 float CEngineTool::GetSoundDuration( const char *pszName )
@@ -689,6 +740,10 @@ void CEngineTool::ReloadSound( const char *pSample )
 void CEngineTool::StopAllSounds( )
 {
 	S_StopAllSounds( true );
+}
+bool CEngineTool::GetPreventSound( )
+{
+	return S_GetPreventSound( );
 }
 
 // Returns if the sound is looping
@@ -828,8 +883,6 @@ void CEngineTool::InstallQuitHandler( void *pvUserData, FnQuitHandler func )
 // precache methods
 bool CEngineTool::PrecacheSound( const char *pName, bool bPreload )
 {
-	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s(%s, %s)", __FUNCTION__, tmDynamicString( TELEMETRY_LEVEL0, pName ), bPreload ? "true" : "false" );
-
 	if ( pName && TestSoundChar( pName, CHAR_SENTENCE ) )
 		return true;
 
@@ -903,18 +956,15 @@ void CEngineTool::StartMovieRecording( KeyValues *pMovieParams )
 	int jpeg_quality = DEFAULT_JPEG_QUALITY;
 
 	int flags = 0;
-	VideoSystem_t videoSystem = VideoSystem::NONE;
 	if ( pMovieParams->GetInt( "outputavi", 0 ) )
 	{
-		Warning( "Got a request to record a movie using AVI, but AVI is deprecated. Using QuickTime/H264 instead.\n" );
-		videoSystem = VideoSystem::QUICKTIME;
 		if ( pMovieParams->GetInt( "avisoundonly", 0 ) )
 		{
-			flags |= MovieInfo_t::FMOVIE_VIDSOUND;
+			flags |= MovieInfo_t::FMOVIE_AVISOUND;
 		}
 		else
 		{
-			flags |= MovieInfo_t::FMOVIE_VID | MovieInfo_t::FMOVIE_VIDSOUND;
+			flags |= MovieInfo_t::FMOVIE_AVI | MovieInfo_t::FMOVIE_AVISOUND;
 		}
 	}
 	if  ( pMovieParams->GetInt( "outputtga", 0 ) )
@@ -938,12 +988,12 @@ void CEngineTool::StartMovieRecording( KeyValues *pMovieParams )
 		return;
 	}
 
-	int nWidth = pMovieParams->GetInt( "width", videomode->GetModeStereoWidth() );
-	int nHeight = pMovieParams->GetInt( "height", videomode->GetModeStereoHeight() );
-	float flFrameRate = pMovieParams->GetFloat( "framerate", 30.0f );
+	int nWidth = pMovieParams->GetInt( "width", videomode->GetModeWidth() );
+	int nHeight = pMovieParams->GetInt( "height", videomode->GetModeHeight() );
+    float flFrameRate = pMovieParams->GetFloat( "framerate", 30.0f );
 
 	m_bRecordingMovie = true;
-	CL_StartMovie( pFileName, flags, nWidth, nHeight, flFrameRate, jpeg_quality, videoSystem );
+	CL_StartMovie( pFileName, flags, nWidth, nHeight, flFrameRate, jpeg_quality );
 }
 
 void CEngineTool::EndMovieRecording()
@@ -960,18 +1010,12 @@ void CEngineTool::CancelMovieRecording()
 	EndMovieRecording();
 }
 
-
-IVideoRecorder *CEngineTool::GetActiveVideoRecorder()
+AVIHandle_t CEngineTool::GetRecordingAVIHandle()
 {
- 	if ( !CL_IsRecordingMovie() )
- 	{
- 		return NULL;
- 	}
- 	
- 	return g_pVideoRecorder;
+	if ( !CL_IsRecordingMovie() )
+		return AVIHANDLE_INVALID;
+	return g_hCurrentAVI;
 }
-
-void Voice_ForceInit();
 
 bool CEngineTool::ShouldSuppressDeInit() const
 {
@@ -1021,7 +1065,7 @@ float CEngineTool::GetMono16Samples( const char *pszName, CUtlVector< short >& s
 void CEngineTool::GetWorldToScreenMatrixForView( const CViewSetup &view, VMatrix *pVMatrix )
 {
 	VMatrix worldToView, viewToProjection;
-	ComputeViewMatrices( &worldToView, &viewToProjection, pVMatrix, view );
+	view.ComputeViewMatrices( &worldToView, &viewToProjection, pVMatrix );
 }
 
 SpatialPartitionHandle_t CEngineTool::CreatePartitionHandle( IHandleEntity *pEntity,
@@ -1057,6 +1101,11 @@ bool CEngineTool::IsVoiceRecording()
 #else
 	return false;
 #endif
+}
+
+void CEngineTool::OnModeChanged( bool bGameMode )
+{
+	EngineVGui()->OnToolModeChanged( bGameMode );
 }
 
 bool EngineTool_SuppressDeInit()

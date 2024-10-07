@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: implements various common send proxies
 //
@@ -27,7 +27,7 @@ void SendProxy_EHandleToInt( const SendProp *pProp, const void *pStruct, const v
 
 	if ( pHandle && pHandle->Get() )
 	{
-		int iSerialNum = pHandle->GetSerialNumber() & ( (1 << NUM_NETWORKED_EHANDLE_SERIAL_NUMBER_BITS) - 1 );
+		int iSerialNum = pHandle->GetSerialNumber() & (1 << NUM_NETWORKED_EHANDLE_SERIAL_NUMBER_BITS) - 1;
 		pOut->m_Int = pHandle->GetEntryIndex() | (iSerialNum << MAX_EDICT_BITS);
 	}
 	else
@@ -51,7 +51,7 @@ void SendProxy_ShortAddOne( const SendProp *pProp, const void *pStruct, const vo
 }
 
 SendProp SendPropBool(
-	const char *pVarName,
+	char *pVarName,
 	int offset,
 	int sizeofVar )
 {
@@ -61,16 +61,16 @@ SendProp SendPropBool(
 
 
 SendProp SendPropEHandle(
-	const char *pVarName,
+	char *pVarName,
 	int offset,
-	int sizeofVar,
 	int flags,
+	int sizeofVar,
 	SendVarProxyFn proxyFn )
 {
 	return SendPropInt( pVarName, offset, sizeofVar, NUM_NETWORKED_EHANDLE_BITS, SPROP_UNSIGNED|flags, proxyFn );
 }
 
-SendProp SendPropIntWithMinusOneFlag( const char *pVarName, int offset, int sizeofVar, int nBits, SendVarProxyFn proxyFn )
+SendProp SendPropIntWithMinusOneFlag( char *pVarName, int offset, int sizeofVar, int nBits, SendVarProxyFn proxyFn )
 {
 	return SendPropInt( pVarName, offset, sizeofVar, nBits, SPROP_UNSIGNED, proxyFn );
 }
@@ -106,7 +106,6 @@ REGISTER_SEND_PROXY_NON_MODIFIED_POINTER( SendProxy_OnlyToTeam );
 #define TIME_BITS 24
 
 // This table encodes edict data.
-#if 0
 static void SendProxy_Time( const SendProp *pProp, const void *pStruct, const void *pVarData, DVariant *pOut, int iElement, int objectID )
 {
 	float clock_base = floor( gpGlobals->curtime );
@@ -120,7 +119,6 @@ static void SendProxy_Time( const SendProp *pProp, const void *pStruct, const vo
 
 	pOut->m_Int = addt;
 }
-#endif
 
 //-----------------------------------------------------------------------------
 // Purpose: 
@@ -131,7 +129,7 @@ static void SendProxy_Time( const SendProp *pProp, const void *pStruct, const vo
 // Output : SendProp
 //-----------------------------------------------------------------------------
 SendProp SendPropTime(
-	const char *pVarName,
+	char *pVarName,
 	int offset,
 	int sizeofVar )
 {
@@ -140,8 +138,7 @@ SendProp SendPropTime(
 	return SendPropFloat( pVarName, offset, sizeofVar, -1, SPROP_NOSCALE );
 }
 
-#if !defined( NO_ENTITY_PREDICTION )
-
+#if !defined( NO_ENTITY_PREDICTION ) && defined( USE_PREDICTABLEID )
 #define PREDICTABLE_ID_BITS 31
 
 //-----------------------------------------------------------------------------
@@ -174,7 +171,7 @@ static void SendProxy_PredictableIdToInt( const SendProp *pProp, const void *pSt
 // Output : SendProp
 //-----------------------------------------------------------------------------
 SendProp SendPropPredictableId(
-	const char *pVarName,
+	char *pVarName,
 	int offset,
 	int sizeofVar )
 {
@@ -190,10 +187,92 @@ void SendProxy_StringT_To_String( const SendProp *pProp, const void *pStruct, co
 }
 
 
-SendProp SendPropStringT( const char *pVarName, int offset, int sizeofVar )
+SendProp SendPropStringT( char *pVarName, int offset, int sizeofVar )
 {
 	// Make sure it's the right type.
 	Assert( sizeofVar == sizeof( string_t ) );
 
 	return SendPropString( pVarName, offset, DT_MAX_STRING_BUFFERSIZE, 0, SendProxy_StringT_To_String );
+}
+
+
+void CSendProxyRecipients::SetRecipient( int iClient )
+{
+	m_Bits.Set( iClient );
+}
+
+void CSendProxyRecipients::ClearRecipient( int iClient )
+{
+	m_Bits.Clear( iClient );
+}
+
+void CSendProxyRecipients::SetOnly( int iClient )
+{
+	m_Bits.ClearAll();
+	SetRecipient( iClient );
+
+	CBaseEntity *pEntity = CBaseEntity::Instance( iClient + 1 );
+	if ( pEntity && pEntity->IsPlayer() )
+	{
+		CBasePlayer *pPlayer = static_cast< CBasePlayer * >( pEntity );
+		if ( pPlayer->IsSplitScreenPlayer() )
+		{
+			if ( pPlayer->GetSplitScreenPlayerOwner() )
+			{
+				SetRecipient( pPlayer->GetSplitScreenPlayerOwner()->entindex() - 1 );
+			}
+			else
+			{
+				AssertOnce( !"CSendProxyRecipients::SetOnly:  NULL pPlayer->GetSplitScreenPlayerOwner()" );
+			}
+		}
+		else
+		{
+			CUtlVector< CHandle< CBasePlayer> > &list = pPlayer->GetSplitScreenPlayers();
+			for ( int i = 0; i < list.Count(); ++i )
+			{
+				CBasePlayer *pSplitPlayer = list[ i ];
+				if ( !pSplitPlayer )
+				{
+					continue;
+				}
+
+				int iEntIndex = pSplitPlayer->entindex();
+				SetRecipient( iEntIndex - 1 );
+			}
+		}
+	}
+}
+
+void CSendProxyRecipients::ExcludeOnly( int iClient )
+{
+	m_Bits.SetAll();
+	ClearRecipient( iClient );
+	CBaseEntity *pEntity = CBaseEntity::Instance( iClient + 1 );
+	if ( pEntity && pEntity->IsPlayer() )
+	{
+		CBasePlayer *pPlayer = static_cast< CBasePlayer * >( pEntity );
+		if ( pPlayer->IsSplitScreenPlayer() )
+		{
+			if ( pPlayer->GetSplitScreenPlayerOwner() )
+			{
+				ClearRecipient( pPlayer->GetSplitScreenPlayerOwner()->entindex() - 1 );
+			}
+		}
+		else
+		{
+			CUtlVector< CHandle< CBasePlayer> > &list = pPlayer->GetSplitScreenPlayers();
+			for ( int i = 0; i < list.Count(); ++i )
+			{
+				CBasePlayer *pSplitPlayer = list[ i ];
+				if ( !pSplitPlayer )
+				{
+					continue;
+				}
+
+				int iEntIndex = pSplitPlayer->entindex();
+				ClearRecipient( iEntIndex - 1 );
+			}
+		}
+	}
 }

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========== Copyright (c) 2005, Valve Corporation, All rights reserved. ========
 //
 // Purpose:
 //
@@ -6,6 +6,10 @@
 
 #ifndef CMATERIALRENDERSTATE_H
 #define CMATERIALRENDERSTATE_H
+
+#if defined( _WIN32 )
+#pragma once
+#endif
 
 #include "tier1/delegates.h"
 #include "tier1/utlstack.h"
@@ -16,17 +20,16 @@
 #include "imaterialinternal.h"
 #include "shadersystem.h"
 #include "imorphinternal.h"
+#include "isubdinternal.h"
 #include "imatrendercontextinternal.h"
 #include "occlusionquerymgr.h"
 #include "materialsystem/MaterialSystemUtil.h"
+#include "tier1/memstack.h"
 
 #ifndef MATSYS_INTERNAL
 #error "This file is private to the implementation of IMaterialSystem/IMaterialSystemInternal"
 #endif
 
-#if defined( _WIN32 )
-#pragma once
-#endif
 
 //-----------------------------------------------------------------------------
 // Forward declarations
@@ -34,7 +37,8 @@
 class ITextureInternal;
 class CMaterialSystem;
 class CMatLightmaps;
-typedef int ShaderAPITextureHandle_t;
+class CMatPaintmaps;
+typedef intp ShaderAPITextureHandle_t;
 class IMorphMgrRenderContext;
 class CMatCallQueue;
 
@@ -42,7 +46,7 @@ class CMatCallQueue;
 //-----------------------------------------------------------------------------
 // Render targets
 //-----------------------------------------------------------------------------
-#if !defined( _X360 )
+#if !defined( _X360 ) && !defined( _PS3 )
 #define MAX_RENDER_TARGETS 4
 #else
 #define MAX_RENDER_TARGETS 1
@@ -70,7 +74,10 @@ public:
 	ITexture *								GetRenderTargetEx( int nRenderTargetID );
 
 	IMaterialInternal*						GetCurrentMaterialInternal() const								{ return m_pCurrentMaterial;	}	
-	virtual void							SetCurrentMaterialInternal(IMaterialInternal* pCurrentMaterial)	{ m_pCurrentMaterial = pCurrentMaterial; Assert( (m_pCurrentMaterial == NULL) || ((IMaterialInternal *)m_pCurrentMaterial)->IsRealTimeVersion() );	}
+	virtual void							SetCurrentMaterialInternal(IMaterialInternal* pCurrentMaterial)	{
+																												m_pCurrentMaterial = pCurrentMaterial;
+																												Assert( (m_pCurrentMaterial == NULL) || ((IMaterialInternal *)m_pCurrentMaterial)->IsRealTimeVersion() );
+																											}
 	IMaterial *								GetCurrentMaterial()											{ return GetCurrentMaterialInternal(); }
 	virtual void *							GetCurrentProxy()												{ return m_pCurrentProxyData; }
 	virtual void							SetCurrentProxy( void *pProxyData )								{ m_pCurrentProxyData = pProxyData; }
@@ -124,6 +131,8 @@ public:
 	void									SyncMatrices();
 	void									SyncMatrix( MaterialMatrixMode_t );
 	const VMatrix &							AccessCurrentMatrix() const { return m_pCurMatrixItem->matrix; }
+	ShaderAPITextureHandle_t				GetLightmapTexture( int nLightmapPage );
+	ShaderAPITextureHandle_t				GetPaintmapTexture( int nLightmapPage );
 
 	virtual void							UpdateHeightClipUserClipPlane( void ) {}
 	virtual void							ApplyCustomClipPlanes( void ) {}
@@ -134,10 +143,7 @@ public:
 	virtual void							GetWorldSpaceCameraPosition( Vector *pCameraPos );
 	virtual void							GetWorldSpaceCameraVectors( Vector *pVecForward, Vector *pVecRight, Vector *pVecUp );
 
-	void									ResetToneMappingScale( float scvalue);
-	void									TurnOnToneMapping();
 	Vector									GetToneMappingScaleLinear();
-	void									SetGoalToneMappingScale( float monoscale);
 
 	// Inherited from IMaterialSystemInternal
 	int										GetLightmapPage( void );
@@ -149,18 +155,12 @@ public:
 	virtual bool							IsRenderData( const void *pData ) const;
 	void									MarkRenderDataUnused( bool bFrameEnd );
 	int										RenderDataSizeUsed() const;
-
+	
 	// debugging
 	virtual void							PrintfVA( char *fmt, va_list vargs );
-	virtual void							Printf( PRINTF_FORMAT_STRING const char *fmt, ... );
+	virtual void							Printf( char *fmt, ... );
 	virtual	float							Knob( char *knobname, float *setvalue = NULL );
-
-protected:
-	void									OnAsyncCreateTextureFromRenderTarget( ITexture* pSrcRt, const char** pDstName, IAsyncTextureOperationReceiver* pRecipient );
-	void									OnAsyncMap( ITextureInternal* pTexToMap, IAsyncTextureOperationReceiver* pRecipient, void* pExtraArgs );
-	void									OnAsyncUnmap( ITextureInternal* pTexToUnmap );
-	void									OnAsyncCopyRenderTargetToStagingTexture( ITexture* pDst, ITexture* pSrc, IAsyncTextureOperationReceiver* pRecipient );
-
+	
 protected:
 	enum MatrixStackFlags_t
 	{
@@ -189,6 +189,14 @@ protected:
 		int m_nViewH;
 	};
 
+	struct ScissorRectStackElement_t
+	{
+		int nLeft;
+		int nTop;
+		int nRight;
+		int nBottom;
+	};
+
 	struct PlaneStackElement
 	{
 		float fValues[4];
@@ -198,7 +206,7 @@ protected:
 	};
 
 protected:
-	CMatRenderContextBase();
+	CMatRenderContextBase( );
 	virtual void CommitRenderTargetAndViewport( void ) {}
 	void RecomputeViewState();
 	void RecomputeViewProjState();
@@ -226,6 +234,9 @@ protected:
 	// Intially a stack of 32 elements allocated, growing by 16 on overflows
 	CUtlStack< RenderTargetStackElement_t >	m_RenderTargetStack;
 
+	// Intially a stack of 32 elements allocated, growing by 16 on overflows
+	CUtlStack< ScissorRectStackElement_t >	m_ScissorRectStack;
+
 	MaterialMatrixMode_t				m_MatrixMode;
 	MatrixStackItem_t *					m_pCurMatrixItem;
 	CUtlStack<MatrixStackItem_t>		m_MatrixStacks[NUM_MATRIX_MODES];
@@ -240,14 +251,13 @@ protected:
 	float								m_FrameTime;
 
 	Vector								m_LastSetToneMapScale;							   	
-	float								m_CurToneMapScale;									// last scale for chasing purposes
-	float								m_GoalToneMapScale;
 	ShaderViewport_t					m_Viewport;
 	CMaterialSystem *					m_pMaterialSystem;
 
 	static CMemoryStack					sm_RenderData[2];
 	static int							sm_nRenderLockCount;
 	static int							sm_nRenderStack;
+	static MemoryStackMark_t			sm_nRenderCurrentAllocPoint;
 	static int							sm_nInitializeCount;
 
 	bool								m_bFlashlightEnable : 1;
@@ -255,11 +265,20 @@ protected:
 	bool								m_bDirtyViewProjState : 1;
 	bool								m_bEnableClipping : 1;
 	bool								m_bFullFrameDepthIsValid : 1;
+	bool								m_bRenderingPaint : 1;
+	bool								m_bCullingEnabledForSinglePassFlashlight : 1;
+	bool								m_bSinglePassFlashlightMode : 1;
+	bool								m_bCascadedShadowMappingEnabled : 1;
+	
+
 };
 
 //-----------------------------------------------------------------------------
 //
 //-----------------------------------------------------------------------------
+#if defined( _PS3 ) || defined( _OSX )
+#define g_pShaderAPI ShaderAPI()
+#endif
 
 class CMatRenderContext : public CMatRenderContextBase
 {
@@ -280,10 +299,12 @@ public:
 
 	void									OnReleaseShaderObjects();
 
+	DELEGATE_TO_OBJECT_0V( 					EvictManagedResources, g_pShaderAPI );
+
 	// Set the current texture that is a copy of the framebuffer.
 	void									SetFrameBufferCopyTexture( ITexture *pTexture, int textureIndex );
 
-	IMesh *									CreateStaticMesh( VertexFormat_t vertexFormat, const char *pTextureBudgetGroup, IMaterial * pMaterial = NULL );
+	IMesh *									CreateStaticMesh( VertexFormat_t vertexFormat, const char *pTextureBudgetGroup, IMaterial * pMaterial = NULL, VertexStreamSpec_t *pStreamSpec = NULL );
 	DELEGATE_TO_OBJECT_1V(					DestroyStaticMesh, IMesh *, g_pShaderDevice );
 	IMesh *									GetDynamicMesh( bool buffered, IMesh* pVertexOverride = 0, IMesh* pIndexOverride = 0, IMaterial *pAutoBind = 0 );
 	virtual IMesh*							GetDynamicMeshEx( VertexFormat_t vertexFormat, bool bBuffered = true, IMesh* pVertexOverride = 0, IMesh* pIndexOverride = 0, IMaterial *pAutoBind = 0 );
@@ -303,7 +324,7 @@ public:
 	DELEGATE_TO_OBJECT_1V(					DestroyVertexBuffer, IVertexBuffer *, g_pShaderDevice );
 	DELEGATE_TO_OBJECT_1V(					DestroyIndexBuffer, IIndexBuffer *, g_pShaderDevice );
 	DELEGATE_TO_OBJECT_3( IVertexBuffer *, 	GetDynamicVertexBuffer, int, VertexFormat_t, bool, g_pShaderDevice );
-	DELEGATE_TO_OBJECT_2( IIndexBuffer *, 	GetDynamicIndexBuffer, MaterialIndexFormat_t, bool, g_pShaderDevice );
+	DELEGATE_TO_OBJECT_0( IIndexBuffer *, 	GetDynamicIndexBuffer, g_pShaderDevice );
 	DELEGATE_TO_OBJECT_7V(					BindVertexBuffer, int, IVertexBuffer *, int, int, int, VertexFormat_t, int, g_pShaderAPI );
 	DELEGATE_TO_OBJECT_2V(					BindIndexBuffer, IIndexBuffer *, int, g_pShaderAPI );
 	DELEGATE_TO_OBJECT_3V(					Draw,  MaterialPrimitiveType_t, int, int, g_pShaderAPI );
@@ -340,9 +361,11 @@ public:
 	void									SyncMatrix( MaterialMatrixMode_t );
 	bool									TestMatrixSync( MaterialMatrixMode_t );
 	void									ForceSyncMatrix( MaterialMatrixMode_t );
+	ShaderAPITextureHandle_t				GetLightmapTexture( int nLightmapPage );
+	ShaderAPITextureHandle_t				GetPaintmapTexture( int nLightmapPage );
 
 	// Allows us to override the depth buffer setting of a material
-	DELEGATE_TO_OBJECT_2V(					OverrideDepthEnable, bool, bool, g_pShaderAPI );
+	DELEGATE_TO_OBJECT_3V(					OverrideDepthEnable, bool, bool, bool, g_pShaderAPI );
 	DELEGATE_TO_OBJECT_2V(					OverrideAlphaWriteEnable, bool, bool, g_pShaderAPI );
 	DELEGATE_TO_OBJECT_2V(					OverrideColorWriteEnable, bool, bool, g_pShaderAPI );
 
@@ -353,13 +376,14 @@ public:
 
 	void									Bind( IMaterial *material, void *proxyData = NULL );
 	void									BindLightmapPage( int lightmapPageID );
+	void									BindPaintTexture( ITexture *pTexture );
 
-	DELEGATE_TO_OBJECT_2V(					SetLight, int, const LightDesc_t &, g_pShaderAPI );
+	DELEGATE_TO_OBJECT_2V(					SetLights, int, const LightDesc_t *, g_pShaderAPI );
 	DELEGATE_TO_OBJECT_1V(					SetLightingOrigin, Vector, g_pShaderAPI );
 
-	DELEGATE_TO_OBJECT_3V(					SetAmbientLight, float, float, float, g_pShaderAPI );
 	DELEGATE_TO_OBJECT_1V(					SetAmbientLightCube, LightCube_t, g_pShaderAPI );
 	DELEGATE_TO_OBJECT_0V(					DisableAllLocalLights, g_pShaderAPI );
+	DELEGATE_TO_OBJECT_1V(					SetLightingState, const MaterialLightingState_t&, g_pShaderAPI );
 
 	void									CopyRenderTargetToTexture( ITexture *pTexture );
 
@@ -372,6 +396,12 @@ public:
 
 	// read to a unsigned char rgb image.
 	DELEGATE_TO_OBJECT_6V(					ReadPixels, int, int, int, int, unsigned char *, ImageFormat, g_pShaderAPI );
+	DELEGATE_TO_OBJECT_7V(					ReadPixels, int, int, int, int, unsigned char *, ImageFormat, ITexture *, g_pShaderAPI );
+	DELEGATE_TO_OBJECT_6V(					ReadPixelsAsync, int, int, int, int, unsigned char *, ImageFormat, g_pShaderAPI );
+	DELEGATE_TO_OBJECT_7V(					ReadPixelsAsync, int, int, int, int, unsigned char *, ImageFormat, ITexture *, g_pShaderAPI );
+	DELEGATE_TO_OBJECT_8V(					ReadPixelsAsync, int, int, int, int, unsigned char *, ImageFormat, ITexture *, CThreadEvent *, g_pShaderAPI );
+	DELEGATE_TO_OBJECT_6V(					ReadPixelsAsyncGetResult, int, int, int, int, unsigned char *, ImageFormat, g_pShaderAPI );
+	DELEGATE_TO_OBJECT_7V(					ReadPixelsAsyncGetResult, int, int, int, int, unsigned char *, ImageFormat, CThreadEvent *, g_pShaderAPI );
 	void									ReadPixelsAndStretch( Rect_t *pSrcRect, Rect_t *pDstRect, unsigned char *pBuffer, ImageFormat dstFormat, int nDstStride ) { g_pShaderAPI->ReadPixels( pSrcRect, pDstRect, pBuffer, dstFormat, nDstStride ); }
 
 	// Gets/sets viewport
@@ -389,6 +419,11 @@ public:
 
 	// Sets the cull mode
 	DELEGATE_TO_OBJECT_1V(					CullMode, MaterialCullMode_t, g_pShaderAPI );
+	DELEGATE_TO_OBJECT_0V(					FlipCullMode, g_pShaderAPI );
+
+	DELEGATE_TO_OBJECT_0V(					BeginGeneratingCSMs, g_pShaderAPI );
+	DELEGATE_TO_OBJECT_0V(					EndGeneratingCSMs, g_pShaderAPI );
+	DELEGATE_TO_OBJECT_3V(					PerpareForCascadeDraw, int, float, float, g_pShaderAPI );
 
 	// Sets the number of bones for skinning
 	DELEGATE_TO_OBJECT_1V(					SetNumBoneWeights, int, g_pShaderAPI );
@@ -413,9 +448,13 @@ public:
 	int										GetCurrentNumBones( ) const											{ return g_pShaderAPI->GetCurrentNumBones(); }	
 
 	// Bind standard textures
-	void									BindStandardTexture( Sampler_t sampler, StandardTextureId_t id );
+	void									BindStandardTexture( Sampler_t sampler, TextureBindFlags_t nBindFlags, StandardTextureId_t id );
+	ShaderAPITextureHandle_t				GetStandardTexture( StandardTextureId_t id );
+
 	virtual void							BindStandardVertexTexture( VertexTextureSampler_t sampler, StandardTextureId_t id );
 	virtual void							GetStandardTextureDimensions( int *pWidth, int *pHeight, StandardTextureId_t id );
+
+	virtual float							GetSubDHeight();
 
 	// By default, the material system applies the VIEW and PROJECTION matrices	to the user clip
 	// planes (which are specified in world space) to generate projection-space user clip planes
@@ -436,12 +475,27 @@ public:
 	int										OcclusionQuery_GetNumPixelsRendered( OcclusionQueryObjectHandle_t h );
 
 	bool									InFlashlightMode() const;
-	void									SetFlashlightMode( bool bEnable );
+	bool									IsRenderingPaint() const;
+	virtual void							SetFlashlightMode( bool bEnable );
+	virtual void							SetRenderingPaint( bool bEnable );
 	bool									GetFlashlightMode( ) const;
+
+	virtual bool							IsCascadedShadowMapping() const;
+	virtual void							SetCascadedShadowMapping( bool bEnable );
+	virtual void							SetCascadedShadowMappingState( const CascadedShadowMappingState_t &state, ITexture *pDepthTextureAtlas );
+	
+	virtual bool							IsCullingEnabledForSinglePassFlashlight() const;
+	virtual void							EnableCullingForSinglePassFlashlight( bool bEnable );	
+
 	void									SetFlashlightState( const FlashlightState_t &state, const VMatrix &worldToTexture );
 	void									SetFlashlightStateEx( const FlashlightState_t &state, const VMatrix &worldToTexture, ITexture *pFlashlightDepthTexture );
 
-	void									SetScissorRect( const int nLeft, const int nTop, const int nRight, const int nBottom, const bool bEnableScissor );
+	void									PushScissorRect( const int nLeft, const int nTop, const int nRight, const int nBottom );
+	void									PopScissorRect();
+	
+#if defined( _GAMECONSOLE )
+	void BeginConsoleZPass( const WorldListIndicesInfo_t &indicesInfo ){ BeginConsoleZPass2( indicesInfo.m_nTotalIndices ); }
+#endif
 
 	// Creates/destroys morph data associated w/ a particular material
 	IMorph *								CreateMorph( MorphFormat_t format, const char *pDebugName );
@@ -477,6 +531,9 @@ public:
 	void									GetLightmapDimensions( int *w, int *h );
 
 	void									DrawClearBufferQuad( unsigned char r, unsigned char g, unsigned char b, unsigned char a, bool bClearColor, bool bClearAlpha, bool bClearDepth );
+#ifdef _PS3
+	void									DrawReloadZcullQuad();
+#endif // _PS3
 
 	void									UpdateHeightClipUserClipPlane( void );
 
@@ -491,22 +548,17 @@ public:
 	
 	DELEGATE_TO_OBJECT_2V(					SetFloatRenderingParameter, int, float, g_pShaderAPI );
 	DELEGATE_TO_OBJECT_2V(					SetIntRenderingParameter, int, int, g_pShaderAPI );
+	DELEGATE_TO_OBJECT_2V(					SetTextureRenderingParameter, int, ITexture *, g_pShaderAPI );
 	DELEGATE_TO_OBJECT_2V(					SetVectorRenderingParameter, int, const Vector &, g_pShaderAPI );
 	DELEGATE_TO_OBJECT_1C( float,			GetFloatRenderingParameter, int, g_pShaderAPI );
 	DELEGATE_TO_OBJECT_1C( int,				GetIntRenderingParameter, int, g_pShaderAPI );
+	DELEGATE_TO_OBJECT_1C( ITexture *,		GetTextureRenderingParameter, int, g_pShaderAPI );
 	DELEGATE_TO_OBJECT_1C( Vector,			GetVectorRenderingParameter, int, g_pShaderAPI );
 
 	DELEGATE_TO_OBJECT_4V(					GetMaxToRender, IMesh *, bool, int *, int *, g_pShaderAPI );
 	DELEGATE_TO_OBJECT_1( int,				GetMaxVerticesToRender, IMaterial *, g_pShaderAPI );
 	DELEGATE_TO_OBJECT_0( int,				GetMaxIndicesToRender, g_pShaderAPI );
-	DELEGATE_TO_OBJECT_1V(					SetStencilEnable, bool, g_pShaderAPI );
-	DELEGATE_TO_OBJECT_1V(					SetStencilFailOperation, StencilOperation_t, g_pShaderAPI );
-	DELEGATE_TO_OBJECT_1V(					SetStencilZFailOperation, StencilOperation_t, g_pShaderAPI );
-	DELEGATE_TO_OBJECT_1V(					SetStencilPassOperation, StencilOperation_t, g_pShaderAPI );
-	DELEGATE_TO_OBJECT_1V(					SetStencilCompareFunction, StencilComparisonFunction_t, g_pShaderAPI );
-	DELEGATE_TO_OBJECT_1V(					SetStencilReferenceValue, int, g_pShaderAPI );
-	DELEGATE_TO_OBJECT_1V(					SetStencilTestMask, uint32, g_pShaderAPI );
-	DELEGATE_TO_OBJECT_1V(					SetStencilWriteMask, uint32, g_pShaderAPI );
+	DELEGATE_TO_OBJECT_1V(					SetStencilState, const ShaderStencilState_t &, g_pShaderAPI );
 	DELEGATE_TO_OBJECT_5V(					ClearStencilBufferRectangle, int, int, int, int, int, g_pShaderAPI );
 
 	// PIX support
@@ -518,17 +570,17 @@ public:
 
 	void									BeginBatch( IMesh* pIndices );
 	void									BindBatch( IMesh* pVertices, IMaterial *pAutoBind = NULL );
-	void									DrawBatch(int firstIndex, int numIndices );
+	void									DrawBatch( MaterialPrimitiveType_t primType, int firstIndex, int numIndices );
 	void									EndBatch();
 
 	void									SetToneMappingScaleLinear( const Vector &scale );
 
 	bool									OnDrawMesh( IMesh *pMesh, int firstIndex, int numIndices );
 	bool									OnDrawMesh( IMesh *pMesh, CPrimList *pLists, int nLists );
+	bool									OnDrawMeshModulated( IMesh *pMesh, const Vector4D &diffuseModulation, int firstIndex, int numIndices );
 	bool									OnSetFlexMesh( IMesh *pStaticMesh, IMesh *pMesh, int nVertexOffsetInBytes ) { return true; }
 	bool									OnSetColorMesh( IMesh *pStaticMesh, IMesh *pMesh, int nVertexOffsetInBytes ) { return true; }
 	bool									OnSetPrimitiveType( IMesh *pMesh, MaterialPrimitiveType_t type ) { return true; }
-	bool									OnFlushBufferedPrimitives() { SyncMatrices(); return true; }
 
 	CMaterialSystem							*GetMaterialSystem() const;
 
@@ -536,18 +588,15 @@ public:
 	DELEGATE_TO_OBJECT_0V(					BeginFrame, g_pShaderAPI );
 	DELEGATE_TO_OBJECT_0V(					EndFrame, g_pShaderAPI );
 
-	virtual void							AsyncCreateTextureFromRenderTarget( ITexture* pSrcRt, const char* pDstName, ImageFormat dstFmt, bool bGenMips, int nAdditionalCreationFlags, IAsyncTextureOperationReceiver* pRecipient, void* pExtraArgs );
-
-	virtual void							AsyncMap( ITextureInternal* pTexToMap, IAsyncTextureOperationReceiver* pRecipient, void* pExtraArgs ) OVERRIDE;
-	virtual void							AsyncUnmap( ITextureInternal* pTexToUnmap ) OVERRIDE;
-	virtual void							AsyncCopyRenderTargetToStagingTexture( ITexture* pDst, ITexture* pSrc, IAsyncTextureOperationReceiver* pRecipient, void* pExtraArgs ) OVERRIDE;
-
-
-
 	virtual void							BeginMorphAccumulation();
 	virtual void							EndMorphAccumulation();
 	virtual void							AccumulateMorph( IMorph* pMorph, int nMorphCount, const MorphWeight_t* pWeights );
 	virtual bool							GetMorphAccumulatorTexCoord( Vector2D *pTexCoord, IMorph *pMorph, int nVertex );
+
+	// Subdivision surface interface
+	virtual int								GetSubDBufferWidth();
+	virtual float							*LockSubDBuffer( int nNumRows );
+	virtual void							UnlockSubDBuffer();
 
 	DELEGATE_TO_OBJECT_1V(                  PushDeformation, const DeformationBase_t *, g_pShaderAPI );
 	DELEGATE_TO_OBJECT_0V(                  PopDeformation, g_pShaderAPI );
@@ -569,24 +618,69 @@ public:
 #if defined( _X360 )
 	DELEGATE_TO_OBJECT_1V(                  PushVertexShaderGPRAllocation, int, g_pShaderAPI );
 	DELEGATE_TO_OBJECT_0V(                  PopVertexShaderGPRAllocation, g_pShaderAPI );
+	DELEGATE_TO_OBJECT_0V(                  FlushHiStencil, g_pShaderAPI );
 #endif
 
+#if defined( _GAMECONSOLE )
+	DELEGATE_TO_OBJECT_1V(                  BeginConsoleZPass2, int, g_pShaderAPI );
+	DELEGATE_TO_OBJECT_0V(                  EndConsoleZPass, g_pShaderAPI );
+#endif
+
+#if defined( _PS3 )
+	DELEGATE_TO_OBJECT_0V(					FlushTextureCache, g_pShaderAPI );
+#endif
+	DELEGATE_TO_OBJECT_1V(					AntiAliasingHint, int, g_pShaderAPI );
+
 	// A special path used to tick the front buffer while loading on the 360
+	virtual void							SetNonInteractiveLogoTexture( ITexture *pTexture, float flNormalizedX, float flNormalizedY, float flNormalizedW, float flNormalizedH );
 	virtual void							SetNonInteractivePacifierTexture( ITexture *pTexture, float flNormalizedX, float flNormalizedY, float flNormalizedSize );
 	virtual void							SetNonInteractiveTempFullscreenBuffer( ITexture *pTexture, MaterialNonInteractiveMode_t mode );
 	virtual void							EnableNonInteractiveMode( MaterialNonInteractiveMode_t mode );
 	virtual void			                RefreshFrontBufferNonInteractive();
 
-	// debug logging
-	virtual void							PrintfVA( char *fmt, va_list vargs );
-	virtual void							Printf( PRINTF_FORMAT_STRING const char *fmt, ... );
-	virtual float							Knob( char *knobname, float *setvalue=NULL );
+	DELEGATE_TO_OBJECT_1V(					FlipCulling, bool, g_pShaderAPI );
 
-#ifdef DX_TO_GL_ABSTRACTION
+//	DELEGATE_TO_OBJECT_1V(					EnableSinglePassFlashlightMode, bool, g_pShaderAPI );
+	virtual void							EnableSinglePassFlashlightMode( bool bEnable );	
+	virtual bool							SinglePassFlashlightModeEnabled() const;
+
+	DELEGATE_TO_OBJECT_2V(					DrawInstances, int, const MeshInstanceData_t *, g_pShaderAPI );
+
+	DELEGATE_TO_OBJECT_1V(                  UpdateGameTime, float, g_pShaderAPI );
+
+	//--------------------------------------------------------
+	// debug logging - no-op in queued context
+	//--------------------------------------------------------
+	virtual void							Printf( char *fmt, ... );
+	virtual void							PrintfVA( char *fmt, va_list vargs );;
+	virtual float							Knob( char *knobname, float *setvalue=NULL );	
+
+#if defined( DX_TO_GL_ABSTRACTION ) && !defined( _GAMECONSOLE )
 	void									DoStartupShaderPreloading( void );
 #endif
 
-	virtual void							TextureManagerUpdate();
+
+	//---------------------------------------------------------
+
+#if defined( INCLUDE_SCALEFORM )
+	//--------------------------------------------------------
+	// scaleform interaction
+	//--------------------------------------------------------
+
+	void									SetScaleformSlotViewport( int slot, int x, int y, int w, int h ) { ScaleformUI()->SetSlotViewport( slot, x, y, w, h ); }
+	void									RenderScaleformSlot( int slot ) { ScaleformUI()->RenderSlot( slot ); }
+	void									ForkRenderScaleformSlot( int slot ) { ScaleformUI()->ForkRenderSlot( slot ); }
+	void									JoinRenderScaleformSlot( int slot ) { ScaleformUI()->JoinRenderSlot( slot ); }
+
+	void									SetScaleformCursorViewport( int x, int y, int w, int h ) { ScaleformUI()->SetCursorViewport( x, y, w, h ); }
+	void									RenderScaleformCursor( void ) { ScaleformUI()->RenderCursor(); }
+
+	void									AdvanceAndRenderScaleformSlot( int slot ) { ScaleformUI()->AdvanceSlot( slot ); ScaleformUI()->RenderSlot( slot ); }
+	void									AdvanceAndRenderScaleformCursor() { ScaleformUI()->AdvanceCursor(); ScaleformUI()->RenderCursor(); }
+
+#endif // INCLUDE_SCALEFORM
+
+	DELEGATE_TO_OBJECT_1( ColorCorrectionHandle_t, FindLookup, const char *, g_pColorCorrectionSystem );
 
 	//---------------------------------------------------------
 protected:
@@ -595,11 +689,14 @@ protected:
 	IMaterialInternal *GetDrawFlatMaterial();
 	IMaterialInternal *GetRenderTargetBlitMaterial();
 	IMaterialInternal *GetBufferClearObeyStencil( int i );
+	IMaterialInternal *GetReloadZcullMaterial();
 
 	ShaderAPITextureHandle_t GetFullbrightLightmapTextureHandle() const;
 	ShaderAPITextureHandle_t GetFullbrightBumpedLightmapTextureHandle() const;
 	ShaderAPITextureHandle_t GetBlackTextureHandle() const;
+	ShaderAPITextureHandle_t GetBlackAlphaZeroTextureHandle() const;
 	ShaderAPITextureHandle_t GetFlatNormalTextureHandle() const;
+	ShaderAPITextureHandle_t GetFlatSSBumpTextureHandle() const;
 	ShaderAPITextureHandle_t GetGreyTextureHandle() const;
 	ShaderAPITextureHandle_t GetGreyAlphaZeroTextureHandle() const;
 	ShaderAPITextureHandle_t GetWhiteTextureHandle() const;
@@ -607,27 +704,40 @@ protected:
 	ShaderAPITextureHandle_t GetMaxDepthTextureHandle() const;
 
 	// Helper methods
-	void BindLightmap( Sampler_t stage );
-	void BindBumpLightmap( Sampler_t stage );
-	void BindFullbrightLightmap( Sampler_t stage );
-	void BindBumpedFullbrightLightmap( Sampler_t stage );
+	void BindLightmap( Sampler_t stage, TextureBindFlags_t nBindFlags );
+	void BindBumpLightmap( Sampler_t stage, TextureBindFlags_t nBindFlags );
+	void BindFullbrightLightmap( Sampler_t stage, TextureBindFlags_t nBindFlags );
+	void BindBumpedFullbrightLightmap( Sampler_t stage, TextureBindFlags_t nBindFlags );
+	void BindPaintTexture( Sampler_t stage, TextureBindFlags_t nBindFlags );
 
 	virtual void OnRenderDataUnreferenced();
 
 	const CMatLightmaps *GetLightmaps() const;
 	CMatLightmaps *GetLightmaps();
 
+	const CMatPaintmaps *GetPaintmaps() const;
+	CMatPaintmaps *GetPaintmaps();
+
 	CUtlVector<PlaneStackElement>		m_CustomClipPlanes; //implemented as a vector so we can remove in special ways
 
 	IMesh *m_pBatchIndices;
 	IMesh *m_pBatchMesh;
 	IIndexBuffer *m_pCurrentIndexBuffer;
+
 	CTextureReference m_pNonInteractiveTempFullscreenBuffer[MATERIAL_NON_INTERACTIVE_MODE_COUNT];
 	CTextureReference m_pNonInteractivePacifier;
+	CTextureReference m_pNonInteractiveLogo;
+
 	MaterialNonInteractiveMode_t m_NonInteractiveMode;
+
 	float m_flNormalizedX;
 	float m_flNormalizedY;
 	float m_flNormalizedSize;
+
+	float m_flLogoNormalizedX;
+	float m_flLogoNormalizedY;
+	float m_flLogoNormalizedW;
+	float m_flLogoNormalizedH;
 };
 
 
@@ -646,9 +756,24 @@ inline bool CMatRenderContext::InFlashlightMode() const
 	return m_bFlashlightEnable;
 }
 
+inline bool CMatRenderContext::IsRenderingPaint() const
+{
+	return m_bRenderingPaint;
+}
+
 inline void CMatRenderContext::SetFlashlightState( const FlashlightState_t &state, const VMatrix &worldToTexture )
 {
 	SetFlashlightStateEx( state, worldToTexture, NULL );
+}
+
+inline bool CMatRenderContext::IsCascadedShadowMapping() const
+{
+	return m_bCascadedShadowMappingEnabled;
+}
+
+inline void CMatRenderContext::SetCascadedShadowMapping( bool bEnable )
+{
+	m_bCascadedShadowMappingEnabled = bEnable;
 }
 
 inline float CMatRenderContextBase::ComputePixelWidthOfSphere( const Vector& vecOrigin, float flRadius )
@@ -687,14 +812,16 @@ inline MorphFormat_t CMatRenderContext::GetBoundMorphFormat()
 //-----------------------------------------------------------------------------
 // Use this to create static vertex and index buffers 
 //-----------------------------------------------------------------------------
-inline IMesh* CMatRenderContext::CreateStaticMesh( VertexFormat_t vertexFormat, const char *pTextureBudgetGroup, IMaterial * pMaterial )
+inline IMesh* CMatRenderContext::CreateStaticMesh( VertexFormat_t vertexFormat, const char *pTextureBudgetGroup, IMaterial * pMaterial, VertexStreamSpec_t *pStreamSpec )
 {
-	return g_pShaderDevice->CreateStaticMesh( vertexFormat, pTextureBudgetGroup, pMaterial );
+	return g_pShaderDevice->CreateStaticMesh( vertexFormat, pTextureBudgetGroup, pMaterial, pStreamSpec );
 }
 
 inline void CMatRenderContext::SyncToken( const char *pToken )
 {
+#if !defined( _PS3 ) && !defined( _OSX )
 	if ( g_pShaderAPI )
+#endif
 	{
 		g_pShaderAPI->SyncToken( pToken );
 	}
@@ -714,6 +841,10 @@ inline CMaterialSystem *CMatRenderContext::GetMaterialSystem() const
 {
 	return m_pMaterialSystem;
 }
+
+#if defined( _PS3 ) || defined( _OSX )
+#undef g_pShaderAPI
+#endif
 
 //-----------------------------------------------------------------------------
 

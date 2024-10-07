@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -145,10 +145,10 @@ static ConCommand vprof_child		("vprof_child",		  IN_VProfChild);
 CVProfGraphPanel::CVProfGraphPanel( vgui::VPANEL parent ) : BaseClass( NULL, "CVProfGraphPanel" )
 {
 	SetParent( parent ); 
-	SetSize( videomode->GetModeStereoWidth(), videomode->GetModeStereoHeight() );
+	SetSize( videomode->GetModeWidth(), videomode->GetModeHeight() );
 	SetPos( 0, 0 );
 	SetVisible( false );
-	SetCursor( null );
+	SetCursor( 0 );
 
 	m_hFont = 0;
 
@@ -234,8 +234,8 @@ void CVProfGraphPanel::Paint()
 	// Get screen rectangle
 	vrect.x		 = 0;
 	vrect.y		 = 0;
-	vrect.width	 = videomode->GetModeStereoWidth();
-	vrect.height = videomode->GetModeStereoHeight();
+	vrect.width	 = videomode->GetModeWidth();
+	vrect.height = videomode->GetModeHeight();
 
 	// Determine graph width
 	w = vprof_graphwidth.GetInt();
@@ -427,6 +427,16 @@ void DestroyVProfGraphPanel()
 		s_pVProfGraphPanel->SetParent( (vgui::Panel *)NULL );
 		delete s_pVProfGraphPanel;
 		s_pVProfGraphPanel = NULL;
+	}
+#endif
+}
+
+void HideVProfGraphPanel()
+{
+#ifdef VPROF_ENABLED
+	if ( s_pVProfGraphPanel )
+	{
+		s_pVProfGraphPanel->SetVisible( false );
 	}
 #endif
 }

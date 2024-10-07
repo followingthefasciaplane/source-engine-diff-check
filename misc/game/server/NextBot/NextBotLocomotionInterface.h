@@ -1,7 +1,7 @@
 // NextBotLocomotionInterface.h
 // NextBot interface for movement through the environment
 // Author: Michael Booth, April 2005
-//========= Copyright Valve Corporation, All rights reserved. ============//
+// Copyright (c) 2005 Turtle Rock Studios, Inc. - All Rights Reserved
 
 #ifndef _NEXT_BOT_LOCOMOTION_INTERFACE_H_
 #define _NEXT_BOT_LOCOMOTION_INTERFACE_H_
@@ -146,12 +146,6 @@ public:
 
 	void TraceHull( const Vector& start, const Vector& end, const Vector &mins, const Vector &maxs, unsigned int fMask, ITraceFilter *pFilter, trace_t *pTrace ) const;
 
-	/**
-	 * Should we collide with this entity?
-	 */
-	virtual bool ShouldCollideWith( const CBaseEntity *object ) const	{ return true; }
-
-
 protected:
 	virtual void AdjustPosture( const Vector &moveGoal );
 	virtual void StuckMonitor( void );
@@ -254,6 +248,11 @@ inline bool ILocomotion::IsAscendingOrDescendingLadder( void ) const
 inline const QAngle &ILocomotion::GetDesiredLean( void ) const
 {
 	return vec3_angle;
+}
+
+inline const Vector &ILocomotion::GetFeet( void ) const
+{
+	return vec3_origin;
 }
 
 inline float ILocomotion::GetStepHeight( void ) const

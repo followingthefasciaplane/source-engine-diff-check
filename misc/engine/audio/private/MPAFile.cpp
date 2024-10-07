@@ -1,28 +1,24 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
 //=============================================================================
 
-#if defined( WIN32) && !defined( _X360 )
 #include "winlite.h"
-#endif
-#include "tier0/platform.h"
 #include "MPAFile.h"
 #include "soundchars.h"
 #include "tier1/utlrbtree.h"
 
-#include "memdbgon.h"
-
-extern IFileSystem *g_pFullFileSystem;
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
 
 
 // exception class
 CMPAException::CMPAException(ErrorIDs ErrorID, const char *szFile, const char *szFunction, bool bGetLastError ) :
 m_ErrorID( ErrorID ), m_bGetLastError( bGetLastError )
 {
-    m_szFile = szFile ? strdup(szFile) : NULL;
-    m_szFunction = szFunction ? strdup(szFunction) : NULL;
+    m_szFile = strdup(szFile);
+    m_szFunction = strdup(szFunction);
 }
 
 // copy constructor (necessary for exception throwing without pointers)
@@ -30,8 +26,8 @@ CMPAException::CMPAException(const CMPAException& Source)
 {
     m_ErrorID = Source.m_ErrorID;
     m_bGetLastError = Source.m_bGetLastError;
-    m_szFile = Source.m_szFile ? strdup(Source.m_szFile) : NULL;
-    m_szFunction = Source.m_szFunction ? strdup(Source.m_szFunction) : NULL;
+    m_szFile = strdup(Source.m_szFile);
+    m_szFunction = strdup(Source.m_szFunction);
 }
 
 // destructor
@@ -316,8 +312,7 @@ uint32 CMPAFile::ExtractBytes( uint32& dwOffset, uint32 dwNumBytes, bool bMoveOf
 
     for( uint32 n=dwOffset; n < dwOffset+dwNumBytes; n++ )
     {
-        dwResult |= ((byte)m_pBuffer[n]) << (8*dwNumByteShifts); // the bit shift will do the correct byte order for you                                                           
-		dwNumByteShifts--;
+        dwResult |= ( ( unsigned char ) m_pBuffer[n] ) << 8*dwNumByteShifts--; // the bit shift will do the correct byte order for you                                                           
     }
     
     if( bMoveOffset )

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======//
 //
 // Purpose: 
 //
@@ -33,7 +33,7 @@ public:
 	CAttributeAssetPickerPanel( vgui::Panel *parent, const AttributeWidgetInfo_t &info );
 	~CAttributeAssetPickerPanel();
 
-private:
+protected:
 	virtual CBaseAssetPickerFrame *CreateAssetPickerFrame() = 0;
 	MESSAGE_FUNC_PARAMS( OnAssetSelected, "AssetSelected", kv );
 	virtual void ShowPickerDialog();
@@ -86,8 +86,20 @@ private:
 // Assets
 //-----------------------------------------------------------------------------
 DECLARE_ATTRIBUTE_ASSET_PICKER( CAttributeBspPickerPanel );
-DECLARE_ATTRIBUTE_ASSET_PREVIEW_PICKER( CAttributeVmtPickerPanel );
 DECLARE_ATTRIBUTE_ASSET_PREVIEW_PICKER( CAttributeVtfPickerPanel );
+DECLARE_ATTRIBUTE_ASSET_PREVIEW_PICKER( CAttributeTgaPickerPanel );
 
+
+class CAttributeVmtPickerPanel : public CAttributeAssetPickerPanel
+{
+	DECLARE_CLASS_SIMPLE( CAttributeVmtPickerPanel, CAttributeAssetPickerPanel );
+public:
+	CAttributeVmtPickerPanel( vgui::Panel *parent, const AttributeWidgetInfo_t &info ) :	
+		BaseClass( parent, info ) {}
+private:
+	virtual CBaseAssetPickerFrame *CreateAssetPickerFrame();
+
+	MESSAGE_FUNC_PARAMS( OnAssetSelected, "AssetSelected", kv );
+};
 
 #endif // ATTRIBUTEASSETPICKERPANEL_H

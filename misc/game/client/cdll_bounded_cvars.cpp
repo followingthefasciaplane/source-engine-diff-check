@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright � 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -10,9 +10,12 @@
 #include "convar_serverbounded.h"
 #include "tier0/icommandline.h"
 
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
 
 bool g_bForceCLPredictOff = false;
-
+bool g_bSpectatingForceCLPredictOff = false;
 // ------------------------------------------------------------------------------------------ //
 // cl_predict.
 // ------------------------------------------------------------------------------------------ //
@@ -23,11 +26,7 @@ public:
 	CBoundedCvar_Predict() :
 	  ConVar_ServerBounded( "cl_predict", 
 		  "1.0", 
-#if defined(DOD_DLL) || defined(CSTRIKE_DLL)
-		  FCVAR_USERINFO | FCVAR_CHEAT, 
-#else
 		  FCVAR_USERINFO | FCVAR_NOT_CONNECTED, 
-#endif
 		  "Perform client side prediction." )
 	  {
 	  }
@@ -35,7 +34,7 @@ public:
 	  virtual float GetFloat() const
 	  {
 		  // Used temporarily for CS kill cam.
-		  if ( g_bForceCLPredictOff )
+		  if ( g_bForceCLPredictOff || g_bSpectatingForceCLPredictOff )
 			  return 0;
 
 		  static const ConVar *pClientPredict = g_pCVar->FindVar( "sv_client_predict" );
@@ -66,7 +65,7 @@ public:
 	CBoundedCvar_InterpRatio() :
 	  ConVar_ServerBounded( "cl_interp_ratio", 
 		  "2.0", 
-		  FCVAR_USERINFO | FCVAR_NOT_CONNECTED | FCVAR_ARCHIVE, 
+		  FCVAR_USERINFO | FCVAR_NOT_CONNECTED, 
 		  "Sets the interpolation amount (final amount is cl_interp_ratio / cl_updaterate)." )
 	  {
 	  }
@@ -75,13 +74,18 @@ public:
 	  {
 		  static const ConVar *pMin = g_pCVar->FindVar( "sv_client_min_interp_ratio" );
 		  static const ConVar *pMax = g_pCVar->FindVar( "sv_client_max_interp_ratio" );
+
+		  float flBaseFloatValue = GetBaseFloatValue();
+		  if ( engine->IsPlayingDemo() && engine->GetDemoPlaybackParameters() )
+			  flBaseFloatValue = 2.0f; // use the default value when playing demos
+
 		  if ( pMin && pMax && pMin->GetFloat() != -1 )
 		  {
-			  return clamp( GetBaseFloatValue(), pMin->GetFloat(), pMax->GetFloat() );
+			  return clamp( flBaseFloatValue, pMin->GetFloat(), pMax->GetFloat() );
 		  }
 		  else
 		  {
-			  return GetBaseFloatValue();
+			  return flBaseFloatValue;
 		  }
 	  }
 };
@@ -99,8 +103,8 @@ class CBoundedCvar_Interp : public ConVar_ServerBounded
 public:
 	CBoundedCvar_Interp() :
 	  ConVar_ServerBounded( "cl_interp", 
-		  "0.1", 
-		  FCVAR_USERINFO | FCVAR_NOT_CONNECTED | FCVAR_ARCHIVE, 
+		  "0.03125",		// 2 / 102.4
+		  FCVAR_USERINFO | FCVAR_NOT_CONNECTED, 
 		  "Sets the interpolation amount (bounded on low side by server interp ratio settings).", true, 0.0f, true, 0.5f )
 	  {
 	  }
@@ -109,13 +113,18 @@ public:
 	  {
 		  static const ConVar *pUpdateRate = g_pCVar->FindVar( "cl_updaterate" );
 		  static const ConVar *pMin = g_pCVar->FindVar( "sv_client_min_interp_ratio" );
+		  
+		  float flBaseFloatValue = GetBaseFloatValue();
+		  if ( engine->IsPlayingDemo() && engine->GetDemoPlaybackParameters() && pUpdateRate )
+			  flBaseFloatValue = 2.0f / pUpdateRate->GetFloat(); // use a default value 2/updaterate when playing demos
+
 		  if ( pUpdateRate && pMin && pMin->GetFloat() != -1 )
 		  {
-			  return MAX( GetBaseFloatValue(), pMin->GetFloat() / pUpdateRate->GetFloat() );
+			  return MAX( flBaseFloatValue, pMin->GetFloat() / pUpdateRate->GetFloat() );
 		  }
 		  else
 		  {
-			  return GetBaseFloatValue();
+			  return flBaseFloatValue;
 		  }
 	  }
 };
@@ -129,16 +138,13 @@ float GetClientInterpAmount()
 	if ( pUpdateRate )
 	{
 		// #define FIXME_INTERP_RATIO
-		return MAX( cl_interp->GetFloat(), cl_interp_ratio->GetFloat() / pUpdateRate->GetFloat() );
+		float interp = cl_interp_ratio->GetFloat() / pUpdateRate->GetFloat();
+		return interp;
 	}
 	else
 	{
-		if ( !HushAsserts() )
-		{
-			AssertMsgOnce( false, "GetInterpolationAmount: can't get cl_updaterate cvar." );
-		}
-	
-		return 0.1;
+		AssertMsgOnce( false, "GetInterpolationAmount: can't get cl_updaterate cvar." );	
+		return 0.1f;
 	}
 }
 

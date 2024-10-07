@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright (c) 1996-2002, Valve LLC, All rights reserved. ============
 //
 // Purpose: 
 //
@@ -12,6 +12,9 @@
 #include "colorcorrection_ps20b.inc"
 
 #include "../materialsystem_global.h"
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
 
 
 BEGIN_VS_SHADER_FLAGS( ColorCorrection, "Help for ColorCorrection", SHADER_NOT_EDITABLE )
@@ -57,11 +60,6 @@ BEGIN_VS_SHADER_FLAGS( ColorCorrection, "Help for ColorCorrection", SHADER_NOT_E
 
 	SHADER_FALLBACK
 	{
-		// Requires DX9 + above
-		if ( g_pHardwareConfig->GetDXSupportLevel() < 90 )
-		{
-			return "wireframe";
-		}
 		return 0;
 	}
 
@@ -88,8 +86,8 @@ BEGIN_VS_SHADER_FLAGS( ColorCorrection, "Help for ColorCorrection", SHADER_NOT_E
 				Assert(0);
 			}
 
-			// Render targets are always sRGB on OSX GL
-			bool bForceSRGBWrite = IsOSX() && g_pHardwareConfig->CanDoSRGBReadFromRTs();
+			// Render targets are always sRGB on togl OSX
+			bool bForceSRGBWrite = false;
 			pShaderShadow->EnableSRGBWrite( bForceSRGBWrite );
 
 			DECLARE_STATIC_VERTEX_SHADER( screenspaceeffect_vs20 );
@@ -109,13 +107,13 @@ BEGIN_VS_SHADER_FLAGS( ColorCorrection, "Help for ColorCorrection", SHADER_NOT_E
 		DYNAMIC_STATE
 		{
 			if( params[ USE_FB_TEXTURE ]->GetIntValue() )
-				pShaderAPI->BindStandardTexture( SHADER_SAMPLER0, TEXTURE_FRAME_BUFFER_FULL_TEXTURE_0 );
+				pShaderAPI->BindStandardTexture( SHADER_SAMPLER0, TEXTURE_BINDFLAGS_NONE, TEXTURE_FRAME_BUFFER_FULL_TEXTURE_0 );
 			else
-				BindTexture( SHADER_SAMPLER0, INPUT_TEXTURE, -1 );
+				BindTexture( SHADER_SAMPLER0, TEXTURE_BINDFLAGS_NONE, INPUT_TEXTURE, -1 );
 
 			for( int i=0;i<params[NUM_LOOKUPS]->GetIntValue();i++ )
 			{
-				pShaderAPI->BindStandardTexture( (Sampler_t)(SHADER_SAMPLER1+i), (StandardTextureId_t)(TEXTURE_COLOR_CORRECTION_VOLUME_0+i) );
+				pShaderAPI->BindStandardTexture( (Sampler_t)(SHADER_SAMPLER1+i), TEXTURE_BINDFLAGS_NONE, (StandardTextureId_t)(TEXTURE_COLOR_CORRECTION_VOLUME_0+i) );
 			}
 
 			float default_weight = params[ WEIGHT_DEFAULT ]->GetFloatValue();

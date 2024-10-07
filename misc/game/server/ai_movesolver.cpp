@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose:
 //
@@ -15,10 +15,13 @@
 
 //-----------------------------------------------------------------------------
 
-inline float V_round( float f )
+#if !defined(PS3) && (!defined(_MSC_VER) || _MSC_VER < 1800)
+// This C99 function exists in VS 2013's math.h and for PS3 but are not currently available elsewhere.
+inline float round( float f )
 {
 	return (float)( (int)( f + 0.5 ) );
 }
+#endif
 
 //-----------------------------------------------------------------------------
 // CAI_MoveSolver
@@ -114,7 +117,7 @@ bool CAI_MoveSolver::Solve( const AI_MoveSuggestion_t *pSuggestions, int nSugges
 		AI_MoveSuggestion_t *pHighSuggestion;
 	};
 
-	Solution_t 	solutions[NUM_SOLUTIONS]	= { { 0, 0, NULL } };
+	Solution_t 	solutions[NUM_SOLUTIONS]	= { 0 };
 
 	//---------------------------------
 
@@ -133,7 +136,7 @@ bool CAI_MoveSolver::Solve( const AI_MoveSuggestion_t *pSuggestions, int nSugges
 
 		// Convert arc values to solution indices relative to right post. Right is angle down, left is angle up.
 		float halfSpan	= current.arc.span * 0.5;
-		int   center 	= V_round( ( halfSpan * NUM_SOLUTIONS ) / 360 );
+		int   center 	= round( ( halfSpan * NUM_SOLUTIONS ) / 360 );
 		int   left		= ( current.arc.span * NUM_SOLUTIONS ) / 360;
 
 		float angRight   = current.arc.center - halfSpan;

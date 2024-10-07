@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -497,8 +497,8 @@ CPerfUIPanel::CPerfUIPanel( vgui::Panel *parent ) : BaseClass( parent, "PerfUIPa
 	int w = 250;
 	int h = 400;
 
-	int x = videomode->GetModeStereoWidth() - w - 10;
-	int y = ( videomode->GetModeStereoHeight() - h ) / 2 + videomode->GetModeStereoHeight() * 0.2;
+	int x = videomode->GetModeWidth() - w - 10;
+	int y = ( videomode->GetModeHeight() - h ) / 2 + videomode->GetModeHeight() * 0.2;
 	SetBounds( x, y, w, h );
 
 	// Create the child tool panels

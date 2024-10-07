@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -44,6 +44,23 @@ struct ShadowVertex_t
 	Vector	m_ShadowSpaceTexCoord;
 };
 
+enum
+{
+	SHADOW_VERTEX_TEMP_COUNT = 48
+};
+
+//-----------------------------------------------------------------------------
+// Used to clip the shadow decals
+//-----------------------------------------------------------------------------
+struct ShadowClipState_t
+{
+	int m_CurrVert;
+	int	m_TempCount;
+	int	m_ClipCount;
+	ShadowVertex_t	m_pTempVertices[SHADOW_VERTEX_TEMP_COUNT];
+	ShadowVertex_t*	RESTRICT m_ppClipVertices[2][SHADOW_VERTEX_TEMP_COUNT];
+};
+
 
 //-----------------------------------------------------------------------------
 // This structure contains info to accelerate shadow darkness computation
@@ -56,6 +73,7 @@ struct ShadowDecalRenderInfo_t
 	float m_flOOZFalloffDist;
 	float m_flFalloffAmount;
 	float m_flFalloffBias;
+	Vector m_vShadowFalloffParams;	// params munged for use in the shader
 };
 
 
@@ -76,13 +94,13 @@ public:
 	// AddShadowsOnSurfaceToRenderList. If there's a model to world transform
 	// for the shadow receiver, then send it in!
 	// NOTE: This draws both shadows and projected textures.
-	virtual void RenderProjectedTextures( VMatrix const* pModelToWorld = 0 ) = 0;
+	virtual void RenderProjectedTextures( IMatRenderContext *pRenderContext, VMatrix const* pModelToWorld = 0 ) = 0;
 
 	// NOTE: This draws shadows
-	virtual void RenderShadows( VMatrix const* pModelToWorld = 0 ) = 0;
+	virtual void RenderShadows( IMatRenderContext *pRenderContext, VMatrix const* pModelToWorld = 0 ) = 0;
 
 	// NOTE: This draws flashlights
-	virtual void RenderFlashlights( bool bDoMasking, VMatrix const* pModelToWorld = 0 ) = 0;
+	virtual void RenderFlashlights( bool bDoMasking, bool bDoSimpleProjections, VMatrix const* pModelToWorld = 0 ) = 0;
 
 	// Clears the list of shadows to render 
 	virtual void ClearShadowRenderList() = 0;
@@ -104,41 +122,29 @@ public:
 
 	virtual void SetNumWorldMaterialBuckets( int numMaterialSortBins ) = 0;
 
-	virtual void DrawFlashlightDecals( int sortGroup, bool bDoMasking ) = 0;
+	virtual void DrawFlashlightDecals( IMatRenderContext *pRenderContext, int sortGroup, bool bDoMasking, float flFade = 1.0f ) = 0;
 
-	virtual void DrawFlashlightDecalsOnSingleSurface( SurfaceHandle_t surfID, bool bDoMasking ) = 0;
+	virtual void DrawFlashlightDecalsOnSurfaceList( IMatRenderContext *pRenderContext, SurfaceHandle_t *pList, int listCount, bool bDoMasking ) = 0;
 
-	virtual void DrawFlashlightOverlays( int nSortGroup, bool bDoMasking ) = 0;
+	virtual void DrawFlashlightOverlays( IMatRenderContext *pRenderContext, int nSortGroup, bool bDoMasking ) = 0;
 
 	virtual void DrawFlashlightDepthTexture( ) = 0;
 
-	virtual void DrawFlashlightDecalsOnDisplacements( int sortGroup, CDispInfo **visibleDisps, int nVisibleDisps, bool bDoMasking ) = 0;
+	virtual void DrawFlashlightDecalsOnDisplacements( IMatRenderContext *pRenderContext, int sortGroup, CDispInfo **visibleDisps, int nVisibleDisps, bool bDoMasking ) = 0;
 
 	virtual void SetFlashlightStencilMasks( bool bDoMasking ) = 0;
 	virtual bool ModelHasShadows( ModelInstanceHandle_t instance ) = 0;
 
-	// Converts z value to darkness
-	inline unsigned char ComputeDarkness( float z, const ShadowDecalRenderInfo_t& info ) const;
+	virtual int ProjectAndClipVerticesEx( ShadowHandle_t handle, int count, 
+		Vector** ppPosition, ShadowVertex_t*** ppOutVertex, ShadowClipState_t& clip ) = 0;
 };
-
-
-//-----------------------------------------------------------------------------
-// inline methods
-//-----------------------------------------------------------------------------
-inline unsigned char IShadowMgrInternal::ComputeDarkness( float z, const ShadowDecalRenderInfo_t& info ) const
-{
-	// NOTE: 0 means black, non-zero adds towards white...
-	z = ( z - info.m_flFalloffOffset ) * info.m_flOOZFalloffDist;
-	z = fsel( z, z, 0.0f );
-	z = info.m_flFalloffBias + z * info.m_flFalloffAmount;
-	z = fsel( z - 255.0f, 255.0f, z );
-	return z;
-}
 
 
 //-----------------------------------------------------------------------------
 // Singleton
 //-----------------------------------------------------------------------------
+#ifndef DEDICATED
 extern IShadowMgrInternal* g_pShadowMgr;
+#endif
 
 #endif

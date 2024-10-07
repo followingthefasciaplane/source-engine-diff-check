@@ -1,59 +1,51 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
 //=============================================================================
+
 #include "cbase.h"
 
 #include "igamesystem.h"
-#include "gamestats.h"
+#include "GameStats.h"
 #include "tier1/utlstring.h"
 #include "filesystem.h"
 #include "tier1/utlbuffer.h"
 #include "fmtstr.h"
+#include "tier2/tier2.h"
+#include "tier0/cpumonitoring.h"
+#include "materialsystem/imaterialsystemhardwareconfig.h"
 
-#ifndef SWDS
+#ifndef DEDICATED
 #include "iregistry.h"
 #endif
 
 #include "tier1/utldict.h"
 #include "tier0/icommandline.h"
+#include "tier0/perfstats.h"
 #include <time.h>
 #ifdef GAME_DLL
 #include "vehicle_base.h"
 #endif 
 
-#if defined( _X360 )
-#include "xbox/xbox_win32stubs.h"
-#endif
-
 #ifdef CLIENT_DLL
-#include "materialsystem/materialsystem_config.h"
 #include "vgui_int.h"
 #include "igameresources.h"
 #include "voice_status.h"
 extern const ConVar *sv_cheats;
-#if !defined(NO_STEAM)
-#include "steam/steam_api.h"
+#ifndef NO_STEAM
+#include "steamworks_gamestats_client.h"
 #endif
-#include "inputsystem/iinputsystem.h"
-#endif
-
-
-#if !defined(NO_STEAM) && defined(CLIENT_DLL)
-#if defined(TF_CLIENT_DLL) ||  defined(CSTRIKE_DLL)
-#define STEAMWORKS_GAMESTATS_ACTIVE
-#include "steamworks_gamestats.h"
-#endif
+#include "materialsystem/materialsystem_config.h"
 #endif
 
-#ifdef CLIENT_DLL
-	// Ensure this is declared in the client dll so everyone finds the same one.
-	ConVar dev_loadtime_mainmenu("dev_loadtime_mainmenu", "0.0", FCVAR_HIDDEN );
+#if defined( _X360 )
+#include "xbox/xbox_win32stubs.h"
 #endif
 
 // NOTE: This has to be the last file included!
 #include "tier0/memdbgon.h"
+
 
 
 #define GAMESTATS_LOG_FILE "gamestats.log"
@@ -104,7 +96,10 @@ public:
 	void AllocData()
 	{
 		FreeData();
-		m_pKVData = new KeyValues( "gamestats" );
+		char buffer[ 128 ];
+		Q_snprintf( buffer, sizeof( buffer ), "gamestats_" );
+		UTIL_GetModDir( buffer + 10, sizeof( buffer ) - 10 );
+		m_pKVData = new KeyValues( buffer );
 	}
 	void FreeData()
 	{
@@ -119,12 +114,366 @@ public:
 	bool m_bHaveData;
 };
 
-CBaseGameStats_Driver CBGSDriver;
+//used to drive most of the game stat event handlers as well as track basic stats under the hood of CBaseGameStats
+class CBaseGameStats_Driver : public CAutoGameSystemPerFrame
+{
+public:
+	CBaseGameStats_Driver( void );
+	
+	typedef CAutoGameSystemPerFrame BaseClass;
+
+	// IGameSystem overloads
+	virtual bool Init();
+	virtual void Shutdown();
+
+	// Level init, shutdown
+	virtual void LevelInitPreEntity();
+	virtual void LevelShutdownPreEntity();
+	// Called during game save
+	virtual void OnSave();
+	// Called during game restore, after the local player has connected and entities have been fully restored
+	virtual void OnRestore();
+
+	virtual void FrameUpdatePostEntityThink();
+
+	void PossibleMapChange( void );
+
+	void CollectData( StatSendType_t sendType );
+	void SendData();
+	void ResetData();
+	bool AddBaseDataForSend( KeyValues *pKV, StatSendType_t sendType );
+
+	StatsBufferRecord_t m_StatsBuffer[STATS_WINDOW_SIZE];
+	bool m_bBufferFull;
+	int m_nWriteIndex;
+	double m_flLastRealTime;
+	double m_flLastSampleTime;
+	float m_flTotalTimeInLevels;
+	int m_iNumLevels;
+	bool m_bDidVoiceChat;	// Did the player use voice chat at ALL this map?
+
+	// Track how often the CPU is reported as running at full speed (above kCPUMonitoringWarning1),
+	// medium speed (above kCPUMonitoringWarning2) or low speed (other).
+	int m_nCPUUnthrottledCount;
+	int m_nCPUThrottle1Count;
+	int m_nCPUThrottle2Count;
+	// Track when we last received data.
+	double m_lastCPUFrequencyTimestamp;
+
+	// Generate a buffer that will keep trailing observations prior to adding them to the main m_StatsBuffer array
+	StatsBufferRecord_t m_TrailingStatsBuffer[STATS_TRAILING_WINDOW_SIZE];
+	int m_nTrailingWriteIndex;
+	int m_nTrailingSamplesWritten;	
+	
+
+	template<class T> T AverageStat( T StatsBufferRecord_t::*field ) const
+	{
+		T sum = 0;
+		int iMax = m_bBufferFull ? ARRAYSIZE( m_StatsBuffer ) : m_nWriteIndex;
+		for( int i = 0; i < iMax; i++ )
+			sum += m_StatsBuffer[i].*field;
+		return sum / iMax;
+	}
+
+	template<class T> T MaxStat( T StatsBufferRecord_t::*field ) const
+	{
+		T maxsofar = -16000000;
+		int iMax = m_bBufferFull ? ARRAYSIZE( m_StatsBuffer ) : m_nWriteIndex;
+		for( int i = 0; i < iMax; i++ )
+			maxsofar = MAX( maxsofar, m_StatsBuffer[i].*field );
+		return maxsofar;
+	}
+
+	template<class T> T MinStat( T StatsBufferRecord_t::*field ) const
+	{
+		T minsofar = 16000000;
+		int iMax = m_bBufferFull ? ARRAYSIZE( m_StatsBuffer ) : m_nWriteIndex;
+		for( int i = 0; i < iMax; i++ )
+			minsofar = MIN( minsofar, m_StatsBuffer[i].*field );
+		return minsofar;
+	}
+
+	template<class T> T StdDevStat( T StatsBufferRecord_t::*field, T average ) const
+	{
+		T flDeviationsquared = 0;
+		int iMax = m_bBufferFull ? ARRAYSIZE( m_StatsBuffer ) : m_nWriteIndex;
+
+		// Compute std deviation
+		for (int i = 0; i < iMax; i++)
+		{
+			T val = m_StatsBuffer[i].*field - average;
+			flDeviationsquared += (val * val);
+		}
+
+		return ( ( iMax > 1 ) ? sqrt( (flDeviationsquared / T(iMax - 1) ) ) : 0 );
+	}
+
+	void SortFramerate()
+	{
+		int iMax = ( ( m_bBufferFull ) ? ARRAYSIZE( m_StatsBuffer ) : m_nWriteIndex ) - 1;
+
+		// Sort members of m_StatsBuffer
+		std::sort(&m_StatsBuffer[0],&m_StatsBuffer[iMax]);
+	}
+
+	float PercentileFramerate( int nPercent )  const
+	{
+	    int iMax = ( ( m_bBufferFull ) ? ARRAYSIZE( m_StatsBuffer ) : m_nWriteIndex ) - 1;
+
+		// Return the first or last member if nPercent is out of bounds
+		if ( nPercent >= 100 )
+			return m_StatsBuffer[iMax].m_flFrameRate;
+		if ( nPercent <= 0 )
+			return m_StatsBuffer[0].m_flFrameRate;
+
+		// Otherwise determine the desired index and return its field.	
+		// NOTE: nPercent = 50 is close to (but is NEVER) the median - special code would be needed to handle odd-item arrays, or averaging two elements for even-item arrays.
+		int nIdx = (iMax * nPercent) / 100;
+		return m_StatsBuffer[nIdx].m_flFrameRate;
+	}
+
+	inline void AdvanceIndex( void )
+	{
+		m_nWriteIndex++;
+		if ( m_nWriteIndex == STATS_WINDOW_SIZE )
+		{
+			m_nWriteIndex = 0;
+			m_bBufferFull = true;
+		}
+	}
+
+	void UpdatePerfStats( void )
+	{
+		double flCurTime = Plat_FloatTime();
+
+		if ( ( m_flLastRealTime > 0.0f ) &&
+				( flCurTime > m_flLastRealTime ) )
+		{				
+			float flFps = 1.0 / ( flCurTime - m_flLastRealTime );
+			float flCpuWait = g_PerfStats.m_Slots[ PERF_STATS_SLOT_END_FRAME ].m_PrevFrameTime.GetMillisecondsF();
+			if ( g_pGameRules ) // are we in the game? if not, it's not worth collecting histogram info
+			{
+				uint8 nBin = m_FpsHistory.Update( flFps, flCpuWait );
+				m_FpsHistogram.Update( nBin );
+				for ( int nEvent = 0; nEvent < PERF_STATS_EVENT_COUNT; ++nEvent )
+				{
+					m_FpsHistogramGame[ nEvent ].Update( nBin );
+				}
+			}
+
+			m_TrailingStatsBuffer[m_nTrailingWriteIndex].m_flFrameRate = flFps;
+
+			m_nTrailingWriteIndex++;
+			if ( m_nTrailingWriteIndex == STATS_TRAILING_WINDOW_SIZE )
+				m_nTrailingWriteIndex = 0;
+				
+			if ( m_nTrailingSamplesWritten < STATS_TRAILING_WINDOW_SIZE )
+				m_nTrailingSamplesWritten++;
+		}
+
+		if ( ( m_flLastSampleTime >= 0.0f ) && 
+			( flCurTime - m_flLastSampleTime >= STATS_RECORD_INTERVAL ) )
+		{
+			if ( ( m_flLastRealTime > 0 ) && ( flCurTime > m_flLastRealTime ) )
+			{
+			
+				StatsBufferRecord_t &stat = m_StatsBuffer[m_nWriteIndex];
+
+				float flSumFrameRate = 0;
+				for ( int i = 0; i < m_nTrailingSamplesWritten; i++ )
+				{
+					flSumFrameRate += m_TrailingStatsBuffer[i].m_flFrameRate;
+				}
+				float flFrameRate = flSumFrameRate / m_nTrailingSamplesWritten; 
+				stat.m_flFrameRate = flFrameRate;
+
+				m_nTrailingSamplesWritten = 0;
+				m_nTrailingWriteIndex = 0;
+
+#ifdef CLIENT_DLL
+				// The stat system isn't designed to handle split screen players. Until it get's 
+				// redesigned, let's take the first player's split screen ping, since all other stats
+				// will be based on the first player
+				IGameResources *gr = GameResources();
+				int ping = 0;
+				C_BasePlayer *pPlayer =	C_BasePlayer::GetLocalPlayer( FirstValidSplitScreenSlot() );
+				if ( pPlayer && gr )
+				{
+					ping = gr->GetPing( pPlayer->entindex() );
+				}
+				stat.m_flServerPing = ping;
+#endif
+
+				stat.m_flMainThreadTimeMS		= g_PerfStats.m_Slots[PERF_STATS_SLOT_MAINTHREAD].m_PrevFrameTime.GetMillisecondsF();
+				stat.m_flMainThreadWaitTimeMS	= g_PerfStats.m_Slots[PERF_STATS_SLOT_END_FRAME].m_PrevFrameTime.GetMillisecondsF();
+				stat.m_flRenderThreadTimeMS		= g_PerfStats.m_Slots[PERF_STATS_SLOT_RENDERTHREAD].m_PrevFrameTime.GetMillisecondsF();
+				stat.m_flRenderThreadWaitTimeMS	= g_PerfStats.m_Slots[PERF_STATS_SLOT_FORCE_HARDWARE_SYNC].m_PrevFrameTime.GetMillisecondsF();
+
+				AdvanceIndex();
+				m_flLastSampleTime = flCurTime;
+			}
+		}
+		if ( m_flLastSampleTime == -1 )
+		{
+			m_flLastSampleTime = flCurTime;
+		}
+		m_flLastRealTime = flCurTime;
+
+#ifdef CLIENT_DLL
+		if ( g_pGameRules && g_pGameRules->IsMultiplayer() )
+		{
+			m_bDidVoiceChat |= GetClientVoiceMgr()->IsLocalPlayerSpeaking( FirstValidSplitScreenSlot() );
+		}
+#endif
+
+		const CPUFrequencyResults results = GetCPUFrequencyResults( true );
+		if ( results.m_timeStamp > m_lastCPUFrequencyTimestamp )
+		{
+			m_lastCPUFrequencyTimestamp = results.m_timeStamp;
+			// Increment the appropriate counter for how much the CPU is throttled (if at all)
+			if ( results.m_percentage > kCPUMonitoringWarning1 )
+				++m_nCPUUnthrottledCount;
+			else if ( results.m_percentage > kCPUMonitoringWarning2 )
+				++m_nCPUThrottle1Count;
+			else
+				++m_nCPUThrottle2Count;
+		}
+	}
+
+
+	void FirePerfStatsEvent( PerfStatsEventEnum_t nEvent, int nLookAhead = CFpsHistory::HISTORY_BUF_SIZE, int nLookBack = CFpsHistory::HISTORY_BUF_SIZE )
+	{
+		m_FpsHistogramGame[ nEvent ].Fire( nLookAhead, nLookBack, m_FpsHistory );
+	}
+
+	CUtlString		m_PrevMapName; //used to track "OnMapChange" events
+	int				m_iLoadedVersion;
+	char			m_szLoadedUserID[ 17 ];	// GUID
+
+	bool			m_bEnabled; //false if incapable of uploading or the user doesn't want to enable stat tracking
+	bool			m_bShuttingDown;
+	bool			m_bInLevel;
+	bool			m_bFirstLevel;
+	time_t			m_tLastUpload;
+
+	float			m_flLevelStartTime;
+
+	bool			m_bStationary;
+	float			m_flLastMovementTime;
+	CUserCmd		m_LastUserCmd;
+	bool			m_bGamePaused;
+	float			m_flPauseStartTime;
+
+	CGamestatsData	*m_pGamestatsData;
+
+	CFpsHistory m_FpsHistory;
+	CFpsHistogram m_FpsHistogram;
+	CFpsSelectiveHistogram m_FpsHistogramGame[ PERF_STATS_EVENT_COUNT ];
+};
+static CBaseGameStats_Driver CBGSDriver;
 
 void UpdatePerfStats( void )
 {
 	CBGSDriver.UpdatePerfStats();
 }
+
+void FirePerfStatsEvent( PerfStatsEventEnum_t nEvent, int nLookAhead, int nLookBack )
+{
+	CBGSDriver.FirePerfStatsEvent( nEvent, nLookAhead, nLookBack );
+}
+
+uint8 CFpsHistory::Update( float flFps, float flCpuWait )
+{
+	uint8 nBin = 0;
+	if ( flFps >= 45 )
+	{
+		if ( flFps >= 90 )
+		{
+			if ( flFps >= 120 )
+			{
+				nBin = FPS_120;
+			}
+			else
+			{
+				nBin = FPS_90;
+			}
+		}
+		else
+		{
+			if ( flFps >= 60 )
+			{
+				nBin = FPS_60;
+			}
+			else
+			{
+				nBin = FPS_45;
+			}
+		}
+	}
+	else
+	{
+		if ( flFps >= 20 )
+		{
+			if ( flFps >= 30 )
+			{
+				nBin = FPS_30;
+			}
+			else
+			{
+				nBin = FPS_20;
+			}
+		}
+		else
+		{
+			if ( flFps >= 10 )
+			{
+				nBin = FPS_10;
+			}
+			else
+			{
+				nBin = FPS_LOW;
+			}
+		}
+	}
+
+	if ( flCpuWait > 0.5f )
+	{
+		nBin |= 0x80;
+	}
+
+	return nBin;
+}
+
+int64 CFpsHistogram::Encode()const
+{
+	uint nMaxBin = 0;
+	for ( int i = 0; i < FPS_BIN_COUNT; ++i )
+	{
+		nMaxBin = Max( nMaxBin, m_nFps[ i ] );
+	}
+
+	if ( nMaxBin == 0 )
+		return 0;
+
+	int64 nEncode = 0;
+	for ( int i = 0; i < FPS_BIN_COUNT / 2; ++i )
+	{
+		nEncode <<= 4;
+		if ( uint nDenominator = m_nFps[ i * 2 ] + m_nFps[ i * 2 + 1 ] )
+		{
+			uint nNormalized = ( 15ll * ( m_nCpuWaits[ i * 2 ] + m_nCpuWaits[ i * 2 + 1 ] ) + nDenominator / 2 ) / nDenominator;
+			nEncode |= nNormalized;
+		}
+	}
+	for ( int i = 0; i < FPS_BIN_COUNT; ++i )
+	{
+		nEncode <<= 6;
+		uint nNormalized = ( ( 0x3Fll * m_nFps[ i ] + nMaxBin / 2 ) / nMaxBin ); // round to nearest
+		nEncode |= nNormalized;
+	}
+	return nEncode;
+}
+
 
 CBaseGameStats_Driver::CBaseGameStats_Driver( void ) :
 	BaseClass( "CGameStats" ),
@@ -144,8 +493,9 @@ CBaseGameStats_Driver::CBaseGameStats_Driver( void ) :
 	m_flLastSampleTime( -1 ),
 	m_flTotalTimeInLevels( 0 ),
 	m_iNumLevels( 0 ),
-	m_bDidVoiceChat( false )
-
+	m_bDidVoiceChat( false ),
+	m_nTrailingWriteIndex( 0 ),
+	m_nTrailingSamplesWritten( 0 )
 {
 	m_szLoadedUserID[0] = 0;
 	m_tLastUpload = 0;
@@ -242,14 +592,9 @@ const char *CBaseGameStats::GetUserPseudoUniqueID( void )
 void CBaseGameStats::Event_Init( void )
 {
 #ifdef GAME_DLL
-	SetHL2UnlockedChapterStatistic();
 	SetSteamStatistic( filesystem->IsSteam() );
 	SetCyberCafeStatistic( gamestatsuploader->IsCyberCafeUser() );
-	ConVarRef pDXLevel( "mat_dxlevel" );
-	if( pDXLevel.IsValid() )
-	{
-		SetDXLevelStatistic( pDXLevel.GetInt() );
-	}
+	SetDXLevelStatistic( g_pMaterialSystemHardwareConfig->GetDXSupportLevel() );
 	++m_BasicStats.m_Summary.m_nCount;
 
 	StatsLog( "CBaseGameStats::Event_Init [%dth session]\n", m_BasicStats.m_Summary.m_nCount );
@@ -472,7 +817,7 @@ void CBaseGameStats::Event_PlayerConnected( CBasePlayer *pBasePlayer )
 
 void CBaseGameStats::Event_PlayerDisconnected( CBasePlayer *pBasePlayer )
 {
-	StatsLog( "CBaseGameStats::Event_PlayerDisconnected\n" );
+	StatsLog( "CBaseGameStats::Event_PlayerDisconnected [%s]\n", pBasePlayer->GetPlayerName() );
 }
 
 void CBaseGameStats::Event_PlayerDamage( CBasePlayer *pBasePlayer, const CTakeDamageInfo &info )
@@ -515,17 +860,11 @@ void CBaseGameStats::Event_IncrementCountedStatistic( const Vector& vecAbsOrigin
 	StatsLog( "Incrementing %s by %f at pos (%d, %d, %d)\n", pchStatisticName, flIncrementAmount, (int)vecAbsOrigin.x, (int)vecAbsOrigin.y, (int)vecAbsOrigin.z );
 }
 
-//=============================================================================
-// HPE_BEGIN
 // [dwenger] Needed for CS window-breaking stat
-//=============================================================================
 void CBaseGameStats::Event_WindowShattered( CBasePlayer *pPlayer )
 {
-    StatsLog( "In Event_WindowShattered\n" );
+	StatsLog( "In Event_WindowShattered\n" );
 }
-//=============================================================================
-// HPE_END
-//=============================================================================
 
 bool CBaseGameStats::UploadStatsFileNOW( void )
 {
@@ -542,7 +881,7 @@ bool CBaseGameStats::UploadStatsFileNOW( void )
 	CBGSDriver.m_tLastUpload = curtime;
 
 	// Update the registry
-#ifndef SWDS
+#ifndef DEDICATED
 	IRegistry *reg = InstanceRegistry( "Steam" );
 	Assert( reg );
 	reg->WriteInt( GetStatUploadRegistryKeyName(), CBGSDriver.m_tLastUpload );
@@ -660,17 +999,6 @@ bool CBaseGameStats::LoadFromFile( void )
 	return false;	
 }
 
-void CBaseGameStats::CollectData( StatSendType_t sendType )
-{
-	CBGSDriver.CollectData( sendType );
-}
-
-void CBaseGameStats::SendData()
-{
-	CBGSDriver.SendData();
-}
-
-
 #endif // GAME_DLL
 
 bool CBaseGameStats_Driver::Init()
@@ -709,7 +1037,7 @@ bool CBaseGameStats_Driver::Init()
 	if ( StatsTrackingIsFullyEnabled() )
 	{
 		// FIXME: Load m_tLastUpload from registry and save it back out, too
-#ifndef SWDS
+#ifndef DEDICATED
 		IRegistry *reg = InstanceRegistry( "Steam" );
 		Assert( reg );
 		m_tLastUpload = reg->ReadInt( gamestats->GetStatUploadRegistryKeyName(), 0 );
@@ -784,45 +1112,6 @@ void CBaseGameStats_Driver::Shutdown()
 	}
 }
 
-void CBaseGameStats_Driver::UpdatePerfStats( void )
-{
-	float flCurTime = Plat_FloatTime();
-	if (
-		( m_flLastSampleTime == -1 ) || 
-		( flCurTime - m_flLastSampleTime >= STATS_RECORD_INTERVAL ) )
-	{
-		if ( ( m_flLastRealTime > 0 ) && ( flCurTime > m_flLastRealTime ) )
-		{
-			float flFrameRate = 1.0 / ( flCurTime - m_flLastRealTime );
-			StatsBufferRecord_t &stat = m_StatsBuffer[m_nWriteIndex];
-			stat.m_flFrameRate = flFrameRate;
-#ifdef CLIENT_DLL
-			// The stat system isn't designed to handle split screen players. Until it get's 
-			// redesigned, let's take the first player's split screen ping, since all other stats
-			// will be based on the first player
-			IGameResources *gr = GameResources();
-			int ping = 0;
-			C_BasePlayer *pPlayer =	C_BasePlayer::GetLocalPlayer(); // GetLocalPlayer( FirstValidSplitScreenSlot() );
-			if ( pPlayer && gr )
-			{
-				ping = gr->GetPing( pPlayer->entindex() );
-			}
-			stat.m_flServerPing = ping;
-#endif
-			AdvanceIndex();
-			m_flLastSampleTime = flCurTime;
-		}
-	}
-	m_flLastRealTime = flCurTime;
-
-#ifdef CLIENT_DLL
-	if ( g_pGameRules && g_pGameRules->IsMultiplayer() )
-	{
-		m_bDidVoiceChat |= GetClientVoiceMgr()->IsLocalPlayerSpeaking();
-	}
-#endif
-}
-
 void CBaseGameStats_Driver::PossibleMapChange( void )
 {
 #ifdef GAME_DLL
@@ -871,7 +1160,7 @@ void CBaseGameStats_Driver::LevelInitPreEntity()
 			if ( crcInput[0] && crcInput[1] )
 			{
 				CRC32_t crc = CRC32_ProcessSingleBuffer( crcInput, sizeof( crcInput ) );
-				Q_snprintf( s_szPseudoUniqueID, ARRAYSIZE( s_szPseudoUniqueID ), "H:%x", crc );
+				Q_snprintf( s_szPseudoUniqueID, ARRAYSIZE( s_szPseudoUniqueID ), "H:%x", ( int ) crc );
 			}
 		}
 	}
@@ -897,20 +1186,6 @@ void CBaseGameStats_Driver::LevelInitPreEntity()
 
 
 void CBaseGameStats_Driver::LevelShutdownPreEntity()
-{
-#ifdef CLIENT_DLL
-	LevelShutdown();
-#endif
-}
-
-void CBaseGameStats_Driver::LevelShutdownPreClearSteamAPIContext()
-{
-#ifdef GAME_DLL
-	LevelShutdown();
-#endif
-}
-
-void CBaseGameStats_Driver::LevelShutdown()
 {
 	float flElapsed = gpGlobals->realtime - m_flLevelStartTime;
 
@@ -965,6 +1240,14 @@ void CBaseGameStats_Driver::OnSave()
 
 void CBaseGameStats_Driver::CollectData( StatSendType_t sendType )
 {
+	MEM_ALLOC_CREDIT();
+
+	// The base stat system holds memory until "APPSHUTDOWN" which on the Xbox isn't good.
+	// When on the Xbox, neither server nor clients collect stats, but the base system still does.
+#ifdef _X360
+	return;
+#endif
+
 	CGamestatsData *pGamestatsData = NULL;
 #ifdef GAME_DLL
 	// for server, check with the engine to see if there already a gamestats data container registered.  (There will be if there is a client
@@ -986,7 +1269,13 @@ void CBaseGameStats_Driver::CollectData( StatSendType_t sendType )
 #else
 	pGamestatsData = m_pGamestatsData;
 #endif
-	Assert( pGamestatsData );
+	Assert( pGamestatsData || //valid stats
+			(!gpGlobals->IsClient() && (sendType == STATSEND_APPSHUTDOWN) && gamestats->ShouldSendDataOnLevelShutdown()) ); //or already sent off stats during level shutdown (now in app shutdown)
+    
+    // If a server is told to send stats on STATSEND_APPSHUTDOWN, we need to check to make sure we still have a valid object.
+	if ( !pGamestatsData )
+		return;
+
 	KeyValues *pKV = pGamestatsData->m_pKVData;
 
 	int iAppID = engine->GetAppID();
@@ -999,16 +1288,20 @@ void CBaseGameStats_Driver::CollectData( StatSendType_t sendType )
 			// make a map node in the KeyValues to use for this level
 			char szMap[MAX_PATH+1]="";
 #ifdef CLIENT_DLL	
-			Q_FileBase( MapName(), szMap, ARRAYSIZE( szMap ) );
+			Q_FileBase( engine->GetLevelName(), szMap, ARRAYSIZE( szMap ) );
 #else
 			Q_strncpy( szMap, gpGlobals->mapname.ToCStr(), ARRAYSIZE( szMap ) );
 #endif // CLIENT_DLL
 			if ( !szMap[0] )
-				return;
+			{
+				Q_FileBase( MapName(), szMap, ARRAYSIZE( szMap ) );
+			}
+
 			KeyValues *pKVMap = new KeyValues( "map" );
 			pKV->AddSubKey( pKVMap );
 			pKVMap->SetString( "mapname", szMap );
 			pKV = pKVMap;
+
 
 		}
 		break;
@@ -1021,26 +1314,44 @@ void CBaseGameStats_Driver::CollectData( StatSendType_t sendType )
 
 	// add common data
 	pGamestatsData->m_bHaveData |= AddBaseDataForSend( pKV, sendType );
-	
-#if defined(STEAMWORKS_GAMESTATS_ACTIVE)
+    
+#if defined(CLIENT_DLL) && !defined(NO_STEAM)
+#if !defined( _GAMECONSOLE )
 	// At the end of every map, clients submit their perfdata for the map
 	if ( sendType == STATSEND_LEVELSHUTDOWN && pGamestatsData && pGamestatsData->m_bHaveData )
 	{
-		GetSteamWorksSGameStatsUploader().AddClientPerfData( pGamestatsData->m_pKVData );
+		// dgoodenough - Remove this for now, since this fails on PS3
+		// PS3_BUILDFIX
+		GetSteamWorksGameStatsClient().AddClientPerfData( pGamestatsData->m_pKVData );
 	}
-	GetSteamWorksSGameStatsUploader().LevelShutdown();
+	// Time to reset ClientPerfData so we're ready for future recording. We clear the data
+	// whether we submitted or not so that perf data has a clear meaning.
+	ResetData();
+    // The ResetData call realloced m_pGamestatsData. Need to point pGamestatsData to the new m_pGamestatsData !
+    pGamestatsData = m_pGamestatsData;
 #endif
-
+	if ( sendType == STATSEND_LEVELSHUTDOWN )
+	{
+#if !defined( _GAMECONSOLE )
+		KeyValues *pKVFileStats = new KeyValues( "FileSystemStats" );
+		filesystem->GetVPKFileStatisticsKV( pKVFileStats );
+		GetSteamWorksGameStatsClient().AddVPKLoadStats( pKVFileStats );
+		GetSteamWorksGameStatsClient().AddVPKFileLoadErrorData( pKVFileStats );
+		pKVFileStats->deleteThis();
+		
+		// On Server Disconnect, session is ended later than when a match restarts. This allows ClientPerfData and VPK stats to report properly
+		// Alternately you could place ClientPerfData and VPK in the cs_game_disconnected event, but this event may fire more frequently than we want for CPD/VPK.
+		GetSteamWorksGameStatsClient().EndSession();
+		GetSteamWorksGameStatsClient().ResetServerState();
+#endif
+	}
+#endif
 	// add game-specific data
 	pGamestatsData->m_bHaveData |= gamestats->AddDataForSend( pKV, sendType );
-
-// Need to initialiate a reset since cs isn't using the gamestat system to add data
-#if defined(CSTRIKE_DLL) && defined(CLIENT_DLL)
-	ResetData();
-#endif
 }
-
-
+#ifndef CLIENT_DLL
+ConVar gamestats_file_output_directory( "gamestats_file_output_directory", "", FCVAR_NONE, "When -gamestatsfileoutputonly is specified, file will be emitted here instead of to modpath\n" );
+#endif
 void CBaseGameStats_Driver::SendData()
 {
 	// if we don't own the data container or there's no valid data, nothing to do
@@ -1051,11 +1362,40 @@ void CBaseGameStats_Driver::SendData()
 	CUtlBuffer buf( 0, 0, CUtlBuffer::TEXT_BUFFER );
 	m_pGamestatsData->m_pKVData->RecursiveSaveToFile( buf, 0 );
 
-	if ( CommandLine()->FindParm( "-gamestatsfileoutputonly" ) )
+#ifdef CLIENT_DLL
+	const bool bOutDirOverriden = false;
+	const char *szOverrideDirectory = NULL;
+#else
+	const bool bOutDirOverriden = gamestats_file_output_directory.GetRawValue().m_StringLength > 1;
+	const char *szOverrideDirectory = gamestats_file_output_directory.GetString();
+#endif
+	if ( CommandLine()->FindParm( "-gamestatsfileoutputonly" ) || bOutDirOverriden )
 	{
 		// write file for debugging
-		const char szFileName[] = "gamestats.dat";
-		filesystem->WriteFile( szFileName, GAMESTATS_PATHID, buf );
+		if ( !bOutDirOverriden ) // if there isn't an override path, put it in the game dir.
+		{
+			const char szFileName[] = "gamestats.dat";
+			filesystem->WriteFile( szFileName, GAMESTATS_PATHID, buf );
+		}
+		else
+		{
+			char szPathName[MAX_PATH] = {0};
+			V_strncat( szPathName, szOverrideDirectory, MAX_PATH );
+			V_AppendSlash( szPathName, MAX_PATH );
+			int pathLen = V_strlen( szPathName );
+			
+			char szFileName[MAX_PATH] = {0};
+			struct tm timeinfo;
+			Plat_GetLocalTime( &timeinfo );
+			int fileLen = V_snprintf( szFileName, MAX_PATH, "%s__%2d_%3d_%2d_%2d_%2d.txt", s_szPseudoUniqueID, 
+				timeinfo.tm_year % 100, timeinfo.tm_yday, timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec );
+
+			Assert( pathLen + fileLen < MAX_PATH );	fileLen;
+
+			V_strncat( szPathName + pathLen, szFileName, MAX_PATH - pathLen );
+
+			filesystem->WriteFile( szPathName, NULL, buf );
+		}
 	}
 	else
 	{
@@ -1066,33 +1406,6 @@ void CBaseGameStats_Driver::SendData()
 
 	ResetData();
 }
-
-#ifdef CLIENT_DLL
-	// Adds the main menu load time to the specified key values, but only ever does the work once.
-	static void AddLoadTimeMainMenu( KeyValues* pKV )
-	{
-		Assert( pKV );
-		float loadTimeMainMenu = dev_loadtime_mainmenu.GetFloat();
-		if ( loadTimeMainMenu > 0.0f ) {
-			pKV->SetFloat( "LoadTimeMainMenu", loadTimeMainMenu );
-			// Only want to set this once, clear it to 0.0 here. The other code will only ever set it once.
-			dev_loadtime_mainmenu.SetValue( 0.0f );
-		}
-	}
-
-	// Adds the map load time to the specified key values, but clears the elapsed data to 0.0 for next computation.
-	static void AddLoadTimeMap(KeyValues* pKV)
-	{
-		static ConVarRef dev_loadtime_map_elapsed( "dev_loadtime_map_elapsed" );
-		float loadTimeMap = dev_loadtime_map_elapsed.GetFloat();
-		if ( loadTimeMap > 0.0f )
-		{
-			pKV->SetFloat( "LoadTimeMap", loadTimeMap );
-			dev_loadtime_map_elapsed.SetValue( 0.0f );
-		}
-	}
-
-#endif
 
 bool CBaseGameStats_Driver::AddBaseDataForSend( KeyValues *pKV, StatSendType_t sendType )
 {
@@ -1107,87 +1420,143 @@ bool CBaseGameStats_Driver::AddBaseDataForSend( KeyValues *pKV, StatSendType_t s
 			pKVData->SetInt( "TotalLevelTime", m_flTotalTimeInLevels );
 			pKVData->SetInt( "NumLevels", m_iNumLevels );
 			pKV->AddSubKey( pKVData );
-
-			AddLoadTimeMainMenu( pKV );
-			// If the user quits directly from the map, we still want to (possibly) capture their map load time, so 
-			// do add it here. It will not be added if it was already attached to a session.
-			AddLoadTimeMap( pKV );
-
 			return true;
 		}
 #endif
 		break;
 	case STATSEND_LEVELSHUTDOWN:
 #ifdef CLIENT_DLL
-		if ( m_bBufferFull )
+		const int MIN_PERF_STAT_COLLECT_TIME = 60 * 5;	// send perf data if we have collected at least this many seconds
+		bool bSend = m_bBufferFull || m_nWriteIndex >= MIN_PERF_STAT_COLLECT_TIME;
+		if ( bSend )
 		{
 			// add perf data
 			KeyValues *pKVPerf = new KeyValues( "perfdata" );
+
+			SortFramerate();
+
 			float flAverageFrameRate = AverageStat( &StatsBufferRecord_t::m_flFrameRate );
-			float flMinFrameRate = MinStat( &StatsBufferRecord_t::m_flFrameRate );
-			float flMaxFrameRate = MaxStat( &StatsBufferRecord_t::m_flFrameRate );
-
-
-			float flDeviationsquared = 0;
-			// Compute std deviation
-			for( int i = 0; i < STATS_WINDOW_SIZE; i++ )
-			{
-				float val = m_StatsBuffer[i].m_flFrameRate - flAverageFrameRate;
-				flDeviationsquared += ( val * val );
-			}
-
-			float var = flDeviationsquared / (float)( STATS_WINDOW_SIZE - 1 );
-			float flStandardDeviationFrameRate = sqrt( var );
+			float flMinFrameRate =	PercentileFramerate( 20 ); 
+			float flMaxFrameRate =	PercentileFramerate( 80 ); 
+			float flStandardDeviationFrameRate = StdDevStat( &StatsBufferRecord_t::m_flFrameRate, flAverageFrameRate );
 
 			pKVPerf->SetFloat( "AvgFPS", flAverageFrameRate );
 			pKVPerf->SetFloat( "MinFPS", flMinFrameRate );
 			pKVPerf->SetFloat( "MaxFPS", flMaxFrameRate );
 			pKVPerf->SetFloat( "StdDevFPS", flStandardDeviationFrameRate );
+			// if encoded histogram is 0, it just means we have no samples, so we don't really need to report it (save on bandwidth)
+			if ( uint64 nHist = m_FpsHistogram.Encode() )
+			{
+				pKVPerf->SetUint64( "FrameHistAll", nHist );
+			}
+			if ( uint64 nHistSmoke = m_FpsHistogramGame[ PERF_STATS_SMOKE ].Encode() )
+			{
+				pKVPerf->SetUint64( "FrameHistGame1", nHistSmoke );
+			}
+			if ( uint64 nHistBullet = m_FpsHistogramGame[ PERF_STATS_BULLET ].Encode() )
+			{
+				pKVPerf->SetUint64( "FrameHistGame2", nHistBullet );
+			}
+			if ( uint64 nHistPlayer = m_FpsHistogramGame[ PERF_STATS_PLAYER ].Encode() )
+			{
+				pKVPerf->SetUint64( "FrameHistGame3", nHistPlayer );
+			}
+			if ( uint64 nHistPlayerSpawn = m_FpsHistogramGame[ PERF_STATS_PLAYER_SPAWN ].Encode() )
+			{
+				pKVPerf->SetUint64( "FrameHistGame4", nHistPlayerSpawn );
+			}
+			m_FpsHistogram.Reset();
+			m_FpsHistogramGame[ PERF_STATS_SMOKE ].Reset();
+			m_FpsHistogramGame[ PERF_STATS_BULLET ].Reset();
+			m_FpsHistogramGame[ PERF_STATS_PLAYER ].Reset();
+			m_FpsHistogramGame[ PERF_STATS_PLAYER_SPAWN ].Reset();
 
 			// Determine the min/avg/max Server Ping and store the results 
 			float flAverageServerPing = AverageStat( &StatsBufferRecord_t::m_flServerPing );
 			pKVPerf->SetFloat( "AvgServerPing", flAverageServerPing );
 
+			// Avg/StdDev main thread time
+			float flAvgMainThreadTime = AverageStat( &StatsBufferRecord_t::m_flMainThreadTimeMS );
+			float flStdDevMainThreadTime = StdDevStat( &StatsBufferRecord_t::m_flMainThreadTimeMS, flAvgMainThreadTime );
+			pKVPerf->SetFloat( "AvgMainThreadTime", flAvgMainThreadTime );
+			pKVPerf->SetFloat( "StdDevMainThreadTime", flStdDevMainThreadTime );
+
+			// Avg/StdDev main thread wait time (time waiting for the render thread)
+			float flAvgMainThreadWaitTime = AverageStat( &StatsBufferRecord_t::m_flMainThreadWaitTimeMS );
+			float flStdDevMainThreadWaitTime = StdDevStat( &StatsBufferRecord_t::m_flMainThreadWaitTimeMS, flAvgMainThreadWaitTime );
+			pKVPerf->SetFloat( "AvgMainThreadWaitTime", flAvgMainThreadWaitTime );
+			pKVPerf->SetFloat( "StdDevMainThreadWaitTime", flStdDevMainThreadWaitTime );
+
+			// Avg/StdDev render thread time
+			float flAvgRenderThreadTime = AverageStat( &StatsBufferRecord_t::m_flRenderThreadTimeMS );
+			float flStdDevRenderThreadTime = StdDevStat( &StatsBufferRecord_t::m_flRenderThreadTimeMS, flAvgRenderThreadTime );
+			pKVPerf->SetFloat( "AvgRenderThreadTime", flAvgRenderThreadTime );
+			pKVPerf->SetFloat( "StdDevRenderThreadTime", flStdDevRenderThreadTime );
+
+			// Avg/StdDev render thread wait time (time waiting for the gpu, ForceHardwareSync)
+			float flAvgRenderThreadWaitTime = AverageStat( &StatsBufferRecord_t::m_flRenderThreadWaitTimeMS );
+			float flStdDevRenderThreadWaitTime = StdDevStat( &StatsBufferRecord_t::m_flRenderThreadWaitTimeMS, flAvgRenderThreadWaitTime );
+			pKVPerf->SetFloat( "AvgRenderThreadWaitTime", flAvgRenderThreadWaitTime );
+			pKVPerf->SetFloat( "StdDevRenderThreadWaitTime", flStdDevRenderThreadWaitTime );
+
+			int nCPUThrottlingSamples = m_nCPUUnthrottledCount + m_nCPUThrottle1Count + m_nCPUThrottle2Count;
+			if ( nCPUThrottlingSamples )
+			{
+				float fThrottledToLevel1 = m_nCPUThrottle1Count * 100.0f / nCPUThrottlingSamples;
+				float fThrottledToLevel2 = m_nCPUThrottle2Count * 100.0f / nCPUThrottlingSamples;
+				pKVPerf->SetFloat( "PercentageCPUThrottledToLevel1", fThrottledToLevel1 );
+				pKVPerf->SetFloat( "PercentageCPUThrottledToLevel2", fThrottledToLevel2 );
+			}
+
 			pKV->AddSubKey( pKVPerf );
-
-			// Only keeping track of using voice in a multiplayer game
-			if ( g_pGameRules && g_pGameRules->IsMultiplayer() )
-			{
-				pKV->SetInt( "UsedVoice", m_bDidVoiceChat );
-			}
-
-			extern ConVar closecaption;
-			pKV->SetInt( "Caption", closecaption.GetInt() );
-
-#ifndef	NO_STEAM
-			// We can now get the game language from steam :)
-			if ( steamapicontext && steamapicontext->SteamApps() )
-			{
-				const char *currentLanguage = steamapicontext->SteamApps()->GetCurrentGameLanguage();
-				pKV->SetString( "Language", currentLanguage ? currentLanguage : "unknown" );
-
-			}
-#endif
-
-			// We need to filter out client side dev work from playtest work for the stat reporting.
-			// The simplest way is to check for sv_cheats, since we also do NOT want client stat reports
-			// where the player has cheated.
-			if ( NULL != sv_cheats )
-			{
-				int iCheats = sv_cheats->GetInt();
-				pKV->SetInt( "Cheats", iCheats );
-			}
-
-			int mapTime = gpGlobals->realtime - m_flLevelStartTime;
-			pKV->SetInt( "MapTime", mapTime );
-
-			pKV->SetBool( "SteamControllerActive", g_pInputSystem->IsSteamControllerActive() );
-
-			AddLoadTimeMainMenu(pKV);
-			AddLoadTimeMap(pKV);
-			
-			return true;
 		}
+
+		// Only keeping track of using voice in a multiplayer game
+		if ( g_pGameRules && g_pGameRules->IsMultiplayer() )
+		{
+			pKV->SetInt( "UsedVoice", m_bDidVoiceChat );
+		}
+
+		extern ConVar closecaption;
+		pKV->SetInt( "Caption", closecaption.GetInt() );
+
+		// Set language to "unknown", then check to see if we can obtain the language.
+		char language[64] = "unknown";
+		if ( engine )
+		{
+			engine->GetUILanguage( language, sizeof( language ) );
+			pKV->SetInt( "BugSub", engine->GetBugSubmissionCount() );
+			engine->ClearBugSubmissionCount();
+		}
+		pKV->SetString( "Language", language );
+
+		if ( materials )
+		{
+			const MaterialSystem_Config_t &config = materials->GetCurrentConfigForVideoCard();
+			pKV->SetBool( "Windowed", config.Windowed() );
+			pKV->SetBool( "WindowedNoBorder", config.NoWindowBorder() );
+		}
+
+		// We want to know if a user is running with cheats on so that we can filter out their data
+		// depending on what we're looking for.
+		if ( NULL != sv_cheats  )
+		{
+			pKV->SetInt( "Cheats", sv_cheats->GetInt() );			
+		}
+
+		
+		int mapTime = gpGlobals->realtime - m_flLevelStartTime;
+		pKV->SetInt( "MapTime", mapTime );
+
+		// reset buffer for next level. This is also done by ResetData().
+		m_bBufferFull = false;
+		m_nWriteIndex = 0;
+		// Reset last realtime timestamp so that we don't compute the fps 
+		// the first time we re-enter UpdatePerfStats
+		m_flLastRealTime	= -1.0f;
+		m_flLastSampleTime	= -1.0f;
+
+		return bSend;
 #endif
 		break;
 	}
@@ -1204,13 +1573,25 @@ void CBaseGameStats_Driver::ResetData()
 		return;
 #endif
 
+	MEM_ALLOC_CREDIT();
+
 	if ( m_pGamestatsData != NULL )
 	{
 		delete m_pGamestatsData;
 		m_pGamestatsData = NULL;
 	}
 
+	m_bBufferFull = false;
+	m_nWriteIndex = 0;
 	m_bDidVoiceChat = false;
+
+	// Reset the CPU throttling statistics.
+	m_nCPUUnthrottledCount = 0;
+	m_nCPUThrottle1Count = 0;
+	m_nCPUThrottle2Count = 0;
+	// Track when we last received data.
+	m_lastCPUFrequencyTimestamp = 0.0;
+
 	m_pGamestatsData = new CGamestatsData();
 	KeyValues *pKV = m_pGamestatsData->m_pKVData;
 	pKV->SetInt( "IsPc", IsPC() );
@@ -1218,7 +1599,7 @@ void CBaseGameStats_Driver::ResetData()
 	pKV->SetString( "srcid", s_szPseudoUniqueID );
 
 #ifdef CLIENT_DLL
-	const CPUInformation &cpu = *GetCPUInformation();
+	const CPUInformation &cpu = GetCPUInformation();
 	OverWriteCharsWeHate( cpu.m_szProcessorID );
 	pKV->SetString( "CPUID", cpu.m_szProcessorID );
 	pKV->SetFloat( "CPUGhz", cpu.m_Speed * ( 1.0 / 1.0e9 ) );
@@ -1227,17 +1608,7 @@ void CBaseGameStats_Driver::ResetData()
 	pKV->SetUint64( "CPUFeatures1", cpu.m_nFeatures[ 1 ] );
 	pKV->SetUint64( "CPUFeatures2", cpu.m_nFeatures[ 2 ] );
 	pKV->SetInt( "NumCores", cpu.m_nPhysicalProcessors );
-	
-	// Capture memory stats as well.
-	MemoryInformation memInfo;
-	if ( GetMemoryInformation( &memInfo ) )
-	{
-		pKV->SetInt( "PhysicalRamMbTotal",     memInfo.m_nPhysicalRamMbTotal );
-		pKV->SetInt( "PhysicalRamMbAvailable", memInfo.m_nPhysicalRamMbAvailable );
-		pKV->SetInt( "VirtualRamMbTotal",      memInfo.m_nVirtualRamMbTotal );
-		pKV->SetInt( "VirtualRamMbAvailable",  memInfo.m_nVirtualRamMbAvailable );
-	}
-			
+
 	MaterialAdapterInfo_t gpu;
 	materials->GetDisplayAdapterInfo( materials->GetCurrentAdapter(), gpu );
 
@@ -1256,23 +1627,10 @@ void CBaseGameStats_Driver::ResetData()
 	pKV->SetInt( "DxLvl", g_pMaterialSystemHardwareConfig->GetDXSupportLevel() );
 	pKV->SetInt( "Width", dest_width );
 	pKV->SetInt( "Height", dest_height );
-	const MaterialSystem_Config_t &config = materials->GetCurrentConfigForVideoCard();
-	pKV->SetInt( "Windowed", config.Windowed() == true );
-	pKV->SetInt( "MaxDxLevel", g_pMaterialSystemHardwareConfig->GetMaxDXSupportLevel() );
-
-	engine->SetGamestatsData( m_pGamestatsData );
-#endif
-
-#if defined(CSTRIKE_DLL) && defined(CLIENT_DLL)
-	// reset perf buffer for next map
-	for( int i = 0; i < STATS_WINDOW_SIZE; i++ )
-	{
-		m_StatsBuffer[i].m_flFrameRate = 0;
-		m_StatsBuffer[i].m_flServerPing = 0;
-	}
+	pKV->SetInt( "IsSplitScreen", VGui_IsSplitScreen() );
 	
-	m_bBufferFull = false;
-	m_nWriteIndex = 0;
+	engine->SetGamestatsData( m_pGamestatsData );
+
 #endif
 }
 
@@ -1441,49 +1799,6 @@ void CBaseGameStats::SetDXLevelStatistic( int iDXLevel )
 	m_BasicStats.m_nDXLevel = iDXLevel;
 }
 
-void CBaseGameStats::SetHL2UnlockedChapterStatistic( void )
-{
-	// Now grab the hl2/cfg/config.cfg and suss out the sv_unlockedchapters cvar to estimate how far they got in HL2
-	char const *relative = "cfg/config.cfg";
-	char fullpath[ 512 ];
-	char gamedir[256];
-	engine->GetGameDir( gamedir, 256 );
-	Q_snprintf( fullpath, sizeof( fullpath ), "%s/../hl2/%s", gamedir, relative );
-
-	if ( filesystem->FileExists( fullpath ) )
-	{
-		FileHandle_t fh = filesystem->Open( fullpath, "rb" );
-		if ( FILESYSTEM_INVALID_HANDLE != fh )
-		{
-			// read file into memory
-			int size = filesystem->Size(fh);
-			char *configBuffer = new char[ size + 1 ];
-			filesystem->Read( configBuffer, size, fh );
-			configBuffer[size] = 0;
-			filesystem->Close( fh );
-
-			// loop through looking for all the cvars to apply
-			const char *search = Q_stristr(configBuffer, "sv_unlockedchapters" );
-			if ( search )
-			{
-				// read over the token
-				search = strtok( (char *)search, " \n" );
-				search = strtok( NULL, " \n" );
-
-				if ( search[0]== '\"' )
-					++search;
-
-				// read the value
-				int iChapter = Q_atoi( search );
-				m_BasicStats.m_nHL2ChaptureUnlocked = iChapter;
-			}
-
-			// free
-			delete [] configBuffer;
-		}
-	}	
-}
-
 static void CC_ResetGameStats( const CCommand &args )
 {
 #if defined ( TF_DLL ) || defined ( TF_CLIENT_DLL )
@@ -1582,3 +1897,4 @@ void CPointGamestatsCounter::InputDisable( inputdata_t &inputdata )
 }
 
 #endif // GAME_DLL
+

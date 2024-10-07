@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -14,26 +14,7 @@
 #include "basetoggle.h"
 #include "entityoutput.h"
 
-//
-// Spawnflags
-//
-
-enum
-{
-	SF_TRIGGER_ALLOW_CLIENTS				= 0x01,		// Players can fire this trigger
-	SF_TRIGGER_ALLOW_NPCS					= 0x02,		// NPCS can fire this trigger
-	SF_TRIGGER_ALLOW_PUSHABLES				= 0x04,		// Pushables can fire this trigger
-	SF_TRIGGER_ALLOW_PHYSICS				= 0x08,		// Physics objects can fire this trigger
-	SF_TRIGGER_ONLY_PLAYER_ALLY_NPCS		= 0x10,		// *if* NPCs can fire this trigger, this flag means only player allies do so
-	SF_TRIGGER_ONLY_CLIENTS_IN_VEHICLES		= 0x20,		// *if* Players can fire this trigger, this flag means only players inside vehicles can 
-	SF_TRIGGER_ALLOW_ALL					= 0x40,		// Everything can fire this trigger EXCEPT DEBRIS!
-	SF_TRIGGER_ONLY_CLIENTS_OUT_OF_VEHICLES	= 0x200,	// *if* Players can fire this trigger, this flag means only players outside vehicles can 
-	SF_TRIG_PUSH_ONCE						= 0x80,		// trigger_push removes itself after firing once
-	SF_TRIG_PUSH_AFFECT_PLAYER_ON_LADDER	= 0x100,	// if pushed object is player on a ladder, then this disengages them from the ladder (HL2only)
-	SF_TRIG_TOUCH_DEBRIS 					= 0x400,	// Will touch physics debris objects
-	SF_TRIGGER_ONLY_NPCS_IN_VEHICLES		= 0X800,	// *if* NPCs can fire this trigger, only NPCs in vehicles do so (respects player ally flag too)
-	SF_TRIGGER_DISALLOW_BOTS                = 0x1000,   // Bots are not allowed to fire this trigger
-};
+#include "triggers_shared.h"
 
 // DVS TODO: get rid of CBaseToggle
 //-----------------------------------------------------------------------------
@@ -42,6 +23,7 @@ enum
 class CBaseTrigger : public CBaseToggle
 {
 	DECLARE_CLASS( CBaseTrigger, CBaseToggle );
+	DECLARE_SERVERCLASS();
 public:
 	CBaseTrigger();
 	
@@ -49,8 +31,9 @@ public:
 	virtual void PostClientActive( void );
 	void InitTrigger( void );
 
-	void Enable( void );
-	void Disable( void );
+	virtual void Enable( void );
+	virtual void Disable( void );
+
 	void Spawn( void );
 	void UpdateOnRemove( void );
 	void TouchTest(  void );
@@ -58,7 +41,6 @@ public:
 	// Input handlers
 	virtual void InputEnable( inputdata_t &inputdata );
 	virtual void InputDisable( inputdata_t &inputdata );
-	virtual void InputDisableAndEndTouch( inputdata_t &inputdata );
 	virtual void InputToggle( inputdata_t &inputdata );
 	virtual void InputTouchTest ( inputdata_t &inputdata );
 
@@ -69,22 +51,27 @@ public:
 	virtual bool PassesTriggerFilters(CBaseEntity *pOther);
 	virtual void StartTouch(CBaseEntity *pOther);
 	virtual void EndTouch(CBaseEntity *pOther);
-	virtual void StartTouchAll() {}
-	virtual void EndTouchAll() {}
-	virtual bool IsTouching( const CBaseEntity *pOther ) const;
+
+	virtual void OnStartTouchAll(CBaseEntity *pOther);
+	virtual void OnEndTouchAll(CBaseEntity *pOther);
+
+	bool IsTouching( CBaseEntity *pOther );
 
 	CBaseEntity *GetTouchedEntityOfType( const char *sClassName );
 
-	int	 DrawDebugTextOverlays(void);
+	virtual int	 DrawDebugTextOverlays(void);
 
 	// by default, triggers don't deal with TraceAttack
 	void TraceAttack(CBaseEntity *pAttacker, float flDamage, const Vector &vecDir, trace_t *ptr, int bitsDamageType) {}
 
-	bool PointIsWithin( const Vector &vecPoint );
-
-	bool		m_bDisabled;
+	CNetworkVarForDerived( bool, m_bDisabled );
 	string_t	m_iFilterName;
 	CHandle<class CBaseFilter>	m_hFilter;
+
+	const CUtlVector< EHANDLE > *GetTouchingEntities( void ) const
+	{
+		return &m_hTouchingEntities;
+	}
 
 protected:
 
@@ -100,6 +87,9 @@ protected:
 	CUtlVector< EHANDLE >	m_hTouchingEntities;
 
 	DECLARE_DATADESC();
+
+	// True if trigger participates in client side prediction
+	CNetworkVar( bool, m_bClientSidePredicted );
 };
 
 //-----------------------------------------------------------------------------
@@ -114,7 +104,7 @@ public:
 	void Spawn( void );
 	void MultiTouch( CBaseEntity *pOther );
 	void MultiWaitOver( void );
-	void ActivateMultiTrigger(CBaseEntity *pActivator);
+	virtual void ActivateMultiTrigger(CBaseEntity *pActivator);
 
 	DECLARE_DATADESC();
 
@@ -136,6 +126,7 @@ extern CUtlVector< CHandle<CTriggerMultiple> >	g_hWeaponFireTriggers;
 class CBaseVPhysicsTrigger : public CBaseEntity
 {
 	DECLARE_CLASS( CBaseVPhysicsTrigger , CBaseEntity );
+	DECLARE_SERVERCLASS();
 
 public:
 	DECLARE_DATADESC();
@@ -158,7 +149,7 @@ public:
 	
 
 protected:
-	bool						m_bDisabled;
+	CNetworkVarForDerived( bool, m_bDisabled );
 	string_t					m_iFilterName;
 	CHandle<class CBaseFilter>	m_hFilter;
 };
@@ -167,21 +158,7 @@ protected:
 // Purpose: Hurts anything that touches it. If the trigger has a targetname,
 //			firing it will toggle state.
 //-----------------------------------------------------------------------------
-
-// This class is to get around the fact that DEFINE_FUNCTION doesn't like multiple inheritance
-class CTriggerHurtShim : public CBaseTrigger
-{
-	virtual void RadiationThink( void ) = 0;
-	virtual void HurtThink( void ) = 0;
-
-public:
-
-	void RadiationThinkShim( void ){ RadiationThink(); }
-	void HurtThinkShim( void ){ HurtThink(); }
-};
-
-DECLARE_AUTO_LIST( ITriggerHurtAutoList );
-class CTriggerHurt : public CTriggerHurtShim, public ITriggerHurtAutoList
+class CTriggerHurt : public CBaseTrigger
 {
 public:
 	CTriggerHurt()
@@ -190,7 +167,7 @@ public:
 		m_flDamageCap = 20.0f;
 	}
 
-	DECLARE_CLASS( CTriggerHurt, CTriggerHurtShim );
+	DECLARE_CLASS( CTriggerHurt, CBaseTrigger );
 
 	void Spawn( void );
 	void RadiationThink( void );
@@ -199,6 +176,8 @@ public:
 	void EndTouch( CBaseEntity *pOther );
 	bool HurtEntity( CBaseEntity *pOther, float damage );
 	int HurtAllTouchers( float dt );
+
+	void NavThink( void );
 
 	DECLARE_DATADESC();
 
@@ -223,7 +202,190 @@ public:
 
 	CUtlVector<EHANDLE>	m_hurtEntities;
 };
+//
+//  Callback trigger
+//
 
-bool IsTakingTriggerHurtDamageAtPoint( const Vector &vecPoint );
+class CTriggerCallback : public CBaseTrigger
+{
+public:
+	DECLARE_CLASS( CTriggerCallback, CBaseTrigger );
+	DECLARE_DATADESC();
+	
+	virtual void Spawn( void );
+	virtual void StartTouch( CBaseEntity *pOther );
+
+	static CTriggerCallback *Create( const Vector &vecOrigin, const QAngle &vecAngles, const Vector &vecMins, const Vector &vecMaxs, CBaseEntity *pOwner, void (CBaseEntity::*pfnCallback)(CBaseEntity *) )
+	{
+		CTriggerCallback *pTrigger = (CTriggerCallback *) CreateEntityByName( "trigger_callback" );
+		if ( pTrigger == NULL )
+			return NULL;
+
+		UTIL_SetOrigin( pTrigger, vecOrigin );
+		pTrigger->SetAbsAngles( vecAngles );
+		UTIL_SetSize( pTrigger, vecMins, vecMaxs );
+
+		DispatchSpawn( pTrigger );
+
+		pTrigger->SetParent( (CBaseEntity *) pOwner );
+
+		// Save our callback function
+		pTrigger->m_pfnCallback = pfnCallback;
+
+		return pTrigger;
+	}
+
+private:
+	void (CBaseEntity::*m_pfnCallback)(CBaseEntity *);
+};
+
+
+//-----------------------------------------------------------------------------
+// Purpose: 
+//-----------------------------------------------------------------------------
+class CTriggerCamera : public CBaseEntity
+{
+public:
+	DECLARE_CLASS( CTriggerCamera, CBaseEntity );
+	// script description
+	DECLARE_ENT_SCRIPTDESC();
+
+
+	CTriggerCamera();
+	void Spawn( void );
+	bool KeyValue( const char *szKeyName, const char *szValue );
+	void Enable( void );
+	void Disable( void );
+	void SetPlayer( CBaseEntity *pPlayer );
+	void Use( CBaseEntity *pActivator, CBaseEntity *pCaller, USE_TYPE useType, float value );
+	void FindAttachment( void );
+	void FollowTarget( void );
+	void ReturnToEyes( void );
+	void MoveViewTo( QAngle vecGoalView );
+	void Move( void );
+	void StartCameraShot( const char *pszShotType, CBaseEntity *pSceneEntity, CBaseEntity *pActor1, CBaseEntity *pActor2, float duration );
+	int ScriptGetFov( void );
+	void ScriptSetFov( int iFOV, float rate );
+
+	// Always transmit to clients so they know where to move the view to
+	virtual int UpdateTransmitState();
+
+	DECLARE_DATADESC();
+
+	// Input handlers
+	void InputEnable( inputdata_t &inputdata );
+	void InputDisable( inputdata_t &inputdata );
+
+	void InputSetTarget( inputdata_t &inputdata );
+	void InputSetTargetAttachment( inputdata_t &inputdata );
+
+	void InputReturnToEyes( inputdata_t &inputdata );
+	void InputTeleportToView( inputdata_t &inputdata );
+	
+
+	void InputSetTrackSpeed( inputdata_t &inputdata );
+
+	void InputSetPath( inputdata_t &inputdata );
+
+private:
+	EHANDLE m_hPlayer;
+	EHANDLE m_hTarget;
+
+	// used for moving the camera along a path (rail rides)
+	CBaseEntity *m_pPath;
+	string_t m_sPath;
+	float m_flWait;
+	float m_flReturnTime;
+	float m_flStopTime;
+	float m_moveDistance;
+	float m_targetSpeed;
+	float m_initialSpeed;
+	float m_acceleration;
+	float m_deceleration;
+	int	  m_state;
+	Vector m_vecMoveDir;
+
+	float m_fov;
+	float m_fovSpeed;
+	float m_trackSpeed;
+
+	string_t m_iszTargetAttachment;
+	int	  m_iAttachmentIndex;
+	bool  m_bSnapToGoal;
+
+#if HL2_EPISODIC
+	bool  m_bInterpolatePosition;
+
+	// these are interpolation vars used for interpolating the camera over time
+	Vector m_vStartPos, m_vEndPos;
+	float m_flInterpStartTime;
+
+	const static float kflPosInterpTime; // seconds
+#endif
+
+	int   m_nPlayerButtons;
+	int m_nOldTakeDamage;
+
+private:
+	COutputEvent m_OnEndFollow;
+};
+
+//-----------------------------------------------------------------------------
+// Purpose: 
+//-----------------------------------------------------------------------------
+class CTriggerViewProxy : public CBaseEntity
+{
+public:
+	DECLARE_CLASS( CTriggerViewProxy, CBaseEntity );
+
+	CTriggerViewProxy();
+	void Spawn( void );
+	bool KeyValue( const char *szKeyName, const char *szValue );
+	void Enable( void );
+	void Disable( void );
+	void SetPlayer( CBaseEntity *pPlayer );
+	void TranslateViewToProxy( void );
+	void Move( void );
+
+	Vector GetPlayerOffset();
+
+	// Always transmit to clients so they know where to move the view to
+	virtual int UpdateTransmitState();
+
+	DECLARE_DATADESC();
+
+	// Input handlers
+	void InputEnable( inputdata_t &inputdata );
+	void InputDisable( inputdata_t &inputdata );
+
+	void InputTeleportPlayerToProxy( inputdata_t &inputdata );
+
+
+private:
+	EHANDLE m_hPlayer;
+
+	CBaseEntity *m_pProxy;
+	string_t m_sProxy;
+	string_t m_sProxyAttachment;
+	int m_nParentAttachment;
+	int	m_state;
+	int	m_nOffsetType;
+	Vector m_vecInitialPosition;
+	Vector m_vecLastPosition;
+	Vector m_vecLastVelocity;
+	Vector m_vecInitialOffset;
+
+	float m_flTiltFraction;
+	float m_flStartTime;
+
+	bool m_bUseFakeAcceleration;
+	bool m_bSkewAccelerationForward;
+	float m_flAccelerationScalar;
+
+	bool m_bEaseAnglesToCamera;
+
+	int m_nPlayerButtons;
+	int m_nOldTakeDamage;
+};
 
 #endif // TRIGGERS_H

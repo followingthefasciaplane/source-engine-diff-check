@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -8,6 +8,10 @@
 #include "cbase.h"
 #include "takedamageinfo.h"
 #include "ammodef.h"
+
+#ifdef GAME_DLL
+#include "cs_player.h"
+#endif
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -28,10 +32,11 @@ BEGIN_SIMPLE_DATADESC( CTakeDamageInfo )
 	DEFINE_FIELD( m_iDamageCustom, FIELD_INTEGER),
 	DEFINE_FIELD( m_iDamageStats, FIELD_INTEGER),
 	DEFINE_FIELD( m_iAmmoType, FIELD_INTEGER),
+	DEFINE_FIELD( m_flRadius, FIELD_FLOAT),
 	DEFINE_FIELD( m_iDamagedOtherPlayers, FIELD_INTEGER),
 END_DATADESC()
 
-void CTakeDamageInfo::Init( CBaseEntity *pInflictor, CBaseEntity *pAttacker, CBaseEntity *pWeapon, const Vector &damageForce, const Vector &damagePosition, const Vector &reportedPosition, float flDamage, int bitsDamageType, int iCustomDamage )
+void CTakeDamageInfo::Init( CBaseEntity *pInflictor, CBaseEntity *pAttacker, CBaseEntity *pWeapon, const Vector &damageForce, const Vector &damagePosition, const Vector &reportedPosition, float flDamage, int bitsDamageType, int iCustomDamage, int iObjectsPenetrated )
 {
 	m_hInflictor = pInflictor;
 	if ( pAttacker )
@@ -57,62 +62,64 @@ void CTakeDamageInfo::Init( CBaseEntity *pInflictor, CBaseEntity *pAttacker, CBa
 	m_vecDamagePosition = damagePosition;
 	m_vecReportedPosition = reportedPosition;
 	m_iAmmoType = -1;
+	m_flRadius = 0.0f;
 	m_iDamagedOtherPlayers = 0;
-	m_iPlayerPenetrationCount = 0;
-	m_flDamageBonus = 0.f;
-	m_bForceFriendlyFire = false;
-	m_flDamageForForce = 0.f;
-	m_eCritType = CRIT_NONE;
+	m_iObjectsPenetrated = iObjectsPenetrated;
+#ifdef GAME_DLL
+	m_uiBulletID = CCSPlayer::GetBulletGroup();
+#else
+	m_uiBulletID = 0;
+#endif
 }
 
 CTakeDamageInfo::CTakeDamageInfo()
 {
-	Init( NULL, NULL, NULL, vec3_origin, vec3_origin, vec3_origin, 0, 0, 0 );
+	Init( NULL, NULL, NULL, vec3_origin, vec3_origin, vec3_origin, 0, 0, 0, 0 );
 }
 
-CTakeDamageInfo::CTakeDamageInfo( CBaseEntity *pInflictor, CBaseEntity *pAttacker, float flDamage, int bitsDamageType, int iKillType )
+CTakeDamageInfo::CTakeDamageInfo( CBaseEntity *pInflictor, CBaseEntity *pAttacker, float flDamage, int bitsDamageType, int iKillType, int iObjectsPenetrated )
 {
-	Set( pInflictor, pAttacker, flDamage, bitsDamageType, iKillType );
+	Set( pInflictor, pAttacker, flDamage, bitsDamageType, iKillType, iObjectsPenetrated );
 }
 
-CTakeDamageInfo::CTakeDamageInfo( CBaseEntity *pInflictor, CBaseEntity *pAttacker, CBaseEntity *pWeapon, float flDamage, int bitsDamageType, int iKillType )
+CTakeDamageInfo::CTakeDamageInfo( CBaseEntity *pInflictor, CBaseEntity *pAttacker, CBaseEntity *pWeapon, float flDamage, int bitsDamageType, int iKillType, int iObjectsPenetrated )
 {
-	Set( pInflictor, pAttacker, pWeapon, flDamage, bitsDamageType, iKillType );
+	Set( pInflictor, pAttacker, pWeapon, flDamage, bitsDamageType, iKillType, iObjectsPenetrated );
 }
 
-CTakeDamageInfo::CTakeDamageInfo( CBaseEntity *pInflictor, CBaseEntity *pAttacker, const Vector &damageForce, const Vector &damagePosition, float flDamage, int bitsDamageType, int iKillType, Vector *reportedPosition )
+CTakeDamageInfo::CTakeDamageInfo( CBaseEntity *pInflictor, CBaseEntity *pAttacker, const Vector &damageForce, const Vector &damagePosition, float flDamage, int bitsDamageType, int iKillType, Vector *reportedPosition, int iObjectsPenetrated )
 {
-	Set( pInflictor, pAttacker, damageForce, damagePosition, flDamage, bitsDamageType, iKillType, reportedPosition );
+	Set( pInflictor, pAttacker, damageForce, damagePosition, flDamage, bitsDamageType, iKillType, reportedPosition, iObjectsPenetrated );
 }
 
-CTakeDamageInfo::CTakeDamageInfo( CBaseEntity *pInflictor, CBaseEntity *pAttacker, CBaseEntity *pWeapon, const Vector &damageForce, const Vector &damagePosition, float flDamage, int bitsDamageType, int iKillType, Vector *reportedPosition )
+CTakeDamageInfo::CTakeDamageInfo( CBaseEntity *pInflictor, CBaseEntity *pAttacker, CBaseEntity *pWeapon, const Vector &damageForce, const Vector &damagePosition, float flDamage, int bitsDamageType, int iKillType, Vector *reportedPosition, int iObjectsPenetrated )
 {
-	Set( pInflictor, pAttacker, pWeapon, damageForce, damagePosition, flDamage, bitsDamageType, iKillType, reportedPosition );
+	Set( pInflictor, pAttacker, pWeapon, damageForce, damagePosition, flDamage, bitsDamageType, iKillType, reportedPosition, iObjectsPenetrated );
 }
 
-void CTakeDamageInfo::Set( CBaseEntity *pInflictor, CBaseEntity *pAttacker, float flDamage, int bitsDamageType, int iKillType )
+void CTakeDamageInfo::Set( CBaseEntity *pInflictor, CBaseEntity *pAttacker, float flDamage, int bitsDamageType, int iKillType, int iObjectsPenetrated )
 {
-	Init( pInflictor, pAttacker, NULL, vec3_origin, vec3_origin, vec3_origin, flDamage, bitsDamageType, iKillType );
+	Init( pInflictor, pAttacker, NULL, vec3_origin, vec3_origin, vec3_origin, flDamage, bitsDamageType, iKillType, iObjectsPenetrated );
 }
 
-void CTakeDamageInfo::Set( CBaseEntity *pInflictor, CBaseEntity *pAttacker, CBaseEntity *pWeapon, float flDamage, int bitsDamageType, int iKillType )
+void CTakeDamageInfo::Set( CBaseEntity *pInflictor, CBaseEntity *pAttacker, CBaseEntity *pWeapon, float flDamage, int bitsDamageType, int iKillType, int iObjectsPenetrated )
 {
-	Init( pInflictor, pAttacker, pWeapon, vec3_origin, vec3_origin, vec3_origin, flDamage, bitsDamageType, iKillType );
+	Init( pInflictor, pAttacker, pWeapon, vec3_origin, vec3_origin, vec3_origin, flDamage, bitsDamageType, iKillType, iObjectsPenetrated );
 }
 
-void CTakeDamageInfo::Set( CBaseEntity *pInflictor, CBaseEntity *pAttacker, const Vector &damageForce, const Vector &damagePosition, float flDamage, int bitsDamageType, int iKillType, Vector *reportedPosition )
+void CTakeDamageInfo::Set( CBaseEntity *pInflictor, CBaseEntity *pAttacker, const Vector &damageForce, const Vector &damagePosition, float flDamage, int bitsDamageType, int iKillType, Vector *reportedPosition, int iObjectsPenetrated )
 {
-	Set( pInflictor, pAttacker, NULL, damageForce, damagePosition, flDamage, bitsDamageType, iKillType, reportedPosition );
+	Set( pInflictor, pAttacker, NULL, damageForce, damagePosition, flDamage, bitsDamageType, iKillType, reportedPosition, iObjectsPenetrated );
 }
 
-void CTakeDamageInfo::Set( CBaseEntity *pInflictor, CBaseEntity *pAttacker, CBaseEntity *pWeapon, const Vector &damageForce, const Vector &damagePosition, float flDamage, int bitsDamageType, int iKillType, Vector *reportedPosition )
+void CTakeDamageInfo::Set( CBaseEntity *pInflictor, CBaseEntity *pAttacker, CBaseEntity *pWeapon, const Vector &damageForce, const Vector &damagePosition, float flDamage, int bitsDamageType, int iKillType, Vector *reportedPosition, int iObjectsPenetrated )
 {
 	Vector vecReported = vec3_origin;
 	if ( reportedPosition )
 	{
 		vecReported = *reportedPosition;
 	}
-	Init( pInflictor, pAttacker, pWeapon, damageForce, damagePosition, vecReported, flDamage, bitsDamageType, iKillType );
+	Init( pInflictor, pAttacker, pWeapon, damageForce, damagePosition, vecReported, flDamage, bitsDamageType, iKillType, iObjectsPenetrated );
 }
 
 //-----------------------------------------------------------------------------
@@ -186,10 +193,10 @@ CMultiDamage::CMultiDamage()
 //-----------------------------------------------------------------------------
 // Purpose: 
 //-----------------------------------------------------------------------------
-void CMultiDamage::Init( CBaseEntity *pTarget, CBaseEntity *pInflictor, CBaseEntity *pAttacker, CBaseEntity *pWeapon, const Vector &damageForce, const Vector &damagePosition, const Vector &reportedPosition, float flDamage, int bitsDamageType, int iKillType )
+void CMultiDamage::Init( CBaseEntity *pTarget, CBaseEntity *pInflictor, CBaseEntity *pAttacker, CBaseEntity *pWeapon, const Vector &damageForce, const Vector &damagePosition, const Vector &reportedPosition, float flDamage, int bitsDamageType, int iKillType, int iObjectsPenetrated )
 {
 	m_hTarget = pTarget;
-	BaseClass::Init( pInflictor, pAttacker, pWeapon, damageForce, damagePosition, reportedPosition, flDamage, bitsDamageType, iKillType );
+	BaseClass::Init( pInflictor, pAttacker, pWeapon, damageForce, damagePosition, reportedPosition, flDamage, bitsDamageType, iKillType, iObjectsPenetrated );
 }
 
 //-----------------------------------------------------------------------------
@@ -197,7 +204,7 @@ void CMultiDamage::Init( CBaseEntity *pTarget, CBaseEntity *pInflictor, CBaseEnt
 //-----------------------------------------------------------------------------
 void ClearMultiDamage( void )
 {
-	g_MultiDamage.Init( NULL, NULL, NULL, NULL, vec3_origin, vec3_origin, vec3_origin, 0, 0, 0 );
+	g_MultiDamage.Init( NULL, NULL, NULL, NULL, vec3_origin, vec3_origin, vec3_origin, 0, 0, 0, 0 );
 }
 
 //-----------------------------------------------------------------------------
@@ -212,12 +219,14 @@ void ApplyMultiDamage( void )
 	if ( !g_MultiDamage.GetTarget() )
 		return;
 
-#ifndef CLIENT_DLL
+#ifdef GAME_DLL
 	const CBaseEntity *host = te->GetSuppressHost();
 	te->SetSuppressHost( NULL );
+#endif
 		
 	g_MultiDamage.GetTarget()->TakeDamage( g_MultiDamage );
 
+#ifdef GAME_DLL
 	te->SetSuppressHost( (CBaseEntity*)host );
 #endif
 
@@ -236,7 +245,8 @@ void AddMultiDamage( const CTakeDamageInfo &info, CBaseEntity *pEntity )
 	if ( pEntity != g_MultiDamage.GetTarget() )
 	{
 		ApplyMultiDamage();
-		g_MultiDamage.Init( pEntity, info.GetInflictor(), info.GetAttacker(), info.GetWeapon(), vec3_origin, vec3_origin, vec3_origin, 0.0, info.GetDamageType(), info.GetDamageCustom() );
+		g_MultiDamage.Init( pEntity, info.GetInflictor(), info.GetAttacker(), info.GetWeapon(), vec3_origin, vec3_origin, vec3_origin, 0.0, info.GetDamageType(), info.GetDamageCustom(), info.GetObjectsPenetrated() );
+		g_MultiDamage.SetDamagedOtherPlayers( info.GetDamagedOtherPlayers() );
 	}
 
 	g_MultiDamage.AddDamageType( info.GetDamageType() );
@@ -244,14 +254,9 @@ void AddMultiDamage( const CTakeDamageInfo &info, CBaseEntity *pEntity )
 	g_MultiDamage.SetDamageForce( g_MultiDamage.GetDamageForce() + info.GetDamageForce() );
 	g_MultiDamage.SetDamagePosition( info.GetDamagePosition() );
 	g_MultiDamage.SetReportedPosition( info.GetReportedPosition() );
-	g_MultiDamage.SetMaxDamage( MAX( g_MultiDamage.GetMaxDamage(), info.GetDamage() ) );
+	g_MultiDamage.SetMaxDamage( MAX( g_MultiDamage.GetMaxDamage(), info.GetMaxDamage() ) );
 	g_MultiDamage.SetAmmoType( info.GetAmmoType() );
-	g_MultiDamage.SetCritType( info.GetCritType() );
-
-	if ( g_MultiDamage.GetPlayerPenetrationCount() == 0 )
-	{
-		g_MultiDamage.SetPlayerPenetrationCount( info.GetPlayerPenetrationCount() );
-	}
+	g_MultiDamage.SetBulletID( info.GetBulletID(), info.GetRecoilIndex() );
 
 	bool bHasPhysicsForceDamage = !g_pGameRules->Damage_NoPhysicsForce( info.GetDamageType() );
 	if ( bHasPhysicsForceDamage && g_MultiDamage.GetDamageType() != DMG_GENERIC )
@@ -452,19 +457,6 @@ void CTakeDamageInfo::DebugGetDamageTypeString(unsigned int damageType, char *ou
 	}
 }
 
-void CTakeDamageInfo::SetCritType( ECritType eType )
-{
-	if ( eType == CRIT_NONE )
-	{
-		// always let CRIT_NONE override the current setting
-		m_eCritType = eType;
-	}
-	else
-	{
-		// don't let CRIT_MINI override CRIT_FULL
-		m_eCritType = ( eType > m_eCritType ) ? eType : m_eCritType;
-	}
-}
 
 /*
 // instant damage

@@ -1,6 +1,8 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
-//----------------------------------------------------------------------------------------
+// Purpose: 
+//
+//=============================================================================//
 
 #ifndef REPLAYSERVER_H
 #define REPLAYSERVER_H
@@ -9,11 +11,13 @@
 #endif
 
 #include "baseserver.h"
+#include "replayclient.h"
 #include "replaydemo.h"
 #include "clientframe.h"
 #include "networkstringtable.h"
+#include "replayhistorymanager.h"
 #include "dt_recv.h"
-#include "replay/ireplayserver.h"
+#include <ireplay.h>
 #include <convar.h>
 
 #define REPLAY_BUFFER_DIRECTOR		0	// director commands
@@ -28,6 +32,8 @@
 #define DISPATCH_MODE_OFF			0
 #define DISPATCH_MODE_AUTO			1
 #define DISPATCH_MODE_ALWAYS		2
+
+extern ConVar replay_debug;
 
 class CReplayFrame : public CClientFrame
 {
@@ -83,12 +89,9 @@ protected:
 class CGameClient;
 class CGameServer;
 class IReplayDirector;
-class IServerReplayContext;
+class IReplayHistoryManager;
 
-class CReplayServer : public IGameEventListener2,
-					  public CBaseServer,
-					  public CClientFrameManager,
-					  public IReplayServer
+class CReplayServer : public IGameEventListener2, public CBaseServer, public CClientFrameManager, public IReplayServer
 {
 	typedef CBaseServer BaseClass;
 
@@ -97,57 +100,62 @@ public:
 	virtual ~CReplayServer();
 
 public: // CBaseServer interface:
-	virtual bool	IsMultiplayer() const { return true; };
-	virtual bool	IsReplay() const { return true; };
-	virtual void	Init( bool bIsDedicated );
-	virtual void	Clear();
-	virtual void	Shutdown();
-	virtual void	FillServerInfo(SVC_ServerInfo &serverinfo);
-	virtual void	GetNetStats( float &avgIn, float &avgOut );
-	virtual int		GetChallengeType ( netadr_t &adr );
-	virtual const char *GetName() const;
-	virtual const char *GetPassword() const;
-	IClient *ConnectClient ( netadr_t &adr, int protocol, int challenge, int clientChallenge, int authProtocol, 
-		const char *name, const char *password, const char *hashedCDkey, int cdKeyLen );
-
-	void ReplyChallenge(netadr_t &adr, int clientChallenge );
-	void ReplyServerChallenge(netadr_t &adr);
-	void RejectConnection( const netadr_t &adr, int clientChallenge, const char *s );
-	CBaseClient *CreateFakeClient(const char *name);
+	virtual bool	IsMultiplayer() const OVERRIDE { return true; };
+	virtual bool	IsReplay() const OVERRIDE { return true; };
+	virtual void	Init( bool bIsDedicated ) OVERRIDE;
+	virtual void	Clear() OVERRIDE;
+	virtual void	Shutdown() OVERRIDE;
+	virtual void	FillServerInfo(CSVCMsg_ServerInfo &serverinfo) OVERRIDE;
+	virtual void	GetNetStats( float &avgIn, float &avgOut ) OVERRIDE;
+	virtual int		GetChallengeType ( const ns_address &adr ) OVERRIDE;
+	virtual const char *GetName() const OVERRIDE;
+	virtual const char *GetPassword() const OVERRIDE;
+	IClient *ConnectClient ( const ns_address &adr, int protocol, int challenge, int authProtocol, 
+		const char *name, const char *password, const char *hashedCDkey, int cdKeyLen,
+		CUtlVector< CCLCMsg_SplitPlayerConnect_t * > & splitScreenClients, bool isClientLowViolence, CrossPlayPlatform_t clientPlatform,
+		const byte *pbEncryptionKey, int nEncryptionKeyIndex ) OVERRIDE;
 
 public: // IGameEventListener2 interface:
 	void	FireGameEvent( IGameEvent *event );
 	int		m_nDebugID;
-	int		GetEventDebugID();
+	int		GetEventDebugID( void );
 
 public: // IReplayServer interface:
 	virtual IServer	*GetBaseServer();
-	virtual IReplayDirector *GetDirector() { return NULL; }
+	virtual IReplayDirector *GetDirector();
 	virtual int		GetReplaySlot(); // return entity index-1 of Replay in game
 	virtual float	GetOnlineTime(); // seconds since broadcast started
-	virtual void	BroadcastEvent( IGameEvent *event ) { }
-	virtual bool	IsRecording()	{ return m_DemoRecorder.IsRecording(); }
-	virtual void	StartRecording();
-	virtual void	StopRecording();
+//	virtual void	GetLocalStats( int &proxies, int &slots, int &clients ); 
+
+	virtual void	BroadcastEvent( IGameEvent *event );
 
 public: // CBaseServer overrides:
 	virtual void	SetMaxClients( int number );
 	virtual void	UserInfoChanged( int nClientIndex );
+	virtual void	SendClientMessages ( bool bSendSnapshots );
 
 public:
-	void	StartMaster(CGameClient *client); // start Replay server as master proxy
-	bool	SendNetMsg( INetMessage &msg, bool bForceReliable = false );
-	void	RunFrame();
-	void	Changelevel();
+	void			StartMaster(CGameClient *client); // start Replay server as master proxy
+	void			StartDemo(const char *filename); // starts playing back a demo file
+	bool			SendNetMsg( INetMessage &msg, bool bForceReliable = false );
+	void			RunFrame();
+	void			Changelevel();
 	CClientFrame *AddNewFrame( CClientFrame * pFrame ); // add new frame, returns Replay's copy
 	void	LinkInstanceBaselines();
+	void	BroadcastEventLocal( IGameEvent *event, bool bReliable ); // broadcast event but not to relay proxies
+	void	BroadcastLocalChat( const char *pszChat, const char *pszGroup ); // broadcast event but not to relay proxies
+	void	BroadcastLocalTitle( CReplayClient *client = NULL ); // NULL = broadcast to all
+	bool	DispatchToRelay( CReplayClient *pClient);
 	bf_write *GetBuffer( int nBuffer);
 	CClientFrame *GetDeltaFrame( int nTick );
+
+	inline CReplayClient* Client( int i ) { return static_cast<CReplayClient*>(m_Clients[i]); }
 
 protected:
 	virtual bool ShouldUpdateMasterServer();
 	
 private:
+	CBaseClient *CreateNewClient( int slot );
 	void		UpdateTick();
 	void		InstallStringTables();
 	void		RestoreTick( int tick );
@@ -160,6 +168,7 @@ public:
 	CGameClient		*m_MasterClient;		// if != NULL, this is the master Replay 
 	CReplayDemoRecorder m_DemoRecorder;			// Replay demo object for recording and playback
 	CGameServer		*m_Server;		// pointer to source server (sv.)
+	IReplayDirector	*m_Director;	// Replay director exported by game.dll	
 	int				m_nFirstTick;	// first known server tick;
 	int				m_nLastTick;	// last tick from AddFrame()
 	CReplayFrame	*m_CurrentFrame; // current delayed Replay frame
@@ -187,11 +196,19 @@ public:
 	CReplayDeltaEntityCache					m_DeltaCache;
 	CUtlVector<CReplayFrameCacheEntry_s>	m_FrameCache;
 
-private:
-	void			SendPendingEvents();	// Send events to clients regarding start/stop/replays available
+	// demoplayer stuff:
+	CDemoFile		m_DemoFile;		// for demo playback
+	int				m_nStartTick;
+	democmdinfo_t	m_LastCmdInfo;
+	bool			m_bPlayingBack;
+	bool			m_bPlaybackPaused; // true if demo is paused right now
+	float			m_flPlaybackRateModifier;
+	int				m_nSkipToTick;	// skip to tick ASAP, -1 = off
 
-	float			m_flStartRecordTime;
-	float			m_flStopRecordTime;
+	// TODO: Index by SteamID
+	CBitVec< 64 >	m_vecClientsDownloading;		// Indexed by client slot - each bit represents whether the given client is currently downloading
+
+	friend class CReplayClientState;
 };
 
 extern CReplayServer *replay;	// The global Replay server/object. NULL on xbox.

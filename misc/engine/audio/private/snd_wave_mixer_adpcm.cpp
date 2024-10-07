@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -21,11 +21,12 @@ public:
 	CAudioMixerWaveADPCM( IWaveData *data );
 	~CAudioMixerWaveADPCM( void );
 	
-	virtual void Mix( IAudioDevice *pDevice, channel_t *pChannel, void *pData, int outputOffset, int inputOffset, fixedint fracRate, int outCount, int timecompress );
+	virtual void Mix( channel_t *pChannel, void *pData, int outputOffset, int inputOffset, fixedint fracRate, int outCount, int timecompress );
 	virtual int	 GetOutputData( void **pData, int sampleCount, char copyBuf[AUDIOSOURCE_COPYBUF_SIZE] );
 
 	// need to override this to fixup blocks
-	void SetSampleStart( int newPosition );
+	virtual bool IsSetSampleStartSupported() const;
+	virtual void SetSampleStart( int newPosition );
 	virtual int GetMixSampleSize() { return CalcSampleSize( 16, NumChannels() ); }
 
 private:
@@ -97,12 +98,16 @@ int	CAudioMixerWaveADPCM::NumChannels( void )
 	return 0;
 }
 
-void CAudioMixerWaveADPCM::Mix( IAudioDevice *pDevice, channel_t *pChannel, void *pData, int outputOffset, int inputOffset, fixedint fracRate, int outCount, int timecompress )
+void CAudioMixerWaveADPCM::Mix( channel_t *pChannel, void *pData, int outputOffset, int inputOffset, fixedint fracRate, int outCount, int timecompress )
 {
 	if ( NumChannels() == 1 )
-		pDevice->Mix16Mono( pChannel, (short *)pData, outputOffset, inputOffset, fracRate, outCount, timecompress );
+	{
+		Device_Mix16Mono( pChannel, (short *)pData, outputOffset, inputOffset, fracRate, outCount, timecompress );
+	}
 	else
-		pDevice->Mix16Stereo( pChannel, (short *)pData, outputOffset, inputOffset, fracRate, outCount, timecompress );
+	{
+		Device_Mix16Stereo( pChannel, (short *)pData, outputOffset, inputOffset, fracRate, outCount, timecompress );
+	}
 }
 
 
@@ -404,7 +409,7 @@ int CAudioMixerWaveADPCM::GetOutputData( void **pData, int sampleCount, char cop
 			return 0;
 	}
 
-	if ( m_pSamples && m_samplePosition < m_sampleCount )
+	if ( m_samplePosition < m_sampleCount )
 	{
 		*pData = (void *)(m_pSamples + m_samplePosition * NumChannels());
 		int available = m_sampleCount - m_samplePosition;
@@ -423,6 +428,11 @@ int CAudioMixerWaveADPCM::GetOutputData( void **pData, int sampleCount, char cop
 	}
 
 	return 0;
+}
+
+bool CAudioMixerWaveADPCM::IsSetSampleStartSupported() const
+{
+	return true;
 }
 
 //-----------------------------------------------------------------------------

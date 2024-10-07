@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright c 1996-2007, Valve Corporation, All rights reserved. =======//
 //
 // Purpose: 
 //
@@ -46,6 +46,7 @@ bool CMdlStripInfo::Serialize( CUtlBuffer &bufStorage ) const
 		return true;
 	
 	case MODE_NO_CHANGE:
+	case MODE_PS3_FORMAT_BASIC:
 		bufStorage.PutInt( m_lChecksumOld );
 		bufStorage.PutInt( m_lChecksumNew );
 		return true;
@@ -73,6 +74,46 @@ bool CMdlStripInfo::Serialize( CUtlBuffer &bufStorage ) const
 			bufStorage.PutInt( pmri->m_numNew );
 
 		return true;
+
+	case MODE_PS3_PARTITIONS:
+		bufStorage.PutInt( m_lChecksumOld );
+		bufStorage.PutInt( m_lChecksumNew );
+		
+		bufStorage.PutUnsignedInt( m_ps3studioBatches.Count() );
+		for ( int k = 0; k < m_ps3studioBatches.Count(); ++ k )
+		{
+			Ps3studioBatch_t &batch = *m_ps3studioBatches[k];
+			bufStorage.PutUnsignedInt( batch.m_arrPartitions.Count() );
+			for ( int j = 0; j < batch.m_arrPartitions.Count(); ++ j )
+			{
+				Ps3studioPartition_t &partition = *batch.m_arrPartitions[j];
+				bufStorage.PutUnsignedInt( partition.m_arrLocalIndices.Count() );
+				for ( int nn = 0; nn < partition.m_arrLocalIndices.Count(); ++ nn )
+				{
+					bufStorage.PutUnsignedShort( partition.m_arrLocalIndices[nn] );
+				}
+				bufStorage.PutUnsignedInt( partition.m_arrVertOriginalIndices.Count() );
+				for ( int nn = 0; nn < partition.m_arrVertOriginalIndices.Count(); ++ nn )
+				{
+					bufStorage.PutUnsignedInt( partition.m_arrVertOriginalIndices[nn] );
+				}
+				bufStorage.PutUnsignedInt( partition.m_arrStripLocalOriginalIndices.Count() );
+				for ( int nn = 0; nn < partition.m_arrStripLocalOriginalIndices.Count(); ++ nn )
+				{
+					bufStorage.PutUnsignedInt( partition.m_arrStripLocalOriginalIndices[nn] );
+				}
+				bufStorage.PutUnsignedInt( partition.m_nIoBufferSize );
+			}
+			bufStorage.PutUnsignedInt( batch.m_uiModelIndexOffset );
+			bufStorage.PutUnsignedInt( batch.m_uiVhvIndexOffset );
+		}
+
+		bufStorage.PutUnsignedInt( m_ps3studioStripGroupHeaderBatchOffset.Count() );
+		for ( int k = 0; k < m_ps3studioStripGroupHeaderBatchOffset.Count(); ++ k )
+		{
+			bufStorage.PutUnsignedInt( m_ps3studioStripGroupHeaderBatchOffset[k] );
+		}
+		return true;
 	}
 }
 
@@ -84,25 +125,24 @@ bool CMdlStripInfo::UnSerialize( CUtlBuffer &bufData )
 	if ( memcmp( chHeader, "MAP", 3 ) )
 		return false;
 
+	m_eMode = chHeader[3];
 	switch ( chHeader[3] )
 	{
 	default:
 		return false;
 	
 	case MODE_UNINITIALIZED:
-		m_eMode = MODE_UNINITIALIZED;
 		m_lChecksumOld = 0;
 		m_lChecksumNew = 0;
 		return true;
 
 	case MODE_NO_CHANGE:
-		m_eMode = MODE_NO_CHANGE;
+	case MODE_PS3_FORMAT_BASIC:
 		m_lChecksumOld = bufData.GetInt();
 		m_lChecksumNew = bufData.GetInt();
 		return true;
 
 	case MODE_STRIP_LOD_1N:
-		m_eMode = MODE_STRIP_LOD_1N;
 		m_lChecksumOld = bufData.GetInt();
 		m_lChecksumNew = bufData.GetInt();
 
@@ -124,6 +164,48 @@ bool CMdlStripInfo::UnSerialize( CUtlBuffer &bufData )
 			pmri->m_numOld = bufData.GetInt(),
 			pmri->m_numNew = bufData.GetInt();
 
+		return true;
+
+	case MODE_PS3_PARTITIONS:
+		m_lChecksumOld = bufData.GetInt();
+		m_lChecksumNew = bufData.GetInt();
+
+		m_ps3studioBatches.SetCount( bufData.GetUnsignedInt() );
+		for ( int k = 0; k < m_ps3studioBatches.Count(); ++ k )
+		{
+			m_ps3studioBatches[k] = new Ps3studioBatch_t;
+			Ps3studioBatch_t &batch = *m_ps3studioBatches[k];
+			batch.m_arrPartitions.SetCount( bufData.GetUnsignedInt() );
+			for ( int j = 0; j < batch.m_arrPartitions.Count(); ++ j )
+			{
+				batch.m_arrPartitions[j] = new Ps3studioPartition_t;
+				Ps3studioPartition_t &partition = *batch.m_arrPartitions[j];
+				partition.m_arrLocalIndices.SetCount( bufData.GetUnsignedInt() );
+				for ( int nn = 0; nn < partition.m_arrLocalIndices.Count(); ++ nn )
+				{
+					partition.m_arrLocalIndices[nn] = bufData.GetUnsignedShort();
+				}
+				partition.m_arrVertOriginalIndices.SetCount( bufData.GetUnsignedInt() );
+				for ( int nn = 0; nn < partition.m_arrVertOriginalIndices.Count(); ++ nn )
+				{
+					partition.m_arrVertOriginalIndices[nn] = bufData.GetUnsignedInt();
+				}
+				partition.m_arrStripLocalOriginalIndices.SetCount( bufData.GetUnsignedInt() );
+				for ( int nn = 0; nn < partition.m_arrStripLocalOriginalIndices.Count(); ++ nn )
+				{
+					partition.m_arrStripLocalOriginalIndices[nn] = bufData.GetUnsignedInt();
+				}
+				partition.m_nIoBufferSize = bufData.GetUnsignedInt();
+			}
+			batch.m_uiModelIndexOffset = bufData.GetUnsignedInt();
+			batch.m_uiVhvIndexOffset = bufData.GetUnsignedInt();
+		}
+
+		m_ps3studioStripGroupHeaderBatchOffset.SetCount( bufData.GetUnsignedInt() );
+		for ( int k = 0; k < m_ps3studioStripGroupHeaderBatchOffset.Count(); ++ k )
+		{
+			m_ps3studioStripGroupHeaderBatchOffset[k] = bufData.GetUnsignedInt();
+		}
 		return true;
 	}
 }
@@ -147,6 +229,16 @@ bool CMdlStripInfo::GetCheckSum( long *plChecksumOriginal, long *plChecksumStrip
 }
 
 
+static inline uint32 Helper_SwapVhvColorForPs3( uint32 uiColor )
+{
+	// Swapping R and B channels
+	return
+		( ( ( uiColor >> 0 ) & 0xFF ) << 16 ) |
+		( ( ( uiColor >> 8 ) & 0xFF ) << 8 ) |
+		( ( ( uiColor >> 16 ) & 0xFF ) << 0 ) |
+		( ( ( uiColor >> 24 ) & 0xFF ) << 24 );
+}
+
 //
 // StripHardwareVertsBuffer
 //	The main function that strips the vhv buffer
@@ -165,7 +257,7 @@ bool CMdlStripInfo::StripHardwareVertsBuffer( CUtlBuffer &vhvBuffer )
 
 	if ( vhvHdr->m_nChecksum != m_lChecksumOld )
 	{
-		DLog( "mdllib", 1, "ERROR: [StripHardwareVertsBuffer] checksum mismatch!\n" );
+		Log_Msg( LOG_ModelLib, "ERROR: [StripHardwareVertsBuffer] checksum mismatch!\n" );
 		return false;
 	}
 
@@ -176,69 +268,182 @@ bool CMdlStripInfo::StripHardwareVertsBuffer( CUtlBuffer &vhvBuffer )
 	if ( m_eMode == MODE_NO_CHANGE )
 		return true;
 
-
-	Assert( m_eMode == MODE_STRIP_LOD_1N );
-
-	//
-	// Now reconstruct the vhv structures to do the mapping
-	//
-
-	CRemoveTracker vhvRemove;
-	size_t vhvVertOffset = ~size_t( 0 ), vhvEndMeshOffset = sizeof( HardwareVerts::FileHeader_t );
-	int numMeshesRemoved = 0, numVertsRemoved = 0;
-
-	ITERATE_CHILDREN( HardwareVerts::MeshHeader_t, vhvMesh, vhvHdr, pMesh, m_nMeshes )
-		if ( vhvMesh->m_nOffset < vhvVertOffset )
-			vhvVertOffset = vhvMesh->m_nOffset;
-		if ( BYTE_DIFF_PTR( vhvHdr, vhvMesh + 1 ) > vhvEndMeshOffset )
-			vhvEndMeshOffset = BYTE_DIFF_PTR( vhvHdr, vhvMesh + 1 );
-		if ( !vhvMesh->m_nLod )
-			continue;
-		vhvRemove.RemoveBytes( BYTE_OFF_PTR( vhvHdr, vhvMesh->m_nOffset ), vhvMesh->m_nVertexes * vhvHdr->m_nVertexSize );
-		vhvRemove.RemoveElements( vhvMesh );
-		numVertsRemoved += vhvMesh->m_nVertexes;
-		++ numMeshesRemoved;
-	ITERATE_END
-	vhvRemove.RemoveBytes( BYTE_OFF_PTR( vhvHdr, vhvEndMeshOffset ), vhvVertOffset - vhvEndMeshOffset );	// Padding
-	vhvRemove.RemoveBytes( BYTE_OFF_PTR( vhvHdr, vhvVertOffset + vhvHdr->m_nVertexes * vhvHdr->m_nVertexSize ), vhvLength - ( vhvVertOffset + vhvHdr->m_nVertexes * vhvHdr->m_nVertexSize ) );
-
-	vhvRemove.Finalize();
-	DLog( "mdllib", 3, " Stripped %d vhv bytes.\n", vhvRemove.GetNumBytesRemoved() );
-
-	// Verts must be aligned from hdr, length must be aligned from hdr
-	size_t vhvNewVertOffset = vhvRemove.ComputeOffset( vhvHdr, vhvVertOffset );
-	size_t vhvAlignedVertOffset = ALIGN_VALUE( vhvNewVertOffset, 4 );
-
-	ITERATE_CHILDREN( HardwareVerts::MeshHeader_t, vhvMesh, vhvHdr, pMesh, m_nMeshes )
-		vhvMesh->m_nOffset = vhvRemove.ComputeOffset( vhvHdr, vhvMesh->m_nOffset ) + vhvAlignedVertOffset - vhvNewVertOffset;
-	ITERATE_END
-	vhvHdr->m_nMeshes -= numMeshesRemoved;
-	vhvHdr->m_nVertexes -= numVertsRemoved;
-
-	// Remove the memory
-	vhvRemove.MemMove( vhvHdr, vhvLength );	// All padding has been removed
-
-	size_t numBytesNewLength = vhvLength + vhvAlignedVertOffset - vhvNewVertOffset;
-	size_t numAlignedNewLength = ALIGN_VALUE( numBytesNewLength, 4 );
-
-	// Now reinsert the padding
-	CInsertionTracker vhvInsertPadding;
-	vhvInsertPadding.InsertBytes( BYTE_OFF_PTR( vhvHdr, vhvNewVertOffset ), vhvAlignedVertOffset - vhvNewVertOffset );
-	vhvInsertPadding.InsertBytes( BYTE_OFF_PTR( vhvHdr, vhvLength ), numAlignedNewLength - numBytesNewLength );
+	// Basic PS3 remapping required
+	if ( m_eMode == MODE_PS3_FORMAT_BASIC )
+	{
+		DECLARE_PTR( uint32, pVertDataSrc, BYTE_OFF_PTR( vhvHdr, AlignValue( sizeof( *vhvHdr ) + vhvHdr->m_nMeshes * sizeof( HardwareVerts::MeshHeader_t ), 512 ) ) );
+		DECLARE_PTR( uint32, pVertDataEnd, BYTE_OFF_PTR( vhvHdr, vhvLength ) );
+		while ( pVertDataSrc + 1 <= pVertDataEnd )
+		{
+			* ( pVertDataSrc ++ ) = Helper_SwapVhvColorForPs3( *pVertDataSrc );
+		}
+		return true;
+	}
 	
-	vhvInsertPadding.Finalize();
-	DLog( "mdllib", 3, " Inserted %d alignment bytes.\n", vhvInsertPadding.GetNumBytesInserted() );
+	if ( m_eMode == MODE_STRIP_LOD_1N )
+	{
+		//
+		// Now reconstruct the vhv structures to do the mapping
+		//
 
-	vhvInsertPadding.MemMove( vhvHdr, vhvLength );
+		CMemoryMovingTracker vhvRemove( CMemoryMovingTracker::MEMORY_REMOVE );
+		size_t vhvVertOffset = ~size_t( 0 ), vhvEndMeshOffset = sizeof( HardwareVerts::FileHeader_t );
+		int numMeshesRemoved = 0, numVertsRemoved = 0;
+
+		ITERATE_CHILDREN( HardwareVerts::MeshHeader_t, vhvMesh, vhvHdr, pMesh, m_nMeshes )
+			if ( vhvMesh->m_nOffset < vhvVertOffset )
+				vhvVertOffset = vhvMesh->m_nOffset;
+			if ( BYTE_DIFF_PTR( vhvHdr, vhvMesh + 1 ) > vhvEndMeshOffset )
+				vhvEndMeshOffset = BYTE_DIFF_PTR( vhvHdr, vhvMesh + 1 );
+			if ( !vhvMesh->m_nLod )
+				continue;
+			vhvRemove.RegisterBytes( BYTE_OFF_PTR( vhvHdr, vhvMesh->m_nOffset ), vhvMesh->m_nVertexes * vhvHdr->m_nVertexSize );
+			vhvRemove.RegisterElements( vhvMesh );
+			numVertsRemoved += vhvMesh->m_nVertexes;
+			++ numMeshesRemoved;
+		ITERATE_END
+		vhvRemove.RegisterBytes( BYTE_OFF_PTR( vhvHdr, vhvEndMeshOffset ), vhvVertOffset - vhvEndMeshOffset );	// Padding
+		vhvRemove.RegisterBytes( BYTE_OFF_PTR( vhvHdr, vhvVertOffset + vhvHdr->m_nVertexes * vhvHdr->m_nVertexSize ), vhvLength - ( vhvVertOffset + vhvHdr->m_nVertexes * vhvHdr->m_nVertexSize ) );
+
+		vhvRemove.Finalize();
+		Log_Msg( LOG_ModelLib, " Stripped %d vhv bytes.\n", vhvRemove.GetNumBytesRegistered() );
+
+		// Verts must be aligned from hdr, length must be aligned from hdr
+		size_t vhvNewVertOffset = vhvRemove.ComputeOffset( vhvHdr, vhvVertOffset );
+		size_t vhvAlignedVertOffset = ALIGN_VALUE( vhvNewVertOffset, 4 );
+
+		ITERATE_CHILDREN( HardwareVerts::MeshHeader_t, vhvMesh, vhvHdr, pMesh, m_nMeshes )
+			vhvMesh->m_nOffset = vhvRemove.ComputeOffset( vhvHdr, vhvMesh->m_nOffset ) + vhvAlignedVertOffset - vhvNewVertOffset;
+		ITERATE_END
+		vhvHdr->m_nMeshes -= numMeshesRemoved;
+		vhvHdr->m_nVertexes -= numVertsRemoved;
+
+		// Remove the memory
+		vhvRemove.MemMove( vhvHdr, vhvLength );	// All padding has been removed
+
+		size_t numBytesNewLength = vhvLength + vhvAlignedVertOffset - vhvNewVertOffset;
+		size_t numAlignedNewLength = ALIGN_VALUE( numBytesNewLength, 4 );
+
+		// Now reinsert the padding
+		CInsertionTracker vhvInsertPadding;
+		vhvInsertPadding.InsertBytes( BYTE_OFF_PTR( vhvHdr, vhvNewVertOffset ), vhvAlignedVertOffset - vhvNewVertOffset );
+		vhvInsertPadding.InsertBytes( BYTE_OFF_PTR( vhvHdr, vhvLength ), numAlignedNewLength - numBytesNewLength );
+		
+		vhvInsertPadding.Finalize();
+		Log_Msg( LOG_ModelLib, " Inserted %d alignment bytes.\n", vhvInsertPadding.GetNumBytesInserted() );
+
+		vhvInsertPadding.MemMove( vhvHdr, vhvLength );
 
 
-	// Update the buffer length
-	vhvBuffer.SeekPut( CUtlBuffer::SEEK_CURRENT, vhvBuffer.TellGet() + vhvLength - vhvBuffer.TellPut() );
+		// Update the buffer length
+		vhvBuffer.SeekPut( CUtlBuffer::SEEK_CURRENT, vhvBuffer.TellGet() + vhvLength - vhvBuffer.TellPut() );
 
-	DLog( "mdllib", 2, " Reduced vhv buffer by %d bytes.\n", vhvRemove.GetNumBytesRemoved() - vhvInsertPadding.GetNumBytesInserted() );
+		Log_Msg( LOG_ModelLib, " Reduced vhv buffer by %d bytes.\n", vhvRemove.GetNumBytesRegistered() - vhvInsertPadding.GetNumBytesInserted() );
+		return true;
+	}
+
+	if ( m_eMode == MODE_PS3_PARTITIONS )
+	{
+		//
+		// Complex partitions processing
+		//
+
+		// Expect number of meshes in VHV header to match
+		if ( !vhvHdr->m_nMeshes || vhvHdr->m_nMeshes != m_ps3studioStripGroupHeaderBatchOffset.Count() )
+		{
+			Log_Msg( LOG_ModelLib, " Mismatching vhv buffer mesh count( vhv=%d, vsi=%d ).\n", vhvHdr->m_nMeshes, m_ps3studioStripGroupHeaderBatchOffset.Count() );
+			return false;
+		}
+
+		// Count total number of vertices
+		uint32 uiTotalVerts = 0;
+		for ( int k = 0; k < m_ps3studioBatches.Count(); ++ k )
+			for ( int j = 0; j < m_ps3studioBatches[k]->m_arrPartitions.Count(); ++ j )
+				uiTotalVerts += m_ps3studioBatches[k]->m_arrPartitions[j]->m_arrVertOriginalIndices.Count();
+
+		// Now allocate enough target buffer space to fit all the verts
+		uint32 uiRequiredBufferSize = sizeof( HardwareVerts::FileHeader_t ) + vhvHdr->m_nMeshes*sizeof( HardwareVerts::MeshHeader_t );
+		uiRequiredBufferSize = AlignValue( uiRequiredBufferSize, 512 ); // start actual data stream on 512-boundary
+		uint32 uiTotalBufferSize = AlignValue( uiRequiredBufferSize + 4 * uiTotalVerts, 512 );
+		
+		// Copy off the source buffer
+		CUtlBuffer bufSrcCopy;
+		bufSrcCopy.EnsureCapacity( MAX( uiTotalBufferSize, vhvLength ) );
+		V_memcpy( bufSrcCopy.Base(), vhvHdr, vhvLength );
+
+		// We know where the first mesh's vertices should start
+		if ( vhvHdr->pMesh(0)->m_nOffset != uiRequiredBufferSize || uiTotalBufferSize < vhvLength )
+		{
+			Log_Msg( LOG_ModelLib, " Unexpected vhv buffer mesh offset.\n" );
+			return false;
+		}
+
+		vhvBuffer.EnsureCapacity( vhvBuffer.TellGet() + uiTotalBufferSize );
+		vhvBuffer.SeekPut( CUtlBuffer::SEEK_CURRENT, uiTotalBufferSize - vhvLength );
+		DECLARE_UPDATE_PTR( HardwareVerts::FileHeader_t, vhvHdr, BYTE_OFF_PTR( vhvBuffer.Base(), vhvBuffer.TellGet() ) );
+		DECLARE_PTR( HardwareVerts::FileHeader_t, vhvHdrSrc, bufSrcCopy.Base() );
+
+		//
+		// === update the actual VHV vertices
+		//
+		DECLARE_PTR( uint32, pVertDataSrc, BYTE_OFF_PTR( vhvHdrSrc, uiRequiredBufferSize ) );
+		DECLARE_PTR( uint32, pVertDataDst, BYTE_OFF_PTR( vhvHdr, uiRequiredBufferSize ) );
+#ifdef _DEBUG
+		// Keep track of which verts got touched
+		CGrowableBitVec arrTouchedOriginalVerts;
+		uint32 uiDebugOriginalVertsPresent = 0;
+		for ( uint32 iDebugMesh = 0; iDebugMesh < vhvHdr->m_nMeshes; ++ iDebugMesh )
+			uiDebugOriginalVertsPresent += vhvHdr->pMesh(iDebugMesh)->m_nVertexes;
+#endif
+		for ( uint32 iMesh = 0, iBatch = 0; iMesh < m_ps3studioStripGroupHeaderBatchOffset.Count(); ++ iMesh )
+		{
+			uint32 numVerts = 0;
+			vhvHdr->pMesh(iMesh)->m_nOffset = BYTE_DIFF_PTR( vhvHdr, pVertDataDst );
+			uint32 iBatchEnd = ( iMesh < m_ps3studioStripGroupHeaderBatchOffset.Count() - 1 )
+				? m_ps3studioStripGroupHeaderBatchOffset[iMesh+1] : m_ps3studioBatches.Count();
+			iBatchEnd = MIN( iBatchEnd, m_ps3studioBatches.Count() );
+			for ( ; iBatch < iBatchEnd; ++ iBatch )
+			{
+				Ps3studioBatch_t &batch = *m_ps3studioBatches[iBatch];
+				// uint32 arrForcedColors[] = { 0xFF200000, 0xFFFF0000, 0xFFFFFF00, 0xFF002000, 0xFF00FF00, 0xFF00FFFF, 0xFF000020, 0xFF0000FF, 0xFFFF00FF  };
+				for ( uint32 iPartition = 0; iPartition < batch.m_arrPartitions.Count(); ++ iPartition )
+				{
+					Ps3studioPartition_t &partition = *batch.m_arrPartitions[iPartition];
+					numVerts += partition.m_arrVertOriginalIndices.Count();
+					for ( uint32 iVertIndex = 0; iVertIndex < partition.m_arrVertOriginalIndices.Count(); ++ iVertIndex )
+					{
+						// uint32 uiOrigVertIndex = partition.m_arrVertOriginalIndices[iVertIndex];
+						uint32 uiOrigVertIndex = partition.m_arrStripLocalOriginalIndices[iVertIndex];
+						uiOrigVertIndex += batch.m_uiVhvIndexOffset;
+						uint32 uiColor = pVertDataSrc[uiOrigVertIndex];
+						Assert( BYTE_DIFF_PTR( vhvHdrSrc, pVertDataSrc[uiOrigVertIndex] ) < vhvLength );
+						// uiColor = arrForcedColors[iPartition%ARRAYSIZE(arrForcedColors)];
+						*( pVertDataDst ++ ) = Helper_SwapVhvColorForPs3( uiColor );
+						Assert( BYTE_DIFF_PTR( vhvHdr, pVertDataDst ) <= uiTotalBufferSize );
+#ifdef _DEBUG
+						arrTouchedOriginalVerts.GrowSetBit( uiOrigVertIndex );
+#endif
+					}
+				}
+			}
+			vhvHdr->pMesh(iMesh)->m_nVertexes = numVerts;
+		}
+#ifdef _DEBUG
+		{
+			uint32 uiDebugTouchedOriginalVerts = arrTouchedOriginalVerts.GetNumBits();
+			for ( uint32 iDebugOrigVert = 0; iDebugOrigVert < uiDebugOriginalVertsPresent; ++ iDebugOrigVert )
+			{
+				Assert( arrTouchedOriginalVerts.IsBitSet( iDebugOrigVert ) );
+			}
+			Assert( uiDebugTouchedOriginalVerts == uiDebugOriginalVertsPresent );
+		}
+#endif
+
+		return true;
+	}
 
 	// Done
-	return true;
+	return false;
 }
 
 //
@@ -258,7 +463,7 @@ bool CMdlStripInfo::StripModelBuffer( CUtlBuffer &mdlBuffer )
 
 	if ( mdlHdr->checksum != m_lChecksumOld )
 	{
-		DLog( "mdllib", 1, "ERROR: [StripModelBuffer] checksum mismatch!\n" );
+		Log_Msg( LOG_ModelLib, "ERROR: [StripModelBuffer] checksum mismatch!\n" );
 		return false;
 	}
 
@@ -268,10 +473,8 @@ bool CMdlStripInfo::StripModelBuffer( CUtlBuffer &mdlBuffer )
 	// No remapping required
 	if ( m_eMode == MODE_NO_CHANGE )
 		return true;
-
-
-	Assert( m_eMode == MODE_STRIP_LOD_1N );
-
+	if ( m_eMode != MODE_STRIP_LOD_1N )
+		return false;
 
 	//
 	// Do the model buffer stripping
@@ -282,7 +485,7 @@ bool CMdlStripInfo::StripModelBuffer( CUtlBuffer &mdlBuffer )
 	ITERATE_CHILDREN( mstudiobodyparts_t, mdlBodyPart, mdlHdr, pBodypart, numbodyparts )
 		ITERATE_CHILDREN( mstudiomodel_t, mdlModel, mdlBodyPart, pModel, nummodels )
 			
-			DLog( "mdllib", 3, " Stripped %d vertexes (was: %d, now: %d).\n", mdlModel->numvertices - srcIndices.Count(), mdlModel->numvertices, srcIndices.Count() );
+			Log_Msg( LOG_ModelLib, " Stripped %d vertexes (was: %d, now: %d).\n", mdlModel->numvertices - srcIndices.Count(), mdlModel->numvertices, srcIndices.Count() );
 
 			mdlModel->numvertices = srcIndices.Count();
 
@@ -303,11 +506,11 @@ bool CMdlStripInfo::StripModelBuffer( CUtlBuffer &mdlBuffer )
 	//
 	// Update bones not to mention anything below LOD0
 	//
-	ITERATE_CHILDREN( mstudiobone_t, mdlBone, mdlHdr, pBone, numbones )
-		mdlBone->flags &= ( BONE_USED_BY_VERTEX_LOD0 | ~BONE_USED_BY_VERTEX_MASK );
+	ITERATE_CHILDREN( const mstudiobone_t, mdlBone, mdlHdr, pBone, numbones )
+		((mstudiobone_t *)mdlBone)->flags &= ( BONE_USED_BY_VERTEX_LOD0 | ~BONE_USED_BY_VERTEX_MASK );
 	ITERATE_END
 
-	DLog( "mdllib", 3, " Updated %d bone(s).\n", mdlHdr->numbones );
+	Log_Msg( LOG_ModelLib, " Updated %d bone(s).\n", mdlHdr->numbones );
 
 	return true;
 }
@@ -331,7 +534,7 @@ bool CMdlStripInfo::StripVertexDataBuffer( CUtlBuffer &vvdBuffer )
 
 	if ( vvdHdr->checksum != m_lChecksumOld )
 	{
-		DLog( "mdllib", 1, "ERROR: [StripVertexDataBuffer] checksum mismatch!\n" );
+		Log_Msg( LOG_ModelLib, "ERROR: [StripVertexDataBuffer] checksum mismatch!\n" );
 		return false;
 	}
 
@@ -341,10 +544,8 @@ bool CMdlStripInfo::StripVertexDataBuffer( CUtlBuffer &vvdBuffer )
 	// No remapping required
 	if ( m_eMode == MODE_NO_CHANGE )
 		return true;
-
-
-	Assert( m_eMode == MODE_STRIP_LOD_1N );
-
+	if ( m_eMode != MODE_STRIP_LOD_1N )
+		return false;
 
 	//
 	// Do the vertex data buffer stripping
@@ -407,7 +608,7 @@ bool CMdlStripInfo::StripVertexDataBuffer( CUtlBuffer &vvdBuffer )
 	
 	vvdBuffer.SeekPut( CUtlBuffer::SEEK_CURRENT, vvdBuffer.TellGet() + vvdLength - vvdBuffer.TellPut() );
 
-	DLog( "mdllib", 3, " Stripped %d vvd bytes.\n", vvdLengthOld - vvdLength );
+	Log_Msg( LOG_ModelLib, " Stripped %d vvd bytes.\n", vvdLengthOld - vvdLength );
 
 	return true;
 }
@@ -430,7 +631,7 @@ bool CMdlStripInfo::StripOptimizedModelBuffer( CUtlBuffer &vtxBuffer )
 
 	if ( vtxHdr->checkSum != m_lChecksumOld )
 	{
-		DLog( "mdllib", 1, "ERROR: [StripOptimizedModelBuffer] checksum mismatch!\n" );
+		Log_Msg( LOG_ModelLib, "ERROR: [StripOptimizedModelBuffer] checksum mismatch!\n" );
 		return false;
 	}
 
@@ -440,8 +641,8 @@ bool CMdlStripInfo::StripOptimizedModelBuffer( CUtlBuffer &vtxBuffer )
 	if ( m_eMode == MODE_NO_CHANGE )
 		return true;
 
-	Assert( m_eMode == MODE_STRIP_LOD_1N );
-
+	if ( m_eMode != MODE_STRIP_LOD_1N )
+		return false;
 
 	//
 	// Do the optimized model buffer stripping
@@ -452,35 +653,35 @@ bool CMdlStripInfo::StripOptimizedModelBuffer( CUtlBuffer &vtxBuffer )
 
 	size_t vtxOffIndexBuffer = ~size_t(0), vtxOffIndexBufferEnd = 0;
 	size_t vtxOffVertexBuffer = ~size_t(0), vtxOffVertexBufferEnd = 0;
-	CRemoveTracker vtxRemove;
+	CMemoryMovingTracker vtxRemove( CMemoryMovingTracker::MEMORY_REMOVE );
 	CUtlVector< size_t > vtxOffIndex;
 	CUtlVector< size_t > vtxOffVertex;
 
-	vtxRemove.RemoveElements( CHILD_AT( vtxHdr, pMaterialReplacementList, 1 ), vtxHdr->numLODs - 1 );
+	vtxRemove.RegisterElements( CHILD_AT( vtxHdr, pMaterialReplacementList, 1 ), vtxHdr->numLODs - 1 );
 	ITERATE_CHILDREN( OptimizedModel::MaterialReplacementListHeader_t, vtxMatList, vtxHdr, pMaterialReplacementList, numLODs )
 		if ( !vtxMatList_idx ) continue;
-		vtxRemove.RemoveElements( CHILD_AT( vtxMatList, pMaterialReplacement, 0 ), vtxMatList->numReplacements );
+		vtxRemove.RegisterElements( CHILD_AT( vtxMatList, pMaterialReplacement, 0 ), vtxMatList->numReplacements );
 		ITERATE_CHILDREN( OptimizedModel::MaterialReplacementHeader_t, vtxMat, vtxMatList, pMaterialReplacement, numReplacements )
 			char const *szName = vtxMat->pMaterialReplacementName();
-			vtxRemove.RemoveElements( szName, szName ? strlen( szName ) + 1 : 0 );
+			vtxRemove.RegisterElements( szName, szName ? strlen( szName ) + 1 : 0 );
 		ITERATE_END
 	ITERATE_END
 
 	ITERATE_CHILDREN( OptimizedModel::BodyPartHeader_t, vtxBodyPart, vtxHdr, pBodyPart, numBodyParts )
 		ITERATE_CHILDREN( OptimizedModel::ModelHeader_t, vtxModel, vtxBodyPart, pModel, numModels )
 		
-			vtxRemove.RemoveElements( CHILD_AT( vtxModel, pLOD, 1 ), vtxModel->numLODs - 1 );
+			vtxRemove.RegisterElements( CHILD_AT( vtxModel, pLOD, 1 ), vtxModel->numLODs - 1 );
 			ITERATE_CHILDREN( OptimizedModel::ModelLODHeader_t, vtxLod, vtxModel, pLOD, numLODs )
 				if ( !vtxLod_idx )	// Process only lod1-N
 					continue;
 				
-				vtxRemove.RemoveElements( CHILD_AT( vtxLod, pMesh, 0 ), vtxLod->numMeshes );
+				vtxRemove.RegisterElements( CHILD_AT( vtxLod, pMesh, 0 ), vtxLod->numMeshes );
 				ITERATE_CHILDREN( OptimizedModel::MeshHeader_t, vtxMesh, vtxLod, pMesh, numMeshes )
-					vtxRemove.RemoveElements( CHILD_AT( vtxMesh, pStripGroup, 0 ), vtxMesh->numStripGroups );
+					vtxRemove.RegisterElements( CHILD_AT( vtxMesh, pStripGroup, 0 ), vtxMesh->numStripGroups );
 					ITERATE_CHILDREN( OptimizedModel::StripGroupHeader_t, vtxStripGroup, vtxMesh, pStripGroup, numStripGroups )
-						vtxRemove.RemoveElements( CHILD_AT( vtxStripGroup, pStrip, 0 ), vtxStripGroup->numStrips );
+						vtxRemove.RegisterElements( CHILD_AT( vtxStripGroup, pStrip, 0 ), vtxStripGroup->numStrips );
 						ITERATE_CHILDREN( OptimizedModel::StripHeader_t, vtxStrip, vtxStripGroup, pStrip, numStrips )
-							vtxRemove.RemoveElements( CHILD_AT( vtxStrip, pBoneStateChange, 0 ), vtxStrip->numBoneStateChanges );
+							vtxRemove.RegisterElements( CHILD_AT( vtxStrip, pBoneStateChange, 0 ), vtxStrip->numBoneStateChanges );
 						ITERATE_END
 					ITERATE_END
 				ITERATE_END
@@ -543,7 +744,7 @@ bool CMdlStripInfo::StripOptimizedModelBuffer( CUtlBuffer &vtxBuffer )
 		if ( !bUsed )
 		{
 			// Index is not in use
-			vtxRemove.RemoveElements( vtxVertexElement );
+			vtxRemove.RegisterElements( vtxVertexElement );
 			vtxIndexDeltas.AddToTail( 0 );
 			vtxNumVertexRemoved ++;
 		}
@@ -581,7 +782,7 @@ bool CMdlStripInfo::StripOptimizedModelBuffer( CUtlBuffer &vtxBuffer )
 		if ( !bUsed )
 		{
 			// Index is not in use
-			vtxRemove.RemoveElements( vtxIndexElement );
+			vtxRemove.RegisterElements( vtxIndexElement );
 		}
 		else
 		{
@@ -592,7 +793,7 @@ bool CMdlStripInfo::StripOptimizedModelBuffer( CUtlBuffer &vtxBuffer )
 
 	// By now should have scheduled all removal information
 	vtxRemove.Finalize();
-	DLog( "mdllib", 3, " Stripped %d vtx bytes.\n", vtxRemove.GetNumBytesRemoved() );
+	Log_Msg( LOG_ModelLib, " Stripped %d vtx bytes.\n", vtxRemove.GetNumBytesRegistered() );
 
 	//
 	// Fixup all the offsets
@@ -667,5 +868,7 @@ void CMdlStripInfo::Reset()
 
 	m_vtxVerts.Resize( 0 );
 	m_vtxIndices.RemoveAll();
+
+	m_ps3studioBatches.PurgeAndDeleteElements();
 }
 

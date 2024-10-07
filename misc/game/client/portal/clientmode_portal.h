@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -15,6 +15,7 @@
 #include <vgui/Cursor.h>
 
 class CHudViewport;
+class CRadialMenu;
 
 namespace vgui
 {
@@ -35,12 +36,33 @@ public:
 
 	virtual void	Init();
 	virtual void	InitViewport();
+	virtual void	LevelInit( const char *newmap );
+	virtual void	LevelShutdown( void );
+	virtual void	SetBlurFade( float scale );
+	virtual float	GetBlurFade( void ) { return m_BlurFadeScale; }
+	virtual void	OnColorCorrectionWeightsReset( void );
+	virtual float	GetColorCorrectionScale( void ) const { return 1.0f; }
+	virtual void	InitWeaponSelectionHudElement( void ) { return; } // don't init this hud
+	virtual bool	ShouldDrawCrosshair( void );
+	virtual void	DoPostScreenSpaceEffects( const CViewSetup *pSetup );
 
-	
+	virtual int		HudElementKeyInput( int down, ButtonCode_t keynum, const char *pszCurrentBinding );
+	void InitRadialMenuHudElement( void );
+
+	virtual float GetViewModelFOV( void );
+
+	void StartTransitionFade( float flFadeTime );
 private:
 	
 	//	void	UpdateSpectatorMode( void );
+	// ClientCCHandle_t	m_CCDeathHandle;	// handle to death cc effect
+	// float				m_flDeathCCWeight;	// for fading in cc effect
 
+	CHandle<C_ColorCorrection>	m_hCurrentColorCorrection;
+
+	float m_BlurFadeScale;
+
+	CRadialMenu	*m_pRadialMenu;
 };
 
 

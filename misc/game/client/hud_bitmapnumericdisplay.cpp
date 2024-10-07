@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -8,8 +8,8 @@
 #include "hud_bitmapnumericdisplay.h"
 #include "iclientmode.h"
 
-#include <Color.h>
-#include <KeyValues.h>
+#include <color.h>
+#include <keyvalues.h>
 #include <vgui/ISurface.h>
 #include <vgui/ISystem.h>
 #include <vgui/IVGui.h>
@@ -24,7 +24,7 @@ using namespace vgui;
 //-----------------------------------------------------------------------------
 CHudBitmapNumericDisplay::CHudBitmapNumericDisplay(vgui::Panel *parent, const char *name) : vgui::Panel(parent, name)
 {
-	vgui::Panel *pParent = g_pClientMode->GetViewport();
+	vgui::Panel *pParent = GetClientMode()->GetViewport();
 	SetParent( pParent );
 
 	m_iValue = 0;
@@ -108,9 +108,9 @@ void CHudBitmapNumericDisplay::PaintNumbers(int xpos, int ypos, int value, Color
 
 		for( i=0;i<10;i++ )
 		{
-			sprintf( a, "number_%d", i );
+			Q_snprintf( a, sizeof(a), "number_%d", i );
 
-			m_pNumbers[i] = gHUD.GetIcon( a );
+			m_pNumbers[i] = HudIcons().GetIcon( a );
 		}
 
 		if( !m_pNumbers[0] )

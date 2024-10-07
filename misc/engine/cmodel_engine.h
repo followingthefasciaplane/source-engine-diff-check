@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 // $NoKeywords: $
@@ -17,9 +17,9 @@
 #include "bspfile.h"
 
 class ICollideable;
+struct AABB_t;
 
-
-cmodel_t	*CM_LoadMap( const char *name, bool allowReusePrevious, unsigned *checksum );
+cmodel_t	*CM_LoadMap( const char *pPathName, bool allowReusePrevious, texinfo_t *pTexinfo, int texInfoCount, unsigned *checksum );
 void		CM_FreeMap( void );
 cmodel_t	*CM_InlineModel( const char *name );	// *1, *2, etc
 cmodel_t	*CM_InlineModelNumber( int index );	// 1, 2, etc
@@ -31,7 +31,7 @@ void		CM_DiscardEntityString( void );
 
 
 // returns an ORed contents mask
-int			CM_PointContents( const Vector &p, int headnode );
+int			CM_PointContents( const Vector &p, int headnode, int contentsMask );
 int			CM_TransformedPointContents( const Vector& p, int headnode, const Vector& origin, const QAngle& angles );
 
 // sets the default values in a trace
@@ -48,13 +48,17 @@ void		CM_SnapPointToReferenceLeaf(const Vector &referenceLeafPoint, float tolera
 // call with topnode set to the headnode, returns with topnode
 // set to the first node that splits the box
 int			CM_BoxLeafnums( const Vector& mins, const Vector& maxs, int *list,
-							int listsize, int *topnode );
+							int listsize, int *topnode, int cmodelIndex = 0 );
 //int			CM_TransformedBoxContents( const Vector& pos, const Vector& mins, const Vector& maxs, int headnode, const Vector& origin, const QAngle& angles );
 
 // Versions that accept rays...
 void		CM_TransformedBoxTrace (const Ray_t& ray, int headnode, int brushmask, const Vector& origin, QAngle const& angles, trace_t& tr );
 void		CM_BoxTrace (const Ray_t& ray, int headnode, int brushmask, bool computeEndpt, trace_t& tr );
-void		CM_BoxTraceAgainstLeafList( const Ray_t &ray, int *pLeafList, int nLeafCount, int nBrushMask, bool bComputeEndpoint, trace_t &trace );
+struct OcclusionTestResults_t;
+bool		CM_IsFullyOccluded( const AABB_t &aabb1, const AABB_t &aabb2 );
+bool		CM_IsFullyOccluded( const VectorAligned &p0, const VectorAligned &vExtents1, const VectorAligned &p1, const VectorAligned &vExtents2, OcclusionTestResults_t * pResults = NULL );
+bool		CM_IsFullyOccluded_WithShadow( const AABB_t &aabb1, const AABB_t &aabb2, const Vector &vShadow );
+void		CM_BoxTraceAgainstLeafList( const Ray_t &ray, const CTraceListData &traceData, int nBrushMask, trace_t &trace );
 
 void		CM_RayLeafnums( const Ray_t &ray, int *pLeafList, int nMaxLeafCount, int &nLeafCount );
 
@@ -65,7 +69,8 @@ int			CM_LeafFlags( int leafnum );
 
 void		CM_SetAreaPortalState( int portalnum, int isOpen );
 void		CM_SetAreaPortalStates( const int *portalnums, const int *isOpen, int nPortals );
-bool	CM_AreasConnected( int area1, int area2 );
+bool		CM_AreasConnected( int area1, int area2 );
+void		CM_LeavesConnected( const Vector &vecOrigin, int nCount, const int *pLeaves, bool *pIsConnected );
 
 int			CM_WriteAreaBits( byte *buffer, int buflen, int area );
 
@@ -107,6 +112,7 @@ class CFastPointLeafNum
 public:
 	CFastPointLeafNum();
 	int GetLeaf( const Vector &vPos );
+	void Reset( void );	// level change, etc.  position <--> leaf mapping has changed.
 
 private:
 	int m_iCachedLeaf;

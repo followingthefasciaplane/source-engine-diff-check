@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -9,16 +9,14 @@
 
 #if defined(_WIN32) && !defined(_X360)
 #include "winlite.h"
-#elif defined(OSX)
+#endif
+#ifdef OSX
 #include <Carbon/Carbon.h>
 #include <sys/sysctl.h>
 #endif
 #if defined(LINUX)
 #include <unistd.h>
 #include <fcntl.h>
-#endif
-
-#if defined( USE_SDL )
 #include "SDL.h"
 #endif
 
@@ -41,21 +39,21 @@
 #include "dt_test.h"
 #include "keys.h"
 #include "gl_matsysiface.h"
-#include "tier0/vcrmode.h"
 #include "tier0/icommandline.h"
+#include "tier0/stacktools.h"
 #include "cmd.h"
 #include <ihltvdirector.h>
-#if defined( REPLAY_ENABLED )
-#include "replay/ireplaysystem.h"
-#endif
+#include <ireplaydirector.h>
 #include "MapReslistGenerator.h"
 #include "DevShotGenerator.h"
 #include "cdll_engine_int.h"
 #include "dt_send.h"
 #include "idedicatedexports.h"
-#include "eifacev21.h"
+#include "cvar.h"
 #include "cl_steamauth.h"
-#include "tier0/etwprof.h"
+#include "status.h"
+#include "tier0/logging.h"
+#include "tier2/tier2_logging.h"
 
 #include "vgui_baseui_interface.h"
 #include "tier0/systeminformation.h"
@@ -67,6 +65,9 @@
 #include "toolframework/itoolframework.h"
 #if defined( _X360 )
 #include "xbox/xbox_win32stubs.h"
+#elif defined( _PS3 )
+#include "ps3/ps3_console.h"
+#include "sys/tty.h"
 #endif
 
 // memdbgon must be the last include file in a .cpp file!!!
@@ -74,28 +75,26 @@
 
 #define ONE_HUNDRED_TWENTY_EIGHT_MB	(128 * 1024 * 1024)
 
-ConVar mem_min_heapsize( "mem_min_heapsize", "48", FCVAR_INTERNAL_USE, "Minimum amount of memory to dedicate to engine hunk and datacache (in mb)" );
-ConVar mem_max_heapsize( "mem_max_heapsize", "256", FCVAR_INTERNAL_USE, "Maximum amount of memory to dedicate to engine hunk and datacache (in mb)" );
-ConVar mem_max_heapsize_dedicated( "mem_max_heapsize_dedicated", "64", FCVAR_INTERNAL_USE, "Maximum amount of memory to dedicate to engine hunk and datacache, for dedicated server (in mb)" );
+ConVar mem_min_heapsize( "mem_min_heapsize", "48", 0, "Minimum amount of memory to dedicate to engine hunk and datacache (in mb)" );
+ConVar mem_max_heapsize( "mem_max_heapsize", "512", 0, "Maximum amount of memory to dedicate to engine hunk and datacache (in mb)" );
+ConVar mem_max_heapsize_dedicated( "mem_max_heapsize_dedicated", "64", 0, "Maximum amount of memory to dedicate to engine hunk and datacache, for dedicated server (in mb)" );
 
 #define MINIMUM_WIN_MEMORY			(unsigned)(mem_min_heapsize.GetInt()*1024*1024)
-#define MAXIMUM_WIN_MEMORY			max( (unsigned)(mem_max_heapsize.GetInt()*1024*1024), MINIMUM_WIN_MEMORY )
+#define MAXIMUM_WIN_MEMORY			MAX( (unsigned)(mem_max_heapsize.GetInt()*1024*1024), MINIMUM_WIN_MEMORY )
 #define MAXIMUM_DEDICATED_MEMORY	(unsigned)(mem_max_heapsize_dedicated.GetInt()*1024*1024)
 
+DEFINE_LOGGING_CHANNEL_NO_TAGS( LOG_SERVER_LOG, "ServerLog", LCF_DO_NOT_ECHO );
 
 char *CheckParm(const char *psz, char **ppszValue = NULL);
 void SeedRandomNumberGenerator( bool random_invariant );
-void Con_ColorPrintf( const Color& clr, PRINTF_FORMAT_STRING const char *fmt, ... ) FMTFUNCTION( 2, 3 );
+void Con_ColorPrintf( const Color& clr, const char *fmt, ... );
 
 void COM_ShutdownFileSystem( void );
 void COM_InitFilesystem( const char *pFullModPath );
 
 modinfo_t			gmodinfo;
 
-#ifdef PLATFORM_WINDOWS
-HWND				*pmainwindow = NULL;
-#endif
-
+extern HWND			*pmainwindow;
 char				gszDisconnectReason[256];
 char				gszExtendedDisconnectReason[256];
 bool				gfExtendedError = false;
@@ -122,18 +121,21 @@ CSysModule *g_GameDLL = NULL;
 typedef void (DLLEXPORT * PFN_GlobalMethod)( edict_t *pEntity );
 
 IServerGameDLL	*serverGameDLL = NULL;
-int g_iServerGameDLLVersion = 0;
+bool g_bServerGameDLLGreaterThanV5;
 IServerGameEnts *serverGameEnts = NULL;
 
 IServerGameClients *serverGameClients = NULL;
 int g_iServerGameClientsVersion = 0;	// This matches the number at the end of the interface name (so for "ServerGameClients004", this would be 4).
 
 IHLTVDirector	*serverGameDirector = NULL;
+IReplayDirector	*serverReplayDirector = NULL;
 
 IServerGameTags *serverGameTags = NULL;
 
 void Sys_InitArgv( char *lpCmdLine );
 void Sys_ShutdownArgv( void );
+
+extern bool s_bIsDedicatedServer;
 
 //-----------------------------------------------------------------------------
 // Purpose: Compare file times
@@ -170,7 +172,7 @@ inline bool IsSlash( char c )
 // Input  : *path - 
 // Output : void Sys_mkdir
 //-----------------------------------------------------------------------------
-void Sys_mkdir( const char *path )
+void Sys_mkdir( const char *path, const char *pPathID /*= 0*/ )
 {
 	char testpath[ MAX_OSPATH ];
 
@@ -183,11 +185,17 @@ void Sys_mkdir( const char *path )
 	}
 
 	// Look for URL
-	const char *pPathID = "MOD";
+	if ( !pPathID )
+	{
+		pPathID = "MOD";
+	}
+
 	if ( IsSlash( testpath[0] ) && IsSlash( testpath[1] ) )
 	{
 		pPathID = NULL;
 	}
+
+	Q_FixSlashes( testpath );
 
 	if ( g_pFileSystem->FileExists( testpath, pPathID ) )
 	{
@@ -333,13 +341,13 @@ bool Sys_MessageBox(const char *title, const char *info, bool bShowOkAndCancel)
 {
 #ifdef _WIN32
 
-	if ( IDOK == ::MessageBox( NULL, title, info, MB_ICONEXCLAMATION | ( bShowOkAndCancel ? MB_OKCANCEL : MB_OK ) ) )
+	if (IDOK == ::MessageBox(NULL, title, info, MB_ICONEXCLAMATION | (bShowOkAndCancel ? MB_OKCANCEL : MB_OK)))
 	{
 		return true;
 	}
 	return false;
 
-#elif defined( USE_SDL )
+#elif defined( LINUX ) && !defined( DEDICATED )
 
 	int buttonid = 0;
 	SDL_MessageBoxData messageboxdata = { 0 };
@@ -358,7 +366,7 @@ bool Sys_MessageBox(const char *title, const char *info, bool bShowOkAndCancel)
 	SDL_ShowMessageBox( &messageboxdata, &buttonid );
 	return ( buttonid == 1 );
 
-#elif defined( POSIX )
+#elif defined ( POSIX )
 
 	Warning( "%s\n", info );
 	return true;
@@ -369,8 +377,17 @@ bool Sys_MessageBox(const char *title, const char *info, bool bShowOkAndCancel)
 }
 
 bool g_bUpdateMinidumpComment = true;
-void BuildMinidumpComment( char const *pchSysErrorText, bool bRealCrash );
 
+#if !defined(NO_STEAM) && !defined(DEDICATED) && !defined(LINUX)
+void BuildMinidumpComment( char const *pchSysErrorText );
+#endif
+
+//-----------------------------------------------------------------------------
+// Purpose: Exit engine with error
+// Input  : *error - 
+//			... - 
+// Output : void Sys_Error
+//-----------------------------------------------------------------------------
 void Sys_Error_Internal( bool bMinidump, const char *error, va_list argsList )
 {
 	char		text[1024];
@@ -395,25 +412,20 @@ void Sys_Error_Internal( bool bMinidump, const char *error, va_list argsList )
 		Sys_Printf( "%s\n", text );
 	}
 
-	// Write the error to the log and ensure the log contents get written to disk
-	g_Log.Printf( "Engine error: %s\n", text );
-	g_Log.Flush();
-
 	g_bInErrorExit = true;
-
-#if !defined( SWDS )
+	
+#if !defined( DEDICATED )
 	if ( IsPC() && videomode )
 		videomode->Shutdown();
 #endif
 
 	if ( IsPC() &&
-		!CommandLine()->FindParm( "-makereslists" ) &&
-		!CommandLine()->FindParm( "-nomessagebox" ) &&
-		!CommandLine()->FindParm( "-nocrashdialog" ) )
+		 !CommandLine()->FindParm( "-makereslists" ) &&
+		 !CommandLine()->FindParm( "-nomessagebox" ) )
 	{
 #ifdef _WIN32
 		::MessageBox( NULL, text, "Engine Error", MB_OK | MB_TOPMOST );
-#elif defined( USE_SDL )
+#elif defined ( LINUX )
 		Sys_MessageBox( "Engine Error", text, false );
 #endif
 	}
@@ -422,19 +434,22 @@ void Sys_Error_Internal( bool bMinidump, const char *error, va_list argsList )
 	{
 		DebuggerBreakIfDebugging();
 	}
-	else if ( !IsRetail() )
+	else
 	{
 		DebuggerBreak(); 
 	}
 
 #if !defined( _X360 )
 
-	BuildMinidumpComment( text, true );
+#if !defined(NO_STEAM) && !defined(DEDICATED) && !defined(LINUX)
+	Status_Update();
+	BuildMinidumpComment( text );
 	g_bUpdateMinidumpComment = false;
+#endif
 
 	if ( bMinidump && !Plat_IsInDebugSession() && !CommandLine()->FindParm( "-nominidumps") )
 	{
-#if defined( WIN32 )
+#ifdef WIN32
 		// MiniDumpWrite() has problems capturing the calling thread's context 
 		// unless it is called with an exception context.  So fake an exception.
 		__try
@@ -453,40 +468,34 @@ void Sys_Error_Internal( bool bMinidump, const char *error, va_list argsList )
 		// valid in the filter)
 		__except ( SteamAPI_WriteMiniDump( 0, GetExceptionInformation(), build_number() ), EXCEPTION_EXECUTE_HANDLER )
 		{
-
+			
 			// We always get here because the above filter evaluates to EXCEPTION_EXECUTE_HANDLER
 		}
 #elif defined( OSX )
-		// Doing this doesn't quite work the way we want because there is no "crashing" thread
-		// and we see "No thread was identified as the cause of the crash; No signature could be created because we do not know which thread crashed" on the back end
-		//SteamAPI_WriteMiniDump( 0, NULL, build_number() );
-		printf("\n ##### Sys_Error: %s", text );
-		fflush(stdout );
-
-		int *p = 0;
-		*p = 0xdeadbeef;
+	// Doing this doesn't quite work the way we want because there is no "crashing" thread
+	// and we see "No thread was identified as the cause of the crash; No signature could be created because we do not know which thread crashed" on the back end
+	//SteamAPI_WriteMiniDump( 0, NULL, build_number() );
+	printf("\n ##### Sys_Error: %s", text );
+	fflush(stdout );
+	
+	int *p = 0;
+	*p = 0xdeadbeef;
 #elif defined( LINUX )
-		// Doing this doesn't quite work the way we want because there is no "crashing" thread
-		// and we see "No thread was identified as the cause of the crash; No signature could be created because we do not know which thread crashed" on the back end
-		//SteamAPI_WriteMiniDump( 0, NULL, build_number() );
-		int *p = 0;
-		*p = 0xdeadbeef;
+	// Doing this doesn't quite work the way we want because there is no "crashing" thread
+	// and we see "No thread was identified as the cause of the crash; No signature could be created because we do not know which thread crashed" on the back end
+	//SteamAPI_WriteMiniDump( 0, NULL, build_number() );
+	int *p = 0;
+	*p = 0xdeadbeef;
 #else
-#warning "need minidump impl on sys_error"
+//!!BUG!! "need minidump impl on sys_error"
 #endif
 	}
-
 #endif // _X360
 
 	host_initialized = false;
-#if defined(_WIN32) && !defined( _X360 )
-	// We don't want global destructors in our process OR in any DLL to get executed.
-	// _exit() avoids calling global destructors in our module, but not in other DLLs.
-	TerminateProcess( GetCurrentProcess(), 100 );
-#else
-	_exit( 100 );
-#endif
+	Plat_ExitProcess( 100 );
 }
+
 
 //-----------------------------------------------------------------------------
 // Purpose: Exit engine with error
@@ -497,11 +506,11 @@ void Sys_Error_Internal( bool bMinidump, const char *error, va_list argsList )
 void Sys_Error(const char *error, ...)
 {
 	va_list		argptr;
-
+	
 	va_start( argptr, error );
 	Sys_Error_Internal( true, error, argptr );
 	va_end( argptr );
-
+	
 }
 
 
@@ -514,11 +523,11 @@ void Sys_Error(const char *error, ...)
 void Sys_Exit(const char *error, ...)
 {
 	va_list		argptr;
-
+	
 	va_start( argptr, error );
 	Sys_Error_Internal( false, error, argptr );
 	va_end( argptr );
-
+	
 }
 
 
@@ -534,11 +543,7 @@ bool IsInErrorExit()
 //-----------------------------------------------------------------------------
 void Sys_Sleep( int msec )
 {
-#ifdef _WIN32
-	Sleep ( msec );
-#elif POSIX
-	usleep( msec * 1000 );
-#endif
+	ThreadSleep( msec );
 }
 
 //-----------------------------------------------------------------------------
@@ -611,7 +616,7 @@ void Sys_InitMemory( void )
 	}
 #endif // (_MSC_VER > 1200)
 
-	if ( !IsX360() )
+	if ( !IsGameConsole() )
 	{
 		if ( host_parms.memsize == 0 )
 		{
@@ -668,6 +673,10 @@ void Sys_InitMemory( void )
 	{
 		host_parms.memsize = 128*1024*1024;
 	}
+#elif defined ( DEDICATED )
+	// hard code 32 mb for dedicated servers
+	host_parms.memsize = MAXIMUM_DEDICATED_MEMORY;
+
 #elif defined(POSIX)
 	uint64_t memsize = ONE_HUNDRED_TWENTY_EIGHT_MB;
 
@@ -727,12 +736,12 @@ void Sys_InitMemory( void )
 	{
 		host_parms.memsize = memsize;
 	}
-
+	
 	if ( host_parms.memsize < ONE_HUNDRED_TWENTY_EIGHT_MB )
 	{
 		Sys_Error( "Available memory less than 128MB!!! %i\n", host_parms.memsize );
 	}
-
+	
 	// take one quarter the physical memory
 	if ( host_parms.memsize <= 512*1024*1024)
 	{
@@ -750,22 +759,23 @@ void Sys_InitMemory( void )
 		// just take one quarter, no cap
 		host_parms.memsize >>= 2;
 	}
-
+	
 	// At least MINIMUM_WIN_MEMORY mb, even if we have to swap a lot.
 	if (host_parms.memsize < MINIMUM_WIN_MEMORY)
 	{
 		host_parms.memsize = MINIMUM_WIN_MEMORY;
 	}
-
+	
 	// Apply cap
 	if (host_parms.memsize > MAXIMUM_WIN_MEMORY)
 	{
 		host_parms.memsize = MAXIMUM_WIN_MEMORY;
 	}
-
+	
+#elif defined( _PS3 )
+	host_parms.memsize = 128*1024*1024;
 #else
-#error Write me.
-
+	#error Write me.
 #endif
 }
 
@@ -797,11 +807,16 @@ void Sys_ShutdownAuthentication( void )
 //-----------------------------------------------------------------------------
 // Debug library spew output
 //-----------------------------------------------------------------------------
-CThreadLocalInt<> g_bInSpew;
+#ifdef _PS3
+#include "tls_ps3.h"
+#define g_bInSpew GetTLSGlobals()->bEngineConsoleIsInSpew
+#else
+CTHREADLOCALINT g_bInSpew;
+#endif
 
 #include "tier1/fmtstr.h"
 
-static ConVar sys_minidumpspewlines( "sys_minidumpspewlines", "500", 0, "Lines of crash dump console spew to keep." );
+static ConVar sys_minidumpspewlines( "sys_minidumpspewlines", "500", FCVAR_RELEASE, "Lines of crash dump console spew to keep." );
 
 static CUtlLinkedList< CUtlString > g_SpewHistory;
 static int g_nSpewLines = 1;
@@ -809,29 +824,25 @@ static CThreadFastMutex g_SpewMutex;
 
 static void AddSpewRecord( char const *pMsg )
 {
-#if !defined( _X360 )
-	AUTO_LOCK( g_SpewMutex );
+#if !defined( DEDICATED ) && !defined( _GAMECONSOLE )
+	CUtlString str;
+	str.Format( "%d(%f):  %s", g_nSpewLines, Plat_FloatTime(), pMsg );
 
-	static bool s_bReentrancyGuard = false;
-	if ( s_bReentrancyGuard )
-		return;
-	s_bReentrancyGuard = true;
-
+	AUTO_LOCK_FM( g_SpewMutex );
+	++g_nSpewLines;
 	if ( g_SpewHistory.Count() > sys_minidumpspewlines.GetInt() )
 	{
 		g_SpewHistory.Remove( g_SpewHistory.Head() );
 	}
 
-	int i = g_SpewHistory.AddToTail();
-	g_SpewHistory[ i ].Format( "%d(%f):  %s", g_nSpewLines++, Plat_FloatTime(), pMsg );
 
-	s_bReentrancyGuard = false;
+	g_SpewHistory.AddToTail( str );
 #endif
 }
 
 void GetSpew( char *buf, size_t buflen )
 {
-	AUTO_LOCK( g_SpewMutex );
+	AUTO_LOCK_FM( g_SpewMutex );
 
 	// Walk list backward
 	char *pcur = buf;
@@ -857,103 +868,144 @@ void GetSpew( char *buf, size_t buflen )
 	*pcur = 0;
 }
 
-ConVar spew_consolelog_to_debugstring( "spew_consolelog_to_debugstring", "0", 0, "Send console log to PLAT_DebugString()" );
 
-SpewRetval_t Sys_SpewFunc( SpewType_t spewType, const char *pMsg )
+
+#ifdef _PS3
+DEFINE_LOGGING_CHANNEL_NO_TAGS( LOG_PSGL, "PSGL" );
+DEFINE_LOGGING_CHANNEL_NO_TAGS( LOG_VJOBS, "VJOBS" );
+DEFINE_LOGGING_CHANNEL_NO_TAGS( LOG_PHYSICS, "PHYSICS" );
+DEFINE_LOGGING_CHANNEL_NO_TAGS( LOG_LOADING, "LOADING" );
+#endif
+
+class CEngineConsoleLoggingListener : public ILoggingListener
 {
-	bool suppress = g_bInSpew;
-
-	g_bInSpew = true;
-
-	AddSpewRecord( pMsg );
-
-	// Text output shows up on dedicated server profiles, both as consuming CPU
-	// time and causing IPC delays. Sending the messages to ETW will help us
-	// understand why, and save us time when server operators are triggering
-	// excessive spew. Having the output in traces is also generically useful
-	// for understanding slowdowns.
-	ETWMark1I( pMsg, spewType );
-
-	if ( !suppress )
+public:
+	virtual void Log( const LoggingContext_t *pContext, const tchar *pMessage )
 	{
-		// If this is a dedicated server, then we have taken over its spew function, but we still
-		// want its vgui console to show the spew, so pass it into the dedicated server.
-		if ( dedicated )
-			dedicated->Sys_Printf( (char*)pMsg );
-
-		if( spew_consolelog_to_debugstring.GetBool() )
+		if ( ( pContext->m_Flags & LCF_DO_NOT_ECHO ) != 0 )
 		{
-			Plat_DebugString( pMsg );
-		}
-
-		if ( g_bTextMode )
-		{
-			printf( "%s", pMsg );
-		}
-
-		if ((spewType != SPEW_LOG) || (sv.GetMaxClients() == 1))
-		{
-			Color color;
-			switch ( spewType )
+			if ( pContext->m_ChannelID == LOG_SERVER_LOG )
 			{
-#ifndef SWDS
-			case SPEW_WARNING:
+				g_Log.Print( pMessage );
+			}
+			return;
+		}
+#if defined( _PS3 ) && !defined( _CERT )
+		if( pContext->m_ChannelID == LOG_PSGL )
+		{
+			uint wrote;
+			// write to TTY USR1
+			sys_tty_write( SYS_TTYP3, pMessage, V_strlen(pMessage), &wrote );
+			return;
+		}
+		else if( pContext->m_ChannelID == LOG_VJOBS )
+		{
+			uint wrote;
+			// write to TTY USR2
+			sys_tty_write( SYS_TTYP4, pMessage, V_strlen(pMessage), &wrote );
+			return;
+		}
+		else if( pContext->m_ChannelID == LOG_PHYSICS )
+		{
+			uint wrote;
+			// write to TTY USR3
+			sys_tty_write( SYS_TTYP5, pMessage, V_strlen(pMessage), &wrote );
+			return;
+		}
+		else if( pContext->m_ChannelID == LOG_LOADING )
+		{
+			uint wrote;
+			// write to TTY USR4
+			sys_tty_write( SYS_TTYP6, pMessage, V_strlen(pMessage), &wrote );
+			return;
+		}
+		// NOTE: SYS_TTYP13 is taken by vxconsole
+		COMPILE_TIME_ASSERT( SYS_TTYP13 == 13 );
+#endif
+		
+
+		bool suppress = g_bInSpew ? true : false;
+
+		g_bInSpew = true;
+
+		AddSpewRecord( pMessage );
+
+		if ( !suppress )
+		{
+			// If this is a dedicated server, then we have taken over its spew function, but we still
+			// want its vgui console to show the spew, so pass it into the dedicated server.
+			if ( dedicated )
+			{
+				if ( ! IsChildProcess() )							// do NOT let subprocesses output to stdout.
 				{
-					color.SetColor( 255, 90, 90, 255 );
+					// This is not actually a varargs-style printf function; it simply takes a char*
+					dedicated->Sys_Printf( (char *) pMessage );		// stupid header has char * instead of const char *
+				}
+				else
+				{
+#ifdef _LINUX
+					SendStringToParentProcess( va( "#%02d:%s", g_nForkID, pMessage ) );
+#endif
+				}
+
+			}
+
+#ifndef _CERT
+			if ( g_bTextMode )
+			{
+				printf( "%s", pMessage );
+			}
+#endif
+			Color spewColor = pContext->m_Color;
+			switch ( pContext->m_Severity )
+			{
+#ifndef DEDICATED
+			case LS_MESSAGE:
+				if ( pContext->m_Color == UNSPECIFIED_LOGGING_COLOR )
+				{
+#if !defined( _X360 )
+					spewColor.SetColor( 255, 255, 255, 255 );
+#else
+					spewColor.SetColor( 0, 0, 0, 255 );
+#endif
 				}
 				break;
-			case SPEW_ASSERT:
-				{
-					color.SetColor( 255, 20, 20, 255 );
-				}
+			case LS_WARNING:
+				spewColor.SetColor( 255, 90, 90, 255 );
 				break;
-			case SPEW_ERROR:
-				{
-					color.SetColor( 20, 70, 255, 255 );
-				}
+			case LS_ASSERT:
+				spewColor.SetColor( 255, 20, 20, 255 );
+				break;
+			case LS_ERROR:
+				spewColor.SetColor( 20, 70, 255, 255 );
 				break;
 #endif
-			default:
-				{
-					color = *GetSpewOutputColor();
-				}
-				break;
 			}
-			Con_ColorPrintf( color, "%s", pMsg );
-
+			
+			Con_ColorPrintf( spewColor, "%s", pMessage );
 		}
-		else
+
+		g_bInSpew = false;
+
+		if ( pContext->m_Severity == LS_ERROR )
 		{
-			g_Log.Printf( "%s", pMsg );
+			Sys_Error( "%s", pMessage );
 		}
 	}
+};
 
-	g_bInSpew = false;
-
-	if (spewType == SPEW_ERROR)
-	{
-		Sys_Error( "%s", pMsg );
-		return SPEW_ABORT;
-	}
-	if (spewType == SPEW_ASSERT)
-	{
-		if ( CommandLine()->FindParm( "-noassert" ) == 0 )
-			return SPEW_DEBUGGER;
-		else
-			return SPEW_CONTINUE;
-	}
-	return SPEW_CONTINUE;
-}
+static CEngineConsoleLoggingListener s_EngineLoggingListener;
+static CFileLoggingListener s_FileLoggingListener;
+EXPOSE_SINGLE_INTERFACE_GLOBALVAR( CFileLoggingListener, IFileLoggingListener, FILELOGGINGLISTENER_INTERFACE_VERSION, s_FileLoggingListener );
 
 void DeveloperChangeCallback( IConVar *pConVar, const char *pOldString, float flOldValue )
 {
 	// Set the "developer" spew group to the value...
 	ConVarRef var( pConVar );
 	int val = var.GetInt();
-	SpewActivate( "developer", val );
 
-	// Activate console spew (spew value 2 == developer console spew)
-	SpewActivate( "console", val ? 2 : 1 );
+	LoggingSystem_SetChannelSpewLevelByTag( "Developer", val >= 1 ? LS_MESSAGE : LS_ERROR );
+	LoggingSystem_SetChannelSpewLevelByTag( "DeveloperVerbose", val >= 2 ? LS_MESSAGE : LS_ERROR );
 }
 
 //-----------------------------------------------------------------------------
@@ -968,7 +1020,13 @@ void *GameFactory( const char *pName, int *pReturnCode )
 	if (pRetVal)
 		return pRetVal;
 
-#ifndef SWDS
+	// ask matchmaking
+	extern CreateInterfaceFn g_pfnMatchmakingFactory;
+	pRetVal = g_pfnMatchmakingFactory( pName, pReturnCode );
+	if (pRetVal)
+		return pRetVal;
+
+#ifndef DEDICATED
 	// now ask the client dll
 	if (ClientDLL_GetFactory())
 	{
@@ -986,9 +1044,19 @@ void *GameFactory( const char *pName, int *pReturnCode )
 	}
 #endif	
 	// server dll factory access would go here when needed
+	
+	// ask vjobs
+#ifdef ENGINE_MANAGES_VJOBS
+	extern CreateInterfaceFn g_pfnVjobsFactory;
+	pRetVal = g_pfnVjobsFactory( pName, pReturnCode );
+	if( pRetVal )
+		return pRetVal;
+#endif
 
 	return NULL;
 }
+
+
 
 // factory instance
 CreateInterfaceFn g_GameSystemFactory = GameFactory;
@@ -1016,22 +1084,20 @@ int Sys_InitGame( CreateInterfaceFn appSystemFactory, const char* pBaseDir, void
 	
 	FileSystem_SetWhitelistSpewFlags();
 
-	// Activate console spew
+	// Activate console, non-dev spew
 	// Must happen before developer.InstallChangeCallback because that callback may reset it 
-	SpewActivate( "console", 1 );
+	LoggingSystem_SetChannelSpewLevelByTag( "Console", LS_MESSAGE );
+	LoggingSystem_PushLoggingState();
+	LoggingSystem_RegisterLoggingListener( &s_EngineLoggingListener );
+	LoggingSystem_RegisterLoggingListener( &s_FileLoggingListener );
 
 	// Install debug spew output....
 	developer.InstallChangeCallback( DeveloperChangeCallback );
-
-	SpewOutputFunc( Sys_SpewFunc );
 	
 	// Assume failure
 	host_initialized = false;
-
-#ifdef PLATFORM_WINDOWS
 	// Grab main window pointer
 	pmainwindow = (HWND *)pwnd;
-#endif
 
 	// Remember that this is a dedicated server
 	s_bIsDedicated = bIsDedicated ? true : false;
@@ -1044,12 +1110,14 @@ int Sys_InitGame( CreateInterfaceFn appSystemFactory, const char* pBaseDir, void
 	Q_FixSlashes( s_pBaseDir );
 	host_parms.basedir = s_pBaseDir;
 
-#ifndef _X360
+#ifdef LINUX
 	if ( CommandLine()->FindParm ( "-pidfile" ) )
 	{	
 		FileHandle_t pidFile = g_pFileSystem->Open( CommandLine()->ParmValue ( "-pidfile", "srcds.pid" ), "w+" );
 		if ( pidFile )
 		{
+			char dir[MAX_PATH];
+			getcwd( dir, sizeof(dir) );
 			g_pFileSystem->FPrintf( pidFile, "%i\n", getpid() );
 			g_pFileSystem->Close(pidFile);
 		}
@@ -1059,6 +1127,7 @@ int Sys_InitGame( CreateInterfaceFn appSystemFactory, const char* pBaseDir, void
 		}
 	}
 #endif
+
 
 	// Initialize clock
 	TRACEINIT( Sys_Init(), Sys_Shutdown() );
@@ -1089,7 +1158,12 @@ int Sys_InitGame( CreateInterfaceFn appSystemFactory, const char* pBaseDir, void
 
 	MapReslistGenerator_BuildMapList();
 
-	BuildMinidumpComment( NULL, false );
+#if !defined(NO_STEAM) && !defined(DEDICATED) && !defined(LINUX)
+	Status_Update();
+	BuildMinidumpComment( NULL );
+#endif
+
+
 	return 1;
 }
 
@@ -1109,8 +1183,8 @@ void Sys_ShutdownGame( void )
 	TRACESHUTDOWN( Sys_Shutdown() );
 
 	// Remove debug spew output....
-	developer.InstallChangeCallback( 0 );
-	SpewOutputFunc( 0 );
+	developer.RemoveChangeCallback( DeveloperChangeCallback );
+	LoggingSystem_PopLoggingState();
 }
 
 //
@@ -1121,18 +1195,17 @@ void Sys_ShutdownGame( void )
 CreateInterfaceFn g_ServerFactory;
 
 
-#pragma optimize( "g", off )
-static bool LoadThisDll( char *szDllFilename, bool bIsServerOnly )
+static bool LoadThisDll( char *szDllFilename, bool bServerOnly )
 {
 	CSysModule *pDLL = NULL;
 
 	// check signature, don't let users with modified binaries connect to secure servers, they will get VAC banned
-	if ( !Host_AllowLoadModule( szDllFilename, "GAMEBIN", true, bIsServerOnly ) )
+	if ( !bServerOnly && !Host_AllowLoadModule( szDllFilename, "GAMEBIN", false ) )
 	{
 		// not supposed to load this but we will anyway
 		Host_DisallowSecureServers();
-		Host_AllowLoadModule( szDllFilename, "GAMEBIN", true, bIsServerOnly );
 	}
+
 	// Load DLL, ignore if cannot
 	// ensures that the game.dll is running under Steam
 	// this will have to be undone when we want mods to be able to run
@@ -1143,29 +1216,26 @@ static bool LoadThisDll( char *szDllFilename, bool bIsServerOnly )
 	}
 
 	// Load interface factory and any interfaces exported by the game .dll
-	g_iServerGameDLLVersion = 0;
 	g_ServerFactory = Sys_GetFactory( pDLL );
 	if ( g_ServerFactory )
 	{
-		// Figure out latest version we understand
-		g_iServerGameDLLVersion = INTERFACEVERSION_SERVERGAMEDLL_INT;
-
-		// Scan for most recent version the game DLL understands.
-		for (;;)
+		g_bServerGameDLLGreaterThanV5 = true;
+		serverGameDLL = (IServerGameDLL*)g_ServerFactory(INTERFACEVERSION_SERVERGAMEDLL, NULL);
+		if ( !serverGameDLL )
 		{
-			char archVersion[64];
-			V_sprintf_safe( archVersion, "ServerGameDLL%03d", g_iServerGameDLLVersion );
-			serverGameDLL = (IServerGameDLL*)g_ServerFactory(archVersion, NULL);
-			if ( serverGameDLL )
-				break;
-			--g_iServerGameDLLVersion;
-			if ( g_iServerGameDLLVersion < 4 )
+#ifdef REL_TO_STAGING_MERGE_TODO
+			// Need to merge eiface for this.
+			// g_bServerGameDLLGreaterThanV5 is true, so we get better stringtables
+			g_bServerGameDLLGreaterThanV5 = true;
+			serverGameDLL = (IServerGameDLL*)g_ServerFactory(INTERFACEVERSION_SERVERGAMEDLL_VERSION_5, NULL);
+#endif			
+			if ( !serverGameDLL )
 			{
-				g_iServerGameDLLVersion = 0;
 				Msg( "Could not get IServerGameDLL interface from library %s", szDllFilename );
 				goto IgnoreThisDLL;
 			}
 		}
+
 
 		serverGameEnts = (IServerGameEnts*)g_ServerFactory(INTERFACEVERSION_SERVERGAMEENTS, NULL);
 		if ( !serverGameEnts )
@@ -1201,6 +1271,13 @@ static bool LoadThisDll( char *szDllFilename, bool bIsServerOnly )
 			// this is not a critical 
 		}
 
+		serverReplayDirector = (IReplayDirector*)g_ServerFactory(INTERFACEVERSION_REPLAYDIRECTOR, NULL);
+		if ( !serverReplayDirector )
+		{
+			ConMsg( "Could not get IReplayDirector interface from library %s", szDllFilename );
+			// this is not a critical 
+		}
+
 		serverGameTags = (IServerGameTags*)g_ServerFactory(INTERFACEVERSION_SERVERGAMETAGS, NULL);
 		// Possible that this is NULL - optional interface
 	}
@@ -1223,12 +1300,11 @@ IgnoreThisDLL:
 	}
 	return false;
 }
-#pragma optimize( "", on )
 
 //
 // Scan DLL directory, load all DLLs that conform to spec.
 //
-void LoadEntityDLLs( const char *szBaseDir, bool bIsServerOnly )
+void LoadEntityDLLs( const char *szBaseDir, bool bServerOnly )
 {
 	memset( &gmodinfo, 0, sizeof( modinfo_t ) );
 	gmodinfo.version = 1;
@@ -1240,25 +1316,62 @@ void LoadEntityDLLs( const char *szBaseDir, bool bIsServerOnly )
 
 	// Listing file for this game.
 	KeyValues *modinfo = new KeyValues("modinfo");
-	MEM_ALLOC_CREDIT();
 	if (modinfo->LoadFromFile(g_pFileSystem, "gameinfo.txt"))
 	{
 		Q_strncpy( gmodinfo.szInfo, modinfo->GetString("url_info"), sizeof( gmodinfo.szInfo ) );
 		Q_strncpy( gmodinfo.szDL, modinfo->GetString("url_dl"), sizeof( gmodinfo.szDL ) );
 		gmodinfo.version = modinfo->GetInt("version");
 		gmodinfo.size = modinfo->GetInt("size");
-		gmodinfo.svonly = modinfo->GetInt("svonly") ? true : false;
-		gmodinfo.cldll = modinfo->GetInt("cldll") ? true : false;
+		gmodinfo.svonly = modinfo->GetBool("svonly");
+		gmodinfo.cldll = modinfo->GetBool("cldll");
 		Q_strncpy( gmodinfo.szHLVersion, modinfo->GetString("hlversion"), sizeof( gmodinfo.szHLVersion ) );
 	}
 	modinfo->deleteThis();
 	
 	// Load the game .dll
-	LoadThisDll( "server" DLL_EXT_STRING, bIsServerOnly );
+	char szDllFilename[ MAX_PATH ];
+
+#if defined( _WIN32 )
+	// [mpritchar] cstrike15 - we now look for server_valve.dll { Valve's datacenter specific version of server }
+	//    first and load it if we find it, otherwise load server.dll
+
+	if ( s_bIsDedicatedServer && !CommandLine()->FindParm( "-novalveds" ) )
+	{
+		Q_snprintf( szDllFilename, sizeof( szDllFilename ), "server_valve" DLL_EXT_STRING );
+		LoadThisDll( szDllFilename, bServerOnly );
+	}
+
+	if ( !serverGameDLL )
+	{
+		Q_snprintf( szDllFilename, sizeof( szDllFilename ), "server" DLL_EXT_STRING );
+		LoadThisDll( szDllFilename, bServerOnly );
+	}
+
+#elif defined( _PS3 )
+	Q_snprintf( szDllFilename, sizeof( szDllFilename ), "server" DLL_EXT_STRING );
+	LoadThisDll( szDllFilename, bServerOnly );
+#elif defined( LINUX )
+	if ( s_bIsDedicatedServer && !CommandLine()->FindParm( "-novalveds" ) )
+	{
+		Q_snprintf( szDllFilename, sizeof( szDllFilename ), "server_valve" );
+		LoadThisDll( szDllFilename, bServerOnly );
+	}
+	if ( !serverGameDLL )
+	{
+		Q_snprintf( szDllFilename, sizeof( szDllFilename ), "server"  );
+		LoadThisDll( szDllFilename, bServerOnly );
+	}
+#elif defined( POSIX )
+	Q_snprintf( szDllFilename, sizeof( szDllFilename ), "server" );
+	LoadThisDll( szDllFilename, bServerOnly );
+#else
+	#error "define server.dll type"
+#endif
+
 
 	if ( serverGameDLL )
 	{
-		Msg("server%s loaded for \"%s\"\n", DLL_EXT_STRING, (char *)serverGameDLL->GetGameDescription());
+		Msg("Game.dll loaded for \"%s\"\n", (char *)serverGameDLL->GetGameDescription());
 	}
 }
 
@@ -1266,7 +1379,7 @@ void LoadEntityDLLs( const char *szBaseDir, bool bIsServerOnly )
 // Purpose: Retrieves a string value from the registry
 //-----------------------------------------------------------------------------
 #if defined(_WIN32)
-void Sys_GetRegKeyValueUnderRoot( HKEY rootKey, const char *pszSubKey, const char *pszElement, OUT_Z_CAP(nReturnLength) char *pszReturnString, int nReturnLength, const char *pszDefaultValue )
+void Sys_GetRegKeyValueUnderRoot( HKEY rootKey, const char *pszSubKey, const char *pszElement, char *pszReturnString, int nReturnLength, const char *pszDefaultValue )
 {
 	LONG lResult;           // Registry function result code
 	HKEY hKey;              // Handle of opened/created key
@@ -1275,17 +1388,11 @@ void Sys_GetRegKeyValueUnderRoot( HKEY rootKey, const char *pszSubKey, const cha
 	DWORD dwType;           // Type of key
 	DWORD dwSize;           // Size of element data
 
-	// Copying a string to itself is both unnecessary and illegal.
-	// Address sanitizer prohibits this so we have to fix this in order
-	// to continue testing with it.
-	if ( pszReturnString != pszDefaultValue )
-	{
-		// Assume the worst
-		Q_strncpy(pszReturnString, pszDefaultValue, nReturnLength );
-	}
+	// Assume the worst
+	Q_strncpy(pszReturnString, pszDefaultValue, nReturnLength );
 
 	// Create it if it doesn't exist.  (Create opens the key otherwise)
-	lResult = VCRHook_RegCreateKeyEx(
+	lResult = RegCreateKeyEx(
 		rootKey,	// handle of open key 
 		pszSubKey,			// address of name of subkey to open 
 		0ul,					// DWORD ulOptions,	  // reserved 
@@ -1303,13 +1410,13 @@ void Sys_GetRegKeyValueUnderRoot( HKEY rootKey, const char *pszSubKey, const cha
 	if (dwDisposition == REG_CREATED_NEW_KEY)
 	{
 		// Just Set the Values according to the defaults
-		lResult = VCRHook_RegSetValueEx( hKey, pszElement, 0, REG_SZ, (CONST BYTE *)pszDefaultValue, Q_strlen(pszDefaultValue) + 1 ); 
+		lResult = RegSetValueEx( hKey, pszElement, 0, REG_SZ, (CONST BYTE *)pszDefaultValue, Q_strlen(pszDefaultValue) + 1 ); 
 	}
 	else
 	{
 		// We opened the existing key. Now go ahead and find out how big the key is.
 		dwSize = nReturnLength;
-		lResult = VCRHook_RegQueryValueEx( hKey, pszElement, 0, &dwType, (unsigned char *)szBuff, &dwSize );
+		lResult = RegQueryValueEx( hKey, pszElement, 0, &dwType, (unsigned char *)szBuff, &dwSize );
 
 		// Success?
 		if (lResult == ERROR_SUCCESS)
@@ -1325,12 +1432,12 @@ void Sys_GetRegKeyValueUnderRoot( HKEY rootKey, const char *pszSubKey, const cha
 		// Didn't find it, so write out new value
 		{
 			// Just Set the Values according to the defaults
-			lResult = VCRHook_RegSetValueEx( hKey, pszElement, 0, REG_SZ, (CONST BYTE *)pszDefaultValue, Q_strlen(pszDefaultValue) + 1 ); 
+			lResult = RegSetValueEx( hKey, pszElement, 0, REG_SZ, (CONST BYTE *)pszDefaultValue, Q_strlen(pszDefaultValue) + 1 ); 
 		}
 	};
 
 	// Always close this key before exiting.
-	VCRHook_RegCloseKey(hKey);
+	RegCloseKey(hKey);
 
 }
 
@@ -1351,7 +1458,7 @@ void Sys_GetRegKeyValueUnderRootInt( HKEY rootKey, const char *pszSubKey, const 
 	*plReturnValue = lDefaultValue; 
 
 	// Create it if it doesn't exist.  (Create opens the key otherwise)
-	lResult = VCRHook_RegCreateKeyEx(
+	lResult = RegCreateKeyEx(
 		rootKey,	// handle of open key 
 		pszSubKey,			// address of name of subkey to open 
 		0ul,					// DWORD ulOptions,	  // reserved 
@@ -1369,25 +1476,25 @@ void Sys_GetRegKeyValueUnderRootInt( HKEY rootKey, const char *pszSubKey, const 
 	if (dwDisposition == REG_CREATED_NEW_KEY)
 	{
 		// Just Set the Values according to the defaults
-		lResult = VCRHook_RegSetValueEx( hKey, pszElement, 0, REG_DWORD, (CONST BYTE *)&lDefaultValue, sizeof( DWORD ) ); 
+		lResult = RegSetValueEx( hKey, pszElement, 0, REG_DWORD, (CONST BYTE *)&lDefaultValue, sizeof( DWORD ) ); 
 	}
 	else
 	{
 		// We opened the existing key. Now go ahead and find out how big the key is.
 		dwSize = sizeof( DWORD );
-		lResult = VCRHook_RegQueryValueEx( hKey, pszElement, 0, &dwType, (unsigned char *)plReturnValue, &dwSize );
+		lResult = RegQueryValueEx( hKey, pszElement, 0, &dwType, (unsigned char *)plReturnValue, &dwSize );
 
 		// Success?
 		if (lResult != ERROR_SUCCESS)
 			// Didn't find it, so write out new value
 		{
 			// Just Set the Values according to the defaults
-			lResult = VCRHook_RegSetValueEx( hKey, pszElement, 0, REG_DWORD, (LPBYTE)&lDefaultValue, sizeof( DWORD ) ); 
+			lResult = RegSetValueEx( hKey, pszElement, 0, REG_DWORD, (LPBYTE)&lDefaultValue, sizeof( DWORD ) ); 
 		}
 	};
 
 	// Always close this key before exiting.
-	VCRHook_RegCloseKey(hKey);
+	RegCloseKey(hKey);
 
 }
 
@@ -1402,7 +1509,7 @@ void Sys_SetRegKeyValueUnderRoot( HKEY rootKey, const char *pszSubKey, const cha
 	//DWORD dwSize;           // Size of element data
 
 	// Create it if it doesn't exist.  (Create opens the key otherwise)
-	lResult = VCRHook_RegCreateKeyEx(
+	lResult = RegCreateKeyEx(
 		rootKey,			// handle of open key 
 		pszSubKey,			// address of name of subkey to open 
 		0ul,					// DWORD ulOptions,	  // reserved 
@@ -1420,7 +1527,7 @@ void Sys_SetRegKeyValueUnderRoot( HKEY rootKey, const char *pszSubKey, const cha
 	if (dwDisposition == REG_CREATED_NEW_KEY)
 	{
 		// Just Set the Values according to the defaults
-		lResult = VCRHook_RegSetValueEx( hKey, pszElement, 0, REG_SZ, (CONST BYTE *)pszValue, Q_strlen(pszValue) + 1 ); 
+		lResult = RegSetValueEx( hKey, pszElement, 0, REG_SZ, (CONST BYTE *)pszValue, Q_strlen(pszValue) + 1 ); 
 	}
 	else
 	{
@@ -1428,7 +1535,7 @@ void Sys_SetRegKeyValueUnderRoot( HKEY rootKey, const char *pszSubKey, const cha
 		// FIXE:  We might want to support a mode where we only create this key, we don't overwrite values already present
 		// We opened the existing key. Now go ahead and find out how big the key is.
 		dwSize = nReturnLength;
-		lResult = VCRHook_RegQueryValueEx( hKey, pszElement, 0, &dwType, (unsigned char *)szBuff, &dwSize );
+		lResult = RegQueryValueEx( hKey, pszElement, 0, &dwType, (unsigned char *)szBuff, &dwSize );
 
 		// Success?
 		if (lResult == ERROR_SUCCESS)
@@ -1445,30 +1552,26 @@ void Sys_SetRegKeyValueUnderRoot( HKEY rootKey, const char *pszSubKey, const cha
 		// Didn't find it, so write out new value
 		{
 			// Just Set the Values according to the defaults
-			lResult = VCRHook_RegSetValueEx( hKey, pszElement, 0, REG_SZ, (CONST BYTE *)pszValue, Q_strlen(pszValue) + 1 ); 
+			lResult = RegSetValueEx( hKey, pszElement, 0, REG_SZ, (CONST BYTE *)pszValue, Q_strlen(pszValue) + 1 ); 
 		}
 	};
 
 	// Always close this key before exiting.
-	VCRHook_RegCloseKey(hKey);
+	RegCloseKey(hKey);
 }
 #endif
 
-void Sys_GetRegKeyValue( const char *pszSubKey, const char *pszElement, OUT_Z_CAP(nReturnLength) char *pszReturnString, int nReturnLength, const char *pszDefaultValue )
+void Sys_GetRegKeyValue( char *pszSubKey, char *pszElement,	char *pszReturnString, int nReturnLength, char *pszDefaultValue )
 {
 #if defined(_WIN32)
 	Sys_GetRegKeyValueUnderRoot( HKEY_CURRENT_USER, pszSubKey, pszElement, pszReturnString, nReturnLength, pszDefaultValue );
 #else
 	//hushed Assert( !"Impl me" );
-	// Copying a string to itself is both unnecessary and illegal.
-	if ( pszReturnString != pszDefaultValue )
-	{
-		Q_strncpy( pszReturnString, pszDefaultValue, nReturnLength );
-	}
+	Q_strncpy( pszReturnString, pszDefaultValue, nReturnLength );
 #endif
 }
 
-void Sys_GetRegKeyValueInt( const char *pszSubKey, const char *pszElement, long *plReturnValue, long lDefaultValue)
+void Sys_GetRegKeyValueInt( char *pszSubKey, char *pszElement, long *plReturnValue, long lDefaultValue)
 {
 #if defined(_WIN32)
 	Sys_GetRegKeyValueUnderRootInt( HKEY_CURRENT_USER, pszSubKey, pszElement, plReturnValue, lDefaultValue );
@@ -1478,7 +1581,7 @@ void Sys_GetRegKeyValueInt( const char *pszSubKey, const char *pszElement, long 
 #endif
 }
 
-void Sys_SetRegKeyValue( const char *pszSubKey, const char *pszElement,	const char *pszValue )
+void Sys_SetRegKeyValue( char *pszSubKey, char *pszElement,	const char *pszValue )
 {
 #if defined(_WIN32)
 	Sys_SetRegKeyValueUnderRoot( HKEY_CURRENT_USER, pszSubKey, pszElement, pszValue );
@@ -1537,7 +1640,7 @@ void Sys_NoCrashDialog()
 
 void Sys_TestSendKey( const char *pKey )
 {
-#if defined(_WIN32) && !defined(USE_SDL) && !defined(_XBOX)
+#if defined(_WIN32)
 	int key = pKey[0];
 	if ( pKey[0] == '\\' && pKey[1] == 'r' )
 	{
@@ -1587,14 +1690,49 @@ CON_COMMAND( star_memory, "Dump memory stats" )
 		 memstats.arena / ( 1024.0 * 1024.0), memstats.uordblks / ( 1024.0 * 1024.0 ), memstats.hblks );
 #elif OSX
 	struct mstats memstats = mstats( );
-	Msg( "Available %.2f MB, Used: %.2f MB, #mallocs = %lu\n",
+	Msg( "Available %.2f MB, Used: %.2f MB, #mallocs = %d\n",
 		 memstats.bytes_free / ( 1024.0 * 1024.0), memstats.bytes_used / ( 1024.0 * 1024.0 ), memstats.chunks_used );
+#elif defined( _PS3 )
+	Msg( "Memory info on PS3: not implemented.\n" );
 #else
-	MEMORYSTATUS stat;
-	GlobalMemoryStatus( &stat );
+	MEMORYSTATUSEX statex;
+	statex.dwLength = sizeof( MEMORYSTATUSEX );
+	GlobalMemoryStatusEx( &statex );
 	Msg( "Available: %.2f MB, Used: %.2f MB, Free: %.2f MB\n", 
-		stat.dwTotalPhys/( 1024.0f*1024.0f ) - 32.0f,
-		( stat.dwTotalPhys - stat.dwAvailPhys )/( 1024.0f*1024.0f ) - 32.0f, 
-		stat.dwAvailPhys/( 1024.0f*1024.0f ) );
+		statex.ullTotalPhys/( 1024.0f*1024.0f ) - 32.0f,
+		( statex.ullTotalPhys - statex.ullAvailPhys )/( 1024.0f*1024.0f ) - 32.0f, 
+		statex.ullAvailPhys/( 1024.0f*1024.0f ) );
 #endif
 }
+
+#if defined( ENABLE_RUNTIME_STACK_TRANSLATION )
+//NOTE: These convars are here because they can't be directly in tier0.
+//	They're more like one-way convars in that they send off the changes, but might not have the same starting value as the actual value
+//	So if you change the defaults, change the defaults in tier0/dbg.cpp to match.
+//	I considered adding some callback functionality to reinforce the bond a bit better. But that seems hairy.
+static void warningcallstacks_enable_callback( IConVar *var, const char *pOldValue, float flOldValue )
+{
+	_Warning_AlwaysSpewCallStack_Enable( ((ConVar *)var)->GetBool() );
+}
+ConVar warningcallstacks_enable( "warningcallstacks_enable", "0", FCVAR_DEVELOPMENTONLY, "All Warning()/DevWarning()/... calls will attach a callstack", warningcallstacks_enable_callback );
+
+static void warningcallstacks_length_callback( IConVar *var, const char *pOldValue, float flOldValue )
+{
+	_Warning_AlwaysSpewCallStack_Length( ((ConVar *)var)->GetInt() );
+}
+ConVar warningcallstacks_length( "warningcallstacks_length", "5", FCVAR_DEVELOPMENTONLY, "Length of automatic warning callstacks", warningcallstacks_length_callback );
+
+static void errorcallstacks_enable_callback( IConVar *var, const char *pOldValue, float flOldValue )
+{
+	_Error_AlwaysSpewCallStack_Enable( ((ConVar *)var)->GetBool() );
+}
+ConVar errorcallstacks_enable( "errorcallstacks_enable", "0", FCVAR_DEVELOPMENTONLY, "All Error() calls will attach a callstack", errorcallstacks_enable_callback );
+
+static void errorcallstacks_length_callback( IConVar *var, const char *pOldValue, float flOldValue )
+{
+	_Error_AlwaysSpewCallStack_Length( ((ConVar *)var)->GetInt() );
+}
+ConVar errorcallstacks_length( "errorcallstacks_length", "20", FCVAR_DEVELOPMENTONLY, "Length of automatic error callstacks", errorcallstacks_length_callback );
+#endif //#if defined( ENABLE_RUNTIME_STACK_TRANSLATION )
+
+

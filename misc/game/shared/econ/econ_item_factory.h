@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright ©, Valve Corporation, All rights reserved. =======
 //
 // Purpose: EconItemFactory: Manages rolling for items requested by the game server
 //
@@ -28,6 +28,12 @@ class CEconItemFactory
 {
 public:
 	CEconItemFactory( );
+
+	enum ECreateItemPolicy_t
+	{
+		k_ECreateItemPolicy_Default = 0,				// Default creating item policy
+		k_ECreateItemPolicy_NoSqlItemID = ( 1 << 0 ),	// Item will have no ItemID generated
+	};
 	
 	// Gets a pointer to the underlying item schema the factory is using
 	GameItemSchema_t &GetSchema() { return m_schema; }
@@ -36,31 +42,24 @@ public:
 	CEconItem *CreateRandomItem( const CEconGameAccount *pGameAccount, const CItemSelectionCriteria &criteria );
 
 	// Create an item from a specific definition index
-	CEconItem *CreateSpecificItem( const CEconGameAccount *pGameAccount, item_definition_index_t unDefinitionIndex );
+	CEconItem *CreateSpecificItem( const CEconGameAccount *pGameAccount, item_definition_index_t unDefinitionIndex, ECreateItemPolicy_t eCreateItemPolicy = k_ECreateItemPolicy_Default );
 
 	CEconItem *CreateSpecificItem( GCSDK::CGCSharedObjectCache *pUserSOCache, item_definition_index_t unDefinitionIndex )
 	{
 		return CreateSpecificItem( pUserSOCache->GetSingleton<CEconGameAccount>(), unDefinitionIndex );
 	}
 
-	uint64 GetNextID() { Assert( m_bIsInitialized ); return m_ulNextObjID++; }
+	itemid_t GetNextID();
 
 	bool BYieldingInit();
 	bool BIsInitialized() { return m_bIsInitialized; }
 
-#ifdef DBGFLAG_VALIDATE
-	virtual void Validate( CValidator &validator, const char *pchName )
-	{
-		VALIDATE_SCOPE();
-		ValidateObj( m_schema );
-	}
-#endif // DBGFLAG_VALIDATE
-
-	void							 ApplyStaticAttributeToItem( CEconItem *pItem, const static_attrib_t& staticAttrib, const CEconGameAccount *pGameAccount ) const;
-	const CEconItemDefinition		*RollItemDefinition( const CItemSelectionCriteria &criteria ) const;
+	void							 ApplyStaticAttributeToItem( CEconItem *pItem, const static_attrib_t& staticAttrib, const CEconGameAccount *pGameAccount, const CCopyableUtlVector< uint32 > *m_vecValues = NULL, float flRangeMin = 0.0f, float flRangeMax = 0.0f ) const;
 
 private:
-	bool							 BAddGCGeneratedAttributesToItem( const CEconGameAccount *pGameAccount, CEconItem *pItem ) const;
+	// Functions to create random items
+	const CEconItemDefinition		*RollItemDefinition( const CItemSelectionCriteria &criteria ) const;
+	void							 AddGCGeneratedAttributesToItem( const CEconGameAccount *pGameAccount, CEconItem *pItem ) const;
 
 private:
 

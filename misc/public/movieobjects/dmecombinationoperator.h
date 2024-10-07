@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =======
 //
 // Operators that generate combinations
 //
@@ -56,9 +56,6 @@ public:
 	// Iterates remapped controls
 	int RawControlCount() const;
 	const char *RawControlName( int nIndex ) const;
-
-	// Do we have a raw control?
-	bool HasRawControl( const char *pRawControlName ) const;
 
 	// Reordering controls
 	void MoveRawControlUp( const char *pRawControlName );
@@ -205,7 +202,7 @@ public:
 	void SetControlValue( ControlIndex_t nControlIndex, float flValue, CombinationControlType_t type = COMBO_CONTROL_NORMAL );
 
 	// Sets the value of a stereo control
-	void SetControlValue( ControlIndex_t nControlIndex, float flLevel, float flBalance, CombinationControlType_t type = COMBO_CONTROL_NORMAL );
+	void SetControlValue( ControlIndex_t nControlIndex, float flLeftValue, float flRightValue, CombinationControlType_t type = COMBO_CONTROL_NORMAL );
 	void SetControlValue( ControlIndex_t nControlIndex, const Vector2D& vec, CombinationControlType_t type = COMBO_CONTROL_NORMAL );
 
 	// Returns true if a control is a stereo control
@@ -302,10 +299,7 @@ public:
 
 	void CopyControls( CDmeCombinationOperator *pSrc );
 
-	// FIXME: Remove soon!
-	// This is a very short-term solution to the problem of autogenerating
-	// wrinkle data; when we have real editors we can remove it
-	void GenerateWrinkleDeltas( bool bOverwrite = true );
+	void GenerateWrinkleDeltas( bool bOverwrite, bool bUseNormalForSign = false, float flScale = 1.0f );
 
 	void SetToDefault();
 
@@ -391,7 +385,7 @@ private:
 	int FindDominationRule( CDmeCombinationDominationRule *pRule );
 
 	// Generates wrinkle deltas for a dag hierarchy
-	void GenerateWrinkleDeltas( CDmeShape *pShape, bool bOverwrite );
+	void GenerateWrinkleDeltas( CDmeShape *pShape, bool bOverwrite, bool bUseNormalForSign, float flScale = 1.0f );
 
 	CDmaElementArray< CDmeCombinationInputControl > m_InputControls;
 	CDmaArray< Vector > m_ControlValues[COMBO_CONTROL_TYPE_COUNT];

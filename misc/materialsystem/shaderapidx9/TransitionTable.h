@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -15,7 +15,7 @@
 
 #include "utlvector.h"
 #include "shadershadowdx8.h"
-#include "UtlSortVector.h"
+#include "utlsortvector.h"
 #include "checksum_crc.h"
 #include "shaderapi/ishaderapi.h"
 
@@ -27,52 +27,6 @@
 // Forward declarations
 //-----------------------------------------------------------------------------
 struct IDirect3DStateBlock9;
-//-----------------------------------------------------------------------------
-// Enumeration for ApplyStateFunc_ts
-//-----------------------------------------------------------------------------
-// Any function that does not require a texture stage
-// NOTE: If you change this, change the function table s_pRenderFunctionTable[] below!!
-enum RenderStateFunc_t
-{
-	RENDER_STATE_DepthTest = 0,
-	RENDER_STATE_ZWriteEnable,
-	RENDER_STATE_ColorWriteEnable,
-	RENDER_STATE_AlphaTest,
-	RENDER_STATE_FillMode,
-	RENDER_STATE_Lighting,
-	RENDER_STATE_SpecularEnable,
-	RENDER_STATE_SRGBWriteEnable,
-	RENDER_STATE_AlphaBlend,
-	RENDER_STATE_SeparateAlphaBlend,
-	RENDER_STATE_CullEnable,
-	RENDER_STATE_VertexBlendEnable,
-	RENDER_STATE_FogMode,
-	RENDER_STATE_ActivateFixedFunction,
-	RENDER_STATE_TextureEnable,
-	RENDER_STATE_DiffuseMaterialSource,
-	RENDER_STATE_DisableFogGammaCorrection,
-	RENDER_STATE_EnableAlphaToCoverage,
-	
-	RENDER_STATE_COUNT,
-};
-
-
-// Any function that requires a texture stage
-// NOTE: If you change this, change the function table s_pTextureFunctionTable[] below!!
-enum TextureStateFunc_t	
-{
-	TEXTURE_STATE_TexCoordIndex = 0,
-	TEXTURE_STATE_SRGBReadEnable,
-	TEXTURE_STATE_Fetch4Enable,
-#ifdef DX_TO_GL_ABSTRACTION
-	TEXTURE_STATE_ShadowFilterEnable,
-#endif	
-	// Fixed function states
-	TEXTURE_STATE_ColorTextureStage,
-	TEXTURE_STATE_AlphaTextureStage,
-	TEXTURE_STATE_COUNT
-};
-
 
 //-----------------------------------------------------------------------------
 // Types related to transition table entries
@@ -86,15 +40,6 @@ typedef void (*ApplyStateFunc_t)( const ShadowState_t& shadowState, int arg );
 class CTransitionTable
 {
 public:
-	struct CurrentTextureStageState_t
-	{
-		D3DTEXTUREOP			m_ColorOp;
-		int						m_ColorArg1;
-		int						m_ColorArg2;
-		D3DTEXTUREOP			m_AlphaOp;
-		int						m_AlphaArg1;
-		int						m_AlphaArg2;
-	};
 	struct CurrentSamplerState_t
 	{
 		bool					m_SRGBReadEnable;
@@ -107,51 +52,50 @@ public:
 		// under certain circumstances, (which therefore can diverge from the shadow state),
 		// or states which we override in the dynamic pass.
 
-		// Alpha state
-		bool				m_AlphaBlendEnable;
-		D3DBLEND			m_SrcBlend;
-		D3DBLEND			m_DestBlend;
-		D3DBLENDOP			m_BlendOp;
-
-		// GR - Separate alpha state
-		bool				m_SeparateAlphaBlendEnable;
-		D3DBLEND			m_SrcBlendAlpha;
-		D3DBLEND			m_DestBlendAlpha;
-		D3DBLENDOP			m_BlendOpAlpha;
-
 		// Depth testing states
-		D3DZBUFFERTYPE		m_ZEnable;
-		D3DCMPFUNC			m_ZFunc;
-		PolygonOffsetMode_t	m_ZBias;
+		union
+		{
+			DepthTestState_t m_DepthTestState;
+			DepthTestState_t::UIntAlias m_nDepthTestStateAsInt;
+		};
 
-		// Alpha testing states
-		bool				m_AlphaTestEnable;
-		D3DCMPFUNC			m_AlphaFunc;
-		int					m_AlphaRef;
+		// alpha testijng and misc state
+		union
+		{
+			AlphaTestAndMiscState_t m_AlphaTestAndMiscState;
+			AlphaTestAndMiscState_t::UIntAlias m_nAlphaTestAndMiscStateAsInt;
+		};
 
-		bool				m_ForceDepthFuncEquals;
-		bool				m_bOverrideDepthEnable;
-		D3DZBUFFERTYPE		m_OverrideZWriteEnable;
+		union
+		{
+			FogAndMiscState_t m_FogAndMiscState;
+			FogAndMiscState_t::UIntAlias m_nFogAndMiscStateAsInt;
+		};
 
-		bool				m_bOverrideAlphaWriteEnable;
-		bool				m_bOverriddenAlphaWriteValue;
-		bool				m_bOverrideColorWriteEnable;
-		bool				m_bOverriddenColorWriteValue;
+		union
+		{
+			AlphaBlendState_t m_AlphaBlendState;
+			AlphaBlendState_t::UIntAlias m_nAlphaBlendStateAsInt;
+		};
+
+
+		bool				m_ForceDepthFuncEquals:1;
+		bool				m_bOverrideDepthEnable:1;
+
+		bool				m_bOverrideAlphaWriteEnable:1;
+		bool				m_bOverrideColorWriteEnable:1;
+
+		bool				m_bOverriddenAlphaWriteValue:1;
+		bool				m_bOverriddenColorWriteValue:1;
+
+
 		DWORD				m_ColorWriteEnable;
+		bool				m_OverrideZWriteEnable;
+		bool				m_OverrideZTestEnable;
 
 		bool				m_bLinearColorSpaceFrameBufferEnable;
 
-		bool				m_StencilEnable;
-		D3DCMPFUNC			m_StencilFunc;
-		int					m_StencilRef;
-		int					m_StencilMask;
-		DWORD				m_StencilFail;
-		DWORD				m_StencilZFail;
-		DWORD				m_StencilPass;
-		int					m_StencilWriteMask;
-
 		// Texture stage state
-		CurrentTextureStageState_t m_TextureStage[MAX_TEXTURE_STAGES];
 		CurrentSamplerState_t m_SamplerState[MAX_SAMPLERS];
 	};
 
@@ -173,15 +117,20 @@ public:
 	// Take startup snapshot
 	void TakeDefaultStateSnapshot( );
 
+	ShadowShaderState_t  *GetShaderShadowState( StateSnapshot_t snapshotId )
+	{
+		return  &m_SnapshotList[snapshotId].m_ShaderState;
+	}
+
 	// Makes the board state match the snapshot
-	void UseSnapshot( StateSnapshot_t snapshotId );
+	void UseSnapshot( StateSnapshot_t snapshotId, bool bApplyShaderState = true );
 
 	// Cause the board to match the default state snapshot
 	void UseDefaultState();
 
 	// Snapshotted state overrides
 	void ForceDepthFuncEquals( bool bEnable );
-	void OverrideDepthEnable( bool bEnable, bool bDepthEnable );
+	void OverrideDepthEnable( bool bEnable, bool bDepthWriteEnable, bool bDepthTestEnable );
 	void OverrideAlphaWriteEnable( bool bOverrideEnable, bool bAlphaWriteEnable );
 	void OverrideColorWriteEnable( bool bOverrideEnable, bool bColorWriteEnable );
 	void EnableLinearColorSpaceFrameBuffer( bool bEnable );
@@ -199,6 +148,8 @@ public:
 
 	CurrentState_t& CurrentState() { return m_CurrentState; }
 
+	void SetShadowDepthBiasValuesDirty( bool bDirty ) { m_bShadowDepthBiasValuesDirty = bDirty; }
+
 #ifdef DEBUG_BOARD_STATE
 	ShadowState_t& BoardState() { return m_BoardState; }
 	ShadowShaderState_t& BoardShaderState() { return m_BoardShaderState; }
@@ -208,7 +159,8 @@ public:
 public:
 	// Applies alpha blending
 	void ApplyAlphaBlend( const ShadowState_t& state );
-	// GR - separate alpha blend
+
+	// Separate alpha blend
 	void ApplySeparateAlphaBlend( const ShadowState_t& state );
 	void ApplyAlphaTest( const ShadowState_t& state );
 	void ApplyDepthTest( const ShadowState_t& state );
@@ -281,9 +233,6 @@ private:
 		bool Less( const TransitionList_t &src1, const TransitionList_t &src2, void *pCtx );
 	};
 
-	CurrentTextureStageState_t &TextureStage( int stage ) { return m_CurrentState.m_TextureStage[stage]; }
-	const CurrentTextureStageState_t &TextureStage( int stage ) const { return m_CurrentState.m_TextureStage[stage]; }
-
 	CurrentSamplerState_t &SamplerState( int stage ) { return m_CurrentState.m_SamplerState[stage]; }
 	const CurrentSamplerState_t &SamplerState( int stage ) const { return m_CurrentState.m_SamplerState[stage]; }
 
@@ -299,34 +248,20 @@ private:
 	unsigned int FindIdenticalTransitionList( unsigned int firstElem, 
 		unsigned short numOps, unsigned int nFirstTest ) const;
 
-	// Adds a transition
-	void AddTransition( RenderStateFunc_t func );
-	void AddTextureTransition( TextureStateFunc_t func, int stage );
-
-	// Apply a transition
-	void ApplyTransition( TransitionList_t& list, int snapshot );
-
-	// Creates an entry in the transition table
-	void CreateTransitionTableEntry( int to, int from );
-
 	// Checks if a state is valid
 	bool TestShadowState( const ShadowState_t& state, const ShadowShaderState_t &shaderState );
 
 	// Perform state block overrides
 	void PerformShadowStateOverrides( );
 
-	// Applies the transition list
-	void ApplyTransitionList( int snapshot, int nFirstOp, int nOpCount );
-
 	// Apply shader state (stuff that doesn't lie in the transition table)
 	void ApplyShaderState( const ShadowState_t &shadowState, const ShadowShaderState_t &shaderState );
-
-	// Wrapper for the non-standard transitions for stateblock + non-stateblock cases
-	int CreateNormalTransitions( const ShadowState_t& fromState, const ShadowState_t& toState, bool bForce );
 
 	// State setting methods
 	void SetZEnable( D3DZBUFFERTYPE nEnable );
 	void SetZFunc( D3DCMPFUNC nCmpFunc );
+
+	void SetBoardStateFromShadowState( ShadowState_t const &shadowState );
 
 private:
 	// Sets up the default state
@@ -361,6 +296,8 @@ private:
 
 	// The current board state.
 	CurrentState_t m_CurrentState;
+	
+	bool m_bShadowDepthBiasValuesDirty;
 
 #ifdef DEBUG_BOARD_STATE
 	// Maintains the total shadow state

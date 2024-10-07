@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -11,6 +11,10 @@
 #include "floattoscreen_ps20.inc"
 #include "floattoscreen_ps20b.inc"
 #include "convar.h"
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
 
 BEGIN_VS_SHADER_FLAGS( floattoscreen, "Help for floattoscreen", SHADER_NOT_EDITABLE )
 	BEGIN_SHADER_PARAMS
@@ -28,9 +32,6 @@ BEGIN_VS_SHADER_FLAGS( floattoscreen, "Help for floattoscreen", SHADER_NOT_EDITA
 	
 	SHADER_FALLBACK
 	{
-		// Requires DX9 + above
-		if ( g_pHardwareConfig->GetDXSupportLevel() < 90 )
-			return "Wireframe";
 		return 0;
 	}
 
@@ -45,7 +46,10 @@ BEGIN_VS_SHADER_FLAGS( floattoscreen, "Help for floattoscreen", SHADER_NOT_EDITA
 			pShaderShadow->VertexShaderVertexFormat( fmt, 1, 0, 0 );
 
 			// convert from linear to gamma on write.
-			pShaderShadow->EnableSRGBWrite( true );
+			if ( !IsX360() ) // The 360 is using this shader when it shouldn't...this is just a quick hack to keep things looking right on the 360
+			{
+				pShaderShadow->EnableSRGBWrite( true );
+			}
 
 			// Pre-cache shaders
 			DECLARE_STATIC_VERTEX_SHADER( screenspaceeffect_vs20 );
@@ -80,7 +84,7 @@ BEGIN_VS_SHADER_FLAGS( floattoscreen, "Help for floattoscreen", SHADER_NOT_EDITA
 
 		DYNAMIC_STATE
 		{
-			BindTexture( SHADER_SAMPLER0, FBTEXTURE, -1 );
+			BindTexture( SHADER_SAMPLER0, TEXTURE_BINDFLAGS_NONE, FBTEXTURE, -1 );
 			DECLARE_DYNAMIC_VERTEX_SHADER( screenspaceeffect_vs20 );
 			SET_DYNAMIC_VERTEX_SHADER( screenspaceeffect_vs20 );
 

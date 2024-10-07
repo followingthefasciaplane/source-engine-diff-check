@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -561,6 +561,8 @@ CFishPool::CFishPool( void )
 	ListenForGameEvent( "hegrenade_detonate" );
 	ListenForGameEvent( "flashbang_detonate" );
 	ListenForGameEvent( "smokegrenade_detonate" );
+	ListenForGameEvent( "molotov_detonate" );
+	ListenForGameEvent( "decoy_detonate" );
 	ListenForGameEvent( "bomb_exploded" );
 }
 

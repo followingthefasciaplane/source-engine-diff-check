@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Linux support for the IGame interface
 //
@@ -22,7 +22,10 @@
 #include "server.h"
 #include "cdll_int.h"
 
-#ifdef SWDS
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
+#ifdef DEDICATED
 void ForceReloadProfile( void );
 
 void ClearIOStates( void );
@@ -46,7 +49,6 @@ public:
 	virtual void	InputDetachFromGameWindow();
 
 	void*			GetMainWindow( void );
-	void*			GetMainDeviceWindow( void );
 	void**			GetMainWindowAddress( void );
 
 	void			SetWindowXY( int x, int y );
@@ -57,6 +59,10 @@ public:
 	virtual void		DispatchAllStoredGameMessages();
 	virtual void		PlayStartupVideos() {}
 	virtual void		GetDesktopInfo( int &width, int &height, int &refreshRate );
+	virtual void    OnScreenSizeChanged( int nOldWidth, int nOldHeight )
+	{
+	}
+
 private:
 	void			SetActiveApp( bool fActive );
 
@@ -156,11 +162,6 @@ void *CGame::GetMainWindow( void )
 	return 0;
 }
 
-void *CGame::GetMainDeviceWindow( void )
-{
-	return 0;
-}
-
 void **CGame::GetMainWindowAddress( void )
 {
 	return NULL;
@@ -212,7 +213,7 @@ void CGame::GetDesktopInfo( int &width, int &height, int &refreshRate )
 {
     width = 0;
     height = 0;
-	refreshRate = 0;
+    refreshRate = 0;
 }
 
 #endif

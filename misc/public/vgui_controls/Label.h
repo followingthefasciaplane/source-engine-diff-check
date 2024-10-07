@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -13,9 +13,10 @@
 #endif
 
 #include "utlvector.h"
-#include "vgui/VGUI.h"
+#include "vgui/vgui.h"
 #include "vgui_controls/Panel.h"
 #include "vgui_controls/PHandle.h"
+#include "dmxloader/dmxelement.h"
 
 namespace vgui
 {
@@ -27,8 +28,10 @@ namespace vgui
 class Label : public Panel
 {
 	DECLARE_CLASS_SIMPLE( Label, Panel );
+	DECLARE_DMXELEMENT_UNPACK_NAMESPACE(vgui);
 
 public:
+
 	// Constructors
 	Label(Panel *parent, const char *panelName, const char *text);
 	Label(Panel *parent, const char *panelName, const wchar_t *wszText);
@@ -108,6 +111,7 @@ public:
 	// Images are drawn from left to right across the label, ordered by index
 	// By default there is a TextImage in position 0 (see GetTextImage()/SetTextImageIndex())
 	virtual int AddImage(IImage *image, int preOffset);  // Return the index the image was placed in
+	virtual void SetImage(IImage *image, int preOffset ); // Clears all images and sets the only remaining image to the passed in image
 	virtual void SetImageAtIndex(int index, IImage *image, int preOffset);	
 	virtual void SetImagePreOffset(int index, int preOffset);  // Set the offset in pixels before the image
 	virtual IImage *GetImageAtIndex(int index);
@@ -154,7 +158,11 @@ public:
 	void SetWrap( bool bWrap );
 	void SetCenterWrap( bool bWrap );
 
+	void SetNoShortcutSyntax( bool bNoShortcutSyntax );
+
 	void SetAllCaps( bool bAllCaps );
+
+	virtual void GetSizerMinimumSize(int &wide, int &tall);
 
 protected:
 	virtual void PerformLayout();
@@ -174,18 +182,27 @@ protected:
 
 	// editing
 	virtual void ApplySchemeSettings(IScheme *pScheme);
+
+public:
 	virtual void GetSettings( KeyValues *outResourceData );
 	virtual void ApplySettings( KeyValues *inResourceData );
+
+protected:
 	virtual const char *GetDescription( void );
 
 	MESSAGE_FUNC_PARAMS( OnDialogVariablesChanged, "DialogVariables", dialogVariables );
 
 	void HandleAutoSizing( void );
 
-private:
-	void Init();
+	// Derived can override to, e.g., recenter text image text if there is space.
+	virtual void RepositionTextImage( int &x, int &y, TextImage *pTextImage ) {}
 
 	Alignment  _contentAlignment;
+
+private:
+
+	void Init();
+
 	TextImage *_textImage; // this is the textImage, if the full text will not
 							// fit we put as much as we can and add an elipsis (...)
 	struct TImageInfo
@@ -216,8 +233,12 @@ private:
 	bool	m_bAllCaps;
 	bool	m_bAutoWideToContents;
 	bool	m_bAutoWideDirty;
-	bool	m_bUseProportionalInsets;
 
+	bool	m_bAutoTallToContents;
+	bool	m_bAutoTallDirty;
+	bool	m_bNoShortcutSyntax;
+
+	bool	m_bUseProportionalInsets;
 };
 
 } // namespace vgui

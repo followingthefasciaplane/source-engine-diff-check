@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -59,6 +59,7 @@ CServerNetworkProperty::~CServerNetworkProperty()
 //-----------------------------------------------------------------------------
 void CServerNetworkProperty::Init( CBaseEntity *pEntity )
 {
+	// NOTE: We're in pEntity's constructor so we can't call virtual methods of pEntity here
 	m_pPev = NULL;
 	m_pOuter = pEntity;
 	m_pServerClass = NULL;
@@ -66,6 +67,11 @@ void CServerNetworkProperty::Init( CBaseEntity *pEntity )
 	m_bPendingStateChange = false;
 	m_PVSInfo.m_nClusterCount = 0;
 	m_TimerEvent.Init( &g_NetworkPropertyEventMgr, this );
+}
+
+void CServerNetworkProperty::CacheServerClass()
+{
+	m_pServerClass = m_pOuter->GetServerClass();
 }
 
 
@@ -108,9 +114,6 @@ IHandleEntity *CServerNetworkProperty::GetEntityHandle( )
 void CServerNetworkProperty::Release()
 {
 	delete m_pOuter;
-	// Don't zero m_pOuter or reference any member variables after
-	// the delete call because the object may be deleted.
-	//m_pOuter = NULL;
 }
 
 
@@ -156,8 +159,6 @@ void CServerNetworkProperty::RecomputePVSInformation()
 //-----------------------------------------------------------------------------
 ServerClass* CServerNetworkProperty::GetServerClass()
 {
-	if ( !m_pServerClass )
-		m_pServerClass = m_pOuter->GetServerClass();
 	return m_pServerClass;
 }
 
@@ -205,7 +206,7 @@ bool CServerNetworkProperty::IsInPVS( const edict_t *pRecipient, const void *pvs
 		return ( engine->CheckHeadnodeVisible( m_PVSInfo.m_nHeadNode, pPVS, pvssize ) != 0);
 	}
 	
-	for ( int i = m_PVSInfo.m_nClusterCount; --i >= 0; )
+	for ( int i = 0; i < m_PVSInfo.m_nClusterCount; i++ )
 	{
 		if (pPVS[m_PVSInfo.m_pClusters[i] >> 3] & (1 << (m_PVSInfo.m_pClusters[i] & 7) ))
 			return true;

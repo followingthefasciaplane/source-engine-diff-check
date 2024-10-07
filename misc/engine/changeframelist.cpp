@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -13,96 +13,51 @@
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
+//-----------------------------------------------------------------------------
+DEFINE_FIXEDSIZE_ALLOCATOR_MT( CChangeFrameList, 2048, CUtlMemoryPool::GROW_FAST );
 
-class CChangeFrameList : public IChangeFrameList
+//-----------------------------------------------------------------------------
+
+CChangeFrameList::CChangeFrameList( int nProperties, int iCurTick )
 {
-public:
+	//determine how many buckets we need for our properties
+	int nNumBuckets = ( nProperties + knBucketSize - 1 ) / knBucketSize;
+	m_nNumProps = nProperties;
 
-	void	Init( int nProperties, int iCurTick )
-	{
-		m_ChangeTicks.SetSize( nProperties );
-		for ( int i=0; i < nProperties; i++ )
-			m_ChangeTicks[i] = iCurTick;
-	}
+	m_ChangeTicks.SetCount( nProperties + nNumBuckets );
+	m_ChangeTicks.FillWithValue( iCurTick );
+}
 
-
-// IChangeFrameList implementation.
-public:
-
-	virtual void	Release()
-	{
-		delete this;
-	}
-
-	virtual IChangeFrameList* Copy()
-	{
-		CChangeFrameList *pRet = new CChangeFrameList;
-
-		int numProps = m_ChangeTicks.Count();
-
-		pRet->m_ChangeTicks.SetSize( numProps );
-
-		for ( int i=0; i < numProps; i++ )
-		{
-			pRet->m_ChangeTicks[ i ] = m_ChangeTicks[ i ];
-		}
-
-		return pRet;
-
-	}
-
-	virtual int		GetNumProps()
-	{
-		return m_ChangeTicks.Count();
-	}
-
-	virtual void	SetChangeTick( const int *pPropIndices, int nPropIndices, const int iTick )
-	{
-		for ( int i=0; i < nPropIndices; i++ )
-		{
-			m_ChangeTicks[ pPropIndices[i] ] = iTick;
-		}
-	}
-
-	virtual int		GetPropsChangedAfterTick( int iTick, int *iOutProps, int nMaxOutProps )
-	{
-		int nOutProps = 0;
-
-		int c = m_ChangeTicks.Count();
-		
-		Assert( c <= nMaxOutProps );
-
-		for ( int i=0; i < c; i++ )
-		{
-			if ( m_ChangeTicks[i] > iTick )
-			{
-				iOutProps[nOutProps] = i;
-				++nOutProps;
-			}
-		}
-
-		return nOutProps;
-	}
-
-// IChangeFrameList implementation.
-protected:
-
-	virtual			~CChangeFrameList()
-	{
-	}
-
-private:
-	// Change frames for each property.
-	CUtlVector<int>		m_ChangeTicks;
-};
-
-
-IChangeFrameList* AllocChangeFrameList( int nProperties, int iCurTick )
+CChangeFrameList::~CChangeFrameList()
 {
-	CChangeFrameList *pRet = new CChangeFrameList;
-	pRet->Init( nProperties, iCurTick);
+}
+
+void CChangeFrameList::Release()
+{
+	delete this;
+}
+
+CChangeFrameList::CChangeFrameList( const CChangeFrameList &rhs )
+{
+	m_ChangeTicks = rhs.m_ChangeTicks;
+	m_nNumProps = rhs.m_nNumProps;
+}
+
+CChangeFrameList *CChangeFrameList::Copy()
+{
+	CChangeFrameList *pRet = new CChangeFrameList( *this );
 	return pRet;
 }
 
-
+void CChangeFrameList::SetChangeTick( const int* RESTRICT pProps, int nNumProps, const int iTick )
+{
+	//avoid loads inside the array by the compiler thinking they could overlap
+	int* pBuckets		= m_ChangeTicks.Base() + m_nNumProps;
+	for ( int i=0; i < nNumProps; i++ )
+	{
+		//update our tick, and the parent bucket for the tick
+		m_ChangeTicks[ pProps[i] ] = iTick;
+		pBuckets[ pProps[i] / knBucketSize ] = iTick;		
+	}
+}
 

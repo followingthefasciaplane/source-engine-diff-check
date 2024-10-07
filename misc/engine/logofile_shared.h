@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -12,6 +12,8 @@
 
 #include "checksum_crc.h"
 
+#define CUSTOM_FILES_FOLDER	"downloads"
+
 // Turns a CRC value into a filename.
 class CCustomFilename
 {
@@ -20,7 +22,7 @@ public:
 	{
 		char hex[16];
 		Q_binarytohex( (byte *)&value, sizeof( value ), hex, sizeof( hex ) );
-		Q_snprintf( m_Filename, sizeof( m_Filename ), "user_custom/%c%c/%s.dat", hex[0], hex[1], hex );
+		Q_snprintf( m_Filename, sizeof( m_Filename ), "%s/%s.dat", CUSTOM_FILES_FOLDER, hex );
 	}
 
 	char m_Filename[MAX_OSPATH];

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright ©, Valve Corporation, All rights reserved. =======
 //
 // Purpose: CItemSelectionCriteria, which serves as a criteria for selection
 //			of a econ item
@@ -8,14 +8,11 @@
 
 #include "cbase.h"
 #include "item_selection_criteria.h"
-
-#include "gcsdk/gcsystemmsgs.h"
+#include "game_item_schema.h" // TODO: Fix circular dependency
 
 #if defined(TF_CLIENT_DLL) || defined(TF_DLL)
 #include "tf_gcmessages.h"
 #endif
-
-#include "gcsdk/enumutils.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -23,23 +20,6 @@
 
 // copied from \common\econ_item_view.h
 #define AE_USE_SCRIPT_VALUE			9999		// Can't be -1, due to unsigned ints used on the backend
-
-ENUMSTRINGS_START( EItemCriteriaOperator )
-{ k_EOperator_String_EQ,		"string==" },
-{ k_EOperator_String_Not_EQ,	"!string==" },
-{ k_EOperator_Float_EQ,			"float==" },
-{ k_EOperator_Float_Not_EQ,		"!float==" },
-{ k_EOperator_Float_LT,			"float<" },
-{ k_EOperator_Float_Not_LT,		"!float<" },
-{ k_EOperator_Float_LTE,		"float<=" },
-{ k_EOperator_Float_Not_LTE,	"!float<=" },
-{ k_EOperator_Float_GT,			"float>" },
-{ k_EOperator_Float_Not_GT,		"!float>" },
-{ k_EOperator_Float_GTE,		"float>=" },
-{ k_EOperator_Float_Not_GTE,	"!float>=" },
-{ k_EOperator_Subkey_Contains,	"contains" },
-{ k_EOperator_Subkey_Not_Contains, "!contains" },
-ENUMSTRINGS_REVERSE( EItemCriteriaOperator, k_EItemCriteriaOperator_Count )
 
 using namespace GCSDK;
 
@@ -51,6 +31,10 @@ CItemSelectionCriteria::CItemSelectionCriteria( const CItemSelectionCriteria &th
 	(*this) = that;
 }
 
+
+struct EmptyStruct_t
+{
+};
 
 //-----------------------------------------------------------------------------
 // Purpose: Operator=
@@ -75,34 +59,12 @@ CItemSelectionCriteria::~CItemSelectionCriteria( void )
 	m_vecConditions.PurgeAndDeleteElements();
 }
 
-//-----------------------------------------------------------------------------
-// Purpose: Look through our conditions and find the first of the specified type, 
-//			and return the value it's looking for.
-//-----------------------------------------------------------------------------
-const char *CItemSelectionCriteria::GetValueForFirstConditionOfType( EItemCriteriaOperator eType ) const
+const char *CItemSelectionCriteria::GetValueForFirstConditionOfFieldName( const char *pchName ) const
 {
-	// Only supporting this for string conditions right now
-	Assert( eType == k_EOperator_String_EQ || eType == k_EOperator_String_Not_EQ );
-
 	FOR_EACH_VEC( m_vecConditions, i )
 	{
-		if ( m_vecConditions[i]->GetEOp() == eType )
+		if ( V_strcmp( m_vecConditions[i]->GetField(), pchName ) == 0 )
 			return m_vecConditions[i]->GetValue();
-	}
-
-	return NULL;
-}
-
-//-----------------------------------------------------------------------------
-// Purpose: Look through our conditions and find the first of the specified type, 
-//			and return the value it's looking for.
-//-----------------------------------------------------------------------------
-const char *CItemSelectionCriteria::GetFieldForFirstConditionOfType( EItemCriteriaOperator eType ) const
-{
-	FOR_EACH_VEC( m_vecConditions, i )
-	{
-		if ( m_vecConditions[i]->GetEOp() == eType )
-			return m_vecConditions[i]->GetField();
 	}
 
 	return NULL;
@@ -111,7 +73,7 @@ const char *CItemSelectionCriteria::GetFieldForFirstConditionOfType( EItemCriter
 //-----------------------------------------------------------------------------
 // Purpose: Initialize from a KV structure
 //-----------------------------------------------------------------------------
-bool CItemSelectionCriteria::BInitFromKV( KeyValues *pKVCriteria )
+bool CItemSelectionCriteria::BInitFromKV( KeyValues *pKVCriteria, const CEconItemSchema &pschema )
 {
 	// Read in the base fields
 	if ( pKVCriteria->FindKey( "level" ) )
@@ -122,10 +84,19 @@ bool CItemSelectionCriteria::BInitFromKV( KeyValues *pKVCriteria )
 	if ( pKVCriteria->FindKey( "quality" ) )
 	{
 		uint8 nQuality;
-		if ( !GetItemSchema()->BGetItemQualityFromName( pKVCriteria->GetString( "quality" ), &nQuality ) )
+		if ( !pschema.BGetItemQualityFromName( pKVCriteria->GetString( "quality" ), &nQuality ) )
 			return false;
 
 		SetQuality( nQuality );
+	}
+
+	if ( pKVCriteria->FindKey( "rarity" ) )
+	{
+		uint8 nRarity;
+		if ( !pschema.BGetItemRarityFromName( pKVCriteria->GetString( "rarity" ), &nRarity ) )
+			return false;
+
+		SetRarity( nRarity );
 	}
 
 	if ( pKVCriteria->FindKey( "inventoryPos" ) )
@@ -143,75 +114,20 @@ bool CItemSelectionCriteria::BInitFromKV( KeyValues *pKVCriteria )
 		SetIgnoreEnabledFlag( pKVCriteria->GetBool( "ignore_enabled" ) );
 	}
 
-	if ( pKVCriteria->FindKey( "tags" ) )
+	if ( pKVCriteria->FindKey( "recent_only" ) )
 	{
-		SetTags( pKVCriteria->GetString( "tags" ) );
-	}
-
-	KeyValues *pKVConditions = pKVCriteria->FindKey( "conditions", true );
-
-	FOR_EACH_TRUE_SUBKEY( pKVConditions, pKVElement )
-	{
-		// Check for required fields
-		if ( !pKVElement->FindKey( "field" ) ||
-			!pKVElement->FindKey( "operator" ) ||
-			!pKVElement->FindKey( "value" ) )
-			return false;
-
-		const char *pszField = pKVElement->GetString( "field" );
-		bool bRequired = pKVElement->GetBool( "required" );
-		const char *pszValue = pKVElement->GetString( "value" );
-
-		// Get the operator
-		const char *pszOperator = pKVElement->GetString( "operator" );
-		EItemCriteriaOperator eOp = EItemCriteriaOperatorFromName( pszOperator );
-		if ( k_EItemCriteriaOperator_Count == eOp )
-			return false;
-
-		BAddCondition( pszField, eOp, pszValue, bRequired );
+		SetRecentOnly( pKVCriteria->GetBool( "recent_only" ) );
 	}
 
 	return true;
 }
 
-
-//-----------------------------------------------------------------------------
-// Purpose:
-//-----------------------------------------------------------------------------
-void CItemSelectionCriteria::SetTags( const char *pszTags )
+bool CItemSelectionCriteria::BInitFromItemAndPaint( int nItemDef, int nPaintID, const CEconItemSchema &schemaa )
 {
-	m_vecTags.Purge();
-
-	m_strTags = pszTags;
-	CSplitString splitString( pszTags, " " );
-	for ( int i=0; i<splitString.Count(); ++i )
-	{
-		econ_tag_handle_t tagHandle = GetItemSchema()->GetHandleForTag( splitString[i] );
-		if ( !m_vecTags.HasElement( tagHandle ) )
-		{
-			m_vecTags.AddToTail( tagHandle );
-		}
-	}
-}
-
-
-//-----------------------------------------------------------------------------
-// Purpose:
-//-----------------------------------------------------------------------------
-bool CItemSelectionCriteria::BAddCondition( CItemSelectionCriteria::ICondition *pCondition )
-{
-	CPlainAutoPtr<ICondition> pConditionPtr( pCondition );
-
-	// Check for condition limit
-	if ( UCHAR_MAX == GetConditionsCount() )
-	{		
-		AssertMsg( false, "Too many conditions on a a CItemSelectionCriteria. Max: 255" );
-		return false;
-	}
-
-	m_vecConditions.AddToTail( pConditionPtr.Detach() );
+	/** Removed for partner depot **/
 	return true;
 }
+
 
 //-----------------------------------------------------------------------------
 // Purpose: Adds a condition to the selection criteria
@@ -224,9 +140,21 @@ bool CItemSelectionCriteria::BAddCondition( CItemSelectionCriteria::ICondition *
 //-----------------------------------------------------------------------------
 bool CItemSelectionCriteria::BAddCondition( const char *pszField, EItemCriteriaOperator eOp, float flValue, bool bRequired )
 {
+	// Check for condition limit
+	if ( UCHAR_MAX == GetConditionsCount() )
+	{		
+		AssertMsg( false, "Too many conditions on a a CItemSelectionCriteria. Max: 255" );
+		return false;
+	}
+
 	// Enforce maximum string lengths
 	if ( Q_strlen( pszField ) >= k_cchCreateItemLen )
 		return false;
+
+	if ( V_strcmp( pszField, "*lootlist" ) == 0 )
+	{
+		m_bIsLootList = true;
+	}
 
 	// Create the appropriate condition for the operator
 	switch ( eOp )
@@ -241,13 +169,15 @@ bool CItemSelectionCriteria::BAddCondition( const char *pszField, EItemCriteriaO
 	case k_EOperator_Float_Not_GT:
 	case k_EOperator_Float_GTE:
 	case k_EOperator_Float_Not_GTE:
-		return BAddCondition( new CFloatCondition( pszField, eOp, flValue, bRequired ) );
+		m_vecConditions.AddToTail( new CFloatCondition( pszField, eOp, flValue, bRequired ) );
+		return true;
 
 	default:
 		AssertMsg1( false, "Bad operator (%d) passed to BAddCondition. Float based operator required for this overload.", eOp );
 		return false;
 	}
 }
+
 
 //-----------------------------------------------------------------------------
 // Purpose: Adds a condition to the selection criteria
@@ -260,21 +190,33 @@ bool CItemSelectionCriteria::BAddCondition( const char *pszField, EItemCriteriaO
 //-----------------------------------------------------------------------------
 bool CItemSelectionCriteria::BAddCondition( const char *pszField, EItemCriteriaOperator eOp, const char * pszValue, bool bRequired )
 {
-	// Enforce maximum string lengths
-	if ( Q_strlen( pszField ) >= k_cchCreateItemLen || Q_strlen( pszValue ) >= k_cchCreateItemLen )
+	// Check for condition limit
+	if ( UCHAR_MAX == GetConditionsCount() )
+	{		
+		AssertMsg( false, "Too many conditions on a a CItemSelectionCriteria. Max: 255" );
 		return false;
+	}
+
+	// Enforce maximum string lengths
+	if ( V_strlen( pszField ) >= k_cchCreateItemLen || Q_strlen( pszValue ) >= k_cchCreateItemLen )
+		return false;
+
+	if ( V_strcmp( pszField, "*lootlist" ) == 0 )
+	{
+		m_bIsLootList = true;
+	}
 
 	// Create the appropriate condition for the operator
 	switch ( eOp )
 	{
 	case k_EOperator_String_EQ:
 	case k_EOperator_String_Not_EQ:
-		return BAddCondition( new CStringCondition( pszField, eOp, pszValue, bRequired ) );
+		m_vecConditions.AddToTail( new CStringCondition( pszField, eOp, pszValue, bRequired ) );
 		return true;
 
 	case k_EOperator_Subkey_Contains:
 	case k_EOperator_Subkey_Not_Contains:
-		return BAddCondition( new CSetCondition( pszField, eOp, pszValue, bRequired ) );
+		m_vecConditions.AddToTail( new CSetCondition( pszField, eOp, pszValue, bRequired ) );
 		return true;
 
 	default:
@@ -283,15 +225,19 @@ bool CItemSelectionCriteria::BAddCondition( const char *pszField, EItemCriteriaO
 	}
 }
 
+
 //-----------------------------------------------------------------------------
 // Purpose: Checks if a given item matches the item selection criteria
 // Input:	itemDef - The item definition to evaluate against
 // Output:	True is the item passes the filter, false otherwise
 //-----------------------------------------------------------------------------
-bool CItemSelectionCriteria::BEvaluate( const CEconItemDefinition* pItemDef ) const
+bool CItemSelectionCriteria::BEvaluate( const CEconItemDefinition* pItemDef, const CEconItemSchema &pschema ) const
 {
 	// Disabled items never match
 	if ( !m_bIgnoreEnabledFlag && !pItemDef->BEnabled() )
+		return false;
+
+	if ( m_bRecentOnly && !pItemDef->IsRecent() )
 		return false;
 
 	// Filter against level
@@ -305,7 +251,13 @@ bool CItemSelectionCriteria::BEvaluate( const CEconItemDefinition* pItemDef ) co
 		if ( GetQuality() != pItemDef->GetQuality() )
 		{
 			// Filter out item defs that have a non-any quality if we have a non-matching & non-any quality criteria
-			if ( k_unItemQuality_Any != GetQuality() && k_unItemQuality_Any != pItemDef->GetQuality() )
+			if ( k_unItemQuality_Any != GetQuality() &&
+				k_unItemQuality_Any != pItemDef->GetQuality() )
+				return false;
+
+			// Filter out item defs that don't have our exact quality if our quality criteria requires explicit matches
+			const CEconItemQualityDefinition *pQuality = pschema.GetQualityDefinition( GetQuality() );
+			if ( m_bForcedQualityMatch || ( pQuality && pQuality->GetRequiresExplicitMatches() ) )
 				return false;
 		}
 	}
@@ -313,32 +265,90 @@ bool CItemSelectionCriteria::BEvaluate( const CEconItemDefinition* pItemDef ) co
 	// Filter against the additional conditions
 	FOR_EACH_VEC( m_vecConditions, i )
 	{
-		if ( !m_vecConditions[i]->BItemDefinitionPassesCriteria( pItemDef ) )
-			return false;
-	}
+		// Skip over dynamic fields that require special logic from an econitem to process
+		if ( m_vecConditions[i]->GetField()[ 0 ] == '*' )
+			continue;
 
-	// Check if we have "any" tags
-	if ( m_vecTags.Count() > 0 )
-	{
-		bool bHasTag = false;
-		FOR_EACH_VEC( m_vecTags, i )
-		{
-			if ( pItemDef->HasEconTag( m_vecTags[i] ) )
-			{
-				bHasTag = true;
-				break;
-			}
-		}
-
-		if ( !bHasTag )
-		{
+		if ( !m_vecConditions[i]->BEvaluate( pItemDef->GetRawDefinition() ) )
 			return false;
-		}
 	}
 
 	return true;
 }
 
+bool CItemSelectionCriteria::BEvaluate( const CEconItem *pItem, const CEconItemSchema &pschema ) const
+{
+	const CEconItemDefinition *pItemDef = pItem->GetItemDefinition();
+
+	if ( !BEvaluate( pItemDef, pschema ) )
+		return false;
+
+	// Filter against the dynamic conditions
+	FOR_EACH_VEC( m_vecConditions, i )
+	{
+		// Skip over dynamic fields that require special logic from an econitem to process
+		const char *pchCondition = m_vecConditions[i]->GetField();
+		if ( pchCondition[ 0 ] != '*' )
+			continue;
+
+		pchCondition++;
+
+		if ( V_strcmp( pchCondition, "rarity" ) == 0 )
+		{
+			const CEconItemRarityDefinition *pRarity = pschema.GetRarityDefinitionByName( m_vecConditions[i]->GetValue() );
+			Assert( pRarity );
+
+			if ( m_vecConditions[i]->GetEOp() == k_EOperator_Not || m_vecConditions[i]->GetEOp() == k_EOperator_String_Not_EQ )
+			{
+				if ( pItem->GetRarity() == pRarity->GetDBValue() )
+					return false;
+			}
+			else
+			{
+				if ( pItem->GetRarity() != pRarity->GetDBValue() )
+					return false;
+			}
+		}
+		else if ( V_strcmp( pchCondition, "quality" ) == 0 )
+		{
+			const CEconItemQualityDefinition *pQuality = pschema.GetQualityDefinitionByName( m_vecConditions[i]->GetValue() );
+			Assert( pQuality );
+
+			if ( m_vecConditions[i]->GetEOp() == k_EOperator_Not || m_vecConditions[i]->GetEOp() == k_EOperator_String_Not_EQ )
+			{
+				if ( pItem->GetQuality() == pQuality->GetDBValue() )
+					return false;
+			}
+			else
+			{
+				if ( pItem->GetQuality() != pQuality->GetDBValue() )
+					return false;
+			}
+		}
+		else if ( V_strcmp( pchCondition, "itemdef" ) == 0 )
+		{
+			if ( pItemDef->GetDefinitionIndex() != V_atoi( m_vecConditions[i]->GetValue() ) )
+				return false;
+		}
+		else if ( V_strcmp( pchCondition, "paintkit" ) == 0 )
+		{
+			if ( pItem->GetCustomPaintKitIndex() != V_atoi( m_vecConditions[i]->GetValue() ) )
+				return false;
+		}
+		else if ( V_strcmp( pchCondition, "kill_eater_score_type" ) == 0 )
+		{
+			static const CSchemaAttributeDefHandle pAttr_KillEaterScoreType( "kill eater score type" );
+			attrib_value_t unKillEaterScoreType;
+			bool bHasKillEaterScoreType = pItem->FindAttribute( pAttr_KillEaterScoreType, &unKillEaterScoreType );
+			if ( !bHasKillEaterScoreType || unKillEaterScoreType != (uint32)V_atoi( m_vecConditions[ i ]->GetValue() ) )
+			{
+				return false;
+			}
+		}
+	}
+
+	return true;
+}
 
 //-----------------------------------------------------------------------------
 // Purpose: Determines if the item matches this condition of the criteria
@@ -466,6 +476,7 @@ bool CItemSelectionCriteria::CFloatCondition::BSerializeToMsg( CSOItemCriteriaCo
 	return true;
 }
 
+
 //-----------------------------------------------------------------------------
 // Purpose: Serialize the item selection criteria to the given message
 // Input:	msg - The message to serialize to.
@@ -475,12 +486,14 @@ bool CItemSelectionCriteria::BSerializeToMsg( CSOItemCriteria & msg ) const
 {
 	msg.set_item_level( m_unItemLevel );
 	msg.set_item_quality( m_nItemQuality );
+	msg.set_item_rarity( m_nItemRarity );
 	msg.set_item_level_set( m_bItemLevelSet );
 	msg.set_item_quality_set( m_bQualitySet );
+	msg.set_item_rarity_set( m_bRaritySet );
 	msg.set_initial_inventory( m_unInitialInventory );
 	msg.set_initial_quantity( m_unInitialQuantity );
 	msg.set_ignore_enabled_flag( m_bIgnoreEnabledFlag );
-	msg.set_tags( m_strTags );
+	msg.set_recent_only( m_bRecentOnly );
 
 	FOR_EACH_VEC( m_vecConditions, i )
 	{
@@ -500,56 +513,18 @@ bool CItemSelectionCriteria::BDeserializeFromMsg( const CSOItemCriteria & msg )
 {
 	m_unItemLevel = msg.item_level();
 	m_nItemQuality = msg.item_quality();
+	m_nItemRarity = msg.item_rarity();
 	m_bItemLevelSet = msg.item_level_set();
 	m_bQualitySet = msg.item_quality_set();
+	m_bRaritySet = msg.item_rarity_set();
 	m_unInitialInventory = msg.initial_inventory();
 	m_unInitialQuantity = msg.initial_quantity();
 	m_bIgnoreEnabledFlag = msg.ignore_enabled_flag();
+	m_bRecentOnly = msg.recent_only();
 
-	SetTags( msg.tags().c_str() );
 
 	uint32 unCount = msg.conditions_size();
 	m_vecConditions.EnsureCapacity( unCount );
-
-	for ( uint32 i = 0; i < unCount; i++ )
-	{
-		const CSOItemCriteriaCondition & cond = msg.conditions( i );
-		EItemCriteriaOperator eOp = (EItemCriteriaOperator)cond.op();
-		bool bRequired = cond.required();
-
-		// Read the value specific to the condition and add the condition
-		switch ( eOp )
-		{
-		case k_EOperator_Float_EQ:
-		case k_EOperator_Float_Not_EQ:
-		case k_EOperator_Float_LT:
-		case k_EOperator_Float_Not_LT:
-		case k_EOperator_Float_LTE:
-		case k_EOperator_Float_Not_LTE:
-		case k_EOperator_Float_GT:
-		case k_EOperator_Float_Not_GT:
-		case k_EOperator_Float_GTE:
-		case k_EOperator_Float_Not_GTE:
-			{
-				if ( !BAddCondition( cond.field().c_str(), eOp, cond.float_value(), bRequired ) )	return false;
-				break;
-			}
-
-		case k_EOperator_String_EQ:
-		case k_EOperator_String_Not_EQ:
-		case k_EOperator_Subkey_Contains:
-		case k_EOperator_Subkey_Not_Contains:
-			{
-				if ( !BAddCondition( cond.field().c_str(), eOp, cond.string_value().c_str(), bRequired ) )	return false;
-				break;
-			}
-
-		default:
-			AssertMsg1( false, "Unknown operator (%d) read.", eOp );
-			return false;
-		}
-	}
-
 
 	return true;
 }
@@ -567,48 +542,3 @@ bool CItemSelectionCriteria::CCondition::BSerializeToMsg( CSOItemCriteriaConditi
 	return true;
 }
 
-//-----------------------------------------------------------------------------
-// Purpose:
-//-----------------------------------------------------------------------------
-bool CItemSelectionCriteria::CCondition::BItemDefinitionPassesCriteria( const CEconItemDefinition *pItemDef ) const
-{
-	return BEvaluate( pItemDef->GetRawDefinition() );
-}
-
-// Validation
-#ifdef DBGFLAG_VALIDATE
-
-//-----------------------------------------------------------------------------
-// Purpose: Run a global validation pass on all of our data structures and memory
-//			allocations.
-// Input:	validator -		Our global validator object
-//			pchName -		Our name (typically a member var in our container)
-//-----------------------------------------------------------------------------
-void CItemSelectionCriteria::Validate( CValidator &validator, const char *pchName )
-{
-	VALIDATE_SCOPE();
-	ValidateObj( m_vecConditions );
-	FOR_EACH_VEC( m_vecConditions, i )
-	{
-		ValidatePtr( m_vecConditions[i] );
-	}
-}
-
-void CItemSelectionCriteria::CCondition::Validate( CValidator &validator, const char *pchName )
-{
-	ValidateObj( m_sField );
-}
-
-void CItemSelectionCriteria::CStringCondition::Validate( CValidator &validator, const char *pchName )
-{
-	CCondition::Validate( validator, pchName );
-	ValidateObj( m_sValue );
-}
-
-void CItemSelectionCriteria::CSetCondition::Validate( CValidator &validator, const char *pchName )
-{
-	CCondition::Validate( validator, pchName );
-	ValidateObj( m_sValue );
-}
-
-#endif

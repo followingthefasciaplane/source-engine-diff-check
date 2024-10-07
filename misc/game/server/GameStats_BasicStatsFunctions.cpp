@@ -1,11 +1,16 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
 //=============================================================================
 
 #include "cbase.h"
-#include "gamestats.h"
+
+#include "GameStats.h"
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
 
 void BasicGameStatsRecord_t::Clear()
 {
@@ -118,7 +123,7 @@ void BasicGameStats_t::SaveToBuffer( CUtlBuffer& buf )
 		rec.SaveToBuffer( buf );
 	}
 
-	buf.PutChar( (char)m_nHL2ChaptureUnlocked );	
+	buf.PutChar( 0 );	
 	buf.PutChar( m_bSteam ? 1 : 0 );
 	buf.PutChar( m_bCyberCafe ? 1 : 0 );
 	buf.PutShort( (short)m_nDXLevel );
@@ -155,7 +160,7 @@ bool BasicGameStats_t::ParseFromBuffer( CUtlBuffer& buf, int iBufferStatsVersion
 	for ( int i = 0; i < c; ++i )
 	{
 		char mapname[ 256 ];
-		buf.GetString( mapname );
+		buf.GetString( mapname, sizeof( mapname ) );
 
 		BasicGameStatsRecord_t *rec = FindOrAddRecordForMap( mapname );
 		bool valid= rec->ParseFromBuffer( buf, iBufferStatsVersion );
@@ -167,7 +172,7 @@ bool BasicGameStats_t::ParseFromBuffer( CUtlBuffer& buf, int iBufferStatsVersion
 
 	if ( iBufferStatsVersion >= GAMESTATS_FILE_VERSION_OLD2 )
 	{
-		m_nHL2ChaptureUnlocked = (int)buf.GetChar();	
+		buf.GetChar();		// Gets the obsolete hl2 unlocked chapter field
 		m_bSteam = buf.GetChar() ? true : false;
 	}
 	if ( iBufferStatsVersion > GAMESTATS_FILE_VERSION_OLD2 )
@@ -180,4 +185,3 @@ bool BasicGameStats_t::ParseFromBuffer( CUtlBuffer& buf, int iBufferStatsVersion
 	}
 	return bret;
 }
-

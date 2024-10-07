@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: Mouse input routines
 //
@@ -6,11 +6,13 @@
 // $Date:         $
 // $NoKeywords: $
 //===========================================================================//
-#if defined( WIN32 ) && !defined( _X360 )
+#if defined( WIN32 ) && !defined( _GAMECONSOLE )
 #define _WIN32_WINNT 0x0502
 #include <windows.h>
 #endif
-#include "cbase.h"
+#ifdef OSX
+#include <Carbon/Carbon.h>
+#endif
 #include "hud.h"
 #include "cdll_int.h"
 #include "kbutton.h"
@@ -26,11 +28,14 @@
 #include "cdll_client_int.h"
 #include "cdll_util.h"
 #include "tier1/convar_serverbounded.h"
-#include "cam_thirdperson.h"
 #include "inputsystem/iinputsystem.h"
+#include "inputsystem/iinputstacksystem.h"
 
 #if defined( _X360 )
 #include "xbox/xbox_win32stubs.h"
+#endif
+#if defined( _PS3 )
+#include "ps3/ps3_win32stubs.h"
 #endif
 
 // memdbgon must be the last include file in a .cpp file!!!
@@ -41,20 +46,21 @@
 // left / right
 #define	YAW		1
 
-#ifdef PORTAL
-	bool g_bUpsideDown = false; // Set when the player is upside down in Portal to invert the mouse.
-#endif //#ifdef PORTAL
-
 extern ConVar lookstrafe;
 extern ConVar cl_pitchdown;
 extern ConVar cl_pitchup;
 extern const ConVar *sv_cheats;
 
+#if defined PORTAL
+ConVar cl_mouselook_roll_compensation( "cl_mouselook_roll_compensation", "1", 0, "In Portal and Paint, if your view is being rolled, compensate for that. So mouse movements are always relative to the screen." );
+#endif
+
+
 class ConVar_m_pitch : public ConVar_ServerBounded
 {
 public:
 	ConVar_m_pitch() : 
-		ConVar_ServerBounded( "m_pitch","0.022", FCVAR_ARCHIVE, "Mouse pitch factor." )
+		ConVar_ServerBounded( "m_pitch","0.022", FCVAR_ARCHIVE|FCVAR_SS, "Mouse pitch factor." )
 	{
 	}
 	
@@ -63,8 +69,18 @@ public:
 		if ( !sv_cheats )
 			sv_cheats = cvar->FindVar( "sv_cheats" );
 
+		float flBaseValue;
 		// If sv_cheats is on then it can be anything.
-		float flBaseValue = GetBaseFloatValue();
+		int nSlot = GET_ACTIVE_SPLITSCREEN_SLOT();
+		if ( nSlot != 0 )
+		{
+			static SplitScreenConVarRef s_m_pitch( "m_pitch" );
+			flBaseValue = s_m_pitch.GetFloat( nSlot );
+		}
+		else
+		{
+			flBaseValue = GetBaseFloatValue();
+		}
 		if ( !sv_cheats || sv_cheats->GetBool() )
 			return flBaseValue;
 
@@ -81,12 +97,11 @@ extern ConVar cam_idealyaw;
 extern ConVar cam_idealpitch;
 extern ConVar thirdperson_platformer;
 
-static ConVar m_filter( "m_filter","0", FCVAR_ARCHIVE, "Mouse filtering (set this to 1 to average the mouse over 2 frames)." );
-ConVar sensitivity( "sensitivity","3", FCVAR_ARCHIVE, "Mouse sensitivity.", true, 0.0001f, true, 10000000 );
+ConVar sensitivity( "sensitivity","2.5", FCVAR_ARCHIVE, "Mouse sensitivity.", true, 0.0001f, true, 1000 );
 
-static ConVar m_side( "m_side","0.8", FCVAR_ARCHIVE, "Mouse side factor." );
-static ConVar m_yaw( "m_yaw","0.022", FCVAR_ARCHIVE, "Mouse yaw factor." );
-static ConVar m_forward( "m_forward","1", FCVAR_ARCHIVE, "Mouse forward factor." );
+static ConVar m_side( "m_side","0.8", FCVAR_ARCHIVE, "Mouse side factor.", true, 0.0001f, true, 1000 );
+static ConVar m_yaw( "m_yaw","0.022", FCVAR_ARCHIVE, "Mouse yaw factor.", true, 0.0001f, true, 1000 );
+static ConVar m_forward( "m_forward","1", FCVAR_ARCHIVE, "Mouse forward factor.", true, 0.0001f, true, 1000 );
 
 static ConVar m_customaccel( "m_customaccel", "0", FCVAR_ARCHIVE, "Custom mouse acceleration:"
 	"\n0: custom accelaration disabled"
@@ -94,31 +109,31 @@ static ConVar m_customaccel( "m_customaccel", "0", FCVAR_ARCHIVE, "Custom mouse 
 	"\n2: Same as 1, with but x and y sensitivity are scaled by m_pitch and m_yaw respectively."
 	"\n3: mouse_acceleration = pow(raw_mouse_delta, m_customaccel_exponent - 1) * sensitivity"
 	);
-static ConVar m_customaccel_scale( "m_customaccel_scale", "0.04", FCVAR_ARCHIVE, "Custom mouse acceleration value.", true, 0, false, 0.0f );
+static ConVar m_customaccel_scale( "m_customaccel_scale", "0.04", FCVAR_ARCHIVE, "Custom mouse acceleration value.", true, 0, true, 10 );
 static ConVar m_customaccel_max( "m_customaccel_max", "0", FCVAR_ARCHIVE, "Max mouse move scale factor, 0 for no limit" );
-static ConVar m_customaccel_exponent( "m_customaccel_exponent", "1", FCVAR_ARCHIVE, "Mouse move is raised to this power before being scaled by scale factor.", true, 1.0f, false, 0.0f);
+static ConVar m_customaccel_exponent( "m_customaccel_exponent", "1.05", FCVAR_ARCHIVE, "Mouse move is raised to this power before being scaled by scale factor.", true, 0.0001f, true, 10 );
 
 static ConVar m_mousespeed( "m_mousespeed", "1", FCVAR_ARCHIVE, "Windows mouse acceleration (0 to disable, 1 to enable [Windows 2000: enable initial threshold], 2 to enable secondary threshold [Windows 2000 only]).", true, 0, true, 2 );
 static ConVar m_mouseaccel1( "m_mouseaccel1", "0", FCVAR_ARCHIVE, "Windows mouse acceleration initial threshold (2x movement).", true, 0, false, 0.0f );
 static ConVar m_mouseaccel2( "m_mouseaccel2", "0", FCVAR_ARCHIVE, "Windows mouse acceleration secondary threshold (4x movement).", true, 0, false, 0.0f );
 
-#ifdef OSX
 static ConVar m_rawinput( "m_rawinput", "1", FCVAR_ARCHIVE, "Use Raw Input for mouse input.");
-#else
-static ConVar m_rawinput( "m_rawinput", "0", FCVAR_ARCHIVE, "Use Raw Input for mouse input.");
-#endif
 
-#if DEBUG
-ConVar cl_mouselook( "cl_mouselook", "1", FCVAR_ARCHIVE, "Set to 1 to use mouse for look, 0 for keyboard look." );
-#else
-ConVar cl_mouselook( "cl_mouselook", "1", FCVAR_ARCHIVE | FCVAR_NOT_CONNECTED, "Set to 1 to use mouse for look, 0 for keyboard look. Cannot be set while connected to a server." );
-#endif
+ConVar cl_mouselook( "cl_mouselook", "1", FCVAR_ARCHIVE | FCVAR_NOT_CONNECTED | FCVAR_SS, "Set to 1 to use mouse for look, 0 for keyboard look. Cannot be set while connected to a server." );
 
-ConVar cl_mouseenable( "cl_mouseenable", "1" );
 
-// From other modules...
-void GetVGUICursorPos( int& x, int& y );
-void SetVGUICursorPos( int x, int y );
+ConVar cl_mouseenable( "cl_mouseenable", "1", FCVAR_RELEASE );
+
+void cl_mouseenable_changed_callback( IConVar *var, const char *pOldValue, float flOldValue )
+{
+	if( cl_mouseenable.GetBool() == true )
+		input->ClearStates();
+}
+
+void CInput::InitMouse( void )
+{
+		cl_mouseenable.InstallChangeCallback( cl_mouseenable_changed_callback, false );
+}
 
 //-----------------------------------------------------------------------------
 // Purpose: Hides cursor and starts accumulation/re-centering
@@ -132,25 +147,24 @@ void CInput::ActivateMouse (void)
 	{
 		if ( m_fMouseParmsValid )
 		{
-#if defined( PLATFORM_WINDOWS )
+#if defined( WIN32 ) && !defined( USE_SDL )
 			m_fRestoreSPI = SystemParametersInfo (SPI_SETMOUSE, 0, m_rgNewMouseParms, 0) ? true : false;
 #endif
 		}
 		m_fMouseActive = true;
 
-		ResetMouse();
-#if !defined( PLATFORM_WINDOWS )
-		int dx, dy;
+		// re-center the mouse if we're controlling the camera with it, otherwise just reset the cursor
+		if ( GetPerUser().m_fCameraInterceptingMouse || cl_mouseenable.GetBool() )
+			ResetMouse();
+		else
+			g_pInputSystem->ResetCursorIcon();
+
+		g_pInputStackSystem->SetCursorIcon( m_hInputContext, INPUT_CURSOR_HANDLE_INVALID );
+#if defined( USE_SDL ) || defined( OSX )
+        int dx, dy;
 		engine->GetMouseDelta( dx, dy, true );
 #endif
-
-		// Clear accumulated error, too
-		m_flAccumulatedMouseXMovement = 0;
-		m_flAccumulatedMouseYMovement = 0;
-
-		// clear raw mouse accumulated data
-		int rawX, rawY;
-		inputsystem->GetRawMouseAccumulators(rawX, rawY);
+		ClearStates();
 	}
 }
 
@@ -168,20 +182,24 @@ void CInput::DeactivateMouse (void)
 	{
 		if ( m_fRestoreSPI )
 		{
-#if defined( PLATFORM_WINDOWS )
+#if defined( WIN32 ) && !defined( USE_SDL )
 			SystemParametersInfo( SPI_SETMOUSE, 0, m_rgOrigMouseParms, 0 );
 #endif
 		}
 		m_fMouseActive = false;
-		vgui::surface()->SetCursor( vgui::dc_arrow );
-#if !defined( PLATFORM_WINDOWS )
-		// now put the mouse back in the middle of the screen
+		g_pInputStackSystem->SetCursorIcon( m_hInputContext, g_pInputSystem->GetStandardCursor( INPUT_CURSOR_ARROW ) );
+#if defined( USE_SDL ) || defined( OSX )
+        // now put the mouse back in the middle of the screen
 		ResetMouse();
 #endif
 
 		// Clear accumulated error, too
-		m_flAccumulatedMouseXMovement = 0;
-		m_flAccumulatedMouseYMovement = 0;
+		for ( int hh = 0; hh < MAX_SPLITSCREEN_PLAYERS; ++hh )
+		{
+			ACTIVE_SPLITSCREEN_PLAYER_GUARD( hh );
+			GetPerUser().m_flAccumulatedMouseXMovement = 0;
+			GetPerUser().m_flAccumulatedMouseYMovement = 0;
+		}
 	}
 }
 
@@ -256,9 +274,6 @@ void CInput::Init_Mouse (void)
 	if ( CommandLine()->FindParm("-nomouse" ) ) 
 		return; 
 
-	m_flPreviousMouseXPosition = 0.0f;
-	m_flPreviousMouseYPosition = 0.0f;
-	
 	m_fMouseInitialized = true;
 
 	m_fMouseParmsValid = false;
@@ -329,6 +344,15 @@ void CInput::ResetMouse( void )
 	int x, y;
 	GetWindowCenter( x,  y );
 	SetMousePos( x, y );	
+
+	// There are cases when coming back from an alt+tab, the mouse is outside of the client rect.  Because of this, our earlier call
+	// to SetCursorIcon is overridden, and we're stuck with a cursor on the screen in front of the crosshairs.  We should actually be calling
+	// ShowCursor to enable/disable the cursor, but that's another story.
+	//
+	// On WINDOWS_PC this should be ok to call every frame without a perf hit.  Inside ResetCursorIcon, we call ::SetCursor.  
+	// According to the msdn docs for SetCursor:
+	// "The cursor is set only if the new cursor is different from the previous cursor; otherwise, the function returns immediately."
+	g_pInputSystem->ResetCursorIcon();
 }
 
 
@@ -338,26 +362,28 @@ void CInput::ResetMouse( void )
 // Input  : *mx - 
 //			*my - 
 //-----------------------------------------------------------------------------
-void CInput::GetAccumulatedMouseDeltasAndResetAccumulators( float *mx, float *my )
+void CInput::GetAccumulatedMouseDeltasAndResetAccumulators( int nSlot, float *mx, float *my )
 {
 	Assert( mx );
 	Assert( my );
 
-	*mx = m_flAccumulatedMouseXMovement;
-	*my = m_flAccumulatedMouseYMovement;
+	PerUserInput_t &user = GetPerUser( nSlot );
 
 	if ( m_rawinput.GetBool() )
 	{
 		int rawMouseX, rawMouseY;
-		if ( inputsystem->GetRawMouseAccumulators(rawMouseX, rawMouseY) )
-		{
-			*mx = (float)rawMouseX;
-			*my = (float)rawMouseY;
-		}
-	}
-	
-	m_flAccumulatedMouseXMovement = 0;
-	m_flAccumulatedMouseYMovement = 0;
+		inputsystem->GetRawMouseAccumulators(rawMouseX, rawMouseY);
+		*mx = (float)rawMouseX;
+		*my = (float)rawMouseY;
+    }
+	else
+	{
+		*mx = user.m_flAccumulatedMouseXMovement;
+		*my = user.m_flAccumulatedMouseYMovement;
+    }
+
+	user.m_flAccumulatedMouseXMovement = 0;
+	user.m_flAccumulatedMouseYMovement = 0;
 }
 
 //-----------------------------------------------------------------------------
@@ -369,25 +395,11 @@ void CInput::GetAccumulatedMouseDeltasAndResetAccumulators( float *mx, float *my
 //			*x - 
 //			*y - 
 //-----------------------------------------------------------------------------
-void CInput::GetMouseDelta( float inmousex, float inmousey, float *pOutMouseX, float *pOutMouseY )
+void CInput::GetMouseDelta( int nSlot, float inmousex, float inmousey, float *pOutMouseX, float *pOutMouseY )
 {
 	// Apply filtering?
-	if ( m_filter.GetBool() )
-	{
-		// Average over last two samples
-		*pOutMouseX = ( inmousex + m_flPreviousMouseXPosition ) * 0.5f;
-		*pOutMouseY = ( inmousey + m_flPreviousMouseYPosition ) * 0.5f;
-	}
-	else
-	{
-		*pOutMouseX = inmousex;
-		*pOutMouseY = inmousey;
-	}
-
-	// Latch previous
-	m_flPreviousMouseXPosition = inmousex;
-	m_flPreviousMouseYPosition = inmousey;
-
+	*pOutMouseX = inmousex;
+	*pOutMouseY = inmousey;
 }
 
 //-----------------------------------------------------------------------------
@@ -397,13 +409,14 @@ void CInput::GetMouseDelta( float inmousex, float inmousey, float *pOutMouseX, f
 // Input  : *x - 
 //			*y - 
 //-----------------------------------------------------------------------------
-void CInput::ScaleMouse( float *x, float *y )
+void CInput::ScaleMouse( int nSlot, float *x, float *y )
 {
-	float mx = *x;
+    float mx = *x;
 	float my = *y;
 
-	float mouse_sensitivity = ( gHUD.GetSensitivity() != 0 ) 
-		?  gHUD.GetSensitivity() : sensitivity.GetFloat();
+	float flHudSensitivity = GetHud( nSlot ).GetSensitivity();
+
+	float mouse_sensitivity = ( flHudSensitivity != 0 ) ? flHudSensitivity : sensitivity.GetFloat();
 
 	if ( m_customaccel.GetInt() == 1 ||  m_customaccel.GetInt() == 2 ) 
 	{ 
@@ -434,7 +447,7 @@ void CInput::ScaleMouse( float *x, float *y )
 	else if ( m_customaccel.GetInt() == 3 )
 	{
 		float raw_mouse_movement_distance_squared = mx * mx + my * my;
-		float fExp = MAX(0.0f, (m_customaccel_exponent.GetFloat() - 1.0f) / 2.0f);
+		float fExp = MAX( 0.0f, ((m_customaccel_exponent.GetFloat() - 1.0f) / 2.0f) );
 		float accelerated_sensitivity = powf( raw_mouse_movement_distance_squared, fExp ) * mouse_sensitivity;
 
 		*x *= accelerated_sensitivity; 
@@ -454,38 +467,63 @@ void CInput::ScaleMouse( float *x, float *y )
 //			mouse_x - 
 //			mouse_y - 
 //-----------------------------------------------------------------------------
-void CInput::ApplyMouse( QAngle& viewangles, CUserCmd *cmd, float mouse_x, float mouse_y )
+void CInput::ApplyMouse( int nSlot, QAngle& viewangles, CUserCmd *cmd, float mouse_x, float mouse_y )
 {
-	if ( !((in_strafe.state & 1) || lookstrafe.GetInt()) )
+	PerUserInput_t &user = GetPerUser( nSlot );
+
+	//roll the view angles so roll is 0 (the HL2 assumed state) and mouse adjustments are relative to the screen.
+	//Assuming roll is unchanging, we want mouse left to translate to screen left at all times (same for right, up, and down)
+	
+#if defined PORTAL //Portal sometimes rolls the player and we want a understandable way of aiming. 
+	//we want mouse left to translate to screen left at all times (same for right, up, and down)
+	//So we'll be transforming mouse inputs by the roll value
+	Quaternion quatRoll;
+	Quaternion quatInverseRoll;
+	QAngle roll( 0.0f, 0.0f, viewangles[ ROLL ] );
+	QAngle invroll( 0.0f, 0.0f, -viewangles[ ROLL ] );
+	AngleQuaternion( roll, quatRoll );
+	AngleQuaternion( invroll, quatInverseRoll );
+#endif	
+
+	if ( !((in_strafe.GetPerUser( nSlot ).state & 1) || lookstrafe.GetInt()) )
 	{
-#ifdef PORTAL
-		if ( g_bUpsideDown )
+		if ( CAM_IsThirdPerson() && thirdperson_platformer.GetInt() )
 		{
-			viewangles[ YAW ] += m_yaw.GetFloat() * mouse_x;
+			if ( mouse_x )
+			{
+				// use the mouse to orbit the camera around the player, and update the idealAngle
+				user.m_vecCameraOffset[ YAW ] -= m_yaw.GetFloat() * mouse_x;
+				cam_idealyaw.SetValue( user.m_vecCameraOffset[ YAW ] - viewangles[ YAW ] );
+
+				// why doesn't this work??? CInput::AdjustYaw is why
+				//cam_idealyaw.SetValue( cam_idealyaw.GetFloat() - m_yaw.GetFloat() * mouse_x );
+			}
 		}
 		else
-#endif //#ifdef PORTAL
 		{
-			if ( CAM_IsThirdPerson() && thirdperson_platformer.GetInt() )
+			// Otherwize, use mouse to spin around vertical axis
+
+#if defined PORTAL
+			if( cl_mouselook_roll_compensation.GetBool() ) //for portal, remap yaw/pitch adjustments to be relative to your current view roll so left/right on the mouse is left/right on the screen
 			{
-				if ( mouse_x )
-				{
-					Vector vTempOffset = g_ThirdPersonManager.GetCameraOffsetAngles();
+				QAngle qAngleTemp( 0.0f, -(m_yaw.GetFloat() * mouse_x), 0.0f );			
 
-					// use the mouse to orbit the camera around the player, and update the idealAngle
-					vTempOffset[ YAW ] -= m_yaw.GetFloat() * mouse_x;
-					cam_idealyaw.SetValue( vTempOffset[ YAW ] - viewangles[ YAW ] );
+				Quaternion quatTemp;
+				AngleQuaternion( qAngleTemp, quatTemp );
 
-					g_ThirdPersonManager.SetCameraOffsetAngles( vTempOffset );
+				Quaternion qRollUndone[2];
+				QuaternionMult( quatTemp, quatInverseRoll, qRollUndone[0] );
+				QuaternionMult( quatRoll, qRollUndone[0], qRollUndone[1] );
+				QuaternionAngles( qRollUndone[1], qAngleTemp );
 
-					// why doesn't this work??? CInput::AdjustYaw is why
-					//cam_idealyaw.SetValue( cam_idealyaw.GetFloat() - m_yaw.GetFloat() * mouse_x );
-				}
+				viewangles[0] += qAngleTemp[0];
+				viewangles[1] += qAngleTemp[1];
+				viewangles[2] += qAngleTemp[2];
 			}
 			else
+#endif
 			{
-				// Otherwize, use mouse to spin around vertical axis
-				viewangles[YAW] -= CAM_CapYaw( m_yaw.GetFloat() * mouse_x );
+				viewangles[YAW] -= m_yaw.GetFloat() * mouse_x;
 			}
 		}
 	}
@@ -498,35 +536,43 @@ void CInput::ApplyMouse( QAngle& viewangles, CUserCmd *cmd, float mouse_x, float
 
 	// If mouselooking and not holding strafe key, then use vertical mouse
 	//  to adjust view pitch.
-	if (!(in_strafe.state & 1))
+	if (!(in_strafe.GetPerUser( nSlot ).state & 1))
 	{
-#ifdef PORTAL
-		if ( g_bUpsideDown )
+		if ( CAM_IsThirdPerson() && thirdperson_platformer.GetInt() )
 		{
-			viewangles[PITCH] -= m_pitch->GetFloat() * mouse_y;
+			if ( mouse_y )
+			{
+				// use the mouse to orbit the camera around the player, and update the idealAngle
+				user.m_vecCameraOffset[ PITCH ] += m_pitch->GetFloat() * mouse_y;
+				cam_idealpitch.SetValue( user.m_vecCameraOffset[ PITCH ] - viewangles[ PITCH ] );
+
+				// why doesn't this work??? CInput::AdjustYaw is why
+				//cam_idealpitch.SetValue( cam_idealpitch.GetFloat() + m_pitch->GetFloat() * mouse_y );
+			}
 		}
 		else
-#endif //#ifdef PORTAL
 		{
-			if ( CAM_IsThirdPerson() && thirdperson_platformer.GetInt() )
+#if defined PORTAL
+			if( cl_mouselook_roll_compensation.GetBool() ) //for portal, remap yaw/pitch adjustments to be relative to your current view roll so left/right on the mouse is left/right on the screen
 			{
-				if ( mouse_y )
-				{
-					Vector vTempOffset = g_ThirdPersonManager.GetCameraOffsetAngles();
+				QAngle qAngleTemp( m_pitch->GetFloat() * mouse_y, 0.0f, 0.0f );
 
-					// use the mouse to orbit the camera around the player, and update the idealAngle
-					vTempOffset[ PITCH ] += m_pitch->GetFloat() * mouse_y;
-					cam_idealpitch.SetValue( vTempOffset[ PITCH ] - viewangles[ PITCH ] );
+				Quaternion quatTemp;
+				AngleQuaternion( qAngleTemp, quatTemp );
 
-					g_ThirdPersonManager.SetCameraOffsetAngles( vTempOffset );
+				Quaternion qRollUndone[2];
+				QuaternionMult( quatTemp, quatInverseRoll, qRollUndone[0] );
+				QuaternionMult( quatRoll, qRollUndone[0], qRollUndone[1] );
+				QuaternionAngles( qRollUndone[1], qAngleTemp );
 
-					// why doesn't this work??? CInput::AdjustYaw is why
-					//cam_idealpitch.SetValue( cam_idealpitch.GetFloat() + m_pitch->GetFloat() * mouse_y );
-				}
+				viewangles[0] += qAngleTemp[0];
+				viewangles[1] += qAngleTemp[1];
+				viewangles[2] += qAngleTemp[2];
 			}
 			else
+#endif
 			{
-				viewangles[PITCH] += CAM_CapPitch( m_pitch->GetFloat() * mouse_y );
+				viewangles[PITCH] += m_pitch->GetFloat() * mouse_y;
 			}
 
 			// Check pitch bounds
@@ -538,7 +584,7 @@ void CInput::ApplyMouse( QAngle& viewangles, CUserCmd *cmd, float mouse_x, float
 			{
 				viewangles[PITCH] = -cl_pitchup.GetFloat();
 			}
-		}
+		}		
 	}
 	else
 	{
@@ -556,55 +602,58 @@ void CInput::ApplyMouse( QAngle& viewangles, CUserCmd *cmd, float mouse_x, float
 
 	// Finally, add mouse state to usercmd.
 	// NOTE:  Does rounding to int cause any issues?  ywb 1/17/04
-	cmd->mousedx = (int)mouse_x;
+    cmd->mousedx = (int)mouse_x;
 	cmd->mousedy = (int)mouse_y;
 }
+
+extern bool UsingMouselook( int nSlot );
 
 //-----------------------------------------------------------------------------
 // Purpose: AccumulateMouse
 //-----------------------------------------------------------------------------
-void CInput::AccumulateMouse( void )
+void CInput::AccumulateMouse( int nSlot )
 {
 	if( !cl_mouseenable.GetBool() )
 	{
-		return;
+        return;
 	}
 
-	if( !cl_mouselook.GetBool() )
+	if( !UsingMouselook( nSlot ) )
 	{
-		return;
+        return;
 	}
 
-	if ( m_rawinput.GetBool() )
+	if ( m_rawinput.GetBool() ) 
 	{
-		return;
+        return;
 	}
 
 	int w, h;
 	engine->GetScreenSize( w, h );
 
 	// x,y = screen center
-	int x = w >> 1;	x;
-	int y = h >> 1;	y;
+	int x = w >> 1;
+	int y = h >> 1;
 
 	//only accumulate mouse if we are not moving the camera with the mouse
-	if ( !m_fCameraInterceptingMouse && vgui::surface()->IsCursorLocked() )
+	PerUserInput_t &user = GetPerUser( nSlot );
+
+	if ( !user.m_fCameraInterceptingMouse && vgui::surface()->IsCursorLocked() )
 	{
 		//Assert( !vgui::surface()->IsCursorVisible() );
-		// By design, we follow the old mouse path even when using SDL for Windows, to retain old mouse behavior.
-#if defined( PLATFORM_WINDOWS )
+#if defined( USE_SDL ) || defined( OSX )
+		int dx, dy;
+		engine->GetMouseDelta( dx, dy );
+		user.m_flAccumulatedMouseXMovement += dx;
+		user.m_flAccumulatedMouseYMovement += dy;
+#elif defined( WIN32 ) 
 		int current_posx, current_posy;
 
 		GetMousePos(current_posx, current_posy);
 
-		m_flAccumulatedMouseXMovement += current_posx - x;
-		m_flAccumulatedMouseYMovement += current_posy - y;
-		
-#elif defined( USE_SDL )
-		int dx, dy;
-		engine->GetMouseDelta( dx, dy );
-		m_flAccumulatedMouseXMovement += dx;
-		m_flAccumulatedMouseYMovement += dy;
+		user.m_flAccumulatedMouseXMovement += current_posx - x;
+		user.m_flAccumulatedMouseYMovement += current_posy - y;
+#elif defined( _PS3 )
 #else
 #error
 #endif
@@ -616,12 +665,10 @@ void CInput::AccumulateMouse( void )
 		// Clamp
 		int ox, oy;
 		GetMousePos( ox, oy );
-		ox = clamp( ox, 0, w - 1 );
+        ox = clamp( ox, 0, w - 1 );
 		oy = clamp( oy, 0, h - 1 );
-		SetMousePos( ox, oy );
+        SetMousePos( ox, oy );
 	}
-
-
 }
 
 //-----------------------------------------------------------------------------
@@ -631,7 +678,7 @@ void CInput::AccumulateMouse( void )
 //-----------------------------------------------------------------------------
 void CInput::GetMousePos(int &ox, int &oy)
 {
-	GetVGUICursorPos( ox, oy );
+	g_pInputSystem->GetCursorPosition( &ox, &oy );
 }
 
 //-----------------------------------------------------------------------------
@@ -639,16 +686,16 @@ void CInput::GetMousePos(int &ox, int &oy)
 // Input  : x - 
 //			y - 
 //-----------------------------------------------------------------------------
-void CInput::SetMousePos(int x, int y)
+void CInput::SetMousePos( int x, int y )
 {
-	SetVGUICursorPos(x, y);
+    g_pInputStackSystem->SetCursorPosition( m_hInputContext, x, y );
 }
 
 //-----------------------------------------------------------------------------
 // Purpose: MouseMove -- main entry point for applying mouse
 // Input  : *cmd - 
 //-----------------------------------------------------------------------------
-void CInput::MouseMove( CUserCmd *cmd )
+void CInput::MouseMove( int nSlot, CUserCmd *cmd )
 {
 	float	mouse_x, mouse_y;
 	float	mx, my;
@@ -665,26 +712,41 @@ void CInput::MouseMove( CUserCmd *cmd )
 
 	//jjb - this disables normal mouse control if the user is trying to 
 	//      move the camera, or if the mouse cursor is visible 
-	if ( !m_fCameraInterceptingMouse && 
-		 !vgui::surface()->IsCursorVisible() )
+	if ( !GetPerUser( nSlot ).m_fCameraInterceptingMouse && g_pInputStackSystem->IsTopmostEnabledContext( m_hInputContext ) && cl_mouseenable.GetBool() )
 	{
 		// Sample mouse one more time
-		AccumulateMouse();
+		AccumulateMouse( nSlot );
 
 		// Latch accumulated mouse movements and reset accumulators
-		GetAccumulatedMouseDeltasAndResetAccumulators( &mx, &my );
+		GetAccumulatedMouseDeltasAndResetAccumulators( nSlot, &mx, &my );
 
 		// Filter, etc. the delta values and place into mouse_x and mouse_y
-		GetMouseDelta( mx, my, &mouse_x, &mouse_y );
+		GetMouseDelta( nSlot, mx, my, &mouse_x, &mouse_y );
+
+		if ( IsPC() )
+		{
+			if ( ControllerModeActive() )
+			{
+				// accumulate mouse movements and if we go over a certain threshold, switch out of controller mode
+				m_fAccumulatedMouseMove += fabsf( mouse_x ) + fabsf( mouse_y );
+
+				//Msg( "total_mouse_move = %f\n", m_fAccumulatedMouseMove );
+				if ( m_fAccumulatedMouseMove > 30.0f )
+				{
+					m_bControllerMode = false;
+					m_fAccumulatedMouseMove = 0.0f;
+				}
+			}
+		}
 
 		// Apply scaling factor
-		ScaleMouse( &mouse_x, &mouse_y );
+		ScaleMouse( nSlot, &mouse_x, &mouse_y );
 
 		// Let the client mode at the mouse input before it's used
-		g_pClientMode->OverrideMouseInput( &mouse_x, &mouse_y );
+		GetClientMode()->OverrideMouseInput( &mouse_x, &mouse_y );
 
 		// Add mouse X/Y movement to cmd
-		ApplyMouse( viewangles, cmd, mouse_x, mouse_y );
+		ApplyMouse( nSlot, viewangles, cmd, mouse_x, mouse_y );
 
 		// Re-center the mouse.
 		ResetMouse();
@@ -706,10 +768,10 @@ void CInput::GetFullscreenMousePos( int *mx, int *my, int *unclampedx /*=NULL*/,
 	Assert( mx );
 	Assert( my );
 
-	if ( !vgui::surface()->IsCursorVisible() )
-	{
+#if !(INFESTED_DLL) && !(DOTA_CLIENT_DLL)
+	if ( g_pInputStackSystem->IsTopmostEnabledContext( m_hInputContext ) )
 		return;
-	}
+#endif
 
 	int x, y;
 	GetWindowCenter( x,  y );
@@ -768,8 +830,12 @@ void CInput::ClearStates (void)
 	if ( !m_fMouseActive )
 		return;
 
-	m_flAccumulatedMouseXMovement = 0;
-	m_flAccumulatedMouseYMovement = 0;
+	for ( int hh = 0; hh < MAX_SPLITSCREEN_PLAYERS; ++hh )
+	{
+		ACTIVE_SPLITSCREEN_PLAYER_GUARD( hh );
+		GetPerUser().m_flAccumulatedMouseXMovement = 0;
+		GetPerUser().m_flAccumulatedMouseYMovement = 0;
+	}
 
 	// clear raw mouse accumulated data
 	int rawX, rawY;

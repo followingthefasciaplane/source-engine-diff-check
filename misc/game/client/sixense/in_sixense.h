@@ -1,10 +1,9 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
 #ifndef IN_SIXENSE_H
 #define IN_SIXENSE_H
 
 #include "mathlib/vector.h"
 #include "vgui_controls/Frame.h"
-#include "vgui_controls/Label.h"
+#include "vgui_controls/label.h"
 #include "vgui_video.h"
 #include "convar.h"
 #include "usercmd.h"

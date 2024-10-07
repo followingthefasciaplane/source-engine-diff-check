@@ -1,3 +1,5 @@
+// ALL SKIP STATEMENTS THAT AFFECT THIS SHADER!!!
+// defined $LIGHTING_PREVIEW && defined $FASTPATH && $LIGHTING_PREVIEW && $FASTPATH
 #include "shaderlib/cshader.h"
 class cloak_blended_pass_vs30_Static_Index
 {
@@ -17,13 +19,15 @@ public:
 	}
 	void SetBUMPMAP( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nBUMPMAP = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bBUMPMAP = true;
 #endif
 	}
 public:
-	cloak_blended_pass_vs30_Static_Index( )
+	// CONSTRUCTOR
+	cloak_blended_pass_vs30_Static_Index( IShaderShadow *pShaderShadow, IMaterialVar **params )
 	{
 #ifdef _DEBUG
 		m_bBUMPMAP = false;
@@ -38,7 +42,7 @@ public:
 		bool bAllStaticVarsDefined = m_bBUMPMAP;
 		Assert( bAllStaticVarsDefined );
 #endif // _DEBUG
-		return ( 8 * m_nBUMPMAP ) + 0;
+		return ( 4 * m_nBUMPMAP ) + 0;
 	}
 };
 #define shaderStaticTest_cloak_blended_pass_vs30 vsh_forgot_to_set_static_BUMPMAP + 0
@@ -60,6 +64,7 @@ public:
 	}
 	void SetCOMPRESSED_VERTS( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nCOMPRESSED_VERTS = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bCOMPRESSED_VERTS = true;
@@ -81,6 +86,7 @@ public:
 	}
 	void SetSKINNING( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nSKINNING = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bSKINNING = true;
@@ -94,7 +100,7 @@ private:
 public:
 	void SetMORPHING( int i )
 	{
-		Assert( i >= 0 && i <= 1 );
+		Assert( i >= 0 && i <= 0 );
 		m_nMORPHING = i;
 #ifdef _DEBUG
 		m_bMORPHING = true;
@@ -102,13 +108,15 @@ public:
 	}
 	void SetMORPHING( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 0 );
 		m_nMORPHING = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bMORPHING = true;
 #endif
 	}
 public:
-	cloak_blended_pass_vs30_Dynamic_Index()
+	// CONSTRUCTOR
+	cloak_blended_pass_vs30_Dynamic_Index( IShaderDynamicAPI *pShaderAPI )
 	{
 #ifdef _DEBUG
 		m_bCOMPRESSED_VERTS = false;
@@ -119,9 +127,9 @@ public:
 #endif // _DEBUG
 		m_nSKINNING = 0;
 #ifdef _DEBUG
-		m_bMORPHING = false;
+		m_bMORPHING = true;
 #endif // _DEBUG
-		m_nMORPHING = 0;
+		m_nMORPHING = false ;
 	}
 	int GetIndex()
 	{
@@ -134,4 +142,31 @@ public:
 		return ( 1 * m_nCOMPRESSED_VERTS ) + ( 2 * m_nSKINNING ) + ( 4 * m_nMORPHING ) + 0;
 	}
 };
-#define shaderDynamicTest_cloak_blended_pass_vs30 vsh_forgot_to_set_dynamic_COMPRESSED_VERTS + vsh_forgot_to_set_dynamic_SKINNING + vsh_forgot_to_set_dynamic_MORPHING + 0
+#define shaderDynamicTest_cloak_blended_pass_vs30 vsh_forgot_to_set_dynamic_COMPRESSED_VERTS + vsh_forgot_to_set_dynamic_SKINNING + 0
+
+static const ShaderComboInformation_t s_DynamicComboArray_cloak_blended_pass_vs30[3] = 
+{
+	{ "COMPRESSED_VERTS", 0, 1 },
+	{ "SKINNING", 0, 1 },
+	{ "MORPHING", 0, 0 },
+};
+
+static const ShaderComboInformation_t s_StaticComboArray_cloak_blended_pass_vs30[1] = 
+{
+	{ "BUMPMAP", 0, 1 },
+};
+static const ShaderComboSemantics_t cloak_blended_pass_vs30_combos =
+{
+	"cloak_blended_pass_vs30", s_DynamicComboArray_cloak_blended_pass_vs30, 3, s_StaticComboArray_cloak_blended_pass_vs30, 1 
+};
+
+class ConstructMe_cloak_blended_pass_vs30
+{
+public:
+	ConstructMe_cloak_blended_pass_vs30()
+	{
+		GetShaderDLL()->AddShaderComboInformation( &cloak_blended_pass_vs30_combos );
+	}
+};
+
+static ConstructMe_cloak_blended_pass_vs30 s_ConstructMe_cloak_blended_pass_vs30;

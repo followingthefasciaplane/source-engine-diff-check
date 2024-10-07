@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -7,10 +7,15 @@
 #include "cbase.h"
 #include "hintmessage.h"
 #include "hintsystem.h"
+#include "usermessages.h"
 
 #ifdef GAME_DLL
 	#include "util.h"
 #endif
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
 
 //--------------------------------------------------------------------------------------------------------
 /**
@@ -94,9 +99,11 @@ void CHintMessage::Send( CBasePlayer * client )
 	user.MakeReliable();
 
 	// client can handle 1 string only
-	UserMessageBegin( user, "HintText" );
-		WRITE_STRING( m_hintString );
-	MessageEnd();
+	CCSUsrMsg_HintText msg;
+	msg.set_text( m_hintString );
+
+	SendUserMessage( user, CS_UM_HintText, msg );
+	
 #endif
 }
 

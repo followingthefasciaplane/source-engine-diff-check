@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -13,27 +13,20 @@
 #endif
 
 #include "cbase.h"
+#include "portal_base2d_shared.h"
 
 #ifdef CLIENT_DLL
-#include "c_prop_portal.h"
+#include "C_Prop_Portal.h"
 #else
 #include "prop_portal.h"
 #endif
 
-// CProp_Portal enum for the portal corners (if a user wants a specific corner)
-enum PortalCorners_t { PORTAL_DOWN_RIGHT = 0, PORTAL_DOWN_LEFT, PORTAL_UP_RIGHT, PORTAL_UP_LEFT };
+#define DEFAULT_PORTAL_HALF_WIDTH	32.0f
+#define DEFAULT_PORTAL_HALF_HEIGHT	56.0f
 
 class CProp_Portal_Shared  //defined as a class to make intellisense more intelligent
 {
 public:
-	static void UpdatePortalTransformationMatrix( const matrix3x4_t &localToWorld, const matrix3x4_t &remoteToWorld, VMatrix *pMatrix );
-
-	static bool IsEntityTeleportable( CBaseEntity *pEntity );
-	//static CProp_Portal *GetPortal1( bool bCreateIfNotFound = false );
-	//static CProp_Portal *GetPortal2( bool bCreateIfNotFound = false );
-
-	static const Vector		vLocalMins;
-	static const Vector		vLocalMaxs;
 
 #ifdef CLIENT_DLL
 	static CUtlVector<C_Prop_Portal *> AllPortals; //an array of existing portal entities	

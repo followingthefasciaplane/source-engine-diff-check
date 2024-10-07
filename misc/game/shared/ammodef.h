@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose:		Holds defintion for game ammo types
 //
@@ -21,7 +21,6 @@ struct Ammo_t
 	char 				*pName;
 	int					nDamageType;
 	int					eTracerType;
-	float				physicsForceImpulse;
 	int					nMinSplashSize;
 	int					nMaxSplashSize;
 
@@ -29,12 +28,14 @@ struct Ammo_t
 
 	// Values for player/NPC damage and carrying capability
 	// If the integers are set, they override the CVars
-	int					pPlrDmg;		// CVar for player damage amount
-	int					pNPCDmg;		// CVar for NPC damage amount
-	int					pMaxCarry;		// CVar for maximum number can carry
-	const ConVar*		pPlrDmgCVar;	// CVar for player damage amount
-	const ConVar*		pNPCDmgCVar;	// CVar for NPC damage amount
-	const ConVar*		pMaxCarryCVar;	// CVar for maximum number can carry
+	int					pPlrDmg;					// CVar for player damage amount
+	int					pNPCDmg;					// CVar for NPC damage amount
+	int					pMaxCarry;					// CVar for maximum number can carry
+	int					pPhysicsForceImpulse;		// CVar for the physics impulse
+	const ConVar*		pPlrDmgCVar;				// CVar for player damage amount
+	const ConVar*		pNPCDmgCVar;				// CVar for NPC damage amount
+	const ConVar*		pMaxCarryCVar;				// CVar for maximum number can carry
+	const ConVar*		pPhysicsForceImpulseCVar;	// CVar for maximum number can carry
 };
 
 // Used to tell AmmoDef to use the cvars, not the integers
@@ -75,7 +76,8 @@ public:
 	int					Index(const char *psz);
 	int					PlrDamage(int nAmmoIndex);
 	int					NPCDamage(int nAmmoIndex);
-	int					MaxCarry(int nAmmoIndex);
+	int					MaxCarry(int nAmmoIndex, const CBaseCombatCharacter *owner);
+	bool				CanCarryInfiniteAmmo(int nAmmoIndex);
 	int					DamageType(int nAmmoIndex);
 	int					TracerType(int nAmmoIndex);
 	float				DamageForce(int nAmmoIndex);
@@ -83,8 +85,9 @@ public:
 	int					MaxSplashSize(int nAmmoIndex);
 	int					Flags(int nAmmoIndex);
 
-	void				AddAmmoType(char const* name, int damageType, int tracerType, int plr_dmg, int npc_dmg, int carry, float physicsForceImpulse, int nFlags, int minSplashSize = 4, int maxSplashSize = 8 );
-	void				AddAmmoType(char const* name, int damageType, int tracerType, char const* plr_cvar, char const* npc_var, char const* carry_cvar, float physicsForceImpulse, int nFlags, int minSplashSize = 4, int maxSplashSize = 8 );
+	void				AddAmmoType(char const* name, int damageType, int tracerType, int plr_dmg, int npc_dmg, int carry, int impulse, int nFlags, int minSplashSize = 4, int maxSplashSize = 8 );
+	void				AddAmmoType(char const* name, int damageType, int tracerType, char const* plr_cvar, char const* npc_var, char const* carry_cvar, char const* impulse_cvar, int nFlags, int minSplashSize = 4, int maxSplashSize = 8 );
+	int					NumAmmoTypes() { return m_nAmmoIndex; }
 
 	CAmmoDef(void);
 	virtual ~CAmmoDef( void );

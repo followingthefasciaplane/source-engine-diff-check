@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -22,13 +22,14 @@ public:
 	virtual bool		IsPublicUI() = 0;
 
 	virtual char const	*GetUserName() = 0;
-	virtual char const	*GetUserName_Display() = 0;
+	virtual char const	*GetUserDisplayName() = 0;
 
 	virtual int			GetNameCount() = 0;
 	virtual char const	*GetName( int index ) = 0;
 
 	virtual int			GetDisplayNameCount() = 0;
 	virtual char const  *GetDisplayName( int index ) = 0;
+	virtual char const	*GetUserName( int index ) = 0;
 
 	virtual char const	*GetDisplayNameForUserName( char const *username ) = 0;
 	virtual char const  *GetUserNameForDisplayName( char const *display ) = 0;
@@ -57,6 +58,9 @@ public:
 	virtual int			GetLevelCount(int area) = 0;
 	virtual char const	*GetLevel(int area, int index ) = 0;
 
+	virtual int			GetLevelOwnerCount(int area) = 0;
+	virtual char const	*GetLevelOwner(int area, int index ) = 0;
+
 // Submission API
 	virtual void		StartNewBugReport() = 0;
 	virtual void		CancelNewBugReport() = 0;
@@ -72,7 +76,7 @@ public:
 	virtual void		SetPriority( char const *priority ) = 0;
 	virtual void		SetArea( char const *area ) = 0;
 	virtual void		SetMapNumber( char const *area ) = 0;
-	virtual void		SetReportType( char const *reporttype ) = 0;
+	virtual void		SetReportType( char const *report_type ) = 0;
 
 	virtual void		SetLevel( char const *levelnamne ) = 0;
 	virtual void		SetPosition( char const *position ) = 0;
@@ -101,8 +105,18 @@ public:
 	virtual void		SetOSVersion( char const *osversion ) = 0;
 
 	virtual void		SetSteamUserID( void *steamid, int idsize ) = 0;
+
+	virtual void		SetConsoleHistory( char const *pchText ) = 0;
 };
 
-#define INTERFACEVERSION_BUGREPORTER		"BugReporter004"
+#define INTERFACEVERSION_BUGREPORTER		"BugReporter005"
+
+abstract_class IBugReporterDefaultUsername
+{
+public:
+	virtual char const	*GetDefaultUsername() const = 0; // returns value of engine bugreporter_username convar since bugreporter .dlls don't have convars for now
+};
+
+#define INTERFACEVERSION_BUGREPORTER_DEFAULT_USER_NAME "BugReporterUserName001"
 
 #endif // BUGREPORTER_H

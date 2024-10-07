@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2006, Valve Corporation, All rights reserved. ============//
 
 /* Example how to plug this into an existing shader:
 
@@ -94,10 +94,14 @@
 #include "emissive_scroll_blended_pass_ps20.inc"
 #include "emissive_scroll_blended_pass_ps20b.inc"
 
-#ifndef _X360
+#if !defined( _X360 ) && !defined( _PS3 )
 #include "emissive_scroll_blended_pass_vs30.inc"
 #include "emissive_scroll_blended_pass_ps30.inc"
 #endif
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
 
 void InitParamsEmissiveScrollBlendedPass( CBaseVSShader *pShader, IMaterialVar** params, const char *pMaterialName, EmissiveScrollBlendedPassVars_t &info )
 {
@@ -143,7 +147,7 @@ void DrawEmissiveScrollBlendedPass( CBaseVSShader *pShader, IMaterialVar** param
 		int userDataSize = 0;
 		pShaderShadow->VertexShaderVertexFormat( flags, nTexCoordCount, NULL, userDataSize );
 
-#ifndef _X360
+#if !defined( _X360 ) && !defined( _PS3 )
 		if ( !g_pHardwareConfig->HasFastVertexTextures() )
 #endif
 		{
@@ -163,7 +167,7 @@ void DrawEmissiveScrollBlendedPass( CBaseVSShader *pShader, IMaterialVar** param
 				SET_STATIC_PIXEL_SHADER( emissive_scroll_blended_pass_ps20 );
 			}
 		}
-#ifndef _X360
+#if !defined( _X360 ) && !defined( _PS3 )
 		else
 		{
 			// The vertex shader uses the vertex id stream
@@ -195,7 +199,7 @@ void DrawEmissiveScrollBlendedPass( CBaseVSShader *pShader, IMaterialVar** param
 		// Reset render state manually since we're drawing from two materials
 		pShaderAPI->SetDefaultState();
 
-#ifndef _X360
+#if !defined( _X360 ) && !defined( _PS3 )
 		if ( !g_pHardwareConfig->HasFastVertexTextures() )
 #endif
 		{
@@ -220,7 +224,7 @@ void DrawEmissiveScrollBlendedPass( CBaseVSShader *pShader, IMaterialVar** param
 				SET_DYNAMIC_PIXEL_SHADER( emissive_scroll_blended_pass_ps20 );
 			}
 		}
-#ifndef _X360
+#if !defined( _X360 ) && !defined( _PS3 )
 		else
 		{
 			pShader->SetHWMorphVertexShaderState( VERTEX_SHADER_SHADER_SPECIFIC_CONST_6, VERTEX_SHADER_SHADER_SPECIFIC_CONST_7, SHADER_VERTEXTEXTURE_SAMPLER0 );
@@ -228,7 +232,6 @@ void DrawEmissiveScrollBlendedPass( CBaseVSShader *pShader, IMaterialVar** param
 			// Set Vertex Shader Combos
 			DECLARE_DYNAMIC_VERTEX_SHADER( emissive_scroll_blended_pass_vs30 );
 			SET_DYNAMIC_VERTEX_SHADER_COMBO( SKINNING, pShaderAPI->GetCurrentNumBones() > 0 );
-			SET_DYNAMIC_VERTEX_SHADER_COMBO( MORPHING, pShaderAPI->IsHWMorphingEnabled() );
 			SET_DYNAMIC_VERTEX_SHADER_COMBO( COMPRESSED_VERTS, (int)vertexCompression );
 			SET_DYNAMIC_VERTEX_SHADER( emissive_scroll_blended_pass_vs30 );
 
@@ -238,9 +241,9 @@ void DrawEmissiveScrollBlendedPass( CBaseVSShader *pShader, IMaterialVar** param
 #endif
 
 		// Bind textures
-		pShader->BindTexture( SHADER_SAMPLER0, info.m_nBaseTexture );
-		pShader->BindTexture( SHADER_SAMPLER1, info.m_nFlowTexture );
-		pShader->BindTexture( SHADER_SAMPLER2, info.m_nEmissiveTexture );
+		pShader->BindTexture( SHADER_SAMPLER0, TEXTURE_BINDFLAGS_SRGBREAD, info.m_nBaseTexture );
+		pShader->BindTexture( SHADER_SAMPLER1, TEXTURE_BINDFLAGS_NONE, info.m_nFlowTexture );
+		pShader->BindTexture( SHADER_SAMPLER2, TEXTURE_BINDFLAGS_SRGBREAD, info.m_nEmissiveTexture );
 
 		// Set Pixel Shader Constants 
 		//float vConstZero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };

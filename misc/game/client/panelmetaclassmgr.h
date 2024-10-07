@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: A panel "metaclass" is a name given to a particular type of 
 // panel with particular instance data. Such panels tend to be dynamically
@@ -16,7 +16,7 @@
 
 #include "tier0/dbg.h"
 #include "basetypes.h"
-#include <vgui/VGUI.h>
+#include <vgui/vgui.h>
 
 //-----------------------------------------------------------------------------
 // forward declarations
@@ -95,7 +95,7 @@ template< class CPanel, class CInitData >
 class CPanelFactory : public IPanelFactory
 {
 public:
-	CPanelFactory( const char *pTypeName )
+	explicit CPanelFactory( const char *pTypeName )
 	{
 		// Hook us up baby
 		Assert( pTypeName );

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -40,13 +40,12 @@ public:
 	// State of entities this frame from the POV of the client.
 	int					last_entity;	// highest entity index
 	int					tick_count;	// server tick of this snapshot
+	CClientFrame*		m_pNext;
 
 	// Used by server to indicate if the entity was in the player's pvs
 	CBitVec<MAX_EDICTS>	transmit_entity; // if bit n is set, entity n will be send to client
 	CBitVec<MAX_EDICTS>	*from_baseline;	// if bit n is set, this entity was send as update from baseline
 	CBitVec<MAX_EDICTS>	*transmit_always; // if bit is set, don't do PVS checks before sending (HLTV only)
-
-	CClientFrame*		m_pNext;
 
 private:
 
@@ -60,23 +59,24 @@ private:
 class CClientFrameManager
 {
 public:
-	CClientFrameManager(void);
-	virtual ~CClientFrameManager(void);
+	CClientFrameManager(void)  : m_ClientFramePool( MAX_CLIENT_FRAMES, CUtlMemoryPool::GROW_SLOW ) {	m_Frames = NULL; }
+	virtual ~CClientFrameManager(void) { DeleteClientFrames(-1); }
 
 	int				AddClientFrame( CClientFrame *pFrame ); // returns current count
 	CClientFrame	*GetClientFrame( int nTick, bool bExact = true );
 	void			DeleteClientFrames( int nTick );	// -1 for all
 	int				CountClientFrames( void );	// returns number of frames in list
 	void			RemoveOldestFrame( void );  // removes the oldest frame in list
+	bool			DeleteUnusedClientFrame( CClientFrame* pFrame );
+	int				GetOldestTick()const{ return m_Frames ? m_Frames->tick_count : 0; }
 
 	CClientFrame*	AllocateFrame();
+	CClientFrame*	AllocateAndInitFrame( int nTick );
 
 private:
 	void			FreeFrame( CClientFrame* pFrame );
 
 	CClientFrame	*m_Frames;		// updates can be delta'ed from here
-	CClientFrame	*m_LastFrame;
-	int				m_nFrames;
 	CClassMemoryPool< CClientFrame >	m_ClientFramePool;
 };
 

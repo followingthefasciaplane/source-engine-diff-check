@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2006, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -17,7 +17,7 @@
 #include <atlcomtime.h>
 #pragma warning( default : 4805 )
 #pragma warning( default : 4127 )
-#include <wbemidl.h>
+#include <Wbemidl.h>
 
 // NOTE: This has to be the last file included!
 #include "tier0/memdbgon.h"
@@ -25,10 +25,10 @@
 
 # pragma comment(lib, "wbemuuid.lib")
 
-uint64 GetVidMemBytes( void )
+int GetVidMemBytes( void )
 {
 	static int bBeenHere = false;
-	static uint64 nBytes = 0;
+	static int nBytes = 0;
 
 	if( bBeenHere )
 	{
@@ -42,6 +42,32 @@ uint64 GetVidMemBytes( void )
     if ( FAILED( hr ) )
     {
 		OutputDebugString ( "GetWMIDeviceStats - Unable to initialize COM library.\n");
+        return 0;
+    }
+
+
+    // Set general COM security levels --------------------------
+    // Note: If you are using Windows 2000, you need to specify 
+    // the default authentication credentials for a user by using
+    // a SOLE_AUTHENTICATION_LIST structure in the pAuthList
+    // parameter of CoInitializeSecurity ------------------------
+
+    hr =  CoInitializeSecurity(
+        NULL,
+        -1,                          // COM authentication
+        NULL,                        // Authentication services
+        NULL,                        // Reserved
+        RPC_C_AUTHN_LEVEL_DEFAULT,   // Default authentication 
+        RPC_C_IMP_LEVEL_IMPERSONATE, // Default Impersonation  
+        NULL,                        // Authentication info
+        EOAC_NONE,                   // Additional capabilities 
+        NULL                         // Reserved
+        );
+
+    if ( FAILED( hr ) )
+    {
+		OutputDebugString ( "GetWMIDeviceStats - Unable to initialize security.\n");
+        CoUninitialize();
         return 0;
     }
 
@@ -161,8 +187,7 @@ uint64 GetVidMemBytes( void )
         hr = pclsObj->Get(L"AdapterRAM", 0, &vtProp, 0, 0);
 		if ( SUCCEEDED( hr ) )
 		{
-			nBytes = vtProp.ulVal; // Video RAM in bytes, AdatperRam is returned as the I4 type so we read it out as unsigned int, 
-								   // see http://msdn.microsoft.com/en-us/library/windows/desktop/aa394512(v=vs.85).aspx
+			nBytes = vtProp.intVal; // Video RAM in bytes
 		}
 
         VariantClear(&vtProp);
@@ -172,10 +197,7 @@ uint64 GetVidMemBytes( void )
     pSvc->Release();
     pLoc->Release();
     pEnumerator->Release();
-	if ( pclsObj )
-	{
-		pclsObj->Release();
-	}
+    pclsObj->Release();
     CoUninitialize();
 
 	return nBytes;

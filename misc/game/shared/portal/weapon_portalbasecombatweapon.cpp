@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -6,15 +6,22 @@
 
 #include "cbase.h"
 #include "weapon_portalbasecombatweapon.h"
+#include "in_buttons.h"
 
 #include "portal_player_shared.h"
+
+#if defined( CLIENT_DLL )
+	#include "c_portal_player.h"
+#else
+	#include "vphysics/constraints.h"
+	#include "gameweaponmanager.h"
+#endif
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
-LINK_ENTITY_TO_CLASS( baseportalcombatweapon, CBasePortalCombatWeapon );
-
 IMPLEMENT_NETWORKCLASS_ALIASED( BasePortalCombatWeapon , DT_BasePortalCombatWeapon )
+LINK_ENTITY_TO_CLASS_ALIASED( baseportalcombatweapon, BasePortalCombatWeapon );
 
 BEGIN_NETWORK_TABLE( CBasePortalCombatWeapon , DT_BasePortalCombatWeapon )
 #if !defined( CLIENT_DLL )
@@ -37,13 +44,18 @@ BEGIN_DATADESC( CBasePortalCombatWeapon )
 	DEFINE_FIELD( m_bLowered,			FIELD_BOOLEAN ),
 	DEFINE_FIELD( m_flRaiseTime,		FIELD_TIME ),
 	DEFINE_FIELD( m_flHolsterTime,		FIELD_TIME ),
-
+	DEFINE_FIELD( m_flNextRepeatPrimaryAttack,		FIELD_TIME ),
+	DEFINE_FIELD( m_flNextRepeatSecondaryAttack,	FIELD_TIME ),
 END_DATADESC()
 
-#endif
+#else
 
 BEGIN_PREDICTION_DATA( CBasePortalCombatWeapon )
+	DEFINE_FIELD( m_flNextRepeatPrimaryAttack, FIELD_TIME ),
+	DEFINE_FIELD( m_flNextRepeatSecondaryAttack, FIELD_TIME ),
 END_PREDICTION_DATA()
+
+#endif
 
 extern ConVar sk_auto_reload_time;
 
@@ -118,30 +130,6 @@ bool CBasePortalCombatWeapon::Ready( void )
 //-----------------------------------------------------------------------------
 bool CBasePortalCombatWeapon::Deploy( void )
 {
-	// If we should be lowered, deploy in the lowered position
-	// We have to ask the player if the last time it checked, the weapon was lowered
-	if ( GetOwner() && GetOwner()->IsPlayer() )
-	{
-		CPortal_Player *pPlayer = assert_cast<CPortal_Player*>( GetOwner() );
-		if ( pPlayer->IsWeaponLowered() )
-		{
-			if ( SelectWeightedSequence( ACT_VM_IDLE_LOWERED ) != ACTIVITY_NOT_AVAILABLE )
-			{
-				if ( DefaultDeploy( (char*)GetViewModel(), (char*)GetWorldModel(), ACT_VM_IDLE_LOWERED, (char*)GetAnimPrefix() ) )
-				{
-					m_bLowered = true;
-
-					// Stomp the next attack time to fix the fact that the lower idles are long
-					pPlayer->SetNextAttack( gpGlobals->curtime + 1.0 );
-					m_flNextPrimaryAttack = gpGlobals->curtime + 1.0;
-					m_flNextSecondaryAttack	= gpGlobals->curtime + 1.0;
-					return true;
-				}
-			}
-		}
-	}
-
-	m_bLowered = false;
 	return BaseClass::Deploy();
 }
 
@@ -189,56 +177,31 @@ bool CBasePortalCombatWeapon::WeaponShouldBeLowered( void )
 //-----------------------------------------------------------------------------
 void CBasePortalCombatWeapon::WeaponIdle( void )
 {
-	//See if we should idle high or low
-	if ( WeaponShouldBeLowered() )
-	{
-		// Move to lowered position if we're not there yet
-		if ( GetActivity() != ACT_VM_IDLE_LOWERED && GetActivity() != ACT_VM_IDLE_TO_LOWERED 
-			 && GetActivity() != ACT_TRANSITION )
-		{
-			SendWeaponAnim( ACT_VM_IDLE_LOWERED );
-		}
-		else if ( HasWeaponIdleTimeElapsed() )
-		{
-			// Keep idling low
-			SendWeaponAnim( ACT_VM_IDLE_LOWERED );
-		}
-	}
-	else
-	{
-		// See if we need to raise immediately
-		if ( m_flRaiseTime < gpGlobals->curtime && GetActivity() == ACT_VM_IDLE_LOWERED ) 
-		{
-			SendWeaponAnim( ACT_VM_IDLE );
-		}
-		else if ( HasWeaponIdleTimeElapsed() ) 
-		{
-			SendWeaponAnim( ACT_VM_IDLE );
-		}
-	}
 }
 
 #if defined( CLIENT_DLL )
+
+extern float	g_lateralBob;
+extern float	g_verticalBob;
 
 #define	HL2_BOB_CYCLE_MIN	1.0f
 #define	HL2_BOB_CYCLE_MAX	0.45f
 #define	HL2_BOB			0.002f
 #define	HL2_BOB_UP		0.5f
 
-extern float	g_lateralBob;
-extern float	g_verticalBob;
-
+#if !defined( PORTAL2 )
 static ConVar	cl_bobcycle( "cl_bobcycle","0.8" );
 static ConVar	cl_bob( "cl_bob","0.002" );
 static ConVar	cl_bobup( "cl_bobup","0.5" );
 
 // Register these cvars if needed for easy tweaking
-static ConVar	v_iyaw_cycle( "v_iyaw_cycle", "2", FCVAR_REPLICATED | FCVAR_CHEAT );
-static ConVar	v_iroll_cycle( "v_iroll_cycle", "0.5", FCVAR_REPLICATED | FCVAR_CHEAT );
-static ConVar	v_ipitch_cycle( "v_ipitch_cycle", "1", FCVAR_REPLICATED | FCVAR_CHEAT );
-static ConVar	v_iyaw_level( "v_iyaw_level", "0.3", FCVAR_REPLICATED | FCVAR_CHEAT );
-static ConVar	v_iroll_level( "v_iroll_level", "0.1", FCVAR_REPLICATED | FCVAR_CHEAT );
-static ConVar	v_ipitch_level( "v_ipitch_level", "0.3", FCVAR_REPLICATED | FCVAR_CHEAT );
+static ConVar	v_iyaw_cycle( "v_iyaw_cycle", "2", FCVAR_CHEAT );
+static ConVar	v_iroll_cycle( "v_iroll_cycle", "0.5", FCVAR_CHEAT );
+static ConVar	v_ipitch_cycle( "v_ipitch_cycle", "1", FCVAR_CHEAT );
+static ConVar	v_iyaw_level( "v_iyaw_level", "0.3", FCVAR_CHEAT );
+static ConVar	v_iroll_level( "v_iroll_level", "0.1", FCVAR_CHEAT );
+static ConVar	v_ipitch_level( "v_ipitch_level", "0.3", FCVAR_CHEAT );
+#endif
 
 //-----------------------------------------------------------------------------
 // Purpose: 
@@ -261,15 +224,23 @@ float CBasePortalCombatWeapon::CalcViewmodelBob( void )
 		return 0.0f;// just use old value
 	}
 
+	// Note: we use paint code for this so when player move on speed paint, gun bob faster (Bank)
 	//Find the speed of the player
-	float speed = player->GetLocalVelocity().Length2D();
+	float speed = player->GetLocalVelocity().Length();
 
-	//FIXME: This maximum speed value must come from the server.
-	//		 MaxSpeed() is not sufficient for dealing with sprinting - jdw
+	speed = clamp( speed, -player->MaxSpeed(), player->MaxSpeed() );
 
-	speed = clamp( speed, -320, 320 );
+	float bob_offset = RemapVal( speed, 0, player->MaxSpeed(), 0.0f, 1.0f );
 
-	float bob_offset = RemapVal( speed, 0, 320, 0.0f, 1.0f );
+	////Find the speed of the player
+	//float speed = player->GetLocalVelocity().Length2D();
+
+	////FIXME: This maximum speed value must come from the server.
+	////		 MaxSpeed() is not sufficient for dealing with sprinting - jdw
+
+	//speed = clamp( speed, -320, 320 );
+
+	//float bob_offset = RemapVal( speed, 0, 320, 0.0f, 1.0f );
 	
 	bobtime += ( gpGlobals->curtime - lastbobtime ) * bob_offset;
 	lastbobtime = gpGlobals->curtime;
@@ -321,24 +292,62 @@ float CBasePortalCombatWeapon::CalcViewmodelBob( void )
 //-----------------------------------------------------------------------------
 void CBasePortalCombatWeapon::AddViewmodelBob( CBaseViewModel *viewmodel, Vector &origin, QAngle &angles )
 {
-	Vector	forward, right;
-	AngleVectors( angles, &forward, &right, NULL );
+	Vector	forward, right, up;
+	AngleVectors( angles, &forward, &right, &up );
 
 	CalcViewmodelBob();
 
+
+	// Note: we need to use paint code for gun bob so the gun bobs correctly when player sticks on walls (Bank)
+	C_Portal_Player *pPortalPlayer = ToPortalPlayer( GetOwner() );
+	if ( !pPortalPlayer )
+		return;
+
 	// Apply bob, but scaled down to 40%
 	VectorMA( origin, g_verticalBob * 0.1f, forward, origin );
-	
+
 	// Z bob a bit more
-	origin[2] += g_verticalBob * 0.1f;
-	
-	// bob the angles
-	angles[ ROLL ]	+= g_verticalBob * 0.5f;
-	angles[ PITCH ]	-= g_verticalBob * 0.4f;
+	origin += g_verticalBob * 0.1f * pPortalPlayer->GetPortalPlayerLocalData().m_Up;
 
-	angles[ YAW ]	-= g_lateralBob  * 0.3f;
-
+	//move left and right
 	VectorMA( origin, g_lateralBob * 0.8f, right, origin );
+
+	//roll, pitch, yaw
+	float rollAngle = g_verticalBob * 0.5f;
+	VMatrix rotMatrix;
+	Vector rotAxis = CrossProduct( right, up ).Normalized();
+
+	MatrixBuildRotationAboutAxis( rotMatrix, rotAxis, rollAngle );
+	up = rotMatrix * up;
+	forward = rotMatrix * forward;
+	right = rotMatrix * right;
+
+	float pitchAngle = -g_verticalBob * 0.4f;
+	rotAxis = right;
+	MatrixBuildRotationAboutAxis( rotMatrix, rotAxis, pitchAngle );
+	up = rotMatrix * up;
+	forward = rotMatrix * forward;
+
+	float yawAngle = -g_lateralBob * 0.3f;
+	rotAxis = up;
+	MatrixBuildRotationAboutAxis( rotMatrix, rotAxis, yawAngle );
+	forward = rotMatrix * forward;
+
+	VectorAngles( forward, up, angles );
+
+	//// Apply bob, but scaled down to 40%
+	//VectorMA( origin, g_verticalBob * 0.1f, forward, origin );
+	//
+	//// Z bob a bit more
+	//origin[2] += g_verticalBob * 0.1f;
+	//
+	//// bob the angles
+	//angles[ ROLL ]	+= g_verticalBob * 0.5f;
+	//angles[ PITCH ]	-= g_verticalBob * 0.4f;
+
+	//angles[ YAW ]	-= g_lateralBob  * 0.3f;
+
+	//VectorMA( origin, g_lateralBob * 0.8f, right, origin );
 }
 
 //-----------------------------------------------------------------------------
@@ -420,3 +429,81 @@ const WeaponProficiencyInfo_t *CBasePortalCombatWeapon::GetDefaultProficiencyVal
 }
 
 #endif
+
+//-----------------------------------------------------------------------------
+// Purpose: Handle firing
+//-----------------------------------------------------------------------------
+void CBasePortalCombatWeapon::ItemPostFrame( void )
+{
+	CPortal_Player *pOwner = ToPortalPlayer( GetOwner() );
+	if ( pOwner == NULL )
+		return;
+
+	// Primary attack
+	if ( pOwner->m_nButtons & IN_ATTACK && ( m_flNextPrimaryAttack <= gpGlobals->curtime ) )
+	{
+		if ( pOwner->GetWaterLevel() == 3 && m_bFiresUnderwater == false )
+		{
+			// This weapon doesn't fire underwater
+			WeaponSound(EMPTY);
+			m_flNextPrimaryAttack = m_flNextSecondaryAttack = gpGlobals->curtime + 0.2;
+			return;
+		}
+
+		// If they're still holding down the button, wait for the next fire time
+		if ( ( pOwner->m_afButtonLast & IN_ATTACK ) && ( m_flNextRepeatPrimaryAttack > gpGlobals->curtime ) )
+			return;
+
+		PrimaryAttack();
+		return;
+	}
+
+	// Secondary attack
+	if ( pOwner->m_nButtons & IN_ATTACK2 && ( m_flNextSecondaryAttack <= gpGlobals->curtime ) )
+	{
+		if ( pOwner->GetWaterLevel() == 3 )
+		{
+			// This weapon doesn't fire underwater
+			WeaponSound( EMPTY );
+			m_flNextPrimaryAttack = m_flNextSecondaryAttack = gpGlobals->curtime + 0.2;
+			return;
+		}
+
+		// If they're still holding down the button, wait for the next fire time
+		if ( ( pOwner->m_afButtonLast & IN_ATTACK2 ) && ( m_flNextRepeatSecondaryAttack > gpGlobals->curtime ) )
+			return;
+
+		// Attack!
+		SecondaryAttack();
+		return;
+	}
+
+	WeaponIdle();
+}
+
+
+ConVar sv_weapon_pickup_time_delay("sv_weapon_pickup_time_delay", "0.2f", FCVAR_REPLICATED | FCVAR_CHEAT);
+
+bool CBasePortalCombatWeapon::EnoughTimeSinceThrown()
+{
+	return gpGlobals->curtime - m_flThrowTime > sv_weapon_pickup_time_delay.GetFloat();
+}
+
+float CBasePortalCombatWeapon::GetThrowTime()
+{
+	return m_flThrowTime;
+}
+
+void CBasePortalCombatWeapon::Drop( const Vector& vecVelocity )
+{
+	// Store time when we threw the gun so we dont go and pick up the gun too soon
+	m_flThrowTime = gpGlobals->curtime;
+	m_pLastOwner = GetOwner();
+
+	BaseClass::Drop( vecVelocity );
+}
+
+CBaseEntity* CBasePortalCombatWeapon::GetLastOwner()
+{
+	return m_pLastOwner;
+}

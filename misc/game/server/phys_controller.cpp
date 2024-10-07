@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -14,13 +14,6 @@
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
-
-#define SF_THRUST_STARTACTIVE		0x0001
-#define SF_THRUST_FORCE				0x0002
-#define SF_THRUST_TORQUE			0x0004
-#define SF_THRUST_LOCAL_ORIENTATION	0x0008
-#define SF_THRUST_MASS_INDEPENDENT	0x0010
-#define SF_THRUST_IGNORE_POS		0x0020
 
 class CPhysThruster;
 
@@ -104,6 +97,7 @@ public:
 	void ForceOn( void );
 	void ForceOff( void );
 	void ActivateForce( void );
+	void SetAttachedObject( EHANDLE hObject ) { m_attachedObject = hObject; }
 
 	// Input handlers
 	void InputActivate( inputdata_t &inputdata );
@@ -327,7 +321,9 @@ public:
 	virtual void OnActivate( void );
 	virtual void SetupForces( IPhysicsObject *pPhys, Vector &linear, AngularImpulse &angular );
 
-private:	
+private:
+	friend CBaseEntity *CreatePhysThruster( const Vector &vecOrigin, const QAngle &vecAngles, CBaseEntity *pOwner, float flForce, float flForcetime, bool bActive, int nFlags );
+	
 	Vector			m_localOrigin;
 };
 
@@ -339,7 +335,26 @@ BEGIN_DATADESC( CPhysThruster )
 
 END_DATADESC()
 
+//-----------------------------------------------------------------------------
+// Purpose: Use this to spawn a keepupright controller via code instead of map-placed
+//-----------------------------------------------------------------------------
+CBaseEntity *CreatePhysThruster( const Vector &vecOrigin, const QAngle &vecAngles, CBaseEntity *pOwner, float flForce, float flForcetime, bool bActive, int nFlags )
+{
+	CPhysThruster *pThruster = ( CPhysThruster* )CBaseEntity::Create( "phys_thruster", vecOrigin, vecAngles, pOwner );
+	if ( pThruster )
+	{
+		pThruster->AddSpawnFlags( nFlags );
+		pThruster->m_attachedObject = pOwner;
+		pThruster->m_force = flForce;
+		pThruster->m_forceTime = flForcetime;
+		pThruster->Spawn();
+		pThruster->Activate();
+		if ( bActive )
+			pThruster->ForceOn();
+	}
 
+	return pThruster;
+}
 
 void CPhysThruster::OnActivate( void )
 {
@@ -533,7 +548,7 @@ IMotionEvent::simresult_e CMotorController::Simulate( IPhysicsMotionController *
 		if ( deltaSpeed * accel > 0 )
 		{
 			float factor = deltaSpeed / m_lastAcceleration;
-			factor = 1 - clamp( factor, 0.f, 1.f );
+			factor = 1 - clamp( factor, 0, 1 );
 			rotForce += m_lastForce * factor * m_restistanceDamping;
 		}
 		else 

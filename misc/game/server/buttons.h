@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ====
 //
 // Purpose: 
 //
@@ -16,6 +16,7 @@ class CBaseButton : public CBaseToggle
 public:
 
 	DECLARE_CLASS( CBaseButton, CBaseToggle );
+	DECLARE_SERVERCLASS();
 
 	void Spawn( void );
 	virtual void Precache( void );
@@ -166,6 +167,55 @@ public:
 protected:
 
 	void UpdateThink( void );
+};
+
+
+
+//--------------------------------------------------------------------------------------------------------
+//
+//	CButtonTimed - func_button_timed
+//
+//--------------------------------------------------------------------------------------------------------
+
+class CButtonTimed : public CBaseButton
+{
+public:
+	DECLARE_CLASS( CButtonTimed, CBaseButton );
+	DECLARE_DATADESC();
+	DECLARE_SERVERCLASS();
+
+	CButtonTimed();
+
+	void UseTimed( CBaseEntity *pActivator, CBaseEntity *pCaller, USE_TYPE useType, float value );
+	void UseThink( void );
+
+	virtual void Spawn( void );
+	virtual int	ObjectCaps( void )
+	{
+		const int base_flags = BaseClass::ObjectCaps();
+		return (base_flags | FCAP_CONTINUOUS_USE | FCAP_USE_IN_RADIUS);
+	}
+
+	void StopUse( void );
+
+	void InputEnable( inputdata_t &inputdata );
+	void InputDisable( inputdata_t &inputdata );
+	void Enable( void );
+	void Disable( void );
+
+private:
+	CNetworkVar( string_t, m_sUseString);
+	CNetworkVar( string_t, m_sUseSubString);
+
+	int m_nUseTime;
+	bool m_bAutoDisable;
+
+	bool m_bInUse;
+	float m_flUseStartTime;
+	float m_flLastUseTime;
+
+	COutputEvent m_OnUnpressed;
+	COutputEvent m_OnTimeUp;
 };
 
 

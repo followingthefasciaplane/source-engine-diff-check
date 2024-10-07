@@ -1,9 +1,8 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
 //=============================================================================
-
 
 #include "cbase.h"
 
@@ -12,12 +11,17 @@
 // this gets compiled in for HL2 + Ep(X) only
 #if ( defined( HL2_DLL ) || defined( HL2_EPISODIC ) ) && ( !defined ( PORTAL ) )
 
+#include "matchmaking/imatchframework.h"
 #include "baseachievement.h"
 #include "prop_combine_ball.h"
 #include "combine_mine.h"
 #include "basegrenade_shared.h"
 #include "basehlcombatweapon_shared.h"
 #include "ammodef.h"
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
 
 class CAchievementHLXKillWithPhysicsObjects : public CBaseAchievement
 {

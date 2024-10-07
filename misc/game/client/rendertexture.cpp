@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 // Implements local hooks into named renderable textures.
@@ -15,7 +15,7 @@
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
-void ReleaseRenderTargets( void );
+void ReleaseRenderTargets( int nChangeFlags );
 
 void AddReleaseFunc( void )
 {
@@ -28,12 +28,28 @@ void AddReleaseFunc( void )
 }
 
 //=============================================================================
+// Stereo Param Texture
+//=============================================================================
+static CTextureReference s_pStereoParamTexture;
+ITexture *GetStereoParamTexture( void )
+{
+	if ( !s_pStereoParamTexture )
+	{
+		s_pStereoParamTexture.Init( materials->FindTexture( "stereoparam", TEXTURE_GROUP_OTHER ) );
+		Assert( !IsErrorTexture( s_pStereoParamTexture ) );
+		AddReleaseFunc();
+	}
+
+	return s_pStereoParamTexture;
+}
+
+//=============================================================================
 // Power of Two Frame Buffer Texture
 //=============================================================================
 static CTextureReference s_pPowerOfTwoFrameBufferTexture;
 ITexture *GetPowerOfTwoFrameBufferTexture( void )
 {
-	if ( IsX360() )
+	if ( IsGameConsole() )
 	{
 		return GetFullFrameFrameBufferTexture( 1 );
 	}
@@ -107,11 +123,11 @@ ITexture *GetFullFrameFrameBufferTexture( int textureIndex )
 		char name[256];
 		if( textureIndex != 0 )
 		{
-			V_sprintf_safe( name, "_rt_FullFrameFB%d", textureIndex );
+			Q_snprintf( name, ARRAYSIZE( name ), "_rt_FullFrameFB%d", textureIndex );
 		}
 		else
 		{
-			V_strcpy_safe( name, "_rt_FullFrameFB" );
+			Q_strcpy( name, "_rt_FullFrameFB" );
 		}
 		s_pFullFrameFrameBufferTexture[textureIndex].Init( materials->FindTexture( name, TEXTURE_GROUP_RENDER_TARGET ) );
 		Assert( !IsErrorTexture( s_pFullFrameFrameBufferTexture[textureIndex] ) );
@@ -152,6 +168,38 @@ ITexture *GetWaterRefractionTexture( void )
 	}
 	
 	return s_pWaterRefractionTexture;
+}
+
+//=============================================================================
+// Custom Weapon RT
+//=============================================================================
+static CTextureReference s_pCustomWeaponTexture;
+ITexture *GetCustomWeaponTexture( void )
+{ 
+	if ( !s_pCustomWeaponTexture )
+	{
+		s_pCustomWeaponTexture.Init( materials->FindTexture( "_rt_CustomWeapon", TEXTURE_GROUP_RENDER_TARGET ) );
+		Assert( !IsErrorTexture( s_pCustomWeaponTexture ) );
+		AddReleaseFunc();
+	}
+
+	return s_pCustomWeaponTexture;
+}
+
+//=============================================================================
+// Custom Weapon RT for exponent
+//=============================================================================
+static CTextureReference s_pCustomWeaponTextureExp;
+ITexture *GetCustomWeaponTextureExp( void )
+{ 
+	if ( !s_pCustomWeaponTextureExp )
+	{
+		s_pCustomWeaponTextureExp.Init( materials->FindTexture( "_rt_CustomWeaponExp", TEXTURE_GROUP_RENDER_TARGET ) );
+		Assert( !IsErrorTexture( s_pCustomWeaponTextureExp ) );
+		AddReleaseFunc();
+	}
+
+	return s_pCustomWeaponTextureExp;
 }
 
 //=============================================================================
@@ -224,7 +272,7 @@ ITexture *GetSmallBuffer1( void )
 static CTextureReference s_TeenyTextures[MAX_TEENY_TEXTURES];
 ITexture *GetTeenyTexture( int which )
 {
-	if ( IsX360() )
+	if ( IsGameConsole() )
 	{
 		Assert( 0 );
 		return NULL;
@@ -235,7 +283,7 @@ ITexture *GetTeenyTexture( int which )
 	if ( !s_TeenyTextures[which] )
 	{
 		char nbuf[20];
-		sprintf( nbuf, "_rt_TeenyFB%d", which );
+		Q_snprintf( nbuf, ARRAYSIZE( nbuf ), "_rt_TeenyFB%d", which );
 		s_TeenyTextures[which].Init( materials->FindTexture( nbuf, TEXTURE_GROUP_RENDER_TARGET ) );
 		Assert( !IsErrorTexture( s_TeenyTextures[which] ) );
 		AddReleaseFunc();
@@ -243,8 +291,11 @@ ITexture *GetTeenyTexture( int which )
 	return s_TeenyTextures[which];
 }
 
-void ReleaseRenderTargets( void )
+void ReleaseRenderTargets( int nChangeFlags )
 {
+	if ( nChangeFlags & MATERIAL_RESTORE_VERTEX_FORMAT_CHANGED )
+		return;
+
 	s_pPowerOfTwoFrameBufferTexture.Shutdown();
 	s_pCameraTexture.Shutdown();
 	s_pWaterReflectionTexture.Shutdown();
@@ -252,7 +303,10 @@ void ReleaseRenderTargets( void )
 	s_pQuarterSizedFB0.Shutdown();
 	s_pQuarterSizedFB1.Shutdown();
 	s_pFullFrameDepthTexture.Shutdown();
+	s_pCustomWeaponTexture.Shutdown();
 
 	for (int i=0; i<MAX_FB_TEXTURES; ++i)
+	{
 		s_pFullFrameFrameBufferTexture[i].Shutdown();
+	}
 }

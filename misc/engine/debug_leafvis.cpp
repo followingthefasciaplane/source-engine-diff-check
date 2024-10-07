@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -9,12 +9,30 @@
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
+#include "r_areaportal.h"
+#include "coordsize.h"
+
 // Leaf visualization routines
+
+// Draw groups can be enabled/disabled for visualization using a bitfield specified by mat_leafvis_draw_mask;
+// e.g. -1 = draw all, bit N set = draw group N, so '5' corresponds to draw group 0 and 2 only since 5 = (1 << 0) + (1 << 2)
+enum DrawGroup_t
+{
+	DG_BASE = 0,
+	DG_PVS_VISIBLE_LEAVES = 0,
+	DG_FRUSTUM_VISIBLE_LEAVES = 1,
+	DG_FRUSTUM = 2,
+	DG_PVS_INVISIBLE_LEAVES = 3,
+	MAX_DRAW_GROUPS = 4,
+};
+
+void CSGFrustum( Frustum_t &frustum );
 
 struct leafvis_t
 {
 	leafvis_t()
 	{
+		memset( &m_Colors, 0, sizeof( m_Colors ) );
 		leafIndex = 0;
 		CCollisionBSPData *pBSP = GetCollisionBSPData();
 		if ( pBSP )
@@ -34,8 +52,20 @@ struct leafvis_t
 	}
 
 	CUtlVector<Vector>		verts;
-	CUtlVector<int>			polyVertCount;
-	Vector					color;
+	struct Polygon_t
+	{
+		Polygon_t( int nVertCount, DrawGroup_t drawGroup = DG_BASE ) : 
+		m_nVertCount( nVertCount ), 
+		m_DrawGroup( drawGroup )
+		{
+		}
+
+		int m_nVertCount;
+		DrawGroup_t m_DrawGroup;
+	};
+
+	CUtlVector< Polygon_t >	m_Polygons;
+	Vector					m_Colors[MAX_DRAW_GROUPS];
 	int						numbrushes;
 	int						numentitychars;
 	int						leafIndex;
@@ -44,6 +74,8 @@ const int MAX_LEAF_PVERTS = 128;
 
 // Only allocate this after it is turned on
 leafvis_t *g_LeafVis = NULL;
+
+leafvis_t *g_FrustumVis = NULL, *g_ClipVis[4] = {NULL,NULL,NULL,NULL};
 
 static void AddPlaneToList( CUtlVector<cplane_t> &list, const Vector& normal, float dist, int invert )
 {
@@ -113,7 +145,7 @@ void TranslatePlaneList( cplane_t *pPlanes, int planeCount, const Vector &offset
 }
 
 
-void CSGPlaneList( leafvis_t *pVis, CUtlVector<cplane_t> &planeList)
+void CSGPlaneList( leafvis_t *pVis, CUtlVector<cplane_t> &planeList, DrawGroup_t drawGroup = DG_BASE )
 {
 	int planeCount = planeList.Count();
 	Vector	vertsIn[MAX_LEAF_PVERTS], vertsOut[MAX_LEAF_PVERTS];
@@ -156,7 +188,7 @@ void CSGPlaneList( leafvis_t *pVis, CUtlVector<cplane_t> &planeList)
 		if ( vertCount >= 3 )
 		{
 			// Copy polygon out
-			pVis->polyVertCount.AddToTail( vertCount );
+			pVis->m_Polygons.AddToTail( leafvis_t::Polygon_t( vertCount, drawGroup ) );
 			for ( j = 0; j < vertCount; j++ )
 			{
 				// move the verts back by the initial translation
@@ -174,9 +206,15 @@ void LeafvisChanged( IConVar *pLeafvisVar, const char *pOld, float flOldValue )
 		delete g_LeafVis;
 		g_LeafVis = NULL;
 	}
+
+	if ( g_FrustumVis )
+	{
+		delete g_FrustumVis;
+		g_FrustumVis = NULL;
+	}
 }
 
-void AddLeafPortals( leafvis_t *pLeafvis, int leafIndex )
+void AddLeafPortals( leafvis_t *pLeafvis, int leafIndex, DrawGroup_t drawGroup = DG_BASE )
 {
 	CUtlVector<cplane_t> planeList;
 	Vector	normal;
@@ -202,11 +240,14 @@ void AddLeafPortals( leafvis_t *pLeafvis, int leafIndex )
 	normal[2] = 1;
 	AddPlaneToList( planeList, normal, MAX_COORD_INTEGER, true );
 	AddPlaneToList( planeList, normal, -MAX_COORD_INTEGER, false );
-	CSGPlaneList( pLeafvis, planeList );
+	CSGPlaneList( pLeafvis, planeList, drawGroup );
 }
 
-ConVar mat_leafvis("mat_leafvis","0", FCVAR_CHEAT, "Draw wireframe of current leaf", LeafvisChanged );
+ConVar mat_leafvis("mat_leafvis","0", FCVAR_CHEAT, "Draw wireframe of: [0] nothing, [1] current leaf, [2] entire vis cluster, or [3] entire PVS (see mat_leafvis_draw_mask for what does/doesn't get drawn)", LeafvisChanged );
+ConVar mat_leafvis_update_every_frame( "mat_leafvis_update_every_frame", "0", 0, "Updates leafvis debug render every frame (expensive)" );
 ConVar r_visambient("r_visambient","0", 0, "Draw leaf ambient lighting samples.  Needs mat_leafvis 1 to work" );
+ConVar mat_leafvis_draw_mask( "mat_leafvis_draw_mask", "3", 0, "A bitfield which affects leaf visibility debug rendering.  -1: show all, bit 0: render PVS-visible leafs, bit 1: render PVS- and frustum-visible leafs, bit 2: render frustum bounds, bit 3: render leaves out of PVS." );
+ConVar mat_leafvis_freeze( "mat_leafvis_freeze", "0", 0, "If set to 1, uses the last known leaf visibility data for visualization.  If set to 0, updates based on camera movement." );
 
 //-----------------------------------------------------------------------------
 // Purpose: Builds a convex polyhedron of the leaf boundary around p
@@ -224,15 +265,34 @@ void LeafVisBuild( const Vector &p )
 		static int last_leaf = -1;
 
 		int leafIndex = CM_PointLeafnum( p );
-		if ( g_LeafVis && last_leaf == leafIndex )
+
+		if ( mat_leafvis_freeze.GetBool() && last_leaf != -1 && last_leaf < host_state.worldmodel->brush.pShared->numleafs )
+		{
+			leafIndex = last_leaf;
+		}
+
+		if ( g_LeafVis && ( last_leaf == leafIndex ) && !mat_leafvis_update_every_frame.GetBool() )
 			return;
 
-		DevMsg( 1, "Leaf %d, Area %d, Cluster %d\n", leafIndex, CM_LeafArea( leafIndex ), CM_LeafCluster( leafIndex ) );
+		bool bSpewOnLeafChanged = ( last_leaf != leafIndex );
+		if ( bSpewOnLeafChanged )
+		{
+			DevMsg( 1, "Leaf %d, Area %d, Cluster %d\n", leafIndex, CM_LeafArea( leafIndex ), CM_LeafCluster( leafIndex ) );
+		}
 		last_leaf = leafIndex;
 
 		delete g_LeafVis;
 		g_LeafVis = new leafvis_t;
-		g_LeafVis->color.Init( 1.0f, 0.0f, 0.0f );
+
+		// Color for leafs in PVS
+		g_LeafVis->m_Colors[DG_PVS_VISIBLE_LEAVES].Init( 0.0f, 0.0f, 1.0f );
+		// Color for leafs in PVS that pass frustum test
+		g_LeafVis->m_Colors[DG_FRUSTUM_VISIBLE_LEAVES].Init( 0.0f, 0.0f, 1.0f );
+		
+		g_LeafVis->m_Colors[DG_PVS_INVISIBLE_LEAVES].Init( 0.5f, 1.0f, 0.0f );
+
+		// Color for frustum is set by CSGFrustum()		
+
 		g_LeafVis->leafIndex = leafIndex;
 		switch( mat_leafvis.GetInt() )
 		{
@@ -260,13 +320,48 @@ void LeafVisBuild( const Vector &p )
 				int visCluster = pLeaf[leafIndex].cluster;
 				CM_Vis( pvs, sizeof( pvs ), visCluster, DVIS_PVS );
 
+				const CViewSetup &view = g_EngineRenderer->ViewGetCurrent();
+				Frustum_t frustum;
+				GeneratePerspectiveFrustum( g_EngineRenderer->ViewOrigin(), g_EngineRenderer->ViewAngles(), g_EngineRenderer->GetZNear(), g_EngineRenderer->GetZFar(), g_EngineRenderer->GetFov(), view.m_flAspectRatio, frustum );
+
+				// Add frustum faces to render list in draw group DG_FRUSTUM
+				CSGFrustum( frustum );
+
+				int nPVSLeafCount = 0, nFrustumLeafCount = 0, nOutOfPVSCount = 0;
 				for ( int i = 0; i < leafCount; i++ )
 				{
 					int cluster = pLeaf[i].cluster;
-					if ( cluster >= 0 && (pvs[cluster>>3] & (1<<(cluster&7))) )
+					if ( cluster >= 0 )
 					{
-						AddLeafPortals( g_LeafVis, i );
+						if ( pLeaf[i].m_vecHalfDiagonal.x < DIST_EPSILON || pLeaf[i].m_vecHalfDiagonal.y < DIST_EPSILON || pLeaf[i].m_vecHalfDiagonal.z < DIST_EPSILON )
+						{
+							// 0-volume leaf, ignore
+							continue;
+						}
+
+						if ( (pvs[cluster>>3] & (1<<(cluster&7))) )
+						{
+							++ nPVSLeafCount;
+							
+							bool bIsVisible = !CullNodeSIMD( frustum, ( mnode_t * )( &pLeaf[i] ) );
+							if ( bIsVisible ) 
+							{
+								++ nFrustumLeafCount;
+							}
+							// Add leaf portals to a different draw group based on whether they pass the frustum test (and are in PVS) or are simply in the PVS but not in the frustum
+							AddLeafPortals( g_LeafVis, i, bIsVisible ? DG_FRUSTUM_VISIBLE_LEAVES : DG_PVS_VISIBLE_LEAVES );
+						}
+						else
+						{
+							++ nOutOfPVSCount;
+							// Add leaf portals to a different draw group based on whether they pass the frustum test (and are in PVS) or are simply in the PVS but not in the frustum
+							AddLeafPortals( g_LeafVis, i, DG_PVS_INVISIBLE_LEAVES );
+						}
 					}
+				}
+				if ( bSpewOnLeafChanged )
+				{
+					DevMsg( 1, "%d Leaves in PVS, %d visible, %d outside of PVS\n", nPVSLeafCount, nFrustumLeafCount, nOutOfPVSCount );
 				}
 			}
 			break;
@@ -279,32 +374,45 @@ void LeafVisBuild( const Vector &p )
 }
 
 
-#ifndef SWDS
+#ifndef DEDICATED
 void DrawLeafvis( leafvis_t *pVis )
 {
 	CMatRenderContextPtr pRenderContext( materials );
 
-	int vert = 0;
-	g_materialLeafVisWireframe->ColorModulate( pVis->color[0], pVis->color[1], pVis->color[2] );
-	pRenderContext->Bind( g_materialLeafVisWireframe );
-	for ( int i = 0; i < pVis->polyVertCount.Count(); i++ )
+	int nMask = mat_leafvis_draw_mask.GetInt();
+
+	for ( int nPass = 0; nPass < MAX_DRAW_GROUPS; ++ nPass )
 	{
-		if ( pVis->polyVertCount[i] >= 3 )
+		int nVertIndex = 0;
+
+		if ( ( ( 1 << nPass ) & nMask ) == 0 )
 		{
-			IMesh *pMesh = pRenderContext->GetDynamicMesh( );
-			CMeshBuilder meshBuilder;
-			meshBuilder.Begin( pMesh, MATERIAL_LINES, pVis->polyVertCount[i] );
-			for ( int j = 0; j < pVis->polyVertCount[i]; j++ )
-			{
-				meshBuilder.Position3fv( pVis->verts[ vert + j ].Base() );
-				meshBuilder.AdvanceVertex();
-				meshBuilder.Position3fv( pVis->verts[ vert + ( ( j + 1 ) % pVis->polyVertCount[i] ) ].Base() );
-				meshBuilder.AdvanceVertex();
-			}
-			meshBuilder.End();
-			pMesh->Draw();
+			continue;
 		}
-		vert += pVis->polyVertCount[i];
+
+		g_materialLeafVisWireframe->ColorModulate( pVis->m_Colors[nPass][0], pVis->m_Colors[nPass][1], pVis->m_Colors[nPass][2] );
+
+		pRenderContext->Bind( g_materialLeafVisWireframe );
+		for ( int i = 0; i < pVis->m_Polygons.Count(); i++ )
+		{
+			int nPolygonVertCount = pVis->m_Polygons[i].m_nVertCount;
+			if ( nPolygonVertCount >= 3 && nPass == pVis->m_Polygons[i].m_DrawGroup )
+			{
+				IMesh *pMesh = pRenderContext->GetDynamicMesh();
+				CMeshBuilder meshBuilder;
+				meshBuilder.Begin( pMesh, MATERIAL_LINES, nPolygonVertCount );
+				for ( int j = 0; j < nPolygonVertCount; j++ )
+				{
+					meshBuilder.Position3fv( pVis->verts[ nVertIndex + j ].Base() );
+					meshBuilder.AdvanceVertex();
+					meshBuilder.Position3fv( pVis->verts[ nVertIndex + ( ( j + 1 ) % nPolygonVertCount ) ].Base() );
+					meshBuilder.AdvanceVertex();
+				}
+				meshBuilder.End();
+				pMesh->Draw();
+			}
+			nVertIndex += nPolygonVertCount;
+		}
 	}
 }
 
@@ -317,9 +425,9 @@ void DrawLeafvis_Solid( leafvis_t *pVis )
 	Vector lightNormal(1,1,1);
 	VectorNormalize(lightNormal);
 	pRenderContext->Bind( g_pMaterialDebugFlat );
-	for ( int i = 0; i < pVis->polyVertCount.Count(); i++ )
+	for ( int i = 0; i < pVis->m_Polygons.Count(); i++ )
 	{
-		int vertCount = pVis->polyVertCount[i];
+		int vertCount = pVis->m_Polygons[i].m_nVertCount;
 		if ( vertCount >= 3 )
 		{
 			IMesh *pMesh = pRenderContext->GetDynamicMesh( );
@@ -331,7 +439,7 @@ void DrawLeafvis_Solid( leafvis_t *pVis )
 			Vector normal = CrossProduct(e1,e0);
 			VectorNormalize( normal );
 			float light = 0.5f + (DotProduct(normal, lightNormal)*0.5f);
-			Vector color = pVis->color * light;
+			Vector color = pVis->m_Colors[DG_BASE] * light;
 
 			for ( int j = 0; j < vertCount; j++ )
 			{
@@ -351,8 +459,6 @@ void DrawLeafvis_Solid( leafvis_t *pVis )
 		vert += vertCount;
 	}
 }
-
-leafvis_t *g_FrustumVis = NULL, *g_ClipVis[3] = {NULL,NULL,NULL};
 
 int FindMinBrush( CCollisionBSPData *pBSPData, int nodenum, int brushIndex )
 {
@@ -380,7 +486,7 @@ int FindMinBrush( CCollisionBSPData *pBSPData, int nodenum, int brushIndex )
 
 void RecomputeClipbrushes( bool bEnabled )
 {
-	for ( int v = 0; v < 3; v++ )
+	for ( int v = 0; v < 4; v++ )
 	{
 		delete g_ClipVis[v];
 		g_ClipVis[v] = NULL;
@@ -389,11 +495,18 @@ void RecomputeClipbrushes( bool bEnabled )
 	if ( !bEnabled )
 		return;
 
-	for ( int v = 0; v < 3; v++ )
+	for ( int v = 0; v < 4; v++ )
 	{
-		int contents[3] = {CONTENTS_PLAYERCLIP|CONTENTS_MONSTERCLIP, CONTENTS_MONSTERCLIP, CONTENTS_PLAYERCLIP};
+		int contents[4] = {CONTENTS_PLAYERCLIP|CONTENTS_MONSTERCLIP, CONTENTS_MONSTERCLIP, CONTENTS_PLAYERCLIP, CONTENTS_GRENADECLIP};
 		g_ClipVis[v] = new leafvis_t;
-		g_ClipVis[v]->color.Init( v != 1 ? 1.0f : 0.5, 0.0f, v != 0 ? 1.0f : 0.0f );
+		if ( v == 3 )
+		{
+			g_ClipVis[v]->m_Colors[DG_BASE].Init( 0.0f, 0.8f, 0.0f );
+		}
+		else
+		{
+			g_ClipVis[v]->m_Colors[DG_BASE].Init( v != 1 ? 1.0f : 0.5, 0.0f, v != 0 ? 1.0f : 0.0f );
+		}
 		CCollisionBSPData *pBSP = GetCollisionBSPData();
 		int lastBrush = pBSP->numbrushes; 
 		if ( pBSP->numcmodels > 1 )
@@ -403,18 +516,18 @@ void RecomputeClipbrushes( bool bEnabled )
 		for ( int i = 0; i < lastBrush; i++ )
 		{
 			cbrush_t *pBrush = &pBSP->map_brushes[i];
-			if ( (pBrush->contents & (CONTENTS_PLAYERCLIP|CONTENTS_MONSTERCLIP)) == contents[v] )
+			if ( (pBrush->contents & (CONTENTS_PLAYERCLIP|CONTENTS_MONSTERCLIP|CONTENTS_GRENADECLIP)) == contents[v] )
 			{
 				CUtlVector<cplane_t> planeList;
 				if ( pBrush->IsBox() )
 				{
 					cboxbrush_t *pBox = &pBSP->map_boxbrushes[pBrush->GetBox()];
-					for ( int idxSide = 0; idxSide < 3; idxSide++ )
+					for ( int i = 0; i < 3; i++ )
 					{
 						Vector normal = vec3_origin;
-						normal[idxSide] = 1.0f;
-						AddPlaneToList( planeList, normal, pBox->maxs[idxSide], true );
-						AddPlaneToList( planeList, -normal, -pBox->mins[idxSide], true );
+						normal[i] = 1.0f;
+						AddPlaneToList( planeList, normal, pBox->maxs[i], true );
+						AddPlaneToList( planeList, -normal, -pBox->mins[i], true );
 					}
 				}
 				else
@@ -515,11 +628,16 @@ void LeafVisDraw( void )
 			DrawLeafvis_Solid( g_ClipVis[1] );
 			DrawLeafvis_Solid( g_ClipVis[2] );
 		}
+		else if ( r_drawclipbrushes.GetInt() == 3 )
+		{
+			DrawLeafvis_Solid( g_ClipVis[3] ); // only grenade clip
+		}
 		else
 		{
 			DrawLeafvis( g_ClipVis[0] );
 			DrawLeafvis( g_ClipVis[1] );
 			DrawLeafvis( g_ClipVis[2] );
+			DrawLeafvis( g_ClipVis[3] );
 		}
 	}
 
@@ -569,12 +687,15 @@ void CSGFrustum( Frustum_t &frustum )
 	delete g_FrustumVis;
 	g_FrustumVis = new leafvis_t;
 
-	g_FrustumVis->color.Init(1.0f, 1.0f, 1.0f);
+	g_FrustumVis->m_Colors[DG_FRUSTUM].Init(1.0f, 1.0f, 1.0f);
 	CUtlVector<cplane_t> planeList;
 	for ( int i = 0; i < 6; i++ )
 	{
-		planeList.AddToTail( *frustum.GetPlane( i ) );
+		cplane_t tmp;
+		tmp.type = PLANE_ANYZ;
+		frustum.GetPlane(i, &tmp.normal, &tmp.dist);
+		planeList.AddToTail( tmp );
 	}
-	CSGPlaneList( g_FrustumVis, planeList );
+	CSGPlaneList( g_FrustumVis, planeList, DG_FRUSTUM );
 }
 #endif

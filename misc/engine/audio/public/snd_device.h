@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: This abstracts the various hardware dependent implementations of sound
 //			At the time of this writing there are Windows WAVEOUT, Direct Sound,
@@ -14,7 +14,11 @@
 #include "snd_mix_buf.h"
 
 // sound engine rate defines
+#if 0 // def _PS3
+#define SOUND_DMA_SPEED		48000		// hardware playback rate
+#else
 #define SOUND_DMA_SPEED		44100		// hardware playback rate
+#endif
 
 #define SOUND_11k			11025		// 11khz sample rate
 #define SOUND_22k			22050		// 22khz sample rate
@@ -24,27 +28,25 @@
 #define SOUND_MIX_WET		0			// mix only samples that don't have channel set to 'dry' or 'speaker' (default)
 #define SOUND_MIX_DRY		1			// mix only samples with channel set to 'dry' (ie: music)
 #define SOUND_MIX_SPEAKER	2			// mix only samples with channel set to 'speaker'
-#define SOUND_MIX_SPECIAL_DSP	3			// mix only samples with channel set to 'special dsp'
 
 #define	SOUND_BUSS_ROOM			(1<<0)		// mix samples using channel dspmix value (based on distance from player)
 #define SOUND_BUSS_FACING		(1<<1)		// mix samples using channel dspface value (source facing)
 #define	SOUND_BUSS_FACINGAWAY	(1<<2)		// mix samples using 1-dspface
 #define SOUND_BUSS_SPEAKER		(1<<3)		// mix ch->bspeaker samples in mono to speaker buffer
 #define SOUND_BUSS_DRY			(1<<4)		// mix ch->bdry samples into dry buffer
-#define SOUND_BUSS_SPECIAL_DSP	(1<<5)		// mix ch->bspecialdsp samples into special dsp buffer
 
 class Vector;
 struct channel_t;
 
-// UNDONE: Create a simulated audio device to replace the old -simsound functionality?
+#if defined(_WIN32) || defined(_WIN64)
+#define USE_AUDIO_DEVICE_V1 1
+#endif
 
+#if USE_AUDIO_DEVICE_V1
 // General interface to an audio device
 abstract_class IAudioDevice
 {
 public:
-	// Add a virtual destructor to silence the clang warning.
-	// This is harmless but not important since the only derived class
-	// doesn't have a destructor.
 	virtual ~IAudioDevice() {}
 
 	// Detect the sound hardware and create a compatible device
@@ -52,10 +54,8 @@ public:
 	// which will create a "null" device that makes no sound.  If we can't create a real 
 	// sound device, this will return a device of that type.  All of the interface
 	// functions can be called on the null device, but it will not, of course, make sound.
-	static IAudioDevice *AutoDetectInit( bool waveOnly );
+	static IAudioDevice *AutoDetectInit();
 
-	// This is needed by some of the routines to avoid doing work when you've got a null device
-	virtual bool		IsActive( void ) = 0;
 	// This initializes the sound hardware.  true on success, false on failure
 	virtual bool		Init( void ) = 0;
 	// This releases all sound hardware
@@ -64,64 +64,51 @@ public:
 	virtual void		Pause( void ) = 0;
 	// return to normal operation after a Pause()
 	virtual void		UnPause( void ) = 0;
-	// The volume of the "dry" mix (no effects).
-	// This should return 0 on all implementations that don't need a separate dry mix
-	virtual float		MixDryVolume( void ) = 0;
-	// Should we mix sounds to a 3D (quadraphonic) sound buffer (front/rear both stereo)
-	virtual bool		Should3DMix( void ) = 0;
 
-	// This is called when the application stops all sounds 
-	// NOTE: Stopping each channel and clearing the sound buffer are done separately
-	virtual void		StopAllSounds( void ) = 0;
-	
 	// Called before painting channels, must calculated the endtime and return it (once per frame)
-	virtual int			PaintBegin( float, int soundtime, int paintedtime ) = 0;
-	// Called when all channels are painted (once per frame)
-	virtual void		PaintEnd( void ) = 0;
+	virtual int64		PaintBegin( float, int64 soundtime, int64 paintedtime ) = 0;
+	virtual void PaintEnd() {}
 
-	// Called to set the volumes on a channel with the given gain & dot parameters
-	virtual void		SpatializeChannel( int volume[6], int master_vol, const Vector& sourceDir, float gain, float mono ) = 0;
-	
-	// The device should apply DSP up to endtime in the current paint buffer
-	// this is called during painting
-	virtual void		ApplyDSPEffects( int idsp, portable_samplepair_t *pbuffront, portable_samplepair_t *pbufrear, portable_samplepair_t *pbufcenter, int samplecount ) = 0;
-	
 	// replaces SNDDMA_GetDMAPos, gets the output sample position for tracking
 	virtual int			GetOutputPosition( void ) = 0;
 
 	// Fill the output buffer with silence (e.g. during pause)
 	virtual void		ClearBuffer( void ) = 0;
 
-	// Called each frame with the listener's coordinate system
-	virtual void		UpdateListener( const Vector& position, const Vector& forward, const Vector& right, const Vector& up ) = 0;
-	
-	// Called each time a new paint buffer is mixed (may be multiple times per frame)
-	virtual void		MixBegin( int sampleCount ) = 0;
-	virtual void		MixUpsample( int sampleCount, int filtertype ) = 0;
-
-	// sink sound data
-	virtual void		Mix8Mono( channel_t *pChannel, char *pData, int outputOffset, int inputOffset, fixedint rateScaleFix, int outCount, int timecompress ) = 0;
-	virtual void		Mix8Stereo( channel_t *pChannel, char *pData, int outputOffset, int inputOffset, fixedint rateScaleFix, int outCount, int timecompress ) = 0;
-	virtual void		Mix16Mono( channel_t *pChannel, short *pData, int outputOffset, int inputOffset, fixedint rateScaleFix, int outCount, int timecompress ) = 0;
-	virtual void		Mix16Stereo( channel_t *pChannel, short *pData, int outputOffset, int inputOffset, fixedint rateScaleFix, int outCount, int timecompress ) = 0;
-
-	// Reset a channel
-	virtual void		ChannelReset( int entnum, int channelIndex, float distanceMod ) = 0;
 	virtual void		TransferSamples( int end ) = 0;
 
 	// device parameters
-	virtual const char *DeviceName( void ) = 0;
-	virtual int			DeviceChannels( void ) = 0;		// 1 = mono, 2 = stereo
-	virtual int			DeviceSampleBits( void ) = 0;	// bits per sample (8 or 16)
-	virtual int			DeviceSampleBytes( void ) = 0;	// above / 8
-	virtual int			DeviceDmaSpeed( void ) = 0;		// Actual DMA speed
 	virtual int			DeviceSampleCount( void ) = 0;	// Total samples in buffer
 
-	virtual bool		IsSurround( void ) = 0;			// surround enabled, could be quad or 5.1
-	virtual bool		IsSurroundCenter( void ) = 0;	// surround enabled as 5.1
-	virtual bool		IsHeadphone( void ) = 0;
+	inline const char *Name() { return m_pName; }
+	inline int ChannelCount() { return m_nChannels; }
+	inline int BitsPerSample() { return m_nSampleBits; }
+	inline int SampleRate() { return m_nSampleRate; }
+
+	virtual bool IsSurround() { return m_nChannels > 2 ? true : false; }
+	virtual bool IsSurroundCenter() { return m_nChannels > 4 ? true : false; }
+	inline bool IsActive() { return m_bIsActive; }
+	inline bool IsHeadphone() { return m_bIsHeadphone; } // mixing makes some choices differently for stereo vs headphones, expose that here.
+
+	inline int	DeviceSampleBytes() { return BitsPerSample() / 8; }
+
+protected:
+	// NOTE: Derived classes MUST initialize these before returning a device from a factory
+	const char *m_pName;
+	int			m_nChannels;
+	int			m_nSampleBits;
+	int			m_nSampleRate;
+	bool		m_bIsActive;
+	bool		m_bIsHeadphone;
 };
 
 extern IAudioDevice *Audio_GetNullDevice( void );
+#else
+#include "soundsystem/lowlevel.h"
+inline IAudioDevice2 *Audio_GetNullDevice()
+{
+	return Audio_CreateNullDevice();
+}
+#endif
 
 #endif // SND_DEVICE_H

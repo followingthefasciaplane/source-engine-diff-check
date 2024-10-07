@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -207,7 +207,7 @@ ID3D10InputLayout *CreateInputLayout( VertexFormat_t fmt, ID3D10ShaderReflection
 	HRESULT hr = D3D10Device()->CreateInputLayout( pDecl, nDeclCount, pByteCode, nByteCodeLen, &pInputLayout );
 	if ( FAILED( hr ) )
 	{
-		Warning( "CreateInputLayout::Unable to create input layout for format %llX!\n", fmt );
+		Warning( "CreateInputLayout::Unable to create input layout for format %X!\n", fmt );
 		return NULL;
 	}
 	return pInputLayout;

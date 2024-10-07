@@ -1,7 +1,8 @@
-// STATIC: "CONVERT_TO_SRGB"			"0..1"	[ps20b][= g_pHardwareConfig->NeedsShaderSRGBConversion()] [PC]
-// STATIC: "CONVERT_TO_SRGB"			"0..0"	[= 0] [XBOX]
+//========== Copyright (c) Valve Corporation, All rights reserved. ==========//
+
 // DYNAMIC: "WRITE_DEPTH_TO_DESTALPHA"	"0..1"	[ps20b] [PC]
-// DYNAMIC: "WRITE_DEPTH_TO_DESTALPHA"	"0..0"	[ps20b] [XBOX]
+// DYNAMIC: "WRITE_DEPTH_TO_DESTALPHA"	"0..0"	[ps20b] [CONSOLE]
+
 #include "common_ps_fxc.h"
 
 #if defined( SHADER_MODEL_PS_2_0 )
@@ -9,7 +10,7 @@
 #endif
 
 sampler RGBSTextureSampler	: register( s0 );
-HALF4 InputScale : register( c0 );
+float4 InputScale : register( c0 );
 
 float2 texWidthHeight : register( c1 );
 
@@ -28,7 +29,7 @@ struct PS_INPUT
 //#endif
 };
 
-float4 main( PS_INPUT i ) : COLOR
+float4_color_return_type main( PS_INPUT i ) : COLOR
 {
 	float3 result;
 	
@@ -67,15 +68,15 @@ float4 main( PS_INPUT i ) : COLOR
 	s00.rgb*=s00.a;
 	s10.rgb*=s10.a;
 
-	s00.xyz = lerp(s00, s10, fracCoord.x); 
+	s00.rgb = lerp(s00.rgb, s10.rgb, fracCoord.x); 
 	
 	s01.rgb*=s01.a;
 	s11.rgb*=s11.a;
-	s01.xyz = lerp(s01, s11, fracCoord.x); 
+	s01.rgb = lerp(s01.rgb, s11.rgb, fracCoord.x); 
 	
-	result = lerp(s00, s01, fracCoord.y); 
+	result.rgb = lerp(s00.rgb, s01.rgb, fracCoord.y); 
 //#endif
  
 	// This is never fogged.
-	return FinalOutput( float4( InputScale*result, 1.0f ), 0, PIXEL_FOG_TYPE_NONE, TONEMAP_SCALE_LINEAR, WRITE_DEPTH_TO_DESTALPHA, 1e20 ); //when writing depth to dest alpha, write a value guaranteed to saturate
+	return FinalOutput( float4( InputScale.rgb*result.rgb, 1.0f ), 0, PIXEL_FOG_TYPE_NONE, TONEMAP_SCALE_LINEAR, WRITE_DEPTH_TO_DESTALPHA, 1e20 ); //when writing depth to dest alpha, write a value guaranteed to saturate
 }

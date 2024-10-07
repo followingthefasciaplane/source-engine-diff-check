@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -19,6 +19,7 @@
 #include "materialsystem/imaterial.h"
 #include "vtf/vtf.h"
 
+#include "imaterialproxydict.h"
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
@@ -299,20 +300,20 @@ void CCamoMaterialProxy::GetColors( Vector &diffuseColor, Vector &baseColor, int
 #endif
 	
 #if 0
-	float max;
-	max = diffuseColor[0];
-	if( diffuseColor[1] > max )
+	float MAX;
+	MAX = diffuseColor[0];
+	if( diffuseColor[1] > MAX )
 	{
-		max = diffuseColor[1];
+		MAX = diffuseColor[1];
 	}
-	if( diffuseColor[2] > max )
+	if( diffuseColor[2] > MAX )
 	{
-		max = diffuseColor[2];
+		MAX = diffuseColor[2];
 	}
-	if( max > 1.0f )
+	if( MAX > 1.0f )
 	{
-		max = 1.0f / max;
-		diffuseColor = diffuseColor * max;
+		MAX = 1.0f / MAX;
+		diffuseColor = diffuseColor * MAX;
 	}
 #else
 	if( diffuseColor[0] > 1.0f )
@@ -478,7 +479,6 @@ void CCamoMaterialProxy::LoadCamoPattern( void )
 	
 	enum ImageFormat indexImageFormat;
 	int indexImageSize;
-#ifndef _XBOX
 	float dummyGamma;
 	if( !TGALoader::GetInfo( m_pCamoPatternTextureVar->GetStringValue(), 
 		&m_CamoPatternWidth, &m_CamoPatternHeight, &indexImageFormat, &dummyGamma ) )
@@ -487,12 +487,6 @@ void CCamoMaterialProxy::LoadCamoPattern( void )
 		m_pCamoTextureVar = NULL;
 		return;
 	}
-#else
-	// xboxissue - no tga support, why implemented this way
-	Assert( 0 );
-	m_pCamoTextureVar = NULL;
-	return;
-#endif
 	
 	if( indexImageFormat != IMAGE_FORMAT_I8 )
 	{
@@ -513,7 +507,6 @@ void CCamoMaterialProxy::LoadCamoPattern( void )
 		return;
 	}
 	
-#ifndef _XBOX
 	if( !TGALoader::Load( m_pCamoPatternImage, m_pCamoPatternTextureVar->GetStringValue(),
 		m_CamoPatternWidth, m_CamoPatternHeight, IMAGE_FORMAT_I8, dummyGamma, false ) )
 	{
@@ -521,10 +514,6 @@ void CCamoMaterialProxy::LoadCamoPattern( void )
 		m_pCamoTextureVar = NULL;
 		return;
 	}
-#else
-	// xboxissue - no tga support, why is the camo done this way?
-	Assert( 0 );
-#endif
 	
 	bool colorUsed[256];
 	int colorRemap[256];
@@ -579,4 +568,4 @@ IMaterial *CCamoMaterialProxy::GetMaterial()
 	return m_pMaterial;
 }
 
-EXPOSE_INTERFACE( CCamoMaterialProxy, IMaterialProxy, "Camo" IMATERIAL_PROXY_INTERFACE_VERSION );
+EXPOSE_MATERIAL_PROXY( CCamoMaterialProxy, Camo );

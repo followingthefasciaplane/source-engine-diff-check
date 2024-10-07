@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: Real-Time Hierarchical Profiling
 //
@@ -41,5 +41,6 @@ extern IVProfExport *g_pVProfExport; // used by engine's budget panel
 // The budget panel and vprof panels use this for display.
 extern CVProfile *g_pVProfileForDisplay;
 
+extern unsigned g_VProfTargetThread;
 
 #endif

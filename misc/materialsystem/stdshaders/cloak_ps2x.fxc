@@ -1,14 +1,7 @@
-//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
-//
-// Purpose: 
-//
-//=============================================================================
+//========== Copyright (c) Valve Corporation, All rights reserved. ==========//
 
-// STATIC: "CONVERT_TO_SRGB"			"0..1"	[ps20b][= g_pHardwareConfig->NeedsShaderSRGBConversion()] [PC]
-// STATIC: "CONVERT_TO_SRGB"			"0..1"	[ps30][= g_pHardwareConfig->NeedsShaderSRGBConversion()] [PC]
-// STATIC: "CONVERT_TO_SRGB"			"0..0"	[= 0] [XBOX]
 // STATIC:  "LIGHTWARPTEXTURE"			"0..1"
-// DYNAMIC: "PIXELFOGTYPE"				"0..1"
+#include "common_fog_ps_fxc.h"
 // DYNAMIC: "WRITEWATERFOGTODESTALPHA"	"0..1"
 // DYNAMIC: "NUM_LIGHTS"				"0..2"	[ps20]
 // DYNAMIC: "NUM_LIGHTS"				"0..4"	[ps20b]
@@ -22,7 +15,7 @@ sampler DiffuseWarpSampler			: register( s1 );	// 1D texture for diffuse lightin
 sampler RefractSampler				: register( s2 );	// Refraction map copied from back buffer
 sampler NormalSampler				: register( s3 );	// Normal map
 sampler SpecExponentSampler			: register( s4 );	// Flashlight cookie
-sampler NormalizeSampler			: register( s5 );	// Normalization cube map
+samplerCUBE NormalizeSampler		: register( s5 );	// Normalization cube map
 
 const float3x3 g_ViewProj			: register( c0 );	// 1st row of Projection matrix
 //                                              c1		// 2nd row
@@ -62,7 +55,7 @@ struct PS_INPUT
 	float4 lightAtten				: TEXCOORD6;
 };
 
-float4 main( PS_INPUT i ) : COLOR
+float4_color_return_type main( PS_INPUT i ) : COLOR
 {
 	float3 vSpecular = float3( 0.0f, 0.0f, 0.0f );
 	bool bDoDiffuseWarp = LIGHTWARPTEXTURE ? true : false;
@@ -86,7 +79,7 @@ float4 main( PS_INPUT i ) : COLOR
 	float3 diffuseLighting = PixelShaderDoLighting( i.worldPos, vWorldNormal,
 													float3( 0.0f, 0.0f, 0.0f ), false,
 													true, i.lightAtten, cAmbientCube, NormalizeSampler,
-													nNumLights, cLightInfo, true, false, 1.0f,
+													nNumLights, cLightInfo, true,
 													bDoDiffuseWarp, DiffuseWarpSampler );
 
 
@@ -113,13 +106,13 @@ float4 main( PS_INPUT i ) : COLOR
 #if defined( SHADER_MODEL_PS_2_B ) || defined( SHADER_MODEL_PS_3_0 )
 	// Blur by scalable Poisson filter
 	float fBlurAmount = lerp( 0.05f, 0.0f, g_CloakControl.y );
-	float3 vRefract = tex2D( RefractSampler, vRefractTexCoord );
-	vRefract += tex2D( RefractSampler, vRefractTexCoord + gPoissonOffset[0].xy * fBlurAmount );
-	vRefract += tex2D( RefractSampler, vRefractTexCoord + gPoissonOffset[0].wz * fBlurAmount );
-	vRefract += tex2D( RefractSampler, vRefractTexCoord + gPoissonOffset[1].xy * fBlurAmount );
-	vRefract += tex2D( RefractSampler, vRefractTexCoord + gPoissonOffset[1].wz * fBlurAmount );
-	vRefract += tex2D( RefractSampler, vRefractTexCoord + gPoissonOffset[2].xy * fBlurAmount );
-	vRefract += tex2D( RefractSampler, vRefractTexCoord + gPoissonOffset[2].wz * fBlurAmount );
+	float3 vRefract = tex2D( RefractSampler, vRefractTexCoord ).rgb;
+	vRefract += tex2D( RefractSampler, vRefractTexCoord + gPoissonOffset[0].xy * fBlurAmount ).rgb;
+	vRefract += tex2D( RefractSampler, vRefractTexCoord + gPoissonOffset[0].wz * fBlurAmount ).rgb;
+	vRefract += tex2D( RefractSampler, vRefractTexCoord + gPoissonOffset[1].xy * fBlurAmount ).rgb;
+	vRefract += tex2D( RefractSampler, vRefractTexCoord + gPoissonOffset[1].wz * fBlurAmount ).rgb;
+	vRefract += tex2D( RefractSampler, vRefractTexCoord + gPoissonOffset[2].xy * fBlurAmount ).rgb;
+	vRefract += tex2D( RefractSampler, vRefractTexCoord + gPoissonOffset[2].wz * fBlurAmount ).rgb;
 
 // We're right at the hairy edge of constant register usage and hence have to drop these taps...
 //	vRefract += tex2D( RefractSampler, vRefractTexCoord + gPoissonOffset[3].xy * fBlurAmount );
@@ -142,7 +135,7 @@ float4 main( PS_INPUT i ) : COLOR
 
 	// If constant tint is negative, tint with albedo, based upon scalar tint map
 	if ( g_SpecularTint.r == -1 )
-		vSpecularTint = lerp( float3(1.0f, 1.0f, 1.0f), albedo, vSpecExpMap.g );
+		vSpecularTint = lerp( float3(1.0f, 1.0f, 1.0f), albedo.rgb, vSpecExpMap.g );
 	else
 		vSpecularTint = g_SpecularTint.rgb;
 
@@ -151,8 +144,8 @@ float4 main( PS_INPUT i ) : COLOR
 
 	// Summation of specular from all local lights besides the flashlight
 	PixelShaderDoSpecularLighting( i.worldPos, vWorldNormal, fSpecExp, vWorldEyeDir,
-								   i.lightAtten, nNumLights, cLightInfo, false, 1.0f, false,
-								   NormalizeSampler, 1.0f, true, g_RimExponent,
+								   i.lightAtten, nNumLights, cLightInfo, false, BaseSampler, // this sampler isn't actually used; it just needs a value passed in
+								   1.0f, true, g_RimExponent, 1.0f,
 
 								   // Outputs
 								   specularLighting, rimLighting );
@@ -173,7 +166,7 @@ float4 main( PS_INPUT i ) : COLOR
 
 	float tintLerpFactor = saturate(lerp( 1, fresnel-1.1, saturate(g_CloakControl.y)));
 	tintLerpFactor = smoothstep( 0.4f, 0.425f, tintLerpFactor );
-	float3 vTintedRefract = lerp( vRefract, albedo * vRefract, 0.7f );
+	float3 vTintedRefract = lerp( vRefract, albedo.rgb * vRefract, 0.7f );
 	vRefract = lerp( vRefract, vTintedRefract, tintLerpFactor );
 
 	vSpecular = specularLighting * smoothstep( 0.98, 0.8, saturate(g_CloakControl.y ));
@@ -183,7 +176,7 @@ float4 main( PS_INPUT i ) : COLOR
 	float diffuseLerpFactor = saturate(lerp( 1, fresnel - 1.35, saturate(g_CloakControl.y)));
 	diffuseLerpFactor = smoothstep( 0.4f, 0.425f, diffuseLerpFactor );
 
-	float3 fDiffuse = lerp( vRefract, albedo * diffuseLighting, diffuseLerpFactor );
+	float3 fDiffuse = lerp( vRefract, albedo.rgb * diffuseLighting, diffuseLerpFactor );
 	float3 result =  fDiffuse + vSpecular;
 
 	float alpha = 1.0f;
@@ -191,7 +184,7 @@ float4 main( PS_INPUT i ) : COLOR
 	// Emulate LinearColorToHDROutput() when uncloaked
 	result = lerp( result.xyz * LINEAR_LIGHT_SCALE, result, saturate(g_CloakControl.y) );
 
-	float fogFactor = CalcPixelFogFactor( PIXELFOGTYPE, g_FogParams, g_EyePos_SpecExponent.z, i.worldPos.z, i.projPos.z );
+	float fogFactor = CalcPixelFogFactor( PIXELFOGTYPE, g_FogParams, g_EyePos_SpecExponent.xyz, i.worldPos.xyz, i.projPos.z );
 	
 #if WRITEWATERFOGTODESTALPHA && (PIXELFOGTYPE == PIXEL_FOG_TYPE_HEIGHT)
 	alpha = fogFactor;

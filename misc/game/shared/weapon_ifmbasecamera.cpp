@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -11,8 +11,12 @@
 #ifdef CLIENT_DLL
 #include "view_shared.h"
 #include "iviewrender.h"
-#include "vgui_controls/Controls.h"
-#include "vgui/ISurface.h"
+#include "vgui_controls/controls.h"
+#include "vgui/isurface.h"
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
 
 bool ToolFramework_SetupEngineView( Vector &origin, QAngle &angles, float &fov );
 
@@ -153,7 +157,7 @@ void CWeaponIFMBaseCamera::OnDataChanged( DataUpdateType_t updateType )
 	if (updateType == DATA_UPDATE_CREATED)
 	{
 		m_FrustumMaterial.Init( "effects/steadycamfrustum", TEXTURE_GROUP_OTHER );
-		m_FrustumWireframeMaterial.Init( "shadertest/wireframevertexcolor", TEXTURE_GROUP_OTHER );
+		m_FrustumWireframeMaterial.Init( "debug/debugwireframevertexcolor", TEXTURE_GROUP_OTHER );
 	}
 }
 
@@ -187,12 +191,12 @@ void CWeaponIFMBaseCamera::TransmitRenderInfo()
 //-----------------------------------------------------------------------------
 #define FRUSTUM_SIZE 1000
 
-int CWeaponIFMBaseCamera::DrawModel( int flags )
+int CWeaponIFMBaseCamera::DrawModel( int flags, const RenderableInstance_t &instance )
 {
-	int nRetVal = BaseClass::DrawModel( flags );
+	int nRetVal = BaseClass::DrawModel( flags, instance );
 
 	CBasePlayer *pPlayer = GetPlayerOwner();
-	if ( pPlayer && !pPlayer->IsLocalPlayer() )
+	if ( pPlayer && !pPlayer->IsLocalPlayer( this ) )
 	{
 		// Compute endpoints
 		float flMaxD = 1.0f / tan( M_PI * m_flFOV / 360.0f );
@@ -353,7 +357,7 @@ void CWeaponIFMBaseCamera::GetOverlayBounds( int &x, int &y, int &w, int &h )
 //-----------------------------------------------------------------------------
 // When drawing the model, if drawing the viewmodel, draw an overlay of what's being rendered
 //-----------------------------------------------------------------------------
-void CWeaponIFMBaseCamera::ViewModelDrawn( CBaseViewModel *pBaseViewModel )
+void CWeaponIFMBaseCamera::ViewModelDrawn( int nFlags, CBaseViewModel *pBaseViewModel )
 {
 	// NOTE: This is not recursively called because we do not draw viewmodels in the overlay
 	CViewSetup overlayView = *view->GetViewSetup();
@@ -387,7 +391,7 @@ void CWeaponIFMBaseCamera::DrawCrosshair( void )
 
 	// Draw the targeting zone around the crosshair
 	int r, g, b, a;
-	gHUD.m_clrYellowish.GetColor( r, g, b, a );
+	GetHud().m_clrYellowish.GetColor( r, g, b, a );
 
 	Color light( r, g, b, 160 );
 

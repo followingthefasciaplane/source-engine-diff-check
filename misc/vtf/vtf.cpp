@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: The VTF file format I/O class to help simplify access to VTF files
 //
@@ -15,7 +15,6 @@
 #include "tier0/mem.h"
 #include "s3tc_decode.h"
 #include "utlvector.h"
-#include "vprof_telemetry.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -54,6 +53,22 @@ BEGIN_BYTESWAP_DATADESC_( VTFFileHeader_t, VTFFileHeaderV7_2_t )
 END_DATADESC()
 
 BEGIN_BYTESWAP_DATADESC_( VTFFileHeaderX360_t, VTFFileBaseHeader_t )
+	DEFINE_FIELD( flags, FIELD_INTEGER ),
+	DEFINE_FIELD( width, FIELD_SHORT ),
+	DEFINE_FIELD( height, FIELD_SHORT ),
+	DEFINE_FIELD( depth, FIELD_SHORT ),
+	DEFINE_FIELD( numFrames, FIELD_SHORT ),
+	DEFINE_FIELD( preloadDataSize, FIELD_SHORT ),
+	DEFINE_FIELD( mipSkipCount, FIELD_CHARACTER ),
+	DEFINE_FIELD( numResources, FIELD_CHARACTER ),
+	DEFINE_FIELD( reflectivity, FIELD_VECTOR ),
+	DEFINE_FIELD( bumpScale, FIELD_FLOAT ),
+	DEFINE_FIELD( imageFormat, FIELD_INTEGER ),
+	DEFINE_ARRAY( lowResImageSample, FIELD_CHARACTER, 4 ),
+	DEFINE_FIELD( compressedSize, FIELD_INTEGER ),
+END_DATADESC()
+
+BEGIN_BYTESWAP_DATADESC_( VTFFileHeaderPS3_t, VTFFileBaseHeader_t )
 	DEFINE_FIELD( flags, FIELD_INTEGER ),
 	DEFINE_FIELD( width, FIELD_SHORT ),
 	DEFINE_FIELD( height, FIELD_SHORT ),
@@ -190,7 +205,11 @@ IVTFTexture *CreateVTFTexture()
 
 void DestroyVTFTexture( IVTFTexture *pTexture )
 {
-	delete pTexture;
+	CVTFTexture *pTex = static_cast<CVTFTexture*>(pTexture);
+	if ( pTex )
+	{
+		delete pTex;
+	}
 }
 
 //-----------------------------------------------------------------------------
@@ -220,6 +239,7 @@ int VTFFileHeaderSize( int nMajorVersion, int nMinorVersion )
 			return sizeof( VTFFileHeaderV7_2_t );
 		case 3:
 			return sizeof( VTFFileHeaderV7_3_t ) + sizeof( ResourceEntryInfo ) * MAX_RSRC_DICTIONARY_ENTRIES;
+		case 4:
 		case VTF_MINOR_VERSION:
 			int size1 = sizeof( VTFFileHeader_t );
 			int size2 = sizeof( ResourceEntryInfo ) * MAX_RSRC_DICTIONARY_ENTRIES;
@@ -231,6 +251,9 @@ int VTFFileHeaderSize( int nMajorVersion, int nMinorVersion )
 	
 	case VTF_X360_MAJOR_VERSION:
 		return sizeof( VTFFileHeaderX360_t ) + sizeof( ResourceEntryInfo ) * MAX_X360_RSRC_DICTIONARY_ENTRIES;
+
+	case VTF_PS3_MAJOR_VERSION:
+		return sizeof( VTFFileHeaderPS3_t ) + sizeof( ResourceEntryInfo ) * MAX_X360_RSRC_DICTIONARY_ENTRIES;
 	}
 
 	return 0;
@@ -274,7 +297,7 @@ CVTFTexture::CVTFTexture()
 	m_pLowResImageData = NULL;
 	m_nLowResImageAllocSize = 0;
 
-#if defined( _X360 )
+#if defined( _X360 ) || defined ( _PS3 )
 	m_nMipSkipCount = 0;
 	*(unsigned int *)m_LowResImageSample = 0;
 #endif
@@ -285,15 +308,19 @@ CVTFTexture::CVTFTexture()
 
 	memset( &m_Options, 0, sizeof( m_Options ) );
 	m_Options.cbSize = sizeof( m_Options );
-
-	m_nFinestMipmapLevel = 0;
-	m_nCoarsestMipmapLevel = 0;
 }
 
 CVTFTexture::~CVTFTexture()
 {
 	Shutdown();
 }
+
+#ifndef PLATFORM_X360
+bool CVTFTexture::IsPreTiled() const
+{
+	return false; 
+}
+#endif
 
 //-----------------------------------------------------------------------------
 // Compute the mip count based on the size + flags
@@ -303,6 +330,12 @@ int CVTFTexture::ComputeMipCount() const
 	if ( IsX360() && ( m_nVersion[0] == VTF_X360_MAJOR_VERSION ) && ( m_nFlags & TEXTUREFLAGS_NOMIP ) )
 	{
 		// 360 vtf format culled unused mips at conversion time
+		return 1;
+	}
+
+	if ( IsPS3() && ( m_nVersion[0] == VTF_PS3_MAJOR_VERSION ) && ( m_nFlags & TEXTUREFLAGS_NOMIP ) )
+	{
+		// PS3 vtf format culled unused mips at conversion time
 		return 1;
 	}
 
@@ -388,10 +421,14 @@ bool CVTFTexture::Init( int nWidth, int nHeight, int nDepth, ImageFormat fmt, in
 		}
 	}
 
-	if ( !IsMultipleOf4( nWidth ) || !IsMultipleOf4( nHeight ) || !IsMultipleOf4( nDepth ) )
+	if ( ( fmt == IMAGE_FORMAT_DXT1 ) || ( fmt == IMAGE_FORMAT_DXT3 ) || ( fmt == IMAGE_FORMAT_DXT5 ) ||
+		 ( fmt == IMAGE_FORMAT_DXT1_RUNTIME ) || ( fmt == IMAGE_FORMAT_DXT5_RUNTIME ) )
 	{
-		Warning( "Image dimensions must be multiple of 4!\n" );
-		return false;
+		if ( !IsMultipleOf4( nWidth ) || !IsMultipleOf4( nHeight ) || !IsMultipleOf4( nDepth ) )
+		{
+			Warning( "Image dimensions must be multiple of 4!\n" );
+			return false;
+		}
 	}
 
 	if ( fmt == IMAGE_FORMAT_DEFAULT )
@@ -424,13 +461,8 @@ bool CVTFTexture::Init( int nWidth, int nHeight, int nDepth, ImageFormat fmt, in
 	m_nFrameCount = iFrameCount;
 
 	m_nFaceCount = (iFlags & TEXTUREFLAGS_ENVMAP) ? CUBEMAP_FACE_COUNT : 1;
-	if ( IsX360() && ( iFlags & TEXTUREFLAGS_ENVMAP ) )
-	{
-		// 360 has no reason to support sphere map
-		m_nFaceCount = CUBEMAP_FACE_COUNT-1;
-	}
 
-#if defined( _X360 )
+#if defined( _X360 ) || defined ( _PS3 )
 	m_nMipSkipCount = 0;
 #endif
 
@@ -522,8 +554,8 @@ void CVTFTexture::ReleaseResources()
 //-----------------------------------------------------------------------------
 void CVTFTexture::Shutdown()
 {
-#if defined( _X360 )
-	// must be first to ensure X360 aliased pointers are unhooked, otherwise memory corruption
+#if defined( _GAMECONSOLE )
+	// must be first to ensure X360/PS3 aliased pointers are unhooked, otherwise memory corruption
 	ReleaseImageMemory();
 #endif
 
@@ -678,87 +710,65 @@ bool CVTFTexture::LoadImageData( CUtlBuffer &buf, const VTFFileHeader_t &header,
 
 	// For backwards compatibility, we don't read in the spheremap fallback on
 	// older format .VTF files...
-	int nFacesToRead = m_nFaceCount;
-	if ( IsCubeMap() )
-	{
-		if ((header.version[0] == 7) && (header.version[1] < 1))
-			nFacesToRead = 6;
-	}
-
-	// Even if we are preloading partial data, always do the full allocation here. We'll use LOD clamping to ensure we only 
-	// reference data that is available.
 	if ( !AllocateImageData( iImageSize ) )
 		return false;
 
-	// We may only have part of the data available--if so we will stream in the rest later. 
-	// If we have the data available but we're ignoring it (for example during development), then we 
-	// need to skip over the data we're ignoring below, otherwise we'll be sad pandas.
-	bool bMipDataPresent = true;
-	int nFirstAvailableMip = 0;
-	int nLastAvailableMip = m_nMipCount - 1;
-	TextureStreamSettings_t const *pStreamSettings = ( TextureStreamSettings_t const * ) GetResourceData( VTF_RSRC_TEXTURE_STREAM_SETTINGS, NULL );
-	if ( pStreamSettings ) 
-	{
-		nFirstAvailableMip = Max( 0, pStreamSettings->m_firstAvailableMip - nSkipMipLevels );
-		nLastAvailableMip = Max( 0, pStreamSettings->m_lastAvailableMip - nSkipMipLevels );
-		bMipDataPresent = false;
-	} 
-	
-	// If we have coarse mips but not the fine mips (yet)
-	if ( ( header.flags & TEXTUREFLAGS_STREAMABLE ) == TEXTUREFLAGS_STREAMABLE_COARSE )
-	{
-		nFirstAvailableMip = Max( 0, Max( nFirstAvailableMip, STREAMING_START_MIPMAP ) - nSkipMipLevels );
-	}
-
-	if ( header.flags & TEXTUREFLAGS_STREAMABLE_FINE )
-	{
-		// Don't need to subtract nSkipMipLevels: m_nMipCount has subtracted that above--assuming this assert doesn't fire.
-		Assert( m_nMipCount == header.numMipLevels - nSkipMipLevels );
-		nLastAvailableMip = Min( nLastAvailableMip, STREAMING_START_MIPMAP - 1 );
-	}
-
-	// Valid settings? 
-	Assert( nFirstAvailableMip >= 0 && nFirstAvailableMip <= nLastAvailableMip && nLastAvailableMip < m_nMipCount );
-
-	// Store the clamp settings
-	m_nFinestMipmapLevel = nFirstAvailableMip;
-	m_nCoarsestMipmapLevel = nLastAvailableMip;
-
 	// NOTE: The mip levels are stored ascending from smallest (1x1) to largest (NxN)
 	// in order to allow for truncated reads of the minimal required data
+
+	// NOTE: I checked in a bad version 4 where it stripped out the spheremap.
+	// To make it all work, need to check for that bad case.
+	bool bNoSkip = false;
+	if ( IsCubeMap() && ( header.version[0] == 7 ) && ( header.version[1] == 4 ) )
+	{
+		int nBytesRemaining = buf.TellMaxPut() - buf.TellGet();
+		int nFileSize = ComputeFaceSize( nSkipMipLevels ) * m_nFaceCount * m_nFrameCount;
+		if ( nBytesRemaining == nFileSize )
+		{
+			bNoSkip = true;
+		}
+	}
+
+	int nGet = buf.TellGet();
+
+retryCubemapLoad:
 	for (int iMip = m_nMipCount; --iMip >= 0; )
 	{
 		// NOTE: This is for older versions...
-		if (header.numMipLevels - nSkipMipLevels <= iMip)
+		if ( header.numMipLevels - nSkipMipLevels <= iMip )
 			continue;
 
 		int iMipSize = ComputeMipSize( iMip );
 
-		// Skip over any levels we don't have data for--we'll get them later. 
-		if ( iMip > nLastAvailableMip || iMip < nFirstAvailableMip )
-		{
-			// If the data is there but we're ignoring it, need to update the get pointer.
-			if ( bMipDataPresent ) 
-			{
-				for ( int iFrame = 0; iFrame < m_nFrameCount; ++iFrame )
-					for ( int iFace = 0; iFace < nFacesToRead; ++iFace )
-						buf.SeekGet( CUtlBuffer::SEEK_CURRENT, iMipSize );
-			}
-			continue;
-		}
-
 		for (int iFrame = 0; iFrame < m_nFrameCount; ++iFrame)
 		{
-			for (int iFace = 0; iFace < nFacesToRead; ++iFace)
+			for (int iFace = 0; iFace < m_nFaceCount; ++iFace)
 			{
 				// printf("\n tex %p mip %i frame %i face %i  size %i  buf offset %i", this, iMip, iFrame, iFace, iMipSize, buf.TellGet() );
 				unsigned char *pMipBits = ImageData( iFrame, iFace, iMip );
 				buf.Get( pMipBits, iMipSize );
 			}
+
+			// Strip out the spheremap in older versions
+			if ( IsCubeMap() && !bNoSkip && ( header.version[0] == 7 ) && ( header.version[1] >= 1 ) && ( header.version[1] < 5 ) )
+			{
+				buf.SeekGet( CUtlBuffer::SEEK_CURRENT, iMipSize );
+			}
 		}
 	}
 
-	return buf.IsValid();
+	bool bOk = buf.IsValid();
+	if ( !bOk && IsCubeMap() && ( header.version[0] == 7 ) && ( header.version[1] <= 4 ) )
+	{
+		if ( !bNoSkip )
+		{
+			bNoSkip = true;
+			buf.SeekGet( CUtlBuffer::SEEK_HEAD, nGet );
+			goto retryCubemapLoad;
+		}
+		Warning( "** Encountered stale cubemap! Please rebuild the following vtf:\n" );
+	}
+	return bOk;
 }
 
 void *CVTFTexture::SetResourceData( uint32 eType, void const *pData, size_t nNumBytes )
@@ -912,7 +922,7 @@ bool CVTFTexture::SetupByteSwap( CUtlBuffer &buf )
 static bool ReadHeaderFromBufferPastBaseHeader( CUtlBuffer &buf, VTFFileHeader_t &header )
 {
 	unsigned char *pBuf = (unsigned char*)(&header) + sizeof(VTFFileBaseHeader_t);
-	if ( header.version[1] == VTF_MINOR_VERSION )
+	if ( header.version[1] <= VTF_MINOR_VERSION && header.version[1] >= 4 )
 	{
 		buf.Get( pBuf, sizeof(VTFFileHeader_t) - sizeof(VTFFileBaseHeader_t) );
 	}
@@ -952,7 +962,7 @@ static bool ReadHeaderFromBufferPastBaseHeader( CUtlBuffer &buf, VTFFileHeader_t
 
 bool CVTFTexture::ReadHeader( CUtlBuffer &buf, VTFFileHeader_t &header )
 {
-	if ( IsX360() && SetupByteSwap( buf ) )
+	if ( (IsX360() || IsPS3()) && SetupByteSwap( buf ) )
 	{
 		VTFFileBaseHeader_t baseHeader;
 		m_Swap.SwapFieldsToTargetEndian( &baseHeader, (VTFFileBaseHeader_t*)buf.PeekGet() );
@@ -974,7 +984,7 @@ bool CVTFTexture::ReadHeader( CUtlBuffer &buf, VTFFileHeader_t &header )
 			{
 				m_Swap.SwapFieldsToTargetEndian( (VTFFileHeaderV7_3_t*)buf.PeekGet() );
 			}
-			else if ( baseHeader.version[1] == VTF_MINOR_VERSION )
+			else if ( baseHeader.version[1] >= 4 && baseHeader.version[1] <= VTF_MINOR_VERSION )
 			{
 				m_Swap.SwapFieldsToTargetEndian( (VTFFileHeader_t*)buf.PeekGet() );
 			}
@@ -1021,9 +1031,11 @@ bool CVTFTexture::ReadHeader( CUtlBuffer &buf, VTFFileHeader_t &header )
 	case 3:
 		header.flags &= VERSIONED_VTF_FLAGS_MASK_7_3;
 		// fall-through
+	case 4:
 	case VTF_MINOR_VERSION:
 		break;
 	}
+
 
 	return true;
 }
@@ -1033,22 +1045,12 @@ bool CVTFTexture::ReadHeader( CUtlBuffer &buf, VTFFileHeader_t &header )
 //-----------------------------------------------------------------------------
 bool CVTFTexture::Unserialize( CUtlBuffer &buf, bool bHeaderOnly, int nSkipMipLevels )
 {
-	return UnserializeEx( buf, bHeaderOnly, 0, nSkipMipLevels );
-}
-
-bool CVTFTexture::UnserializeEx( CUtlBuffer &buf, bool bHeaderOnly, int nForceFlags, int nSkipMipLevels )
-{
-	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s (header only: %d, nForceFlags: %d, skipMips: %d)", __FUNCTION__, bHeaderOnly ? 1 : 0, nForceFlags, nSkipMipLevels );
-
 	// When unserializing, we can skip a certain number of mip levels,
 	// and we also can just load everything but the image data
 	VTFFileHeader_t header;
 
 	if ( !ReadHeader( buf, header ) )
 		return false;
-
-	// Pretend these flags are also set.
-	header.flags |= nForceFlags;
 
 	if ( (header.flags & TEXTUREFLAGS_ENVMAP) && (header.width != header.height) )
 	{
@@ -1057,25 +1059,12 @@ bool CVTFTexture::UnserializeEx( CUtlBuffer &buf, bool bHeaderOnly, int nForceFl
 	}
 	if ( (header.flags & TEXTUREFLAGS_ENVMAP) && (header.depth != 1) )
 	{
-		Warning( "*** Encountered VTF volume texture cubemap!\n" );
+		Warning("*** Encountered VTF volume texture cubemap!\n");
 		return false;
 	}
 	if ( header.width <= 0 || header.height <= 0 || header.depth <= 0 )
 	{
 		Warning( "*** Encountered VTF invalid texture size!\n" );
-		return false;
-	}
-	if ( ( header.imageFormat < IMAGE_FORMAT_UNKNOWN ) || ( header.imageFormat >= NUM_IMAGE_FORMATS ) )
-	{
-		Warning( "*** Encountered VTF invalid image format!\n" );
-		return false;
-	}
-	
-	// If the header says we should be doing a texture allocation of more than 32M, just tell the caller we failed.
-	const int cMaxImageSizeLog2 = Q_log2( 32 * 1024 * 1024 );
-	if ( ( Q_log2( header.width ) + Q_log2( header.height ) + Q_log2( header.depth ) + Q_log2( header.numFrames ) > cMaxImageSizeLog2 ) || ( header.numResources > MAX_RSRC_DICTIONARY_ENTRIES ) )
-	{
-		STAGING_ONLY_EXEC( DevWarning( "Asked for a large texture to be created (%d h x %d w x %d d x %d f). Nope.\n", header.width, header.height, header.depth, header.numFrames ) );
 		return false;
 	}
 
@@ -1086,15 +1075,11 @@ bool CVTFTexture::UnserializeEx( CUtlBuffer &buf, bool bHeaderOnly, int nForceFl
 	m_nFlags = header.flags;
 	m_nFrameCount = header.numFrames;
 
-
 	m_nFaceCount = (m_nFlags & TEXTUREFLAGS_ENVMAP) ? CUBEMAP_FACE_COUNT : 1;
 
 	// NOTE: We're going to store space for all mip levels, even if we don't 
 	// have data on disk for them. This is for backward compatibility
 	m_nMipCount = ComputeMipCount();
-
-	m_nFinestMipmapLevel = 0;
-	m_nCoarsestMipmapLevel = m_nMipCount - 1;
 
 	m_vecReflectivity = header.reflectivity;
 	m_flBumpScale = header.bumpScale;
@@ -1117,10 +1102,6 @@ bool CVTFTexture::UnserializeEx( CUtlBuffer &buf, bool bHeaderOnly, int nForceFl
 		m_nLowResImageHeight = header.lowResImageHeight;
 	}
 	m_LowResImageFormat = header.lowResImageFormat;
-
-	// invalid image format
-	if ( ( m_LowResImageFormat < IMAGE_FORMAT_UNKNOWN ) || ( m_LowResImageFormat >= NUM_IMAGE_FORMATS ) )
-		return false;
 
 	// Keep the allocated memory chunks of data
 	if ( int( header.numResources ) < m_arrResourcesData.Count() )
@@ -1148,7 +1129,7 @@ bool CVTFTexture::UnserializeEx( CUtlBuffer &buf, bool bHeaderOnly, int nForceFl
 		if ( !buf.IsValid() )
 			return false;
 
-		if ( IsX360() )
+		if ( IsX360() || IsPS3() )
 		{
 			// Byte-swap the dictionary data offsets
 			for ( int k = 0; k < m_arrResourcesInfo.Count(); ++ k )
@@ -1214,15 +1195,6 @@ bool CVTFTexture::UnserializeEx( CUtlBuffer &buf, bool bHeaderOnly, int nForceFl
 	}
 
 	return true;
-}
-
-void CVTFTexture::GetMipmapRange( int* pOutFinest, int* pOutCoarsest )
-{
-	if ( pOutFinest )
-		*pOutFinest = m_nFinestMipmapLevel;
-
-	if ( pOutCoarsest )
-		*pOutCoarsest = m_nCoarsestMipmapLevel;
 }
 
 bool CVTFTexture::LoadNewResources( CUtlBuffer &buf )
@@ -1417,9 +1389,9 @@ static int PadBuffer( CUtlBuffer &buf, int iAlignment )
 //-----------------------------------------------------------------------------
 bool CVTFTexture::Serialize( CUtlBuffer &buf )
 {
-	if ( IsX360() )
+	if ( IsGameConsole() )
 	{
-		// Unsupported path, 360 has no reason and cannot serialize
+		// Unsupported path, console has no reason and cannot serialize
 		Assert( 0 );
 		return false;
 	}
@@ -1444,6 +1416,17 @@ bool CVTFTexture::Serialize( CUtlBuffer &buf )
 	header.numFrames = m_nFrameCount;
 	header.numMipLevels = m_nMipCount;
 	header.imageFormat = m_Format;
+
+	// fixup runtime image formats to be their non-runtime equivolents.
+	if ( m_Format == IMAGE_FORMAT_DXT1_RUNTIME )
+	{
+		header.imageFormat = IMAGE_FORMAT_DXT1;
+	}
+	else if ( m_Format == IMAGE_FORMAT_DXT5_RUNTIME )
+	{
+		header.imageFormat = IMAGE_FORMAT_DXT5;
+	}
+
 	VectorCopy( m_vecReflectivity, header.reflectivity );
 	header.bumpScale = m_flBumpScale;
 
@@ -1641,7 +1624,7 @@ int CVTFTexture::FaceSizeInBytes( int nMipLevel ) const
 	{
 		nHeight = 1;
 	}
-	return ImageLoader::SizeInBytes( m_Format ) * nWidth * nHeight;
+	return ImageLoader::SizeInBytes( m_Format, nWidth, nHeight );
 }
 
 
@@ -1670,7 +1653,6 @@ unsigned char *CVTFTexture::ImageData( int iFrame, int iFace, int iMipLevel, int
 	int nFaceBytes = FaceSizeInBytes( iMipLevel );
 	int nRowBytes = RowSizeInBytes( iMipLevel );
 	int nTexelBytes = ImageLoader::SizeInBytes( m_Format );
-
 	unsigned char *pMipBits = ImageData( iFrame, iFace, iMipLevel );
 	pMipBits += z * nFaceBytes + y * nRowBytes + x * nTexelBytes;
 	return pMipBits;
@@ -1768,7 +1750,7 @@ int CVTFTexture::GetImageOffset( int iFrame, int iFace, int iMipLevel, ImageForm
 	int i;
 	int iOffset = 0;
 
-	if ( IsX360() && ( m_nVersion[0] == VTF_X360_MAJOR_VERSION ) )
+	if ( ( IsX360() && ( m_nVersion[0] == VTF_X360_MAJOR_VERSION ) ) || ( IsPS3() && ( m_nVersion[0] == VTF_PS3_MAJOR_VERSION ) ) )
 	{
 		// 360 data is stored same as disk, 1x1 up to NxN
 		// get to the right miplevel
@@ -1849,8 +1831,8 @@ void CVTFTexture::ComputeMipLevelSubRect( Rect_t *pSrcRect, int nMipLevel, Rect_
 	}
 
 	float flInvShrink = 1.0f / (float)(1 << nMipLevel);
-	pSubRect->x = pSrcRect->x * flInvShrink;
-	pSubRect->y = pSrcRect->y * flInvShrink;
+	pSubRect->x = ( int )( pSrcRect->x * flInvShrink );
+	pSubRect->y = ( int )( pSrcRect->y * flInvShrink );
 	pSubRect->width = (int)ceil( (pSrcRect->x + pSrcRect->width) * flInvShrink ) - pSubRect->x;
 	pSubRect->height = (int)ceil( (pSrcRect->y + pSrcRect->height) * flInvShrink ) - pSubRect->y;
 }
@@ -1860,7 +1842,7 @@ void CVTFTexture::ComputeMipLevelSubRect( Rect_t *pSrcRect, int nMipLevel, Rect_
 // Converts the texture's image format. Use IMAGE_FORMAT_DEFAULT
 // if you want to be able to use various tool functions below
 //-----------------------------------------------------------------------------
-void CVTFTexture::ConvertImageFormat( ImageFormat fmt, bool bNormalToDUDV )
+void CVTFTexture::ConvertImageFormat( ImageFormat fmt, bool bNormalToDUDV, bool bNormalToDXT5GA )
 {
 	if ( !m_pImageData )
 	{
@@ -1883,7 +1865,7 @@ void CVTFTexture::ConvertImageFormat( ImageFormat fmt, bool bNormalToDUDV )
 		return;
 	}
 
-	if ( IsX360() && ( m_nVersion[0] == VTF_X360_MAJOR_VERSION ) )
+	if ( ( IsX360() && ( m_nVersion[0] == VTF_X360_MAJOR_VERSION ) ) || ( IsPS3() && ( m_nVersion[0] == VTF_PS3_MAJOR_VERSION ) ) )
 	{
 		// 360 textures should be baked in final format
 		Assert( 0 );
@@ -1893,12 +1875,7 @@ void CVTFTexture::ConvertImageFormat( ImageFormat fmt, bool bNormalToDUDV )
 	// FIXME: Should this be re-written to not do an allocation?
 	int iConvertedSize = ComputeTotalSize( fmt );
 
-	unsigned char *pConvertedImage = new unsigned char[ iConvertedSize ];
-
-	// This can happen for large, bogus textures.
-	if ( !pConvertedImage )
-		return;
-
+	unsigned char *pConvertedImage = (unsigned char*)MemAllocScratch(iConvertedSize);
 	for (int iMip = 0; iMip < m_nMipCount; ++iMip)
 	{
 		int nMipWidth, nMipHeight, nMipDepth;
@@ -1912,8 +1889,7 @@ void CVTFTexture::ConvertImageFormat( ImageFormat fmt, bool bNormalToDUDV )
 			for (int iFace = 0; iFace < m_nFaceCount; ++iFace)
 			{
 				unsigned char *pSrcData = ImageData( iFrame, iFace, iMip );
-				unsigned char *pDstData = pConvertedImage + 
-					GetImageOffset( iFrame, iFace, iMip, fmt );
+				unsigned char *pDstData = pConvertedImage + GetImageOffset( iFrame, iFace, iMip, fmt );
 
 				for ( int z = 0; z < nMipDepth; ++z, pSrcData += nSrcFaceStride, pDstData += nDstFaceStride )
 				{
@@ -1940,6 +1916,10 @@ void CVTFTexture::ConvertImageFormat( ImageFormat fmt, bool bNormalToDUDV )
 							return;
 						}
 					}
+					else if( bNormalToDXT5GA )
+					{
+						ImageLoader::ConvertNormalMapARGB8888ToDXT5GA( pSrcData, pDstData, nMipWidth, nMipHeight );
+					}
 					else
 					{
 						ImageLoader::ConvertImageFormat( pSrcData, m_Format, 
@@ -1952,13 +1932,15 @@ void CVTFTexture::ConvertImageFormat( ImageFormat fmt, bool bNormalToDUDV )
 
 	if ( !AllocateImageData(iConvertedSize) )
 		return;
+		
+	Assert(iConvertedSize<=m_nImageAllocSize);
 
 	memcpy( m_pImageData, pConvertedImage, iConvertedSize );
 	m_Format = fmt;
 
 	if ( !ImageLoader::IsCompressed( fmt ) )
 	{
-		int nAlphaBits = ImageLoader::ImageFormatInfo( fmt ).m_NumAlphaBits;
+		int nAlphaBits = ImageLoader::ImageFormatInfo( fmt ).m_nNumAlphaBits;
 		if ( nAlphaBits > 1 )
 		{
 			m_nFlags |= TEXTUREFLAGS_EIGHTBITALPHA;
@@ -1982,7 +1964,7 @@ void CVTFTexture::ConvertImageFormat( ImageFormat fmt, bool bNormalToDUDV )
 		}
 	}
 
-	delete [] pConvertedImage;
+	MemFreeScratch();
 }
 
 
@@ -2367,7 +2349,7 @@ void CVTFTexture::GenerateSpheremap( LookDir_t lookDir )
 {
 	if (!IsCubeMap())
 		return;
-
+	/*
 	// HDRFIXME: Need to re-enable this.
 //	Assert( m_Format == IMAGE_FORMAT_RGBA8888 );
 
@@ -2377,7 +2359,7 @@ void CVTFTexture::GenerateSpheremap( LookDir_t lookDir )
 	// Allocate the bits for the spheremap
 	Assert( m_nDepth == 1 );
 	int iMemRequired = ComputeFaceSize( 0, IMAGE_FORMAT_RGBA8888 );
-	unsigned char *pSphereMapBits = new unsigned char [ iMemRequired ];
+	unsigned char *pSphereMapBits = (unsigned char *)MemAllocScratch(iMemRequired);
 
 	// Generate a spheremap for each frame of the cubemap
 	for (int iFrame = 0; iFrame < m_nFrameCount; ++iFrame)
@@ -2402,7 +2384,8 @@ void CVTFTexture::GenerateSpheremap( LookDir_t lookDir )
 	}
 
 	// Free memory
-	delete [] pSphereMapBits;
+	MemFreeScratch();
+	*/
 }
 
 void CVTFTexture::GenerateHemisphereMap( unsigned char *pSphereMapBitsRGBA, int targetWidth, 
@@ -2517,6 +2500,102 @@ void CVTFTexture::NormalizeTopMipLevel()
 	}
 }
 
+static inline int PixelOffset( int x, int y, int w, int h )
+{
+	x = ( x + w ) % w;
+	y = ( y + h ) % h;
+	return y * w + x;
+}
+
+void CVTFTexture::Compute2DGradient()
+{
+	int nSrcWidth, nSrcHeight, nSrcDepth;
+	int srcMipLevel = 0;
+	ComputeMipLevelDimensions( srcMipLevel, &nSrcWidth, &nSrcHeight, &nSrcDepth );
+	for ( int iFrame = 0; iFrame < m_nFrameCount; ++iFrame )
+	{
+		for ( int iFace = 0; iFace < m_nFaceCount; ++iFace )
+		{
+			unsigned char *pSrcLevel = ImageData( iFrame, iFace, srcMipLevel );
+			for ( int iSlice = 0; iSlice < nSrcDepth; iSlice++ )
+			{
+				uint8 *pSliceData = pSrcLevel + iSlice * nSrcWidth * nSrcHeight * 4;
+				// Copy G to A channel
+				for ( int iY = 0; iY < nSrcHeight; iY++ )
+				{
+					for ( int iX = 0; iX < nSrcWidth; iX++ )
+					{
+						// Copy green channel into alpha
+						pSliceData[ PixelOffset( iX, iY, nSrcWidth, nSrcHeight ) * 4 + 3 ] = pSliceData[ PixelOffset( iX, iY, nSrcWidth, nSrcHeight ) * 4 + 1 ];
+					}
+				}
+
+
+				for ( int iY = 0; iY < nSrcHeight; iY++ )
+				{
+					for ( int iX = 0; iX < nSrcWidth; iX++ )
+					{
+						float flSobelX, flSobelY;
+						flSobelX  = pSliceData[ PixelOffset( iX - 1, iY - 1, nSrcWidth, nSrcHeight ) * 4 + 3 ] * -1.0f; // Apply Sobel filter in X, with wrapping texel accesses
+						flSobelX += pSliceData[ PixelOffset( iX - 1, iY + 0, nSrcWidth, nSrcHeight ) * 4 + 3 ] * -2.0f; //
+						flSobelX += pSliceData[ PixelOffset( iX - 1, iY + 1, nSrcWidth, nSrcHeight ) * 4 + 3 ] * -1.0f; //	[ -1  0  1 ]
+						flSobelX += pSliceData[ PixelOffset( iX + 1, iY - 1, nSrcWidth, nSrcHeight ) * 4 + 3 ] * 1.0f;  //	[ -2  0  2 ]
+						flSobelX += pSliceData[ PixelOffset( iX + 1, iY + 0, nSrcWidth, nSrcHeight ) * 4 + 3 ] * 2.0f;  //	[ -1  0  1 ]
+						flSobelX += pSliceData[ PixelOffset( iX + 1, iY + 1, nSrcWidth, nSrcHeight ) * 4 + 3 ] * 1.0f;  //
+						flSobelX /= 255.0f;
+
+						flSobelY  = pSliceData[ PixelOffset( iX - 1, iY - 1, nSrcWidth, nSrcHeight ) * 4 + 3 ] * -1.0f; // Apply Sobel filter in Y, with wrapping texel accesses
+						flSobelY += pSliceData[ PixelOffset( iX + 0, iY - 1, nSrcWidth, nSrcHeight ) * 4 + 3 ] * -2.0f; //
+						flSobelY += pSliceData[ PixelOffset( iX + 1, iY - 1, nSrcWidth, nSrcHeight ) * 4 + 3 ] * -1.0f; //	[ -1 -2  -1 ]
+						flSobelY += pSliceData[ PixelOffset( iX - 1, iY + 1, nSrcWidth, nSrcHeight ) * 4 + 3 ] * 1.0f;  //	[  0  0   0 ]
+						flSobelY += pSliceData[ PixelOffset( iX + 0, iY + 1, nSrcWidth, nSrcHeight ) * 4 + 3 ] * 2.0f;  //	[  1 2 1 ]
+						flSobelY += pSliceData[ PixelOffset( iX + 1, iY + 1, nSrcWidth, nSrcHeight ) * 4 + 3 ] * 1.0f;  //
+						flSobelY /= 255.0f;
+
+						float flLength = sqrtf( ( flSobelX * flSobelX ) + ( flSobelY * flSobelY ) );
+
+						float flX = ( flLength == 0.0f ) ? 0.5f : ( ( flSobelX / flLength ) + 1.0f ) / 2.0f; // Normalized, since we care about direction, but not magnitude
+						float flY = ( flLength == 0.0f ) ? 0.5f : ( ( -flSobelY / flLength ) + 1.0f ) / 2.0f;	// Inverting Y to match source1-style normals
+
+						// 2D gradient story in R and G
+						pSliceData[ PixelOffset( iX, iY, nSrcWidth, nSrcHeight ) * 4 + 0 ] = uint8( flX*255.0f );
+						pSliceData[ PixelOffset( iX, iY, nSrcWidth, nSrcHeight ) * 4 + 1 ] = uint8( flY*255.0f );
+						pSliceData[ PixelOffset( iX, iY, nSrcWidth, nSrcHeight ) * 4 + 2 ] = 0;
+					}
+				}
+			}
+		}
+	}
+}
+//-----------------------------------------------------------------------------
+// Converts PC Gamma to 360 Gamma
+//-----------------------------------------------------------------------------
+static void ConvertPcTo360SrgbRGBA8888( unsigned char *pImageData, int iWidth, int iHeight )
+{
+	int nBytesPerPixel = 4;
+	for ( int32 h = 0; h < iHeight; h++ ) // For each row
+	{
+		for ( int32 w = 0; w < iWidth; w++ ) // For each texel in this row
+		{
+			unsigned char *pRGB[3] = { NULL, NULL, NULL };
+
+			pRGB[0] = &( pImageData[ ( h * iWidth * nBytesPerPixel ) + ( w * nBytesPerPixel ) + 0 ] ); // Red
+			pRGB[1] = &( pImageData[ ( h * iWidth * nBytesPerPixel ) + ( w * nBytesPerPixel ) + 1 ] ); // Green
+			pRGB[2] = &( pImageData[ ( h * iWidth * nBytesPerPixel ) + ( w * nBytesPerPixel ) + 2 ] ); // Blue
+
+			// Modify RGB data in place
+			for ( int j = 0; j < 3; j++ ) // For red, green, blue
+			{
+				float flSrgbGamma = float( *( pRGB[j] ) ) / 255.0f;
+				float fl360Gamma = SrgbGammaTo360Gamma( flSrgbGamma );
+
+				fl360Gamma = clamp( fl360Gamma, 0.0f, 1.0f );
+				*( pRGB[j] ) = ( unsigned char ) ( clamp( ( ( fl360Gamma * 255.0f ) + 0.5f ), 0.0f, 255.0f ) );
+			}
+		}
+	}
+}
+
 //-----------------------------------------------------------------------------
 // Generates mipmaps from the base mip levels
 //-----------------------------------------------------------------------------
@@ -2528,7 +2607,7 @@ void CVTFTexture::GenerateMipmaps()
 //		return;
 //	}
 
-	Assert( m_Format == IMAGE_FORMAT_RGBA8888 || m_Format == IMAGE_FORMAT_RGB323232F );
+	Assert( m_Format == IMAGE_FORMAT_RGBA8888 || m_Format == IMAGE_FORMAT_RGB323232F || m_Format == IMAGE_FORMAT_RGBA32323232F );
 
 	// FIXME: Should we be doing anything special for normalmaps other than a final normalization pass?
 	ImageLoader::ResampleInfo_t info;
@@ -2578,8 +2657,8 @@ void CVTFTexture::GenerateMipmaps()
 	int numMipsClampedLod = 0;
 	if ( TextureLODControlSettings_t const *pLodSettings = ( TextureLODControlSettings_t const * ) GetResourceData( VTF_RSRC_TEXTURE_LOD_SETTINGS, NULL ) )
 	{
-		int iClampX = 1 << min( pLodSettings->m_ResolutionClampX, pLodSettings->m_ResolutionClampX_360 );
-		int iClampY = 1 << min( pLodSettings->m_ResolutionClampX, pLodSettings->m_ResolutionClampX_360 );
+		int iClampX = 1 << MIN( pLodSettings->m_ResolutionClampX, pLodSettings->m_ResolutionClampX_360 );
+		int iClampY = 1 << MIN( pLodSettings->m_ResolutionClampX, pLodSettings->m_ResolutionClampX_360 );
 
 		while ( iClampX < m_nWidth || iClampY < m_nHeight )
 		{
@@ -2587,6 +2666,36 @@ void CVTFTexture::GenerateMipmaps()
 			iClampX <<= 1;
 			iClampY <<= 1;
 		}
+	}
+
+	if ( m_Options.flags0 & VtfProcessingOptions::OPT_SRGB_PC_TO_360 )
+	{
+		int iMipLevel = 0; // Perform srgb-correction on mip0, it will be propagated down the mip chain
+		for ( int iFrame = 0; iFrame < m_nFrameCount; ++iFrame )
+		{
+			for ( int iFace = 0; iFace < m_nFaceCount; ++iFace )
+			{
+				unsigned char *pImageData = ImageData( iFrame, iFace, iMipLevel );
+				int w, h, d;
+				ComputeMipLevelDimensions( iMipLevel, &w, &h, &d );
+				if ( m_Format == IMAGE_FORMAT_RGB323232F )
+				{
+					// We only convert 8-bit art, so do nothing for 32f?
+				}
+				else
+				{
+					ConvertPcTo360SrgbRGBA8888( pImageData, w, h );
+				}
+			}
+		}
+
+		// Mark as pwl corrected, used as a debugging aid in VXConsole
+		m_nFlags |= TEXTUREFLAGS_PWL_CORRECTED;
+	}
+	else
+	{
+		// Mark not pwl
+		m_nFlags &= ~TEXTUREFLAGS_PWL_CORRECTED;
 	}
 
 	for ( int iMipLevel = 1; iMipLevel < m_nMipCount; ++iMipLevel )
@@ -2667,7 +2776,11 @@ void CVTFTexture::GenerateMipmaps()
 				info.m_pSrc = pSrcLevel;
 				info.m_pDest = pDstLevel;
 				ComputeMipLevelDimensions( nSrcMipLevel, &info.m_nSrcWidth, &info.m_nSrcHeight, &info.m_nSrcDepth );
-				if( m_Format == IMAGE_FORMAT_RGB323232F )
+				if( m_Format == IMAGE_FORMAT_RGBA32323232F )
+				{
+					ImageLoader::ResampleRGBA32323232F( info );
+				}
+				else if( m_Format == IMAGE_FORMAT_RGB323232F )
 				{
 					ImageLoader::ResampleRGB323232F( info );
 				}
@@ -2704,6 +2817,35 @@ void CVTFTexture::PutOneOverMipLevelInAlpha()
 				for( pDst = pDstLevel; pDst < pDstLevel + size * 4; pDst += 4 )
 				{
 					pDst[3] = ooMipLevel;
+				}
+			}
+		}
+	}
+}
+
+void CVTFTexture::PremultAlphaWithMipFraction()
+{
+	Assert( m_Format == IMAGE_FORMAT_RGBA8888 );
+
+	for (int iMipLevel = 0; iMipLevel < m_nMipCount; ++iMipLevel)
+	{
+		int nMipWidth, nMipHeight, nMipDepth;
+		ComputeMipLevelDimensions( iMipLevel, &nMipWidth, &nMipHeight, &nMipDepth );
+		int size = nMipWidth * nMipHeight * nMipDepth;
+		int maxAlphaAtMip = clamp ( m_Options.fullAlphaAtMipLevel, 1, m_nMipCount );
+		float flMipScale = ( float )( iMipLevel ) / ( float )( maxAlphaAtMip );
+		flMipScale = clamp ( flMipScale, 0.0f, 1.0f );
+
+		for (int iFrame = 0; iFrame < m_nFrameCount; ++iFrame)
+		{
+			for (int iFace = 0; iFace < m_nFaceCount; ++iFace)
+			{
+				unsigned char *pDstLevel = ImageData( iFrame, iFace, iMipLevel );
+				unsigned char *pDst;
+				for( pDst = pDstLevel; pDst < pDstLevel + size * 4; pDst += 4 )
+				{
+					pDst[3] = ( unsigned char )( ( float )( pDst[3] ) * flMipScale );
+					pDst[3] = ( unsigned char )clamp( pDst[3], m_Options.minAlpha, 255 );
 				}
 			}
 		}
@@ -2824,7 +2966,7 @@ void CVTFTexture::ComputeAlphaFlags()
 // Gets the texture all internally consistent assuming you've loaded
 // mip 0 of all faces of all frames
 //-----------------------------------------------------------------------------
-void CVTFTexture::PostProcess( bool bGenerateSpheremap, LookDir_t lookDir, bool bAllowFixCubemapOrientation )
+void CVTFTexture::PostProcess( bool bGenerateSpheremap, LookDir_t lookDir, bool bAllowFixCubemapOrientation, bool bLoadedMiplevels )
 {
 	// HDRFIXME: Make sure that all of the below functions check for the proper formats if we get rid of this assert.
 //	Assert( m_Format == IMAGE_FORMAT_RGBA8888 );
@@ -2845,17 +2987,30 @@ void CVTFTexture::PostProcess( bool bGenerateSpheremap, LookDir_t lookDir, bool 
 			GenerateSpheremap(lookDir);
 	}
 
+	if ( m_Options.flags0 & VtfProcessingOptions::OPT_COMPUTE_GRADIENT )
+	{
+		Compute2DGradient();
+	}
+
 	// Normalize the top mip level if necessary.
 	NormalizeTopMipLevel();
 	
 	// Generate mipmap levels
-	GenerateMipmaps();
+	if ( !bLoadedMiplevels )
+	{
+		GenerateMipmaps();
+	}
 
 	if( m_Options.flags0 & VtfProcessingOptions::OPT_SET_ALPHA_ONEOVERMIP )
 	{
 		PutOneOverMipLevelInAlpha();
 	}
 	
+	if( m_Options.flags0 & VtfProcessingOptions::OPT_PREMULT_ALPHA_MIPFRACTION )
+	{
+		PremultAlphaWithMipFraction();
+	}
+
 	// Compute reflectivity
 	ComputeReflectivity();
 
@@ -2868,7 +3023,7 @@ void CVTFTexture::PostProcess( bool bGenerateSpheremap, LookDir_t lookDir, bool 
 void CVTFTexture::SetPostProcessingSettings( VtfProcessingOptions const *pOptions )
 {
 	memset( &m_Options, 0, sizeof( m_Options ) );
-	memcpy( &m_Options, pOptions, min( (uint32)sizeof( m_Options ), pOptions->cbSize ) );
+	memcpy( &m_Options, pOptions, MIN( sizeof( m_Options ), pOptions->cbSize ) );
 	m_Options.cbSize = sizeof( m_Options );
 
 	// Optionally perform the fixups
@@ -3305,6 +3460,7 @@ void CVTFTexture::MatchCubeMapBorders( int iStage, ImageFormat finalFormat, bool
 	// HDRFIXME: hack hack hack
 	if( m_Format != IMAGE_FORMAT_RGBA8888 )
 	{
+		//Assert( 0 );
 		return;
 	}
 	if ( !IsCubeMap() )

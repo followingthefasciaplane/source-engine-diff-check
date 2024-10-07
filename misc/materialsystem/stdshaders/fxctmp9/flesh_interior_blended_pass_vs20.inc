@@ -1,3 +1,8 @@
+// ALL SKIP STATEMENTS THAT AFFECT THIS SHADER!!!
+// ( $DOWATERFOG == 0 ) && ( $DOPIXELFOG && $HARDWAREFOGBLEND )
+// ( $DOWATERFOG == 0 ) && ( $HARDWAREFOGBLEND == 0 ) && ( $DOPIXELFOG == 0 )
+// ( $FLATTEN_STATIC_CONTROL_FLOW == 0 ) && ( $NUM_LIGHTS > 0 )  [PC]
+// defined $LIGHTING_PREVIEW && defined $FASTPATH && $LIGHTING_PREVIEW && $FASTPATH
 #include "shaderlib/cshader.h"
 class flesh_interior_blended_pass_vs20_Static_Index
 {
@@ -17,56 +22,111 @@ public:
 	}
 	void SetHALFLAMBERT( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nHALFLAMBERT = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bHALFLAMBERT = true;
 #endif
 	}
 private:
-	int m_nUSE_STATIC_CONTROL_FLOW;
+	int m_nFLATTEN_STATIC_CONTROL_FLOW;
 #ifdef _DEBUG
-	bool m_bUSE_STATIC_CONTROL_FLOW;
+	bool m_bFLATTEN_STATIC_CONTROL_FLOW;
 #endif
 public:
-	void SetUSE_STATIC_CONTROL_FLOW( int i )
+	void SetFLATTEN_STATIC_CONTROL_FLOW( int i )
 	{
 		Assert( i >= 0 && i <= 1 );
-		m_nUSE_STATIC_CONTROL_FLOW = i;
+		m_nFLATTEN_STATIC_CONTROL_FLOW = i;
 #ifdef _DEBUG
-		m_bUSE_STATIC_CONTROL_FLOW = true;
+		m_bFLATTEN_STATIC_CONTROL_FLOW = true;
 #endif
 	}
-	void SetUSE_STATIC_CONTROL_FLOW( bool i )
+	void SetFLATTEN_STATIC_CONTROL_FLOW( bool i )
 	{
-		m_nUSE_STATIC_CONTROL_FLOW = i ? 1 : 0;
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
+		m_nFLATTEN_STATIC_CONTROL_FLOW = i ? 1 : 0;
 #ifdef _DEBUG
-		m_bUSE_STATIC_CONTROL_FLOW = true;
+		m_bFLATTEN_STATIC_CONTROL_FLOW = true;
+#endif
+	}
+private:
+	int m_nDOPIXELFOG;
+#ifdef _DEBUG
+	bool m_bDOPIXELFOG;
+#endif
+public:
+	void SetDOPIXELFOG( int i )
+	{
+		Assert( i >= 0 && i <= 1 );
+		m_nDOPIXELFOG = i;
+#ifdef _DEBUG
+		m_bDOPIXELFOG = true;
+#endif
+	}
+	void SetDOPIXELFOG( bool i )
+	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
+		m_nDOPIXELFOG = i ? 1 : 0;
+#ifdef _DEBUG
+		m_bDOPIXELFOG = true;
+#endif
+	}
+private:
+	int m_nHARDWAREFOGBLEND;
+#ifdef _DEBUG
+	bool m_bHARDWAREFOGBLEND;
+#endif
+public:
+	void SetHARDWAREFOGBLEND( int i )
+	{
+		Assert( i >= 0 && i <= 1 );
+		m_nHARDWAREFOGBLEND = i;
+#ifdef _DEBUG
+		m_bHARDWAREFOGBLEND = true;
+#endif
+	}
+	void SetHARDWAREFOGBLEND( bool i )
+	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
+		m_nHARDWAREFOGBLEND = i ? 1 : 0;
+#ifdef _DEBUG
+		m_bHARDWAREFOGBLEND = true;
 #endif
 	}
 public:
-	flesh_interior_blended_pass_vs20_Static_Index( )
+	// CONSTRUCTOR
+	flesh_interior_blended_pass_vs20_Static_Index( IShaderShadow *pShaderShadow, IMaterialVar **params )
 	{
 #ifdef _DEBUG
 		m_bHALFLAMBERT = false;
 #endif // _DEBUG
 		m_nHALFLAMBERT = 0;
 #ifdef _DEBUG
-		m_bUSE_STATIC_CONTROL_FLOW = false;
+		m_bFLATTEN_STATIC_CONTROL_FLOW = false;
 #endif // _DEBUG
-		m_nUSE_STATIC_CONTROL_FLOW = 0;
+		m_nFLATTEN_STATIC_CONTROL_FLOW = 0;
+#ifdef _DEBUG
+		m_bDOPIXELFOG = true;
+#endif // _DEBUG
+		m_nDOPIXELFOG = g_pHardwareConfig->SupportsPixelShaders_2_b() ;
+#ifdef _DEBUG
+		m_bHARDWAREFOGBLEND = true;
+#endif // _DEBUG
+		m_nHARDWAREFOGBLEND = !g_pHardwareConfig->SupportsPixelShaders_2_b() ;
 	}
 	int GetIndex()
 	{
 		// Asserts to make sure that we aren't using any skipped combinations.
 		// Asserts to make sure that we are setting all of the combination vars.
 #ifdef _DEBUG
-		bool bAllStaticVarsDefined = m_bHALFLAMBERT && m_bUSE_STATIC_CONTROL_FLOW;
+		bool bAllStaticVarsDefined = m_bHALFLAMBERT && m_bFLATTEN_STATIC_CONTROL_FLOW && m_bDOPIXELFOG && m_bHARDWAREFOGBLEND;
 		Assert( bAllStaticVarsDefined );
 #endif // _DEBUG
-		return ( 96 * m_nHALFLAMBERT ) + ( 192 * m_nUSE_STATIC_CONTROL_FLOW ) + 0;
+		return ( 96 * m_nHALFLAMBERT ) + ( 192 * m_nFLATTEN_STATIC_CONTROL_FLOW ) + ( 384 * m_nDOPIXELFOG ) + ( 768 * m_nHARDWAREFOGBLEND ) + 0;
 	}
 };
-#define shaderStaticTest_flesh_interior_blended_pass_vs20 vsh_forgot_to_set_static_HALFLAMBERT + vsh_forgot_to_set_static_USE_STATIC_CONTROL_FLOW + 0
+#define shaderStaticTest_flesh_interior_blended_pass_vs20 vsh_forgot_to_set_static_HALFLAMBERT + vsh_forgot_to_set_static_FLATTEN_STATIC_CONTROL_FLOW + 0
 class flesh_interior_blended_pass_vs20_Dynamic_Index
 {
 private:
@@ -85,6 +145,7 @@ public:
 	}
 	void SetCOMPRESSED_VERTS( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nCOMPRESSED_VERTS = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bCOMPRESSED_VERTS = true;
@@ -106,6 +167,7 @@ public:
 	}
 	void SetSKINNING( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nSKINNING = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bSKINNING = true;
@@ -127,6 +189,7 @@ public:
 	}
 	void SetDOWATERFOG( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nDOWATERFOG = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bDOWATERFOG = true;
@@ -148,6 +211,7 @@ public:
 	}
 	void SetDYNAMIC_LIGHT( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nDYNAMIC_LIGHT = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bDYNAMIC_LIGHT = true;
@@ -169,6 +233,7 @@ public:
 	}
 	void SetSTATIC_LIGHT( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nSTATIC_LIGHT = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bSTATIC_LIGHT = true;
@@ -190,13 +255,15 @@ public:
 	}
 	void SetNUM_LIGHTS( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 2 );
 		m_nNUM_LIGHTS = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bNUM_LIGHTS = true;
 #endif
 	}
 public:
-	flesh_interior_blended_pass_vs20_Dynamic_Index()
+	// CONSTRUCTOR
+	flesh_interior_blended_pass_vs20_Dynamic_Index( IShaderDynamicAPI *pShaderAPI )
 	{
 #ifdef _DEBUG
 		m_bCOMPRESSED_VERTS = false;
@@ -207,9 +274,9 @@ public:
 #endif // _DEBUG
 		m_nSKINNING = 0;
 #ifdef _DEBUG
-		m_bDOWATERFOG = false;
+		m_bDOWATERFOG = true;
 #endif // _DEBUG
-		m_nDOWATERFOG = 0;
+		m_nDOWATERFOG = ( pShaderAPI->GetSceneFogMode() == MATERIAL_FOG_LINEAR_BELOW_FOG_Z ) ;
 #ifdef _DEBUG
 		m_bDYNAMIC_LIGHT = false;
 #endif // _DEBUG
@@ -234,4 +301,37 @@ public:
 		return ( 1 * m_nCOMPRESSED_VERTS ) + ( 2 * m_nSKINNING ) + ( 4 * m_nDOWATERFOG ) + ( 8 * m_nDYNAMIC_LIGHT ) + ( 16 * m_nSTATIC_LIGHT ) + ( 32 * m_nNUM_LIGHTS ) + 0;
 	}
 };
-#define shaderDynamicTest_flesh_interior_blended_pass_vs20 vsh_forgot_to_set_dynamic_COMPRESSED_VERTS + vsh_forgot_to_set_dynamic_SKINNING + vsh_forgot_to_set_dynamic_DOWATERFOG + vsh_forgot_to_set_dynamic_DYNAMIC_LIGHT + vsh_forgot_to_set_dynamic_STATIC_LIGHT + vsh_forgot_to_set_dynamic_NUM_LIGHTS + 0
+#define shaderDynamicTest_flesh_interior_blended_pass_vs20 vsh_forgot_to_set_dynamic_COMPRESSED_VERTS + vsh_forgot_to_set_dynamic_SKINNING + vsh_forgot_to_set_dynamic_DYNAMIC_LIGHT + vsh_forgot_to_set_dynamic_STATIC_LIGHT + vsh_forgot_to_set_dynamic_NUM_LIGHTS + 0
+
+static const ShaderComboInformation_t s_DynamicComboArray_flesh_interior_blended_pass_vs20[6] = 
+{
+	{ "COMPRESSED_VERTS", 0, 1 },
+	{ "SKINNING", 0, 1 },
+	{ "DOWATERFOG", 0, 1 },
+	{ "DYNAMIC_LIGHT", 0, 1 },
+	{ "STATIC_LIGHT", 0, 1 },
+	{ "NUM_LIGHTS", 0, 2 },
+};
+
+static const ShaderComboInformation_t s_StaticComboArray_flesh_interior_blended_pass_vs20[4] = 
+{
+	{ "HALFLAMBERT", 0, 1 },
+	{ "FLATTEN_STATIC_CONTROL_FLOW", 0, 1 },
+	{ "DOPIXELFOG", 0, 1 },
+	{ "HARDWAREFOGBLEND", 0, 1 },
+};
+static const ShaderComboSemantics_t flesh_interior_blended_pass_vs20_combos =
+{
+	"flesh_interior_blended_pass_vs20", s_DynamicComboArray_flesh_interior_blended_pass_vs20, 6, s_StaticComboArray_flesh_interior_blended_pass_vs20, 4 
+};
+
+class ConstructMe_flesh_interior_blended_pass_vs20
+{
+public:
+	ConstructMe_flesh_interior_blended_pass_vs20()
+	{
+		GetShaderDLL()->AddShaderComboInformation( &flesh_interior_blended_pass_vs20_combos );
+	}
+};
+
+static ConstructMe_flesh_interior_blended_pass_vs20 s_ConstructMe_flesh_interior_blended_pass_vs20;

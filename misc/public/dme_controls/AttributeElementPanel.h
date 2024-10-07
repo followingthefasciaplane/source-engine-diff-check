@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======//
 //
 // Purpose: 
 //
@@ -43,6 +43,7 @@ public:
 
 protected:
 	virtual vgui::Panel *GetDataPanel();
+	virtual void SetFont( HFont font );
 	virtual void OnCreateDragData( KeyValues *msg );
 
 	MESSAGE_FUNC(OnTextChanged, "TextChanged")
@@ -55,6 +56,7 @@ private:
 
 	CAttributeTextEntry		*m_pData;
 	bool					m_bShowMemoryUsage;
+	bool					m_bShowUniqueID;
 };
 
 

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2003, Valve LLC, All rights reserved. ============
 //
 // Purpose: 
 //
@@ -6,16 +6,11 @@
 
 #include "cbase.h"
 #include "attribute_manager.h"
-#include "gamestringpool.h"
 #include "saverestore.h"
 #include "saverestore_utlvector.h"
 #include "fmtstr.h"
-#include "KeyValues.h"
+#include "keyvalues.h"
 #include "econ_item_system.h"
-
-#if defined( TF_DLL ) || defined( TF_CLIENT_DLL )
-	#include "tf_gamerules.h"								// attribute cache flushing; can be generalized if/when Dota needs similar functionality
-#endif // defined( TF_DLL ) || defined( TF_CLIENT_DLL )
 
 #define PROVIDER_PARITY_BITS		6
 #define PROVIDER_PARITY_MASK		((1<<PROVIDER_PARITY_BITS)-1)
@@ -24,19 +19,18 @@
 // ATTRIBUTE MANAGER SAVE/LOAD & NETWORKING
 //===================================================================================================================
 BEGIN_DATADESC_NO_BASE( CAttributeManager )
-	DEFINE_UTLVECTOR( m_Providers,				FIELD_EHANDLE ),
-	DEFINE_UTLVECTOR( m_Receivers,				FIELD_EHANDLE ),
-	DEFINE_FIELD( m_iReapplyProvisionParity,	FIELD_INTEGER ),
-	DEFINE_FIELD( m_hOuter,						FIELD_EHANDLE ),
-	// DEFINE_FIELD( m_bPreventLoopback,		FIELD_BOOLEAN ),		// Don't need to save
-	DEFINE_FIELD( m_ProviderType,				FIELD_INTEGER ),
+	DEFINE_UTLVECTOR( m_Providers,			FIELD_EHANDLE ),
+	DEFINE_FIELD( m_iReapplyProvisionParity,		FIELD_INTEGER ),
+	DEFINE_FIELD( m_hOuter,					FIELD_EHANDLE ),
+	// DEFINE_FIELD( m_bPreventLoopback,	FIELD_BOOLEAN ),		// Don't need to save
+	DEFINE_FIELD( m_ProviderType,			FIELD_INTEGER ),
 END_DATADESC()
 
 BEGIN_DATADESC( CAttributeContainer )
 	DEFINE_EMBEDDED( m_Item ),
 END_DATADESC()
 
-#ifndef DOTA_DLL
+#if defined( TF_DLL ) || defined( CSTRIKE_DLL )
 BEGIN_DATADESC( CAttributeContainerPlayer )
 END_DATADESC()
 #endif
@@ -73,7 +67,7 @@ BEGIN_NETWORK_TABLE_NOBASE( CAttributeContainer, DT_AttributeContainer )
 #endif
 END_NETWORK_TABLE()
 
-#ifndef DOTA_DLL
+#if defined( TF_DLL ) || defined( CSTRIKE_DLL )
 BEGIN_NETWORK_TABLE_NOBASE( CAttributeContainerPlayer, DT_AttributeContainerPlayer )
 #ifndef CLIENT_DLL
 	SendPropEHandle( SENDINFO(m_hOuter) ),
@@ -109,26 +103,18 @@ template<> int AttributeConvertFromFloat<int>( float flValue )
 //-----------------------------------------------------------------------------
 void *CAttributeManager::operator new( size_t stAllocateBlock )
 {
-	// call into engine to get memory
-	Assert( stAllocateBlock != 0 );
-	void *pMem = malloc( stAllocateBlock );
+	ASSERT_MEMALLOC_WILL_ALIGN( CAttributeManager );
+	void *pMem = MemAlloc_Alloc( stAllocateBlock );
 	memset( pMem, 0, stAllocateBlock );
 	return pMem;
 };
 
 void *CAttributeManager::operator new( size_t stAllocateBlock, int nBlockUse, const char *pFileName, int nLine )
 {
-	// call into engine to get memory
-	Assert( stAllocateBlock != 0 );				
-	void *pMem = malloc( stAllocateBlock );
+	ASSERT_MEMALLOC_WILL_ALIGN( CAttributeManager );
+	void *pMem = MemAlloc_Alloc( stAllocateBlock, pFileName, nLine );
 	memset( pMem, 0, stAllocateBlock );
 	return pMem;
-}
-
-CAttributeManager::CAttributeManager()
-{
-	m_nCalls = 0;
-	m_nCurrentTick = 0;
 }
 
 #ifdef CLIENT_DLL
@@ -148,7 +134,7 @@ void CAttributeManager::OnDataChanged( DataUpdateType_t updateType )
 	if ( m_iReapplyProvisionParity != m_iOldReapplyProvisionParity )
 	{
 		// We've changed who we're providing to in some way. Reapply it.
-		IHasAttributes *pAttribInterface = GetAttribInterface( GetOuter() );
+		IHasAttributes *pAttribInterface = dynamic_cast<IHasAttributes *>( GetOuter() );
 		if ( pAttribInterface )
 		{
 			pAttribInterface->ReapplyProvision();
@@ -166,7 +152,7 @@ void CAttributeManager::OnDataChanged( DataUpdateType_t updateType )
 //-----------------------------------------------------------------------------
 void CAttributeManager::InitializeAttributes( CBaseEntity *pEntity )
 {
-	Assert( GetAttribInterface( pEntity ) );
+	Assert( dynamic_cast<IHasAttributes*>( pEntity ) );
 	m_hOuter = pEntity;
 	m_bPreventLoopback = false;
 }
@@ -179,10 +165,11 @@ void CAttributeManager::InitializeAttributes( CBaseEntity *pEntity )
 //-----------------------------------------------------------------------------
 void CAttributeManager::ProvideTo( CBaseEntity *pProvider )
 {
-	IHasAttributes *pOwnerAttribInterface = GetAttribInterface( pProvider );
+	IHasAttributes *pOwnerAttribInterface = dynamic_cast<IHasAttributes *>( pProvider );
 	if ( pOwnerAttribInterface )
 	{
-		pOwnerAttribInterface->GetAttributeManager()->AddProvider( m_hOuter.Get() );
+		if ( CAttributeManager * pAttrMgrForUse = pOwnerAttribInterface->GetAttributeManager() )
+			pAttrMgrForUse->AddProvider( m_hOuter.Get() );
 
 #ifndef CLIENT_DLL
 		m_iReapplyProvisionParity = (m_iReapplyProvisionParity + 1) & PROVIDER_PARITY_MASK;
@@ -196,10 +183,12 @@ void CAttributeManager::ProvideTo( CBaseEntity *pProvider )
 //-----------------------------------------------------------------------------
 void CAttributeManager::StopProvidingTo( CBaseEntity *pProvider )
 {
-	IHasAttributes *pOwnerAttribInterface = GetAttribInterface( pProvider );
+	IHasAttributes *pOwnerAttribInterface = dynamic_cast<IHasAttributes *>( pProvider );
 	if ( pOwnerAttribInterface )
 	{
-		pOwnerAttribInterface->GetAttributeManager()->RemoveProvider( m_hOuter.Get() );
+		if ( CAttributeManager * pAttrMgrForUse = pOwnerAttribInterface->GetAttributeManager() )
+			pAttrMgrForUse->RemoveProvider( m_hOuter.Get() );
+
 #ifndef CLIENT_DLL
 		m_iReapplyProvisionParity = (m_iReapplyProvisionParity + 1) & PROVIDER_PARITY_MASK;
 		NetworkStateChanged();
@@ -217,13 +206,27 @@ void CAttributeManager::AddProvider( CBaseEntity *pProvider )
 	Assert( !IsProvidingTo(pProvider) );
 
 	// Ensure he's allowed to provide
-	IHasAttributes *pProviderAttrInterface = GetAttribInterface( pProvider );
-	Assert( pProviderAttrInterface );
+	Assert( dynamic_cast<IHasAttributes *>(pProvider) );
 
 	m_Providers.AddToTail( pProvider );
-	pProviderAttrInterface->GetAttributeManager()->m_Receivers.AddToTail( GetOuter() );
 
 	ClearCache();
+
+	/*
+#ifdef CLIENT_DLL
+	Msg("CLIENT PROVIDER UPDATE: %s now has %d providers:\n", STRING(GetOuter()->GetDebugName()), m_Providers.Count() );
+	for ( int i = 0; i < m_Providers.Count(); i++ )
+	{
+		Msg("    %d: %s\n", i, STRING(m_Providers[i]->GetDebugName()) );
+	}
+#else
+	Msg("SERVER PROVIDER UPDATE: %s now has %d providers:\n", GetOuter()->GetDebugName(), m_Providers.Count() );
+	for ( int i = 0; i < m_Providers.Count(); i++ )
+	{
+		Msg("    %d: %s\n", i, m_Providers[i]->GetDebugName() );
+	}
+#endif
+	*/
 }
 
 //-----------------------------------------------------------------------------
@@ -231,21 +234,24 @@ void CAttributeManager::AddProvider( CBaseEntity *pProvider )
 //-----------------------------------------------------------------------------
 void CAttributeManager::RemoveProvider( CBaseEntity *pProvider )
 {
-	Assert( pProvider );
-
-	IHasAttributes *pProviderAttrInterface = GetAttribInterface( pProvider );
-	Assert( pProviderAttrInterface );
-
-	if ( !IsBeingProvidedToBy( pProvider ) )
-		return;
-	
-	Assert( pProviderAttrInterface->GetAttributeManager()->IsProvidingTo( GetOuter() ) );
-	Assert( pProviderAttrInterface->GetAttributeManager()->m_Receivers.Find( GetOuter() ) != pProviderAttrInterface->GetAttributeManager()->m_Receivers.InvalidIndex() );
-
-	m_Providers.FindAndFastRemove( pProvider );
-	pProviderAttrInterface->GetAttributeManager()->m_Receivers.FindAndFastRemove( GetOuter() );
-
+	m_Providers.FindAndRemove( pProvider );
 	ClearCache();
+
+/*
+#ifdef CLIENT_DLL
+	Msg("CLIENT PROVIDER UPDATE: %s now has %d providers:\n", STRING(GetOuter()->GetDebugName()), m_Providers.Count() );
+	for ( int i = 0; i < m_Providers.Count(); i++ )
+	{
+		Msg("    %d: %s\n", i, STRING(m_Providers[i]->GetDebugName()) );
+	}
+#else
+	Msg("SERVER PROVIDER UPDATE: %s now has %d providers:\n", GetOuter()->GetDebugName(), m_Providers.Count() );
+	for ( int i = 0; i < m_Providers.Count(); i++ )
+	{
+		Msg("    %d: %s\n", i, m_Providers[i]->GetDebugName() );
+	}
+#endif
+*/
 }
 
 //-----------------------------------------------------------------------------
@@ -261,20 +267,23 @@ void CAttributeManager::ClearCache( void )
 	m_bPreventLoopback = true;
 
 	// Tell all providers relying on me that they need to wipe their cache too
-	FOR_EACH_VEC( m_Receivers, i )
+	int iCount = m_Providers.Count();
+	for ( int iHook = 0; iHook < iCount; iHook++ )
 	{
-		IHasAttributes *pAttribInterface = GetAttribInterface( m_Receivers[i].Get() );
+		IHasAttributes *pAttribInterface = dynamic_cast<IHasAttributes *>(m_Providers[iHook].Get());
 		if ( pAttribInterface )
 		{
-			pAttribInterface->GetAttributeManager()->ClearCache();
+			if ( CAttributeManager * pAttrMgrForUse = pAttribInterface->GetAttributeManager() )
+				pAttrMgrForUse->ClearCache();
 		}
 	}
 
 	// Tell our owner that he needs to clear his too, in case he has attributes affecting him
-	IHasAttributes *pMyAttribInterface = GetAttribInterface( m_hOuter.Get().Get() );
+	IHasAttributes *pMyAttribInterface = dynamic_cast<IHasAttributes *>( m_hOuter.Get().Get() );
 	if ( pMyAttribInterface )
 	{
-		pMyAttribInterface->GetAttributeManager()->ClearCache();
+		if ( CAttributeManager * pAttrMgrForUse = pMyAttribInterface->GetAttributeManager() )
+			pAttrMgrForUse->ClearCache();
 	}
 
 	m_bPreventLoopback = false;
@@ -289,25 +298,23 @@ void CAttributeManager::ClearCache( void )
 //-----------------------------------------------------------------------------
 // Purpose: 
 //-----------------------------------------------------------------------------
-int	CAttributeManager::GetGlobalCacheVersion() const
-{
-#if defined( TF_DLL ) || defined( TF_CLIENT_DLL )
-	return TFGameRules() ? TFGameRules()->GetGlobalAttributeCacheVersion() : 0;
-#else
-	return 0;
-#endif 
+CBaseEntity *CAttributeManager::GetProvider( int iIndex )
+{ 
+	Assert( iIndex >= 0 && iIndex < m_Providers.Count() );
+	return m_Providers[iIndex]; 
 }
 
 //-----------------------------------------------------------------------------
 // Purpose: Return true if this entity is providing attributes to the specified entity
 //-----------------------------------------------------------------------------
-bool CAttributeManager::IsProvidingTo( CBaseEntity *pEntity ) const
+bool CAttributeManager::IsProvidingTo( CBaseEntity *pEntity )
 {
-	IHasAttributes *pAttribInterface = GetAttribInterface( pEntity );
+	IHasAttributes *pAttribInterface = dynamic_cast<IHasAttributes *>(pEntity);
 	if ( pAttribInterface )
 	{
-		if ( pAttribInterface->GetAttributeManager()->IsBeingProvidedToBy( GetOuter() ) )
-			return true;
+		if ( CAttributeManager * pAttrMgrForUse = pAttribInterface->GetAttributeManager() )
+			if ( pAttrMgrForUse->IsBeingProvidedToBy( GetOuter() ) )
+				return true;
 	}
 
 	return false;
@@ -316,7 +323,7 @@ bool CAttributeManager::IsProvidingTo( CBaseEntity *pEntity ) const
 //-----------------------------------------------------------------------------
 // Purpose: Return true if this entity is being provided attributes by the specified entity
 //-----------------------------------------------------------------------------
-bool CAttributeManager::IsBeingProvidedToBy( CBaseEntity *pEntity ) const
+bool CAttributeManager::IsBeingProvidedToBy( CBaseEntity *pEntity )
 {
 	return ( m_Providers.Find( pEntity ) != m_Providers.InvalidIndex() );
 }
@@ -330,111 +337,31 @@ bool CAttributeManager::IsBeingProvidedToBy( CBaseEntity *pEntity ) const
 //-----------------------------------------------------------------------------
 float CAttributeManager::ApplyAttributeFloatWrapper( float flValue, CBaseEntity *pInitiator, string_t iszAttribHook, CUtlVector<CBaseEntity*> *pItemList )
 {
-	VPROF_BUDGET( "CAttributeManager::ApplyAttributeFloatWrapper", VPROF_BUDGETGROUP_ATTRIBUTES );
-
-#ifdef DEBUG
-	AssertMsg1( m_nCalls != 5000, "%d calls for attributes in a single tick.  This is slow and bad.", m_nCalls );
-
-	if( m_nCurrentTick != gpGlobals->tickcount )
-	{	
-		m_nCalls = 0;
-		m_nCurrentTick = gpGlobals->tickcount;
-	}
-
-	++m_nCalls;
-#endif
-
-	// Have we requested a global attribute cache flush?
-	const int iGlobalCacheVersion = GetGlobalCacheVersion();
-	if ( m_iCacheVersion != iGlobalCacheVersion )
+	int iCount = m_CachedResults.Count();
+	for ( int i = iCount-1; i >= 0; i-- )
 	{
-		ClearCache();
-		m_iCacheVersion = iGlobalCacheVersion;
-	}
-
-	// We can't cache off item references so if we asked for them we need to execute the whole slow path.
-	if ( !pItemList )
-	{
-		int iCount = m_CachedResults.Count();
-		for ( int i = iCount-1; i >= 0; i-- )
+		if ( m_CachedResults[i].iAttribHook == iszAttribHook )
 		{
-			if ( m_CachedResults[i].iAttribHook == iszAttribHook )
-			{
-				if ( m_CachedResults[i].in.fl == flValue )
-					return m_CachedResults[i].out.fl;
+			if ( m_CachedResults[i].flIn == flValue )
+				return m_CachedResults[i].flOut;
 
-				// We've got a cached result for a different flIn value. Remove the cached result to
-				// prevent stacking up entries for different requests (i.e. crit chance)
-				m_CachedResults.Remove(i);
-				break;
-			}
+			// We've got a cached result for a different flIn value. Remove the cached result to
+			// prevent stacking up entries for different requests (i.e. crit chance)
+			m_CachedResults.Remove(i);
+			break;
 		}
 	}
 
-	// Wasn't in cache, or we need item references. Do the work.
+	// Wasn't in cache. Do the work.
 	float flResult = ApplyAttributeFloat( flValue, pInitiator, iszAttribHook, pItemList );
 
-	// Add it to our cache if we didn't ask for item references. We could add the result value here
-	// even if we did but we'd need to walk the cache to search for an old entry to overwrite first.
-	if ( !pItemList )
-	{
-		int iIndex = m_CachedResults.AddToTail();
-		m_CachedResults[iIndex].in.fl = flValue;
-		m_CachedResults[iIndex].out.fl = flResult;
-		m_CachedResults[iIndex].iAttribHook = iszAttribHook;
-	}
+	// Add it to our cache
+	int iIndex = m_CachedResults.AddToTail();
+	m_CachedResults[iIndex].flIn = flValue;
+	m_CachedResults[iIndex].flOut = flResult;
+	m_CachedResults[iIndex].iAttribHook = iszAttribHook;
 
 	return flResult;
-}
-
-//-----------------------------------------------------------------------------
-// Purpose: Wrapper that checks to see if we've already got the result in our cache
-//-----------------------------------------------------------------------------
-string_t CAttributeManager::ApplyAttributeStringWrapper( string_t iszValue, CBaseEntity *pInitiator, string_t iszAttribHook, CUtlVector<CBaseEntity*> *pItemList /*= NULL*/ )
-{
-	// Have we requested a global attribute cache flush?
-	const int iGlobalCacheVersion = GetGlobalCacheVersion();
-	if ( m_iCacheVersion != iGlobalCacheVersion )
-	{
-		ClearCache();
-		m_iCacheVersion = iGlobalCacheVersion;
-	}
-
-	// We can't cache off item references so if we asked for them we need to execute the whole slow path.
-	if ( !pItemList )
-	{
-		int iCount = m_CachedResults.Count();
-		for ( int i = iCount-1; i >= 0; i-- )
-		{
-			if ( m_CachedResults[i].iAttribHook == iszAttribHook )
-			{
-				if ( m_CachedResults[i].in.isz == iszValue )
-				{
-					return m_CachedResults[i].out.isz;
-				}
-
-				// We've got a cached result for a different flIn value. Remove the cached result to
-				// prevent stacking up entries for different requests (i.e. crit chance)
-				m_CachedResults.Remove(i);
-				break;
-			}
-		}
-	}
-
-	// Wasn't in cache, or we need item references. Do the work.
-	string_t iszOut = ApplyAttributeString( iszValue, pInitiator, iszAttribHook, pItemList );
-
-	// Add it to our cache if we didn't ask for item references. We could add the result value here
-	// even if we did but we'd need to walk the cache to search for an old entry to overwrite first.
-	if ( !pItemList )
-	{
-		int iIndex = m_CachedResults.AddToTail();
-		m_CachedResults[iIndex].in.isz = iszValue;
-		m_CachedResults[iIndex].out.isz = iszOut;
-		m_CachedResults[iIndex].iAttribHook = iszAttribHook;
-	}
-
-	return iszOut;
 }
 
 //-----------------------------------------------------------------------------
@@ -442,114 +369,50 @@ string_t CAttributeManager::ApplyAttributeStringWrapper( string_t iszValue, CBas
 //-----------------------------------------------------------------------------
 float CAttributeManager::ApplyAttributeFloat( float flValue, CBaseEntity *pInitiator, string_t iszAttribHook, CUtlVector<CBaseEntity*> *pItemList )
 {
-	VPROF_BUDGET( "CAttributeManager::ApplyAttributeFloat", VPROF_BUDGETGROUP_ATTRIBUTES );
-
 	if ( m_bPreventLoopback || !GetOuter() )
 		return flValue;
 
 	// We need to prevent loopback between two items both providing to the same entity.
 	m_bPreventLoopback = true;
 
-	IHasAttributes *pInitiatorAttribInterface = GetAttribInterface( pInitiator );
-
 	// See if we have any providers. If we do, tell them to apply.
-	FOR_EACH_VEC( m_Providers, iHook )
+	int iCount = m_Providers.Count();
+	for ( int iHook = 0; iHook < iCount; iHook++ )
 	{
-		CBaseEntity *pProvider = m_Providers[iHook].Get();
-		
-		if ( !pProvider )
+		if ( m_Providers[iHook].Get() == pInitiator )
 			continue;
-			
-		if ( pProvider == pInitiator )
-			continue;
-			
-		IHasAttributes *pAttribInterface = GetAttribInterface( pProvider );
-		Assert( pAttribInterface );
 
 		// Don't allow weapons to provide to other weapons being carried by the same person
-		if ( pInitiatorAttribInterface &&
-		     pAttribInterface->GetAttributeManager()->GetProviderType() == PROVIDER_WEAPON &&
-			 pInitiatorAttribInterface->GetAttributeManager()->GetProviderType() == PROVIDER_WEAPON )
+		IHasAttributes *pAttribInterface = dynamic_cast<IHasAttributes *>(m_Providers[iHook].Get());
+		if ( pInitiator && pAttribInterface->GetAttributeManager() &&
+			pAttribInterface->GetAttributeManager()->GetProviderType() == PROVIDER_WEAPON )
 		{
-			continue;
+			IHasAttributes *pInitiatorAttribInterface = dynamic_cast<IHasAttributes *>(pInitiator);
+			if ( pInitiatorAttribInterface->GetAttributeManager() &&
+				pInitiatorAttribInterface->GetAttributeManager()->GetProviderType() == PROVIDER_WEAPON )
+				continue;
 		}
 
-		flValue = pAttribInterface->GetAttributeManager()->ApplyAttributeFloat( flValue, pInitiator, iszAttribHook, pItemList );
+		if ( CAttributeManager *pAttrMgrForUse = pAttribInterface->GetAttributeManager() )
+			flValue = pAttrMgrForUse->ApplyAttributeFloat( flValue, pInitiator, iszAttribHook, pItemList );
 	}
 
 	// Then see if our owner has any attributes he wants to apply as well.
 	// i.e. An aura is providing attributes to this weapon's carrier.
-	IHasAttributes *pMyAttribInterface = GetAttribInterface( m_hOuter.Get().Get() );
-	Assert( pMyAttribInterface );
-
-	if ( pMyAttribInterface && pMyAttribInterface->GetAttributeOwner() )
+	IHasAttributes *pMyAttribInterface = dynamic_cast<IHasAttributes *>( m_hOuter.Get().Get() );
+	if ( pMyAttribInterface->GetAttributeOwner() )
 	{
-		IHasAttributes *pOwnerAttribInterface = GetAttribInterface( pMyAttribInterface->GetAttributeOwner() );
+		IHasAttributes *pOwnerAttribInterface = dynamic_cast<IHasAttributes *>( pMyAttribInterface->GetAttributeOwner() );
 		if ( pOwnerAttribInterface )
 		{
-			flValue = pOwnerAttribInterface->GetAttributeManager()->ApplyAttributeFloat( flValue, pInitiator, iszAttribHook, pItemList );
+			if ( CAttributeManager * pAttrMgrForUse = pOwnerAttribInterface->GetAttributeManager() )
+				flValue = pAttrMgrForUse->ApplyAttributeFloat( flValue, pInitiator, iszAttribHook, pItemList );
 		}
 	}
 
 	m_bPreventLoopback = false;
 
 	return flValue;
-}
-
-string_t CAttributeManager::ApplyAttributeString( string_t iszValue, CBaseEntity *pInitiator, string_t iszAttribHook /*= NULL_STRING*/, CUtlVector<CBaseEntity*> *pItemList /*= NULL*/ )
-{
-	VPROF_BUDGET( "CAttributeManager::ApplyAttributeString", VPROF_BUDGETGROUP_ATTRIBUTES );
-
-	if ( m_bPreventLoopback || !GetOuter() )
-		return iszValue;
-
-	// We need to prevent loopback between two items both providing to the same entity.
-	m_bPreventLoopback = true;
-
-	IHasAttributes *pInitiatorAttribInterface = GetAttribInterface( pInitiator );
-
-	// See if we have any providers. If we do, tell them to apply.
-	FOR_EACH_VEC( m_Providers, iHook )
-	{
-		CBaseEntity *pProvider = m_Providers[iHook].Get();
-
-		if ( !pProvider )
-			continue;
-
-		if ( pProvider == pInitiator )
-			continue;
-
-		IHasAttributes *pAttribInterface = GetAttribInterface( pProvider );
-		Assert( pAttribInterface );
-
-		// Don't allow weapons to provide to other weapons being carried by the same person
-		if ( pInitiatorAttribInterface &&
-			pAttribInterface->GetAttributeManager()->GetProviderType() == PROVIDER_WEAPON &&
-			pInitiatorAttribInterface->GetAttributeManager()->GetProviderType() == PROVIDER_WEAPON )
-		{
-			continue;
-		}
-
-		iszValue = pAttribInterface->GetAttributeManager()->ApplyAttributeString( iszValue, pInitiator, iszAttribHook, pItemList );
-	}
-
-	// Then see if our owner has any attributes he wants to apply as well.
-	// i.e. An aura is providing attributes to this weapon's carrier.
-	IHasAttributes *pMyAttribInterface = GetAttribInterface( m_hOuter.Get().Get() );
-	Assert( pMyAttribInterface );
-
-	if ( pMyAttribInterface->GetAttributeOwner() )
-	{
-		IHasAttributes *pOwnerAttribInterface = GetAttribInterface( pMyAttribInterface->GetAttributeOwner() );
-		if ( pOwnerAttribInterface )
-		{
-			iszValue = pOwnerAttribInterface->GetAttributeManager()->ApplyAttributeString( iszValue, pInitiator, iszAttribHook, pItemList );
-		}
-	}
-
-	m_bPreventLoopback = false;
-
-	return iszValue;
 }
 
 //=====================================================================================================
@@ -574,7 +437,7 @@ void CAttributeContainer::InitializeAttributes( CBaseEntity *pEntity )
 
 	m_Item.GetAttributeList()->SetManager( this );
 
-	OnAttributeValuesChanged();
+	ClearCache();
 }
 
 static void ApplyAttribute( const CEconItemAttributeDefinition *pAttributeDef, float& flValue, const float flValueModifier )
@@ -594,6 +457,7 @@ static void ApplyAttribute( const CEconItemAttributeDefinition *pAttributeDef, f
 		}
 		break;
 
+	case ATTDESCFORM_VALUE_IS_COLOR:
 	case ATTDESCFORM_VALUE_IS_ADDITIVE:
 	case ATTDESCFORM_VALUE_IS_ADDITIVE_PERCENTAGE:
 	case ATTDESCFORM_VALUE_IS_PARTICLE_INDEX:
@@ -602,9 +466,7 @@ static void ApplyAttribute( const CEconItemAttributeDefinition *pAttributeDef, f
 		}
 		break;
 
-	case ATTDESCFORM_VALUE_IS_KILLSTREAK_IDLEEFFECT_INDEX:
-	case ATTDESCFORM_VALUE_IS_KILLSTREAKEFFECT_INDEX:
-	case ATTDESCFORM_VALUE_IS_FROM_LOOKUP_TABLE:
+	case ATTDESCFORM_VALUE_IS_REPLACE:
 		{
 			flValue = flValueModifier;
 		}
@@ -618,6 +480,7 @@ static void ApplyAttribute( const CEconItemAttributeDefinition *pAttributeDef, f
 		}
 		break;
 
+	case ATTDESCFORM_VALUE_IS_GAME_TIME:
 	case ATTDESCFORM_VALUE_IS_DATE:
 		Assert( !"Attempt to apply date attribute in ApplyAttribute()." ); // No-one should be hooking date descriptions
 		break;
@@ -632,14 +495,13 @@ static void ApplyAttribute( const CEconItemAttributeDefinition *pAttributeDef, f
 //-----------------------------------------------------------------------------
 // Purpose: Given two attributes, return a collated value.
 //-----------------------------------------------------------------------------
-float CollateAttributeValues( const CEconItemAttributeDefinition *pAttrDef1, const float flAttribValue1, const CEconItemAttributeDefinition *pAttrDef2, const float flAttribValue2 )
+float CollateAttributeValues( const CEconItemAttribute *pAttrib1, const CEconItemAttribute *pAttrib2 )
 {
-	Assert( pAttrDef1 );
-	Assert( pAttrDef2 );
-	AssertMsg2( !Q_stricmp( pAttrDef1->GetAttributeClass(), pAttrDef2->GetAttributeClass() ), "We can only collate attributes of matching definitions: mismatch between '%s' / '%s'!", pAttrDef1->GetAttributeClass(), pAttrDef2->GetAttributeClass() );
-	AssertMsg2( pAttrDef1->GetDescriptionFormat() == pAttrDef2->GetDescriptionFormat(), "We can only collate attributes of matching description format: mismatch between '%u' / '%u'!", pAttrDef1->GetDescriptionFormat(), pAttrDef2->GetDescriptionFormat() );
+	// We can only collate attributes of matching definitions
+	Assert( !Q_stricmp( pAttrib1->GetStaticData()->GetAttributeClass(), pAttrib2->GetStaticData()->GetAttributeClass() ) );
 
-	const int iAttrDescFormat = pAttrDef1->GetDescriptionFormat();
+	const CEconItemAttributeDefinition *pDef = pAttrib1->GetStaticData();
+	const int iAttrDescFormat = pDef->GetDescriptionFormat();
 
 	float flValue = 0;
 	switch ( iAttrDescFormat )
@@ -651,17 +513,18 @@ float CollateAttributeValues( const CEconItemAttributeDefinition *pAttrDef1, con
 		}
 		break;
 
+	case ATTDESCFORM_VALUE_IS_COLOR:
 	case ATTDESCFORM_VALUE_IS_ADDITIVE:
 	case ATTDESCFORM_VALUE_IS_ADDITIVE_PERCENTAGE:
-	case ATTDESCFORM_VALUE_IS_FROM_LOOKUP_TABLE:
 	case ATTDESCFORM_VALUE_IS_OR:
+	case ATTDESCFORM_VALUE_IS_REPLACE:
 		{
 			flValue = 0;
 		}
 		break;
 
 	case ATTDESCFORM_VALUE_IS_DATE:
-		Assert( !"Attempt to apply date attribute in CollateAttributeValues()." ); // No-one should be hooking date descriptions
+		Assert( !"Attempt to apply date attribute in ApplyAttribute()." ); // No-one should be hooking date descriptions
 		break;
 
 	default:
@@ -670,8 +533,8 @@ float CollateAttributeValues( const CEconItemAttributeDefinition *pAttrDef1, con
 		break;
 	}
 
-	ApplyAttribute( pAttrDef1, flValue, flAttribValue1 );
-	ApplyAttribute( pAttrDef2, flValue, flAttribValue2 );
+	ApplyAttribute( pDef, flValue, pAttrib1->GetValue() );
+	ApplyAttribute( pDef, flValue, pAttrib2->GetValue() );
 
 	return flValue;
 }
@@ -679,7 +542,7 @@ float CollateAttributeValues( const CEconItemAttributeDefinition *pAttrDef1, con
 //-----------------------------------------------------------------------------
 // Purpose:
 //-----------------------------------------------------------------------------
-class CEconItemAttributeIterator_ApplyAttributeFloat : public CEconItemSpecificAttributeIterator
+class CEconItemAttributeIterator_ApplyAttributeFloat : public IEconItemAttributeIterator
 {
 public:
 	CEconItemAttributeIterator_ApplyAttributeFloat( CBaseEntity *pOuter, float flInitialValue, string_t iszAttribHook, CUtlVector<CBaseEntity *> *pItemList )
@@ -709,6 +572,43 @@ public:
 
 		// We assume that each attribute can only be in the attribute list for a single item once, but we're
 		// iterating over attribute *classes* here, not unique attribute types, so we carry on looking.
+		return true;
+	}
+
+	virtual bool OnIterateAttributeValue( const CEconItemAttributeDefinition *pAttrDef, float value )
+	{
+		Assert( pAttrDef );
+
+		if ( pAttrDef->GetCachedClass() != m_iszAttribHook )
+			return true;
+
+		if ( m_pItemList && !m_pItemList->HasElement( m_pOuter ) )
+		{
+			m_pItemList->AddToTail( m_pOuter );
+		}
+
+		ApplyAttribute( pAttrDef, m_flValue, value );
+
+		// We assume that each attribute can only be in the attribute list for a single item once, but we're
+		// iterating over attribute *classes* here, not unique attribute types, so we carry on looking.
+		return true;
+	}
+
+	virtual bool OnIterateAttributeValue( const CEconItemAttributeDefinition *pAttrDef, const CAttribute_String& value )
+	{
+		// We can't possibly process an attribute of this type!
+		Assert( pAttrDef );
+		Assert( pAttrDef->GetCachedClass() != m_iszAttribHook );
+
+		return true;
+	}
+
+	virtual bool OnIterateAttributeValue( const CEconItemAttributeDefinition *pAttrDef, const Vector& value )
+	{
+		// We can't possibly process an attribute of this type!
+		Assert( pAttrDef );
+		Assert( pAttrDef->GetCachedClass() != m_iszAttribHook );
+
 		return true;
 	}
 
@@ -744,7 +644,17 @@ float CAttributeContainer::ApplyAttributeFloat( float flValue, CBaseEntity *pIni
 	return BaseClass::ApplyAttributeFloat( it.GetResultValue(), pInitiator, iszAttribHook, pItemList );
 }
 
-#ifndef DOTA_DLL
+#if defined( TF_DLL ) || defined( CSTRIKE_DLL )
+//-----------------------------------------------------------------------------
+// Purpose:
+//-----------------------------------------------------------------------------
+void CAttributeContainerPlayer::InitializeAttributes( CBaseEntity *pEntity )
+{
+	BaseClass::InitializeAttributes( pEntity );
+
+	ClearCache();
+}
+
 //-----------------------------------------------------------------------------
 // Purpose:
 //-----------------------------------------------------------------------------
@@ -754,14 +664,64 @@ float CAttributeContainerPlayer::ApplyAttributeFloat( float flValue, CBaseEntity
 		return flValue;
 
 	m_bPreventLoopback = true;
+#ifdef DEBUG
+	int iFoundAttributeCount = 0;
+#endif // DEBUG
 
 	CEconItemAttributeIterator_ApplyAttributeFloat it( GetOuter(), flValue, iszAttribHook, pItemList );
 
+#if defined( USE_PLAYER_ATTRIBUTE_MANAGER )
 	CBasePlayer *pPlayer = GetPlayer();
 	if ( pPlayer )
 	{
 		pPlayer->m_AttributeList.IterateAttributes( &it );
+
+		// Apply all the attributes within this manager
+		int iAttributes = pPlayer->m_AttributeList.GetNumAttributes();
+		for ( int i = 0; i < iAttributes; i++ )
+		{
+			CEconItemAttribute *pAttribute = pPlayer->m_AttributeList.GetAttribute(i);
+			CEconItemAttributeDefinition *pData = pAttribute->GetStaticData();
+
+			// The first time we try to compare to an attribute, we alloc this for faster future lookup
+			if ( pData->GetCachedClass() == iszAttribHook )
+			{
+				// If we are keep track (ie. pItemList != NULL), then put the item in the list.
+				if ( pItemList )
+				{
+					if ( pItemList->Find( GetOuter() ) == -1 )
+					{
+						pItemList->AddToTail( GetOuter() );
+					}
+				}
+
+				ApplyAttribute( pData, flValue, pAttribute->GetValue() );
+#ifdef DEBUG
+				iFoundAttributeCount++;
+#endif // DEBUG
+			}
+		}
 	}
+#endif //#if defined( USE_PLAYER_ATTRIBUTE_MANAGER )
+
+#ifdef DEBUG
+	// If we didn't find any attributes on this object, loop through all the attributes in our schema to find
+	// out whether this attribute even exists so we can spew a warning if it doesn't.
+	if ( iFoundAttributeCount == 0 )
+	{
+		const CEconItemSchema::EconAttrDefsContainer_t & mapAttrDefs = ItemSystem()->GetItemSchema()->GetAttributeDefinitionContainer();
+		FOR_EACH_VEC( mapAttrDefs, i )
+		{
+			if ( mapAttrDefs[i] && ( mapAttrDefs[i]->GetCachedClass() == iszAttribHook ) )
+			{
+				iFoundAttributeCount++;
+				break;
+			}
+		}
+	}
+
+	AssertMsg1( iFoundAttributeCount != 0, "Attempt to apply unknown attribute '%s'.", STRING( iszAttribHook ) );
+#endif // DEBUG
 
 	m_bPreventLoopback = false;
 
@@ -770,112 +730,3 @@ float CAttributeContainerPlayer::ApplyAttributeFloat( float flValue, CBaseEntity
 
 
 #endif
-
-
-//-----------------------------------------------------------------------------
-// Purpose:
-//-----------------------------------------------------------------------------
-class CEconItemAttributeIterator_ApplyAttributeString : public CEconItemSpecificAttributeIterator
-{
-public:
-	CEconItemAttributeIterator_ApplyAttributeString( CBaseEntity *pOuter, string_t iszInitialValue, string_t iszAttribHook, CUtlVector<CBaseEntity *> *pItemList )
-		: m_pOuter( pOuter )
-		, m_iszValue( iszInitialValue )
-		, m_iszAttribHook( iszAttribHook )
-		, m_pItemList( pItemList )
-		, m_bFoundString( false )
-	{
-		Assert( pOuter );
-	}
-
-	virtual bool OnIterateAttributeValue( const CEconItemAttributeDefinition *pAttrDef, attrib_value_t value )
-	{
-		COMPILE_TIME_ASSERT( sizeof( value ) == sizeof( float ) );
-
-		// Do we want to process attribute of this type?
-		Assert( pAttrDef );
-		Assert( pAttrDef->GetCachedClass() != m_iszAttribHook );
-		//AssertMsg( 0, "OnIterateAttributeValue of type CAttribute_String, we shouldn't get here." );
-
-		return true;
-	}
-
-	virtual bool OnIterateAttributeValue( const CEconItemAttributeDefinition *pAttrDef, const CAttribute_String& value )
-	{
-		Assert( pAttrDef );
-		
-		if ( pAttrDef->GetCachedClass() != m_iszAttribHook )
-			return true;
-
-		if ( FoundString() )
-			return true;
-
-		m_iszValue = AllocPooledString( value.value().c_str() );
-
-		m_bFoundString = true;
-
-		return true;
-	}
-
-	string_t GetResultValue()
-	{
-		return m_iszValue;
-	}
-
-private:
-	bool FoundString()
-	{
-		// Implement something for the case where there's more than one of the same attribute
-		AssertMsg( !m_bFoundString, "Already found a string attribute with %s class, return the first attribute found.", STRING( m_iszAttribHook ) );
-
-		return m_bFoundString;
-	}
-
-	CBaseEntity *m_pOuter;
-	string_t m_iszValue;
-	string_t m_iszAttribHook;
-	CUtlVector<CBaseEntity *> *m_pItemList;
-	bool m_bFoundString;
-};
-
-
-//-----------------------------------------------------------------------------
-// Purpose:
-//-----------------------------------------------------------------------------
-string_t CAttributeContainer::ApplyAttributeString( string_t iszValue, CBaseEntity *pInitiator, string_t iszAttribHook /*= NULL_STRING*/, CUtlVector<CBaseEntity*> *pItemList /*= NULL*/ )
-{
-	if ( m_bPreventLoopback || !GetOuter() )
-		return iszValue;
-
-	// We need to prevent loopback between two items both providing to the same entity.
-	m_bPreventLoopback = true;
-
-	// ...
-	CEconItemAttributeIterator_ApplyAttributeString it( GetOuter(), iszValue, iszAttribHook, pItemList );
-	m_Item.IterateAttributes( &it );
-
-	m_bPreventLoopback = false;
-
-	return BaseClass::ApplyAttributeString( it.GetResultValue(), pInitiator, iszAttribHook, pItemList );
-}
-
-
-string_t CAttributeContainerPlayer::ApplyAttributeString( string_t iszValue, CBaseEntity *pInitiator, string_t iszAttribHook /*= NULL_STRING*/, CUtlVector<CBaseEntity*> *pItemList /*= NULL*/ )
-{
-	if ( m_bPreventLoopback || !GetOuter() )
-		return iszValue;
-
-	m_bPreventLoopback = true;
-
-	CEconItemAttributeIterator_ApplyAttributeString it( GetOuter(), iszValue, iszAttribHook, pItemList );
-
-	CBasePlayer *pPlayer = GetPlayer();
-	if ( pPlayer )
-	{
-		pPlayer->m_AttributeList.IterateAttributes( &it );
-	}
-
-	m_bPreventLoopback = false;
-
-	return BaseClass::ApplyAttributeString( it.GetResultValue(), pInitiator, iszAttribHook, pItemList );
-}

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -49,6 +49,9 @@
 #include "tier0/dbg.h"
 #include "dt_utlvector_send.h"
 #include "dt_utlvector_recv.h"
+#include "vstdlib/random.h"
+#include "ents_shared.h"
+#include "netmessages.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -810,12 +813,7 @@ bool WriteSendTable_R( SendTable *pTable, bf_write &bfWrite, bool bNeedsDecoder 
 
 	pTable->SetWriteFlag( true );
 
-	// Send the version with the exclude props.
-	bfWrite.WriteOneBit( 1 );
-
-	bfWrite.WriteOneBit( bNeedsDecoder?1:0 );
-	
-	if( !SendTable_WriteInfos( pTable, &bfWrite ) )
+	if( !SendTable_WriteInfos( pTable, bfWrite, bNeedsDecoder, false ) )
 		return false;
 
 	for( int i=0; i < pTable->m_nProps; i++ )
@@ -830,23 +828,54 @@ bool WriteSendTable_R( SendTable *pTable, bf_write &bfWrite, bool bNeedsDecoder 
 	return true;
 }
 
+void TestDeltaBitEncoders()
+{
+	ALIGN4 char tempData[8192] ALIGN4_POST;
+	bf_write bfw( "", tempData, sizeof( tempData ) );
+	int nSamples = 500;
+	CUtlVector<int> written;
+	written.SetSize( nSamples );
+	RandomSeed( 4 );
+	
+	{
+		CDeltaBitsWriter deltaw( &bfw );
+		int nProp = 1;
+		for ( int i=0; i < nSamples; i++ )
+		{
+			nProp += RandomInt( 1, 5 );
+			deltaw.WritePropIndex( nProp );
+			written[i] = nProp;
+		}
+	}
+
+	bf_read bfr( tempData, sizeof( tempData ) );
+	CDeltaBitsReader deltar( &bfr );
+	int nCurProp = 0;
+	while ( 1 )
+	{
+		int nTestIndex = deltar.ReadNextPropIndex();
+		if ( nTestIndex == -1 )
+		{
+			Assert( nCurProp == nSamples );
+			break;
+		}
+		else
+		{
+			Assert( nTestIndex == written[nCurProp++] );
+		}
+	}
+
+
+	Assert( nCurProp == nSamples );
+}
 
 void RunDataTableTest()
 {
+	TestDeltaBitEncoders();
+
+
 	RecvTable *pRecvTable = &REFERENCE_RECV_TABLE(DT_DTTest);
 	SendTable *pSendTable = &REFERENCE_SEND_TABLE(DT_DTTest);
-
-
-	ALIGN4 unsigned char buf[4096] ALIGN4_POST;
-	bf_write x = bf_write(buf, 4096);
-	bf_read y = bf_read(buf, 4096);
-	x.WriteUBitLong(1, 1);
-	x.WriteUBitLong(3, 2);
-	x.WriteUBitLong(7, 3);
-	x.WriteUBitLong(0x31415926, 32);
-	Verify( y.ReadOneBit() == 1 );
-	Verify( y.ReadUBitLong(5) == 7*4+3 );
-	Verify( y.ReadUBitLong(32) == 0x31415926 );
 
 
 	// Initialize the send and receive modules.
@@ -862,19 +891,36 @@ void RunDataTableTest()
 	{
 		Assert( !"RunDataTableTest: SendTable_SendInfo failed." );
 	}	
-	bfWrite.WriteOneBit(0);
-
+	// Signal no more send tables.
+	SendTable_WriteInfos( NULL, bfWrite, false, true );
 
 	// Receive the SendTable's info.
+	CSVCMsg_SendTable_t msg;
 	bf_read bfRead( "RunDataTableTest->bfRead", commBuf, sizeof(commBuf));
-	while( bfRead.ReadOneBit() )
+	while ( 1 )
 	{
-		bool bNeedsDecoder = bfRead.ReadOneBit()!=0;
+		int type = bfRead.ReadVarInt32();
+		
+		if( !msg.ReadFromBuffer( bfRead ) )
+		{
+			Assert( !"RunDataTableTest: ReadFromBuffer failed." );
+			break;
+		}
 
-		if( !RecvTable_RecvClassInfos( &bfRead, bNeedsDecoder ) )
+		int msgType = msg.GetType();
+		if ( type != msgType )
+		{
+			Assert( !"RunDataTableTest: ReadFromBuffer failed." );
+			break;
+		}
+
+		if( msg.is_end() )
+			break;
+
+		if( !RecvTable_RecvClassInfos( msg ) )
 		{
 			Assert( !"RunDataTableTest: RecvTable_ReadInfos failed." );
-			continue;
+			break;
 		}
 	}
 
@@ -897,6 +943,10 @@ void RunDataTableTest()
 	memset(prevEncoded, 0, sizeof(prevEncoded));
 
 	SetGuardBytes( &dtClient );
+
+	SerializedEntityHandle_t startEntity = g_pSerializedEntities->AllocateSerializedEntity( __FILE__, __LINE__ );
+	SerializedEntityHandle_t endEntity = g_pSerializedEntities->AllocateSerializedEntity( __FILE__, __LINE__ );
+	SerializedEntityHandle_t received = g_pSerializedEntities->AllocateSerializedEntity( __FILE__, __LINE__ );
 
 	// Now loop around, changing the data a little bit each time and send/recv deltas.
 	int nIterations = 25;
@@ -925,74 +975,54 @@ void RunDataTableTest()
 			}
 		}
 
-		// Fully encode it.
-		bf_write bfFullEncoded( "RunDataTableTest->bfFullEncoded", fullEncoded, sizeof(fullEncoded) );
-		if( !SendTable_Encode( pSendTable, &dtServer, &bfFullEncoded, -1, NULL ) )
+
+		if( !SendTable_Encode( pSendTable, startEntity, &dtServer, -1, NULL ) )
 		{
 			Assert(false);
 		}
 
+		// Fully encode it.
+		bf_write bfFullEncoded( "RunDataTableTest->bfFullEncoded", fullEncoded, sizeof(fullEncoded) );
+		SendTable_WritePropList( pSendTable, startEntity, &bfFullEncoded, -1, NULL );
 
 		ALIGN4 unsigned char deltaEncoded[4096] ALIGN4_POST;
 		bf_write bfDeltaEncoded( "RunDataTableTest->bfDeltaEncoded", deltaEncoded, sizeof(deltaEncoded) );
 		
 		if ( iIteration == 0 )
 		{
-			// On the first iteration, just write the whole state.
-			if( !SendTable_Encode( pSendTable, &dtServer, &bfDeltaEncoded, -1, NULL ) )
+			if( !SendTable_Encode( pSendTable, endEntity, &dtServer, -11111, NULL ) )
 			{
-				Assert( false );
+				Assert(false);
 			}
+
+			SendTable_WritePropList( pSendTable, endEntity, &bfDeltaEncoded, -1111, NULL );
 		}
 		else
 		{
 			// Figure out the delta between the newly encoded one and the previously encoded one.
-			ALIGN4 int deltaProps[MAX_DATATABLE_PROPS] ALIGN4_POST;
+			CalcDeltaResultsList_t deltaProps;
 
-			bf_read fullEncodedRead( "RunDataTableTest->fullEncodedRead", fullEncoded, sizeof( fullEncoded ), bfFullEncoded.GetNumBitsWritten() );
-			bf_read prevEncodedRead( "RunDataTableTest->prevEncodedRead", prevEncoded, sizeof( prevEncoded ) );
-
-			int nDeltaProps = SendTable_CalcDelta( 
-				pSendTable, 
-				prevEncoded, sizeof( prevEncoded ) * 8, 
-				fullEncoded, bfFullEncoded.GetNumBitsWritten(),
-				deltaProps,
-				ARRAYSIZE( deltaProps ),
-				-1 );
-			
-			Assert( nDeltaProps != -1 ); // BAD: buffer overflow
-
-			
-			// Reencode with just the delta. This is what is actually sent to the client.
-			SendTable_WritePropList( 
-				pSendTable,
-				fullEncoded,
-				bfFullEncoded.GetNumBitsWritten(),
-				&bfDeltaEncoded,
-				-1111, 
-				deltaProps,
-				nDeltaProps );
+			SendTable_CalcDelta( pSendTable, startEntity, endEntity, -1111, deltaProps );
+			SendTable_WritePropList( pSendTable, endEntity, &bfDeltaEncoded, -1, &deltaProps );
 		}
 
 		memcpy( prevEncoded, fullEncoded, sizeof( prevEncoded ) );
 
+		bf_read bfDecode( "RunDataTableTest->copyEncoded", prevEncoded, sizeof( prevEncoded ) );
 
 		// This step isn't necessary to have the client decode the data but it's here to test
 		// RecvTable_CopyEncoding (and RecvTable_MergeDeltas). This call should just make an exact
 		// copy of the encoded data.
-		ALIGN4 unsigned char copyEncoded[4096] ALIGN4_POST;
-		bf_read bfReadDeltaEncoded( "RunDataTableTest->bfReadDeltaEncoded", deltaEncoded, sizeof( deltaEncoded ) );
-		bf_write bfCopyEncoded( "RunDataTableTest->bfCopyEncoded", copyEncoded, sizeof(copyEncoded) );
-
-		RecvTable_CopyEncoding( pRecvTable, &bfReadDeltaEncoded, &bfCopyEncoded, -1 );
 		
-		// Decode..
-		bf_read bfDecode( "RunDataTableTest->copyEncoded", copyEncoded, sizeof( copyEncoded ) );
-		if(!RecvTable_Decode(pRecvTable, &dtClient, &bfDecode, 1111))
+		if ( !RecvTable_ReadFieldList( pRecvTable, bfDecode, received, 1111, false ) )
+		{
+			Assert( false );
+		}
+
+		if ( !RecvTable_Decode( pRecvTable, &dtClient, received, 1111 ) )
 		{
 			Assert(false);
 		}
-
 		
 		// Make sure it didn't go into memory it shouldn't have.
 		CheckGuardBytes( &dtClient );
@@ -1001,6 +1031,10 @@ void RunDataTableTest()
 		// Verify that only the changed properties were sent and that they were received correctly.
 		CompareDTTest( &dtClient, &dtServer );
 	}
+
+	g_pSerializedEntities->ReleaseSerializedEntity( received );
+	g_pSerializedEntities->ReleaseSerializedEntity( endEntity );
+	g_pSerializedEntities->ReleaseSerializedEntity( startEntity );
 
 	SendTable_Term();
 	RecvTable_Term();

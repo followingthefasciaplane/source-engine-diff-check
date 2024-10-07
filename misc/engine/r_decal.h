@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -15,16 +15,17 @@
 #include "utllinkedlist.h"
 #include "utlrbtree.h"
 
+#include "tier0/platform.h"
+
 #include "tier0/memdbgon.h"
 
 // Initialize and shutdown the decal stuff.
 // R_DecalTerm unlinks all the active decals (which frees their counterparts in displacements).
 void R_DecalInit();
-void R_DecalTerm( worldbrushdata_t *pBrushData, bool term_permanent_decals );
+void R_DecalTerm( worldbrushdata_t *pBrushData, bool term_permanent_decals, bool term_player_decals );
+void R_DecalTermNew( worldbrushdata_t *pBrushData, int nTick );
 void R_DecalTermAll();
 float ComputeDecalLightmapOffset( SurfaceHandle_t surfID );
-// get the max vertex/index to lock in a dynamic VB
-void R_DecalsGetMaxMesh( IMatRenderContext *pRenderContext, int &nDecalSortMaxVerts, int &nDecalSortMaxIndices );
 
 // --------------------------------------------------------------- //
 // Decal functions used for displacements.
@@ -74,7 +75,8 @@ struct DecalMaterialSortData_t
 
 struct DecalMaterialBucket_t
 {
-	int			m_iHead;
+	intp		m_iHead;
+	intp		m_iTail;
 	int			m_nCheckCount;
 };
 
@@ -82,16 +84,16 @@ inline bool DecalSortTreeSortLessFunc( const DecalMaterialSortData_t &decal1, co
 {
 	if ( ( decal1.m_iLightmapPage == -1 ) || ( decal2.m_iLightmapPage == -1 ) )
 	{
-		return ( ( int )decal1.m_pMaterial < ( int )decal2.m_pMaterial );
+		return ( ( intp )decal1.m_pMaterial < ( intp )decal2.m_pMaterial );
 	}
 
-	if ( ( int )decal1.m_pMaterial == ( int )decal2.m_pMaterial )
+	if ( ( intp )decal1.m_pMaterial == ( intp )decal2.m_pMaterial )
 	{
 		return ( decal1.m_iLightmapPage < decal2.m_iLightmapPage );
 	}
 	else
 	{
-		return ( ( int )decal1.m_pMaterial < ( int )decal2.m_pMaterial );
+		return ( ( intp )decal1.m_pMaterial < ( intp )decal2.m_pMaterial );
 	}
 }
 
@@ -164,7 +166,7 @@ void DecalSurfaceDraw( IMatRenderContext *pRenderContext, int renderGroup, float
 void DrawDecalsOnSingleSurface( IMatRenderContext *pRenderContext, SurfaceHandle_t surfID );
 
 void R_DecalReSortMaterials( void );
-void R_DecalFlushDestroyList( void );
+void R_DecalFlushDestroyList( bool bImmediateCleanup = false );
 
 extern VMatrix g_BrushToWorldMatrix;
 #include "tier0/memdbgoff.h"

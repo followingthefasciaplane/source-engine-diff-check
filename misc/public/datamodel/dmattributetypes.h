@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright (c) 1996-2004, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -11,16 +11,16 @@
 #endif
 
 #include "tier1/utlvector.h"
-#include "tier1/utlbinaryblock.h"
 #include "tier1/utlstring.h"
 #include "tier1/uniqueid.h"
-#include "Color.h"
+#include "color.h"
 #include "mathlib/vector2d.h"
 #include "mathlib/vector.h"
 #include "mathlib/vector4d.h"
 #include "mathlib/vmatrix.h"
 #include "datamodel/dmelementhandle.h"
-#include "tier1/utlsymbol.h"
+#include "tier1/utlsymbollarge.h"
+#include "tier1/timeutils.h"
 
 
 //-----------------------------------------------------------------------------
@@ -43,20 +43,20 @@ struct DmUnknownAttribute_t
 //-----------------------------------------------------------------------------
 struct DmElementAttribute_t
 {
-	DmElementAttribute_t() : m_ElementType( UTL_INVAL_SYMBOL ) {}
+	DmElementAttribute_t() : m_ElementType( UTL_INVAL_SYMBOL_LARGE ) {}
 
 	operator DmElementHandle_t&() { return m_Handle; }
 	operator const DmElementHandle_t&() const { return m_Handle; }
 
 	DmElementHandle_t m_Handle;
-	UtlSymId_t m_ElementType;
+	CUtlSymbolLarge m_ElementType;
 };
 
 struct DmElementArray_t : public CUtlVector< DmElementHandle_t >
 {
-	DmElementArray_t() : m_ElementType( UTL_INVAL_SYMBOL ) {}
+	DmElementArray_t() : m_ElementType( UTL_INVAL_SYMBOL_LARGE ) {}
 
-	UtlSymId_t m_ElementType;	
+	CUtlSymbolLarge m_ElementType;	
 };
 
 
@@ -75,7 +75,7 @@ enum DmAttributeType_t
 	AT_BOOL,
 	AT_STRING,
 	AT_VOID,
-	AT_OBJECTID,
+	AT_TIME,
 	AT_COLOR, //rgba
 	AT_VECTOR2,
 	AT_VECTOR3,
@@ -92,7 +92,7 @@ enum DmAttributeType_t
 	AT_BOOL_ARRAY,
 	AT_STRING_ARRAY,
 	AT_VOID_ARRAY,
-	AT_OBJECTID_ARRAY,
+	AT_TIME_ARRAY,
 	AT_COLOR_ARRAY,
 	AT_VECTOR2_ARRAY,
 	AT_VECTOR3_ARRAY,
@@ -101,6 +101,8 @@ enum DmAttributeType_t
 	AT_QUATERNION_ARRAY,
 	AT_VMATRIX_ARRAY,
 	AT_TYPE_COUNT,
+
+	AT_TYPE_INVALID,
 };
 
 const char *GetTypeString( DmAttributeType_t type );
@@ -139,6 +141,7 @@ inline int NumComponents( DmAttributeType_t type )
 	case AT_BOOL:
 	case AT_INT:
 	case AT_FLOAT:
+	case AT_TIME:
 		return 1;
 
 	case AT_VECTOR2:
@@ -159,7 +162,6 @@ inline int NumComponents( DmAttributeType_t type )
 	case AT_ELEMENT:
 	case AT_STRING:
 	case AT_VOID:
-	case AT_OBJECTID:
 	default:
 		return 0;
 	}
@@ -188,6 +190,12 @@ template <> inline float GetComponent( const float &value, int i )
 {
 	Assert( i == 0 );
 	return value;
+}
+
+template <> inline float GetComponent( const DmeTime_t &value, int i )
+{
+	Assert( i == 0 );
+	return value.GetSeconds();
 }
 
 template <> inline float GetComponent( const Vector2D &value, int i )
@@ -229,13 +237,40 @@ template <> inline float GetComponent( const VMatrix &value, int i )
 //-----------------------------------------------------------------------------
 // Attribute info... 
 //-----------------------------------------------------------------------------
+
 template <typename T>
 class CDmAttributeInfo
+{
+private:
+	enum { ATTRIBUTE_TYPE = AT_TYPE_INVALID };
+
+	typedef T StorageType_t;
+	friend class CDmxAttribute;
+
+	static DmAttributeType_t AttributeType()
+	{
+		return AT_TYPE_INVALID;
+	}
+
+	static const char *AttributeTypeName()
+	{
+		return "invalid";
+	}
+
+	static void SetDefaultValue( T& value )
+	{
+		Assert(0);
+	}
+};
+
+
+template <>
+class CDmAttributeInfo< DmUnknownAttribute_t >
 {
 public:
 	enum { ATTRIBUTE_TYPE = AT_UNKNOWN };
 
-	typedef T StorageType_t;
+	typedef DmUnknownAttribute_t StorageType_t;
 
 	static DmAttributeType_t AttributeType()
 	{
@@ -247,7 +282,7 @@ public:
 		return "unknown";
 	}
 
-	static void SetDefaultValue( T& value )
+	static void SetDefaultValue( DmUnknownAttribute_t& value )
 	{
 		Assert(0);
 	}
@@ -293,9 +328,9 @@ DECLARE_ATTRIBUTE_TYPE( Vector4D,				AT_VECTOR4,				"vector4",		value.Init( 0.0f
 DECLARE_ATTRIBUTE_TYPE( QAngle,					AT_QANGLE,				"qangle",		value.Init( 0.0f, 0.0f, 0.0f ); )
 DECLARE_ATTRIBUTE_TYPE( Quaternion,				AT_QUATERNION,			"quaternion",	value.Init( 0.0f, 0.0f, 0.0f, 1.0f ); )
 DECLARE_ATTRIBUTE_TYPE( VMatrix,				AT_VMATRIX,				"matrix",		MatrixSetIdentity( value ); )
-DECLARE_ATTRIBUTE_TYPE( CUtlString,				AT_STRING,				"string",		value.Set( NULL ); )
+DECLARE_ATTRIBUTE_TYPE( CUtlSymbolLarge,		AT_STRING,				"string",		value = UTL_INVAL_SYMBOL_LARGE; )
 DECLARE_ATTRIBUTE_TYPE( CUtlBinaryBlock,		AT_VOID,				"binary",		value.Set( NULL, 0 ); )
-DECLARE_ATTRIBUTE_TYPE( DmObjectId_t,			AT_OBJECTID,			"elementid",	InvalidateUniqueId( &value ); )
+DECLARE_ATTRIBUTE_TYPE( DmeTime_t,				AT_TIME,				"time",			value.SetTenthsOfMS( 0 ); )
 DECLARE_ATTRIBUTE_TYPE_INTERNAL( DmElementHandle_t, DmElementAttribute_t, AT_ELEMENT,	"element", value = DMELEMENT_HANDLE_INVALID; )
 
 DECLARE_ATTRIBUTE_ARRAY_TYPE( int,				AT_INT_ARRAY,			"int_array" )
@@ -308,9 +343,9 @@ DECLARE_ATTRIBUTE_ARRAY_TYPE( Vector4D,			AT_VECTOR4_ARRAY,		"vector4_array" )
 DECLARE_ATTRIBUTE_ARRAY_TYPE( QAngle,			AT_QANGLE_ARRAY,		"qangle_array" )
 DECLARE_ATTRIBUTE_ARRAY_TYPE( Quaternion,		AT_QUATERNION_ARRAY,	"quaternion_array" )
 DECLARE_ATTRIBUTE_ARRAY_TYPE( VMatrix,			AT_VMATRIX_ARRAY,		"matrix_array" )
-DECLARE_ATTRIBUTE_ARRAY_TYPE( CUtlString,		AT_STRING_ARRAY,		"string_array" )
+DECLARE_ATTRIBUTE_ARRAY_TYPE( CUtlSymbolLarge,	AT_STRING_ARRAY,		"string_array" )
 DECLARE_ATTRIBUTE_ARRAY_TYPE( CUtlBinaryBlock,	AT_VOID_ARRAY,			"binary_array" )
-DECLARE_ATTRIBUTE_ARRAY_TYPE( DmObjectId_t,		AT_OBJECTID_ARRAY,		"elementid_array" )
+DECLARE_ATTRIBUTE_ARRAY_TYPE( DmeTime_t,		AT_TIME_ARRAY,			"time_array" )
 DECLARE_ATTRIBUTE_ARRAY_TYPE_INTERNAL( DmElementHandle_t, DmElementArray_t,	AT_ELEMENT_ARRAY, "element_array" )
 
 

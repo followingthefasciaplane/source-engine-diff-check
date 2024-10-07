@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -31,28 +31,8 @@ class CSceneEntity;
 class CSceneEventInfo
 {
 public:
-	CSceneEventInfo()
-		:
-	m_pEvent( 0 ),
-	m_pScene( 0 ),
-	m_pActor( 0 ),
-	m_bStarted( false ),
-	m_iLayer( -1 ),
-	m_iPriority( 0 ),
-	m_nSequence( 0 ),
-	m_bIsGesture( false ),
-	m_flWeight( 0.0f ),
-	m_hTarget(),
-	m_bIsMoving( false ),
-	m_bHasArrived( false ),
-	m_flInitialYaw( 0.0f ),
-	m_flTargetYaw( 0.0f ),
-	m_flFacingYaw( 0.0f ),
-	m_nType( 0 ),
-	m_flNext( 0.0f ),
-	m_bClientSide( false )
-	{
-	}
+	CSceneEventInfo();
+	~CSceneEventInfo(); // out-of-line default destructor to deal with template on forward-declared class
 
 	// The event handle of the current scene event
 	CChoreoEvent	*m_pEvent;
@@ -62,6 +42,8 @@ public:
 
 	// Current actor
 	CChoreoActor	*m_pActor;
+
+	CHandle< CSceneEntity >	m_hSceneEntity;
 
 	// Set after the first time the event has been configured ( allows
 	//  bumping markov index only at start of event playback, not every frame )
@@ -91,6 +73,9 @@ public:
 
 	// is this event only client side?
 	bool					m_bClientSide; 
+
+	// cached flex file
+	const flexsettinghdr_t *m_pExpHdr; 
 
 	void					InitWeight( CBaseFlex *pActor );
 	float					UpdateWeight( CBaseFlex *pActor );

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =====//
 //
 // Describes the way to compile a MDL file (eventual replacement for qc)
 //
@@ -161,7 +161,7 @@ private:
 	// Inherited classes should re-implement these methods
 	virtual CDmElement *CreateOutputElement( ) { return NULL; }
 	virtual void DestroyOutputElement( CDmElement *pOutput ) { }
-	virtual ProcessHandle_t PerformCompilation() { Assert(0); return PROCESS_HANDLE_INVALID; }
+	virtual IProcess* PerformCompilation() { Assert(0); return NULL; }
 	virtual const char *GetOutputDirectoryID() { return "makefilegamedir:"; }
 
 private:
@@ -176,7 +176,7 @@ private:
 
 	CDmaElementArray< CDmeSource > m_Sources;
 	CDmeHandle< CDmElement > m_hOutput;
-	ProcessHandle_t m_hCompileProcess;
+	IProcess *m_hCompileProcess;
 	bool m_bIsDirty;
 };
 
@@ -220,7 +220,7 @@ void CDmeMakefile::GetSources( CUtlVector< CDmeHandle<T> > &sources )
 template< class T >
 T* CDmeMakefile::AddSource( const char *pFullPath )
 {
-	return CastElement< T >( AddSource( g_pDataModel->GetString( T::GetStaticTypeSymbol() ), pFullPath ) );
+	return CastElement< T >( AddSource( T::GetStaticTypeSymbol().String(), pFullPath ) );
 }
 
 

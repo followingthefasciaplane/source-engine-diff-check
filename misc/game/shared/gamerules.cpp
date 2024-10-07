@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -8,9 +8,8 @@
 #include "gamerules.h"
 #include "ammodef.h"
 #include "tier0/vprof.h"
-#include "KeyValues.h"
-#include "iachievementmgr.h"
-
+#include "keyvalues.h"
+#include "usermessages.h"
 #ifdef CLIENT_DLL
 
 	#include "usermessages.h"
@@ -25,8 +24,7 @@
 	#include "voice_gamemgr.h"
 	#include "globalstate.h"
 	#include "player_resource.h"
-	#include "tactical_mission.h"
-	#include "gamestats.h"
+#include "GameStats.h"
 
 #endif
 
@@ -36,11 +34,6 @@
 
 ConVar g_Language( "g_Language", "0", FCVAR_REPLICATED );
 ConVar sk_autoaim_mode( "sk_autoaim_mode", "1", FCVAR_ARCHIVE | FCVAR_REPLICATED );
-
-#ifndef CLIENT_DLL
-ConVar log_verbose_enable( "log_verbose_enable", "0", FCVAR_GAMEDLL, "Set to 1 to enable verbose server log on the server." );
-ConVar log_verbose_interval( "log_verbose_interval", "3.0", FCVAR_GAMEDLL, "Determines the interval (in seconds) for the verbose server log." );
-#endif // CLIENT_DLL
 
 static CViewVectors g_DefaultViewVectors(
 	Vector( 0, 0, 64 ),			//VEC_VIEW (m_vView)
@@ -57,7 +50,15 @@ static CViewVectors g_DefaultViewVectors(
 													
 	Vector( 0, 0, 14 )			//VEC_DEAD_VIEWHEIGHT (m_vDeadViewHeight)
 );													
-													
+	
+
+#ifdef PORTAL2
+ConVar sv_portal_players( "sv_portal_players", "1", FCVAR_REPLICATED | FCVAR_DEVELOPMENTONLY | FCVAR_HIDDEN );
+bool IsGameRulesMultiplayer()
+{
+	return ( sv_portal_players.GetInt() > 1 );
+}
+#endif
 
 // ------------------------------------------------------------------------------------ //
 // CGameRulesProxy implementation.
@@ -121,12 +122,6 @@ bool CGameRules::IsBonusChallengeTimeBased( void )
 	return true;
 }
 
-bool CGameRules::IsLocalPlayer( int nEntIndex )
-{
-	C_BasePlayer *pLocalPlayer = C_BasePlayer::GetLocalPlayer();
-	return ( pLocalPlayer && pLocalPlayer == ClientEntityList().GetEnt( nEntIndex ) );
-}
-
 CGameRules::CGameRules() : CAutoGameSystemPerFrame( "CGameRules" )
 {
 	Assert( !g_pGameRules );
@@ -152,9 +147,33 @@ CGameRules::CGameRules() : CAutoGameSystemPerFrame( "CGameRules" )
 
 	GetVoiceGameMgr()->Init( g_pVoiceGameMgrHelper, gpGlobals->maxClients );
 	ClearMultiDamage();
-
-	m_flNextVerboseLogOutput = 0.0f;
 }
+
+//-----------------------------------------------------------------------------
+// Precache game-specific resources
+//-----------------------------------------------------------------------------
+void CGameRules::Precache( void ) 
+{
+	// Used by particle property
+	PrecacheEffect( "ParticleEffect" );
+	PrecacheEffect( "ParticleEffectStop" );
+
+	// Used by default impact system
+	PrecacheEffect( "GlassImpact" );
+	PrecacheEffect( "Impact" );
+	PrecacheEffect( "RagdollImpact" );
+	PrecacheEffect( "gunshotsplash"	);
+	PrecacheEffect( "TracerSound" );
+	PrecacheEffect( "Tracer" );
+
+	// Used by physics impacts
+	PrecacheEffect( "watersplash" );
+	PrecacheEffect( "waterripple" );
+
+	// Used by UTIL_BloodImpact, which is used in many places
+	PrecacheEffect( "bloodimpact" );
+}
+
 
 //-----------------------------------------------------------------------------
 // Purpose: Return true if the specified player can carry any more of the ammo type
@@ -164,7 +183,7 @@ bool CGameRules::CanHaveAmmo( CBaseCombatCharacter *pPlayer, int iAmmoIndex )
 	if ( iAmmoIndex > -1 )
 	{
 		// Get the max carrying capacity for this ammo
-		int iMaxCarry = GetAmmoDef()->MaxCarry( iAmmoIndex );
+		int iMaxCarry = GetAmmoDef()->MaxCarry( iAmmoIndex, pPlayer );
 
 		// Does the player have room for more of this type of ammo?
 		if ( pPlayer->GetAmmoCount( iAmmoIndex ) < iMaxCarry )
@@ -188,12 +207,15 @@ CBaseEntity *CGameRules::GetPlayerSpawnSpot( CBasePlayer *pPlayer )
 {
 	CBaseEntity *pSpawnSpot = pPlayer->EntSelectSpawnPoint();
 	Assert( pSpawnSpot );
+	if ( pSpawnSpot == NULL )
+		return NULL;
 
 	pPlayer->SetLocalOrigin( pSpawnSpot->GetAbsOrigin() + Vector(0,0,1) );
 	pPlayer->SetAbsVelocity( vec3_origin );
 	pPlayer->SetLocalAngles( pSpawnSpot->GetLocalAngles() );
-	pPlayer->m_Local.m_vecPunchAngle = vec3_angle;
-	pPlayer->m_Local.m_vecPunchAngleVel = vec3_angle;
+	pPlayer->m_Local.m_viewPunchAngle = vec3_angle;
+	pPlayer->m_Local.m_aimPunchAngle = vec3_angle;
+	pPlayer->m_Local.m_aimPunchAngleVel = vec3_angle;
 	pPlayer->SnapEyeAngles( pSpawnSpot->GetLocalAngles() );
 
 	return pSpawnSpot;
@@ -261,10 +283,7 @@ void CGameRules::RefreshSkillData ( bool forceUpdate )
 			return;
 	}
 	GlobalEntity_Add( "skill.cfg", STRING(gpGlobals->mapname), GLOBAL_ON );
-
-#if !defined( TF_DLL ) && !defined( DOD_DLL )
 	char	szExec[256];
-#endif 
 
 	ConVarRef skill( "skill" );
 
@@ -278,14 +297,10 @@ void CGameRules::RefreshSkillData ( bool forceUpdate )
 	engine->ServerCommand( szExec );
 	engine->ServerExecute();
 #else
-
-#if !defined( TF_DLL ) && !defined( DOD_DLL )
 	Q_snprintf( szExec,sizeof(szExec), "exec skill%d.cfg\n", GetSkillLevel() );
 
 	engine->ServerCommand( szExec );
 	engine->ServerExecute();
-#endif // TF_DLL && DOD_DLL
-
 #endif // HL2_DLL
 #endif // CLIENT_DLL
 }
@@ -333,13 +348,13 @@ void CGameRules::RadiusDamage( const CTakeDamageInfo &info, const Vector &vecSrc
 	else
 		falloff = 1.0;
 
-	int bInWater = (UTIL_PointContents ( vecSrc ) & MASK_WATER) ? true : false;
+	int bInWater = (UTIL_PointContents ( vecSrc, MASK_WATER ) & MASK_WATER) ? true : false;
 
 #ifdef HL2_DLL
 	if( bInWater )
 	{
 		// Only muffle the explosion if deeper than 2 feet in water.
-		if( !(UTIL_PointContents(vecSrc + Vector(0, 0, 24)) & MASK_WATER) )
+		if( !(UTIL_PointContents(vecSrc + Vector(0, 0, 24), MASK_WATER) & MASK_WATER) )
 		{
 			bInWater = false;
 		}
@@ -369,10 +384,10 @@ void CGameRules::RadiusDamage( const CTakeDamageInfo &info, const Vector &vecSrc
 		}
 
 		// blast's don't tavel into or out of water
-		if (bInWater && pEntity->GetWaterLevel() == 0)
+		if (bInWater && pEntity->GetWaterLevel() == WL_NotInWater)
 			continue;
 
-		if (!bInWater && pEntity->GetWaterLevel() == 3)
+		if (!bInWater && pEntity->GetWaterLevel() == WL_Eyes)
 			continue;
 
 		// Check that the explosion can 'see' this entity.
@@ -472,7 +487,8 @@ void CGameRules::RadiusDamage( const CTakeDamageInfo &info, const Vector &vecSrc
 			}
 		}
 		// decrease damage for an ent that's farther from the bomb.
-		flAdjustedDamage = ( vecSrc - tr.endpos ).Length() * falloff;
+		float flDistanceToEnt = ( vecSrc - tr.endpos ).Length();
+		flAdjustedDamage = flDistanceToEnt * falloff;
 		flAdjustedDamage = info.GetDamage() - flAdjustedDamage;
 
 		if ( flAdjustedDamage <= 0 )
@@ -490,6 +506,7 @@ void CGameRules::RadiusDamage( const CTakeDamageInfo &info, const Vector &vecSrc
 		
 		CTakeDamageInfo adjustedInfo = info;
 		//Msg("%s: Blocked damage: %f percent (in:%f  out:%f)\n", pEntity->GetClassname(), flBlockedDamagePercent * 100, flAdjustedDamage, flAdjustedDamage - (flAdjustedDamage * flBlockedDamagePercent) );
+		adjustedInfo.SetRadius( flRadius );
 		adjustedInfo.SetDamage( flAdjustedDamage - (flAdjustedDamage * flBlockedDamagePercent) );
 
 		// Now make a consideration for skill level!
@@ -532,7 +549,7 @@ void CGameRules::RadiusDamage( const CTakeDamageInfo &info, const Vector &vecSrc
 		// Now hit all triggers along the way that respond to damage... 
 		pEntity->TraceAttackToTriggers( adjustedInfo, vecSrc, tr.endpos, dir );
 
-#if defined( GAME_DLL )
+#if defined( GAME_DLL ) && !defined( _GAMECONSOLE )
 		if ( info.GetAttacker() && info.GetAttacker()->IsPlayer() && ToBaseCombatCharacter( tr.m_pEnt ) )
 		{
 
@@ -567,26 +584,20 @@ bool CGameRules::ClientCommand( CBaseEntity *pEdict, const CCommand &args )
 void CGameRules::FrameUpdatePostEntityThink()
 {
 	VPROF( "CGameRules::FrameUpdatePostEntityThink" );
+    SNPROF( "CGameRules::FrameUpdatePostEntityThink" );
 	Think();
 }
 
 // Hook into the convar from the engine
-ConVar skill( "skill", "1" );
+ConVar skill( "skill", "1", FCVAR_ARCHIVE );
 
 void CGameRules::Think()
 {
 	GetVoiceGameMgr()->Update( gpGlobals->frametime );
-	SetSkillLevel( skill.GetInt() );
 
-	if ( log_verbose_enable.GetBool() )
-	{
-		if ( m_flNextVerboseLogOutput < gpGlobals->curtime )
-		{
-			ProcessVerboseLogOutput();
-			m_flNextVerboseLogOutput = gpGlobals->curtime + log_verbose_interval.GetFloat();
-		}
-	}
+	SetSkillLevel( skill.GetInt() );
 }
+
 
 //-----------------------------------------------------------------------------
 // Purpose: Called at the end of GameFrame (i.e. after all game logic has run this frame)
@@ -631,13 +642,19 @@ void CGameRules::CreateStandardEntities()
 //-----------------------------------------------------------------------------
 void CGameRules::MarkAchievement( IRecipientFilter& filter, char const *pchAchievementName )
 {
+	#ifndef _GAMECONSOLE
 	gamestats->Event_IncrementCountedStatistic( vec3_origin, pchAchievementName, 1.0f );
-
-	IAchievementMgr *pAchievementMgr = engine->GetAchievementMgr();
-	if ( !pAchievementMgr )
-		return;
-	pAchievementMgr->OnMapEvent( pchAchievementName );
+	#endif
 }
+
+//-----------------------------------------------------------------------------
+// Purpose: Wrapper allowing gamerules to change the way client-finding in PVS works
+//-----------------------------------------------------------------------------
+edict_t *CGameRules::DoFindClientInPVS( edict_t *pEdict, unsigned char *pvs, unsigned pvssize )
+{
+	return UTIL_FindClientInPVSGuts( pEdict, pvs, pvssize );
+}
+
 
 #endif //} !CLIENT_DLL
 
@@ -650,6 +667,15 @@ CGameRules::~CGameRules()
 {
 	Assert( g_pGameRules == this );
 	g_pGameRules = NULL;
+}
+
+bool CGameRules::Init()
+{
+#ifndef CLIENT_DLL
+	RefreshSkillData( true );
+#endif
+
+	return true;
 }
 
 bool CGameRules::SwitchToNextBestWeapon( CBaseCombatCharacter *pPlayer, CBaseCombatWeapon *pCurrentWeapon )
@@ -667,22 +693,27 @@ bool CGameRules::ShouldCollide( int collisionGroup0, int collisionGroup1 )
 	if ( collisionGroup0 > collisionGroup1 )
 	{
 		// swap so that lowest is always first
-		::V_swap(collisionGroup0,collisionGroup1);
+		V_swap(collisionGroup0,collisionGroup1);
 	}
 
-#ifndef HL2MP
 	if ( (collisionGroup0 == COLLISION_GROUP_PLAYER || collisionGroup0 == COLLISION_GROUP_PLAYER_MOVEMENT) &&
 		collisionGroup1 == COLLISION_GROUP_PUSHAWAY )
 	{
 		return false;
 	}
-#endif
 
 	if ( collisionGroup0 == COLLISION_GROUP_DEBRIS && collisionGroup1 == COLLISION_GROUP_PUSHAWAY )
 	{
 		// let debris and multiplayer objects collide
 		return true;
 	}
+
+	// Only let projectile blocking debris collide with projectiles
+	if ( collisionGroup0 == COLLISION_GROUP_PROJECTILE && collisionGroup1 == COLLISION_GROUP_DEBRIS_BLOCK_PROJECTILE )
+		return true;
+
+	if ( collisionGroup0 == COLLISION_GROUP_DEBRIS_BLOCK_PROJECTILE || collisionGroup1 == COLLISION_GROUP_DEBRIS_BLOCK_PROJECTILE )
+		return false;
 	
 	// --------------------------------------------------------------------------
 	// NOTE: All of this code assumes the collision groups have been sorted!!!!
@@ -717,12 +748,34 @@ bool CGameRules::ShouldCollide( int collisionGroup0, int collisionGroup1 )
 	if ( collisionGroup0 == COLLISION_GROUP_INTERACTIVE_DEBRIS && collisionGroup1 == COLLISION_GROUP_INTERACTIVE_DEBRIS )
 		return false;
 
-#ifndef HL2MP
 	// This change was breaking HL2DM
 	// Adrian: TEST! Interactive Debris doesn't collide with the player.
 	if ( collisionGroup0 == COLLISION_GROUP_INTERACTIVE_DEBRIS && ( collisionGroup1 == COLLISION_GROUP_PLAYER_MOVEMENT || collisionGroup1 == COLLISION_GROUP_PLAYER ) )
 		 return false;
-#endif
+
+#ifdef PORTAL2
+	// Only hit something of the same group
+	if ( collisionGroup0 == COLLISION_GROUP_CAMERA_SOLID || collisionGroup1 == COLLISION_GROUP_CAMERA_SOLID )
+	{
+		if ( collisionGroup0 != COLLISION_GROUP_CAMERA_SOLID || collisionGroup1 != COLLISION_GROUP_CAMERA_SOLID )
+			return false;
+	}
+
+	// Only hit something of the same group
+	if ( collisionGroup0 == COLLISION_GROUP_PLACEMENT_SOLID || collisionGroup1 == COLLISION_GROUP_PLACEMENT_SOLID )
+	{
+		if ( collisionGroup0 != COLLISION_GROUP_PLACEMENT_SOLID || collisionGroup1 != COLLISION_GROUP_PLACEMENT_SOLID )
+			return false;
+	}
+
+	// Held objects shouldn't collide with players 
+	// BUG: Not sure if we want this in MP, intention is to not collide with the holding player, not necessarily all. 
+	if ( collisionGroup1 == COLLISION_GROUP_PLAYER_HELD && collisionGroup0 == COLLISION_GROUP_PLAYER )
+		return false;
+
+	if ( collisionGroup1 == COLLISION_GROUP_PLAYER_HELD && collisionGroup0 == COLLISION_GROUP_PLAYER_MOVEMENT )
+		return false;
+#endif // PORTAL2
 
 	if ( collisionGroup0 == COLLISION_GROUP_BREAKABLE_GLASS && collisionGroup1 == COLLISION_GROUP_BREAKABLE_GLASS )
 		return false;
@@ -750,7 +803,8 @@ bool CGameRules::ShouldCollide( int collisionGroup0, int collisionGroup1 )
 	{
 		if ( collisionGroup0 == COLLISION_GROUP_VEHICLE || 
 			collisionGroup0 == COLLISION_GROUP_PLAYER ||
-			collisionGroup0 == COLLISION_GROUP_NPC )
+			collisionGroup0 == COLLISION_GROUP_NPC || 
+			collisionGroup0 == COLLISION_GROUP_WEAPON ) //don't let weapons collide with weapons, they can pile up and choke the server
 		{
 			return false;
 		}
@@ -802,7 +856,6 @@ float CGameRules::GetAmmoDamage( CBaseEntity *pAttacker, CBaseEntity *pVictim, i
 	return flDamage;
 }
 
-
 #ifndef CLIENT_DLL
 const char *CGameRules::GetChatPrefix( bool bTeamOnly, CBasePlayer *pPlayer )
 {
@@ -817,41 +870,29 @@ const char *CGameRules::GetChatPrefix( bool bTeamOnly, CBasePlayer *pPlayer )
 	return "";
 }
 
-void CGameRules::CheckHaptics(CBasePlayer* pPlayer)
-{
-	// NVNT see if the client of pPlayer is using a haptic device.
-	const char *pszHH = engine->GetClientConVarValue( pPlayer->entindex(), "hap_HasDevice" );
-	if( pszHH )
-	{
-		int iHH = atoi( pszHH );
-		pPlayer->SetHaptics( iHH != 0 );
-	}
-}
-
 void CGameRules::ClientSettingsChanged( CBasePlayer *pPlayer )
 {
 	const char *pszName = engine->GetClientConVarValue( pPlayer->entindex(), "name" );
 
 	const char *pszOldName = pPlayer->GetPlayerName();
 
-	// msg everyone if someone changes their name,  and it isn't the first time (changing no name to current name)
-	// Note, not using FStrEq so that this is case sensitive
-	if ( pszOldName[0] != 0 && Q_strcmp( pszOldName, pszName ) )
+	// msg everyone if someone changes their name, and it isn't the first time (changing no name to current name)
+	// Note, this is case sensitive
+	if ( ( Q_strcmp( pszOldName, pszName ) != 0 ) &&
+		CanClientCustomizeOwnIdentity() )
 	{
-		char text[256];
-		Q_snprintf( text,sizeof(text), "%s changed name to %s\n", pszOldName, pszName );
-
-		UTIL_ClientPrintAll( HUD_PRINTTALK, text );
-
-		IGameEvent * event = gameeventmanager->CreateEvent( "player_changename" );
-		if ( event )
+		if ( pszOldName[0] != '\0' )
 		{
-			event->SetInt( "userid", pPlayer->GetUserID() );
-			event->SetString( "oldname", pszOldName );
-			event->SetString( "newname", pszName );
-			gameeventmanager->FireEvent( event );
+			IGameEvent * event = gameeventmanager->CreateEvent( "player_changename" );
+			if ( event )
+			{
+				event->SetInt( "userid", pPlayer->GetUserID() );
+				event->SetString( "oldname", pszOldName );
+				event->SetString( "newname", pszName );
+				gameeventmanager->FireEvent( event );
+			}
 		}
-		
+
 		pPlayer->SetPlayerName( pszName );
 	}
 
@@ -859,22 +900,9 @@ void CGameRules::ClientSettingsChanged( CBasePlayer *pPlayer )
 	if ( pszFov )
 	{
 		int iFov = atoi(pszFov);
-		iFov = clamp( iFov, 75, 90 );
+		iFov = clamp( iFov, 1, 90 );
 		pPlayer->SetDefaultFOV( iFov );
 	}
-
-	// NVNT see if this user is still or has began using a haptic device
-	const char *pszHH = engine->GetClientConVarValue( pPlayer->entindex(), "hap_HasDevice" );
-	if( pszHH )
-	{
-		int iHH = atoi( pszHH );
-		pPlayer->SetHaptics( iHH != 0 );
-	}
-}
-
-CTacticalMissionManager *CGameRules::TacticalMissionManagerFactory( void )
-{
-	return new CTacticalMissionManager;
 }
 
 #endif

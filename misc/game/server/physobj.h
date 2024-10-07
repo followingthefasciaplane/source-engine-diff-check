@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -69,13 +69,18 @@ public:
 	bool		 HasPreferredCarryAnglesForPlayer( CBasePlayer *pPlayer );
 	virtual QAngle PreferredCarryAngles( void ) { return m_angPreferredCarryAngles; }
 
+	int			ExploitableByPlayer() const { return m_iExploitableByPlayer; }
+
 	// inputs
 	void InputWake( inputdata_t &inputdata );
 	void InputSleep( inputdata_t &inputdata );
 	void InputEnableMotion( inputdata_t &inputdata );
 	void InputDisableMotion( inputdata_t &inputdata );
+	void InputEnable( inputdata_t &inputdata );
+	void InputDisable( inputdata_t &inputdata );
 	void InputForceDrop( inputdata_t &inputdata );
 	void InputDisableFloating( inputdata_t &inputdata );
+	void InputBecomeDebris( inputdata_t &inputdata );
 
 	DECLARE_DATADESC();
 	
@@ -87,6 +92,7 @@ protected:
 	float			m_flForceToEnableMotion;
 	QAngle			m_angPreferredCarryAngles;
 	bool			m_bNotSolidToWorld;
+	int				m_iExploitableByPlayer;
 
 	// Outputs
 	COutputEvent	m_OnDamaged;
@@ -106,6 +112,12 @@ protected:
 // CPhysExplosion -- physically simulated explosion
 //
 // ---------------------------------------------------------------------
+#define SF_PHYSEXPLOSION_NODAMAGE			0x0001
+#define SF_PHYSEXPLOSION_PUSH_PLAYER		0x0002
+#define SF_PHYSEXPLOSION_RADIAL				0x0004
+#define	SF_PHYSEXPLOSION_TEST_LOS			0x0008
+#define SF_PHYSEXPLOSION_DISORIENT_PLAYER	0x0010
+
 class CPhysExplosion : public CPointEntity
 {
 public:
@@ -113,6 +125,7 @@ public:
 
 	void	Spawn ( void );
 	void	Explode( CBaseEntity *pActivator, CBaseEntity *pCaller );
+	void	ExplodeAndRemove( CBaseEntity *pActivator, CBaseEntity *pCaller );
 
 	CBaseEntity *FindEntity( CBaseEntity *pEntity, CBaseEntity *pActivator, CBaseEntity *pCaller );
 
@@ -120,12 +133,11 @@ public:
 
 	// Input handlers
 	void InputExplode( inputdata_t &inputdata );
+	void InputExplodeAndRemove( inputdata_t &inputdata );
 
 	DECLARE_DATADESC();
-private:
 	
 	float		GetRadius( void );
-
 	float		m_damage;
 	float		m_radius;
 	string_t	m_targetEntityName;
@@ -134,6 +146,7 @@ private:
 	COutputEvent	m_OnPushedPlayer;	
 };
 
+void CreatePhysExplosion( Vector origin, float magnitude, float radius, string_t target, float innerRadius, int flags );
 
 //==================================================
 // CPhysImpact

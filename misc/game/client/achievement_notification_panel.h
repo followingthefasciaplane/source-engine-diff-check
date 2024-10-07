@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2006, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -21,7 +21,7 @@ class CAchievementNotificationPanel : public CHudElement, public EditablePanel
 	DECLARE_CLASS_SIMPLE( CAchievementNotificationPanel, EditablePanel );
 
 public:
-	CAchievementNotificationPanel( const char *pElementName );
+	explicit CAchievementNotificationPanel( const char *pElementName );
 
 	virtual void	Init();
 	virtual void	ApplySchemeSettings( IScheme *scheme );

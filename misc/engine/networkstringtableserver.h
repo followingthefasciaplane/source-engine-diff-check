@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -11,8 +11,9 @@
 #pragma once
 #endif
 
-void SV_CreateNetworkStringTables( void );
+void SV_CreateNetworkStringTables( char const *pchMapName );
 
 void SV_PrintStringTables( void );
+void SV_CreateDictionary( char const *pchMapName );
 
 #endif // NETWORKSTRINGTABLESERVER_H

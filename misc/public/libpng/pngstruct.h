@@ -1,4 +1,3 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
 
 /* pngstruct.h - header file for PNG reference library
  *

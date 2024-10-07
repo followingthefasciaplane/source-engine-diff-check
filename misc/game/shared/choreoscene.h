@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -39,21 +39,6 @@ class IChoreoStringPool;
 //-----------------------------------------------------------------------------
 class CChoreoScene : public ICurveDataAccessor
 {
-	typedef enum 
-	{
-		PROCESSING_TYPE_IGNORE = 0,
-		PROCESSING_TYPE_START,
-		PROCESSING_TYPE_START_RESUMECONDITION,
-		PROCESSING_TYPE_CONTINUE,
-		PROCESSING_TYPE_STOP,
-	} PROCESSING_TYPE;
-
-	struct ActiveList
-	{
-		PROCESSING_TYPE		pt;
-		CChoreoEvent		*e;
-	};
-
 public:
 	// Construction
 					CChoreoScene( IChoreoEventCallback *callback );
@@ -87,7 +72,7 @@ public:
 
 	// Loading
 	bool			ParseFromBuffer( char const *pFilename, ISceneTokenProcessor *tokenizer );
-	void			SetPrintFunc( void ( *pfn )( PRINTF_FORMAT_STRING const char *fmt, ... ) );
+	void			SetPrintFunc( void ( *pfn )( const char *fmt, ... ) );
 
 	// Saving
 	bool			SaveToFile( const char *filename );
@@ -115,11 +100,10 @@ public:
 
 	// Sound system needs to have sounds pre-queued by this much time
 	void			SetSoundFileStartupLatency( float time );
+	float			GetSoundFileStartupLatency() const;
 
 	// Simulation
 	void			Think( float curtime );
-	float			LoopThink( float curtime );
-	void			ProcessActiveListEntry( ActiveList *entry );
 	// Retrieves time in simulation
 	float			GetTime( void );
 	// Retrieves start/stop time for looped/debug scene
@@ -130,10 +114,14 @@ public:
 
 	// Has simulation finished
 	bool			SimulationFinished( void );
+	// Has the last speech event in the scene already fired
+	bool			SpeechFinished( void ) const;
 	// Reset simulation
 	void			ResetSimulation( bool forward = true, float starttime = 0.0f, float endtime = 0.0f );
 	// Find time at which last simulation event is triggered
 	float			FindStopTime( void );
+	// Find time at which last SPEAK event is complete
+	float			FindLastSpeakTime( void ) const;
 
 	void			ResumeSimulation( void );
 
@@ -255,6 +243,21 @@ private:
 
 	int				IsTimeInRange( float t, float starttime, float endtime );
 
+	typedef enum 
+	{
+		PROCESSING_TYPE_IGNORE = 0,
+		PROCESSING_TYPE_START,
+		PROCESSING_TYPE_START_RESUMECONDITION,
+		PROCESSING_TYPE_CONTINUE,
+		PROCESSING_TYPE_STOP,
+	} PROCESSING_TYPE;
+
+	struct ActiveList
+	{
+		PROCESSING_TYPE		pt;
+		CChoreoEvent		*e;
+	};
+
 	static bool EventLess( const CChoreoScene::ActiveList &al0, const CChoreoScene::ActiveList &al1 );
 
 	int				EventThink( CChoreoEvent *e, 
@@ -326,11 +329,10 @@ private:
 	// Current simulation time
 	float			m_flCurrentTime;
 
-	float			m_flStartLoopTime;
-
 	float			m_flStartTime;
 	float			m_flEndTime;
 
+	bool			m_bRecalculateSceneTimes;
 	float			m_flEarliestTime;
 	float			m_flLatestTime;
 	int				m_nActiveEvents;

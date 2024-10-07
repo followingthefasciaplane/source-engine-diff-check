@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -11,7 +11,7 @@
 #endif
 
 #include "tier0/platform.h"
-#include "netadr.h"
+#include "tier1/netadr.h"
 
 //-----------------------------------------------------------------------------
 // Purpose: Internal winsock helpers for launcher

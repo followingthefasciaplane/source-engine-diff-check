@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =======
 //
 // A class representing an MDL
 //
@@ -48,6 +48,8 @@ public:
 
 	void DrawInEngine( bool bDrawInEngine );
 	bool IsDrawingInEngine() const;
+	void ZUp( bool bZUp );
+	bool IsZUp() const;
 
 	void SetMDL( MDLHandle_t handle );
 	MDLHandle_t GetMDL( ) const;
@@ -69,11 +71,14 @@ public:
 	CDmaVar<Vector> m_vecViewTarget;
 	CDmaVar<bool> m_bWorldSpaceViewTarget;
 
+	virtual void GetBoundingBox( Vector &min, Vector &max ) const { return GetBoundingBox( &min, &max ); }
+
 private:
 	void UpdateMDL();
 
 	CMDL m_MDL;
 	bool m_bDrawInEngine;
+	bool m_bZUp;
 };
 
 #endif // DMEMDL_H

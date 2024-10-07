@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -31,7 +31,7 @@ class CAudioSourceWave : public CAudioSource
 public:
 	CAudioSourceWave( CSfxTable *pSfx );
 	CAudioSourceWave( CSfxTable *pSfx, CAudioSourceCachedInfo *info );
-	~CAudioSourceWave( void );
+	virtual ~CAudioSourceWave( void );
 
 	virtual int				GetType( void );
 	virtual void			GetCacheData( CAudioSourceCachedInfo *info );
@@ -46,6 +46,7 @@ public:
 
 	void					*GetHeader( void );
 	virtual bool			IsVoiceSource();
+	virtual bool			IsPlayerVoice() { return false; }
 
 	virtual	void			ParseChunk( IterateRIFF &walk, int chunkName );
 	virtual void			ParseSentence( IterateRIFF &walk );
@@ -55,7 +56,7 @@ public:
 	bool					IsStereoWav( void );
 	bool					IsStreaming( void );
 	int						GetCacheStatus( void );
-	int						ConvertLoopedPosition( int samplePosition );
+	int64					ConvertLoopedPosition( int64 samplePosition );
 	void					CacheLoad( void );
 	void					CacheUnload( void );
 	virtual int				ZeroCrossingBefore( int sample );
@@ -64,13 +65,14 @@ public:
 	virtual void			ReferenceRemove( CAudioMixer *pMixer );
 	virtual bool			CanDelete( void );
 	virtual CSentence		*GetSentence( void );
-	const char				*GetName();
+	const char				*GetName(char *pBuf, size_t bufLen );
+	virtual int				GetQuality( void );
 
 	virtual bool			IsAsyncLoad();
 
 	virtual void			CheckAudioSourceCache();
 
-	virtual char const		*GetFileName();
+	virtual char const		*GetFileName( char *pOutBuffer, size_t bufLen );
 
 	// 360 uses alternate play once semantics
 	virtual void			SetPlayOnce( bool bIsPlayOnce ) { m_bIsPlayOnce = IsPC() ? bIsPlayOnce : false; }
@@ -84,12 +86,15 @@ public:
 	virtual int				SampleToStreamPosition( int samplePosition ) { return 0; }
 	virtual int				StreamToSamplePosition( int streamPosition ) { return 0; }
 
+	// TERROR: limit data read while rebuilding cache
+	void					SetRebuildingCache( void ) { m_bIsRebuildingCache = true; }
+
 protected:
 	void					ParseCueChunk( IterateRIFF &walk );
 	void					ParseSamplerChunk( IterateRIFF &walk );
 
 	void					Init( const char *pHeaderBuffer, int headerSize );
-	bool					GetStartupData( void *dest, int destsize, int& bytesCopied );
+	bool					GetStartupData( int &nFileSize );
 	bool					GetXboxAudioStartupData();
 
 	//-----------------------------------------------------------------------------
@@ -140,11 +145,12 @@ protected:
 	unsigned short	m_loopBlock;			// the block the loop occurs in
 	unsigned short	m_numLeadingSamples;	// number of leader samples in the loop block to discard
 	unsigned short	m_numTrailingSamples;	// number of trailing samples in the final block to discard
-	unsigned short	unused;
+	unsigned short	m_quality;
 
 	unsigned int	m_bNoSentence : 1;
 	unsigned int	m_bIsPlayOnce : 1;
 	unsigned int	m_bIsSentenceWord : 1;
+	unsigned int	m_bIsRebuildingCache : 1;	// TERROR: limit data read while rebuilding cache
 
 private:
 	CAudioSourceWave( const CAudioSourceWave & ); // not implemented, not allowed
@@ -156,5 +162,6 @@ private:
 #endif
 };
 
+PathTypeFilter_t GetAudioPathFilter();
 
 #endif // SND_WAVE_SOURCE_H

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -91,7 +91,18 @@ public:
 	DECLARE_NETWORKCLASS();
 
 	CSprite();
+	virtual ~CSprite();
+
 	virtual void SetModel( const char *szModelName );
+
+#if defined( CLIENT_DLL )
+	virtual bool IsSprite( void ) const
+	{
+		return true;
+	};
+
+	bool IsClientOnly() const { return m_bClientOnly; }
+#endif
 
 	void Spawn( void );
 	void Precache( void );
@@ -159,10 +170,10 @@ public:
 		SetRenderMode( (RenderMode_t)rendermode );
 		SetColor( r, g, b );
 		SetBrightness( a );
-		m_nRenderFX = fx;
+		SetRenderFX( (RenderFx_t)fx );
 	}
 	inline void SetTexture( int spriteIndex ) { SetModelIndex( spriteIndex ); }
-	inline void SetColor( int r, int g, int b ) { SetRenderColor( r, g, b, GetRenderColor().a ); }
+	inline void SetColor( int r, int g, int b ) { SetRenderColor( r, g, b ); }
 	
 	void SetBrightness( int brightness, float duration = 0.0f );
 	void SetScale( float scale, float duration = 0.0f );
@@ -219,36 +230,34 @@ public:
 	static CSprite *SpriteCreatePredictable( const char *module, int line, const char *pSpriteName, const Vector &origin, bool animate );
 
 #if defined( CLIENT_DLL )
-	virtual float	GetRenderScale( void );
-	virtual int		GetRenderBrightness( void );
+	float	GetRenderScale( void );
+	float	GetMaxRenderScale( void );
+	int		GetRenderBrightness( void );
 
-	virtual int		DrawModel( int flags );
+	virtual int		DrawModel( int flags, const RenderableInstance_t &instance );
 	virtual const	Vector& GetRenderOrigin();
 	virtual void	GetRenderBounds( Vector &vecMins, Vector &vecMaxs );
 	virtual float	GlowBlend( CEngineSprite *psprite, const Vector& entorigin, int rendermode, int renderfx, int alpha, float *scale );
 	virtual void	GetToolRecordingState( KeyValues *msg );
 
-// Only supported in TF2 right now
-#if defined( INVASION_CLIENT_DLL )
-	virtual bool	ShouldPredict( void )
-	{
-		return true;
-	}
-#endif
-
 	virtual void	ClientThink( void );
 	virtual void	OnDataChanged( DataUpdateType_t updateType );
 
-#endif
+	static void RecreateAllClientside();
+	static void DestroyAllClientside();
+	static void ParseAllClientsideEntities(const char *pMapData);
+	static const char *ParseClientsideEntity( const char *pEntData );
+
+	bool InitializeClientside();
+
+	virtual bool KeyValue( const char *szKeyName, const char *szValue ) ;	
+#endif // CLIENT_DLL
+
 public:
 	CNetworkHandle( CBaseEntity, m_hAttachedToEntity );
 	CNetworkVar( int, m_nAttachment );
 	CNetworkVar( float, m_flSpriteFramerate );
 	CNetworkVar( float, m_flFrame );
-#ifdef PORTAL
-	CNetworkVar( bool, m_bDrawInMainRender );
-	CNetworkVar( bool, m_bDrawInPortalRender );
-#endif
 
 	float		m_flDieTime;
 
@@ -272,6 +281,10 @@ private:
 	int			m_nStartBrightness;
 	int			m_nDestBrightness;		//Destination brightness
 	float		m_flBrightnessTimeStart;//Real time for brightness
+
+#ifdef CLIENT_DLL
+	bool		m_bClientOnly;
+#endif // CLIENT_DLL
 };
 
 
@@ -284,7 +297,7 @@ public:
 	void Spawn( void );
 #else
 	DECLARE_CLIENTCLASS();
-	virtual bool IsTransparent( void );
+	virtual RenderableTranslucencyType_t ComputeTranslucencyType();
 #endif
 };
 

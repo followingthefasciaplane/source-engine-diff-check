@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose:  baseclientstate.cpp: implementation of the CBaseClientState class.
 //
@@ -46,5 +46,5 @@ protected:
 extern CPluginUIManager *g_PluginManager;
 
 
-void PluginHelpers_Menu( SVC_Menu *msg );
+void PluginHelpers_Menu( const CSVCMsg_Menu& msg );
 

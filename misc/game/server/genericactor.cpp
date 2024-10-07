@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -43,8 +43,9 @@ public:
 	Class_T Classify ( void );
 	void	HandleAnimEvent( animevent_t *pEvent );
 	int		GetSoundInterests ( void );
-
 	
+	virtual int		UpdateTransmitState( void );
+
 	void	TempGunEffect( void );
 
 	string_t			m_strHullName;
@@ -168,6 +169,15 @@ void CGenericActor::Precache()
 }	
 
 //=========================================================
+// Send to all clients since we need to drive the lighted mouth with this
+//=========================================================
+int CGenericActor::UpdateTransmitState()
+{
+	// ALWAYS transmit to all clients.
+	return SetTransmitState( FL_EDICT_ALWAYS );
+}
+
+//=========================================================
 // AI Schedules Specific to this NPC
 //=========================================================
 
@@ -269,16 +279,16 @@ void CFlextalkActor::SetFlexTarget( LocalFlexController_t flexnum, float value )
 	if (1 || random->RandomFloat( 0.0, 1.0 ) < 0.2)
 	{
 		value2 = random->RandomFloat( value - 0.2, value + 0.2 );
-		value2 = clamp( value2, 0.0f, 1.0f );
+		value2 = clamp( value2, 0.0, 1.0 );
 	}
 
 
 	// HACK, for now, consider then linked is named "right_" or "left_"
-	if (strncmp( "right_", GetFlexControllerName( flexnum ), 6 ) == 0)
+	if ( StringHasPrefixCaseSensitive( GetFlexControllerName( flexnum ), "right_" )  )
 	{
 		m_flextarget[flexnum+1] = value2;
 	}
-	else if (strncmp( "left_", GetFlexControllerName( flexnum ), 5 ) == 0)
+	else if ( StringHasPrefixCaseSensitive( GetFlexControllerName( flexnum ), "left_" ) )
 	{
 		m_flextarget[flexnum-1] = value2;
 	}
@@ -372,7 +382,7 @@ void CFlextalkActor::ProcessSceneEvents( void )
 						{
 							m_flexnum = LookupFlex( szTemp );
 
-							if (m_flexnum != LocalFlexController_t(-1) && m_flextarget[m_flexnum] != 1)
+							if (m_flexnum != -1 && m_flextarget[m_flexnum] != 1)
 							{
 								m_flextarget[m_flexnum] = 1.0;
 								// SetFlexTarget( m_flexnum );

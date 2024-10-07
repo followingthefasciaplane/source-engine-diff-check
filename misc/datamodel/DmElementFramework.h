@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -19,7 +19,7 @@
 //-----------------------------------------------------------------------------
 // element framework implementation
 //-----------------------------------------------------------------------------
-class CDmElementFramework : public IDmElementFramework
+class CDmElementFramework : public CBaseAppSystem< IDmElementFramework >
 {
 public:
 	CDmElementFramework();
@@ -39,6 +39,10 @@ public:
 	virtual void Operate( bool bResolve ); // ends in output phase
 	virtual void Resolve();
 
+	// Get the sorted operators in their current order, does not perform sort.
+	virtual const CUtlVector< IDmeOperator* > &GetSortedOperators() const; 
+
+	
 public:
 	// Other public methods
 	void AddElementToDirtyList( DmElementHandle_t hElement );

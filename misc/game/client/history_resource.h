@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Item pickup history displayed onscreen when items are picked up.
 //
@@ -58,7 +58,7 @@ private:
 
 public:
 
-	CHudHistoryResource( const char *pElementName );
+	explicit CHudHistoryResource( const char *pElementName );
 
 	// CHudElement overrides
 	virtual void Init( void );
@@ -71,8 +71,11 @@ public:
 	void	AddToHistory( int iType, int iId, int iCount = 0 );
 	void	AddToHistory( int iType, const char *szName, int iCount = 0 );
 	void	AddToHistory( C_BaseCombatWeapon *weapon );
-	void	MsgFunc_ItemPickup( bf_read &msg );
-	void	MsgFunc_AmmoDenied( bf_read &msg );
+	bool	MsgFunc_ItemPickup( const CCSUsrMsg_ItemPickup &msg );
+	bool	MsgFunc_AmmoDenied( const CCSUsrMsg_AmmoDenied &msg );
+
+	CUserMessageBinder m_UMCMsgItemPickup;
+	CUserMessageBinder m_UMCMsgAmmoDenied;
 	
 	void	CheckClearHistory( void );
 	void	SetHistoryGap( int iNewHistoryGap );

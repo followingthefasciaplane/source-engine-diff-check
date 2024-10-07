@@ -16,7 +16,7 @@
 
 #define STEAM_CONTROLLER_MAX_ANALOG_ACTIONS 16
 
-#define STEAM_CONTROLLER_MAX_DIGITAL_ACTIONS 32
+#define STEAM_CONTROLLER_MAX_DIGITAL_ACTIONS 128
 
 #define STEAM_CONTROLLER_MAX_ORIGINS 8
 
@@ -42,7 +42,8 @@ enum EControllerSource
 	k_EControllerSource_Switch,
 	k_EControllerSource_LeftTrigger,
 	k_EControllerSource_RightTrigger,
-	k_EControllerSource_Gyro
+	k_EControllerSource_Gyro,
+	k_EControllerSource_Count
 };
 
 enum EControllerSourceMode
@@ -57,7 +58,9 @@ enum EControllerSourceMode
 	k_EControllerSourceMode_JoystickCamera,
 	k_EControllerSourceMode_ScrollWheel,
 	k_EControllerSourceMode_Trigger,
-	k_EControllerSourceMode_TouchMenu
+	k_EControllerSourceMode_TouchMenu,
+	k_EControllerSourceMode_MouseJoystick,
+	k_EControllerSourceMode_MouseRegion
 };
 
 enum EControllerActionOrigin
@@ -153,8 +156,9 @@ public:
 	virtual bool Init() = 0;
 	virtual bool Shutdown() = 0;
 	
-	// Pump callback/callresult events
-	// Note: SteamAPI_RunCallbacks will do this for you, so you should never need to call this directly.
+	// Synchronize API state with the latest Steam Controller inputs available. This
+	// is performed automatically by SteamAPI_RunCallbacks, but for the absolute lowest
+	// possible latency, you call this directly before reading controller state.
 	virtual void RunFrame() = 0;
 
 	// Enumerate currently connected controllers
@@ -196,13 +200,13 @@ public:
 	// Get the origin(s) for an analog action within an action set. Returns the number of origins supplied in originsOut. Use this to display the appropriate on-screen prompt for the action.
 	// originsOut should point to a STEAM_CONTROLLER_MAX_ORIGINS sized array of EControllerActionOrigin handles
 	virtual int GetAnalogActionOrigins( ControllerHandle_t controllerHandle, ControllerActionSetHandle_t actionSetHandle, ControllerAnalogActionHandle_t analogActionHandle, EControllerActionOrigin *originsOut ) = 0;
-	
-
-	
+		
 	virtual void StopAnalogActionMomentum( ControllerHandle_t controllerHandle, ControllerAnalogActionHandle_t eAction ) = 0;
 	
 	// Trigger a haptic pulse on a controller
 	virtual void TriggerHapticPulse( ControllerHandle_t controllerHandle, ESteamControllerPad eTargetPad, unsigned short usDurationMicroSec ) = 0;
+
+	virtual void TriggerRepeatedHapticPulse( ControllerHandle_t controllerHandle, ESteamControllerPad eTargetPad, unsigned short usDurationMicroSec, unsigned short usOffMicroSec, unsigned short unRepeat, unsigned int nFlags ) = 0;
 };
 
 #define STEAMCONTROLLER_INTERFACE_VERSION "SteamController003"

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -13,7 +13,6 @@
 #include "phonemeextractor/PhonemeExtractor.h"
 #include "tier1/UtlString.h"
 #include "sentence.h"
-#include "dme_controls/logpreview.h"
 
 
 //-----------------------------------------------------------------------------
@@ -22,6 +21,8 @@
 class CDmeSoundClip;
 class CDmeGameSound;
 class CDmeAnimationSet;
+class CDmeFilmClip;
+struct LogPreview_t;
 
 
 //-----------------------------------------------------------------------------
@@ -41,6 +42,7 @@ public:
 	CDmeGameSound	*m_pSound; 
 	CUtlString		m_sHintText;
 	bool			m_bUseSentence;
+	bool			m_bFullPathInSoundName;
 
 	// Filled in by Extract()
 	CSentence		m_Sentence;
@@ -85,7 +87,7 @@ struct ExtractDesc_t
 	SFMPhonemeFilterType_t m_nFilterType;
 	bool m_bCreateBookmarks;
 	CUtlVector< CExtractInfo > m_WorkList;		// One or more .wavs to extract from
-	CUtlVector< LogPreview_t > m_ControlList;	// List of facial controls
+	CUtlVector< LogPreview_t* > m_ControlList;	// List of facial controls
 	CDmeFilmClip *m_pMovie;
 	CDmeFilmClip *m_pShot;
 	CDmeAnimationSet *m_pSet; 
@@ -120,7 +122,7 @@ extern ISFMPhonemeExtractor *sfm_phonemeextractor;
 // inline methods of CExtractInfo
 //-----------------------------------------------------------------------------
 inline CExtractInfo::CExtractInfo() : m_pClip( 0 ), m_pSound( 0 ),
-	m_bSentenceValid( false ), m_bUseSentence( false ), m_flDuration( 0.0f )
+	m_bSentenceValid( false ), m_bUseSentence( false ), m_bFullPathInSoundName( false ), m_flDuration( 0.0f )
 {
 }
 
@@ -132,6 +134,7 @@ inline CExtractInfo::CExtractInfo( const CExtractInfo& src )
 	m_Sentence = src.m_Sentence;
 	m_bSentenceValid = src.m_bSentenceValid;
 	m_bUseSentence = src.m_bUseSentence;
+	m_bFullPathInSoundName = src.m_bFullPathInSoundName;
 	m_flDuration = src.m_flDuration;
 
 	ClearTags();

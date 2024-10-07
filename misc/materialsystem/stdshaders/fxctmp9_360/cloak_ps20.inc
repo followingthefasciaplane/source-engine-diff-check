@@ -1,27 +1,12 @@
+// ALL SKIP STATEMENTS THAT AFFECT THIS SHADER!!!
+// defined $PIXELFOGTYPE && defined $WRITEWATERFOGTODESTALPHA && ( $PIXELFOGTYPE != 1 ) && $WRITEWATERFOGTODESTALPHA
+// defined $LIGHTING_PREVIEW && defined $FASTPATHENVMAPTINT && $LIGHTING_PREVIEW && $FASTPATHENVMAPTINT
+// defined $LIGHTING_PREVIEW && defined $FASTPATHENVMAPCONTRAST && $LIGHTING_PREVIEW && $FASTPATHENVMAPCONTRAST
+// defined $LIGHTING_PREVIEW && defined $FASTPATH && $LIGHTING_PREVIEW && $FASTPATH
+// ($FLASHLIGHT || $FLASHLIGHTSHADOWS) && $LIGHTING_PREVIEW
 #include "shaderlib/cshader.h"
 class cloak_ps20_Static_Index
 {
-private:
-	int m_nCONVERT_TO_SRGB;
-#ifdef _DEBUG
-	bool m_bCONVERT_TO_SRGB;
-#endif
-public:
-	void SetCONVERT_TO_SRGB( int i )
-	{
-		Assert( i >= 0 && i <= 0 );
-		m_nCONVERT_TO_SRGB = i;
-#ifdef _DEBUG
-		m_bCONVERT_TO_SRGB = true;
-#endif
-	}
-	void SetCONVERT_TO_SRGB( bool i )
-	{
-		m_nCONVERT_TO_SRGB = i ? 1 : 0;
-#ifdef _DEBUG
-		m_bCONVERT_TO_SRGB = true;
-#endif
-	}
 private:
 	int m_nLIGHTWARPTEXTURE;
 #ifdef _DEBUG
@@ -38,18 +23,16 @@ public:
 	}
 	void SetLIGHTWARPTEXTURE( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nLIGHTWARPTEXTURE = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bLIGHTWARPTEXTURE = true;
 #endif
 	}
 public:
-	cloak_ps20_Static_Index( )
+	// CONSTRUCTOR
+	cloak_ps20_Static_Index( IShaderShadow *pShaderShadow, IMaterialVar **params )
 	{
-#ifdef _DEBUG
-		m_bCONVERT_TO_SRGB = true;
-#endif // _DEBUG
-		m_nCONVERT_TO_SRGB =  0;
 #ifdef _DEBUG
 		m_bLIGHTWARPTEXTURE = false;
 #endif // _DEBUG
@@ -60,10 +43,10 @@ public:
 		// Asserts to make sure that we aren't using any skipped combinations.
 		// Asserts to make sure that we are setting all of the combination vars.
 #ifdef _DEBUG
-		bool bAllStaticVarsDefined = m_bCONVERT_TO_SRGB && m_bLIGHTWARPTEXTURE;
+		bool bAllStaticVarsDefined = m_bLIGHTWARPTEXTURE;
 		Assert( bAllStaticVarsDefined );
 #endif // _DEBUG
-		return ( 12 * m_nCONVERT_TO_SRGB ) + ( 12 * m_nLIGHTWARPTEXTURE ) + 0;
+		return ( 12 * m_nLIGHTWARPTEXTURE ) + 0;
 	}
 };
 #define shaderStaticTest_cloak_ps20 psh_forgot_to_set_static_LIGHTWARPTEXTURE + 0
@@ -85,6 +68,7 @@ public:
 	}
 	void SetPIXELFOGTYPE( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nPIXELFOGTYPE = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bPIXELFOGTYPE = true;
@@ -106,6 +90,7 @@ public:
 	}
 	void SetWRITEWATERFOGTODESTALPHA( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nWRITEWATERFOGTODESTALPHA = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bWRITEWATERFOGTODESTALPHA = true;
@@ -127,18 +112,20 @@ public:
 	}
 	void SetNUM_LIGHTS( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 2 );
 		m_nNUM_LIGHTS = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bNUM_LIGHTS = true;
 #endif
 	}
 public:
-	cloak_ps20_Dynamic_Index()
+	// CONSTRUCTOR
+	cloak_ps20_Dynamic_Index( IShaderDynamicAPI *pShaderAPI )
 	{
 #ifdef _DEBUG
-		m_bPIXELFOGTYPE = false;
+		m_bPIXELFOGTYPE = true;
 #endif // _DEBUG
-		m_nPIXELFOGTYPE = 0;
+		m_nPIXELFOGTYPE = ( pShaderAPI->GetSceneFogMode() == MATERIAL_FOG_LINEAR_BELOW_FOG_Z ) ;
 #ifdef _DEBUG
 		m_bWRITEWATERFOGTODESTALPHA = false;
 #endif // _DEBUG
@@ -159,4 +146,31 @@ public:
 		return ( 1 * m_nPIXELFOGTYPE ) + ( 2 * m_nWRITEWATERFOGTODESTALPHA ) + ( 4 * m_nNUM_LIGHTS ) + 0;
 	}
 };
-#define shaderDynamicTest_cloak_ps20 psh_forgot_to_set_dynamic_PIXELFOGTYPE + psh_forgot_to_set_dynamic_WRITEWATERFOGTODESTALPHA + psh_forgot_to_set_dynamic_NUM_LIGHTS + 0
+#define shaderDynamicTest_cloak_ps20 psh_forgot_to_set_dynamic_WRITEWATERFOGTODESTALPHA + psh_forgot_to_set_dynamic_NUM_LIGHTS + 0
+
+static const ShaderComboInformation_t s_DynamicComboArray_cloak_ps20[3] = 
+{
+	{ "PIXELFOGTYPE", 0, 1 },
+	{ "WRITEWATERFOGTODESTALPHA", 0, 1 },
+	{ "NUM_LIGHTS", 0, 2 },
+};
+
+static const ShaderComboInformation_t s_StaticComboArray_cloak_ps20[1] = 
+{
+	{ "LIGHTWARPTEXTURE", 0, 1 },
+};
+static const ShaderComboSemantics_t cloak_ps20_combos =
+{
+	"cloak_ps20", s_DynamicComboArray_cloak_ps20, 3, s_StaticComboArray_cloak_ps20, 1 
+};
+
+class ConstructMe_cloak_ps20
+{
+public:
+	ConstructMe_cloak_ps20()
+	{
+		GetShaderDLL()->AddShaderComboInformation( &cloak_ps20_combos );
+	}
+};
+
+static ConstructMe_cloak_ps20 s_ConstructMe_cloak_ps20;

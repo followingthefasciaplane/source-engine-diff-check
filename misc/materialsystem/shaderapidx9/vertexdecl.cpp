@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2008, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -18,6 +18,7 @@
 #include "tier0/vprof.h"
 #include "materialsystem/imesh.h"
 #include "shaderdevicedx8.h"
+#include "convar.h"
 
 // NOTE: This has to be the last file included!
 #include "tier0/memdbgon.h"
@@ -152,7 +153,9 @@ static D3DDECLTYPE VertexElementToDeclType( VertexElement_t element, VertexCompr
 	switch ( element )
 	{
 		case VERTEX_ELEMENT_POSITION:		return D3DDECLTYPE_FLOAT3;
+		case VERTEX_ELEMENT_POSITION4D:		return D3DDECLTYPE_FLOAT4;
 		case VERTEX_ELEMENT_NORMAL:			return D3DDECLTYPE_FLOAT3;
+		case VERTEX_ELEMENT_NORMAL4D:		return D3DDECLTYPE_FLOAT4;
 		case VERTEX_ELEMENT_COLOR:			return D3DDECLTYPE_D3DCOLOR;
 		case VERTEX_ELEMENT_SPECULAR:		return D3DDECLTYPE_D3DCOLOR;
 		case VERTEX_ELEMENT_TANGENT_S:		return D3DDECLTYPE_FLOAT3;
@@ -237,10 +240,13 @@ void PrintVertexDeclaration( const D3DVERTEXELEMENT9 *pDecl )
 //-----------------------------------------------------------------------------
 // Converts format to a vertex decl
 //-----------------------------------------------------------------------------
-void ComputeVertexSpec( VertexFormat_t fmt, D3DVERTEXELEMENT9 *pDecl, bool bStaticLit, bool bUsingFlex, bool bUsingMorph )
+void ComputeVertexSpec( VertexFormat_t fmt, D3DVERTEXELEMENT9 *pDecl,
+					    bool bStaticLit, bool bUsingFlex, bool bUsingMorph, bool bUsingPreTessPatch,
+					    VertexStreamSpec_t *pStreamSpec )
 {
 	int i = 0;
-	int offset = 0;
+	int iStream;
+	int offset;
 
 	VertexCompressionType_t compressionType = CompressionType( fmt );
 
@@ -248,28 +254,175 @@ void ComputeVertexSpec( VertexFormat_t fmt, D3DVERTEXELEMENT9 *pDecl, bool bStat
 	{
 		// On 360, there's a performance penalty for reading more than 2 streams in the vertex shader
 		// (we don't do this yet, but we should be aware if we start doing it)
+
+		// As an extra clarification - perf difference is only observed in bandwidth-bound cases,
+		// so it is safe to use extra streams as long as we aren't bandwidth-bound,
+		// the assertion is safe to be removed.
+
 #ifdef _DEBUG
 		int numStreams = 1 + ( bStaticLit ? 1 : 0 ) + ( bUsingFlex ? 1 : 0 ) + ( bUsingMorph ? 1 : 0 );
-		Assert( numStreams <= 2 );
+		numStreams;
+		// Assert( numStreams <= 2 );
 #endif
 	}
 
+	if( bUsingPreTessPatch )
+	{
+		// Special case for Pre-Tessellated Patches
+		// Ignore all of the inputs and create a very custom vertex declaration
+
+		// patch stream
+		pDecl[i].Stream = 0;
+		pDecl[i].Offset = 0;
+		pDecl[i].Method = D3DDECLMETHOD_DEFAULT;
+		pDecl[i].Usage = D3DDECLUSAGE_POSITION;
+		pDecl[i].UsageIndex = 0;
+		pDecl[i].Type = D3DDECLTYPE_FLOAT2;
+		i ++;
+		pDecl[i].Stream = 0;
+		pDecl[i].Offset = 8;
+		pDecl[i].Method = D3DDECLMETHOD_DEFAULT;
+		pDecl[i].Usage = D3DDECLUSAGE_TEXCOORD;
+		pDecl[i].UsageIndex = 0;
+		pDecl[i].Type = D3DDECLTYPE_FLOAT4;
+		i ++;
+		pDecl[i].Stream = 0;
+		pDecl[i].Offset = 24;
+		pDecl[i].Method = D3DDECLMETHOD_DEFAULT;
+		pDecl[i].Usage = D3DDECLUSAGE_TEXCOORD;
+		pDecl[i].UsageIndex = 1;
+		pDecl[i].Type = D3DDECLTYPE_FLOAT4;
+		i ++;
+		// Quad stream
+		//0
+		pDecl[i].Stream = VertexStreamSpec_t::STREAM_SUBDQUADS;
+		pDecl[i].Offset = 0;
+		pDecl[i].Method = D3DDECLMETHOD_DEFAULT;
+		pDecl[i].Usage = D3DDECLUSAGE_POSITION;
+		pDecl[i].UsageIndex = 1;
+		pDecl[i].Type = D3DDECLTYPE_FLOAT4;
+		i ++;
+		pDecl[i].Stream = VertexStreamSpec_t::STREAM_SUBDQUADS;
+		pDecl[i].Offset = 16;
+		pDecl[i].Method = D3DDECLMETHOD_DEFAULT;
+		pDecl[i].Usage = D3DDECLUSAGE_TEXCOORD;
+		pDecl[i].UsageIndex = 2;
+		pDecl[i].Type = D3DDECLTYPE_FLOAT4;
+		i ++;
+		pDecl[i].Stream = VertexStreamSpec_t::STREAM_SUBDQUADS;
+		pDecl[i].Offset = 32;
+		pDecl[i].Method = D3DDECLMETHOD_DEFAULT;
+		pDecl[i].Usage = D3DDECLUSAGE_TEXCOORD;
+		pDecl[i].UsageIndex = 3;
+		pDecl[i].Type = D3DDECLTYPE_FLOAT4;
+		i ++;
+		//1
+		pDecl[i].Stream = VertexStreamSpec_t::STREAM_SUBDQUADS;
+		pDecl[i].Offset = 48;
+		pDecl[i].Method = D3DDECLMETHOD_DEFAULT;
+		pDecl[i].Usage = D3DDECLUSAGE_POSITION;
+		pDecl[i].UsageIndex = 2;
+		pDecl[i].Type = D3DDECLTYPE_FLOAT4;
+		i ++;
+		pDecl[i].Stream = VertexStreamSpec_t::STREAM_SUBDQUADS;
+		pDecl[i].Offset = 64;
+		pDecl[i].Method = D3DDECLMETHOD_DEFAULT;
+		pDecl[i].Usage = D3DDECLUSAGE_TEXCOORD;
+		pDecl[i].UsageIndex = 4;
+		pDecl[i].Type = D3DDECLTYPE_FLOAT4;
+		i ++;
+		pDecl[i].Stream = VertexStreamSpec_t::STREAM_SUBDQUADS;
+		pDecl[i].Offset = 80;
+		pDecl[i].Method = D3DDECLMETHOD_DEFAULT;
+		pDecl[i].Usage = D3DDECLUSAGE_TEXCOORD;
+		pDecl[i].UsageIndex = 5;
+		pDecl[i].Type = D3DDECLTYPE_FLOAT4;
+		i ++;
+		//2
+		pDecl[i].Stream = VertexStreamSpec_t::STREAM_SUBDQUADS;
+		pDecl[i].Offset = 96;
+		pDecl[i].Method = D3DDECLMETHOD_DEFAULT;
+		pDecl[i].Usage = D3DDECLUSAGE_POSITION;
+		pDecl[i].UsageIndex = 3;
+		pDecl[i].Type = D3DDECLTYPE_FLOAT4;
+		i ++;
+		pDecl[i].Stream = VertexStreamSpec_t::STREAM_SUBDQUADS;
+		pDecl[i].Offset = 112;
+		pDecl[i].Method = D3DDECLMETHOD_DEFAULT;
+		pDecl[i].Usage = D3DDECLUSAGE_TEXCOORD;
+		pDecl[i].UsageIndex = 6;
+		pDecl[i].Type = D3DDECLTYPE_FLOAT4;
+		i ++;
+		pDecl[i].Stream = VertexStreamSpec_t::STREAM_SUBDQUADS;
+		pDecl[i].Offset = 128;
+		pDecl[i].Method = D3DDECLMETHOD_DEFAULT;
+		pDecl[i].Usage = D3DDECLUSAGE_TEXCOORD;
+		pDecl[i].UsageIndex = 7;
+		pDecl[i].Type = D3DDECLTYPE_FLOAT4;
+		i ++;
+		//3
+		pDecl[i].Stream = VertexStreamSpec_t::STREAM_SUBDQUADS;
+		pDecl[i].Offset = 144;
+		pDecl[i].Method = D3DDECLMETHOD_DEFAULT;
+		pDecl[i].Usage = D3DDECLUSAGE_POSITION;
+		pDecl[i].UsageIndex = 4;
+		pDecl[i].Type = D3DDECLTYPE_FLOAT4;
+		i ++;
+		pDecl[i].Stream = VertexStreamSpec_t::STREAM_SUBDQUADS;
+		pDecl[i].Offset =160;
+		pDecl[i].Method = D3DDECLMETHOD_DEFAULT;
+		pDecl[i].Usage = D3DDECLUSAGE_TEXCOORD;
+		pDecl[i].UsageIndex = 8;
+		pDecl[i].Type = D3DDECLTYPE_FLOAT4;
+		i ++;
+		pDecl[i].Stream = VertexStreamSpec_t::STREAM_SUBDQUADS;
+		pDecl[i].Offset = 176;
+		pDecl[i].Method = D3DDECLMETHOD_DEFAULT;
+		pDecl[i].Usage = D3DDECLUSAGE_TEXCOORD;
+		pDecl[i].UsageIndex = 9;
+		pDecl[i].Type = D3DDECLTYPE_FLOAT4;
+		i ++;
+		// patch ID
+		pDecl[i].Stream = VertexStreamSpec_t::STREAM_MORPH;
+		pDecl[i].Offset = 0;
+		pDecl[i].Method = D3DDECLMETHOD_DEFAULT;
+		pDecl[i].Usage = D3DDECLUSAGE_TEXCOORD;
+		pDecl[i].UsageIndex = 10;
+		pDecl[i].Type = D3DDECLTYPE_FLOAT1;
+		i ++;
+
+		static D3DVERTEXELEMENT9 declEnd = D3DDECL_END();
+		pDecl[i] = declEnd;
+
+		return;
+	}
+
+	//
+	// Stream 0
+	//
+	iStream = 0;
+	offset = 0;
+
 	if ( fmt & VERTEX_POSITION )
 	{
-		pDecl[i].Stream = 0;
+		pDecl[i].Stream = iStream;
 		pDecl[i].Offset = offset;
 		pDecl[i].Method = D3DDECLMETHOD_DEFAULT;
 		pDecl[i].Usage = D3DDECLUSAGE_POSITION;
 		pDecl[i].UsageIndex = 0;
-		pDecl[i].Type = VertexElementToDeclType( VERTEX_ELEMENT_POSITION, compressionType );
-		offset += GetVertexElementSize( VERTEX_ELEMENT_POSITION, compressionType );
+
+		// Handle 4D positions
+		VertexElement_t posElement = fmt & VERTEX_FORMAT_PAD_POS_NORM ? VERTEX_ELEMENT_POSITION4D : VERTEX_ELEMENT_POSITION;
+
+		pDecl[i].Type = VertexElementToDeclType( posElement, compressionType );
+		offset += GetVertexElementSize( posElement, compressionType );
 		++i;
 	}
 
 	int numBones = NumBoneWeights(fmt);
 	if ( numBones > 0 )
 	{
-		pDecl[i].Stream = 0;
+		pDecl[i].Stream = iStream;
 		pDecl[i].Offset = offset;
 		pDecl[i].Method = D3DDECLMETHOD_DEFAULT;
 		pDecl[i].Usage = D3DDECLUSAGE_BLENDWEIGHT;
@@ -284,7 +437,7 @@ void ComputeVertexSpec( VertexFormat_t fmt, D3DVERTEXELEMENT9 *pDecl, bool bStat
 	if ( fmt & VERTEX_BONE_INDEX )
 	{
 		// this isn't FVF!!!!!
-		pDecl[i].Stream = 0;
+		pDecl[i].Stream = iStream;
 		pDecl[i].Offset = offset;
 		pDecl[i].Method = D3DDECLMETHOD_DEFAULT;
 		pDecl[i].Usage = D3DDECLUSAGE_BLENDINDICES;
@@ -297,20 +450,24 @@ void ComputeVertexSpec( VertexFormat_t fmt, D3DVERTEXELEMENT9 *pDecl, bool bStat
 	int normalOffset = -1;
 	if ( fmt & VERTEX_NORMAL )
 	{
-		pDecl[i].Stream = 0;
+		pDecl[i].Stream = iStream;
 		pDecl[i].Offset = offset;
 		normalOffset = offset;
 		pDecl[i].Method = D3DDECLMETHOD_DEFAULT;
 		pDecl[i].Usage = D3DDECLUSAGE_NORMAL;
 		pDecl[i].UsageIndex = 0;
-		pDecl[i].Type = VertexElementToDeclType( VERTEX_ELEMENT_NORMAL, compressionType );
-		offset += GetVertexElementSize( VERTEX_ELEMENT_NORMAL, compressionType );
+
+		// Handle 4D positions
+		VertexElement_t normalElement = fmt & VERTEX_FORMAT_PAD_POS_NORM ? VERTEX_ELEMENT_NORMAL4D : VERTEX_ELEMENT_NORMAL;
+
+		pDecl[i].Type = VertexElementToDeclType( normalElement, compressionType );
+		offset += GetVertexElementSize( normalElement, compressionType );
 		++i;
 	}
 
 	if ( fmt & VERTEX_COLOR )
 	{
-		pDecl[i].Stream = 0;
+		pDecl[i].Stream = iStream;
 		pDecl[i].Offset = offset;
 		pDecl[i].Method = D3DDECLMETHOD_DEFAULT;
 		pDecl[i].Usage = D3DDECLUSAGE_COLOR;
@@ -323,7 +480,7 @@ void ComputeVertexSpec( VertexFormat_t fmt, D3DVERTEXELEMENT9 *pDecl, bool bStat
 	if ( fmt & VERTEX_SPECULAR )
 	{
 		Assert( !bStaticLit );
-		pDecl[i].Stream = 0;
+		pDecl[i].Stream = iStream;
 		pDecl[i].Offset = offset;
 		pDecl[i].Method = D3DDECLMETHOD_DEFAULT;
 		pDecl[i].Usage = D3DDECLUSAGE_COLOR;
@@ -344,7 +501,15 @@ void ComputeVertexSpec( VertexFormat_t fmt, D3DVERTEXELEMENT9 *pDecl, bool bStat
 			continue;
 		Assert( nCoordSize <= 4 );
 
-		pDecl[i].Stream = 0;
+		// Check if the texcoord goes as a separate stream spec
+		if ( VertexStreamSpec_t *pSpecEntry = FindVertexStreamSpec( VERTEX_TEXCOORD_SIZE( j, nCoordSize ), pStreamSpec ) )
+		{
+			if ( pSpecEntry->iStreamSpec != VertexStreamSpec_t::STREAM_DEFAULT )
+				// Special streams for TexCoordN are handled later
+				continue;
+		}
+
+		pDecl[i].Stream = iStream;
 		pDecl[i].Offset = offset;
 		pDecl[i].Method = D3DDECLMETHOD_DEFAULT;
 		pDecl[i].Usage = D3DDECLUSAGE_TEXCOORD;
@@ -357,7 +522,7 @@ void ComputeVertexSpec( VertexFormat_t fmt, D3DVERTEXELEMENT9 *pDecl, bool bStat
 
 	if ( fmt & VERTEX_TANGENT_S )
 	{
-		pDecl[i].Stream = 0;
+		pDecl[i].Stream = iStream;
 		pDecl[i].Offset = offset;
 		pDecl[i].Method = D3DDECLMETHOD_DEFAULT;
 		pDecl[i].Usage = D3DDECLUSAGE_TANGENT;
@@ -370,7 +535,7 @@ void ComputeVertexSpec( VertexFormat_t fmt, D3DVERTEXELEMENT9 *pDecl, bool bStat
 
 	if ( fmt & VERTEX_TANGENT_T )
 	{
-		pDecl[i].Stream = 0;
+		pDecl[i].Stream = iStream;
 		pDecl[i].Offset = offset;
 		pDecl[i].Method = D3DDECLMETHOD_DEFAULT;
 		pDecl[i].Usage =   D3DDECLUSAGE_BINORMAL;
@@ -385,7 +550,7 @@ void ComputeVertexSpec( VertexFormat_t fmt, D3DVERTEXELEMENT9 *pDecl, bool bStat
 	if ( userDataSize > 0 )
 	{
 		Assert( userDataSize == 4 ); // This is actually only ever used for tangents
-		pDecl[i].Stream = 0;
+		pDecl[i].Stream = iStream;
 		if ( ( compressionType == VERTEX_COMPRESSION_ON ) &&
 			 ( COMPRESSED_NORMALS_TYPE == COMPRESSED_NORMALS_COMBINEDTANGENTS_UBYTE4 ) )
 		{
@@ -406,27 +571,80 @@ void ComputeVertexSpec( VertexFormat_t fmt, D3DVERTEXELEMENT9 *pDecl, bool bStat
 		++i;
 	}
 
+	//
+	// Stream 1
+	//
+	++ iStream;
+	offset = 0;
+
 	if ( bStaticLit )
 	{
-		// force stream 1 to have specular color in it, which is used for baked static lighting
-		pDecl[i].Stream = 1;
-		pDecl[i].Offset = 0;
+		// r_staticlight_streams (from engine.dll)
+		static ConVarRef r_staticlight_streams( "r_staticlight_streams", true );
+		int iColorSemanticSlot = 1; // Static lighting goes into COLOR1 semantic (and COLOR2, COLOR3, ...)
+		int numStaticColorSamples = r_staticlight_streams.GetInt(); // NUM_BUMP_VECTS;
+
+		for ( int iColorSample = 0; iColorSample < numStaticColorSamples; ++ iColorSample )
+		{
+			// force stream to have specular color in it, which is used for baked static lighting
+			pDecl[i].Stream = iStream;
+			pDecl[i].Offset = offset;
+			pDecl[i].Method = D3DDECLMETHOD_DEFAULT;
+			pDecl[i].Usage = D3DDECLUSAGE_COLOR;
+			pDecl[i].UsageIndex = iColorSemanticSlot ++;
+			pDecl[i].Type = VertexElementToDeclType( VERTEX_ELEMENT_SPECULAR, compressionType );
+			offset += GetVertexElementSize( VERTEX_ELEMENT_SPECULAR, compressionType );
+			++i;
+		}
+	}
+
+	for ( VertexStreamSpec_t *pSpecEntry = pStreamSpec;
+		  pSpecEntry && pSpecEntry->iVertexDataElement != VERTEX_FORMAT_UNKNOWN;
+		  ++ pSpecEntry )
+	{
+		if ( pSpecEntry->iStreamSpec != VertexStreamSpec_t::STREAM_SPECULAR1 )
+			continue;
+
+		// Supporting only 2D texcoords to be passed with VHV
+		int idxTexCoord = 0;
+		int nCoordSize = 2;
+		for ( ; idxTexCoord < VERTEX_MAX_TEXTURE_COORDINATES; ++ idxTexCoord )
+		{
+			if ( pSpecEntry->iVertexDataElement == VERTEX_TEXCOORD_SIZE( idxTexCoord, nCoordSize ) )
+				break;
+		}
+		Assert( pSpecEntry->iVertexDataElement == VERTEX_TEXCOORD_SIZE( idxTexCoord, nCoordSize ) );
+		if ( pSpecEntry->iVertexDataElement != VERTEX_TEXCOORD_SIZE( idxTexCoord, nCoordSize ) )
+		{
+			Warning( " ERROR: Cannot compute vertex spec for fmt 0x%08llX requesting 0x%08llX to be passed on STREAM_SPECULAR1!\n",
+					 fmt, pSpecEntry->iVertexDataElement);
+		}
+
+		pDecl[i].Stream = iStream;
+		pDecl[i].Offset = offset;
 		pDecl[i].Method = D3DDECLMETHOD_DEFAULT;
-		pDecl[i].Usage = D3DDECLUSAGE_COLOR;
-		pDecl[i].UsageIndex = 1; // SPECULAR goes into the second COLOR slot
-		pDecl[i].Type = VertexElementToDeclType( VERTEX_ELEMENT_SPECULAR, compressionType );
+		pDecl[i].Usage = D3DDECLUSAGE_TEXCOORD;
+		pDecl[i].UsageIndex = idxTexCoord;
+		VertexElement_t texCoordElement = (VertexElement_t)( texCoordDimensions[ nCoordSize - 1 ] + idxTexCoord );
+		pDecl[i].Type = VertexElementToDeclType( texCoordElement, compressionType );
+		offset += GetVertexElementSize( texCoordElement, compressionType );
 		++i;
 	}
 
-	if ( HardwareConfig()->SupportsVertexAndPixelShaders() )
+	//
+	// Stream 2
+	//
+	++ iStream;
+	offset = 0;
+
 	{
 		// FIXME: There needs to be a better way of doing this
 		// In 2.0b, assume position is 4d, storing wrinkle in pos.w.
-		bool bUseWrinkle = HardwareConfig()->SupportsPixelShaders_2_b();
+		bool bUseWrinkle = bUsingFlex && ( HardwareConfig()->GetDXSupportLevel() >= 92 );
 
 		// Force stream 2 to have flex deltas in it
-		pDecl[i].Stream = 2;
-		pDecl[i].Offset = 0;
+		pDecl[i].Stream = iStream;
+		pDecl[i].Offset = offset;
 		pDecl[i].Method = D3DDECLMETHOD_DEFAULT;
 		pDecl[i].Usage = D3DDECLUSAGE_POSITION;
 		pDecl[i].UsageIndex = 1;
@@ -441,26 +659,77 @@ void ComputeVertexSpec( VertexFormat_t fmt, D3DVERTEXELEMENT9 *pDecl, bool bStat
 		}
 
 		// Normal deltas
-		pDecl[i].Stream = 2;
+		pDecl[i].Stream = iStream;
 		pDecl[i].Offset = normalOffset;
 		pDecl[i].Method = D3DDECLMETHOD_DEFAULT;
 		pDecl[i].Usage = D3DDECLUSAGE_NORMAL;
 		pDecl[i].UsageIndex = 1;
 		// NOTE: this is currently *not* compressed
-		pDecl[i].Type = VertexElementToDeclType( VERTEX_ELEMENT_NORMAL, VERTEX_COMPRESSION_NONE );
+		// If we are using vertex compression and not actually morphing (ie. binding the primary stream again for the morph channel), then make sure we are setting the vertexdecl up for the compression format so that we don't get 0 * NaN in the vertex shader and get badness.
+		pDecl[i].Type = VertexElementToDeclType( VERTEX_ELEMENT_NORMAL, bUsingFlex ? VERTEX_COMPRESSION_NONE : compressionType );
 		++i;
 	}
+
+	//
+	// Stream 3
+	//
+	++ iStream;
+	offset = 0;
 
 	if ( bUsingMorph )
 	{
 		// force stream 3 to have vertex index in it, which is used for doing vertex texture reads
-		pDecl[i].Stream = 3;
-		pDecl[i].Offset = 0;
+		pDecl[i].Stream = iStream;
+		pDecl[i].Offset = offset;
 		pDecl[i].Method = D3DDECLMETHOD_DEFAULT;
 		pDecl[i].Usage = D3DDECLUSAGE_POSITION;
 		pDecl[i].UsageIndex = 2;
 		pDecl[i].Type = VertexElementToDeclType( VERTEX_ELEMENT_USERDATA1, compressionType );
 		++i;
+	}
+
+	//
+	// Unique Streams
+	//
+	for ( int iUniqueStreamSpec = VertexStreamSpec_t::STREAM_UNIQUE_A;
+		  iUniqueStreamSpec < VertexStreamSpec_t::STREAM_UNIQUE_A + VertexStreamSpec_t::MAX_UNIQUE_STREAMS;
+		  ++ iUniqueStreamSpec )
+	{
+		++ iStream;
+		offset = 0;
+
+		for ( VertexStreamSpec_t *pSpecEntry = pStreamSpec;
+			  pSpecEntry && pSpecEntry->iVertexDataElement != VERTEX_FORMAT_UNKNOWN;
+			  ++ pSpecEntry )
+		{
+			if ( pSpecEntry->iStreamSpec != iUniqueStreamSpec )
+				continue;
+
+			// Supporting only 2D texcoords to be passed as unique streams
+			int idxTexCoord = 0;
+			int nCoordSize = 2;
+			for ( ; idxTexCoord < VERTEX_MAX_TEXTURE_COORDINATES; ++ idxTexCoord )
+			{
+				if ( pSpecEntry->iVertexDataElement == VERTEX_TEXCOORD_SIZE( idxTexCoord, nCoordSize ) )
+					break;
+			}
+			Assert( pSpecEntry->iVertexDataElement == VERTEX_TEXCOORD_SIZE( idxTexCoord, nCoordSize ) );
+			if ( pSpecEntry->iVertexDataElement != VERTEX_TEXCOORD_SIZE( idxTexCoord, nCoordSize ) )
+			{
+				Warning( " ERROR: Cannot compute vertex spec for fmt 0x%08llX requesting 0x%08llX to be passed on STREAM%d!\n",
+						 fmt, pSpecEntry->iVertexDataElement, iUniqueStreamSpec );
+			}
+
+			pDecl[i].Stream = iStream;
+			pDecl[i].Offset = offset;
+			pDecl[i].Method = D3DDECLMETHOD_DEFAULT;
+			pDecl[i].Usage = D3DDECLUSAGE_TEXCOORD;
+			pDecl[i].UsageIndex = idxTexCoord;
+			VertexElement_t texCoordElement = (VertexElement_t)( texCoordDimensions[ nCoordSize - 1 ] + idxTexCoord );
+			pDecl[i].Type = VertexElementToDeclType( texCoordElement, compressionType );
+			offset += GetVertexElementSize( texCoordElement, compressionType );
+			++i;
+		}
 	}
 
 	static D3DVERTEXELEMENT9 declEnd = D3DDECL_END();
@@ -479,6 +748,8 @@ struct VertexDeclLookup_t
 		STATIC_LIT = 0x1,
 		USING_MORPH = 0x2,
 		USING_FLEX = 0x4,
+		USING_PRE_TESS_PATCHES = 0x8,
+		STATIC_LIT3 = 0x10,
 	};
 
 	VertexFormat_t				m_VertexFormat;
@@ -510,7 +781,7 @@ static CUtlRBTree<VertexDeclLookup_t, int> s_VertexDeclDict( 0, 256, VertexDeclL
 //-----------------------------------------------------------------------------
 // Gets the declspec associated with a vertex format
 //-----------------------------------------------------------------------------
-IDirect3DVertexDeclaration9 *FindOrCreateVertexDecl( VertexFormat_t fmt, bool bStaticLit, bool bUsingFlex, bool bUsingMorph )
+IDirect3DVertexDeclaration9 *FindOrCreateVertexDecl( VertexFormat_t fmt, bool bStaticLit, bool bUsingFlex, bool bUsingMorph, bool bUsingPreTessPatch, VertexStreamSpec_t *pStreamSpec )
 {
 	MEM_ALLOC_D3D_CREDIT();
 
@@ -519,7 +790,17 @@ IDirect3DVertexDeclaration9 *FindOrCreateVertexDecl( VertexFormat_t fmt, bool bS
 	lookup.m_nFlags = 0;
 	if ( bStaticLit )
 	{
-		lookup.m_nFlags |= VertexDeclLookup_t::STATIC_LIT;
+		// r_staticlight_streams (from engine.dll)
+		static ConVarRef r_staticlight_streams( "r_staticlight_streams", true );
+
+		if ( r_staticlight_streams.GetInt() == 3 )
+		{
+			lookup.m_nFlags |= VertexDeclLookup_t::STATIC_LIT3;
+		}
+		else
+		{
+			lookup.m_nFlags |= VertexDeclLookup_t::STATIC_LIT;
+		}
 	}
 	if ( bUsingMorph )
 	{
@@ -528,6 +809,10 @@ IDirect3DVertexDeclaration9 *FindOrCreateVertexDecl( VertexFormat_t fmt, bool bS
 	if ( bUsingFlex )
 	{
 		lookup.m_nFlags |= VertexDeclLookup_t::USING_FLEX;
+	}
+	if( bUsingPreTessPatch )
+	{
+		lookup.m_nFlags |= VertexDeclLookup_t::USING_PRE_TESS_PATCHES;
 	}
 
 	int i = s_VertexDeclDict.Find( lookup );
@@ -538,7 +823,7 @@ IDirect3DVertexDeclaration9 *FindOrCreateVertexDecl( VertexFormat_t fmt, bool bS
 	}
 
 	D3DVERTEXELEMENT9 decl[32];
-	ComputeVertexSpec( fmt, decl, bStaticLit, bUsingFlex, bUsingMorph );
+	ComputeVertexSpec( fmt, decl, bStaticLit, bUsingFlex, bUsingMorph, bUsingPreTessPatch, pStreamSpec );
 
 	HRESULT hr = 
 		Dx9Device()->CreateVertexDeclaration( decl, &lookup.m_pDecl );
@@ -552,7 +837,7 @@ IDirect3DVertexDeclaration9 *FindOrCreateVertexDecl( VertexFormat_t fmt, bool bS
 	Assert( hr == D3D_OK );
 	if ( hr != D3D_OK )
 	{
-		Warning( " ERROR: failed to create vertex decl for vertex format 0x%08llX! You'll probably see messed-up mesh rendering - to diagnose, build shaderapidx9.dll in debug.\n", fmt );
+		Warning( " ERROR: failed to create vertex decl for vertex format %x! You'll probably see messed-up mesh rendering - to diagnose, build shaderapidx9.dll in debug.\n", (int)fmt );
 	}
 
 	s_VertexDeclDict.Insert( lookup );
@@ -568,9 +853,7 @@ void ReleaseAllVertexDecl()
 	int i = s_VertexDeclDict.FirstInorder();
 	while ( i != s_VertexDeclDict.InvalidIndex() )
 	{
-		if ( s_VertexDeclDict[i].m_pDecl )
-			s_VertexDeclDict[i].m_pDecl->Release();
+		s_VertexDeclDict[i].m_pDecl->Release();
 		i = s_VertexDeclDict.NextInorder( i );
 	}
 }
-

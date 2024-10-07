@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: VGUI scoreboard
 //
@@ -9,7 +9,7 @@
 
 #include "client_pch.h"
 #include "vgui_vprofpanel.h"
-#include <KeyValues.h>
+#include <keyvalues.h>
 #include "vgui_budgetpanel.h"
 #include "vprof_engine.h"
 #include "vprof_record.h"
@@ -386,7 +386,7 @@ void CProfileHierarchyPanel::PerformLayout()
 
 		for ( int col = 0; col < numColumns; ++col )
 		{
-			int left, right, bottom;
+			int left, top, right, bottom;
 			GetGridElementBounds( col, row, left, top, right, bottom );
 
 			ColumnPanels_t search;
@@ -488,8 +488,8 @@ CVProfPanel::CVProfPanel( vgui::Panel *pParent, const char *pElementName )
 
 	int x = VPROF_INDENT_X;
 	int y = VPROF_INDENT_Y;
-	int wide = videomode->GetModeStereoWidth() - x * 2;
-	int tall = videomode->GetModeStereoHeight() - y * 2;
+	int wide = videomode->GetModeWidth() - x * 2;
+	int tall = videomode->GetModeHeight() - y * 2;
 	SetBgColor(Color(0, 0, 0, 175));
 
 	// Initialize the top title.
@@ -596,7 +596,7 @@ void CVProfPanel::PerformLayout()
 	m_pHierarchy->SetBounds( inset, topoffset, w - 2 * inset, h - inset - topoffset );
 
 	int treewide = w - 900 - 20;
-	treewide = max( treewide, 240 );
+	treewide = MAX( treewide, 240 );
 	m_pHierarchy->SetColumnInfo( 0, "Tree", treewide );
 
 	m_pHierarchy->SetColumnInfo( 1, "Group", 125 );
@@ -649,20 +649,20 @@ void CVProfPanel::OnTick()
 		m_pVProfile = g_pVProfileForDisplay;
 
 		bool bVisible = false;
-#ifndef _XBOX
+
 		if ( VProfRecord_IsPlayingBack() )
 		{
 			bVisible = true;
 			m_iLastPlaybackTick = -1;
 		}
-#endif
+
 		m_pStepForward->SetVisible( bVisible );
 		m_pStepBack->SetVisible( bVisible );
 		m_pPlaybackLabel->SetVisible( bVisible );
 		m_pPlaybackScroll->SetVisible( bVisible );
 		m_pGotoButton->SetVisible( bVisible );
 	}
-#ifndef _XBOX
+
 	if ( VProfRecord_IsPlayingBack() )
 	{
 		// Update the playback tick.
@@ -674,8 +674,8 @@ void CVProfPanel::OnTick()
 			m_pPlaybackLabel->SetText( str );
 		}
 	}
-#endif
-	SetVisible( m_fShowVprofHeld != 0 );
+
+	SetVisible( m_fShowVprofHeld ? true : false );
 
 	m_pRedoSort->SetVisible( !m_bHierarchicalView );
 }
@@ -906,9 +906,9 @@ int CVProfPanel::UpdateVProfTreeEntry( KeyValues *pKeyValues, CVProfNode *pNode,
 	{											 
 		double avgCalls = ( m_pVProfile->NumFramesSampled() > 0 ) ? (double)pNode->GetTotalCalls() / (double)m_pVProfile->NumFramesSampled() : 0;
 		double avg = ( m_pVProfile->NumFramesSampled() > 0 ) ? (double)pNode->GetTotalTime() / (double)m_pVProfile->NumFramesSampled() : 0;
-		double avgLessChildrenVerbose = ( m_pVProfile->NumFramesSampled() > 0 ) ? (double)pNode->GetTotalTimeLessChildren() / (double)m_pVProfile->NumFramesSampled() : 0;
+		double avgLessChildren = ( m_pVProfile->NumFramesSampled() > 0 ) ? (double)pNode->GetTotalTimeLessChildren() / (double)m_pVProfile->NumFramesSampled() : 0;
 
-		avgstr.sprintf( "[%6.2f] %6.3f %6.3f", avgCalls, avg, avgLessChildrenVerbose );
+		avgstr.sprintf( "[%6.2f] %6.3f %6.3f", avgCalls, avg, avgLessChildren );
 		sum.sprintf( "[%7d] %9.2f %9.2f %8.2fp", pNode->GetTotalCalls(), pNode->GetTotalTime(), pNode->GetTotalTimeLessChildren(), pNode->GetPeakTime() );
 	}
 
@@ -1122,7 +1122,6 @@ void CVProfPanel::Paint()
 
 void CVProfPanel::OnCommand( const char *pCommand )
 {
-#ifndef _XBOX
 	if ( !Q_stricmp( pCommand, "StepForward" ) )
 	{
 		VProfPlayback_Step();
@@ -1149,7 +1148,6 @@ void CVProfPanel::OnCommand( const char *pCommand )
 		Assert( !m_bHierarchicalView );
 		Reset();
 	}
-#endif
 }
 
 #endif

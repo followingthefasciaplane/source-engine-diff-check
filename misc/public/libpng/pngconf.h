@@ -1,4 +1,3 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
 
 /* pngconf.h - machine configurable file for libpng
  *

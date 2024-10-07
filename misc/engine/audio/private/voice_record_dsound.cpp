@@ -14,7 +14,6 @@
 #endif
 #include <assert.h>
 #include "voice.h"
-#include "tier0/vcrmode.h"
 #include "ivoicerecord.h"
 
 #if defined( _X360 )
@@ -177,8 +176,8 @@ bool VoiceRecord_DSound::Init(int sampleRate)
 	{
 		WAVE_FORMAT_PCM,		// wFormatTag
 		1,						// nChannels
-		(uint32)sampleRate,				// nSamplesPerSec
-		(uint32)sampleRate*2,			// nAvgBytesPerSec
+		sampleRate,				// nSamplesPerSec
+		sampleRate*2,			// nAvgBytesPerSec
 		2,						// nBlockAlign
 		16,						// wBitsPerSample
 		sizeof(WAVEFORMATEX)	// cbSize
@@ -324,7 +323,7 @@ int VoiceRecord_DSound::GetRecordedData( short *pOut, int nSamples )
 	dwReadPos += m_WrapOffset;
 
 	// Read the range (dwReadPos-nSamplesWanted, dwReadPos), but don't re-read data we've already read.
-	DWORD readStart = Max( dwReadPos - nBytesWanted, (DWORD)0u );
+	DWORD readStart = MAX( dwReadPos - nBytesWanted, 0 );
 	if ( readStart < m_LastReadPos )
 	{
 		readStart = m_LastReadPos;
@@ -374,7 +373,7 @@ void VoiceRecord_DSound::UpdateWrapping()
 		return;
 
 	// Has the buffer wrapped?
-	if ( VCRHook_WaitForSingleObject(m_hWrapEvent, 0) == WAIT_OBJECT_0 )
+	if ( WaitForSingleObject(m_hWrapEvent, 0) == WAIT_OBJECT_0 )
 	{
 		m_WrapOffset += m_nCaptureBufferBytes;
 	}

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2008, Valve Corporation, All rights reserved. =====//
 //
 // Describes the way to compile a MDL file (eventual replacement for qc)
 //
@@ -33,6 +33,7 @@ public:
 
 	CDmaString m_SkinName;
 	CDmaVar<bool> m_bFlipTriangles;
+	CDmaVar<bool> m_bQuadSubd;
 	CDmaVar<float> m_flScale;
 };
 

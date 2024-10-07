@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright (c) 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -40,7 +40,8 @@ void CL_Predict( int world_start_state, bool validframe, int start_command, int 
 //-----------------------------------------------------------------------------
 void CL_RunPrediction( PREDICTION_REASON reason )
 {
-	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
+
+	CClientState &cl = GetBaseLocalClient();
 
 	if ( !cl.IsActive() )
 		return;
@@ -60,12 +61,12 @@ void CL_RunPrediction( PREDICTION_REASON reason )
 	//Msg( "%i pred reason %s\n", host_framecount, reason == PREDICTION_SIMULATION_RESULTS_ARRIVING_ON_SEND_FRAME ?
 	//	"same frame" : "normal" );
 
-	bool valid = cl.m_nDeltaTick > 0; // cl.GetReceiveList( cl.delta_tick ) != NULL;
+	bool valid = cl.m_nDeltaTick > 0; // GetBaseLocalClient().GetReceiveList( GetLocalClient().delta_tick ) != NULL;
 
 	//Msg( "%i/%i CL_RunPrediction:  last ack %i most recent %i\n", 
-	//	host_framecount, cl.tickcount,
-	//	cl.last_command_ack, 
-	//	cl.netchan->m_nOutSequenceNr - 1 );
+	//	host_framecount, GetBaseLocalClient().tickcount,
+	//	GetBaseLocalClient().last_command_ack, 
+	//	GetBaseLocalClient().netchan->m_nOutSequenceNr - 1 );
 
 	CL_Predict( cl.m_nDeltaTick, 
 		valid,  

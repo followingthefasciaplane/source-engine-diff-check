@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -262,12 +262,12 @@ static void PSDConvertToRGBA8888( int nChannelsCount, PSDMode_t mode, PSDPalette
 	if ( bShouldFillInAlpha )
 	{
 		// No alpha channel, fill in white
-		unsigned char *pDestAlpha = bitmap.GetBits();
+		unsigned char *pDest = bitmap.GetBits();
 		for( int j=0; j < bitmap.Height(); ++j )
 		{
-			for ( int k = 0; k < bitmap.Width(); ++k, pDestAlpha += 4 )
+			for ( int k = 0; k < bitmap.Width(); ++k, pDest += 4 )
 			{
-				pDestAlpha[3] = 0xFF;
+				pDest[3] = 0xFF;
 			}
 		}
 	}
@@ -295,7 +295,7 @@ static int s_pChannelIndex[MODE_COUNT+1][4] =
 
 static void PSDReadUncompressedChannels( CUtlBuffer &buf, int nChannelsCount, PSDMode_t mode, PSDPalette_t &palette, Bitmap_t &bitmap )
 {
-	unsigned char *pChannelRow = (unsigned char*)_alloca( bitmap.Width() );
+	unsigned char *pChannelRow = (unsigned char*)stackalloc( bitmap.Width() );
 	for ( int i=0; i<nChannelsCount; ++i )
 	{
 		int nIndex = s_pChannelIndex[mode][i];
@@ -323,7 +323,7 @@ static void PSDReadUncompressedChannels( CUtlBuffer &buf, int nChannelsCount, PS
 //-----------------------------------------------------------------------------
 static void PSDReadCompressedChannels( CUtlBuffer &buf, int nChannelsCount, PSDMode_t mode, PSDPalette_t &palette, Bitmap_t &bitmap )
 {
-	unsigned char *pChannelRow = (unsigned char*)_alloca( bitmap.Width() );
+	unsigned char *pChannelRow = (unsigned char*)stackalloc( bitmap.Width() );
 	for ( int i=0; i<nChannelsCount; ++i )
 	{
 		int nIndex = s_pChannelIndex[mode][i];
@@ -419,7 +419,7 @@ bool PSDReadFileRGBA8888( CUtlBuffer &buf, Bitmap_t &bitmap )
 	// Skip parts of memory we don't care about
 	int nColorModeSize = BigLong( buf.GetUnsignedInt() );
 	Assert( nColorModeSize % 3 == 0 );
-	unsigned char *pPaletteBits = (unsigned char*)_alloca( nColorModeSize );
+	unsigned char *pPaletteBits = (unsigned char*)stackalloc( nColorModeSize );
 	PSDPalette_t palette;
 	palette.m_pRed = palette.m_pGreen = palette.m_pBlue = 0;
 	if ( nColorModeSize )
@@ -505,7 +505,7 @@ PSDImageResources::ResElement PSDImageResources::FindElement( Resource eType ) c
 		// 2 : length
 		// bytes[ length ]
 
-		unsigned long uSignature = BigLong( *( unsigned long * )( pvBuffer ) );
+		uint32 uSignature = BigLong( *( uint32* )( pvBuffer ) );
 		pvBuffer += 4;
 		if ( uSignature != PSD_IMGRES_SIGNATURE )
 			break;

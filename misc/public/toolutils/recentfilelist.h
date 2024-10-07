@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Class that contains a list of recent files
 //
@@ -35,7 +35,7 @@ namespace vgui
 //-----------------------------------------------------------------------------
 // Class that contains a list of recent files
 //-----------------------------------------------------------------------------
-class CRecentFileList
+class CToolsRecentFileList
 {
 public:
 	// Adds a file to the list

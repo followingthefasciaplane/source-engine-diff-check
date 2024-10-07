@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -11,6 +11,8 @@
 #ifdef _WIN32
 #pragma once
 #endif
+
+#include "tier0/platform.h"
 
 #if defined( DX10 ) && !defined( DX_TO_GL_ABSTRACTION )
 
@@ -46,7 +48,7 @@ public:
 	typedef ID3D10Buffer					*LPDIRECT3DVERTEXBUFFER;
 };
 
-#endif // defined( DX10 ) && !defined( DX_TO_GL_ABSTRACTION )
+#endif // defined( DX10 ) && !defined( POSIX )
 
 
 #if !defined( _X360 ) && !defined( DX_TO_GL_ABSTRACTION )
@@ -113,8 +115,8 @@ typedef void *HardwareShader_t;
 //-----------------------------------------------------------------------------
 // The vertex and pixel shader type
 //-----------------------------------------------------------------------------
-typedef int VertexShader_t;
-typedef int PixelShader_t;	
+typedef intp VertexShader_t;
+typedef intp PixelShader_t;	
 
 //-----------------------------------------------------------------------------
 // Bitpattern for an invalid shader
@@ -184,6 +186,7 @@ typedef enum D3DSHADEMODE
 {
 	D3DSHADE_FLAT = 0,
 	D3DSHADE_GOURAUD = 0,
+	D3DSHADE_NONE    = -1
 };
 
 #endif // _X360

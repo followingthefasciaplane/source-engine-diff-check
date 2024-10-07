@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -9,24 +9,26 @@
 #ifndef _LINUX
 #undef fopen
 #endif
-#if defined( WIN32 ) && !defined( _X360 )
+#if defined( WIN32 ) 
+#if !defined( _X360 )
 #include "winlite.h"
-#include <winsock2.h> // INADDR_ANY defn
+#include <winsock2.h> // inaddr_any defn
+#include <shlobj.h> // isuseranadmin
+#endif
 #include <direct.h>
+#elif defined(_PS3)
+#include <sys/stat.h>
+#include <unistd.h>
+#define PS3_FS_NORMAL_PERMISSIONS S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH
+#define GetLastError() errno
 #elif defined(POSIX)
 #include <sys/stat.h>
 
-#ifdef OSX
+#if !defined( LINUX )
 #include <copyfile.h>
-#import <mach/mach_host.h>
-#import <sys/sysctl.h>
-#elif defined(LINUX)
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#endif
+#endif 
+
 #define GetLastError() errno
-#elif defined( _X360 )
 #else
 #error
 #endif
@@ -39,7 +41,7 @@
 #include <vgui/ISurface.h>
 #include <vgui/IInput.h>
 #include <vgui/IVGui.h>
-#include <KeyValues.h>
+#include <keyvalues.h>
 #include <vgui_controls/BuildGroup.h>
 #include <vgui_controls/Tooltip.h>
 #include <vgui_controls/TextImage.h>
@@ -55,13 +57,13 @@
 #include <vgui_controls/TextEntry.h>
 #include "enginebugreporter.h"
 #include "vgui_baseui_interface.h"
-#include <vgui_controls/FileOpenDialog.h>
 #include "ivideomode.h"
 #include "cl_main.h"
 #include "gl_model_private.h"
 #include "tier2/tier2.h"
 #include "tier1/utlstring.h"
 #include "tier1/callqueue.h"
+#include "tier1/fmtstr.h"
 #include "vstdlib/jobthread.h"
 
 #include "utlsymbol.h"
@@ -71,7 +73,6 @@
 #include "icliententitylist.h"
 #include "bugreporter/bugreporter.h"
 #include "icliententity.h"
-#include "tier0/vcrmode.h"
 #include "tier0/platform.h"
 #include "net.h"
 #include "host_phonehome.h"
@@ -82,34 +83,37 @@
 #include "eiface.h"
 #include "gl_matsysiface.h"
 #include "materialsystem/imaterialsystemhardwareconfig.h"
+#include "materialsystem/materialsystem_config.h"
+#include "Steam.h"
 #include "FindSteamServers.h"
 #include "vstdlib/random.h"
-#ifndef SWDS
+#include "blackbox.h"
+#ifndef DEDICATED
 #include "cl_steamauth.h"
 #endif
-
 #include "zip/XZip.h"
+#include "vengineserver_impl.h"
+#include "vprof.h"
+#include "matchmaking/imatchframework.h"
+#include "sv_remoteaccess.h"	// used for remote bug reporting
 
 #if defined( _X360 )
 #include "xbox/xbox_win32stubs.h"
+#include "xbox/xbox_console.h"
+#elif defined( _PS3 )
+#include "ps3/ps3_console.h"
 #endif
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
+extern IBaseClientDLL *g_ClientDLL;
+
 #define DENY_SOUND		"common/bugreporter_failed"
 #define SUCCEED_SOUND	"common/bugreporter_succeeded"
 
 // Fixme, move these to buguiddata.res script file?
-#ifdef WIN32
 #define BUG_REPOSITORY_URL "\\\\fileserver\\bugs"
-#elif defined(OSX)
-#define BUG_REPOSITORY_URL "/Volumes/bugs"
-#elif defined(LINUX)
-#define BUG_REPOSITORY_URL "\\\\fileserver\\bugs"
-#else
-//#error
-#endif
 #define REPOSITORY_VALIDATION_FILE "info.txt"
 
 #define BUG_REPORTER_DLLNAME "bugreporter_filequeue" 
@@ -124,33 +128,26 @@
 // 16Mb max zipped size
 #define MAX_ZIP_SIZE	(1024 * 1024 * 16 )
 
-extern ConVar	skill;
 extern float g_fFramesPerSecond;
+
+// Need a non trivial amount of frames to let pause blur effect "unblur" due to screensnapshot temp hiding the gameui.
+#define SNAPSHOT_DELAY_DEFAULT "15"
 
 static ConVar bugreporter_includebsp( "bugreporter_includebsp", "1", 0, "Include .bsp for internal bug submissions." );
 static ConVar bugreporter_uploadasync( "bugreporter_uploadasync", "0", FCVAR_ARCHIVE, "Upload attachments asynchronously" );
-
+static ConVar bugreporter_snapshot_delay("bugreporter_snapshot_delay", SNAPSHOT_DELAY_DEFAULT, 0, "Frames to delay before taking snapshot" );
+static ConVar bugreporter_username( "bugreporter_username", "", FCVAR_ARCHIVE, "Username to use for bugreporter" );
+static ConVar bugreporter_console_bytes( "bugreporter_console_bytes", "15000", 0, "Max # of console bytes to put into bug report body (full text still attached)." );
 
 using namespace vgui;
 
 unsigned long GetRam()
 {
 #ifdef WIN32
-	MEMORYSTATUS stat;
-	GlobalMemoryStatus( &stat );
-	return (stat.dwTotalPhys / (1024 * 1024));
-#elif defined(OSX)
-	int mib[2] = { CTL_HW, HW_MEMSIZE };
-	u_int namelen = sizeof(mib) / sizeof(mib[0]);
-	uint64_t memsize;
-	size_t len = sizeof(memsize);
-	
-	if (sysctl(mib, namelen, &memsize, &len, NULL, 0) >= 0) 
-	{
-		return memsize / (1024*1024);
-	}
-	else
-		return 0;
+	MEMORYSTATUSEX statex;
+	statex.dwLength = sizeof( MEMORYSTATUSEX );
+	GlobalMemoryStatusEx( &statex );
+	return ( unsigned long )( statex.ullTotalPhys / ( 1024 * 1024 ) );
 #elif defined( LINUX )
 	unsigned long Ram = 0;
 	FILE *fh = fopen( "/proc/meminfo", "r" );
@@ -173,18 +170,31 @@ unsigned long GetRam()
 	}
 	return Ram;
 #else
-	Assert( !"Impl GetRam" );
+	Assert( !"Impl me " );
 	return 0;
 #endif
 }
 
 const char *GetInternalBugReporterDLL( void )
 {
+	// If remote bugging is set on the commandline, always load the remote bug dll
+	if ( CommandLine()->CheckParm("-remotebug" ) )
+		return "bugreporter_remote";
+
 	char const *pBugReportedDLL = NULL;
 	if ( CommandLine()->CheckParm("-bugreporterdll", &pBugReportedDLL ) )
 		return pBugReportedDLL;
 
 	return BUG_REPORTER_DLLNAME;
+}
+
+bool Plat_IsUserAnAdmin()
+{
+#if defined( _WIN32 ) && !defined( _X360 )
+	return ::IsUserAnAdmin() ? true : false;
+#else
+	return true;
+#endif
 }
 
 void DisplaySystemVersion( char *osversion, int maxlen )
@@ -223,27 +233,48 @@ void DisplaySystemVersion( char *osversion, int maxlen )
 		
 		if ( osvi.dwMajorVersion <= 4 )
 		{
-			Q_strncat ( osversion, "NT ", maxlen, COPY_ALL_CHARACTERS );
+			Q_strncat ( osversion, "Windows NT ", maxlen, COPY_ALL_CHARACTERS );
 		}
 		
 		if ( osvi.dwMajorVersion == 5 && osvi.dwMinorVersion == 0 )
 		{
-			Q_strncat ( osversion, "2000 ", maxlen, COPY_ALL_CHARACTERS );
+			Q_strncat ( osversion, "Windows 2000 ", maxlen, COPY_ALL_CHARACTERS );
 		}
 		
 		if ( osvi.dwMajorVersion == 5 && osvi.dwMinorVersion == 1 )
 		{
-			Q_strncat ( osversion, "XP ", maxlen, COPY_ALL_CHARACTERS );
+			Q_strncat ( osversion, "Windows XP ", maxlen, COPY_ALL_CHARACTERS );
 		}
 		
+		if ( osvi.dwMajorVersion == 6 && osvi.dwMinorVersion == 0 )
+		{
+			Q_strncat( osversion, "Windows Vista ", maxlen, COPY_ALL_CHARACTERS );
+		}
+
+		if ( osvi.dwMajorVersion == 6 && osvi.dwMinorVersion == 1 )
+		{
+			Q_strncat( osversion, "Windows 7 ", maxlen, COPY_ALL_CHARACTERS );
+		}
+
+		if ( osvi.dwMajorVersion == 6 && osvi.dwMinorVersion == 2 )
+		{
+			Q_strncat( osversion, "Windows 8 ", maxlen, COPY_ALL_CHARACTERS );
+		}
+
+		if ( osvi.dwMajorVersion == 6 && osvi.dwMinorVersion == 3 )
+		{
+			Q_strncat( osversion, "Windows 8.1 ", maxlen, COPY_ALL_CHARACTERS );
+		}
+
 		// Display version, service pack (if any), and build number.
 		
 		char build[256];
-		Q_snprintf (build, sizeof( build ), "%s (Build %d) version %d.%d",
+		Q_snprintf (build, sizeof( build ), "%s (Build %d) version %d.%d (LimitedUser: %s)",
 			osvi.szCSDVersion,
 			osvi.dwBuildNumber & 0xFFFF,
 			osvi.dwMajorVersion,
-			osvi.dwMinorVersion );
+			osvi.dwMinorVersion,
+			Plat_IsUserAnAdmin() ? "no" : "yes" );
 		Q_strncat ( osversion, build, maxlen, COPY_ALL_CHARACTERS );
 		break;
 		
@@ -285,38 +316,19 @@ void DisplaySystemVersion( char *osversion, int maxlen )
 	char rgchVersionLine[1024];
 		
 	if ( !fpVersionInfo )
-		Q_strncat ( osversion, "OSXU ", maxlen, COPY_ALL_CHARACTERS );
+		Q_strncpy ( osversion, "OSXU ", maxlen );
 	else
 	{
+		Q_strncpy ( osversion, "OSX10", maxlen );
+
 		while ( fgets( rgchVersionLine, sizeof(rgchVersionLine), fpVersionInfo ) )
 		{
 			if ( !Q_strnicmp( rgchVersionLine, pszSearchString, cchSearchString ) )
 			{
 				const char *pchVersion = rgchVersionLine + cchSearchString;
-				if ( !Q_strnicmp( pchVersion, "10.", Q_strlen( "10." ) ) )
-				{
-					pchVersion += 3; // move past "10."
-					if( *pchVersion == '4' && *(pchVersion+1) == '.' )
-					{
-						Q_strncat ( osversion, "OSX104 ", maxlen, COPY_ALL_CHARACTERS );
-						break;
-					}
-					else if ( *pchVersion == '5' && *(pchVersion+1) == '.' )
-					{
-						Q_strncat ( osversion, "OSX105 ", maxlen, COPY_ALL_CHARACTERS );
-						break;
-					}
-					else if ( *pchVersion == '6' && *(pchVersion+1) == '.' )
-					{
-						Q_strncat ( osversion, "OSX106 ", maxlen, COPY_ALL_CHARACTERS );
-						break;
-					}
-					else if ( *pchVersion == '7' && *(pchVersion+1) == '.' )
-					{
-						Q_strncat ( osversion, "OSX107 ", maxlen, COPY_ALL_CHARACTERS );
-						break;
-					}
-				}
+				int ccVersion = Q_strlen(pchVersion); // trim the \n
+				Q_strncpy ( osversion, pchVersion, ccVersion );
+				osversion[ ccVersion ] = 0;
 				break;
 			}
 		}
@@ -376,7 +388,7 @@ static int GetNumberForMap()
 		return 1; 
 
 	Q_strncpy( szNameCopy, pszResult + 1, sizeof( szNameCopy ) );
-	if ( !szNameCopy[0] )
+	if ( !szNameCopy || !*szNameCopy )
 		return 1;
 	
 //	in case we can't use tchar.h, this will do the same thing
@@ -549,10 +561,10 @@ public:
 		}
 	}
 
-	bool			Init();
+	void			Init();
 	void			Shutdown();
 
-	virtual void	OnKeyCodePressed( KeyCode code );
+	virtual void	OnKeyCodeTyped(KeyCode code);
 
 	void			ParseDefaultParams( void );
 	void			ParseCommands( const CCommand &args );
@@ -562,6 +574,13 @@ public:
 		return m_bTakingSnapshot;
 	}
 
+	// Methods to get bug count for internal dev work stat tracking.
+	// Will get the bug count and clear it every map transition
+	virtual int		GetBugSubmissionCount() const;
+	virtual void	ClearBugSubmissionCount();
+	
+	// When using the remote bugreporter dll, call this to set up any special options
+	void			InitAsRemoteBug();
 
 protected:
 	vgui::TextEntry *m_pTitle;
@@ -584,7 +603,7 @@ protected:
 	vgui::Label  *m_pLevelName;
 	vgui::Label  *m_pBuildNumber;
 
-	vgui::Label		*m_pSubmitter;
+	vgui::ComboBox *m_pSubmitter;
 
 	vgui::ComboBox *m_pAssignTo;
 	vgui::ComboBox *m_pSeverity;
@@ -609,11 +628,12 @@ protected:
 	MESSAGE_FUNC_CHARPTR( OnDirectorySelected, "DirectorySelected", dir );
 	MESSAGE_FUNC( OnChooseVMFFolder, "OnChooseVMFFolder" );
 	MESSAGE_FUNC_PTR( OnChooseArea, "TextChanged", panel);
-protected:
 
 	void						DetermineSubmitterName();
 
 	void						PopulateControls();
+	void						TakeSnapshot();
+	void						RepopulateMaps(int area_index, const char *default_level);
 
 	void						OnTakeSnapshot();
 	void						OnSaveGame();
@@ -667,6 +687,12 @@ protected:
 
 	void						OnFinishBugReport();
 
+	void						PauseGame( bool bPause );
+
+	void						GetConsoleHistory( CUtlBuffer &buf ) const;
+
+	bool						CopyInfoFromRemoteBug();
+
 	bool						m_bCanSubmit;
 	bool						m_bLoggedIn;
 	bool						m_bCanSeeRepository;
@@ -686,6 +712,11 @@ protected:
 	bool						m_bTakingSnapshot;
 	bool						m_bHidGameUIForSnapshot;
 	int							m_nSnapShotFrame;
+	bool						m_bAutoSubmit;
+	bool						m_bPause;
+
+	bool						m_bIsSubmittingRemoteBug; // If we're submitting a bug that has some of its fields sent from a remote machine
+	CUtlString					m_strRemoteBugInfoPath;
 
 	char						m_szVMFContentDirFullpath[ MAX_PATH ];
 
@@ -700,11 +731,13 @@ protected:
 	vgui::DHANDLE< CBugReportFinishedDialog > m_hFinishedDialog;
 	bool						m_bWaitForFinish;
 	float						m_flPauseTime;
-	CSteamID					m_SteamID;
+	TSteamGlobalUserID			m_SteamID;
 	netadr_t					m_cserIP;
 	bool						m_bQueryingSteamForCSER;
 	bool						m_bIsPublic;
 	CUtlString					m_sDllName;
+
+	int							m_BugSub; // The number of bugs submitted. This is tracked and reset per map for internal dev stat tracking
 };
 
 //-----------------------------------------------------------------------------
@@ -715,6 +748,9 @@ CBugUIPanel::CBugUIPanel( bool bIsPublic, vgui::Panel *parent ) :
 	m_bIsPublic( bIsPublic ),
 	m_bAddVMF( false )
 {
+
+	m_BugSub = 0;
+
 	m_sDllName = m_bIsPublic ? 
 		BUG_REPORTER_PUBLIC_DLLNAME : 
 		GetInternalBugReporterDLL();
@@ -726,9 +762,11 @@ CBugUIPanel::CBugUIPanel( bool bIsPublic, vgui::Panel *parent ) :
 	m_pBugReporter = NULL;
 	m_hBugReporter = 0;
 	m_bQueryingSteamForCSER = false;
+
+	memset( &m_SteamID, 0x00, sizeof(m_SteamID) );
 	
 	// Default server address (hardcoded in case not running on steam)
-	char const *cserIP = "207.173.177.12:27013";
+	char const *cserIP = "67.132.200.140:27013";
 
 	// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 	// NOTE:  If you need to override the CSER Ip, make sure you tweak the code in
@@ -749,6 +787,9 @@ CBugUIPanel::CBugUIPanel( bool bIsPublic, vgui::Panel *parent ) :
 	m_bTakingSnapshot = false;
 	m_bHidGameUIForSnapshot = false;
 
+	m_bAutoSubmit = false;
+	m_bPause = false;
+	m_bIsSubmittingRemoteBug = false;
 	m_bCanSubmit = false;
 	m_bLoggedIn = false;
 	m_bCanSeeRepository = false;
@@ -772,7 +813,7 @@ CBugUIPanel::CBugUIPanel( bool bIsPublic, vgui::Panel *parent ) :
 	m_pEmail = new vgui::TextEntry( this, "BugEmail" );;
 	m_pEmail->SetMaximumCharCount( 80 );
 
-	m_pSubmitterLabel = new vgui::Label( this, "BugSubitterLabelPublic", "" );
+	m_pSubmitterLabel = new vgui::Label( this, "BugSubmitterLabel", "Submitter:" );
 
 	m_pScreenShotURL = new vgui::Label( this, "BugScreenShotURL", "" );
 	m_pSaveGameURL = new vgui::Label( this, "BugSaveGameURL", "" );
@@ -796,7 +837,7 @@ CBugUIPanel::CBugUIPanel( bool bIsPublic, vgui::Panel *parent ) :
 	m_pLevelName = new vgui::Label( this, "BugLevel", "" );
 	m_pBuildNumber = new vgui::Label( this, "BugBuild", "" );
 
-	m_pSubmitter = new Label(this, "BugSubmitter", "" );
+	m_pSubmitter = new ComboBox(this, "BugSubmitter", 5, false );
 	m_pAssignTo = new ComboBox(this, "BugOwner", 10, false);
 	m_pSeverity = new ComboBox(this, "BugSeverity", 10, false);
 	m_pReportType = new ComboBox(this, "BugReportType", 10, false);
@@ -825,8 +866,8 @@ CBugUIPanel::CBugUIPanel( bool bIsPublic, vgui::Panel *parent ) :
 	int w = GetWide();
 	int h = GetTall();
 
-	int x = ( videomode->GetModeStereoWidth() - w ) / 2;
-	int y = ( videomode->GetModeStereoHeight() - h ) / 2;
+	int x = ( videomode->GetModeWidth() - w ) / 2;
+	int y = ( videomode->GetModeHeight() - h ) / 2;
 
 	// Hidden by default
 	SetVisible( false );
@@ -837,7 +878,7 @@ CBugUIPanel::CBugUIPanel( bool bIsPublic, vgui::Panel *parent ) :
 	SetPos( x, y );
 }
 
-bool CBugUIPanel::Init()
+void CBugUIPanel::Init()
 {
 	Color clr( 50, 100, 255, 255 );
 
@@ -855,8 +896,8 @@ bool CBugUIPanel::Init()
 		int w = GetWide();
 		int h = GetTall();
 	
-		int x = ( videomode->GetModeStereoWidth() - w ) / 2;
-		int y = ( videomode->GetModeStereoHeight() - h ) / 2;
+		int x = ( videomode->GetModeWidth() - w ) / 2;
+		int y = ( videomode->GetModeHeight() - h ) / 2;
 
 
 		SetPos( x, y );
@@ -880,32 +921,27 @@ bool CBugUIPanel::Init()
 				{
 					m_pBugReporter = NULL;
 					ConColorMsg( clr, "m_pBugReporter->Init() failed\n" );
-					return false;
 				}
 			}
 			else
 			{
 				ConColorMsg( clr, "Couldn't get interface '%s' from '%s'\n", INTERFACEVERSION_BUGREPORTER, m_sDllName.String() );
-				return false;
 			}
 		}
 		else
 		{
 			ConColorMsg( clr, "Couldn't get factory '%s'\n", m_sDllName.String() );
-			return false;
 		}
 	}
 	else
 	{
 		ConColorMsg( clr, "Couldn't load '%s'\n", m_sDllName.String() );
-		return false;
 	}
 
 	if ( m_bCanSubmit )
 	{
 		PopulateControls();
 	}
-
 
 	if ( m_pBugReporter && m_pBugReporter->IsPublicUI() )
 	{
@@ -926,18 +962,8 @@ bool CBugUIPanel::Init()
 		m_pMapNumber->SetVisible( false );
 
 		m_pIncludedFiles->SetVisible( false );
-		m_pSubmitter->SetVisible( false );
-
-		if ( Steam3Client().SteamUser() )
-		{
-			m_pSubmitterLabel->SetText( Steam3Client().SteamUser()->GetSteamID().Render() );
-		}
-		else
-		{
-			m_pSubmitterLabel->SetText( "PublicUser" );
-		}
-
-		m_pSubmitterLabel->SetVisible( true );
+		m_pSubmitter->SetVisible( true );
+		m_pSubmitterLabel->SetVisible( false );
 
 		m_bQueryingSteamForCSER = true;
 	}
@@ -945,7 +971,7 @@ bool CBugUIPanel::Init()
 	{
 		m_pEmail->SetVisible( false );
 		m_pSubmitterLabel->SetVisible( true );
-
+		m_pSubmitter->SetVisible( true );
 	}
 
 	Q_snprintf( m_szVMFContentDirFullpath, sizeof( m_szVMFContentDirFullpath ), "%s/maps", com_gamedir );
@@ -953,8 +979,6 @@ bool CBugUIPanel::Init()
 	Q_FixSlashes( m_szVMFContentDirFullpath );
 
 	m_pBuildNumber->SetText( va( "%d", build_number() ) );
-
-	return false;
 }
 
 void CBugUIPanel::Shutdown()
@@ -977,7 +1001,6 @@ void CBugUIPanel::Shutdown()
 //-----------------------------------------------------------------------------
 CBugUIPanel::~CBugUIPanel()
 {
-
 }
 
 void CBugUIPanel::OnTick()
@@ -990,9 +1013,15 @@ void CBugUIPanel::OnTick()
 	{
 		if ( !m_bTakingSnapshot )
 		{
+			if ( m_nSnapShotFrame > 0 && host_framecount >= m_nSnapShotFrame + bugreporter_snapshot_delay.GetInt() ) 
+			{
+				// Wait for a few frames for nextbot debug entities to appear on screen
+				TakeSnapshot();
+			}
 			return;
 		}
 
+		// wait two frames for the snapshot to occur
 		if ( host_framecount < m_nSnapShotFrame + 2 )
 			return;;
 
@@ -1001,7 +1030,7 @@ void CBugUIPanel::OnTick()
 
 		m_pScreenShotURL->SetText( m_szScreenShotName );
 
-		if (m_bHidGameUIForSnapshot)
+		if ( m_bHidGameUIForSnapshot || !m_bAutoSubmit )
 		{
 			EngineVGui()->ActivateGameUI();
 		}
@@ -1027,6 +1056,10 @@ void CBugUIPanel::OnTick()
 			{
 				Assert( 0 );
 			}
+			const char textError[] =	"If you are accessing from VPN at home, try this:\n"
+										"Set the ConVar 'bugreporter_username' to your Valve user name.\n"
+										"Then call the command '_bugreporter_restart autoselect'.\n";
+			Warning( "%s", textError );
 		}
 		
 		SetVisible( false );
@@ -1035,7 +1068,15 @@ void CBugUIPanel::OnTick()
 
 	m_pSubmit->SetEnabled( IsValidSubmission( false ) );
 
-	if (m_flPauseTime > 0.0f )
+	// Have to do it on the tick to ensure the UI is properly populated?
+	if ( m_bAutoSubmit )
+	{
+		OnSubmit();
+		SetVisible(false);
+		m_bAutoSubmit = false;
+	}
+
+	if ( m_flPauseTime > 0.0f )
 	{
 		if ( m_flPauseTime <= system()->GetFrameTime())
 		{
@@ -1062,7 +1103,7 @@ void CBugUIPanel::OnTick()
 		{
 			if ( m_pProgressDialog )
 			{
-				float percent = clamp( 1.0f - (float)( m_flPauseTime - system()->GetFrameTime() ) / (float)PUBLIC_BUGREPORT_WAIT_TIME, 0.0f, 1.0f );
+				float percent = clamp( 1.0f - ( m_flPauseTime - system()->GetFrameTime() ) / (float)PUBLIC_BUGREPORT_WAIT_TIME, 0.0f, 1.0f );
 				m_pProgressDialog->SetProgress( percent );
 			}
 		}
@@ -1084,7 +1125,7 @@ void CBugUIPanel::OnTick()
 void CBugUIPanel::GetDataFileBase( char const *suffix, char *buf, int bufsize )
 {
 	struct tm t;
-	VCRHook_LocalTime( &t );
+	Plat_GetLocalTime( &t );
 
 	char who[ 128 ];
 	Q_strncpy( who, suffix, sizeof( who ) );
@@ -1132,11 +1173,9 @@ const char *CBugUIPanel::GetSubmissionURL( int bugid )
 //-----------------------------------------------------------------------------
 void CBugUIPanel::OnTakeSnapshot()
 {
-	GetDataFileBase( GetSubmitter(), m_szScreenShotName, sizeof( m_szScreenShotName ) );
-	
 	m_nSnapShotFrame = host_framecount;
-	m_bTakingSnapshot = true;
-	
+	m_bTakingSnapshot = false;
+
 	if ( EngineVGui()->IsGameUIVisible() )
 	{
 		m_bHidGameUIForSnapshot = true;
@@ -1148,6 +1187,16 @@ void CBugUIPanel::OnTakeSnapshot()
 	}
 
 	SetVisible( false );
+	// unpause because we need entities to update for nextbot debug
+	PauseGame( false );
+}
+
+void CBugUIPanel::TakeSnapshot()
+{
+	m_nSnapShotFrame = host_framecount;
+	m_bTakingSnapshot = true;
+
+	GetDataFileBase( GetSubmitter(), m_szScreenShotName, sizeof( m_szScreenShotName ) );
 
 	// Internal reports at 100% quality .jpg
 	int quality = 100;
@@ -1157,7 +1206,9 @@ void CBugUIPanel::OnTakeSnapshot()
 		quality = 40;
 	}
 
-	Cbuf_AddText( va( "jpeg \"%s\" %i\n", m_szScreenShotName, quality ) );
+	Cbuf_AddText( Cbuf_GetCurrentPlayer(), va( "jpeg \"%s\" %i\n", m_szScreenShotName, quality ) );
+
+	PauseGame( true );
 }
 
 //-----------------------------------------------------------------------------
@@ -1170,11 +1221,11 @@ void CBugUIPanel::OnSaveGame()
 	if ( m_pBugReporter && m_pBugReporter->IsPublicUI() )
 	{
 		// External users send us a "minisave" file which doesn't contain data from other previously encoudntered/connected levels
-		Cbuf_AddText( va( "minisave %s\n", m_szSaveGameName ) );
+		Cbuf_AddText( Cbuf_GetCurrentPlayer(), va( "minisave %s\n", m_szSaveGameName ) );
 	}
 	else
 	{
-		Cbuf_AddText( va( "save %s notmostrecent copymap\n", m_szSaveGameName ) );
+		Cbuf_AddText( Cbuf_GetCurrentPlayer(), va( "save %s.sav notmostrecent copymap\n", m_szSaveGameName ) );
 	}
 
 	m_pSaveGameURL->SetText( m_szSaveGameName );
@@ -1226,37 +1277,61 @@ void CBugUIPanel::OnChooseVMFFolder()
 	m_hDirectorySelectDialog->DoModal();
 }
 
+void CBugUIPanel::RepopulateMaps(int area_index, const char *default_level)
+{
+	int c = m_pBugReporter->GetLevelCount(area_index);
+	int item = -1;
+
+	m_pMapNumber->DeleteAllItems();		
+	for ( int i = 0; i < c; i++ )
+	{
+		const char *level = m_pBugReporter->GetLevel(area_index, i );
+		int id = m_pMapNumber->AddItem( level, NULL );
+		if (!Q_stricmp(default_level, level))
+		{
+			item = id;
+		}
+	}
+
+	if (item >= 0)
+	{
+		m_pMapNumber->ActivateItem( item );						
+	}
+	else
+	{
+		m_pMapNumber->ActivateItemByRow(0);
+	}
+}
+
 void CBugUIPanel::OnChooseArea(vgui::Panel *panel)
 {
-	if (panel != m_pGameArea)
-		return;
-
-	if (!Q_strcmp(BUG_REPORTER_DLLNAME, GetInternalBugReporterDLL()))
+	if (panel == m_pGameArea)
 	{
-		int area_index = m_pGameArea->GetActiveItem();
-		int c = m_pBugReporter->GetLevelCount(area_index);
-		int item = -1;
-		const char *currentLevel = cl.IsActive() ? cl.m_szLevelBaseName : "console";
-
-		m_pMapNumber->DeleteAllItems();
-		
-		for ( int i = 0; i < c; i++ )
+		if (!Q_strcmp(BUG_REPORTER_DLLNAME, GetInternalBugReporterDLL()))
 		{
-			const char *level = m_pBugReporter->GetLevel(area_index, i );
-			int id = m_pMapNumber->AddItem( level, NULL );
-			if (!Q_strcmp(currentLevel, level))
+			int area_index = m_pGameArea->GetActiveItem();
+			const char *currentLevel = GetBaseLocalClient().IsActive() ? GetBaseLocalClient().m_szLevelNameShort : "console";
+			
+			RepopulateMaps(area_index, currentLevel);
+		}
+	}
+	else if (panel == m_pMapNumber)
+	{
+		if (!Q_strcmp(BUG_REPORTER_DLLNAME, GetInternalBugReporterDLL()))
+		{
+			int area_index = m_pGameArea->GetActiveItem();
+			int map_index = m_pMapNumber->GetActiveItem();
+			const char *defaultOwner = m_pBugReporter->GetLevelOwner(area_index, map_index);
+			int c = m_pBugReporter->GetDisplayNameCount();
+			for ( int i = 0; i < c; i++ )
 			{
-				item = id;
+				const char *userName = m_pBugReporter->GetUserName( i );
+				if (!Q_stricmp( userName, defaultOwner ))
+				{
+					m_pAssignTo->ActivateItem( i );
+					break;
+				}
 			}
-		}
-
-		if (item >= 0)
-		{
-			m_pMapNumber->ActivateItem( item );
-		}
-		else
-		{
-			m_pMapNumber->ActivateItemByRow(0);
 		}
 	}
 }
@@ -1268,7 +1343,7 @@ void CBugUIPanel::OnDirectorySelected( char const *dir )
 	Q_FixSlashes( m_szVMFContentDirFullpath );
 	Q_StripTrailingSlash( m_szVMFContentDirFullpath );
 
-	if ( m_hDirectorySelectDialog != 0 )
+	if ( m_hDirectorySelectDialog != NULL )
 	{
 		m_hDirectorySelectDialog->MarkForDeletion();
 	}
@@ -1310,7 +1385,7 @@ void CBugUIPanel::OnFileSelected( char const *fullpath )
 	char ext[ 10 ];
 	Q_ExtractFileExtension( relativepath, ext, sizeof( ext ) );
 
-	if ( m_hFileOpenDialog != 0 )
+	if ( m_hFileOpenDialog != NULL )
 	{
 		m_hFileOpenDialog->MarkForDeletion();
 	}
@@ -1347,9 +1422,10 @@ void CBugUIPanel::OnIncludeFile()
 
 	if ( !m_hFileOpenDialog.Get() )
 	{
-		m_hFileOpenDialog = new FileOpenDialog( this, "Choose file to include", true );
-		if ( m_hFileOpenDialog != 0 )
+		m_hFileOpenDialog = new vgui::FileOpenDialog( this, "Choose file to include", true );
+		if ( m_hFileOpenDialog != NULL )
 		{
+			m_hFileOpenDialog->SetDeleteSelfOnClose( false );
 			m_hFileOpenDialog->AddFilter("*.*", "All Files (*.*)", true);
 		}
 	}
@@ -1376,55 +1452,34 @@ void CBugUIPanel::OnClearIncludedFiles()
 //-----------------------------------------------------------------------------
 void CBugUIPanel::Activate()
 {
+	ACTIVE_SPLITSCREEN_PLAYER_GUARD( 0 );
+
 	if ( !m_bValidated )
 	{
-		if ( Init() )
-		{
-			m_bValidated = true;
-			DetermineSubmitterName();
-		}
+		m_bValidated = true;
+		Init();
+		DetermineSubmitterName();
 	}
-
+	
 	if ( m_pGameArea->GetItemCount() != 0 )
 	{
 		int iArea = GetArea();
 		if ( iArea != 0 )
-			m_pGameArea->ActivateItem( iArea );
-	}
-
-	{
-		int c = m_pMapNumber->GetItemCount();
-		const char *currentLevel = cl.IsActive() ? cl.m_szLevelBaseName : "console";
-		int item = -1;
-
-		for ( int i = 0; i < c; i++ )
 		{
-			int id = m_pMapNumber->GetItemIDFromRow(i);
-			char level[256];
-			m_pMapNumber->GetItemText(id, level, sizeof(level));
-			if (!Q_strcmp(currentLevel, level))
-			{
-				item = id;
-			}
-		}
-
-		if (item >= 0)
-		{
-			m_pMapNumber->ActivateItem( item );
-		}
-		else
-		{
-			m_pMapNumber->ActivateItemByRow(0);
+			if ( m_pGameArea->GetActiveItem() != iArea )
+				m_pGameArea->ActivateItem( iArea );
+			else
+				OnChooseArea( m_pGameArea );
 		}
 	}
 
-	if ( cl.IsActive() )
+	if ( GetBaseLocalClient().IsActive() )
 	{
 		Vector org = MainViewOrigin();
 		QAngle ang;
 		VectorAngles( MainViewForward(), ang );
 
-		IClientEntity *localPlayer = entitylist->GetClientEntity( cl.m_nPlayerSlot + 1 );
+		IClientEntity *localPlayer = entitylist->GetClientEntity( GetBaseLocalClient().m_nPlayerSlot + 1 );
 		if ( localPlayer )
 		{
 			org = localPlayer->GetAbsOrigin();
@@ -1433,8 +1488,8 @@ void CBugUIPanel::Activate()
 		m_pPosition->SetText( va( "%f %f %f", org.x, org.y, org.z ) );
 		m_pOrientation->SetText( va( "%f %f %f", ang.x, ang.y, ang.z ) );
 
-		m_pLevelName->SetText( cl.m_szLevelBaseName );
-		m_pSaveGame->SetEnabled( ( cl.m_nMaxClients == 1 ) ? true : false );
+		m_pLevelName->SetText( GetBaseLocalClient().m_szLevelNameShort );
+		m_pSaveGame->SetEnabled( ( GetBaseLocalClient().m_nMaxClients == 1 ) ? true : false );
 		m_pSaveBSP->SetEnabled( true );
 		m_pSaveVMF->SetEnabled( true );
 		m_pChooseVMFFolder->SetEnabled( true );
@@ -1482,6 +1537,10 @@ void CBugUIPanel::Activate()
 			OnTakeSnapshot();
 		}
 	}
+
+	// HACK: This is only relevant for portal2. 
+	Msg( "BUG REPORT PORTAL POSITIONS:\n" );
+	Cbuf_AddText( Cbuf_GetCurrentPlayer(), "portal_report\n" );
 }
 
 void CBugUIPanel::WipeData()
@@ -1502,6 +1561,9 @@ void CBugUIPanel::WipeData()
 //	m_pTitle->SetText( "" );
 	m_pDescription->SetText( "" );
 	m_pEmail->SetText( "" );
+
+	m_bIsSubmittingRemoteBug = false;
+	m_strRemoteBugInfoPath.Clear();
 }
 
 //-----------------------------------------------------------------------------
@@ -1545,6 +1607,14 @@ bool CBugUIPanel::IsValidSubmission( bool verbose )
 	if ( !m_pBugReporter )
 		return false;
 
+	// If set, this machine sends it's bugs to fileserver
+	// and another mahchine will submit. Validation checking
+	// can be trusted to the other machine.
+	if ( CommandLine()->CheckParm( "-remotebug" ) ) 
+	{
+		return true;
+	}
+	
 	bool isPublic = m_pBugReporter->IsPublicUI();
 
 	char title[ 256 ];
@@ -1621,7 +1691,7 @@ bool CBugUIPanel::IsValidSubmission( bool verbose )
 	{
 		if ( verbose ) 
 		{
-			Warning( "Report Type not set!\n" );
+			Warning( "ReportType not set!\n" );
 		}
 		return false;
 	}
@@ -1640,7 +1710,7 @@ bool CBugUIPanel::IsValidSubmission( bool verbose )
 	{
 		if ( verbose )
 		{
-			Warning( "Report type not set!\n" );
+			Warning( "ReportType not set!\n" );
 		}
 		return false;
 	}
@@ -1709,6 +1779,18 @@ bool CBugUIPanel::AddFileToZip( char const *relative )
 	return false;
 }
 
+class CKeyValuesDumpForBugreport : public IKeyValuesDumpContextAsText
+{
+public:
+	CKeyValuesDumpForBugreport( CUtlBuffer &buffer ) : m_buffer( buffer ) {}
+
+public:
+	virtual bool KvWriteText( char const *szText ) { m_buffer.Printf( "%s", szText ); return true; }
+
+protected:
+	CUtlBuffer &m_buffer;
+};
+
 void CBugUIPanel::OnSubmit()
 {
 	if ( !m_bCanSubmit )
@@ -1725,19 +1807,19 @@ void CBugUIPanel::OnSubmit()
 
 	bool isPublic = m_pBugReporter->IsPublicUI();
 
-	char title[ 80 ];
-	char desc[ 4096 ];
-	char severity[ 128 ];
-	char area[ 128 ];
-	char mapnumber[ 128 ];
-	char priority[ 128 ];
-	char assignedto[ 128 ];
-	char level[ 128 ];
-	char position[ 128 ];
-	char orientation[ 128 ];
-	char build[ 128 ];
-	char reporttype[ 128 ];
-	char email[ 80 ];
+	char title[ 256 ];
+	char desc[ 8192 ];
+	char severity[ 256 ];
+	char area[ 256 ];
+	char mapnumber[ 256 ];
+	char priority[ 256 ];
+	char assignedto[ 256 ];
+	char level[ 256 ];
+	char position[ 256 ];
+	char orientation[ 256 ];
+	char build[ 256 ];
+	char report_type[ 256 ];
+	char email[ 256 ];
 
 	title[ 0 ] = 0;
 	desc[ 0 ] = 0;
@@ -1750,7 +1832,7 @@ void CBugUIPanel::OnSubmit()
 	orientation[ 0 ] = 0;
 	position[ 0 ] = 0;
 	build[ 0 ] = 0;
-	reporttype [ 0 ] = 0;
+	report_type [ 0 ] = 0;
 	email[ 0 ] = 0;
 
 	Assert( m_pBugReporter );
@@ -1758,20 +1840,40 @@ void CBugUIPanel::OnSubmit()
 	// Stuff bug data files up to server
 	m_pBugReporter->StartNewBugReport();
 
+	// If we are submitting a remote bug, replace fields that are specific to the remote machine
+	// (position, screenshot, etc) with the ones saved in the fileserver KV file
+	if ( m_bIsSubmittingRemoteBug )
+	{
+		CopyInfoFromRemoteBug();
+	}
 
-	char temp[ 80 ];
+	char temp[ 256 ];
 	m_pTitle->GetText( temp, sizeof( temp ) );
 
-	if ( host_state.worldmodel )
+	if ( !m_bIsSubmittingRemoteBug )
 	{
-		char mapname[256];
-		CL_SetupMapName( modelloader->GetName( host_state.worldmodel ), mapname, sizeof( mapname ) );
+		if ( host_state.worldmodel )
+		{
+			char mapname[256];
+			CL_SetupMapName( modelloader->GetName( host_state.worldmodel ), mapname, sizeof( mapname ) );
 
-		Q_snprintf( title, sizeof( title ), "%s: %s", mapname, temp );
+			Q_snprintf( title, sizeof( title ), "%s: %s", mapname, temp );
+		}
+		else
+		{
+			Q_snprintf( title, sizeof( title ), "%s", temp );
+		}
 	}
 	else
 	{
-		Q_snprintf( title, sizeof( title ), "%s", temp );
+		// remote bugs add the map used by the remote machine
+		char mapname[256];
+		if ( m_szLevel[0] == 0 )
+		{
+			V_strncpy( m_szLevel, "console", sizeof( m_szLevel ) );
+		}
+		V_strncpy( mapname, m_szLevel, sizeof( mapname ) );
+		Q_snprintf( title, sizeof( title ), "%s: %s", mapname, temp );
 	}
 
 	Msg( "title:  %s\n", title );
@@ -1785,11 +1887,20 @@ void CBugUIPanel::OnSubmit()
 	m_pOrientation->GetText( orientation, sizeof( orientation ) );
 	m_pBuildNumber->GetText( build, sizeof( build ) );
 
-	Q_strncat( build, " (Steam)", sizeof(build), COPY_ALL_CHARACTERS );
+	if ( g_pFileSystem->IsSteam() )
+	{
+		Q_strncat( build, " (Steam)", sizeof(build), COPY_ALL_CHARACTERS );
+	}
+	else
+	{
+		Q_strncat( build, " (Perforce)", sizeof(build), COPY_ALL_CHARACTERS );
+	}
 
 	MaterialAdapterInfo_t info;
 	materials->GetDisplayAdapterInfo( materials->GetCurrentAdapter(), info );
 	char driverinfo[ 2048 ];
+
+	const MaterialSystem_Config_t& matSysCfg = materials->GetCurrentConfigForVideoCard();
 
 	char const *dxlevel = "Unk";
 	if ( g_pMaterialSystemHardwareConfig )
@@ -1797,17 +1908,44 @@ void CBugUIPanel::OnSubmit()
 		dxlevel = COM_DXLevelToString( g_pMaterialSystemHardwareConfig->GetDXSupportLevel() ) ;
 	}
 
-	char osversion[ 256 ];
-	DisplaySystemVersion( osversion, sizeof( osversion ) );
+	const char *pMaterialThreadMode = "???";
+	if ( g_pMaterialSystem )
+	{
+		switch ( g_pMaterialSystem->GetThreadMode() )
+		{
+		case MATERIAL_SINGLE_THREADED:
+			pMaterialThreadMode = "MATERIAL_SINGLE_THREADED";
+			break;
+
+		case MATERIAL_QUEUED_SINGLE_THREADED:
+			pMaterialThreadMode = "MATERIAL_QUEUED_SINGLE_THREADED";
+			break;
+
+		case MATERIAL_QUEUED_THREADED:
+			pMaterialThreadMode = "MATERIAL_QUEUED_THREADED";
+			break;
+
+		default:
+			pMaterialThreadMode = "unknown";
+			break;
+		}
+	}
+
+#ifdef VPROF_ENABLED
+	int nLostDeviceCount = *g_VProfCurrentProfile.FindOrCreateCounter( "reacquire_resources", COUNTER_GROUP_NO_RESET );
+#else
+	int nLostDeviceCount = -1;
+#endif
 
 	Q_snprintf( driverinfo, sizeof( driverinfo ), 
-		"OS Version:  %s\n"
 		"Driver Name:  %s\n"
 		"VendorId / DeviceId:  0x%x / 0x%x\n"
 		"SubSystem / Rev:  0x%x / 0x%x\n"
 		"DXLevel:  %s\nVid:  %i x %i\n"
-		"Framerate:  %.3f\n",
-		osversion,
+		"Framerate:  %.3f\n"
+		"Window mode: %s\n"
+		"Number of ReaquireResource events (lost device): %d\n"
+		"Material system thread mode: %s",
 		info.m_pDriverName,
 		info.m_VendorID,
 		info.m_DeviceID,
@@ -1815,37 +1953,62 @@ void CBugUIPanel::OnSubmit()
 		info.m_Revision,
 		dxlevel ? dxlevel : "Unk",
 		videomode->GetModeWidth(), videomode->GetModeHeight(),
-		g_fFramesPerSecond );
+		g_fFramesPerSecond,
+		matSysCfg.Windowed() ? ( matSysCfg.NoWindowBorder() ? "Windowed no border" : "Windowed" ) : "Fullscreen",
+		nLostDeviceCount,
+		pMaterialThreadMode );
 
-	Msg( "%s", driverinfo );
+	Msg( "%s\n", driverinfo );
 
 	int latency = 0;
-	if ( cl.m_NetChannel )
+	if ( GetBaseLocalClient().m_NetChannel )
 	{
-		latency = (int)( 1000.0f * cl.m_NetChannel->GetAvgLatency( FLOW_OUTGOING ) );
+		latency = (int)( 1000.0f * GetBaseLocalClient().m_NetChannel->GetAvgLatency( FLOW_OUTGOING ) );
 	}
 	
-	ConVarRef host_thread_mode( "host_thread_mode" );
-	ConVarRef sv_alternateticks( "sv_alternateticks" );
-	ConVarRef ai_strong_optimizations( "ai_strong_optimizations" );
+	static ConVarRef host_thread_mode( "host_thread_mode" );
+	static ConVarRef sv_alternateticks( "sv_alternateticks" );
+	static ConVarRef mat_queue_mode( "mat_queue_mode" );
 
-	char misc[ 1024 ];
-	Q_snprintf( misc, sizeof( misc ), "Convars:\n\tskill:  %i\n\tnet:  rate %i update %i cmd %i latency %i msec\n\thost_thread_mode:  %i\n\tsv_alternateticks:  %i\n\tai_strong_optimizations:  %i\n", 
-		skill.GetInt(),
+	CUtlBuffer bufDescription( 0, 0, CUtlBuffer::TEXT_BUFFER );
+
+	static ConVarRef skill("skill");
+	bufDescription.Printf( "Convars:\n"
+		"\tnet:  rate %i update %i cmd %i latency %i msec\n"
+		"\thost_thread_mode:  %i\n"
+		"\tsv_alternateticks:  %i\n"
+		"\tmat_queue_mode: %i\n", 
 		cl_rate->GetInt(),
 		(int)cl_updaterate->GetFloat(),
 		(int)cl_cmdrate->GetFloat(),
 		latency,
 		host_thread_mode.GetInt(),
 		sv_alternateticks.GetInt(),
-		ai_strong_optimizations.GetInt()
+		mat_queue_mode.GetInt()
 	);
 
-	if ( cl.IsActive() && g_ServerGlobalVariables.mapversion != 0 && host_state.worldmodel )
+	KeyValues *pModConvars = new KeyValues( "bugreport_convars" );
+	if ( pModConvars->LoadFromFile( g_pFileSystem, "scripts/bugreport_convars.txt", "GAME" ) )
+	{
+		KeyValues *entry = pModConvars->GetFirstSubKey();
+
+		while ( entry )
+		{
+			ConVarRef modConvar( entry->GetString() );
+			if ( modConvar.IsValid() )
+			{
+				bufDescription.Printf( "%s:  %s\n", entry->GetName(), modConvar.GetString() );
+			}
+
+			entry = entry->GetNextKey();
+		}
+	}
+	pModConvars->deleteThis();
+
+	if ( GetBaseLocalClient().IsActive() && g_ServerGlobalVariables.mapversion != 0 && host_state.worldmodel )
 	{
 		// Note, this won't work in multiplayer, oh well...
 		extern CGlobalVars g_ServerGlobalVariables;
-		char misc2[ 256 ];
 
 		long mapfiletime = g_pFileSystem->GetFileTime( modelloader->GetName( host_state.worldmodel ), "GAME" );
 		if ( !isPublic && mapfiletime != 0L )
@@ -1853,33 +2016,101 @@ void CBugUIPanel::OnSubmit()
 			char filetimebuf[ 64 ];
 			g_pFileSystem->FileTimeToString( filetimebuf, sizeof( filetimebuf ), mapfiletime );
 
-			Q_snprintf( misc2, sizeof( misc2 ), "Map version:  %i\nFile timestamp:  %s", g_ServerGlobalVariables.mapversion, filetimebuf );
-			Q_strncat( misc, misc2, sizeof( misc ), COPY_ALL_CHARACTERS );
+			bufDescription.Printf( "Map version:  %i\nFile timestamp:  %s", g_ServerGlobalVariables.mapversion, filetimebuf );
 		}
 		else
 		{
-			Q_snprintf( misc2, sizeof( misc2 ), "Map version:  %i\n", g_ServerGlobalVariables.mapversion );
-			Q_strncat( misc, misc2, sizeof( misc ), COPY_ALL_CHARACTERS );
+			bufDescription.Printf( "Map version:  %i\n", g_ServerGlobalVariables.mapversion );
 		}
 	}
 
-	if ( sv.IsActive() && serverGameClients )
+	// We only want to get extra bug info if we are connected to SteamBeta
+	// Also, serverGameClients->GetBugReportInfo has a fairly high percentage crash rate
+	// when used in SteamPublic.
+	if ( k_EUniverseBeta == GetSteamUniverse() )
 	{
-		char gamedlldata[ 2048 ];
-		Q_memset( gamedlldata, 0, sizeof( gamedlldata ) );
-		serverGameClients->GetBugReportInfo( gamedlldata, sizeof( gamedlldata ) );
-		Q_strncat( misc, gamedlldata, sizeof( misc ), COPY_ALL_CHARACTERS );
+		if ( sv.IsActive() && serverGameClients )
+		{
+			char gamedlldata[ 2048 ];
+			Q_memset( gamedlldata, 0, sizeof( gamedlldata ) );
+			serverGameClients->GetBugReportInfo( gamedlldata, sizeof( gamedlldata ) );
+			bufDescription.Printf( "%s", gamedlldata );
+		}
+
+		// Call into matchmaking.dll for matchmaking bug info
+		bufDescription.Printf( "matchmaking.dll info\n" );
+		if ( g_pMatchFramework )
+		{
+			if ( IMatchSession *pMatchSession = g_pMatchFramework->GetMatchSession() )
+			{
+				bufDescription.Printf( "match session %p\n", pMatchSession );
+
+				CKeyValuesDumpForBugreport kvDumpContext( bufDescription );
+
+				bufDescription.Printf( "session system data:\n" );
+				pMatchSession->GetSessionSystemData()->Dump( &kvDumpContext );
+
+				bufDescription.Printf( "session settings:\n" );
+				pMatchSession->GetSessionSettings()->Dump( &kvDumpContext );
+			}
+			else
+			{
+				bufDescription.Printf( "[ no match session ]\n" );
+			}
+		}
 	}
 
 	{
-		char misc2[ 128 ];
-		Q_snprintf( misc2, sizeof( misc2 ), "gamedir:  %s\n", com_gamedir );
-		Q_strncat( misc, misc2, sizeof( misc ), COPY_ALL_CHARACTERS );
-		//Q_snprintf( misc2, sizeof( misc2 ), "game:  %s\n", COM_GetModDirectory() );
-		//Q_strncat( misc, misc2, sizeof( misc ), COPY_ALL_CHARACTERS );
+		bufDescription.Printf( "\n" );
+	}
+	{
+		bufDescription.Printf( "gamedir:  %s\n", com_gamedir );
+	}
+	{
+		bufDescription.Printf( "\n" );
 	}
 
-	Msg( "%s", misc );
+	char blackbox[8192];
+	double now = Plat_FloatTime();
+	int hh = int(now/(60*60));
+	int mm = int(now/60) % 60;
+	double ss = now - (mm + hh*60)*60;
+	V_snprintf(blackbox, sizeof(blackbox), "Blackbox dumped at %02d:%02d:%02.3f\n", hh, mm, ss);
+	for ( int type = 0; type < gBlackBox->GetTypeCount(); type++ )
+	{
+		for (int i = 0; i < gBlackBox->Count( type ); i++)
+		{
+			CFmtStrN<1024+16> entry;
+
+			entry.sprintf("%s: %s\n", gBlackBox->GetTypeName(type), gBlackBox->Get( type, i ));
+			Q_strncat(blackbox, entry, sizeof(blackbox));
+		}
+	}
+
+	bufDescription.Printf( "%s", blackbox );
+
+	Msg( "%s", (char *)bufDescription.Base() );
+
+	CUtlBuffer buf( 0, 0, CUtlBuffer::TEXT_BUFFER );
+
+	buf.Printf( "Console:\n\n" );
+	GetConsoleHistory( buf );
+
+	if ( !m_bIsSubmittingRemoteBug )
+	{
+		// Add it as an attached file
+		char consolePath[ MAX_PATH ];
+		g_pFullFileSystem->RelativePathToFullPath( "bugconsole.txt", "MOD", consolePath, sizeof( consolePath ) );
+		g_pFullFileSystem->WriteFile( consolePath, "MOD", buf );
+
+		OnFileSelected( consolePath );
+	}
+
+// 	int nBytesToPut = MIN( buf.TellPut(), MAX( bugreporter_console_bytes.GetInt(), 1 ) );
+// 	char *pStart = (char *)buf.Base() + buf.TellPut() - nBytesToPut;
+// 
+// 	bufDescription.Printf( "\n\n-----------------------------------------------------------\nConsole:  (last %d bytes)\n\n", nBytesToPut );
+// 	bufDescription.Put( (char *)pStart, nBytesToPut );
 
 	if ( !isPublic )
 	{
@@ -1912,30 +2143,21 @@ void CBugUIPanel::OnSubmit()
 		}
 
 		m_pBugReporter->SetOwner( email );
-		char submitter[ 80 ];
-		m_pSubmitterLabel->GetText( submitter, sizeof( submitter ) );
-		m_pBugReporter->SetSubmitter( submitter );
 	}
 	else
 	{
 		m_pBugReporter->SetOwner( m_pBugReporter->GetUserNameForDisplayName( assignedto ) );
-
-		if ( m_bUseNameForSubmitter )
-		{
-			char submitter[ 80 ];
-			m_pSubmitter->GetText( submitter, sizeof( submitter ) );
-			m_pBugReporter->SetSubmitter( submitter );
-		}
-		else
-		{
-			m_pBugReporter->SetSubmitter( NULL );
-		}
 	}
 
-	m_pReportType->GetText( reporttype, sizeof( reporttype ) );
-	Msg( "report type %s\n", reporttype );
+	char submitter[ 256 ];
+	m_pSubmitter->GetText( submitter, sizeof( submitter ) );
+	m_pBugReporter->SetSubmitter( m_pBugReporter->GetUserNameForDisplayName( submitter ) );
 
-	Msg( "submitter %s\n", m_pBugReporter->GetUserName() );
+	Msg( "submitter %s\n", submitter );
+
+
+	m_pReportType->GetText( report_type, sizeof( report_type ) );
+	Msg( "report_type %s\n", report_type );
 
 	Msg( "level %s\n", level );
 	Msg( "position %s\n", position );
@@ -1984,24 +2206,33 @@ void CBugUIPanel::OnSubmit()
 
 	m_pBugReporter->SetTitle( title );
 	m_pBugReporter->SetDescription( desc );
-	m_pBugReporter->SetLevel( level );
-	m_pBugReporter->SetPosition( position );
-	m_pBugReporter->SetOrientation( orientation );
-	m_pBugReporter->SetBuildNumber( build );
 
+	if ( !m_bIsSubmittingRemoteBug )
+	{
+		m_pBugReporter->SetLevel( level );
+		m_pBugReporter->SetPosition( position );
+		m_pBugReporter->SetOrientation( orientation );
+		m_pBugReporter->SetBuildNumber( build );
+	}
+	
 	m_pBugReporter->SetSeverity( severity );
 	m_pBugReporter->SetPriority( priority );
 	m_pBugReporter->SetArea( area );
 	m_pBugReporter->SetMapNumber( mapnumber );
-	m_pBugReporter->SetReportType( reporttype );
-	m_pBugReporter->SetDriverInfo( driverinfo );
-	m_pBugReporter->SetMiscInfo( misc );
+	m_pBugReporter->SetReportType( report_type );
+
+	if ( !m_bIsSubmittingRemoteBug )
+	{
+		m_pBugReporter->SetDriverInfo( driverinfo );
+		m_pBugReporter->SetMiscInfo( (char const *)bufDescription.Base() );
+		m_pBugReporter->SetConsoleHistory( (char const *)buf.Base() );
+	}
 
 	m_pBugReporter->SetCSERAddress( m_cserIP );
 	m_pBugReporter->SetExeName( "hl2.exe" );
 	m_pBugReporter->SetGameDirectory( com_gamedir );
 
-	const CPUInformation& pi = *GetCPUInformation();
+	const CPUInformation& pi = GetCPUInformation();
 
 	m_pBugReporter->SetRAM( GetRam() );
 
@@ -2017,6 +2248,8 @@ void CBugUIPanel::OnSubmit()
 
 	m_pBugReporter->SetDXVersion( vHigh, vLow, info.m_VendorID, info.m_DeviceID );
 
+	char osversion[ 128 ];
+	DisplaySystemVersion( osversion, sizeof( osversion ) );
 	m_pBugReporter->SetOSVersion( osversion );
 
 	m_pBugReporter->ResetIncludedFiles();
@@ -2037,7 +2270,7 @@ void CBugUIPanel::OnSubmit()
 		buginfo.Printf( "Orientation:  %s\n", orientation );
 		buginfo.Printf( "BuildNumber:  %s\n", build );
 		buginfo.Printf( "DriverInfo:  %s\n", driverinfo );
-		buginfo.Printf( "Misc:  %s\n", misc );
+		buginfo.Printf( "Misc:  %s\n", (char const *)bufDescription.Base() );
 		buginfo.Printf( "Exe:  %s\n", "hl2.exe" );
 		char gd[ 256 ];
 		Q_FileBase( com_gamedir, gd, sizeof( gd ) );
@@ -2080,7 +2313,7 @@ void CBugUIPanel::OnSubmit()
 		}
 
 		// Only attach .sav files in single player
-		if ( ( cl.m_nMaxClients == 1 ) && m_szSaveGameName[ 0 ] )
+		if ( ( GetBaseLocalClient().m_nMaxClients == 1 ) && m_szSaveGameName[ 0 ] )
 		{
 			Q_snprintf( fn, sizeof( fn ), "save/%s.sav", m_szSaveGameName );
 			Q_FixSlashes( fn );
@@ -2098,7 +2331,7 @@ void CBugUIPanel::OnSubmit()
 		if ( m_hZip && ( attachedSave || attachedScreenshot ) )
 		{
 			Assert( m_hZip );
-			void *mem;
+			void *mem = NULL;
 			unsigned long len;
 
 			ZipGetMemory( m_hZip, &mem, &len );
@@ -2123,17 +2356,16 @@ void CBugUIPanel::OnSubmit()
 			m_hZip = (HZIP)0;
 		}
 
-		uint64 un64SteamID = m_SteamID.ConvertToUint64();
-		m_pBugReporter->SetSteamUserID( &un64SteamID, sizeof( un64SteamID ) );
+		m_pBugReporter->SetSteamUserID( &m_SteamID, sizeof( m_SteamID ) );
 	}
 	else
 	{
 		// Notify other players that we've submitted a bug
-		if ( cl.IsActive() && cl.m_nMaxClients > 1 )
-		{
+		if ( GetBaseLocalClient().IsActive() && GetBaseLocalClient().m_nMaxClients > 1 )
+		{			
 			char buf[256];
-			Q_snprintf( buf, sizeof(buf), "say \"Bug Submitted: \'%s\'\"", title );
-			Cbuf_AddText( buf );
+			Q_snprintf( buf, sizeof(buf), "say \"Bug Submitted [%s]: %s\"\n", assignedto, title );
+			Cbuf_AddText( Cbuf_GetCurrentPlayer(), buf, kCommandSrcCode, TIME_TO_TICKS(1.5) );
 		}
 
 		if ( m_szSaveGameName[ 0 ] )
@@ -2173,7 +2405,10 @@ void CBugUIPanel::OnSubmit()
 		}
 	}
 
-	Q_strncpy( m_szLevel, level, sizeof( m_szLevel ) );
+	if ( !m_bIsSubmittingRemoteBug )
+	{
+		Q_strncpy( m_szLevel, level, sizeof( m_szLevel ) );
+	}
 
 	if ( m_pBugReporter->IsPublicUI() )
 	{
@@ -2204,6 +2439,13 @@ void CBugUIPanel::OnFinishBugReport()
 				success = false;
 			}
 		}
+
+		if ( CommandLine()->CheckParm( "-remotebug" ) )
+		{
+			// If we're using the remote bug reporter dll, respond to the
+			// bug requesting machine with the fileserver location of the bug info and files
+			g_ServerRemoteAccess.RemoteBug( m_pBugReporter->GetSubmissionURL() );
+		}
 	}
 	else
 	{
@@ -2225,7 +2467,22 @@ void CBugUIPanel::OnFinishBugReport()
 		if ( !m_pBugReporter->IsPublicUI() )
 		{
 			Close();
+
+			// This is for our internal bug stat tracking for clients.
+			// We only want to track client side bug submissions this way, wonder
+			++m_BugSub;
 		}
+	}
+}
+
+void CBugUIPanel::PauseGame( bool bPause )
+{
+	ACTIVE_SPLITSCREEN_PLAYER_GUARD( 0 );
+
+	// Don't pause the game or display 'paused by' text when submitting from a remote machine
+	if ( CommandLine()->CheckParm( "-remotebug" ) == NULL )
+	{
+		Cbuf_AddText( sv.IsActive() ? CBUF_SERVER : CBUF_FIRST_PLAYER, bPause ? "cmd bugpause\n" : "cmd bugunpause\n" );
 	}
 }
 
@@ -2240,35 +2497,15 @@ void NonFileSystem_CreatePath (const char *path)
 		{       // create the directory
 			char old = *ofs;
 			*ofs = 0;
+#ifdef _PS3
+			mkdir( temppath, PS3_FS_NORMAL_PERMISSIONS );
+#else
 			_mkdir (temppath);
+#endif
 			*ofs = old;
 		}
 	}
 }
-
-#ifdef LINUX
-#define COPYFILE_ALL 0
-#define BSIZE 65535
-int copyfile( const char *local, const char *remote, void *ignored, int ignoredFlags )
-{
-	ssize_t bytes;
-	int fps, fpd;
-	char buffer[BSIZE];
-
-	if ( (fps = open( local , O_RDONLY ) ) == -1 ) 
-		return -1;
-	
-	if ( (fpd = open( remote, O_WRONLY | O_CREAT | O_TRUNC, 0644 ) ) == -1 )
-		return -1;
-
-	while((bytes = read(fps, buffer, BSIZE)) > 0)
-		write(fpd, buffer, bytes);
-
-	close(fpd);
-	close(fps);
-	return 0;
-}
-#endif
 
 bool CBugUIPanel::UploadFile( char const *local, char const *remote, bool bDeleteLocal )
 {
@@ -2295,6 +2532,12 @@ bool CBugUIPanel::UploadFile( char const *local, char const *remote, bool bDelet
 		g_pFileSystem->Close( hLocal );
 #ifdef WIN32
 		bResult = CopyFile( local, remote, false ) ? true : false;
+#elif defined( _PS3 )
+		Warning( "PS3 is missing UploadFile implementation!\n" );
+		bResult = false;
+#elif defined( LINUX )
+		Warning( "LINUX is missing UploadFile implementation!\n" );
+		bResult = false;
 #elif POSIX
 		bResult = (0 == copyfile( local, remote, NULL, COPYFILE_ALL )); 
 #else
@@ -2347,7 +2590,7 @@ bool CBugUIPanel::UploadFile( char const *local, char const *remote, bool bDelet
 	}
 	else if ( bDeleteLocal )
 	{
-		unlink( local );
+		_unlink( local );
 	}
 	return bResult;
 }
@@ -2432,7 +2675,7 @@ bool CBugUIPanel::UploadBugSubmission( char const *levelname, int bugId, char co
 			Q_snprintf( remotefile, sizeof( remotefile ), "%s/%s", GetSubmissionURL(bugId), files[ i ].fixedname );
 			Q_FixSlashes( localfile );
 			Q_FixSlashes( remotefile );
-			
+
 			g_UploadQueue.QueueCall( this, &CBugUIPanel::UploadFile, CUtlEnvelope<const char *>(localfile), CUtlEnvelope<const char *>(remotefile), false );
 		}
 	}
@@ -2453,6 +2696,8 @@ void CBugUIPanel::Close()
 {
 	WipeData();
 	BaseClass::Close();
+	PauseGame( false );
+	EngineVGui()->HideGameUI();
 }
 
 void CBugUIPanel::OnCommand( char const *command )
@@ -2521,6 +2766,7 @@ void CBugUIPanel::OnClearForm()
 	m_pPriority->ActivateItem( 2 );
 	m_pGameArea->ActivateItem( 0 );
 	m_pMapNumber->ActivateItem( 0 );
+	m_pSubmitter->ActivateItem( 0 );
 }
 
 void CBugUIPanel::DetermineSubmitterName()
@@ -2538,22 +2784,22 @@ void CBugUIPanel::DetermineSubmitterName()
 	{
 		Color clr( 100, 200, 255, 255 );
 
-		const char *pUserName = m_pBugReporter->GetUserName();
-		const char *pUserDisplayName = m_pBugReporter->GetUserName_Display();
+		//const char *pUserName = GetSubmitter();
+		char display[ 256 ] = { 0 };
+
+		m_pSubmitter->GetText( display, sizeof( display ) );
+		const char *pUserDisplayName = display;
+		char const *pUserName = m_pBugReporter->GetUserNameForDisplayName( display );
 
 		if ( pUserName && pUserName[0] && pUserDisplayName && pUserDisplayName[0] )
 		{
 			ConColorMsg( clr, "Username '%s' -- '%s'\n", pUserName, pUserDisplayName );
 		}
-		else if ( cl.IsActive() )
-		{
-			m_bUseNameForSubmitter = true;
-			pUserDisplayName = cl_name.GetString();
-			ConColorMsg( clr, "Using '%s' as bug submission name.\n", pUserDisplayName );
-		}
 		else
 		{
 			ConColorMsg( clr, "Failed to determine bug submission name.\n" );
+			m_bCanSubmit = false;
+			return;
 		}
 
 		// See if we can see the bug repository right now
@@ -2575,7 +2821,7 @@ void CBugUIPanel::DetermineSubmitterName()
 			m_bCanSubmit = false;
 		}
 
-		m_pSubmitter->SetText( pUserDisplayName );
+		// m_pSubmitter->SetText( pUserDisplayName );
 	}
 }
 
@@ -2583,15 +2829,33 @@ void CBugUIPanel::PopulateControls()
 {
 	if ( !m_pBugReporter )
 		return;
+	
+	int i;	
+	int defitem = -1;
 
-	m_pAssignTo->DeleteAllItems();
-	int i;
+	char const *submitter = m_pBugReporter->GetUserName();
+
+	m_pSubmitter->DeleteAllItems();
 	int c = m_pBugReporter->GetDisplayNameCount();
-	int defitem = 0;
 	for ( i = 0; i < c; i++ )
 	{
-		char const  *name = m_pBugReporter->GetDisplayName( i );
-		if (!V_strcasecmp(name, "Triage"))
+		char const *name = m_pBugReporter->GetDisplayName( i );
+		char const *userName = m_pBugReporter->GetUserNameForDisplayName( name );
+		if (!V_strcasecmp( userName, submitter ))
+			defitem = i;
+		m_pSubmitter->AddItem( name, NULL );
+	}
+	m_pSubmitter->ActivateItem( defitem );
+	m_pSubmitter->SetText( m_pBugReporter->GetDisplayName( defitem ) );
+
+	c = m_pBugReporter->GetDisplayNameCount();
+	m_pAssignTo->DeleteAllItems();
+	defitem = -1;
+	for ( i = 0; i < c; i++ )
+	{
+		char const *name = m_pBugReporter->GetDisplayName( i );
+		char const *userName = m_pBugReporter->GetUserNameForDisplayName( name );
+		if (!V_strcasecmp( userName, submitter ))
 			defitem = i;
 		m_pAssignTo->AddItem(name , NULL );
 	}
@@ -2621,9 +2885,12 @@ void CBugUIPanel::PopulateControls()
 	c = m_pBugReporter->GetPriorityCount();
 	for ( i = 0; i < c; i++ )
 	{
-		m_pPriority->AddItem( m_pBugReporter->GetPriority( i ), NULL );
+		char const  *priority = m_pBugReporter->GetPriority( i );
+		if (!V_strcasecmp(priority, "None"))
+			defitem = i;
+		m_pPriority->AddItem( priority, NULL );
 	}
-	m_pPriority->ActivateItem( 2 );
+	m_pPriority->ActivateItem( defitem );
 
 	m_pGameArea->DeleteAllItems();
 	c = m_pBugReporter->GetAreaCount();
@@ -2636,11 +2903,53 @@ void CBugUIPanel::PopulateControls()
 	m_pGameArea->ActivateItem( area_index );
 }
 
+// Evil hack shim to expose convar to bugreporter_filequeue
+class CBugReporterDefaultUsername : public IBugReporterDefaultUsername
+{
+public:
+	virtual char const	*GetDefaultUsername() const
+	{
+		return bugreporter_username.GetString();
+	}
+};
+
+static CBugReporterDefaultUsername g_ExposeBugreporterUsername;
+EXPOSE_SINGLE_INTERFACE_GLOBALVAR( CBugReporterDefaultUsername,IBugReporterDefaultUsername, INTERFACEVERSION_BUGREPORTER_DEFAULT_USER_NAME, g_ExposeBugreporterUsername );
+
 char const *CBugUIPanel::GetSubmitter()
 {
 	if ( !m_bCanSubmit )
 		return "";
-	return m_pBugReporter->GetUserName();
+
+	const char *pUsername = bugreporter_username.GetString();
+	if ( 0 == pUsername[0] )
+	{
+		char submitter[ 256 ];
+		m_pSubmitter->GetText( submitter, sizeof( submitter ) );
+		pUsername = m_pBugReporter->GetUserNameForDisplayName( submitter );
+		if ( 0 == pUsername[0] )
+		{	
+			if ( m_bIsPublic )
+			{
+				if ( Steam3Client().SteamUser() )
+				{
+					pUsername = Steam3Client().SteamUser()->GetSteamID().Render();
+				}
+				else
+				{
+					pUsername = "PublicUser";
+				}
+			}
+
+			if ( 0 == pUsername[ 0 ] )
+			{
+				Color clr( 255, 50, 50, 255 );
+				ConColorMsg( clr, "Can't determine username. Please set email address with bugreporter_username ConVar and run _bugreporter_restart autoselect\n" );			
+			}
+		}
+	}
+
+	return pUsername;
 }
 
 //-----------------------------------------------------------------------------
@@ -2648,7 +2957,7 @@ char const *CBugUIPanel::GetSubmitter()
 //-----------------------------------------------------------------------------
 void CBugUIPanel::DenySound()
 {
-	Cbuf_AddText( va( "play %s\n", DENY_SOUND ) );
+	Cbuf_AddText( Cbuf_GetCurrentPlayer(), va( "play %s\n", DENY_SOUND ) );
 }
 
 //-----------------------------------------------------------------------------
@@ -2666,20 +2975,19 @@ void CBugUIPanel::SuccessSound( int bugId )
 	{
 		ConColorMsg( clr, "Bug submission succeeded for bug (%i)\n", bugId );
 	}
-	Cbuf_AddText( va( "play %s\n", SUCCEED_SOUND ) );
+	Cbuf_AddText( Cbuf_GetCurrentPlayer(), va( "play %s\n", SUCCEED_SOUND ) );
 }
 
-void CBugUIPanel::OnKeyCodePressed(KeyCode code)
+void CBugUIPanel::OnKeyCodeTyped(KeyCode code)
 {
-	if ( code == KEY_ESCAPE || 
-		 GetBaseButtonCode( code ) == KEY_XBUTTON_B )
+	if ( code == KEY_ESCAPE )
 	{
 		Close();
 		WipeData();
 	}
 	else
 	{
-		BaseClass::OnKeyCodePressed( code );
+		BaseClass::OnKeyCodeTyped( code );
 	}
 }
 
@@ -2687,27 +2995,14 @@ void CBugUIPanel::OnKeyCodePressed(KeyCode code)
 // Load game-specific bug reporter defaults as params
 void CBugUIPanel::ParseDefaultParams( void )
 {
-	const char *szDefaults = "scripts/bugreporter_defaults.txt";
-
-	FileHandle_t hLocal = g_pFileSystem->Open( szDefaults, "rb" );
-	if ( FILESYSTEM_INVALID_HANDLE == hLocal )
+	CUtlBuffer buffer( 0, 0, CUtlBuffer::TEXT_BUFFER );
+	if ( !g_pFileSystem->ReadFile( "scripts/bugreporter_defaults.txt", NULL, buffer ) )
 	{
 		return;
 	}
 
-	// load file into a null-terminated buffer
-	int fileSize = g_pFileSystem->Size(hLocal);
-	char *buffer = (char*)MemAllocScratch(fileSize + 1);
-
-	Assert(buffer);
-
-	g_pFileSystem->Read(buffer, fileSize, hLocal); // read into local buffer
-	buffer[fileSize] = 0; // null terminate file as EOF
-	g_pFileSystem->Close( hLocal );	// close file after reading
-
-	char token[64];
-	const char *pfile = COM_ParseFile(buffer, token, sizeof( token ) );
-
+	char token[256];
+	const char *pfile = COM_ParseFile( (const char *)buffer.Base(), token, sizeof( token ) );
 	while ( pfile )
 	{
 		bool success = AutoFillToken( token, false );
@@ -2721,7 +3016,7 @@ void CBugUIPanel::ParseDefaultParams( void )
 			}
 		}
 
-		pfile = COM_ParseFile(pfile, token, sizeof( token ) );
+		pfile = COM_ParseFile( pfile, token, sizeof( token ) );
 	}
 }
 
@@ -2729,17 +3024,48 @@ void CBugUIPanel::ParseCommands( const CCommand &args )
 {
 	if ( !m_bCanSubmit )
 		return;
-
-	for ( int i = 1; i < args.ArgC(); i++ )
+	
+	for (int i = 1; i < args.ArgC(); i++)
 	{
-		bool success = AutoFillToken( args[ i ], false );
-		if ( !success )
+		const char *token = args[i];
+
+		if (!V_stricmp("-title", token))
 		{
-			// Try partials
-			success = AutoFillToken( args[ i ], true );
+			if (i+1 < args.ArgC())
+			{
+				m_pTitle->SetText(args[i+1]);
+				m_pDescription->SetText(args[i+1]);
+				i++;
+			}
+		}
+		else if (!V_stricmp("-auto", token))
+		{
+			m_bAutoSubmit = true;
+		}
+		else if ( !V_stricmp( "-remotebugpath", token ) )
+		{
+			if (i+1 < args.ArgC())
+			{
+				// This param should only be specified
+				// when we receive a remote bug response from
+				// the rcon server, and the path should lead to a
+				// fileserver location with bug.txt
+				m_strRemoteBugInfoPath = args[i+1];
+				m_bIsSubmittingRemoteBug = true;
+				i++;
+			}
+		}
+		else
+		{
+			bool success = AutoFillToken( token, false );
 			if ( !success )
 			{
-				Msg( "Unable to determine where to set bug parameter '%s', ignoring...\n", args[ i ] );
+				// Try partials
+				success = AutoFillToken( token, true );
+				if ( !success )
+				{
+					Msg( "Unable to determine where to set default bug parameter '%s', ignoring...\n", token );
+				}
 			}
 		}
 	}
@@ -2773,11 +3099,16 @@ bool CBugUIPanel::AutoFillToken( char const *token, bool partial )
 	int i;
 	int c;
 	
+	Msg("AUTOFILL: %s (%s)\n", token, partial ? "PARTIAL" : "FULL");
+
 	c = m_pBugReporter->GetDisplayNameCount();
 	for ( i = 0; i < c; i++ )
 	{
-		if ( Compare( m_pBugReporter->GetDisplayName( i ), token, partial ) )
+		const char *dispName = m_pBugReporter->GetDisplayName( i );
+		const char *userName = m_pBugReporter->GetUserNameForDisplayName( dispName );
+		if (Compare( userName, token, partial ) || Compare( dispName, token, partial ) )
 		{
+			Msg("  ASSIGNED TO: %s\n", userName);
 			m_pAssignTo->ActivateItem( i );
 			return true;
 		}
@@ -2788,6 +3119,7 @@ bool CBugUIPanel::AutoFillToken( char const *token, bool partial )
 	{
 		if ( Compare( m_pBugReporter->GetSeverity( i ), token, partial ) )
 		{
+			Msg("  SEVERITY: %s\n", m_pBugReporter->GetSeverity( i ));
 			m_pSeverity->ActivateItem( i );
 			return true;
 		}
@@ -2798,6 +3130,7 @@ bool CBugUIPanel::AutoFillToken( char const *token, bool partial )
 	{
 		if ( Compare( m_pBugReporter->GetReportType( i ), token, partial ) )
 		{
+			Msg("  REPORT TYPE: %s\n", m_pBugReporter->GetReportType( i ));
 			m_pReportType->ActivateItem( i );
 			return true;
 		}
@@ -2808,6 +3141,7 @@ bool CBugUIPanel::AutoFillToken( char const *token, bool partial )
 	{
 		if ( Compare( m_pBugReporter->GetPriority( i ), token, partial ) )
 		{
+			Msg("  PRIORITY: %s\n", m_pBugReporter->GetPriority( i ));
 			m_pPriority->ActivateItem( i );
 			return true;
 		}
@@ -2818,6 +3152,7 @@ bool CBugUIPanel::AutoFillToken( char const *token, bool partial )
 	{
 		if ( Compare( m_pBugReporter->GetArea( i ), token, partial ) )
 		{
+			Msg("  AREA: %s\n", m_pBugReporter->GetArea( i ));
 			m_pGameArea->ActivateItem( i );
 			return true;
 		}
@@ -2855,6 +3190,122 @@ void CBugUIPanel::CheckContinueQueryingSteamForCSERList()
 	}
 }
 
+// Get the bug submission count. Called every map transition
+int CBugUIPanel::GetBugSubmissionCount() const
+{
+	return m_BugSub;
+}
+
+// Clear the bug submission count. Called every map transition
+void CBugUIPanel::ClearBugSubmissionCount()
+{
+	m_BugSub = 0;
+}
+
+
+
+//-----------------------------------------------------------------------------
+// Read a partial bug report kv file from fileserver, populate the appropriate fields in this bug report
+// This is intended for internal use only during viper playtests.
+//-----------------------------------------------------------------------------
+bool CBugUIPanel::CopyInfoFromRemoteBug()
+{
+	Assert( m_pBugReporter );
+	if ( !m_pBugReporter )
+		return false;
+
+	Assert ( m_bIsSubmittingRemoteBug );
+	if ( !m_bIsSubmittingRemoteBug )
+		return false;
+
+	KeyValues *pKV = new KeyValues ( "Bug" );
+	if ( !pKV->LoadFromFile( g_pFileSystem, m_strRemoteBugInfoPath + "\\bug.txt") )
+	{
+		Warning( "Failed to parse remote bug KV file at path: '%s'", m_strRemoteBugInfoPath.Get() );
+		pKV->deleteThis();
+		Assert( 0 );
+		return false;
+	}
+
+	// Stomp fields that we need to keep matching the remote machine's values
+	const char* pLevelName = pKV->GetString( "level" );
+	m_pBugReporter->SetLevel( pLevelName );
+	V_strncpy( m_szLevel, pLevelName, sizeof ( m_szLevel ) );
+	m_pBugReporter->SetBuildNumber( pKV->GetString( "Build" ) );
+	m_pBugReporter->SetPosition( pKV->GetString( "Position" ) );
+	m_pBugReporter->SetOrientation( pKV->GetString( "Orientation" ) );
+
+	m_pBugReporter->SetMiscInfo( pKV->GetString( "Misc" ) );
+	m_pBugReporter->SetConsoleHistory( pKV->GetString( "Console" ) );
+	m_pBugReporter->SetDriverInfo( pKV->GetString( "DriverInfo" ) );
+
+#if 0 
+	// BUG: Savegames crash on load after this copy step. Not including them for now, if we use this feature
+	// a lot then we can revisit this and fix it.
+	CUtlString strSaveName = pKV->GetString( "Savegame" );
+	if ( strSaveName.IsEmpty() == false )
+	{
+		char buffer[MAX_PATH];
+		V_StripExtension( strSaveName.UnqualifiedFilename(), m_szSaveGameName, sizeof ( m_szSaveGameName ) );
+		V_snprintf( buffer, sizeof( buffer ), "%s/save/%s.sav", com_gamedir, m_szSaveGameName );
+		CUtlString strSavePath = m_strRemoteBugInfoPath + "\\" + m_szSaveGameName + ".sav";
+		UploadFile( strSavePath, buffer, true );
+
+		V_snprintf( buffer, sizeof( buffer ), "%s/BugId/%s.sav", GetRepositoryURL(), m_szSaveGameName );
+		V_FixSlashes( buffer );
+		m_pBugReporter->SetSaveGame( buffer );
+	}
+
+	CUtlString strBSPName = pKV->GetString( "Bspname" );
+	if ( strBSPName.IsEmpty() == false )
+	{
+		char buffer[MAX_PATH];
+		V_StripExtension( strBSPName.UnqualifiedFilename(), m_szBSPName, sizeof ( m_szBSPName ) );
+		V_snprintf( buffer, sizeof( buffer ), "%s/maps/%s.bsp", com_gamedir, m_szBSPName );
+		CUtlString strBSPPath = m_strRemoteBugInfoPath + "\\" + m_szBSPName + ".bsp";
+		UploadFile( strBSPPath, buffer, true );
+
+		V_snprintf( buffer, sizeof( buffer ), "%s/BugId/%s.bsp", GetRepositoryURL(), m_szBSPName );
+		V_FixSlashes( buffer );
+		m_pBugReporter->SetBSPName( buffer );
+	}
+#endif
+
+	CUtlString strSSName = pKV->GetString( "Screenshot" );
+	if ( strSSName.IsEmpty() == false )
+	{
+		char buffer[MAX_PATH];
+		V_StripExtension( strSSName.UnqualifiedFilename(), m_szScreenShotName, sizeof ( m_szScreenShotName ) );
+		V_snprintf( buffer, sizeof( buffer ), "%s/screenshots/%s.jpg", com_gamedir, m_szScreenShotName );
+		CUtlString strSSPath = m_strRemoteBugInfoPath + "\\" + m_szScreenShotName + ".jpg";
+		UploadFile( strSSPath, buffer, true );
+
+		V_snprintf( buffer, sizeof( buffer ), "%s/BugId/%s.jpg", GetRepositoryURL(), m_szScreenShotName );
+		V_FixSlashes( buffer );
+		m_pBugReporter->SetScreenShot( buffer );
+	}
+
+	char localBugConsole[MAX_PATH];
+	Q_snprintf( localBugConsole, sizeof( localBugConsole ), "%s/bugconsole.txt", com_gamedir );
+	CUtlString strBugConsolePath = m_strRemoteBugInfoPath + "\\bugconsole.txt";
+	UploadFile( strBugConsolePath, localBugConsole, true );
+	OnFileSelected( localBugConsole );
+
+	pKV->deleteThis();
+
+	// Remove the bug.txt file and directory
+	_unlink( m_strRemoteBugInfoPath + "\\bug.txt" );
+
+#if defined(_PS3) || defined(POSIX)
+	rmdir( m_strRemoteBugInfoPath );
+#else
+	_rmdir( m_strRemoteBugInfoPath );
+#endif
+
+	return true;
+}
+
+
 static CBugUIPanel *g_pBugUI = NULL;
 
 class CEngineBugReporter : public IEngineBugReporter
@@ -2867,6 +3318,11 @@ public:
 	virtual bool		ShouldPause() const;
 
 	virtual bool		IsVisible() const; //< true iff the bug panel is active and on screen right now
+
+	// Methods to get bug count for internal dev work stat tracking.
+	// Will get the bug count and clear it every map transition
+	virtual int			GetBugSubmissionCount() const;
+	virtual void		ClearBugSubmissionCount();
 
 	void				Restart( IEngineBugReporter::BR_TYPE type );
 private:
@@ -2917,53 +3373,47 @@ void CEngineBugReporter::InstallBugReportingUI( vgui::Panel *parent, IEngineBugR
 	if ( g_pBugUI )
 		return;
 
-	bool bIsPublic = true;
-	
 	char fn[ 512 ];
-
-	Q_snprintf( fn, sizeof( fn ), "%s%s", GetInternalBugReporterDLL(), DLL_EXT_STRING );
-
-	bool bCanUseInternal = g_pFileSystem->FileExists( fn, "EXECUTABLE_PATH" );
-
-	switch ( type )
-	{
-	case IEngineBugReporter::BR_PUBLIC:
-		// Nothing
-		break;
-	default:
-	case IEngineBugReporter::BR_AUTOSELECT:
-		{
-			// check
-			bIsPublic = phonehome->IsExternalBuild() ? true : false;
-			if ( bCanUseInternal )
-			{
-				// if command line param specifies internal, use that
-				if ( CommandLine()->FindParm( "-internalbuild" ) )
-				{
-					bIsPublic = false;
-				}
-#if !defined( _X360 )
-				// otherwise, if Steam is running and connected to beta, autoselect the internal bug db
-				else if ( k_EUniverseBeta == GetSteamUniverse() )
-				{
-					bIsPublic = false;
-				}
+#ifdef OSX
+	Q_snprintf( fn, sizeof( fn ), "%s.dylib", GetInternalBugReporterDLL() );
+#else
+	Q_snprintf( fn, sizeof( fn ), "%s.dll", GetInternalBugReporterDLL() );
 #endif
-			}
-		}
-		break;
+	const bool bCouldUseInternal = g_pFileSystem->FileExists( fn, "EXECUTABLE_PATH" );
+	bool bUsePublic = true;
 
-	case IEngineBugReporter::BR_INTERNAL:
+	if ( bCouldUseInternal )
+	{
+		switch ( type )
 		{
-			if ( bCanUseInternal )
+			case IEngineBugReporter::BR_PUBLIC:
+			// Do nothing
+			break;
+			default:
+			case IEngineBugReporter::BR_AUTOSELECT:
 			{
-				bIsPublic = false;
+	#if !defined( _X360 )
+				bUsePublic = ( k_EUniversePublic == GetSteamUniverse() );
+	#else
+				bUsePublic = false;
+	#endif
 			}
+			break;
+			case IEngineBugReporter::BR_INTERNAL:
+			{
+				bUsePublic = false;
+			}
+			break;
 		}
-		break;
 	}
 
-	g_pBugUI = new CBugUIPanel( bIsPublic, parent );
+	if (! bUsePublic )
+	{
+		// Default internal bug reporter to async upload
+		bugreporter_uploadasync.SetValue(1);
+	}
+
+	g_pBugUI = new CBugUIPanel( bUsePublic, parent );
 	Assert( g_pBugUI );
 
 	m_ParentPanel = parent;
@@ -2983,7 +3433,7 @@ void CEngineBugReporter::Restart( IEngineBugReporter::BR_TYPE type )
 
 bool CEngineBugReporter::ShouldPause() const
 {
-	return g_pBugUI && ( g_pBugUI->IsVisible() || g_pBugUI->IsTakingSnapshot() ) && (cl.m_nMaxClients == 1);
+	return g_pBugUI && ( g_pBugUI->IsVisible() || g_pBugUI->IsTakingSnapshot() ) && (GetBaseLocalClient().m_nMaxClients == 1);
 }
 
 
@@ -2992,32 +3442,66 @@ bool CEngineBugReporter::IsVisible() const
 	return g_pBugUI && g_pBugUI->IsVisible();
 }
 
-CON_COMMAND_F( bug, "Show/hide the bug reporting UI.", FCVAR_DONTRECORD )
+
+// return the number of bugs submitted so far. This is reset every map transition
+// and is used to track the number of bugs submitted during development for the 
+// game stat system
+int CEngineBugReporter::GetBugSubmissionCount() const
 {
-	if ( !g_pBugUI )
-		return;
-
-	bool bWasVisible = g_pBugUI->IsVisible();
-
-	if ( bWasVisible )
+	unsigned int bugCnt = 0;
+	if ( g_pBugUI )
 	{
-		// hide
-		g_pBugUI->Close();		
+		bugCnt = g_pBugUI->GetBugSubmissionCount();
 	}
-			
-	// make sure the gameUI is open so the bugreporter is visible
-	EngineVGui()->ActivateGameUI();
 
-	g_pBugUI->Activate();
+	return bugCnt;
+}
 
-
-	g_pBugUI->ParseDefaultParams();
-	if (args.ArgC() > 1 )
+// clears the number of bugs submitted. This is called every map transition since
+// we are interested in the number of bugs submitted per map for internal stat tracking
+void CEngineBugReporter::ClearBugSubmissionCount()
+{
+	if ( g_pBugUI )
 	{
-		g_pBugUI->ParseCommands( args );
+		g_pBugUI->ClearBugSubmissionCount();
 	}
 }
 
+
+CON_COMMAND_F( bug, "Show the bug reporting UI.", FCVAR_DONTRECORD )
+{
+#if defined( _X360 )
+	XBX_rBugReporter();
+	return;
+#elif defined( _PS3 )
+	if ( g_pValvePS3Console )
+	{
+		g_pValvePS3Console->BugReporter();
+	}
+	return;
+#endif
+
+	if ( !g_pBugUI )
+		return;
+
+	// Make sure bug ui is closed otherwise the snapshot code will not work
+	bool bWasVisible = g_pBugUI->IsVisible();
+	if ( bWasVisible )
+	{
+		// already open, close for reset
+		g_pBugUI->Close();		
+	}
+
+	g_pBugUI->Activate();
+	g_pBugUI->ParseDefaultParams();
+	g_pBugUI->ParseCommands( args );
+
+	// Force certain behavior when using the remote bugreporter dll
+	if ( CommandLine()->CheckParm( "-remotebug" ) )
+	{
+		g_pBugUI->InitAsRemoteBug();
+	}
+}
 
 int CBugUIPanel::GetArea()
 {
@@ -3037,7 +3521,7 @@ int CBugUIPanel::GetArea()
 	for ( int i = 0; i < m_pBugReporter->GetAreaMapCount(); i++ )
 	{
 		char szAreaMap[MAX_PATH];
-		V_strcpy_safe( szAreaMap, m_pBugReporter->GetAreaMap( i ) );
+        V_strcpy_safe( szAreaMap, m_pBugReporter->GetAreaMap( i ) );
 		char *pszAreaDir = Q_strrchr( szAreaMap, '@' );
 		char *pszAreaPrefix = Q_strrchr( szAreaMap, '%' );
 		int iDirLength = 0;
@@ -3059,23 +3543,62 @@ int CBugUIPanel::GetArea()
 
 		char szDirectory[MAX_PATH];
 		Q_memmove( szDirectory, pszAreaDir, iDirLength );
-		szDirectory[iDirLength] = 0;
+        szDirectory[iDirLength] = 0;
 
 		if ( pszAreaDir && pszAreaPrefix )
 		{
 			if ( !Q_strcmp( szDirectory, gamedir) 
-				&& Q_strstr( mapname, pszAreaPrefix ) )
+				&& mapname && Q_strstr( mapname, pszAreaPrefix ) )
 			{
-				return i+1;
+				return i;
 			}
 		}
 		else if ( pszAreaDir && !pszAreaPrefix )
 		{
 			if ( !Q_strcmp( szDirectory, gamedir ) )
 			{
-				return i+1;
+				return i;
 			}
 		}		
 	}
 	return 0;
+}
+
+void CBugUIPanel::GetConsoleHistory( CUtlBuffer &buf ) const
+{
+	int nCount = g_pCVar->GetConsoleDisplayFuncCount();
+	if ( nCount <= 0 )
+	{
+		buf.PutChar( 0 );
+		return;
+	}
+
+	// 1 Mb max
+	int nMaxConsoleHistory = 1024 * 1024;
+
+	int nCur = buf.TellPut();
+	int nNeeded = nCur + nMaxConsoleHistory;
+	buf.EnsureCapacity( nNeeded );
+	g_pCVar->GetConsoleText( 0, (char *)buf.Base() + nCur, nMaxConsoleHistory );
+	int nActual = Q_strlen( (char *)buf.Base() + nCur ) + 1;
+	buf.SeekPut( CUtlBuffer::SEEK_HEAD, nCur + nActual );
+}
+
+void CBugUIPanel::InitAsRemoteBug()
+{
+	Assert( CommandLine()->CheckParm( "-remotebug" ) );
+	
+	// always autosubmit when bugging from a remote machine
+	m_bAutoSubmit = true;
+
+#if 0 // BUG: The save games come across broken. Leaving alone
+	// for now but will fix if we make use of this feature
+
+	// always take a save game if singleplayer
+	if ( GetBaseLocalClient().m_nMaxClients == 1 ) 
+	{
+		OnSaveGame();
+		OnSaveBSP();
+	}
+#endif
 }

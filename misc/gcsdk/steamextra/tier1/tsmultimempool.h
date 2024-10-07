@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//=========== (C) Copyright 2000 Valve, L.L.C. All rights reserved. ===========
 //
 // The copyright to the contents herein is the property of Valve, L.L.C.
 // The contents may be used and/or copied only with the written permission of
@@ -40,7 +40,7 @@ public:
 		uint32 m_cubDefaultPoolSize;
 	};
 
-	CThreadSafeMultiMemoryPool( const MemPoolConfig_t *pnBlock, int cnMemPoolConfig, int nGrowMode = UTLMEMORYPOOL_GROW_FAST );
+	CThreadSafeMultiMemoryPool( const MemPoolConfig_t *pnBlock, int cnMemPoolConfig, int nGrowMode = CUtlMemoryPool::GROW_FAST );
 	~CThreadSafeMultiMemoryPool();
 
 	// Allocate a block of at least nAllocSize bytes
@@ -65,10 +65,6 @@ public:
 	int CMBPoolSize() const;
 	// Return the amount of memory in use
 	int CMBPoolSizeInUse() const;
-
-#ifdef DBGFLAG_VALIDATE
-	void Validate( CValidator &validator, const char *pchName );		// Validate our internal structures
-#endif // DBGFLAG_VALIDATE
 
 private:
 	struct MemPoolRecord_t

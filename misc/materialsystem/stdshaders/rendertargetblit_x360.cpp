@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2001, Valve LLC, All rights reserved. ============
 //
 // Purpose: Replaces 360 missing StretchRect() functionality.
 //
@@ -61,7 +61,7 @@ BEGIN_VS_SHADER_FLAGS( RenderTargetBlit_X360, "", SHADER_NOT_EDITABLE )
 
 		DYNAMIC_STATE
 		{
-			BindTexture( SHADER_SAMPLER0, BASETEXTURE, FRAME );
+			BindTexture( SHADER_SAMPLER0, TEXTURE_BINDFLAGS_NONE, BASETEXTURE, FRAME );
 
 			DECLARE_DYNAMIC_VERTEX_SHADER( rendertargetblit_vs20 );
 			SET_DYNAMIC_VERTEX_SHADER( rendertargetblit_vs20 );

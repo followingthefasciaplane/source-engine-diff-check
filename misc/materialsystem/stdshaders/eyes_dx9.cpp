@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: eye renderer
 //
@@ -27,7 +27,6 @@ BEGIN_VS_SHADER( Eyes_dx9, "Help for Eyes" )
 		SHADER_PARAM( GLINTU, SHADER_PARAM_TYPE_VEC4, "[0 1 0 0]", "U projection vector for the glint" )
 		SHADER_PARAM( GLINTV, SHADER_PARAM_TYPE_VEC4, "[0 0 1 0]", "V projection vector for the glint" )
 		SHADER_PARAM( DILATION, SHADER_PARAM_TYPE_FLOAT, "0", "Pupil dilation (0 is none, 1 is maximal)" )
-		SHADER_PARAM( INTRO, SHADER_PARAM_TYPE_BOOL, "0", "is eyes in the ep1 intro" )
  	    SHADER_PARAM( ENTITYORIGIN, SHADER_PARAM_TYPE_VEC3,"0.0","center if the model in world space" )
  	    SHADER_PARAM( WARPPARAM, SHADER_PARAM_TYPE_FLOAT,"0.0","animation param between 0 and 1" )
 	END_SHADER_PARAMS
@@ -46,7 +45,6 @@ BEGIN_VS_SHADER( Eyes_dx9, "Help for Eyes" )
 		info.m_nGlintU = GLINTU;
 		info.m_nGlintV = GLINTV;
 		info.m_nDilation = DILATION;
-		info.m_nIntro = INTRO;
 		info.m_nEntityOrigin = ENTITYORIGIN;
 		info.m_nWarpParam = WARPPARAM;
 	}
@@ -60,9 +58,6 @@ BEGIN_VS_SHADER( Eyes_dx9, "Help for Eyes" )
 
 	SHADER_FALLBACK
 	{
-		if ( g_pHardwareConfig->GetDXSupportLevel() < 90 )
-			return "Eyes_dx8";
-
 		return 0;
 	}
 

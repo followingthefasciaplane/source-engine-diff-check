@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -6,6 +6,8 @@
 
 #if defined(_WIN32) && !defined(_X360)
 #include <winsock.h>
+#elif defined( _PS3 )
+#include "blockingudpsocket.h"
 #elif POSIX
 #define INVALID_SOCKET -1
 #define SOCKET_ERROR -1
@@ -17,7 +19,22 @@
 #endif
 
 #include "blockingudpsocket.h"
-#include "tier0/vcrmode.h"
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
+#ifdef _PS3
+
+CBlockingUDPSocket::CBlockingUDPSocket() : m_pImpl( NULL ), m_Socket( 0 ) {}
+CBlockingUDPSocket::~CBlockingUDPSocket() {}
+
+bool CBlockingUDPSocket::WaitForMessage( float timeOutInSeconds ) { return false; }
+unsigned int CBlockingUDPSocket::ReceiveSocketMessage( struct sockaddr_in *packet_from, unsigned char *buf, size_t bufsize ) { return 0; }
+bool CBlockingUDPSocket::SendSocketMessage( const struct sockaddr_in& rRecipient, const unsigned char *buf, size_t bufsize ) { return false; }
+
+bool CBlockingUDPSocket::CreateSocket (void) { return false; }
+
+#else
 
 class CBlockingUDPSocket::CImpl	
 {
@@ -104,14 +121,14 @@ unsigned int CBlockingUDPSocket::ReceiveSocketMessage( struct sockaddr_in *packe
 	struct sockaddr fromaddress;
 	int		fromlen = sizeof( fromaddress );
 
-	int packet_length = VCRHook_recvfrom
+	int packet_length = recvfrom
 		(
 		m_Socket, 
 		(char *)buf, 
 		(int)bufsize, 
 		0, 
 		&fromaddress, 
-		&fromlen 
+		(socklen_t *)&fromlen 
 		);
 
 	if ( SOCKET_ERROR == packet_length )
@@ -148,3 +165,6 @@ bool CBlockingUDPSocket::SendSocketMessage( const struct sockaddr_in & rRecipien
 
 	return true;
 }
+
+#endif
+

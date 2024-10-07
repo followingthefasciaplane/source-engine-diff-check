@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -41,13 +41,13 @@ public:
 
 	// entering a new keyvalues block, save state for errors
 	// Not save symbols instead of pointers because the pointers can move!
-	int Push( CUtlSymbol symName );
+	int Push( CUtlSymbolLarge symName );
 
 	// exiting block, error isn't in this block, remove.
 	void Pop();
 
 	// Allows you to keep the same stack level, but change the name as you parse peers
-	void Reset( int stackLevel, CUtlSymbol symName );
+	void Reset( int stackLevel, CUtlSymbolLarge symName );
 
 	// Hit an error, report it and the parsing stack for context
 	void ReportError( const char *pError, ... );
@@ -58,7 +58,7 @@ private:
 		MAX_ERROR_STACK = 64
 	};
 
-	CUtlSymbol	m_errorStack[MAX_ERROR_STACK];
+	CUtlSymbolLarge	m_errorStack[MAX_ERROR_STACK];
 	const char *m_pFilename;
 	int		m_nFileLine;
 	int		m_errorIndex;
@@ -115,14 +115,14 @@ int CKeyValues2ErrorStack::GetCurrentLine() const
 // entering a new keyvalues block, save state for errors
 // Not save symbols instead of pointers because the pointers can move!
 //-----------------------------------------------------------------------------
-int CKeyValues2ErrorStack::Push( CUtlSymbol symName )
+int CKeyValues2ErrorStack::Push( CUtlSymbolLarge symName )
 {
 	if ( m_errorIndex < MAX_ERROR_STACK )
 	{
 		m_errorStack[m_errorIndex] = symName;
 	}
 	m_errorIndex++;
-	m_maxErrorIndex = max( m_maxErrorIndex, (m_errorIndex-1) );
+	m_maxErrorIndex = MAX( m_maxErrorIndex, (m_errorIndex-1) );
 	return m_errorIndex-1;
 }
 
@@ -140,7 +140,7 @@ void CKeyValues2ErrorStack::Pop()
 //-----------------------------------------------------------------------------
 // Allows you to keep the same stack level, but change the name as you parse peers
 //-----------------------------------------------------------------------------
-void CKeyValues2ErrorStack::Reset( int stackLevel, CUtlSymbol symName )
+void CKeyValues2ErrorStack::Reset( int stackLevel, CUtlSymbolLarge symName )
 {
 	Assert( stackLevel >= 0 && stackLevel < m_errorIndex );
 	m_errorStack[stackLevel] = symName;
@@ -170,11 +170,11 @@ void CKeyValues2ErrorStack::ReportError( const char *pFmt, ... )
 
 		if ( i < m_errorIndex )
 		{
-			Warning( "%s, ", g_pDataModel->GetString( m_errorStack[i] ) );
+			Warning( "%s, ", m_errorStack[i].String() );
 		}
 		else
 		{
-			Warning( "(*%s*), ", g_pDataModel->GetString( m_errorStack[i] ) );
+			Warning( "(*%s*), ", m_errorStack[i].String() );
 		}
 	}
 	Warning( "\n" );
@@ -192,7 +192,7 @@ public:
 		Init( g_pDataModel->GetSymbol( pSymName ) );
 	}
 
-	CKeyValues2ErrorContext( CUtlSymbol symName )
+	CKeyValues2ErrorContext( CUtlSymbolLarge symName )
 	{
 		Init( symName );
 	}
@@ -202,13 +202,13 @@ public:
 		g_KeyValues2ErrorStack.Pop();
 	}
 
-	void Reset( CUtlSymbol symName )
+	void Reset( CUtlSymbolLarge symName )
 	{
 		g_KeyValues2ErrorStack.Reset( m_stackLevel, symName );
 	}
 
 private:
-	void Init( CUtlSymbol symName )
+	void Init( CUtlSymbolLarge symName )
 	{
 		m_stackLevel = g_KeyValues2ErrorStack.Push( symName );
 	}
@@ -231,10 +231,12 @@ public:
 	virtual bool StoresVersionInFile() const { return true; }
 	virtual bool IsBinaryFormat() const { return false; }
 	virtual int GetCurrentVersion() const { return 1; }
+ 	virtual int GetImportedVersion() const { return 1; }
 	virtual bool Serialize( CUtlBuffer &buf, CDmElement *pRoot );
 	virtual bool Unserialize( CUtlBuffer &buf, const char *pEncodingName, int nEncodingVersion,
 		const char *pSourceFormatName, int nSourceFormatVersion,
 		DmFileId_t fileid, DmConflictResolution_t idConflictResolution, CDmElement **ppRoot );
+	virtual const char *GetImportedFormat() const { return NULL; }
 
 private:
 	enum TokenType_t
@@ -489,7 +491,7 @@ bool CDmSerializerKeyValues2::SaveElement( CUtlBuffer& buf, CDmElementSerializat
 	buf.PushTab();
 
 	// explicitly serialize id, now that it's no longer an attribute
-	buf.Printf( "\"id\" \"%s\" ", g_pDataModel->GetAttributeNameForType( AT_OBJECTID ) );
+	buf.PutString( "\"id\" \"elementid\" " );
 	buf.PutChar( '\"' );
 	::Serialize( buf, pElement->GetId() );
 	buf.PutString( "\"\n" );
@@ -676,7 +678,7 @@ DmElementDictHandle_t CDmSerializerKeyValues2::CreateDmElement( const char *pEle
 	}
 
 	CDmElement *pElement = g_pDataModel->GetElement( hElement );
-	CDmeElementAccessor::MarkBeingUnserialized( pElement, true );
+	CDmeElementAccessor::DisableOnChangedCallbacks( pElement );
 	return m_ElementDict.InsertElement( pElement );
 }
 
@@ -721,7 +723,8 @@ bool CDmSerializerKeyValues2::UnserializeElementArrayAttribute( CUtlBuffer &buf,
 	// Arrays first must have a '[' specified
 	TokenType_t token;
 	CUtlBuffer tokenBuf( 0, 0, CUtlBuffer::TEXT_BUFFER );
-	CUtlCharConversion *pConv;
+	CUtlCharConversion *pConv = GetCStringCharConversion();
+
 	token = ReadToken( buf, tokenBuf );
 	if ( token != TOKEN_OPEN_BRACKET )
 	{
@@ -766,13 +769,11 @@ bool CDmSerializerKeyValues2::UnserializeElementArrayAttribute( CUtlBuffer &buf,
 		}
 
 		// Get the element type out
-		pConv = GetCStringCharConversion();
-		int nLength = tokenBuf.PeekDelimitedStringLength( pConv );
-		char *pElementType = (char*)stackalloc( nLength * sizeof(char) );
-		tokenBuf.GetDelimitedString( pConv, pElementType, nLength );
+		char elementType[ 256 ];
+		tokenBuf.GetDelimitedString( pConv, elementType, sizeof( elementType ) );
 
 		// Use the element type to figure out if we're using a element reference or an inlined element
-		if ( !Q_strncmp( pElementType, g_pDataModel->GetAttributeNameForType( AT_ELEMENT ), nLength ) )
+		if ( !V_strcmp( elementType, g_pDataModel->GetAttributeNameForType( AT_ELEMENT ) ) )
 		{
 			token = ReadToken( buf, tokenBuf );
 
@@ -784,25 +785,30 @@ bool CDmSerializerKeyValues2::UnserializeElementArrayAttribute( CUtlBuffer &buf,
 			}
 
 			// Get the element type out
-			pConv = GetCStringCharConversion();
-			nLength = tokenBuf.PeekDelimitedStringLength( pConv );
-			char *pElementId = (char*)stackalloc( nLength  * sizeof(char) );
-			tokenBuf.GetDelimitedString( pConv, pElementId, nLength );
+			char elementId[ 256 ];
+			tokenBuf.GetDelimitedString( pConv, elementId, sizeof( elementId ) );
 
-			DmObjectId_t id;
-			if ( !UniqueIdFromString( &id, pElementId ) )
+			if ( elementId[ 0 ] == '\0' )
 			{
-				g_KeyValues2ErrorStack.ReportError( "Encountered invalid element ID data!" );
-				return false;
+				m_ElementDict.AddArrayAttribute( pAttribute, ELEMENT_DICT_HANDLE_INVALID );
 			}
+			else
+			{
+				DmObjectId_t id;
+				if ( !UniqueIdFromString( &id, elementId ) )
+				{
+					g_KeyValues2ErrorStack.ReportError( "Encountered invalid element ID data!" );
+					return false;
+				}
 
-			Assert( IsUniqueIdValid( id ) );
-			m_ElementDict.AddArrayAttribute( pAttribute, id );
+				Assert( IsUniqueIdValid( id ) );
+				m_ElementDict.AddArrayAttribute( pAttribute, id );
+			}
 		}
 		else
 		{
 			DmElementDictHandle_t hArrayElement;
-			bool bOk = UnserializeElement( buf, pElementType, &hArrayElement );
+			bool bOk = UnserializeElement( buf, elementType, &hArrayElement );
 			if ( !bOk )
 				return false;
 			m_ElementDict.AddArrayAttribute( pAttribute, hArrayElement );
@@ -949,25 +955,6 @@ bool CDmSerializerKeyValues2::UnserializeAttribute( CUtlBuffer &buf,
 		return false;
 	}
 
-	if ( ( nAttrType == AT_OBJECTID ) && !V_stricmp( pAttributeName, "id" ) )
-	{
-		CUtlCharConversion *pConv = GetCStringCharConversion();
-		int nLength = tokenBuf.PeekDelimitedStringLength( pConv );
-		char *pElementId = (char*)stackalloc( nLength * sizeof(char) );
-		tokenBuf.GetDelimitedString( pConv, pElementId, nLength );
-
-		DmObjectId_t id;
-		if ( !UniqueIdFromString( &id, pElementId ) )
-		{
-			g_KeyValues2ErrorStack.ReportError( "Encountered invalid element ID data!" );
-			return false;
-		}
-
-		m_ElementDict.SetElementId( hElement, id, m_idConflictResolution );
-
-		return true;
-	}
-
 	CDmElement *pElement = m_ElementDict.GetElement( hElement );
 	CDmAttribute *pAttribute = pElement->AddAttribute( pAttributeName, nAttrType );
 	if ( !pAttribute )
@@ -1080,7 +1067,7 @@ void KeyValues::ParseIncludedKeys( char const *resourceName, const char *filetoi
 
 	KeyValues *newKV = new KeyValues( fullpath );
 
-	// CUtlSymbol save = s_CurrentFileSymbol;	// did that had any use ???
+	// CUtlSymbolLarge save = s_CurrentFileSymbol;	// did that had any use ???
 
 	newKV->UsesEscapeSequences( m_bHasEscapeSequences );	// use same format as parent
 
@@ -1194,8 +1181,7 @@ bool CDmSerializerKeyValues2::UnserializeElement( CUtlBuffer &buf, const char *p
 
 	TokenType_t token;
 	CUtlBuffer tokenBuf( 0, 0, CUtlBuffer::TEXT_BUFFER );
-	CUtlCharConversion *pConv;
-	int nLength;
+	CUtlCharConversion *pConv = GetCStringCharConversion();
 
 	// Then we expect a '{'
 	token = ReadToken( buf, tokenBuf );
@@ -1226,45 +1212,70 @@ bool CDmSerializerKeyValues2::UnserializeElement( CUtlBuffer &buf, const char *p
 		}
 
 		// First, read an attribute name
-		pConv = GetCStringCharConversion();
-		nLength = tokenBuf.PeekDelimitedStringLength( pConv );
-		char *pAttributeName = (char*)stackalloc( nLength * sizeof(char) );
-		tokenBuf.GetDelimitedString( pConv, pAttributeName, nLength );
+		char attributeName[ 256 ];
+		tokenBuf.GetDelimitedString( pConv, attributeName, sizeof( attributeName ) );
 
 		// Next, read an attribute type
 		token = ReadToken( buf, tokenBuf );
 		if ( token != TOKEN_DELIMITED_STRING )
 		{
-			g_KeyValues2ErrorStack.ReportError( "Expecting attribute type for attribute %s, didn't find it!", pAttributeName );
+			g_KeyValues2ErrorStack.ReportError( "Expecting attribute type for attribute %s, didn't find it!", attributeName );
 			return false;
 		}
 
-		pConv = GetCStringCharConversion();
-		nLength = tokenBuf.PeekDelimitedStringLength( pConv );
-		char *pAttributeType = (char*)stackalloc( nLength * sizeof(char) );
-		tokenBuf.GetDelimitedString( pConv, pAttributeType, nLength );
-		DmAttributeType_t nAttrType = g_pDataModel->GetAttributeTypeForName( pAttributeType );
+		char attributeType[ 256 ];
+		tokenBuf.GetDelimitedString( pConv, attributeType, sizeof( attributeType ) );
+
+		// read element's id (or any other id attribute, if any)
+		if ( !V_strcmp( attributeType, "elementid" ) )
+		{
+			// Next, read the id
+			token = ReadToken( buf, tokenBuf );
+			if ( token != TOKEN_DELIMITED_STRING )
+			{
+				g_KeyValues2ErrorStack.ReportError( "Expecting attribute type for attribute %s, didn't find it!", attributeName );
+				return false;
+			}
+
+			char elementId[ 256 ];
+			tokenBuf.GetDelimitedString( pConv, elementId, sizeof( elementId ) );
+
+			Assert( !V_stricmp( attributeName, "id" ) );
+			if ( !V_stricmp( attributeName, "id" ) )
+			{
+				DmObjectId_t id;
+				if ( !UniqueIdFromString( &id, elementId ) )
+				{
+					g_KeyValues2ErrorStack.ReportError( "Encountered invalid element ID data!" );
+					return false;
+				}
+
+				m_ElementDict.SetElementId( hElement, id, m_idConflictResolution );
+			}
+			continue;
+		}
+		DmAttributeType_t nAttrType = g_pDataModel->GetAttributeTypeForName( attributeType );
 
 		// Next, read an attribute value
 		bool bOk = true;
 		switch( nAttrType )
 		{
 		case AT_UNKNOWN:
-			bOk = UnserializeElementAttribute( buf, hElement, pAttributeName, pAttributeType );
+			bOk = UnserializeElementAttribute( buf, hElement, attributeName, attributeType );
 			break;
 
 		case AT_ELEMENT_ARRAY:
-			bOk = UnserializeElementArrayAttribute( buf, hElement, pAttributeName );
+			bOk = UnserializeElementArrayAttribute( buf, hElement, attributeName );
 			break;
 
 		default:
 			if ( nAttrType >= AT_FIRST_ARRAY_TYPE )
 			{
-				bOk = UnserializeArrayAttribute( buf, hElement, pAttributeName, nAttrType );
+				bOk = UnserializeArrayAttribute( buf, hElement, attributeName, nAttrType );
 			}
 			else
 			{
-				bOk = UnserializeAttribute( buf, hElement, pAttributeName, nAttrType );
+				bOk = UnserializeAttribute( buf, hElement, attributeName, nAttrType );
 			}
 			break;
 		}
@@ -1287,7 +1298,6 @@ bool CDmSerializerKeyValues2::UnserializeElement( CUtlBuffer &buf, DmElementDict
 
 	// First, read the type name
 	CUtlBuffer tokenBuf( 0, 0, CUtlBuffer::TEXT_BUFFER );
-	CUtlCharConversion* pConv;
 
 	TokenType_t token = ReadToken( buf, tokenBuf );
 	if ( token == TOKEN_INVALID )
@@ -1303,7 +1313,7 @@ bool CDmSerializerKeyValues2::UnserializeElement( CUtlBuffer &buf, DmElementDict
 		return false;
 	}
 
-	pConv = GetCStringCharConversion();
+	CUtlCharConversion* pConv = GetCStringCharConversion();
 	int nLength = tokenBuf.PeekDelimitedStringLength( pConv );
 	char *pTypeName = (char*)stackalloc( nLength * sizeof(char) );
 	tokenBuf.GetDelimitedString( pConv, pTypeName, nLength );
@@ -1366,7 +1376,8 @@ bool CDmSerializerKeyValues2::UnserializeElements( CUtlBuffer &buf, DmFileId_t f
 		if ( !pElement )
 			continue;
 
-		CDmeElementAccessor::MarkBeingUnserialized( pElement, false );
+		CDmeElementAccessor::EnableOnChangedCallbacks( pElement );
+		CDmeElementAccessor::FinishUnserialization( pElement );
 	}
 
 	m_fileid = DMFILEID_INVALID;

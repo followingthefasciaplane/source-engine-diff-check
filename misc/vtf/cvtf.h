@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: Local header for CVTFTexture class declaration - allows platform-specific
 //			implementation to be placed in separate cpp files.
@@ -154,10 +154,7 @@ public:
 	// When unserializing, we can skip a certain number of mip levels,
 	// and we also can just load everything but the image data
 	virtual bool Unserialize( CUtlBuffer &buf, bool bBufferHeaderOnly = false, int nSkipMipLevels = 0 );
-	virtual bool UnserializeEx( CUtlBuffer &buf, bool bHeaderOnly = false, int nForceFlags = 0, int nSkipMipLevels = 0 );
 	virtual bool Serialize( CUtlBuffer &buf );
-
-	virtual void GetMipmapRange( int* pOutFinest, int* pOutCoarsest );
 
 	// Attributes...
 	virtual int Width() const;
@@ -213,7 +210,7 @@ public:
 	virtual unsigned char *LowResImageData();
 
 	// Converts the texture's image format. Use IMAGE_FORMAT_DEFAULT
-	virtual void ConvertImageFormat( ImageFormat fmt, bool bNormalToDUDV );
+	virtual void ConvertImageFormat( ImageFormat fmt, bool bNormalToDUDV, bool bNormalToDXT5GA );
 
 	// Generate spheremap based on the current cube faces (only works for cubemaps)
 	// The look dir indicates the direction of the center of the sphere
@@ -235,15 +232,20 @@ public:
 	// Put 1/miplevel (1..n) into alpha.
 	virtual void PutOneOverMipLevelInAlpha();
 
+	// Scale alpha by miplevel/ mipcount
+	virtual void PremultAlphaWithMipFraction();
+
 	// Computes the reflectivity
 	virtual void ComputeReflectivity( );
 
 	// Computes the alpha flags
 	virtual void ComputeAlphaFlags();
 
+	virtual void Compute2DGradient();
+
 	// Gets the texture all internally consistent assuming you've loaded
 	// mip 0 of all faces of all frames
-	virtual void PostProcess(bool bGenerateSpheremap, LookDir_t lookDir = LOOK_DOWN_Z, bool bAllowFixCubemapOrientation = true);
+	virtual void PostProcess(bool bGenerateSpheremap, LookDir_t lookDir = LOOK_DOWN_Z, bool bAllowFixCubemapOrientation = true, bool bLoadedMiplevels = false);
 	virtual void SetPostProcessingSettings( VtfProcessingOptions const *pOptions );
 
 	// Generate the low-res image bits
@@ -254,11 +256,12 @@ public:
 	// Sets threshhold values for alphatest mipmapping
 	virtual void SetAlphaTestThreshholds( float flBase, float flHighFreq );
 
-#if defined( _X360 )
+	virtual bool IsPreTiled() const;
+
+#if defined( _GAMECONSOLE )
 	virtual int UpdateOrCreate( const char *pFilename, const char *pPathID = NULL, bool bForce = false );
 	virtual int FileSize( bool bPreloadOnly, int nMipSkipCount ) const;
 	virtual bool UnserializeFromBuffer( CUtlBuffer &buf, bool bBufferIsVolatile, bool bHeaderOnly, bool bPreloadOnly, int nMipSkipCount );
-	virtual bool IsPreTiled() const;
 	virtual int MappingWidth() const;
 	virtual int MappingHeight() const;
 	virtual int MappingDepth() const;
@@ -366,6 +369,10 @@ private:
 #if defined( _X360 )
 	bool ReadHeader( CUtlBuffer &buf, VTFFileHeaderX360_t &header );
 	bool LoadImageData( CUtlBuffer &buf, bool bBufferIsVolatile, int nMipSkipCount );
+#elif defined ( _PS3 )
+	bool ReadHeader( CUtlBuffer &buf, VTFFileHeaderPS3_t &header );
+	bool LoadImageData( CUtlBuffer &buf, bool bBufferIsVolatile, int nMipSkipCount );
+	int GetImageOffset() const;
 #endif
 
 private:
@@ -407,10 +414,7 @@ private:
 
 	CByteswap		m_Swap;
 
-	int				m_nFinestMipmapLevel;
-	int				m_nCoarsestMipmapLevel;
-
-#if defined( _X360 )
+#if defined( _X360 ) || defined ( _PS3 )
 	int				m_iPreloadDataSize;
 	int				m_iCompressedSize;
 	// resolves actual dimensions to/from mapping dimensions due to pre-picmipping

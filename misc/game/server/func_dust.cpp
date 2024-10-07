@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Volumetric dust motes.
 //
@@ -58,6 +58,8 @@ public:
 
 	CNetworkVar( float, m_FallSpeed );
 
+	CNetworkVar( bool, m_bAffectedByWind );
+
 public:
 
 	CNetworkVar( int, m_DustFlags );	// Combination of DUSTFLAGS_
@@ -82,19 +84,23 @@ class CFunc_DustCloud : public CFunc_Dust
 public:
 };
 
+// Changing this will break demos. Peeling it out to clamp post creation to fix some shipped maps that specify out of range lifetimes. 
+#define DUST_LIFETIME_NETWORK_BITS 4
+
 IMPLEMENT_SERVERCLASS_ST_NOBASE( CFunc_Dust, DT_Func_Dust )
-	SendPropInt( SENDINFO(m_Color),	32, SPROP_UNSIGNED ),
+	SendPropInt( SENDINFO(m_Color),	32, SPROP_UNSIGNED, SendProxy_Color32ToInt32 ),
 	SendPropInt( SENDINFO(m_SpawnRate),	12, SPROP_UNSIGNED ),
 	SendPropInt( SENDINFO(m_SpeedMax),	12, SPROP_UNSIGNED ),
 	SendPropFloat( SENDINFO(m_flSizeMin), 0, SPROP_NOSCALE ),
 	SendPropFloat( SENDINFO(m_flSizeMax), 0, SPROP_NOSCALE ),
 	SendPropInt( SENDINFO(m_DistMax), 16, SPROP_UNSIGNED ),
-	SendPropInt( SENDINFO(m_LifetimeMin), 4, SPROP_UNSIGNED ),
-	SendPropInt( SENDINFO(m_LifetimeMax), 4, SPROP_UNSIGNED ),
+	SendPropInt( SENDINFO( m_LifetimeMin ), DUST_LIFETIME_NETWORK_BITS, SPROP_UNSIGNED ),
+	SendPropInt( SENDINFO( m_LifetimeMax ), DUST_LIFETIME_NETWORK_BITS, SPROP_UNSIGNED ),
 	SendPropInt( SENDINFO(m_DustFlags), DUST_NUMFLAGS, SPROP_UNSIGNED ),
 
 	SendPropModelIndex( SENDINFO(m_nModelIndex) ),
 	SendPropFloat( SENDINFO(m_FallSpeed), 0, SPROP_NOSCALE ),
+	SendPropBool( SENDINFO(m_bAffectedByWind) ),
 	SendPropDataTable( SENDINFO_DT( m_Collision ), &REFERENCE_SEND_TABLE(DT_CollisionProperty) ),
 END_SEND_TABLE()
 
@@ -113,6 +119,7 @@ BEGIN_DATADESC( CFunc_Dust )
 	DEFINE_KEYFIELD( m_DistMax,		FIELD_INTEGER,	"DistMax" ),
 	DEFINE_FIELD( m_iAlpha,			FIELD_INTEGER ),
 	DEFINE_KEYFIELD( m_FallSpeed,	FIELD_FLOAT,	"FallSpeed" ),
+	DEFINE_KEYFIELD( m_bAffectedByWind,	FIELD_BOOLEAN,	"AffectedByWind" ),
 
 	DEFINE_INPUTFUNC( FIELD_VOID, "TurnOn",  InputTurnOn ),
 	DEFINE_INPUTFUNC( FIELD_VOID, "TurnOff", InputTurnOff )
@@ -160,9 +167,14 @@ void CFunc_Dust::Spawn()
 	//AddSolidFlags( FSOLID_NOT_SOLID );
 	AddSolidFlags( FSOLID_VOLUME_CONTENTS );
 
+	// Clamp to values in a networkable range... can't up the networked bits without breaking demos. 
+	const int unMaxLifetimeVal = (1 << (DUST_LIFETIME_NETWORK_BITS) ) - 1;
+	m_LifetimeMin = Clamp( m_LifetimeMin.Get(), 0, unMaxLifetimeVal );
+	m_LifetimeMax = Clamp( m_LifetimeMax.Get(), 0, unMaxLifetimeVal );
+
 	//Since keyvalues can arrive in any order, and UTIL_StringToColor32 stomps alpha,
 	//install the alpha value here.
-	color32 clr = { m_Color.m_Value.r, m_Color.m_Value.g, m_Color.m_Value.b, (byte)m_iAlpha };
+	color32 clr = { m_Color.m_Value.r, m_Color.m_Value.g, m_Color.m_Value.b, m_iAlpha };
 	m_Color.Set( clr );
 
 	BaseClass::Spawn();

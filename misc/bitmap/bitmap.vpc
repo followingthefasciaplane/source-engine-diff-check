@@ -12,9 +12,9 @@ $Configuration
 {
 	$Compiler
 	{
-		$AdditionalIncludeDirectories	"$BASE;$SRCDIR\dx9sdk\include"					[$WINDOWS]
-		$AdditionalIncludeDirectories	"$BASE;$SRCDIR\x360xdk\include\win32\vs2005"	[$WINDOWS]
-		$AdditionalIncludeDirectories	"$BASE;$SRCDIR\thirdparty\stb"
+		$AdditionalIncludeDirectories	"$BASE;$SRCDIR\dx9sdk\include"			[$WINDOWS]
+		$AdditionalIncludeDirectories	"$BASE;$(XEDK)\include\win32"			[$WINDOWS && $XDKINSTALLED]
+		$AdditionalIncludeDirectories	"$BASE;$(XEDK)\include\xbox"			[$X360]
 	}
 }
 
@@ -22,36 +22,42 @@ $Project "bitmap"
 {
 	$Folder	"Source Files"
 	{
-		$File	"ImageByteSwap.cpp"
+		$File	"bitmap.cpp"
+		$File	"ImageByteSwap.cpp"					[$X360 || $PS3]
 		$File	"colorconversion.cpp"
-		$File	"float_bm.cpp"
-		$File	"float_bm2.cpp"
-		$File	"float_bm3.cpp"
-		$File	"float_bm4.cpp"					[$WINDOWS]
-		$File	"float_bm_bilateral_filter.cpp"
-		$File	"float_cube.cpp"
+		$File	"floatbitmap.cpp"
+		$File	"floatbitmap2.cpp"
+		$File	"floatbitmap3.cpp"
+		$File	"floatbitmap4.cpp"					[$WINDOWS]
+		$File	"floatbitmap_bilateralfilter.cpp"
+		$File	"floatcubemap.cpp"
 		$File	"imageformat.cpp"
 		$File	"psd.cpp"
+		$File	"psheet.cpp"
 		$File	"resample.cpp"
 		$File	"tgaloader.cpp"
+		$File	"texturepacker.cpp"
 		$File	"tgawriter.cpp"
-		$File	"bitmap.cpp"
 	}
 
 	$Folder	"Header Files"
 	{
 		$File	"$SRCDIR\public\bitmap\bitmap.h"
-		$File	"$SRCDIR\public\bitmap\float_bm.h"
+		$File	"$SRCDIR\public\bitmap\floatbitmap.h"
 		$File	"$SRCDIR\public\bitmap\imageformat.h"
+		$File	"$SRCDIR\public\bitmap\imageformat_declarations.h"
 		$File	"$SRCDIR\public\bitmap\psd.h"
+		$File	"$SRCDIR\public\bitmap\psheet.h"
+		$File	"$SRCDIR\public\bitmap\texturepacker.h"
 		$File	"$SRCDIR\public\bitmap\tgaloader.h"
 		$File	"$SRCDIR\public\bitmap\tgawriter.h"
-		$File	"$SRCDIR\thirdparty\stb\stb_dxt.h"
+		$File	"$SRCDIR\public\bitmap\stb_dxt.h"
 	}
 
-	$Folder "Link Libraries" [$WIN32]
+	$Folder "Link Libraries" [$WINDOWS]
 	{
-		$Lib nvtc
-		$Lib ATI_Compress_MT_VC10
+		$Lib	"$SRCDIR\lib\public\nvtc"			[!$WIN64]
+		$Lib	"$SRCDIR\lib\public\nvtc64"			[$WIN64]
+		$Lib	"bitmap_byteswap"
 	}
 }

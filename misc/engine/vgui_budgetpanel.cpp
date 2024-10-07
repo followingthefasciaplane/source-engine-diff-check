@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: Does anyone ever read this?
 //
@@ -40,16 +40,26 @@ CON_COMMAND( vprof_adddebuggroup1, "add a new budget group dynamically for debug
 
 void IN_BudgetDown(void)
 {
-	GetBudgetPanel()->UserCmd_ShowBudgetPanel();
+	CBudgetPanelEngine *panel = GetBudgetPanel();
+	Assert( panel != NULL );
+	if( panel != NULL )
+	{
+		panel->UserCmd_ShowBudgetPanel();
+	}
 }
 
 void IN_BudgetUp(void)
 {
-	GetBudgetPanel()->UserCmd_HideBudgetPanel();
+	CBudgetPanelEngine *panel = GetBudgetPanel();
+	Assert( panel != NULL );
+	if( panel != NULL )
+	{
+		panel->UserCmd_HideBudgetPanel();
+	}
 }
 
-static ConCommand startshowbudget("+showbudget", IN_BudgetDown, "" );
-static ConCommand endshowbudget("-showbudget", IN_BudgetUp, "" );
+static ConCommand startshowbudget("+showbudget", IN_BudgetDown, "", FCVAR_CHEAT);
+static ConCommand endshowbudget("-showbudget", IN_BudgetUp, "", FCVAR_CHEAT);
 
 
 
@@ -85,8 +95,8 @@ void CBudgetPanelEngine::PostChildPaint()
 
 	int nDXSupportLevel = g_pMaterialSystemHardwareConfig->GetDXSupportLevel();
 	if( ( g_fFrameRate >= 60 )
-	 || ( nDXSupportLevel <= 80 && g_fFrameRate >= 30 )
-	 || ( nDXSupportLevel <= 70 && g_fFrameRate >= 20 ) )
+	 || ( nDXSupportLevel <= 92 && g_fFrameRate >= 30 )
+	 || ( nDXSupportLevel <= 90 && g_fFrameRate >= 20 ) )
 	{
 		r = 0;
 		g = 255;
@@ -98,7 +108,7 @@ void CBudgetPanelEngine::PostChildPaint()
 
 	g_pMatSystemSurface->DrawColoredText( m_hFont, 600, yPos, r, g, 0, 255, "%5.1f ms", g_fFrameTimeLessBudget*1000.0f );
 	yPos += 14;
-#ifndef _XBOX
+
 	if ( VProfRecord_IsPlayingBack() )
 	{
 		int iCur = VProfPlayback_GetCurrentTick();
@@ -107,7 +117,7 @@ void CBudgetPanelEngine::PostChildPaint()
 		g_pMatSystemSurface->DrawColoredText( m_hFont, 600, yPos, 255, 0, 0, 255, "%s", str );
 		yPos += 14;
 	}
-#endif	
+
 	BaseClass::PostChildPaint();
 }
 
@@ -117,7 +127,7 @@ void CBudgetPanelEngine::PostChildPaint()
 //-----------------------------------------------------------------------------
 void CBudgetPanelEngine::UserCmd_ShowBudgetPanel( void )
 {
-	Cbuf_AddText( "vprof_on\n" );
+	Cbuf_AddText( Cbuf_GetCurrentPlayer(), "vprof_on\n" );
 	m_bShowBudgetPanelHeld = true;
 	SetVisible( true );
 }
@@ -127,7 +137,7 @@ void CBudgetPanelEngine::UserCmd_ShowBudgetPanel( void )
 //-----------------------------------------------------------------------------
 void CBudgetPanelEngine::UserCmd_HideBudgetPanel( void )
 {
-	Cbuf_AddText( "vprof_off\n" );
+	Cbuf_AddText( Cbuf_GetCurrentPlayer(), "vprof_off\n" );
 	m_bShowBudgetPanelHeld = false;
 	SetVisible( false );
 }

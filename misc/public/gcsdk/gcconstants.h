@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright ©, Valve LLC, All rights reserved. ============
 //
 // Purpose: declares a variety of constants
 //
@@ -13,7 +13,6 @@
 
 #include "steam/steamtypes.h"
 #include "tier0/t0constants.h"
-#include "gamecoordinator/igcsqlquery.h"
 
 namespace GCSDK
 {
@@ -53,39 +52,6 @@ const int k_nGSSessionRunInterval = 5 * k_nMillion;
 const int k_nAccountDetailsRunInterval = 30 * k_nMillion;
 const int k_nLocksRunInterval = 120 * k_nMillion;
 
-// Time to keep an unused lock before removing it
-const uint64 k_cMicroSecLockLifetime = (uint64)k_nSecondsPerHour * (uint64)k_nMillion;
-
-//-----------------------------------------------------------------------------
-// Server types
-//-----------------------------------------------------------------------------
-// EServerType
-// Specifies the type of a specific server
-// MUST BE KEPT IN SYNC with g_rgchServerTypeName !!! 
-enum EServerType
-{
-	k_EServerTypeInvalid = -1,
-
-	k_EServerTypeShell = 0,
-	k_EServerTypeGC = 1,
-	k_EServerTypeGCClient = 2,
-
-	// Must be last!!!
-	k_EServerTypeMax = 2,
-};
-const EServerType k_EServerTypeFirst = k_EServerTypeShell;
-
-
-//-----------------------------------------------------------------------------
-// Alert constants
-//-----------------------------------------------------------------------------
-enum EAlertType
-{
-	k_EAlertTypeAssert,
-	k_EAlertTypeInfo,
-	k_EAlertTypeReport,
-};
-
 //-----------------------------------------------------------------------------
 // Spew / EmitEvent constants
 //-----------------------------------------------------------------------------
@@ -114,8 +80,6 @@ const uint32 k_cubRecordMax = 4 * k_nMillion;				// Max size of a single record
 const uint32 k_cubVarFieldMax = 1 * k_nMillion;			// Max size of a variable-length field
 const int k_cMaxCol = 50;
 const uint32 k_cMaxBindParams = 500;				// the largest number of bind parameters allowed in a single query
-const uint32 k_cMaxFreeBindParamBuffers = 2000;		// How many bind param buffers should we leave free before we start deleting some
-const uint32 k_cMaxFreeBindWebAPIBuffers = 32;		// How many WebAPI buffers should we leave free before we start deleting some
 
 // iTable constants
 const int k_iTableNil = -1;		// No table at all
@@ -166,6 +130,12 @@ const uint32 k_cchGameServerTokenStringMax = (k_cubGameServerToken * 2) + 1;	// 
 typedef	unsigned char GameServerIdentityToken_t[ k_cubGameServerToken ];
 
 
+//-----------------------------------------------------------------------------
+// Account linkage (constants from Steam)
+//-----------------------------------------------------------------------------
+
+const uint32 k_unInvalidPerfectWorldID = 0;
+
 
 //-----------------------------------------------------------------------------
 // Other constants
@@ -180,17 +150,21 @@ const int k_cInitialNetworkBuffers = 10;		// # of network buffers to see the sys
 
 const int k_cubMaxExpectedMsgDataSize = 5 * k_nMegabyte;// the maximum application data that we EXPECT to be sent in a single message
 
+#ifndef STRINGIFY
 #define STRINGIFY(x) #x
+#endif // CS:GO already defines STRINGIFY appropriately, no reason to redefine here
 #define TOSTRING(x) STRINGIFY(x)
 #define FILE_AND_LINE __FILE__ ":" TOSTRING(__LINE__)	
 
 // Default capacity for session hash tables
 const int k_cGCUserSessionInit = 10 * k_nThousand;		// Can grow indefinitely by this increment
 const int k_cBucketGCUserSession = 100 * k_nThousand;			// Fixed size
-const int k_cGCGSSessionInit = 1 * k_nThousand;		// Can grow indefinitely by this increment
-const int k_cBucketGCGSSession = 10 * k_nThousand;			// Fixed size
+const int k_cGCGSSessionInit = 5 * k_nThousand;		// Can grow indefinitely by this increment
+const int k_cBucketGCGSSession = 50 * k_nThousand;			// Fixed size
 const int k_cAccountDetailsInit = 10 * k_nThousand;		// Can grow indefinitely by this increment
 const int k_cBucketAccountDetails = 100 * k_nThousand;			// Fixed size
+const int k_cPersonaNamesInit = 50 * k_nThousand;		// Can grow indefinitely by this increment
+const int k_cBucketPersonaNames = 250 * k_nThousand;			// Fixed size
 const int k_cGCLocksInit = 50 * k_nThousand;		// Can grow indefinitely by this increment
 const int k_cBucketGCLocks = 500 * k_nThousand;			// Fixed size
 

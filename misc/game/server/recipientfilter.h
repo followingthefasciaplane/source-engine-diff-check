@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -13,8 +13,9 @@
 
 #include "irecipientfilter.h"
 #include "const.h"
-#include "player.h"
 #include "bitvec.h"
+
+class CBasePlayer;
 
 //-----------------------------------------------------------------------------
 // Purpose: A generic filter for determining whom to send message/sounds etc. to and
@@ -46,7 +47,7 @@ public:
 	void			AddRecipientsByPVS( const Vector& origin );
 	void			RemoveRecipientsByPVS( const Vector& origin );
 	void			AddRecipientsByPAS( const Vector& origin );
-	void			AddRecipient( const CBasePlayer *player );
+	void			AddRecipient( CBasePlayer *player );
 	void			RemoveAllRecipients( void );
 	void			RemoveRecipient( CBasePlayer *player );
 	void			RemoveRecipientByPlayerIndex( int playerindex );
@@ -60,10 +61,15 @@ public:
 	bool			IgnorePredictionCull( void ) const;
 	void			SetIgnorePredictionCull( bool ignore );
 
-	void			AddPlayersFromBitMask( CBitVec< ABSOLUTE_PLAYER_LIMIT >& playerbits );
-	void			RemovePlayersFromBitMask( CBitVec< ABSOLUTE_PLAYER_LIMIT >& playerbits );
+	void			AddPlayersFromBitMask( CPlayerBitVec& playerbits );
+	void			RemovePlayersFromBitMask( CPlayerBitVec& playerbits );
 
-private:
+	void			RemoveSplitScreenPlayers();
+	void			ReplaceSplitScreenPlayersWithOwners();
+
+	void			RemoveDuplicateRecipients();
+
+protected:
 
 	bool				m_bReliable;
 	bool				m_bInitMessage;
@@ -82,12 +88,17 @@ private:
 class CSingleUserRecipientFilter : public CRecipientFilter
 {
 public:
-	CSingleUserRecipientFilter( const CBasePlayer *player )
+	CSingleUserRecipientFilter( CBasePlayer *player )
 	{
 		AddRecipient( player );
 	}
 };
 
+class CSingleUserAndReplayRecipientFilter : public CRecipientFilter
+{
+public:
+	CSingleUserAndReplayRecipientFilter( CBasePlayer *player );
+};
 //-----------------------------------------------------------------------------
 // Purpose: Simple class to create a filter for all players on a given team 
 //-----------------------------------------------------------------------------
@@ -118,19 +129,6 @@ public:
 	CReliableBroadcastRecipientFilter( void )
 	{
 		MakeReliable();
-	}
-};
-
-//-----------------------------------------------------------------------------
-// Purpose: Simple class to create a filter for all players except for one ( unreliable )
-//-----------------------------------------------------------------------------
-class CBroadcastNonOwnerRecipientFilter : public CRecipientFilter
-{
-public:
-	CBroadcastNonOwnerRecipientFilter( CBasePlayer *player )
-	{
-		AddAllPlayers();
-		RemoveRecipient( player );
 	}
 };
 
@@ -203,7 +201,7 @@ public:
 		Filter( origin, attenuation );
 	}
 
-	CPASAttenuationFilter( CBaseEntity *entity, const char *lookupSound, HSOUNDSCRIPTHANDLE& handle ) :
+	CPASAttenuationFilter( CBaseEntity *entity, const char *lookupSound, HSOUNDSCRIPTHASH& handle ) :
 		CPASFilter( static_cast<const Vector&>(entity->GetSoundEmissionOrigin()) )
 	{
 		soundlevel_t level = CBaseEntity::LookupSoundLevel( lookupSound, handle );
@@ -211,7 +209,7 @@ public:
 		Filter( entity->GetSoundEmissionOrigin(), attenuation );
 	}
 
-	CPASAttenuationFilter( const Vector& origin, const char *lookupSound, HSOUNDSCRIPTHANDLE& handle ) :
+	CPASAttenuationFilter( const Vector& origin, const char *lookupSound, HSOUNDSCRIPTHASH& handle ) :
 		CPASFilter( origin )
 	{
 		soundlevel_t level = CBaseEntity::LookupSoundLevel( lookupSound, handle );

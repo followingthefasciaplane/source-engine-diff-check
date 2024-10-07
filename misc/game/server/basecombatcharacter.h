@@ -1,42 +1,40 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: Base combat character with no AI
 //
 // $NoKeywords: $
-//=============================================================================//
+//===========================================================================//
 
 #ifndef BASECOMBATCHARACTER_H
 #define BASECOMBATCHARACTER_H
-
-#include <limits.h>
-#include "weapon_proficiency.h"
 
 #ifdef _WIN32
 #pragma once
 #endif
 
-#ifdef INVASION_DLL
-#include "tf_shareddefs.h"
-
-#define POWERUP_THINK_CONTEXT	"PowerupThink"
-#endif
-
-#include "cbase.h"
-#include "baseentity.h"
 #include "baseflex.h"
 #include "damagemodifier.h"
 #include "utllinkedlist.h"
 #include "ai_hull.h"
 #include "ai_utils.h"
 #include "physics_impact_damage.h"
+#include <limits.h>
+#include "weapon_proficiency.h"
 
-#ifdef TF_DLL
-#include "tf_shareddefs.h"
-#endif // TF_DLL
+#if defined( PORTAL2 )
+// HACK, Should come from game specific enum...
+#include "weapons_portal.h"
+#elif defined( CSTRIKE_DLL )
+#include "cs_weapon_parse.h"
+#else
+#define WEAPON_MAX 32   
+#endif
 
-class CNavArea;
 class CScriptedTarget;
 typedef CHandle<CBaseCombatWeapon> CBaseCombatWeaponHandle;
+struct fogparams_t;
+
+class CNavArea;
 
 // -------------------------------------
 //  Capability Bits
@@ -48,12 +46,12 @@ enum Capability_t
 	bits_CAP_MOVE_JUMP				= 0x00000002, // jump/leap
 	bits_CAP_MOVE_FLY				= 0x00000004, // can fly, move all around
 	bits_CAP_MOVE_CLIMB				= 0x00000008, // climb ladders
-	bits_CAP_MOVE_SWIM				= 0x00000010, // navigate in water			// UNDONE - not yet implemented
-	bits_CAP_MOVE_CRAWL				= 0x00000020, // crawl						// UNDONE - not yet implemented
+	bits_CAP_MOVE_CRAWL				= 0x00000010, // crawl
+	bits_CAP_MOVE_SWIM				= 0x00000020, // navigate in water			// UNDONE - not yet implemented
 	bits_CAP_MOVE_SHOOT				= 0x00000040, // tries to shoot weapon while moving
 	bits_CAP_SKIP_NAV_GROUND_CHECK	= 0x00000080, // optimization - skips ground tests while computing navigation
 	bits_CAP_USE					= 0x00000100, // open doors/push buttons/pull levers
-	//bits_CAP_HEAR					= 0x00000200, // can hear forced sounds
+	bits_CAP_NO_LOCAL_NAV_CRAWL		= 0x00000200, // Don't try to crawl when doing local navigation
 	bits_CAP_AUTO_DOORS				= 0x00000400, // can trigger auto doors
 	bits_CAP_OPEN_DOORS				= 0x00000800, // can open manual doors
 	bits_CAP_TURN_HEAD				= 0x00001000, // can turn head, always bone controller 0
@@ -81,6 +79,7 @@ enum Capability_t
 #define bits_CAP_DOORS_GROUP    (bits_CAP_AUTO_DOORS | bits_CAP_OPEN_DOORS)
 #define bits_CAP_RANGE_ATTACK_GROUP	(bits_CAP_WEAPON_RANGE_ATTACK1 | bits_CAP_WEAPON_RANGE_ATTACK2)
 #define bits_CAP_MELEE_ATTACK_GROUP	(bits_CAP_WEAPON_MELEE_ATTACK1 | bits_CAP_WEAPON_MELEE_ATTACK2)
+#define bits_CAP_MOVE_GROUP    (bits_CAP_MOVE_GROUND | bits_CAP_MOVE_JUMP | bits_CAP_MOVE_FLY | bits_CAP_MOVE_CLIMB | bits_CAP_MOVE_CRAWL | bits_CAP_MOVE_SWIM)
 
 
 class CBaseCombatWeapon;
@@ -93,7 +92,14 @@ enum Disposition_t
 	D_HT,		// Hate
 	D_FR,		// Fear
 	D_LI,		// Like
-	D_NU		// Neutral
+	D_NU,		// Neutral
+
+	// The following are duplicates of the above, only with friendlier names
+	D_ERROR = D_ER,		// Undefined - error
+	D_HATE = D_HT,		// Hate
+	D_FEAR = D_FR,		// Fear
+	D_LIKE = D_LI,		// Like
+	D_NEUTRAL = D_NU,	// Neutral
 };
 
 const int DEF_RELATIONSHIP_PRIORITY = INT_MIN;
@@ -102,6 +108,8 @@ struct Relationship_t
 {
 	EHANDLE			entity;			// Relationship to a particular entity
 	Class_T			classType;		// Relationship to a class  CLASS_NONE = not class based (Def. in baseentity.h)
+	int				faction;		// Relationship to a faction FACTION_NONE = not faction based
+
 	Disposition_t	disposition;	// D_HT (Hate), D_FR (Fear), D_LI (Like), D_NT (Neutral)
 	int				priority;		// Relative importance of this relationship (higher numbers mean more important)
 
@@ -127,6 +135,7 @@ public:
 public:
 
 	virtual void		Spawn( void );
+
 	virtual void		Precache();
 
 	virtual int			Restore( IRestore &restore );
@@ -141,15 +150,15 @@ public:
 	static void			ResetVisibilityCache( CBaseCombatCharacter *pBCC = NULL );
 
 #ifdef PORTAL
-	virtual	bool		FVisibleThroughPortal( const CProp_Portal *pPortal, CBaseEntity *pEntity, int traceMask = MASK_BLOCKLOS, CBaseEntity **ppBlocker = NULL );
+	virtual	bool		FVisibleThroughPortal( const CPortal_Base2D *pPortal, CBaseEntity *pEntity, int traceMask = MASK_BLOCKLOS, CBaseEntity **ppBlocker = NULL );
 #endif
 
 	virtual bool		FInViewCone( CBaseEntity *pEntity );
 	virtual bool		FInViewCone( const Vector &vecSpot );
 
 #ifdef PORTAL
-	virtual CProp_Portal*	FInViewConeThroughPortal( CBaseEntity *pEntity );
-	virtual CProp_Portal*	FInViewConeThroughPortal( const Vector &vecSpot );
+	virtual CPortal_Base2D*	FInViewConeThroughPortal( CBaseEntity *pEntity );
+	virtual CPortal_Base2D*	FInViewConeThroughPortal( const Vector &vecSpot );
 #endif
 
 	virtual bool		FInAimCone( CBaseEntity *pEntity );
@@ -172,16 +181,21 @@ public:
 
 	virtual void SetTransmit( CCheckTransmitInfo *pInfo, bool bAlways );
 
+
 	// -----------------------
 	// Fog
 	// -----------------------
+	void				OnFogTriggerStartTouch( CBaseEntity *fogTrigger );
+	void				OnFogTriggerEndTouch( CBaseEntity *fogTrigger );
+	CBaseEntity *		GetFogTrigger( void );
+
 	virtual bool		IsHiddenByFog( const Vector &target ) const;	///< return true if given target cant be seen because of fog
 	virtual bool		IsHiddenByFog( CBaseEntity *target ) const;		///< return true if given target cant be seen because of fog
 	virtual bool		IsHiddenByFog( float range ) const;				///< return true if given distance is too far to see through the fog
 	virtual float		GetFogObscuredRatio( const Vector &target ) const;///< return 0-1 ratio where zero is not obscured, and 1 is completely obscured
 	virtual float		GetFogObscuredRatio( CBaseEntity *target ) const;	///< return 0-1 ratio where zero is not obscured, and 1 is completely obscured
 	virtual float		GetFogObscuredRatio( float range ) const;		///< return 0-1 ratio where zero is not obscured, and 1 is completely obscured
-
+	virtual bool		GetFogParams( fogparams_t *fog ) const;			///< return the current fog parameters
 
 	// -----------------------
 	// Vision
@@ -207,14 +221,20 @@ public:
 	virtual bool IsLineOfSightClear( const Vector &pos, LineOfSightCheckType checkType = IGNORE_NOTHING, CBaseEntity *entityToIgnore = NULL ) const;
 
 	// -----------------------
+	// Footsteps
+	// -----------------------
+	void PlayFootstepSound( const Vector& origin, bool leftFoot, bool feetInWater, bool kneesInWater, bool jumping = false );
+	virtual void OnFootstep( const Vector& origin, bool leftFoot, bool feetInWater, bool kneesInWater, bool jumping ) {}
+
+	// -----------------------
 	// Ammo
 	// -----------------------
 	virtual int			GiveAmmo( int iCount, int iAmmoIndex, bool bSuppressSound = false );
 	int					GiveAmmo( int iCount, const char *szName, bool bSuppressSound = false );
-	virtual void		RemoveAmmo( int iCount, int iAmmoIndex );
-	virtual void		RemoveAmmo( int iCount, const char *szName );
+	void				RemoveAmmo( int iCount, int iAmmoIndex );
+	void				RemoveAmmo( int iCount, const char *szName );
 	void				RemoveAllAmmo( );
-	virtual int			GetAmmoCount( int iAmmoIndex ) const;
+	int					GetAmmoCount( int iAmmoIndex ) const;
 	int					GetAmmoCount( char *szName ) const;
 
 	virtual Activity	NPC_TranslateActivity( Activity baseAct );
@@ -227,7 +247,7 @@ public:
 	void				Weapon_SetActivity( Activity newActivity, float duration );
 	virtual void		Weapon_FrameUpdate( void );
 	virtual void		Weapon_HandleAnimEvent( animevent_t *pEvent );
-	CBaseCombatWeapon*	Weapon_OwnsThisType( const char *pszWeapon, int iSubType = 0 ) const;  // True if already owns a weapon of this class
+	virtual CBaseCombatWeapon*	Weapon_OwnsThisType( const char *pszWeapon, int iSubType = 0 ) const;  // True if already owns a weapon of this class
 	virtual bool		Weapon_CanUse( CBaseCombatWeapon *pWeapon );		// True is allowed to use this class of weapon
 	virtual void		Weapon_Equip( CBaseCombatWeapon *pWeapon );			// Adds weapon to player
 	virtual bool		Weapon_EquipAmmoOnly( CBaseCombatWeapon *pWeapon );	// Adds weapon ammo to player, leaves weapon
@@ -240,8 +260,10 @@ public:
 	virtual	bool		Weapon_CanSwitchTo(CBaseCombatWeapon *pWeapon);
 	virtual bool		Weapon_SlotOccupied( CBaseCombatWeapon *pWeapon );
 	virtual CBaseCombatWeapon *Weapon_GetSlot( int slot ) const;
-	CBaseCombatWeapon	*Weapon_GetWpnForAmmo( int iAmmoIndex );
+	virtual CBaseCombatWeapon *Weapon_GetPosition( int pos ) const;
 
+	CBaseCombatWeapon	*Weapon_GetWpnForAmmo( int iAmmoIndex );
+	virtual bool		ShouldPickupItemSilently( CBaseCombatCharacter *pNewOwner ) { return false; }
 
 	// For weapon strip
 	void				Weapon_DropAll( bool bDisallowWeaponPickup = false );
@@ -268,12 +290,14 @@ public:
 	virtual void 			NotifyFriendsOfDamage( CBaseEntity *pAttackerEntity ) {}
 	virtual bool			HasEverBeenInjured( int team = TEAM_ANY ) const;			// return true if we have ever been injured by a member of the given team
 	virtual float			GetTimeSinceLastInjury( int team = TEAM_ANY ) const;		// return time since we were hurt by a member of the given team
+	RelativeDamagedDirection_t GetLastInjuryRelativeDirection( void ) { return m_nRelativeDirectionOfLastInjury; }
 
+	uint32					GetLastDamageTypeFlags( void ) const { return m_uiLastDamageTypeFlags; }
 
 	virtual void			OnPlayerKilledOther( CBaseEntity *pVictim, const CTakeDamageInfo &info ) {}
 
-		// utility function to calc damage force
-	Vector					CalcDamageForceVector( const CTakeDamageInfo &info );
+	// utility function to calc damage force
+	virtual Vector			CalcDeathForceVector( const CTakeDamageInfo &info );
 
 	virtual int				BloodColor();
 	virtual Activity		GetDeathActivity( void );
@@ -289,6 +313,7 @@ public:
 
 	// Character killed (only fired once)
 	virtual void			Event_Killed( const CTakeDamageInfo &info );
+	virtual bool			ShouldDropActiveWeaponWhenKilled() { return true; }
 
 	// Killed a character
 	void InputKilledNPC( inputdata_t &inputdata );
@@ -299,8 +324,7 @@ public:
 	// returns true if gibs were spawned
 	virtual bool			Event_Gibbed( const CTakeDamageInfo &info );
 	// Character entered the dying state without being gibbed (only fired once)
-	virtual void			Event_Dying( const CTakeDamageInfo &info );
-	virtual void			Event_Dying();
+	virtual void			Event_Dying( void );
 	// character died and should become a ragdoll now
 	// return true if converted to a ragdoll, false to use AI death
 	virtual bool			BecomeRagdoll( const CTakeDamageInfo &info, const Vector &forceVector );
@@ -311,14 +335,16 @@ public:
 	CBaseEntity				*FindHealthItem( const Vector &vecPosition, const Vector &range );
 
 
-	virtual CBaseEntity		*CheckTraceHullAttack( float flDist, const Vector &mins, const Vector &maxs, int iDamage, int iDmgType, float forceScale = 1.0f, bool bDamageAnyNPC = false );
-	virtual CBaseEntity		*CheckTraceHullAttack( const Vector &vStart, const Vector &vEnd, const Vector &mins, const Vector &maxs, int iDamage, int iDmgType, float flForceScale = 1.0f, bool bDamageAnyNPC = false );
+	virtual CBaseEntity		*CheckTraceHullAttack( float flDist, const Vector &mins, const Vector &maxs, float flDamage, int iDmgType, float forceScale = 1.0f, bool bDamageAnyNPC = false );
+	virtual CBaseEntity		*CheckTraceHullAttack( const Vector &vStart, const Vector &vEnd, const Vector &mins, const Vector &maxs, float flDamage, int iDmgType, float flForceScale = 1.0f, bool bDamageAnyNPC = false );
 
 	virtual CBaseCombatCharacter *MyCombatCharacterPointer( void ) { return this; }
 
 	// VPHYSICS
 	virtual void			VPhysicsShadowCollision( int index, gamevcollisionevent_t *pEvent );
+#if !defined( PORTAL2 )
 	virtual void			VPhysicsUpdate( IPhysicsObject *pPhysics );
+#endif
 	float					CalculatePhysicsStressDamage( vphysics_objectstress_t *pStressOut, IPhysicsObject *pPhysics );
 	void					ApplyStressDamage( IPhysicsObject *pPhysics, bool bRequireLargeObject );
 
@@ -353,6 +379,8 @@ public:
 	CBaseCombatWeapon*	GetWeapon( int i ) const;
 	bool				RemoveWeapon( CBaseCombatWeapon *pWeapon );
 	virtual void		RemoveAllWeapons();
+	virtual void		RemoveAllWearables( void );
+	virtual void		RemoveWeaponOnPlayer( CBaseCombatWeapon *pWeapon );
 	WeaponProficiency_t GetCurrentWeaponProficiency() { return m_CurrentWeaponProficiency; }
 	void				SetCurrentWeaponProficiency( WeaponProficiency_t iProficiency ) { m_CurrentWeaponProficiency = iProficiency; }
 	virtual WeaponProficiency_t CalcWeaponProficiency( CBaseCombatWeapon *pWeapon );
@@ -364,14 +392,24 @@ public:
 	static void			InitInteractionSystem();
 
 	// Relationships
+	static void			SetDefaultFactionRelationship(int nFaction, int nFactionTarget, Disposition_t nDisposition, int nPriority);
+	Disposition_t		GetFactionRelationshipDisposition( int nFaction );
 	static void			AllocateDefaultRelationships( );
+	static void			AllocateDefaultFactionRelationships( );
 	static void			SetDefaultRelationship( Class_T nClass, Class_T nClassTarget,  Disposition_t nDisposition, int nPriority );
 	Disposition_t		GetDefaultRelationshipDisposition( Class_T nClassTarget );
 	virtual void		AddEntityRelationship( CBaseEntity *pEntity, Disposition_t nDisposition, int nPriority );
 	virtual bool		RemoveEntityRelationship( CBaseEntity *pEntity );
 	virtual void		AddClassRelationship( Class_T nClass, Disposition_t nDisposition, int nPriority );
+	virtual void		AddFactionRelationship(int nFaction, Disposition_t nDisposition, int nPriority);
 
-	virtual void		ChangeTeam( int iTeamNum ) OVERRIDE;
+	// Factions
+	static int			GetNumFactions( void );
+	static CUtlVector<EHANDLE> *GetEntitiesInFaction( int nFaction );
+	int					GetFaction( void ) const { return m_nFaction; }
+	virtual void		ChangeFaction( int nNewFaction );
+
+	virtual void		ChangeTeam( int iTeamNum );
 
 	// Nav hull type
 	Hull_t	GetHullType() const				{ return m_eHull; }
@@ -414,46 +452,8 @@ public:
 	// -----------------------
 	// Notification from INextBots.
 	// -----------------------
-	virtual void		OnPursuedBy( INextBot * RESTRICT pPursuer ){} // called every frame while pursued by a bot in DirectChase.
+	virtual void OnPursuedBy( INextBot * RESTRICT pPursuer ){} // called every frame while pursued by a bot in DirectChase.
 
-#ifdef TF_DLL
-	virtual HalloweenBossType GetBossType() const { return HALLOWEEN_BOSS_INVALID; }
-#endif // TF_DLL
-
-#ifdef GLOWS_ENABLE
-	// Glows
-	void				AddGlowEffect( void );
-	void				RemoveGlowEffect( void );
-	bool				IsGlowEffectActive( void );
-#endif // GLOWS_ENABLE
-
-#ifdef INVASION_DLL
-public:
-
-
-	// TF2 Powerups
-	virtual bool		CanBePoweredUp( void );
-	bool				HasPowerup( int iPowerup );
-	virtual	bool		CanPowerupNow( int iPowerup );		// Return true if I can be powered by this powerup right now
-	virtual	bool		CanPowerupEver( int iPowerup );		// Return true if I ever accept this powerup type
-
-	void				SetPowerup( int iPowerup, bool bState, float flTime = 0, float flAmount = 0, CBaseEntity *pAttacker = NULL, CDamageModifier *pDamageModifier = NULL );
-	virtual	bool		AttemptToPowerup( int iPowerup, float flTime, float flAmount = 0, CBaseEntity *pAttacker = NULL, CDamageModifier *pDamageModifier = NULL );
-	virtual	float		PowerupDuration( int iPowerup, float flTime );
-	virtual	void		PowerupStart( int iPowerup, float flAmount = 0, CBaseEntity *pAttacker = NULL, CDamageModifier *pDamageModifier = NULL );
-	virtual	void		PowerupEnd( int iPowerup );
-
-	void				PowerupThink( void );
-	virtual	void		PowerupThink( int iPowerup );
-
-public:
-
-	CNetworkVar( int, m_iPowerups );
-	float				m_flPowerupAttemptTimes[ MAX_POWERUPS ];
-	float				m_flPowerupEndTimes[ MAX_POWERUPS ];
-	float				m_flFractionalBoost;	// POWERUP_BOOST health fraction - specific powerup data
-
-#endif
 
 public:
 	// returns the last body region that took damage
@@ -464,16 +464,8 @@ protected:
 public:
 	CNetworkVar( float, m_flNextAttack );			// cannot attack again until this time
 
-#ifdef GLOWS_ENABLE
-protected:
-	CNetworkVar( bool, m_bGlowEnabled );
-#endif // GLOWS_ENABLE
-
 private:
 	Hull_t		m_eHull;
-
-	void				UpdateGlowEffect( void );
-	void				DestroyGlowEffect( void );
 
 protected:
 	int			m_bloodColor;			// color of blood particless
@@ -486,24 +478,37 @@ protected:
 	string_t	m_RelationshipString;	// Used to load up relationship keyvalues
 	float		m_impactEnergyScale;// scale the amount of energy used to calculate damage this ent takes due to physics
 
+	byte		m_weaponIDToIndex[WEAPON_MAX];
+
 public:
 	static int					GetInteractionID();	// Returns the next interaction #
+	
+	float		GetTimeOfLastInjury( void ) const {  return m_flTimeOfLastInjury; };
 
 protected:
 	// Visibility-related stuff
 	bool ComputeLOS( const Vector &vecEyePosition, const Vector &vecTarget ) const;
 private:
+	bool ComputeTargetIsInDarkness( const Vector &vecEyePosition, CNavArea *pTargetNavArea, const Vector &vecTargetPos ) const;
+
+protected:
 	// For weapon strip
 	void ThrowDirForWeaponStrip( CBaseCombatWeapon *pWeapon, const Vector &vecForward, Vector *pVecThrowDir );
 	void DropWeaponForWeaponStrip( CBaseCombatWeapon *pWeapon, const Vector &vecForward, const QAngle &vecAngles, float flDiameter );
 
+protected:
 	friend class CScriptedTarget; // needs to access GetInteractionID()
 	
 	static int					m_lastInteraction;	// Last registered interaction #
 	static Relationship_t**		m_DefaultRelationship;
+	static Relationship_t**		m_FactionRelationship;
+	static CUtlVector< CUtlVector< EHANDLE> > m_aFactions;
 
+public:
 	// attack/damage
-	int					m_LastHitGroup;			// the last body region that took damage
+	CNetworkVar( int, m_LastHitGroup );			// the last body region that took damage
+
+private:
 	float				m_flDamageAccumulator;	// so very small amounts of damage do not get lost.
 	int					m_iDamageCount;			// # of times NPC has been damaged.  used for tracking 1-shot kills.
 	
@@ -515,18 +520,20 @@ private:
 	//  Relationships
 	// ---------------
 	CUtlVector<Relationship_t>		m_Relationship;						// Array of relationships
+	int								m_nFaction;
 
+	// Used by trigger_fog to manage when the character is touching multiple fog triggers simultaneously.
+	// The one at the HEAD of the list is always the current fog trigger for the character.
+	CUtlVector<EHANDLE> m_hTriggerFogList;
+	EHANDLE m_hLastFogTrigger;
 protected:
 	// shared ammo slots
-	CNetworkArrayForDerived( int, m_iAmmo, MAX_AMMO_SLOTS );
+	CNetworkArrayForDerived( int, m_iAmmo, MAX_AMMO_TYPES );
 
 	// Usable character items 
 	CNetworkArray( CBaseCombatWeaponHandle, m_hMyWeapons, MAX_WEAPONS );
-
 	CNetworkHandle( CBaseCombatWeapon, m_hActiveWeapon );
 
-	friend class CCleanupDefaultRelationShips;
-	
 	IntervalTimer m_aliveTimer;
 
 	unsigned int m_hasBeenInjured;							// bitfield corresponding to team ID that did the injury	
@@ -540,10 +547,18 @@ protected:
 	};
 	DamageHistory m_damageHistory[ MAX_DAMAGE_TEAMS ];
 
+	CNetworkVar( float, m_flTimeOfLastInjury );
+	CNetworkVar( RelativeDamagedDirection_t, m_nRelativeDirectionOfLastInjury );
+
+	// CNetworkVar( uint32, m_uiLastDamageTypeFlags );
+	uint32 m_uiLastDamageTypeFlags;
+
 	// last known navigation area of player - NULL if unknown
 	CNavArea *m_lastNavArea;
 	CAI_MoveMonitor m_NavAreaUpdateMonitor;
 	int m_registeredNavTeam;	// ugly, but needed to clean up player team counts in nav mesh
+	
+	friend class CCleanupDefaultRelationShips;
 };
 
 
@@ -559,24 +574,6 @@ inline int	CBaseCombatCharacter::WeaponCount() const
 {
 	return MAX_WEAPONS;
 }
-
-//-----------------------------------------------------------------------------
-// Purpose: 
-// Input  : i - 
-//-----------------------------------------------------------------------------
-inline CBaseCombatWeapon *CBaseCombatCharacter::GetWeapon( int i ) const
-{
-	Assert( (i >= 0) && (i < MAX_WEAPONS) );
-	return m_hMyWeapons[i].Get();
-}
-
-#ifdef INVASION_DLL
-// Powerup Inlines
-inline bool CBaseCombatCharacter::CanBePoweredUp( void )							{ return true; }
-inline float CBaseCombatCharacter::PowerupDuration( int iPowerup, float flTime )	{ return flTime; }
-inline void	CBaseCombatCharacter::PowerupEnd( int iPowerup )						{ return; }
-inline void	CBaseCombatCharacter::PowerupThink( int iPowerup )						{ return; }
-#endif
 
 EXTERN_SEND_TABLE(DT_BaseCombatCharacter);
 

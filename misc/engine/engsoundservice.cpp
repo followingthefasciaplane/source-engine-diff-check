@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Engine implementation of services required by the audio subsystem
 //
@@ -6,6 +6,7 @@
 //=============================================================================//
 
 #include "quakedef.h"
+#include "cdll_int.h"
 #include "soundservice.h"
 #include "zone.h"
 #include "cdll_engine_int.h"
@@ -92,7 +93,7 @@ public:
 
 	virtual float GetClientTime()
 	{
-		return cl.GetTime();
+		return GetBaseLocalClient().GetTime();
 	}
 
 	// Filtered local time
@@ -101,15 +102,21 @@ public:
 		return host_time;
 	}
 
-	virtual int GetViewEntity()
+	virtual int GetViewEntity( int nSlot )
 	{
-		return cl.m_nViewEntity;
+		if ( g_ClientDLL != nullptr )
+		{
+			const int nInEyeEntity = g_ClientDLL->GetInEyeEntity();
+			if (nInEyeEntity >= 0)
+				return nInEyeEntity;
+		}
+
+		return GetLocalClient( nSlot ).GetViewEntity();
 	}
 
 	virtual void SetSoundFrametime( float realDt, float hostDt )
 	{
-		extern bool IsReplayRendering();
-		if ( cl_movieinfo.IsRecording() || IsReplayRendering() )
+		if ( cl_movieinfo.IsRecording() )
 		{
 			m_frameTime = hostDt;
 		}
@@ -126,22 +133,58 @@ public:
 
 	virtual int GetServerCount()
 	{
-		return cl.m_nServerCount;
+		return GetBaseLocalClient().m_nServerCount;
 	}
 
 	virtual bool IsPlayer( SoundSource source )
 	{
-		return ( source == cl.m_nPlayerSlot + 1 );
+		if ( source == GetSpectatorTarget( NULL ) )
+		{
+			return true;
+		}
+
+		if ( splitscreen->IsLocalPlayerResolvable() )
+		{
+			return ( source == GetLocalClient().m_nPlayerSlot + 1 );
+		}
+
+		FOR_EACH_VALID_SPLITSCREEN_PLAYER( i )
+		{
+			if ( GetLocalClient( i ).m_nPlayerSlot + 1 == source )
+				return true;
+		}
+
+		return false;
 	}
 
-	virtual void OnChangeVoiceStatus( int entity, bool status)
+	virtual int GetSpectatorTarget( ClientDLLObserverMode_t *pObserverMode )
 	{
-		ClientDLL_VoiceStatus(entity, status);
+		ASSERT_LOCAL_PLAYER_RESOLVABLE();
+		return ClientDLL_GetSpectatorTarget( pObserverMode );
+	}
+
+	virtual void OnChangeVoiceStatus( int entity, int iSsSlot, bool status )
+	{
+		// Local player changing state
+		if ( iSsSlot >= 0 )
+		{
+			if ( Steam3Client().SteamFriends() && Steam3Client().SteamUser() )
+			{
+				// Tell Friends' Voice chat that the local user is speaking!!!
+				Steam3Client().SteamFriends()->SetInGameVoiceSpeaking( Steam3Client().SteamUser()->GetSteamID(), status );
+			}
+		}
+		ClientDLL_VoiceStatus( entity, iSsSlot, status );
+	}
+
+	virtual bool GetPlayerAudible( int iPlayerIndex )
+	{
+		return ClientDLL_IsPlayerAudible( iPlayerIndex );
 	}
 
 	virtual bool IsConnected() 
 	{
-		return cl.IsConnected();
+		return GetBaseLocalClient().IsConnected();
 	}
 
 	// Calls into client .dll with list of close caption tokens to construct a caption out of
@@ -177,18 +220,6 @@ public:
 		}
 
 		return engineClient->IsPaused();
-	}
-	
-	virtual bool IsGameActive()
-	{
-		extern IVEngineClient *engineClient;
-		if ( !engineClient )
-		{
-			Assert( !"No engineClient, bug???" );
-			return true;
-		}
-
-		return engineClient->IsActiveApp();
 	}
 
 	virtual void RestartSoundSystem()
@@ -341,8 +372,9 @@ public:
 			wchar_t file[ 256 ];
 			g_pVGuiLocalize->ConvertANSIToUnicode( cachefile, file, sizeof( file ) );
 
-			g_pVGuiLocalize->ConstructString_safe( 
+			g_pVGuiLocalize->ConstructString( 
 				constructed, 
+				sizeof( constructed ),
 				( wchar_t * )format,
 				1,
 				file );
@@ -477,13 +509,15 @@ private:
 	{
 		VPROF("OnSoundStarted");
 
-		if ( IsX360() || !toolframework->IsToolRecording() || params.suppressrecording )
+		// Don't send the sound message to the tool framework if active tool 
+		// is not recording or the sound originated from the tool.
+		if ( IsX360() || !toolframework->IsToolRecording() || params.bToolSound )
 			return;
 
 		KeyValues *msg = new KeyValues( "StartSound" );
 		msg->SetInt( "guid", guid );
-		msg->SetFloat( "time", cl.GetTime() );
-		msg->SetInt( "staticsound", params.staticsound ? 1 : 0 );
+		msg->SetFloat( "time", GetBaseLocalClient().GetTime() );
+		msg->SetBool( "staticsound", params.staticsound );
 		msg->SetInt( "soundsource", params.soundsource );
 		msg->SetInt( "entchannel", params.entchannel );
 		msg->SetString( "soundname", soundname );
@@ -498,8 +532,7 @@ private:
 		msg->SetInt( "soundlevel", (int)params.soundlevel );
 		msg->SetInt( "flags", params.flags );
 		msg->SetInt( "pitch", params.pitch );
-		msg->SetInt( "specialdsp", params.specialdsp );
-		msg->SetInt( "fromserver", params.fromserver ? 1 : 0 );
+		msg->SetBool( "fromserver", params.fromserver );
 		msg->SetFloat( "delay", params.delay );
 		msg->SetInt( "speakerentity", params.speakerentity );
 
@@ -523,7 +556,7 @@ private:
 
 		KeyValues *msg = new KeyValues( "StopSound" );
 		msg->SetInt( "guid", guid );
-		msg->SetFloat( "time", cl.GetTime() );
+		msg->SetFloat( "time", GetBaseLocalClient().GetTime() );
 		msg->SetInt( "soundsource", soundsource );
 		msg->SetInt( "entchannel", channel );
 		msg->SetString( "soundname", soundname );

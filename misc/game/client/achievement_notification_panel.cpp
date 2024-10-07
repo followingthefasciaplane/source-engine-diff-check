@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2002, Valve LLC, All rights reserved. ============
 //
 // Purpose: 
 //
@@ -13,12 +13,14 @@
 #include "ienginevgui.h"
 #include <vgui/ILocalize.h>
 #include <vgui/ISurface.h>
-#include <vgui/IVGui.h>
+#include <vgui/IVGUI.h>
 #include <vgui_controls/EditablePanel.h>
 #include <vgui_controls/Label.h>
 #include <vgui_controls/ImagePanel.h>
 #include "achievement_notification_panel.h"
+#ifndef NO_STEAM
 #include "steam/steam_api.h"
+#endif
 #include "iachievementmgr.h"
 #include "fmtstr.h"
 
@@ -40,8 +42,10 @@ DECLARE_HUDELEMENT_DEPTH( CAchievementNotificationPanel, 100 );
 //-----------------------------------------------------------------------------
 CAchievementNotificationPanel::CAchievementNotificationPanel( const char *pElementName ) : CHudElement( pElementName ), BaseClass( NULL, "AchievementNotificationPanel" )
 {
-	Panel *pParent = g_pClientMode->GetViewport();
+	Panel *pParent = GetClientMode()->GetViewport();
 	SetParent( pParent );
+
+	SetScheme( "basemodui_scheme" );
 
 	m_flHideTime = 0;
 	m_pPanelBackground = new EditablePanel( this, "Notification_Background" );
@@ -101,6 +105,7 @@ void CAchievementNotificationPanel::FireGameEvent( IGameEvent * event )
 		int iMax = event->GetInt( "max_val" );
 		wchar_t szLocalizedName[256]=L"";
 
+#ifndef NO_STEAM
 		if ( IsPC() )
 		{
 			// shouldn't ever get achievement progress if steam not running and user logged in, but check just in case
@@ -108,13 +113,14 @@ void CAchievementNotificationPanel::FireGameEvent( IGameEvent * event )
 			{				
 				Msg( "Steam not running, achievement progress notification not displayed\n" );
 			}
-			else 
+			else
 			{
 				// use Steam to show achievement progress UI
 				steamapicontext->SteamUserStats()->IndicateAchievementProgress( pchName, iCur, iMax );
 			}
 		}
 		else 
+#endif
 		{
 			// on X360 we need to show our own achievement progress UI
 
@@ -129,16 +135,16 @@ void CAchievementNotificationPanel::FireGameEvent( IGameEvent * event )
 			wchar_t szText[512]=L"";
 			wchar_t szNumFound[16]=L"";
 			wchar_t szNumTotal[16]=L"";
-			_snwprintf( szNumFound, ARRAYSIZE( szNumFound ), L"%i", iCur );
-			_snwprintf( szNumTotal, ARRAYSIZE( szNumTotal ), L"%i", iMax );
+			Q_snwprintf( szNumFound, ARRAYSIZE( szNumFound ), L"%i", iCur );
+			Q_snwprintf( szNumTotal, ARRAYSIZE( szNumTotal ), L"%i", iMax );
 
 			const wchar_t *pchFmt = g_pVGuiLocalize->Find( "#GameUI_Achievement_Progress_Fmt" );
 			if ( !pchFmt || !pchFmt[0] )
 				return;
 			Q_wcsncpy( szFmt, pchFmt, sizeof( szFmt ) );
 
-			g_pVGuiLocalize->ConstructString_safe( szText, szFmt, 3, szLocalizedName, szNumFound, szNumTotal );
-			AddNotification( pchName, g_pVGuiLocalize->Find( "#GameUI_Achievement_Progress" ), szText );
+			g_pVGuiLocalize->ConstructString( szText, sizeof( szText ), szFmt, 3, szLocalizedName, szNumFound, szNumTotal );
+			AddNotification( pchName, g_pVGuiLocalize->FindSafe( "#GameUI_Achievement_Progress" ), szText );
 		}
 	}
 }

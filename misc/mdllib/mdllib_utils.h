@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2007, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -25,6 +25,7 @@
 
 // Declare a pointer and automatically do the cast of initial value to the pointer type
 #define DECLARE_PTR( type, name, initval ) type *name = ( type * ) ( initval )
+#define DECLARE_UPDATE_PTR( type, name, initval ) name = ( type * ) ( initval )
 
 // Compute a pointer that is offset given number of bytes from the base pointer
 #define BYTE_OFF_PTR( initval, offval ) ( ( ( byte * ) ( initval ) ) + ( offval ) )
@@ -109,30 +110,37 @@ protected:
 
 
 //
-// CRemoveTracker
+// CMemoryMovingTracker
 //	Class that is tracking removals that are scheduled to happen at given points.
 //	Use policy:
-//		RemoveBytes / RemoveElements	[*]		-- schedule removals
-//		Finalize								-- finalize removal information
-//		ComputePointer / ComputeOffset	[*]		-- compute new pointers/offsets that will happen after removals
-//		MemMove									-- perform memory moves to apply removals
+//		RegisterBytes / RegisterElements[*]		-- schedule moving
+//		Finalize								-- finalize moving information
+//		ComputePointer / ComputeOffset	[*]		-- compute new pointers/offsets that will happen after moving
+//		MemMove									-- perform memory moves to apply
 //
-class CRemoveTracker
+class CMemoryMovingTracker
 {
 public:
-	CRemoveTracker() : m_map( DefLessFunc( byte * ) ) {}
+	enum MemoryMovingPolicy_t
+	{
+		MEMORY_REMOVE,
+		MEMORY_INSERT,
+		MEMORY_MODIFY,
+	};
+	explicit CMemoryMovingTracker( MemoryMovingPolicy_t ePolicy ) : m_map( DefLessFunc( byte * ) ), m_ePolicy( ePolicy ) {}
 
 	// Schedules a piece of memory for removal
 public:
-	void RemoveBytes( void *pos, int length );
+	void RegisterBytes( void *pos, int length );
 	
 	template< typename T >
-	void RemoveElements( T *ptr, int count = 1 ) { RemoveBytes( ( byte * ) ptr, count * sizeof( T ) ); }
+	void RegisterElements( T *ptr, int count = 1 ) { RegisterBytes( ( byte * ) ptr, count * sizeof( T ) ); }
 
-	int GetNumBytesRemoved() const;
+	int GetNumBytesRegistered() const;
 
 	// Finalizes the removal information
 public:
+	void RegisterBaseDelta( void *pOldBase, void *pNewBase );
 	void Finalize();
 
 	// Computes where the pointer would point after memory removal occurs
@@ -154,6 +162,7 @@ protected:
 		int len;
 	};
 	Item m_hint;
+	MemoryMovingPolicy_t m_ePolicy;
 };
 
 
@@ -164,7 +173,7 @@ protected:
 //	and set the given bit.
 //	Provides safe "IsBitSet" that would return false for missing bits.
 //
-class CGrowableBitVec : public CVarBitVec
+class CGrowableBitVec : public CLargeVarBitVec
 {
 public:
 	void GrowSetBit( int iBit )
@@ -176,7 +185,7 @@ public:
 
 	bool IsBitSet( int bitNum ) const
 	{
-		return ( bitNum < GetNumBits() ) && CVarBitVec::IsBitSet( bitNum );
+		return ( bitNum < GetNumBits() ) && CLargeVarBitVec::IsBitSet( bitNum );
 	}
 };
 

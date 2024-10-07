@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -20,7 +20,7 @@ typedef void (*ResizeUtlVectorFn)( void *pVoid, int offsetToUtlVector, int len )
 template< class T >
 void UtlVector_InitializeAllocatedElements( T *pBase, int count )
 {
-	memset( reinterpret_cast<void*>( pBase ), 0, count * sizeof( T ) );
+	memset( (void *)pBase, 0, count * sizeof( T ) );
 }
 
 template< class T, class A >

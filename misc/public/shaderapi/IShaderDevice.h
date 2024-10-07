@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -14,7 +14,7 @@
 #endif
 
 #include "tier1/interface.h"
-#include "appframework/IAppSystem.h"
+#include "appframework/iappsystem.h"
 #include "bitmap/imageformat.h"
 #include "tier1/utlbuffer.h"
 #include "materialsystem/imaterial.h"
@@ -44,6 +44,9 @@ struct ShaderDisplayMode_t
 	ImageFormat m_Format;			// use ImageFormats (ignored for windowed mode)
 	int m_nRefreshRateNumerator;	// Refresh rate. Use 0 in numerator + denominator for a default setting.
 	int m_nRefreshRateDenominator;	// Refresh rate = numerator / denominator.
+#ifdef _PS3
+	float m_flAspectRatio;
+#endif
 };
 
 	
@@ -81,7 +84,17 @@ struct ShaderDeviceInfo_t
 //-----------------------------------------------------------------------------
 struct ShaderNonInteractiveInfo_t
 {
+	// background
 	ShaderAPITextureHandle_t m_hTempFullscreenTexture;
+
+	// logo
+	ShaderAPITextureHandle_t m_hLogoTexture;
+	float m_flLogoNormalizedX;
+	float m_flLogoNormalizedY;
+	float m_flLogoNormalizedW;
+	float m_flLogoNormalizedH;
+
+	// pacifier
 	int m_nPacifierCount;
 	ShaderAPITextureHandle_t m_pPacifierTextures[64];
 	float m_flNormalizedX;
@@ -139,6 +152,21 @@ public:
 //-----------------------------------------------------------------------------
 typedef void (*ShaderModeChangeCallbackFunc_t)( void );
 
+//-----------------------------------------------------------------------------
+// Used by the scaleform UI to manage when then device is lost or reset, or when
+// the mode changes
+//-----------------------------------------------------------------------------
+
+class IShaderDevice;
+
+abstract_class IShaderDeviceDependentObject
+{
+public:
+	virtual void DeviceLost( void ) = 0;
+	virtual void DeviceReset( void *pDevice, void *pPresentParameters, void *pHWnd ) = 0;
+	virtual void ScreenSizeChanged( int width, int height ) = 0;
+};
+
 
 //-----------------------------------------------------------------------------
 // Methods related to discovering and selecting devices
@@ -177,6 +205,11 @@ public:
 	// Installs a callback to get called 
 	virtual void AddModeChangeCallback( ShaderModeChangeCallbackFunc_t func ) = 0;
 	virtual void RemoveModeChangeCallback( ShaderModeChangeCallbackFunc_t func ) = 0;
+
+	virtual bool GetRecommendedVideoConfig( int nAdapter, KeyValues *pConfiguration ) = 0;
+
+	virtual void AddDeviceDependentObject( IShaderDeviceDependentObject *pObject ) = 0;
+	virtual void RemoveDeviceDependentObject( IShaderDeviceDependentObject *pObject ) = 0;
 };
 
 
@@ -188,12 +221,14 @@ abstract_class IShaderDevice
 {
 public:
 	// Releases/reloads resources when other apps want some memory
-	virtual void ReleaseResources() = 0;
+	virtual void ReleaseResources( bool bReleaseManagedResources = true ) = 0;
 	virtual void ReacquireResources() = 0;
 
 	// returns the backbuffer format and dimensions
 	virtual ImageFormat GetBackBufferFormat() const = 0;
 	virtual void GetBackBufferDimensions( int& width, int& height ) const = 0;
+
+	virtual const AspectRatioInfo_t &GetAspectRatioInfo( void ) const = 0;
 
 	// Returns the current adapter in use
 	virtual int GetCurrentAdapter() const = 0;
@@ -249,7 +284,7 @@ public:
 
 	// NOTE: Deprecated!! Use CreateVertexBuffer/CreateIndexBuffer instead
 	// Creates/destroys Mesh
-	virtual IMesh* CreateStaticMesh( VertexFormat_t vertexFormat, const char *pTextureBudgetGroup, IMaterial * pMaterial = NULL ) = 0;
+	virtual IMesh* CreateStaticMesh( VertexFormat_t vertexFormat, const char *pTextureBudgetGroup, IMaterial * pMaterial = NULL, VertexStreamSpec_t *pStreamSpec = NULL ) = 0;
 	virtual void DestroyStaticMesh( IMesh* mesh ) = 0;
 
 	// Creates/destroys static vertex + index buffers
@@ -261,18 +296,23 @@ public:
 
 	// Do we need to specify the stream here in the case of locking multiple dynamic VBs on different streams?
 	virtual IVertexBuffer *GetDynamicVertexBuffer( int nStreamID, VertexFormat_t vertexFormat, bool bBuffered = true ) = 0;
-	virtual IIndexBuffer *GetDynamicIndexBuffer( MaterialIndexFormat_t fmt, bool bBuffered = true ) = 0;
+	virtual IIndexBuffer *GetDynamicIndexBuffer() = 0;
 
 	// A special path used to tick the front buffer while loading on the 360
 	virtual void EnableNonInteractiveMode( MaterialNonInteractiveMode_t mode, ShaderNonInteractiveInfo_t *pInfo = NULL ) = 0;
 	virtual void RefreshFrontBufferNonInteractive( ) = 0;
 	virtual void HandleThreadEvent( uint32 threadEvent ) = 0;
 
-#ifdef DX_TO_GL_ABSTRACTION
+#if defined( DX_TO_GL_ABSTRACTION ) && !defined( _GAMECONSOLE )
 	virtual void DoStartupShaderPreloading( void ) = 0;
 #endif
-	virtual char *GetDisplayDeviceName() = 0;
-
+	
+#ifdef _CERT
+	static
+#else
+	virtual 
+#endif
+		void            OnDebugEvent( const char * pEvent = "" ){}
 };
 
 

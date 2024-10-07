@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -120,7 +120,7 @@ public:
 	virtual void	GetEntryTarget( Vector *vecOrigin, QAngle *vecAngles );
 	virtual void	GatherConditions( void );
 	virtual void	ModifyOrAppendCriteria( AI_CriteriaSet& criteriaSet );
-	virtual void	Teleport( const Vector *newPosition, const QAngle *newAngles, const Vector *newVelocity );
+	virtual void	Teleport( const Vector *newPosition, const QAngle *newAngles, const Vector *newVelocity, bool bUseSlowHighAccuracyContacts );
 	virtual void	ClearSchedule( const char *szReason );
 	virtual bool	IsInterruptable( void );
 	virtual void	PrescheduleThink( void );

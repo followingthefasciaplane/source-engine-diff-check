@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -17,15 +17,26 @@ class CChoreoEvent;
 
 #define SCENECACHE_VERSION		7
 
+
+class CSceneCacheListLess
+{
+public:
+	bool Less( const int &lhs, const int &rhs, void *pCtx )
+	{
+		return lhs < rhs;
+	}
+};
+
+
 #pragma pack(1)
 class CSceneCache : public IBaseCacheInfo
 {
 public:
 	unsigned int		msecs;
-	CUtlVector< unsigned short > sounds;
+	CUtlSortVector< int, CSceneCacheListLess > sounds;
 
 	CSceneCache();
-	CSceneCache( const CSceneCache& src );
+//	CSceneCache( const CSceneCache& src );
 
 	int	GetSoundCount() const;
 	char const *GetSoundName( int index );
@@ -35,7 +46,7 @@ public:
 	virtual void Rebuild( char const *filename );
 
 	static unsigned int ComputeSoundScriptFileTimestampChecksum();
-	static void PrecacheSceneEvent( CChoreoEvent *event, CUtlVector< unsigned short >& soundlist );
+	static void PrecacheSceneEvent( CChoreoEvent *event, CUtlSortVector< int, CSceneCacheListLess > &soundlist );
 };
 #pragma pack()
 

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2003, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -12,10 +12,9 @@
 #endif
 
 
-#include "vgui_controls/Frame.h"
+#include "vgui_controls/frame.h"
 #include "matsys_controls/curveeditorpanel.h"
 #include "datamodel/dmehandle.h"
-#include "movieobjects/timeutils.h"
 
 
 //-----------------------------------------------------------------------------

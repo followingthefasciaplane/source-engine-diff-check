@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -24,6 +24,7 @@ public:
 	
 	// This can be used to filter debug output or to catch the client or server in the act.
 	bool IsClient() const;
+	inline bool IsRemoteClient() const;
 
 	// for encoding m_flSimulationTime, m_flAnimTime
 	int GetNetworkBase( int nTick, int nEntity );
@@ -33,10 +34,11 @@ public:
 	// Absolute time (per frame still - Use Plat_FloatTime() for a high precision real time 
 	//  perf clock, but not that it doesn't obey host_timescale/host_framerate)
 	float			realtime;
-	// Absolute frame counter
+	// Absolute frame counter - continues to increase even if game is paused
 	int				framecount;
 	// Non-paused frametime
 	float			absoluteframetime;
+	float			absoluteframestarttimestddev;
 
 	// Current time 
 	//
@@ -60,7 +62,7 @@ public:
 	// current maxplayers setting
 	int				maxClients;
 
-	// Simulation ticks
+	// Simulation ticks - does not increase when game is paused
 	int				tickcount;
 
 	// Simulation tick interval
@@ -78,7 +80,10 @@ public:
 private:
 	// Set to true in client code.
 	bool			m_bClient;
-
+public:
+	// true if we are a remote clinet (needs prediction & interpolation - server not on this machine) as opposed to split-screen or local
+	bool			m_bRemoteClient;
+private:
 	// 100 (i.e., tickcount is rounded down to this base and then the "delta" from this base is networked
 	int				nTimestampNetworkingBase;   
 	// 32 (entindex() % nTimestampRandomizeWindow ) is subtracted from gpGlobals->tickcount to set the networking basis, prevents
@@ -104,6 +109,11 @@ inline CGlobalVarsBase::CGlobalVarsBase( bool bIsClient ) :
 inline bool CGlobalVarsBase::IsClient() const
 {
 	return m_bClient;
+}
+
+inline bool CGlobalVarsBase::IsRemoteClient() const
+{
+	return m_bRemoteClient;
 }
 
 #endif // GLOBALVARS_BASE_H

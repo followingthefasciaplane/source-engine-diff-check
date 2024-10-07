@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -172,6 +172,7 @@ void CDebugHistory::DumpDebugHistory( int iCategory )
 			if ( szMsgBuffer[0] != '\0' )
 			{
 				// Found a full line, so print it
+
 				Msg( "%s", szMsgBuffer );
 			}
 
@@ -291,6 +292,11 @@ CDebugHistory *GetDebugHistory()
 
 	Assert( s_DebugHistory );
 	return s_DebugHistory;
+}
+
+void ClearDebugHistory()
+{
+	s_DebugHistory = NULL;
 }
 
 //-----------------------------------------------------------------------------

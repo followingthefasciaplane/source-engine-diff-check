@@ -1,7 +1,7 @@
 // NextBotPlayerLocomotion.cpp
 // Implementation of Locomotion interface for CBasePlayer-derived classes
 // Author: Michael Booth, November 2005
-//========= Copyright Valve Corporation, All rights reserved. ============//
+// Copyright (c) 2005 Turtle Rock Studios, Inc. - All Rights Reserved
 
 #include "cbase.h"
 #include "nav_mesh.h"

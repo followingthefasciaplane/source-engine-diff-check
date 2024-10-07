@@ -1,8 +1,9 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose:
 //
 //=============================================================================//
+#ifndef _PS3
 #if !defined(_STATIC_LINKED) || defined(_SHARED_LIB)
 
 #include "stdlib.h"
@@ -25,3 +26,4 @@ int __cdecl rand()
 }
 
 #endif // !_STATIC_LINKED || _SHARED_LIB
+#endif // PS3

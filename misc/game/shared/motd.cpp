@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright (c), Valve Corporation, All rights reserved. =======
 //
 // Purpose: motd: Handles a list of message of the day entries
 //
@@ -8,9 +8,6 @@
 #include "motd.h"
 #include "schemainitutils.h"
 #include "rtime.h"
-
-// memdbgon must be the last include file in a .cpp file!!!
-#include "tier0/memdbgon.h"
 
 using namespace GCSDK;
 
@@ -86,34 +83,16 @@ const char *CMOTDEntryDefinition::GetText( ELanguage eLang )
 	return "No text";
 }
 
-//-----------------------------------------------------------------------------
-// 
-//-----------------------------------------------------------------------------
-const char *CMOTDEntryDefinition::GetHeaderTitle( ELanguage eLang )
-{ 
-	if ( m_pKVMOTD )
-	{
-		// See if we have a localised block for the specified language.
-		const char *pszLanguage = GetLanguageShortName( eLang );
-		if ( pszLanguage && pszLanguage[0] )
-		{
-			const char *pszText = m_pKVMOTD->GetString( CFmtStr( "header_%s", pszLanguage ), NULL );
-			if ( pszText && pszText[0] )
-				return pszText;
-		}
-
-		// Fall back to english
-		return m_pKVMOTD->GetString( "header_english", "News" );
-	}
-
-	return "News";
-}
-
-// Sort by ID
+// Sorts the MOTD entries in order of the time they last changed
 int	MOTDEntriesListLess( const CMOTDEntryDefinition *pLhs, const CMOTDEntryDefinition *pRhs )
 {
-	// This is stupid, sort by the KeyID instead
-	return ( pLhs->GetNameInt() > pRhs->GetNameInt() );
+#ifdef TF_GC_DLL
+	// The GC sorts by changetime
+	return ( pLhs->GetChangedTime() > pRhs->GetChangedTime() );
+#else
+	// The client sorts by post time
+	return ( pLhs->GetPostTime() > pRhs->GetPostTime() );
+#endif
 }
 
 //-----------------------------------------------------------------------------
@@ -131,13 +110,13 @@ bool CMOTDManager::BInitMOTDEntries( KeyValues *pKVMOTDEntries, CUtlVector<CUtlS
 		{
 			const char *listName = pKVEntry->GetName();
 
-			SCHEMA_INIT_CHECK( listName != NULL, "All MOTD entries must have titles." );
+			SCHEMA_INIT_CHECK( listName != NULL, CFmtStr( "All MOTD entries must have titles.") );
 
 			int idx = m_vecMOTDEntries.AddToTail();
 			SCHEMA_INIT_SUBSTEP( m_vecMOTDEntries[idx].BInitFromKV( pKVEntry, pVecErrors ) );
 
 			// Make sure the dates all move forward
-			SCHEMA_INIT_CHECK( m_vecMOTDEntries[idx].GetPostTime() > iPrevTime , "MOTD entry '%s' occurs prior to the previous entry.", m_vecMOTDEntries[idx].GetName() );
+			SCHEMA_INIT_CHECK( m_vecMOTDEntries[idx].GetPostTime() > iPrevTime , CFmtStr( "MOTD entry '%s' occurs prior to the previous entry.", m_vecMOTDEntries[idx].GetName() ) );
 			iPrevTime = m_vecMOTDEntries[idx].GetPostTime();
 		}
 	}
@@ -166,40 +145,6 @@ int CMOTDManager::GetNumMOTDAfter( RTime32 iTime )
 }
 
 //-----------------------------------------------------------------------------
-// Remove all unused MOTD: Save memory and whatever
-//-----------------------------------------------------------------------------
-void CMOTDManager::PurgeUnusedMOTDEntries( KeyValues *pKVMOTDEntries ) 
-{
-	// Find the latest entry name and remove all others
-	int iLargest = -1;
-	FOR_EACH_VEC_BACK( m_vecMOTDEntries, i )
-	{
-		int iMOTDindex = m_vecMOTDEntries[i].GetNameInt();
-		if ( iMOTDindex > iLargest )
-		{
-			iLargest = iMOTDindex;
-		}
-	}
-
-	FOR_EACH_VEC_BACK( m_vecMOTDEntries, i )
-	{
-		int iMOTDindex = m_vecMOTDEntries[i].GetNameInt();
-		if ( iMOTDindex < iLargest )
-		{
-			if ( pKVMOTDEntries )
-			{
-				KeyValues *pKey = pKVMOTDEntries->FindKey( m_vecMOTDEntries[i].GetName() );
-				if ( pKey )
-				{
-					pKVMOTDEntries->RemoveSubKey( pKey );
-				}
-			}
-			m_vecMOTDEntries.Remove( i );
-		}
-	}
-}
-
-//-----------------------------------------------------------------------------
 // Purpose:	Returns the definition for the next blog post after the specified time
 //-----------------------------------------------------------------------------
 CMOTDEntryDefinition *CMOTDManager::GetNextMOTDAfter( RTime32 iTime )
@@ -224,7 +169,7 @@ CMOTDEntryDefinition *CMOTDManager::GetMOTDByIndex( int iIndex )
 }
 
 
-#ifdef GC_DLL
+#ifdef TF_GC_DLL
 
 //-----------------------------------------------------------------------------
 // Handle MOTD requests job.
@@ -259,10 +204,6 @@ bool CGCMOTDRequest::BYieldingRunJobFromMsg( IMsgNetPacket *pNetPacket )
 		msg_response.AddStrData( pMOTD->GetTitle( eLang ) );
 		msg_response.AddStrData( pMOTD->GetText( eLang ) );
 		msg_response.AddStrData( pMOTD->GetURL() );
-		msg_response.AddStrData( pMOTD->GetImage() );
-		msg_response.AddIntData( pMOTD->GetHeaderType() );
-		msg_response.AddStrData( pMOTD->GetHeaderTitle( eLang ) );
-		msg_response.AddStrData( pMOTD->GetHeaderIcon() );
 		iEntries++;
 
 		// Move on to the next message.
@@ -271,11 +212,11 @@ bool CGCMOTDRequest::BYieldingRunJobFromMsg( IMsgNetPacket *pNetPacket )
 	} 
 	msg_response.Body().m_nEntries = iEntries;
 
-	GGCEcon()->BSendGCMsgToClient( msg.Hdr().m_ulSteamID, msg_response );
+	GGCTF()->BSendGCMsgToClient( msg.Hdr().m_ulSteamID, msg_response );
 
 	return true;
 }
 
 GC_REG_JOB( CGCGameBase, CGCMOTDRequest, "CGCMOTDRequest", k_EMsgGCMOTDRequest, k_EServerTypeGC );
 
-#endif // GC_DLL
+#endif // TF_GC_DLL

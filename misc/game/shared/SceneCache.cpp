@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2007, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -9,6 +9,10 @@
 #include "choreoscene.h"
 #include "choreoevent.h"
 
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
+
 extern ISoundEmitterSystemBase *soundemitterbase;
 CChoreoScene *BlockingLoadScene( const char *filename );
 
@@ -17,11 +21,11 @@ CSceneCache::CSceneCache()
 	msecs = 0;
 }
 
-CSceneCache::CSceneCache( const CSceneCache& src )
-{
-	msecs  = src.msecs;
-	sounds = src.sounds;
-}
+//CSceneCache::CSceneCache( const CSceneCache& src )
+//{
+//	msecs  = src.msecs;
+//	sounds = src.sounds;
+//}
 
 int	CSceneCache::GetSoundCount() const
 {
@@ -59,15 +63,14 @@ void CSceneCache::Restore( CUtlBuffer& buf  )
 	for ( int i = 0; i < c; ++i )
 	{
 		char soundname[ 512 ];
-		buf.GetString( soundname );
+		buf.GetString( soundname, sizeof( soundname ) );
 
 		int idx = soundemitterbase->GetSoundIndex( soundname );
-		if ( idx != -1 )
+		if ( soundemitterbase->IsValidIndex( idx ) )
 		{
-			Assert( idx <= 65535 );
 			if ( sounds.Find( idx ) == sounds.InvalidIndex() )
 			{
-				sounds.AddToTail( (unsigned short)idx );
+				sounds.Insert( idx );
 			}
 		}
 	}
@@ -78,17 +81,16 @@ void CSceneCache::Restore( CUtlBuffer& buf  )
 // Input  : *event - 
 //			soundlist - 
 //-----------------------------------------------------------------------------
-void CSceneCache::PrecacheSceneEvent( CChoreoEvent *event, CUtlVector< unsigned short >& soundlist )
+void CSceneCache::PrecacheSceneEvent( CChoreoEvent *event, CUtlSortVector< int, CSceneCacheListLess > &soundlist )
 {
 	if ( !event || event->GetType() != CChoreoEvent::SPEAK )
 		return;
 
 	int idx = soundemitterbase->GetSoundIndex( event->GetParameters() );
-	if ( idx != -1 )
+	if ( soundemitterbase->IsValidIndex( idx ) )
 	{
 		MEM_ALLOC_CREDIT();
-		Assert( idx <= 65535 );
-		soundlist.AddToTail( (unsigned short)idx );
+		soundlist.Insert( idx );
 	}
 
 	if ( event->GetCloseCaptionType() == CChoreoEvent::CC_MASTER )
@@ -97,11 +99,10 @@ void CSceneCache::PrecacheSceneEvent( CChoreoEvent *event, CUtlVector< unsigned 
 		if ( event->GetPlaybackCloseCaptionToken( tok, sizeof( tok ) ) )
 		{
 			int idx = soundemitterbase->GetSoundIndex( tok );
-			if ( idx != -1 && soundlist.Find( idx ) == soundlist.InvalidIndex() )
+			if ( soundemitterbase->IsValidIndex( idx ) && soundlist.Find( idx ) == soundlist.InvalidIndex() )
 			{
 				MEM_ALLOC_CREDIT();
-				Assert( idx <= 65535 );
-				soundlist.AddToTail( (unsigned short)idx );
+				soundlist.Insert( idx );
 			}
 		}
 	}

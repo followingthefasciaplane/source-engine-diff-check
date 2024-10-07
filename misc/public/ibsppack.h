@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -26,14 +26,7 @@ public:
 	virtual void AddFileToPack( const char *relativename, const char *fullpath ) = 0;
 	virtual void AddBufferToPack( const char *relativename, void *data, int length, bool bTextMode ) = 0;
 	virtual void SetHDRMode( bool bHDR ) = 0;
-	virtual bool SwapBSPFile( IFileSystem *pFileSystem, const char *filename, const char *swapFilename, bool bSwapOnLoad, VTFConvertFunc_t pVTFConvertFunc, VHVFixupFunc_t pVHVFixupFunc, CompressFunc_t pCompressFunc ) = 0;
-
-	enum eRepackBSPFlags
-	{
-		eRepackBSP_CompressLumps    = 1 << 0,
-		eRepackBSP_CompressPackfile = 1 << 1
-	};
-	virtual bool RepackBSP( CUtlBuffer &inputBuffer, CUtlBuffer &outputBuffer, eRepackBSPFlags repackFlags ) = 0;
+	virtual bool SwapBSPFile( IFileSystem *pFileSystem, const char *filename, const char *swapFilename, bool bSwapOnLoad, VTFConvertFunc_t pVTFConvertFunc, VHVFixupFunc_t pVHVFixupFunc, StudioConvertFunc_t pStudioConvertFunc, CompressFunc_t pCompressFunc, char const *szPlatform ) = 0;
 
 	// used to get/set the pak file from a BSP
 	virtual bool GetPakFileLump( IFileSystem *pFileSystem, const char *pBSPFilename, void **pPakData, int *pPakSize ) = 0;
@@ -41,8 +34,12 @@ public:
 
 	// populates list of files that bsp owns, i.e. world/cubmap materials, statis props, etc
 	virtual bool GetBSPDependants( IFileSystem *pFileSystem, const char *pBSPFilename, CUtlVector< CUtlString > *pList ) = 0;
+
+	// This is here to avoid having things like the runtime engine.dll have to statically link to LZMA for the encoder!!!
+	virtual void AddBufferToPackAndLZMACompress( const char *relativename, void *data, int length ) = 0;
+	virtual void RemoveFileFromPack( char const *relativename ) = 0;
 };
 
-#define IBSPPACK_VERSION_STRING "IBSPPACK004"
+#define IBSPPACK_VERSION_STRING "IBSPPACK003"
 
 #endif // IBSPPACK_H

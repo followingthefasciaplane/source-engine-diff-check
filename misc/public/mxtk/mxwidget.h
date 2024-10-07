@@ -78,7 +78,7 @@ public:
 	// void setLabel (const char *label);
 	//
 	//
-	void setLabel (PRINTF_FORMAT_STRING const char *format, ... );
+	void setLabel (const char *format, ... );
 
 	void setVisible (bool b);
 	void setEnabled (bool b);

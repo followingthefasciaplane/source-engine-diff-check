@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: Declaration of FileOpenDialog class, a generic open/save as file dialog
 //
@@ -21,7 +21,7 @@ class FileCompletionEdit;		// local
 class InputDialog;
 
 //-----------------------------------------------------------------------------
-// Purpose: generic open/save as file dialog
+// Purpose: generic open/save as file dialog, by default deletes itself on close
 //-----------------------------------------------------------------------------
 enum FileOpenDialogType_t
 {
@@ -30,6 +30,23 @@ enum FileOpenDialogType_t
 	FOD_SELECT_DIRECTORY,
 };
 
+struct FileData_t
+{
+	CUtlString		m_FileAttributes;
+	CUtlString		m_CreationTime;
+	int64			m_nCreationTime;
+	CUtlString		m_LastAccessTime;
+	CUtlString		m_LastWriteTime;
+	int64			m_nLastWriteTime;
+	int64			m_nFileSize;
+	CUtlString		m_FileName;
+	CUtlString		m_FullPath;
+	wchar_t			m_FileType[ 80 ];
+
+	bool			m_bDirectory;
+
+	void	PrepareKV( KeyValues *kv );
+};
 
 class FileOpenDialog : public vgui::Frame
 {
@@ -74,6 +91,8 @@ public:
 			"FileSelectionCancelled"
 	*/
 
+	static bool FileNameWildCardMatch( char const *pchFileName, char const *pchPattern );
+
 protected:
 	virtual void OnCommand( const char *command );
 	virtual void ApplySchemeSettings(IScheme *pScheme);
@@ -90,7 +109,7 @@ protected:
 
 	MESSAGE_FUNC( PopulateFileList, "PopulateFileList" );
 	MESSAGE_FUNC( PopulateDriveList, "PopulateDriveList" );
-	MESSAGE_FUNC( PopulateFileNameCompletion, "PopulateFileNameCompletion" );
+	MESSAGE_FUNC( PopulateFileNameSearchHistory, "PopulateFileNameSearchHistory" );
 
 	// moves the directory structure up
 	virtual void MoveUpFolder();
@@ -110,6 +129,7 @@ protected:
 
 	MESSAGE_FUNC( OnInputCanceled, "InputCanceled" );
 	MESSAGE_FUNC_PARAMS( OnInputCompleted, "InputCompleted", data );
+	MESSAGE_FUNC( OnMatchStringSelected, "OnMatchStringSelected" );
 
 private:
 	// Necessary because we have 2 constructors
@@ -130,10 +150,18 @@ private:
 	// Creates a new folder
 	void NewFolder( char const *folderName );
 
+	void BuildFileList();
+	void FilterFileList();
+
+	bool PassesFilter( FileData_t *fd );
+	int  CountSubstringMatches();
+
+	void AddSearchHistoryString( char const *str );
+
 	vgui::ComboBox 		*m_pFullPathEdit;
 	vgui::ListPanel		*m_pFileList;
 	
-	FileCompletionEdit 	*m_pFileNameEdit;
+	vgui::ComboBox 		*m_pFileNameCombo;
 
 	vgui::ComboBox 		*m_pFileTypeCombo;
 	vgui::Button 		*m_pOpenButton;
@@ -141,7 +169,6 @@ private:
 	vgui::Button 		*m_pFolderUpButton;
 	vgui::Button		*m_pNewFolderButton;
 	vgui::Button		*m_pOpenInExplorerButton;
-	vgui::ImagePanel 	*m_pFolderIcon;
 	vgui::Label			*m_pFileTypeLabel;
 
 	KeyValues			*m_pContextKeyValues;
@@ -153,6 +180,12 @@ private:
 
 	VPANEL				m_SaveModal;
 	vgui::DHANDLE< vgui::InputDialog >	m_hInputDialog;
+
+	CUtlVector< FileData_t > m_Files;
+	CUtlVector< FileData_t * > m_Filtered;
+	CUtlVector< CUtlString >  m_SearchHistory;
+
+	CUtlString			m_CurrentSubstringFilter;
 };
 
 } // namespace vgui

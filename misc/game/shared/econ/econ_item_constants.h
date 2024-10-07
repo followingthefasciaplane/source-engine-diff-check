@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -24,50 +24,29 @@ typedef uint8		item_transaction_quantity_t;
 
 class CLocalizationProvider;
 
-enum { kLocalizedPriceSizeInChararacters = 64 };
-
 //-----------------------------------------------------------------------------
 // Econ Item testing
 //-----------------------------------------------------------------------------
-enum testitem_itemtypes_t
-{
-	TI_TYPE_UNKNOWN = -1,
-
-	TI_TYPE_WEAPON = 0,
-	TI_TYPE_HEADGEAR,
-	TI_TYPE_MISC1,
-	TI_TYPE_MISC2,
-
-	TI_TYPE_COUNT,
-};
-#define TESTITEM_DEFINITIONS_BEGIN_AT		40000
+#define TESTITEM_DEFINITIONS_BEGIN_AT		32000
+#define TESTITEM_DEFINITIONS_COUNT			16
 
 //-----------------------------------------------------------------------------
 // Type IDs for economy classes. These are part of the client-GC protocol and
 // should not change if it can be helped
+// NOTE: if possible fill up the gaps in this enum so that cache objects could
+// consume less memory!
 //-----------------------------------------------------------------------------
 enum EEconTypeID
 {
 	k_EEconTypeItem							=1,
-	k_EEconTypePlayerInfo					=2,
-	k_EEconTypeClaimCode					=3,
-	k_EEconTypeRecipe						=5,
+	k_EEconTypePersonaDataPublic			=2,
 	k_EEconTypeGameAccountClient			=7,
 	k_EEconTypeGameAccount					=8,
-	k_EEconTypeDuelSummary					=19,
-	k_EEconTypeExperiment					=20,
-	k_EEconTypeMapContribution				=28,
-	k_EEconTypeGameServerAccount			=29,
-	k_EEconTypeCoachRating					=30,
-//	k_EEconTypeEquipInstance				=31,		// DEPRECATED
-	k_EEconTypeSelectedItemPreset			=35,
-	k_EEconTypeItemPresetInstance			=36,
-	k_EEconTypeGameAccountForGameServers	=37,
-	k_EEConTypeWarData						=38,
-	k_EEConTypeLadderData					=39,
-	k_EEConTypeMatchResultPlayerInfo		=40,
-	k_EEconTypeXPSource						=41,
-	k_EEconTypeNotification					=42,
+	k_EEconTypeEquipInstance				=31,
+	k_EEconTypeDefaultEquippedDefinitionInstance		=42,
+	k_EEconTypeDefaultEquippedDefinitionInstanceClient	=43,
+	k_EEconTypeCoupon						=45,
+	k_EEconTypeQuest						=46,
 };
 
 //-----------------------------------------------------------------------------
@@ -126,7 +105,7 @@ enum EItemAction
 	k_EItemActionRemoveItemPaint_Add		 = 46,
 	k_EItemActionHalloweenDrop				 = 47,
 	k_EItemActionSteamWorkshopContributor	 = 48,
-	k_EItemActionManualOwnershipChange		 = 49,			// when we have bad bugs that corrupt item data and have to fix up rows in the DB by hand
+
 	k_EItemActionSupportDelete				 = 50,
 	k_EItemActionSupportCreatedByUndo		 = 51,
 	k_EItemActionSupportDeletedByUndo		 = 52,
@@ -136,27 +115,37 @@ enum EItemAction
 	k_EItemActionSupportDescribe_Add		 = 56,
 	k_EItemActionSupportDescribe_Remove		 = 57,
 
-	k_EItemActionStrangePartApply_Add		 = 58,
-	k_EItemActionStrangePartApply_Remove	 = 59,
-	k_EItemActionStrangeScoreReset_Add		 = 60,
-	k_EItemActionStrangeScoreReset_Remove	 = 61,
-	k_EItemActionStrangePartRemove_Add		 = 62,
-	k_EItemActionStrangePartRemove_Remove	 = 63,
+	k_EItemActionPeriodicScoreReward_Add	 = 58,
+	k_EItemActionPeriodicScoreReward_Remove	 = 59,
+	k_EItemActionStrangePartApply_Add		 = 60,
+	k_EItemActionStrangePartApply_Remove	 = 61,
 
-	k_EItemActionSupportStrangify_Add		 = 64,
-	k_EItemActionSupportStrangify_Remove	 = 65,
+	k_EItemActionPennantUpgradeApply_Add	 = 62,
+	k_EItemActionPennantUpgradeApply_Remove	 = 63,
 
-	k_EItemActionUpgradeCardApply_Add		 = 66,
-	k_EItemActionUpgradeCardApply_Remove	 = 67,
-	k_EItemActionUpgradeCardRemove_Add		 = 68,
-	k_EItemActionUpgradeCardRemove_Remove	 = 69,
+	k_EItemActionPaintKitItem_Add			 = 64,
+	k_EItemActionPaintKitItem_Remove		 = 65,
 
-	k_EItemActionStrangeRestrictionApply_Add	= 70,
-	k_EItemActionStrangeRestrictionApply_Remove	= 71,
-	k_EItemActionTransmogrify_Add				= 72,
-	k_EItemActionTransmogrify_Remove			= 73,
-	k_EItemActionHalloweenSpellPageAdd_Add		= 74,
-	k_EItemActionHalloweenSpellPageAdd_Remove	= 75,
+	k_EItemActionUpgradeChallengeCoin_Add	 = 66,
+	k_EItemActionUpgradeChallengeCoin_Remove = 67,
+
+	k_EItemActionStickerApply_Add			 = 68,
+	k_EItemActionStickerApply_Remove		 = 69,
+	k_EItemActionStickerRemove_Add			 = 70,
+	k_EItemActionStickerRemove_Remove		 = 71,
+
+	k_EItemActionGrantQuestReward_Add		 = 72,
+	k_EItemActionGrantQuestReward_Remove	 = 73,
+	k_EItemActionApplyQuestProgress_Add		 = 74,
+	k_EItemActionApplyQuestProgress_Remove	 = 75,
+
+	k_EItemActionPurchaseUnlockCrate_Add	 = 76,
+	k_EItemActionPurchaseUnlockCrate_Remove	 = 77,
+
+	k_EItemActionSwapStatTrak_Add			 = 78,
+	k_EItemActionSwapStatTrak_Remove		 = 79,
+
+	k_EItemActionPurchaseConsumedAsNonItem	 = 80,
 
 	k_EItemActionDev_ClientLootListRoll		 = 90,
 
@@ -182,15 +171,6 @@ enum EItemAction
 	k_EItemActionWeddingRing_AddPartner		 = 119,
 	k_EItemActionEconSetUnowned				 = 120,
 	k_EItemActionEconSetOwned				 = 121,
-	k_EItemActionStrangifyItem_Add			 = 122,
-	k_EItemActionStrangifyItem_Remove		 = 123,
-	k_EItemActionConsumeItem_Consume_ToolRemove		= 124,
-	k_EItemActionConsumeItem_Consume_ToolAdd		= 125,
-	k_EItemActionConsumeItem_Consume_InputRemove	= 126,
-	k_EItemActionConsumeItem_Complete_OutputAdd		= 127,	
-	k_EItemActionConsumeItem_Complete_ToolRemove	= 128,
-	k_EItemActionItemEaterRecharge_Add			 = 129,
-	k_EItemActionItemEaterRecharge_Remove		 = 130,
 
 	k_EItemActionRemoveItemCraftIndex_Remove = 150,
 	k_EItemActionRemoveItemCraftIndex_Add	 = 151,
@@ -206,74 +186,33 @@ enum EItemAction
 	k_EItemActionPreviewItem_EndPreviewPeriodExpired	= 159,
 	k_EItemActionPreviewItem_EndPreviewPeriodItemBought	= 160,
 
-	k_EItemActionPeriodicScoreReward_Add	 = 170,
-	k_EItemActionPeriodicScoreReward_Remove	 = 171,
+	k_EItemActionRecycling					= 161,
+	k_EItemActionAwardXP					 = 162,
+	k_EItemActionTournamentDrop					= 163,
+	k_EItemDiretideReward = 164,
 
-	k_EItemActionMvM_ChallengeCompleted_RemoveTicket				= 180,			// we completed a challenge and consumed this ticket as the cost
-	k_EItemActionMvM_ChallengeCompleted_GrantBadge					= 181,			// we completed a challenge and granted the player a badge because they didn't have one
-	k_EItemActionMvM_ChallengeCompleted_UpdateBadgeStamps_Remove	= 182,			// we completed a challenge and we're crossing an entry off our badge checklist (this may also reset the badge back down to empty if this was the last line item)
-	k_EItemActionMvM_ChallengeCompleted_UpdateBadgeStamps_Add		= 183,			// (other half of the above)
-	k_EItemActionMvM_ChallengeCompleted_GrantMissionCompletionLoot	= 184,			// we completed a mission in MvM
-	k_EItemActionMvM_RemoveSquadSurplusVoucher						= 185,
-	k_EItemActionMvM_AwardSquadSurplus_Receiver						= 186,
-	k_EItemActionMvM_AwardSquadSurplus_Giver						= 187,
-	k_EItemActionMvM_ChallengeCompleted_GrantTourCompletionLoot		= 188,			// we completed a full tour in MvM
-	k_EItemActionMvM_AwardHelpANoobBonus_Helper						= 189,
 
-	k_EItemActionHalloween_UpdateMerasmusLootLevel_Add				= 200,			// set the level of the merasmus loot
-	k_EItemActionHalloween_UpdateMerasmusLootLevel_Remove			= 201,			
+	k_EItemDiretideEggAddOnModify				= 165,
+	k_EItemDiretideEssenceRemove				= 166,
+	k_EItemDiretideEggRemoveOnModify			= 167,
 
-	k_EItemActionRemoveItemKillStreak_Remove = 202,
-	k_EItemActionRemoveItemKillStreak_Add	 = 203,
+	k_EItemActionUnpackItems					= 168,
 
-	k_EItemActionSupportAddOrModifyAttribute_Remove = 204,
-	k_EItemActionSupportAddOrModifyAttribute_Add	= 205,
+	k_EItemActionUnlockStyle					= 169,
+	k_EItemActionUnlockStyle_Remove				= 170,
 
-	k_EItemActionSpyVsEngyWar_JoinedWar	= 206,
+	k_EItemActionTutorialDrop					= 171,
 
-	k_EItemAction_UpdateDuckBadgeLevel_Add			= 207,
-	k_EItemAction_UpdateDuckBadgeLevel_Remove		= 208,
+	k_EItemActionAutographAdd					= 172,
+	k_EItemActionAutographRemove				= 173,
 
-	k_EItemAction_QuestDrop							= 209,
+	k_EItemActionApplyIntermediateStickerWear	= 174,
+	k_EItemActionTemplateItemGrant				= 175,
 
-	k_EItemAction_OperationPass_Add					= 210,
-
-	k_EItemActionMarket_Add							= 211,
-	k_EItemActionMarket_Remove						= 212,
-
-	k_EItemAction_QuestComplete_Reward				= 213,
-	k_EItemAction_QuestComplete_Remove				= 214,
-
-	k_EItemAction_QuestLoaner_Add					= 215,
-	k_EItemActionStrangeCountTransfer_Add			= 216,
-	k_EItemActionStrangeCountTransfer_Remove		= 217,
-
-	k_EItemActionCraftCollectionUpgrade_Add			= 218,
-	k_EItemActionCraftCollectionUpgrade_Remove		= 219,
-
-	k_EItemActionCraftHalloweenOffering_Add			= 220,
-	k_EItemActionCraftHalloweenOffering_Remove		= 221,
-
-	k_EItemActionRemoveItemGiftedBy_Remove			= 222,
-	k_EItemActionRemoveItemGiftedBy_Add				= 223,
-
-	k_EItemActionAddParticleVerticalAttr_Remove		= 224,
-	k_EItemActionAddParticleVerticalAttr_Add		= 225,
-
-	k_EItemActionAddParticleUseHeadOriginAttr_Remove = 226,
-	k_EItemActionAddParticleUseHeadOriginAttr_Add	= 227,
-
-	k_EItemActionRemoveItemDynamicAttr_Add			= 228,
-	k_EItemActionRemoveItemDynamicAttr_Remove		= 229,
-
-	k_EItemActionCraftStatClockTradeUp_Add			= 230,
-	k_EItemActionCraftStatClockTradeUp_Remove		= 231,
-
-	k_EItemActionViralCompetitiveBetaPass_Drop		= 232,
-
-	k_EItemActionSupportDeleteAttribute_Remove		= 233,
-	k_EItemActionSupportDeleteAttribute_Add			= 234,
-
+	k_EItemActionCoinCampaignProgress			= 176,
+	
+	k_EItemActionMarket_Add						= 177,
+	k_EItemActionMarket_Remove					= 178,
 	// Let's be consistent with the underscores please.
 	// k_EItemActionYourNewAction, not k_EItemAction_YourNewAction
 	// Yes, it matters. See PchLocalizedNameFromEItemAction for why.
@@ -287,6 +226,7 @@ extern bool BIsActionDestructive( EItemAction );
 enum EItemActionMissingBehavior { kEItemAction_FriendlyNameLookup_ReturnNULLIfMissing, kEItemAction_FriendlyNameLookup_ReturnDummyStringIfMissing };
 extern const char		*PchFriendlyNameFromEItemAction( EItemAction eAction, EItemActionMissingBehavior eMissingBehavior );
 extern const char		*PchLocalizedNameFromEItemAction( EItemAction eAction, CLocalizationProvider &localizationProvider );
+
 
 //-----------------------------------------------------------------------------
 // Purpose: Used to pass audit actions to asset servers for SetUnowned and 
@@ -312,37 +252,29 @@ enum eEconItemFlags_Deprecated
 };
 
 //-----------------------------------------------------------------------------
-// Periodic score events
-//-----------------------------------------------------------------------------
-enum eEconPeriodicScoreEvents
-{
-	kPeriodicScoreEvent_GiftsDistributed	= 0,
-	kPeriodicScoreEvent_DuelsWon			= 1,
-	kPeriodicScoreEvent_MapStampsPurchased	= 2,
-};
-
-//-----------------------------------------------------------------------------
 // Flags for CEconItem
 //-----------------------------------------------------------------------------
 // WARNING!!! Values stored in DB.  DO NOT CHANGE EXISTING VALUES.  Add values to the end.
 enum eEconItemFlags
 {
-	kEconItemFlag_CannotTrade									= 1 << 0,
-	kEconItemFlag_CannotBeUsedInCrafting						= 1 << 1,
-	kEconItemFlag_CanBeTradedByFreeAccounts						= 1 << 2,
-	kEconItemFlag_NonEconomy									= 1 << 3,		// used for items that are meant to not interact in the economy -- these can't be traded, gift-wrapped, crafted, etc.
-	kEconItemFlag_PurchasedAfterStoreCraftabilityChanges2012	= 1 << 4,		// cosmetic items coming from the store are now usable in crafting; this flag is set on all items purchased from the store after this change was made
+	kEconItemFlag_CannotTrade				= 1 << 0,
+	kEconItemFlag_CannotBeUsedInCrafting	= 1 << 1,
+	kEconItemFlag_CanBeTradedByFreeAccounts	= 1 << 2,
+	kEconItemFlag_NonEconomy				= 1 << 3,		// used for items that are meant to not interact in the economy -- these can't be traded, gift-wrapped, crafted, etc.
 
 #ifdef CLIENT_DLL
 #ifdef TF_CLIENT_DLL
-	kEconItemFlagClient_ForceBlueTeam							= 1 << 5,
+	kEconItemFlagClient_ForceBlueTeam		= 1 << 5,
 #endif // TF_CLIENT_DLL
-	kEconItemFlagClient_StoreItem								= 1 << 6,
-	kEconItemFlagClient_Preview									= 1 << 7,		// only set on the client; means "this item is being previewed"
+	kEconItemFlagClient_StoreItem			= 1 << 6,
+	kEconItemFlagClient_Preview				= 1 << 7,		// only set on the client; means "this item is being previewed"
 #endif // CLIENT_DLL
 
 	// combination of the above flags used in code
-	kEconItemFlags_CheckFlags_AllGCFlags						= kEconItemFlag_CannotTrade | kEconItemFlag_CannotBeUsedInCrafting | kEconItemFlag_CanBeTradedByFreeAccounts | kEconItemFlag_NonEconomy | kEconItemFlag_PurchasedAfterStoreCraftabilityChanges2012,
+	kEconItemFlags_CheckFlags_CannotTrade			= kEconItemFlag_CannotTrade,
+	kEconItemFlags_CheckFlags_NotUsableInCrafting	= kEconItemFlag_CannotBeUsedInCrafting,
+
+	kEconItemFlags_CheckFlags_AllGCFlags			= kEconItemFlags_CheckFlags_CannotTrade | kEconItemFlags_CheckFlags_NotUsableInCrafting,
 };
 
 //-----------------------------------------------------------------------------
@@ -373,13 +305,11 @@ enum eEconItemOrigin
 	kEconItemOrigin_PreviewItem,
 	kEconItemOrigin_SteamWorkshopContribution,
 	kEconItemOrigin_PeriodicScoreReward,
-	kEconItemOrigin_MvMMissionCompletionReward,			// includes loot from both "mission completed" and "tour completed" events
-	kEconItemOrigin_MvMSquadSurplusReward,
-	kEconItemOrigin_RecipeOutput,
-	kEconItemOrigin_QuestDrop,
-	kEconItemOrigin_QuestLoanerItem,
-	kEconItemOrigin_TradeUp,
-	kEconItemOrigin_ViralCompetitiveBetaPassSpread,
+	kEconItemOrigin_Recycling,
+	kEconItemOrigin_TournamentDrop,
+	kEconItemOrigin_StockItem,
+	KEconItemOrigin_QuestReward,
+	KEconItemOrigin_LevelUpReward,
 
 	kEconItemOrigin_Max,
 };
@@ -390,9 +320,6 @@ typedef uint64	itemid_t;
 typedef uint16	item_definition_index_t;
 typedef uint16	attrib_definition_index_t;
 typedef uint32	attrib_value_t;
-typedef uint32	operation_definition_index_t;
-typedef uint8	war_definition_index_t;
-typedef uint8	war_side_t;
 
 // Misc typedefs for clarity.
 typedef uint32	equip_region_mask_t;
@@ -401,18 +328,13 @@ typedef uint8	style_index_t;
 const uint64 INVALID_ITEM_ID							= (itemid_t)-1;
 const item_definition_index_t INVALID_ITEM_DEF_INDEX	= ((item_definition_index_t)-1);
 const attrib_definition_index_t INVALID_ATTRIB_DEF_INDEX= ((attrib_definition_index_t)-1);
-const war_definition_index_t INVALID_WAR_DEF_INDEX		= ((war_definition_index_t)-1);
-const war_side_t INVALID_WAR_SIDE						= ((war_side_t)-1);
-// Hard code the pyro/heavy stuff. Must be in sync with the schema.
-const war_definition_index_t PYRO_VS_HEAVY_WAR_DEF_INDEX= ((war_definition_index_t)0);
-const war_side_t PYRO_VS_HEAVY_WAR_SIDE_HEAVY = ((war_side_t)0);
-const war_side_t PYRO_VS_HEAVY_WAR_SIDE_PYRO = ((war_side_t)1);
 
 //-----------------------------------------------------------------------------
 
 // Standard/default backpack size
-#define DEFAULT_NUM_BACKPACK_SLOTS						300
-#define DEFAULT_NUM_BACKPACK_SLOTS_FREE_TRIAL_ACCOUNT	50
+#define DEFAULT_NUM_BACKPACK_SLOTS_PER_PAGE				100
+#define DEFAULT_NUM_BACKPACK_SLOTS						1000
+#define DEFAULT_NUM_BACKPACK_SLOTS_FREE_TRIAL_ACCOUNT	100
 #define MAX_NUM_BACKPACK_SLOTS							2000
 
 // Current item level range
@@ -420,7 +342,7 @@ const war_side_t PYRO_VS_HEAVY_WAR_SIDE_PYRO = ((war_side_t)1);
 #define MAX_ITEM_LEVEL					100
 
 // Maximum number of attributes allowed on a single item
-#define MAX_ATTRIBUTES_PER_ITEM					15
+#define MAX_ATTRIBUTES_PER_ITEM					32
 // The maximum length of a single attribute's description
 //	divide by locchar_t, so we can ensure 192 bytes, whether that's 128 wchars on client or 256 utf-8 bytes on gc
 #define MAX_ATTRIBUTE_DESCRIPTION_LENGTH		( 256 / sizeof( locchar_t ) )
@@ -428,8 +350,9 @@ const war_side_t PYRO_VS_HEAVY_WAR_SIDE_PYRO = ((war_side_t)1);
 // The maximum length of an item's name
 #define MAX_ITEM_NAME_LENGTH					128
 #define MAX_ITEM_DESC_LENGTH					256
+#define MAX_ITEM_LONG_DESC_LENGTH				2048
 // The maximum length of an item description. (Extra +1 line is for the base item type line)
-#define MAX_ITEM_DESCRIPTION_LENGTH				((MAX_ATTRIBUTES_PER_ITEM+1) * MAX_ATTRIBUTE_DESCRIPTION_LENGTH)
+// #define MAX_ITEM_DESCRIPTION_LENGTH				((MAX_ATTRIBUTES_PER_ITEM+1) * MAX_ATTRIBUTE_DESCRIPTION_LENGTH)
 
 // For custom user-naming of econ items.
 #define MAX_ITEM_CUSTOM_NAME_LENGTH				40
@@ -438,14 +361,8 @@ const war_side_t PYRO_VS_HEAVY_WAR_SIDE_PYRO = ((war_side_t)1);
 #define MAX_ITEM_CUSTOM_DESC_LENGTH				80
 #define MAX_ITEM_CUSTOM_DESC_DATABASE_SIZE		((4 * MAX_ITEM_CUSTOM_DESC_LENGTH) + 1)
 
-#define MAX_KILLCAM_MESSAGE_LENGTH				40
-#define MAX_KILLCAM_MESSAGE_DATABASE_SIZE		((4 * MAX_KILLCAM_MESSAGE_LENGTH) + 1)
-
 // max length in the DB for claim codes
 #define MAX_CLAIM_CODE_LENGTH					128	
-
-// The item definition index reserved for the preview item
-#define PREVIEW_ITEM_DEFINITION_INDEX			(item_definition_index_t)-1
 
 // The number of items to work on in a job before checking if a yield is necessary
 #define MAX_ITEMS_BEFORE_YIELD					50
@@ -455,7 +372,7 @@ const war_side_t PYRO_VS_HEAVY_WAR_SIDE_PYRO = ((war_side_t)1);
 #define RGB_INT_BLUE 5801378
 
 // Custom textures
-const int k_nCustomImageSize = 128;
+const int k_nCustomImageSize = 256;
 const int k_nMaxCustomImageFileSize = k_nCustomImageSize*k_nCustomImageSize*4 + 4*1024; // Is this about right?
 
 //-----------------------------------------------------------------------------
@@ -467,32 +384,21 @@ enum EEconItemQuality
 	AE_UNDEFINED = -1,
 
 	AE_NORMAL = 0,
-	AE_RARITY1 = 1,			// Genuine
-	AE_RARITY2 = 2,			// Customized (unused)
-	AE_VINTAGE = 3,			// Vintage has to stay at 3 for backwards compatibility
-	AE_RARITY3,				// Artisan
-	AE_UNUSUAL,				// Unusual
+	AE_GENUINE = 1,
+	AE_VINTAGE,	
+	AE_UNUSUAL,
 	AE_UNIQUE,
 	AE_COMMUNITY,
 	AE_DEVELOPER,
 	AE_SELFMADE,
-	AE_CUSTOMIZED,			// (unused)
+	AE_CUSTOMIZED,
 	AE_STRANGE,
 	AE_COMPLETED,
 	AE_HAUNTED,
-	AE_COLLECTORS,
-	AE_PAINTKITWEAPON,
-
-	AE_RARITY_DEFAULT,
-	AE_RARITY_COMMON,
-	AE_RARITY_UNCOMMON,
-	AE_RARITY_RARE,
-	AE_RARITY_MYTHICAL,
-	AE_RARITY_LEGENDARY,
-	AE_RARITY_ANCIENT,
+	AE_TOURNAMENT,
+	AE_FAVORED,
 
 	AE_MAX_TYPES,
-	AE_DEPRECATED_UNIQUE = 3,
 };
 
 
@@ -510,9 +416,7 @@ enum attrib_colors_t
 	ATTRIB_COL_ITEMSET_MISSING,
 	ATTRIB_COL_BUNDLE_ITEM,
 	ATTRIB_COL_LIMITED_USE,
-	ATTRIB_COL_component_flags,
-	ATTRIB_COL_LIMITED_QUANTITY,
-
+	ATTRIB_COL_ITEM_FLAGS,
 	ATTRIB_COL_RARITY_DEFAULT,
 	ATTRIB_COL_RARITY_COMMON,
 	ATTRIB_COL_RARITY_UNCOMMON,
@@ -522,7 +426,6 @@ enum attrib_colors_t
 	ATTRIB_COL_RARITY_ANCIENT,
 	ATTRIB_COL_RARITY_IMMORTAL,
 	ATTRIB_COL_RARITY_ARCANA,
-
 	ATTRIB_COL_STRANGE,
 	ATTRIB_COL_UNUSUAL,
 
@@ -535,12 +438,23 @@ enum attrib_colors_t
 const char *EconQuality_GetQualityString( EEconItemQuality eQuality );
 const char *EconQuality_GetColorString( EEconItemQuality eQuality );
 const char *EconQuality_GetLocalizationString( EEconItemQuality eQuality );
-EEconItemQuality EconQuality_GetQualityFromString( const char* pszQuality );
 
 // Sort order for rarities
 int EconQuality_GetRarityScore( EEconItemQuality eQuality );
 
+int EconRarity_CombinedItemAndPaintRarity( int nItemDefRarity, int nPaintRarity );
+
+int EconWear_ToIntCategory( float flWear );
+float EconWear_FromIntCategory( int nWearCategory );
+
+int EconMinutes_ToRoundMinHrsCategory( float flMinutes );
+float EconMinutes_FromRoundMinHrsCategory( int nRoundMinHrsCategory );
+
+int EconTintID_ToRoundCategory( uint32 unTintID );
+uint32 EconTintID_FromRoundCategory( int nRoundCategory );
+
 extern attrib_colors_t GetAttribColorIndexForName( const char* pszName );
+
 extern const char *GetColorNameForAttribColor( attrib_colors_t unAttribColor );
 extern const char *GetHexColorForAttribColor( attrib_colors_t unAttribColor );
 
@@ -560,209 +474,69 @@ extern const char *g_szRecipeCategoryStrings[NUM_RECIPE_CATEGORIES];
 
 //-----------------------------------------------------------------------------
 // Kill eater support.
-// Strange counters and strange parts
 //-----------------------------------------------------------------------------
-#if defined( TF_DLL ) || defined( TF_GC_DLL ) || defined( TF_CLIENT_DLL )
 enum kill_eater_event_t
 {
-	kKillEaterEvent_PlayerKill = 0,			// default; items with no event type specified use this
-	kKillEaterEvent_UberActivated,
-	kKillEaterEvent_PlayerKillAssist,
-	kKillEaterEvent_PlayerKillsBySentry,	// your sentry you built with this item killed someone
-	kKillEaterEvent_PeeVictims,				// this game is great
-	kKillEaterEvent_BackstabAbsorbed,		// you're a sniper and you got a spy to stab your Razorback
-	kKillEaterEvent_HeadsTaken,				// this also tracks kills but with different flavor text
-	kKillEaterEvent_Humiliations,			// fish kills!
-	kKillEaterEvent_GiftsGiven,				// number of gifts given
-	kKillEaterEvent_DeathsFeigned,			// number of deaths successfully feigned with the Dead Ringer
-	kKillEaterEvent_ScoutKill,				// (part)
-	kKillEaterEvent_SniperKill,				// (part)
-	kKillEaterEvent_SoldierKill,			// (part)
-	kKillEaterEvent_DemomanKill,			// (part)
-	kKillEaterEvent_HeavyKill,				// (part)
-	kKillEaterEvent_PyroKill,				// (part)
-	kKillEaterEvent_SpyKill,				// (part)
-	kKillEaterEvent_EngineerKill,			// (part)
-	kKillEaterEvent_MedicKill,				// (part)
-	kKillEaterEvent_BuildingDestroyed,		// (part)
-	kKillEaterEvent_ProjectileReflect,		// (part)
-	kKillEaterEvent_HeadshotKill,			// (part)
-	kKillEaterEvent_AirborneEnemyKill,		// (part) (enemy is in the air when they die)
-	kKillEaterEvent_GibKill,				// (part)
-	kKillEaterEvent_BuildingSapped,			// a sapper was doing damage to this building while it was destroyed
-	kKillEaterEvent_PlayerTickle,			// we used our comedy holiday gloves to force someone else to laugh
-	kKillEaterEvent_PlayerKillByBootStomp,	// we killed a player by transferring our falling damage onto them
-	kKillEaterEvent_PlayerKillDuringFullMoon,				// (part) we killed a player during the full moon holiday event (GC-updated)
-	kKillEaterEvent_PlayerKillStartDomination,				// (part) we killed a player and this kill was enough to start our domination of them
-	kKillEaterEvent_PlayerKillAlreadyDominated,				// (part) we killed a player with this weapon that we were already dominating
-	kKillEaterEvent_PlayerKillRevenge,						// (part) we killed a player with this weapon when that player was dominating us
-	kKillEaterEvent_PlayerKillPosthumous,					// (part) we killed a player after we were already dead (afterburn, stray rocket, etc.)
-	kKillEaterEvent_BurningAllyExtinguished,				// (part) we used urine/milk/flamethrower/whatever to put out the fire on an ally that was burning
-	kKillEaterEvent_PlayerKillCritical,						// (part) we killed a player with a shot that was a critical
-	kKillEaterEvent_PlayerKillWhileExplosiveJumping,		// (part) we killed a player while we were rocket/sticky-jumping
-	kKillEaterEvent_PlayerKillFriend,						// (part) we killed a player who is a Steam friend (GC-updated)
-	kKillEaterEvent_SapperDestroyed,						// (part) we destroyed a sapper that was on a friendly building
-	kKillEaterEvent_InvisibleSpiesKilled,					// (part) we killed an invisible spy
-	kKillEaterEvent_MedicsWithFullUberKilled,				// (part) we killed a fully ubered medic
-	kKillEaterEvent_RobotsDestroyed,						// (part) we killed a robot in MvM
-	kKillEaterEvent_MinibossRobotsDestroyed,				// (part) we killed a miniboss robot in MvM
-	kKillEaterEvent_RobotsDestroyedAfterPenetration,		// (part) we killed a robot with a shot that had already penetrated another robot
-	kKillEaterEvent_RobotHeadshotKills,						// (part) like kKillEaterEvent_HeadshotKill, but only for robots
-	kKillEaterEvent_RobotsSlowed,							// (part) we hit some robots with Jarate and now they're slow
-	kKillEaterEvent_KillWhileLowHealth,						// (part) we killed someone while we had <10% max health
-	kKillEaterEvent_HalloweenKill,							// (part) we killed someone during the Halloween holiday
-	kKillEaterEvent_HalloweenKillRobot,						// (part) we killed a robot in MvM during the Halloween holiday
-	kKillEaterEvent_DefenderKill,							// (part) we killed someone carrying the intel, pushing the cart, or capping a point
-	kKillEaterEvent_UnderwaterKill,							// (part) we killed someone who was completely submerged
-	kKillEaterEvent_KillWhileUbercharged,					// (part) we killed someone while we were invulnerable
-	kKillEaterEvent_FoodEaten,								// We ate our food
-	kKillEaterEvent_BannersDeployed,						// We deployed a banner buff
-	kKillEaterEvent_NEGATIVE_SniperShotsMissed,				// (part) we shot our sniper rifle and didnt hit anything
-	kKillEaterEvent_NEGATIVE_UbersDropped,					// (part) we died with a full ubercharge
-	kKillEaterEvent_NEGATIVE_DeathsWhileCarryingBuilding,	// (part) we died while carrying a building
-	kKillEaterEvent_NEGATIVE_DeathsFromCratering,			// (part) we died from cratering
-	kKillEaterEvent_NEGATIVE_DeathsFromEnvironment,			// (part) we died from environmental damage
-	kKillEaterEvent_NEGATIVE_Deaths,						// (part) we died :(
-	kKillEaterEvent_TimeCloaked,							// Time we are cloaked
-	kKillEaterEvent_HealingProvided,						// Health Provided to Allies
-	kKillEaterEvent_TeleportsProvided,						// Teleports Provided to Allies
-	kKillEaterEvent_TanksDestroyed,							// (part) we dealt the killing blow to a tank in MvM
-	kKillEaterEvent_LongDistanceKill,						// (part) we dealt the killing blow (while alive) from far away
-	kKillEaterEvent_UniqueEvent__KilledAccountWithItem,					// (part) (unique event) how many individual accounts have we killed?
-//	kKillEaterEvent_UniqueEvent__PlayedWithAccountIDWhileWearingItem,	// (part) (unique event) how many individual accounts have we played a round with?
-	kKillEaterEvent_PointsScored,						// How many score points we've accumulated
-	kKillEaterEvent_DoubleDonks,						// Double-Donks scored with the loose cannon
-	kKillEaterEvent_TeammatesWhipped,					// Whipped Teammates with the Disciplinary Action
-	kKillEaterEvent_VictoryTimeKill,					// Kills while in Victory / Bonus Time
-	kKillEaterEvent_RobotScoutKill,				// (part)
-	kKillEaterEvent_RobotSniperKill,			// (part) Not yet shipped
-	kKillEaterEvent_RobotSoldierKill,			// (part) Not yet shipped
-	kKillEaterEvent_RobotDemomanKill,			// (part) Not yet shipped
-	kKillEaterEvent_RobotHeavyKill,				// (part) Not yet shipped
-	kKillEaterEvent_RobotPyroKill,				// (part) Not yet shipped
-	kKillEaterEvent_RobotSpyKill,				// (part)
-	kKillEaterEvent_RobotEngineerKill,			// (part) Not yet shipped
-	kKillEaterEvent_RobotMedicKill,				// (part) Not yet shipped
-	kKillEaterEvent_TauntKill,					// Taunt Kills
-	kKillEaterEvent_PlayersWearingUnusualKill,	// (part) we killed someone wearing an unusual hat (!)
-	kKillEaterEvent_BurningEnemyKill,			// (part) we killed someone who was on fire up until they died
-	kKillEaterEvent_KillstreaksEnded,			// (part) we killed someone who was on a killstreak
-	kKillEaterEvent_KillcamTaunts,				// (cosmetic part) we appeared wearing this item in the killcam taunting
-	kKillEaterEvent_DamageDealt,				// (part) we have dealt this much damage to people
-	kKillEaterEvent_FiresSurvived,				// (cosmetic part) we were lit on fire wearing this item and then the fire went out and we were still alive
-	kKillEaterEvent_AllyHealingDone,			// (part) we have healed this much (directly, so doesn't count Mad Milk, etc. because we lose the item pointer at some point); also ignores self heal (ie., Concheror buff, MvM upgrades)
-	kKillEaterEvent_PointBlankKills,			// (part) we killed someone while standing right next to them
-	kKillEaterEvent_PlayerKillsByManualControlOfSentry,	// Kills from wrangled a sentry
-	kKillEaterEvent_CosmeticKills,				// (cosmetic part) kills
-	kKillEaterEvent_FullHealthKills,			// (part) Kills while at fullhealth
-	kKillEaterEvent_TauntingPlayerKills,		// (part) Taunting Player Kills
-	kKillEaterEvent_Halloween_OverworldKills,
-	kKillEaterEvent_Halloween_UnderworldKills,
-	kKillEaterEvent_Halloween_MinigamesWon,
-	kKillEaterEvent_NonCritKills,				// part kills that are not crit or mini crit
-	kKillEaterEvent_PlayersHit,					// part
-	kKillEaterEvent_CosmeticAssists,			// Cosmetic part
-	kKillEaterEvent_CosmeticOperationContractsCompleted, // Operation Stat Tracker
-	kKillEaterEvent_CosmeticOperationKills, // Operation Stat Tracker
-	kKillEaterEvent_CosmeticOperationContractsPoints,
-	kKillEaterEvent_CosmeticOperationBonusPoints,
-	kKillEaterEvent_TauntsPerformed,			// Strange Taunts
-	kKillEaterEvent_InvasionKills,				// Kills During Invasion Event.  Locked after Operation
-	kKillEaterEvent_InvasionKillsOnMap01,
-	kKillEaterEvent_InvasionKillsOnMap02,
-	kKillEaterEvent_InvasionKillsOnMap03,
-	kKillEaterEvent_InvasionKillsOnMap04,
-	kKillEaterEvent_HalloweenSouls,				// Halloween
-	kKillEaterEvent_HalloweenContractsCompleted,
-	kKillEaterEvent_HalloweenOfferings,
-	kKillEaterEvent_PowerupBottlesUsed,
+	kKillEaterEvent_PlayerKill = 0,		
+	kKillEaterEvent_MVPs,
+
+// 	kKillEaterEvent_KillAssists,			// not yet implemented
+// 	kKillEaterEvent_Wins,
+// 	kKillEaterEvent_Treants_Created,
+// 	kKillEaterEvent_Omnislash_Jumps,
+// 	kKillEaterEvent_Blade_Fury_Damage,
+// 	kKillEaterEvent_Blade_Dance_Crits,
+// 	kKillEaterEvent_Wards_Placed,
+// 	kKillEaterEvent_Killing_Sprees,			// not yet implemented
+// 	kKillEaterEvent_Trees_Created,
+// 	kKillEaterEvent_Carries_Killed,			// not yet implemented
+// 	kKillEaterEvent_First_Blood,
+// 	kKillEaterEvent_Godlike,
+// 	kKillEaterEvent_Gold_Earned,
+// 	kKillEaterEvent_Gold_Spent,
+// 	kKillEaterEvent_Towers_Destroyed,
+// 	kKillEaterEventType_Bounty_TrackedKills,
+// 	kKillEaterEventType_Bounty_TrackedInvisKills,
+// 	kKillEaterEventType_Bounty_InvisJinadaHits,
+// 	kKillEaterEventType_Bounty_TrackGold,
+// 	kKillEaterEventType_Tide_GoodRavages,
+// 	kKillEaterEventType_Windrunner_DoubleShackles,
+// 	kKillEaterEventType_Windrunner_GoodPowershots,
+// 	kKillEaterEventType_Invoker_SunstrikeKills,
+// 	kKillEaterEventType_Couriers_Purchased,
+// 	kKillEaterEventType_Wards_Purchased,
+// 	kKillEaterEventType_Tide_EnemiesGushed,
+// 	kKillEaterEventType_Axe_Culls,
+// 	kKillEaterEventType_Axe_BattleHungerKills,
+// 	kKillEaterEventType_Axe_LowHealthKills,
+// 	kKillEaterEventType_Axe_CalledDamageDone,
+// 	kKillEaterEventType_Axe_CalledDamageTaken,
+// 	kKillEaterEventType_Invoker_TornadoKills,
+// 	kKillEaterEventType_Games_Viewed,
+// 	kKillEaterEventType_Sven_DoubleStuns,
+// 	kKillEaterEventType_Sven_WarcryAssists,
+// 	kKillEaterEventType_Sven_CleaveDoubleKills,
+// 	kKillEaterEventType_Sven_TeleportInterrupts,
+// 	kKillEaterEventType_Faceless_MultiChrono,
+// 	kKillEaterEventType_Faceless_ChronoKills,
+// 	kKillEaterEventType_Ursa_MultiShocks,
+// 	kKillEaterEventType_RoshanKills,
+
 
 	// NEW ENTRIES MUST BE ADDED AT THE BOTTOM
 };
-#else
-	// projects that actually want to implement kill-eater functionality will want to put their list somewhere around here,
-	// but unfortunately the base code relies on this specific definition being entry 0
-	static const uint32 kKillEaterEvent_PlayerKill = 0;
-#endif // defined( TF_DLL ) || defined( TF_GC_DLL ) || defined( TF_CLIENT_DLL )
 
-enum strange_event_restriction_t
-{
-	kStrangeEventRestriction_None = 0,				// default -- unassigned, all events pass
-	kStrangeEventRestriction_VictimSteamAccount,	// the victim must have a specific Steam ID
-#if defined( TF_DLL ) || defined( TF_GC_DLL ) || defined( TF_CLIENT_DLL )
-	kStrangeEventRestriction_Map,					// must be playing on a certain map when the event takes place
-	kStrangeEventRestriction_Competitive,			// must be playing in a competitive game
-#endif // defined( TF_DLL ) || defined( TF_GC_DLL ) || defined( TF_CLIENT_DLL )
-	kStrangeEventRestrictionCount
-};
+// Make sure to update this when you add a new type.
+bool EventRequiresVictim( kill_eater_event_t ke_event );
 
 // Ugh -- these are shared between the GC and the client. Maybe #define is slightly better than
 // magic string literals?
 #define KILL_EATER_RANK_LEVEL_BLOCK_NAME		"KillEaterRank"
 
-#ifdef TF_DLL
-	class CTFWeaponBase *GetKilleaterWeaponFromDamageInfo( const class CTakeDamageInfo *pInfo );
-	// A specific CEconEntity caused a kill eater event to happen. For example, a weapon might cause a
-	// player kill event so we want to update the stats for that specific weapon.
-	void EconEntity_OnOwnerKillEaterEvent( class CEconEntity *pEconEntity, class CTFPlayer *pOwner, class CTFPlayer *pVictim, kill_eater_event_t eEventType, int nIncrementValue = 1 );
-	void EconItemInterface_OnOwnerKillEaterEvent( class IEconItemInterface *pEconEntity, class CTFPlayer *pOwner, class CTFPlayer *pVictim, kill_eater_event_t eEventType, int nIncrementValue = 1 );
-	void EconEntity_OnOwnerKillEaterEventNoPartner( class CEconEntity *pEconEntity, class CTFPlayer *pOwner, kill_eater_event_t eEventType, int nIncrementValue = 1 );
-	void EconItemInterface_OnOwnerKillEaterEventNoPartner( class IEconItemInterface *pEconEntity, class CTFPlayer *pOwner, kill_eater_event_t eEventType, int nIncrementValue = 1 );
-
-	void HatAndMiscEconEntities_OnOwnerKillEaterEvent( class CTFPlayer *pOwner, class CTFPlayer *pVictim, kill_eater_event_t eEventType, int nIncrementValue = 1 );
-	void HatAndMiscEconEntities_OnOwnerKillEaterEventNoParter( class CTFPlayer *pOwner, kill_eater_event_t eEventType, int nIncrementValue = 1 );
-
-	void EconEntity_NonEquippedItemKillTracking_NoPartner( class CTFPlayer *pOwner, item_definition_index_t iDefIndex, kill_eater_event_t eEventType, int nIncrementValue = 1 );
-	void EconEntity_NonEquippedItemKillTracking_NoPartnerBatched( class CTFPlayer *pOwner, item_definition_index_t iDefIndex, kill_eater_event_t eEventType, int nIncrementValue = 1 );
-	// Batching system for frequent events (ie., damage dealing). The game server will flush all batches
-	// at specific time intervals and send up one composite message to avoid flooding the GC. Batched
-	// messages will only work correctly for types that support increment values. Because the game client
-	// and game server don't know which event types support increment values we can't do any checking
-	// before we send the message.
-	void EconEntity_OnOwnerKillEaterEvent_Batched( class CEconEntity *pEconEntity, class CTFPlayer *pOwner, class CTFPlayer *pVictim, kill_eater_event_t eEventType, int nIncrementValue = 1 );
-	void EconItemInterface_OnOwnerKillEaterEvent_Batched( class IEconItemInterface *pEconEntity, class CTFPlayer *pOwner, class CTFPlayer *pVictim, kill_eater_event_t eEventType, int nIncrementValue = 1 );
-	void KillEaterEvents_FlushBatches();
-#endif // TF_DLL
-
-int GetKillEaterAttrCount();
-int GetKillEaterAttrCount_UserCustomizable();
-const class CEconItemAttributeDefinition *GetKillEaterAttr_Score( int i );
-const class CEconItemAttributeDefinition *GetKillEaterAttr_Type( int i );
-const class CEconItemAttributeDefinition *GetKillEaterAttr_Restriction( int i );
-const class CEconItemAttributeDefinition *GetKillEaterAttr_RestrictionValue( int i );
-bool GetKillEaterAttr_IsUserCustomizable( int i );
-bool GetKilleaterValueByEvent( const class IEconItemInterface* pItem, const kill_eater_event_t& EEventType, uint32& value );
-bool BIsItemStrange( const class IEconItemInterface *pItem );
-
-const int COLLECTION_CRAFTING_ITEM_COUNT = 10;
-const char* GetCollectionCraftingInvalidReason( const class IEconItemInterface *pTestItem, const class IEconItemInterface *pSourceItem );
-
-const int HALLOWEEN_OFFERING_ITEM_COUNT = 3;
-const char* GetHalloweenOfferingInvalidReason( const class IEconItemInterface *pTestItem, const class IEconItemInterface *pSourceItem );
-
-const int CRAFT_COMMON_STATCLOCK_ITEM_COUNT = 5;
-const char* GetCraftCommonStatClockInvalidReason( const class IEconItemInterface *pTestItem, const class IEconItemInterface *pSourceItem );
-
-int GetMaxCardUpgradesPerItem();
-const class CEconItemAttributeDefinition *GetCardUpgradeForIndex( const class IEconItemInterface *pItem, int i );
-
-#define GUARANTEED_OUTPUT	(1<<0)
-#define GUARANTEED_INPUT	(1<<1)
-
-#define DYNAMIC_RECIPE_FLAG_IS_OUTPUT			(1<<0)
-#define DYNAMIC_RECIPE_FLAG_IS_UNTRADABLE		(1<<1)
-#define DYNAMIC_RECIPE_FLAG_PARAM_ITEM_DEF_SET	(1<<2)
-#define DYNAMIC_RECIPE_FLAG_PARAM_QUALITY_SET	(1<<3)
-#define DYNAMIC_RECIPE_FLAG_PARAM_ATTRIBUTE_SET_ALL	(1<<4)
-#define DYNAMIC_RECIPE_FLAG_PARAM_ATTRIBUTE_SET_ANY	(1<<5)
-
-#define k_ObjectiveTrackerFlag_OwnerClient	(1<<0)
-#define k_ObjectiveTrackerFlag_Servers		(1<<1)
-#define k_ObjectiveTrackerFlag_AllClients	(1<<2)
-
-#define k_ObjectiveTrackerFlag_ClientAndServer ( k_ObjectiveTrackerFlag_OwnerClient | k_ObjectiveTrackerFlag_Servers )
-
-const float k_MaxElapsedQuestReportTime = 10.f;
+int GetKillEaterAttrPairCount();
+const class CEconItemAttributeDefinition *GetKillEaterAttrPair_Score( int i );
+const class CEconItemAttributeDefinition *GetKillEaterAttrPair_Type( int i );
+bool GetKillEaterAttrPair_IsUserCustomizable( int i );
 
 //===============================================================================================================
 // POSITION HANDLING
@@ -790,12 +564,10 @@ const float k_MaxElapsedQuestReportTime = 10.f;
 //			Bits 1-16 are the method by the player found the item (see unacknowledged_item_inventory_positions_t)
 //		Equipped state is stored elsewhere.
 //		This is the only format that should exist on clients.
-// Note (1/15/2013) For backwards compatibility, if the value is 0 item is considered unacknowledged too
 
 
 enum unacknowledged_item_inventory_positions_t
 {
-	UNACK_ITEM_UNKNOWN = 0,
 	UNACK_ITEM_DROPPED = 1,
 	UNACK_ITEM_CRAFTED,
 	UNACK_ITEM_TRADED,
@@ -812,17 +584,10 @@ enum unacknowledged_item_inventory_positions_t
 	UNACK_ITEM_PREVIEW_ITEM,
 	UNACK_ITEM_PREVIEW_ITEM_PURCHASED,
 	UNACK_ITEM_PERIODIC_SCORE_REWARD,
-	UNACK_ITEM_MVM_MISSION_COMPLETION_REWARD,
-	UNACK_ITEM_MVM_SQUAD_SURPLUS_REWARD,
-	UNACK_ITEM_FOUND_HOLIDAY_GIFT,
-	UNACK_ITEM_COMMUNITY_MARKET_PURCHASE,
-	UNACK_ITEM_RECIPE_OUTPUT,
-	UNACK_ITEM_HIDDEN_QUEST_ITEM,
-	UNACK_ITEM_QUEST_OUTPUT,
-	UNACK_ITEM_QUEST_LOANER,
-	UNACK_ITEM_TRADE_UP,
-	UNACK_ITEM_QUEST_MERASMISSION_OUTPUT,
-	UNACK_ITEM_VIRAL_COMPETITIVE_BETA_PASS_SPREAD,
+	UNACK_ITEM_RECYCLING,
+	UNACK_ITEM_TOURNAMENT_DROP,
+	UNACK_ITEM_QUEST_REWARD,
+	UNACK_ITEM_LEVEL_UP_REWARD,
 #ifdef ENABLE_STORE_RENTAL_BACKEND
 	UNACK_ITEM_RENTAL_PURCHASE,
 #endif
@@ -830,9 +595,9 @@ enum unacknowledged_item_inventory_positions_t
 	UNACK_NUM_METHODS,
 };
 
-extern const char *g_pszItemPickupMethodStrings[UNACK_NUM_METHODS - 1];			// -1 because UNACK_ITEM_DROPPED is index 1, not 0
-extern const char *g_pszItemPickupMethodStringsUnloc[UNACK_NUM_METHODS - 1];
-extern const char *g_pszItemFoundMethodStrings[UNACK_NUM_METHODS - 1];
+extern const char *g_pszItemPickupMethodStrings[UNACK_NUM_METHODS];
+extern const char *g_pszItemPickupMethodStringsUnloc[UNACK_NUM_METHODS];
+extern const char *g_pszItemFoundMethodStrings[UNACK_NUM_METHODS];
 
 enum
 {
@@ -842,7 +607,7 @@ enum
 	kGCItemSort_SortByDefIndex		= 2,
 	kGCItemSort_SortByRarity		= 3,
 	kGCItemSort_SortByType			= 4,
-	kGCItemSort_SortByDate			= 5,
+	kGCItemSort_SortByQuality		= 5,
 
 	kGCItemSort_GameSpecificBase	= 100,
 };
@@ -852,15 +617,16 @@ enum
 {
 	kTFGCItemSort_SortByClass		= kGCItemSort_GameSpecificBase + 1,
 	kTFGCItemSort_SortBySlot		= kGCItemSort_GameSpecificBase + 2,
+	kDOTAGCItemSort_SortByHero		= kGCItemSort_GameSpecificBase + 3,
 };
 
 enum
 {
 	kBackendPosition_Unacked	= 1 << 30,
-	kBackendPosition_NewFormat	= 1 << 31,
+	kBackendPosition_Reserved	= 1 << 31,
 
 	kBackendPositionMask_Position		= 0x0000ffff,
-	kBackendPositionMask_FormatFlags	= (kBackendPosition_Unacked | kBackendPosition_NewFormat),
+	kBackendPositionMask_FormatFlags	= (kBackendPosition_Unacked | kBackendPosition_Reserved),
 };
 
 inline void SetBackpackPosition( uint32 *pPosition, uint32 iPackPosition )
@@ -871,15 +637,10 @@ inline void SetBackpackPosition( uint32 *pPosition, uint32 iPackPosition )
 	(*pPosition) &= ~kBackendPosition_Unacked;	
 }
 
-inline bool IsNewPositionFormat( uint32 iBackendPosition )
-{
-	return ( iBackendPosition & kBackendPosition_NewFormat ) != 0;
-}
-
 inline bool IsUnacknowledged( uint32 iBackendPosition )
 {
 	// For backwards compatibility, we consider position 0 as unacknowledged too
-	return (iBackendPosition == 0 || (iBackendPosition & kBackendPosition_Unacked) != 0);
+	return ( iBackendPosition == 0 || (iBackendPosition & kBackendPosition_Unacked) != 0 );
 }
 
 inline int ExtractBackpackPositionFromBackend( uint32 iBackendPosition )
@@ -897,7 +658,7 @@ inline unacknowledged_item_inventory_positions_t GetUnacknowledgedReason( uint32
 
 inline uint32 GetUnacknowledgedPositionFor( unacknowledged_item_inventory_positions_t iMethod )
 {
-	return (iMethod | kBackendPosition_Unacked | kBackendPosition_NewFormat);
+	return ( iMethod | kBackendPosition_Unacked | kBackendPosition_Reserved );
 }
 
 //-----------------------------------------------------------------------------
@@ -911,22 +672,17 @@ enum EEconItemPreviewEventIDs
 };
 
 //-----------------------------------------------------------------------------
-// List of holidays. These are sorted by priority. Needs to match static IIsHolidayActive *s_HolidayChecks
+//
 //-----------------------------------------------------------------------------
 enum EHoliday
 {
-	kHoliday_None							= 0,		// must stay at zero for backwards compatibility
-	kHoliday_TFBirthday,
+	kHoliday_None							= 0,		// must stay at zero for backwards compatability
 	kHoliday_Halloween,
 	kHoliday_Christmas,
-	kHoliday_CommunityUpdate,
-	kHoliday_EOTL,
-	kHoliday_Valentines,
-	kHoliday_MeetThePyro,
 	kHoliday_FullMoon,
 	kHoliday_HalloweenOrFullMoon,
-	kHoliday_HalloweenOrFullMoonOrValentines,
-	kHoliday_AprilFools,
+	kHoliday_Easter,
+
 	kHolidayCount,
 };
 
@@ -942,6 +698,7 @@ enum ECartItemType
 	kCartItem_Rental_7Day,
 };
 
+void GetHexStringFromPaintColor( float flPaint, char *pszRGB );
 inline bool IsRentalCartItemType( ECartItemType eCartType )
 {
 	return eCartType == kCartItem_Rental_1Day
@@ -949,17 +706,5 @@ inline bool IsRentalCartItemType( ECartItemType eCartType )
 		|| eCartType == kCartItem_Rental_7Day;
 }
 
-const uint8	 k_unItemRarity_Any = 0xFF;
-const uint8	 k_unItemQuality_Any = 0xFF;
-
-typedef int		econ_tag_handle_t;
-
-enum EItemUntradability
-{
-	k_Untradability_Temporary	= 1<<1,
-	k_Untradability_Permanent	= 1<<2,
-};
-
-#define INVALID_ECON_TAG_HANDLE	((econ_tag_handle_t)-1)
 
 #endif // ACTUAL_ECON_ITEM_CONSTANTS_H

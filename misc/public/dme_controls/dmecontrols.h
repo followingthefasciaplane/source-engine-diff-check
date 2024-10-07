@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -62,6 +62,7 @@ void SetElementPropertiesChoices( IElementPropertiesChoices *pChoices );
 class CDmeMDLPanel;
 class CMDLSequencePicker;
 class CMDLPicker;
+class CParticlePicker;
 class CSequencePicker;
 class CDmePicker;
 class CSoundPicker;

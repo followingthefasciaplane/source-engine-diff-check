@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -7,7 +7,7 @@
 #include "cbase.h"
 #include "filesystem.h"
 #include "viewangleanim.h"
-#include "KeyValues.h"
+#include "keyvalues.h"
 
 #include "tier0/memdbgon.h"
 
@@ -122,7 +122,7 @@ CON_COMMAND( viewanim_load, "load animation from file" )
 		Msg( "No view anim created\n" );
 }
 
-LINK_ENTITY_TO_CLASS( viewangleanim, CViewAngleAnimation );
+LINK_ENTITY_TO_CLASS_CLIENTONLY( viewangleanim, CViewAngleAnimation );
 
 CViewAngleAnimation::CViewAngleAnimation()
 {

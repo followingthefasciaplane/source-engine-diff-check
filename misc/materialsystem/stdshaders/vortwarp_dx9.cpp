@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -18,9 +18,11 @@
 #include "vortwarp_ps30.inc"
 #endif
 
-DEFINE_FALLBACK_SHADER( VortWarp, VortWarp_dx9 )
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
 
-extern ConVar r_flashlight_version2;
+
+DEFINE_FALLBACK_SHADER( VortWarp, VortWarp_dx9 )
 
 struct VortWarp_DX9_Vars_t : public VertexLitGeneric_DX9_Vars_t
 {
@@ -51,6 +53,7 @@ void DrawVortWarp_DX9( CBaseVSShader *pShader, IMaterialVar** params, IShaderDyn
 		( params[info.m_nSelfIllumEnvMapMask_Alpha]->GetFloatValue() != 0.0 ) ;
 	bool bHasFlowMap = ( info.m_nFlowMap != -1 ) && params[info.m_nFlowMap]->IsTexture();
 	bool bHasSelfIllumMap = ( info.m_nSelfIllumMap != -1 ) && params[info.m_nSelfIllumMap]->IsTexture();
+	bool bSRGBReadEnvMap = ( g_pHardwareConfig->GetHDRType() == HDR_TYPE_NONE );
 	
 	BlendType_t blendType;
 	if ( params[info.m_nBaseTexture]->IsTexture() )
@@ -134,10 +137,7 @@ void DrawVortWarp_DX9( CBaseVSShader *pShader, IMaterialVar** params, IShaderDyn
 		if( hasEnvmap )
 		{
 			pShaderShadow->EnableTexture( SHADER_SAMPLER1, true );
-			if( g_pHardwareConfig->GetHDRType() == HDR_TYPE_NONE )
-			{
-				pShaderShadow->EnableSRGBRead( SHADER_SAMPLER1, true );
-			}
+			pShaderShadow->EnableSRGBRead( SHADER_SAMPLER1, bSRGBReadEnvMap );
 		}
 		if( hasFlashlight )
 		{
@@ -189,11 +189,11 @@ void DrawVortWarp_DX9( CBaseVSShader *pShader, IMaterialVar** params, IShaderDyn
 		if ( !g_pHardwareConfig->HasFastVertexTextures() )
 #endif
 		{
-			bool bUseStaticControlFlow = g_pHardwareConfig->SupportsStaticControlFlow();
+			bool bFlattenStaticControlFlow = !g_pHardwareConfig->SupportsStaticControlFlow();
 
 			DECLARE_STATIC_VERTEX_SHADER( vortwarp_vs20 );
 			SET_STATIC_VERTEX_SHADER_COMBO( HALFLAMBERT, bHalfLambert);
-			SET_STATIC_VERTEX_SHADER_COMBO( USE_STATIC_CONTROL_FLOW, bUseStaticControlFlow );
+			SET_STATIC_VERTEX_SHADER_COMBO( FLATTEN_STATIC_CONTROL_FLOW, bFlattenStaticControlFlow );
 			SET_STATIC_VERTEX_SHADER( vortwarp_vs20 );
 			
 			if( g_pHardwareConfig->SupportsPixelShaders_2_b() )
@@ -262,6 +262,24 @@ void DrawVortWarp_DX9( CBaseVSShader *pShader, IMaterialVar** params, IShaderDyn
 		{
 			pShaderShadow->EnableAlphaWrites( true );
 		}
+
+		// Lighting constants
+		pShader->PI_BeginCommandBuffer();
+		if( hasBump )
+		{
+			pShader->PI_SetPixelShaderAmbientLightCube( 5 );
+			pShader->PI_SetPixelShaderLocalLighting( 13 );
+		}
+		pShader->PI_SetVertexShaderAmbientLightCube();
+		if ( ( info.m_nHDRColorScale != -1 ) && pShader->IsHDREnabled() )
+		{
+			pShader->PI_SetModulationPixelShaderDynamicState_LinearColorSpace_LinearScale( 1, params[info.m_nHDRColorScale]->GetFloatValue() );
+		}
+		else
+		{
+			pShader->PI_SetModulationPixelShaderDynamicState_LinearColorSpace( 1 );
+		}
+		pShader->PI_EndCommandBuffer();
 	}
 	else
 	{
@@ -270,43 +288,43 @@ void DrawVortWarp_DX9( CBaseVSShader *pShader, IMaterialVar** params, IShaderDyn
 
 		if( hasBaseTexture )
 		{
-			pShader->BindTexture( SHADER_SAMPLER0, info.m_nBaseTexture, info.m_nBaseTextureFrame );
+			pShader->BindTexture( SHADER_SAMPLER0, TEXTURE_BINDFLAGS_SRGBREAD, info.m_nBaseTexture, info.m_nBaseTextureFrame );
 		}
 		if( hasEnvmap )
 		{
-			pShader->BindTexture( SHADER_SAMPLER1, info.m_nEnvmap, info.m_nEnvmapFrame );
+			pShader->BindTexture( SHADER_SAMPLER1, SRGBReadMask( bSRGBReadEnvMap ), info.m_nEnvmap, info.m_nEnvmapFrame );
 		}
 		if( hasDetailTexture )
 		{
-			pShader->BindTexture( SHADER_SAMPLER2, info.m_nDetail, info.m_nDetailFrame );
+			pShader->BindTexture( SHADER_SAMPLER2, TEXTURE_BINDFLAGS_NONE, info.m_nDetail, info.m_nDetailFrame );
 		}
 		if( !g_pConfig->m_bFastNoBump )
 		{
 			if( hasBump )
 			{
-				pShader->BindTexture( SHADER_SAMPLER3, info.m_nBumpmap, info.m_nBumpFrame );
+				pShader->BindTexture( SHADER_SAMPLER3, TEXTURE_BINDFLAGS_NONE, info.m_nBumpmap, info.m_nBumpFrame );
 			}
 		}
 		else
 		{
 			if( hasBump )
 			{
-				pShaderAPI->BindStandardTexture( SHADER_SAMPLER3, TEXTURE_NORMALMAP_FLAT );
+				pShaderAPI->BindStandardTexture( SHADER_SAMPLER3, TEXTURE_BINDFLAGS_NONE, TEXTURE_NORMALMAP_FLAT );
 			}
 		}
 		if( hasEnvmapMask )
 		{
-			pShader->BindTexture( SHADER_SAMPLER4, info.m_nEnvmapMask, info.m_nEnvmapMaskFrame );
+			pShader->BindTexture( SHADER_SAMPLER4, TEXTURE_BINDFLAGS_NONE, info.m_nEnvmapMask, info.m_nEnvmapMaskFrame );
 		}
 
 		if( hasFlashlight )
 		{
 			Assert( info.m_nFlashlightTexture >= 0 && info.m_nFlashlightTextureFrame >= 0 );
-			pShader->BindTexture( SHADER_SAMPLER7, info.m_nFlashlightTexture, info.m_nFlashlightTextureFrame );
+			pShader->BindTexture( SHADER_SAMPLER7, TEXTURE_BINDFLAGS_NONE, info.m_nFlashlightTexture, info.m_nFlashlightTextureFrame );
 			VMatrix worldToTexture;
 			ITexture *pFlashlightDepthTexture;
 			FlashlightState_t state = pShaderAPI->GetFlashlightStateEx( worldToTexture, &pFlashlightDepthTexture );
-			SetFlashLightColorFromState( state, pShaderAPI );
+			SetFlashLightColorFromState( state, pShaderAPI, false );
 		}
 
 		// Set up light combo state
@@ -317,7 +335,6 @@ void DrawVortWarp_DX9( CBaseVSShader *pShader, IMaterialVar** params, IShaderDyn
 		}
 
 		MaterialFogMode_t fogType = pShaderAPI->GetSceneFogMode();
-		int fogIndex = ( fogType == MATERIAL_FOG_LINEAR_BELOW_FOG_Z ) ? 1 : 0;
 		int numBones = pShaderAPI->GetCurrentNumBones();
 
 		Assert( hasBump );
@@ -329,7 +346,6 @@ void DrawVortWarp_DX9( CBaseVSShader *pShader, IMaterialVar** params, IShaderDyn
 			bool bUseStaticControlFlow = g_pHardwareConfig->SupportsStaticControlFlow();
 
 			DECLARE_DYNAMIC_VERTEX_SHADER( vortwarp_vs20 );
-			SET_DYNAMIC_VERTEX_SHADER_COMBO( DOWATERFOG,  fogIndex );
 			SET_DYNAMIC_VERTEX_SHADER_COMBO( SKINNING,  numBones > 0 );
 			SET_DYNAMIC_VERTEX_SHADER_COMBO( COMPRESSED_VERTS, (int)vertexCompression );
 			SET_DYNAMIC_VERTEX_SHADER_COMBO( NUM_LIGHTS, bUseStaticControlFlow ? 0 : lightState.m_nNumLights );
@@ -342,7 +358,6 @@ void DrawVortWarp_DX9( CBaseVSShader *pShader, IMaterialVar** params, IShaderDyn
 				SET_DYNAMIC_PIXEL_SHADER_COMBO( AMBIENT_LIGHT, lightState.m_bAmbientLight ? 1 : 0 );
 				SET_DYNAMIC_PIXEL_SHADER_COMBO( WRITEWATERFOGTODESTALPHA,  fogType == MATERIAL_FOG_LINEAR_BELOW_FOG_Z &&
 					blendType != BT_BLENDADD && blendType != BT_BLEND && !bIsAlphaTested );
-				SET_DYNAMIC_PIXEL_SHADER_COMBO( PIXELFOGTYPE, pShaderAPI->GetPixelFogCombo() );
 				float warpParam = params[info.m_nWarpParam]->GetFloatValue();
 		//		float selfIllumTint = params[info.m_nSelfIllumTint]->GetFloatValue();
 		//		DevMsg( 1, "warpParam: %f %f\n", warpParam, selfIllumTint );
@@ -356,7 +371,6 @@ void DrawVortWarp_DX9( CBaseVSShader *pShader, IMaterialVar** params, IShaderDyn
 				SET_DYNAMIC_PIXEL_SHADER_COMBO( AMBIENT_LIGHT, lightState.m_bAmbientLight ? 1 : 0 );
 				SET_DYNAMIC_PIXEL_SHADER_COMBO( WRITEWATERFOGTODESTALPHA,  fogType == MATERIAL_FOG_LINEAR_BELOW_FOG_Z &&
 					blendType != BT_BLENDADD && blendType != BT_BLEND && !bIsAlphaTested );
-				SET_DYNAMIC_PIXEL_SHADER_COMBO( PIXELFOGTYPE, pShaderAPI->GetPixelFogCombo() );
 				float warpParam = params[info.m_nWarpParam]->GetFloatValue();
 		//		float selfIllumTint = params[info.m_nSelfIllumTint]->GetFloatValue();
 		//		DevMsg( 1, "warpParam: %f %f\n", warpParam, selfIllumTint );
@@ -370,9 +384,7 @@ void DrawVortWarp_DX9( CBaseVSShader *pShader, IMaterialVar** params, IShaderDyn
 			pShader->SetHWMorphVertexShaderState( VERTEX_SHADER_SHADER_SPECIFIC_CONST_6, VERTEX_SHADER_SHADER_SPECIFIC_CONST_7, SHADER_VERTEXTEXTURE_SAMPLER0 );
 
 			DECLARE_DYNAMIC_VERTEX_SHADER( vortwarp_vs30 );
-			SET_DYNAMIC_VERTEX_SHADER_COMBO( DOWATERFOG, fogIndex );
 			SET_DYNAMIC_VERTEX_SHADER_COMBO( SKINNING, numBones > 0 );
-			SET_DYNAMIC_VERTEX_SHADER_COMBO( MORPHING, pShaderAPI->IsHWMorphingEnabled() );
 			SET_DYNAMIC_VERTEX_SHADER_COMBO( COMPRESSED_VERTS, (int)vertexCompression );
 			SET_DYNAMIC_VERTEX_SHADER( vortwarp_vs30 );
 
@@ -381,7 +393,6 @@ void DrawVortWarp_DX9( CBaseVSShader *pShader, IMaterialVar** params, IShaderDyn
 			SET_DYNAMIC_PIXEL_SHADER_COMBO( AMBIENT_LIGHT, lightState.m_bAmbientLight ? 1 : 0 );
 			SET_DYNAMIC_PIXEL_SHADER_COMBO( WRITEWATERFOGTODESTALPHA,  fogType == MATERIAL_FOG_LINEAR_BELOW_FOG_Z &&
 				blendType != BT_BLENDADD && blendType != BT_BLEND && !bIsAlphaTested );
-			SET_DYNAMIC_PIXEL_SHADER_COMBO( PIXELFOGTYPE, pShaderAPI->GetPixelFogCombo() );
 			float warpParam = params[info.m_nWarpParam]->GetFloatValue();
 			//		float selfIllumTint = params[info.m_nSelfIllumTint]->GetFloatValue();
 			//		DevMsg( 1, "warpParam: %f %f\n", warpParam, selfIllumTint );
@@ -411,36 +422,24 @@ void DrawVortWarp_DX9( CBaseVSShader *pShader, IMaterialVar** params, IShaderDyn
 		{
 			pShader->SetEnvMapTintPixelShaderDynamicState( 0, info.m_nEnvmapTint, -1, true );
 		}
-		if( ( info.m_nHDRColorScale != -1 ) && pShader->IsHDREnabled() )
-		{
-			pShader->SetModulationPixelShaderDynamicState_LinearColorSpace_LinearScale( 1, params[info.m_nHDRColorScale]->GetFloatValue() );
-		}
-		else
-		{
-			pShader->SetModulationPixelShaderDynamicState_LinearColorSpace( 1 );
-		}
 
 		pShader->SetPixelShaderConstant( 2, info.m_nEnvmapContrast );
 		pShader->SetPixelShaderConstant( 3, info.m_nEnvmapSaturation );
 
 		pShader->SetPixelShaderConstant( 4, info.m_nSelfIllumTint );
-		pShader->SetAmbientCubeDynamicStateVertexShader();
 		if( hasBump )
 		{
-			pShaderAPI->BindStandardTexture( SHADER_SAMPLER5, TEXTURE_NORMALIZATION_CUBEMAP_SIGNED );
-			pShaderAPI->SetPixelShaderStateAmbientLightCube( 5 );
-            pShaderAPI->CommitPixelShaderLighting( 13 );
-	
+			pShaderAPI->BindStandardTexture( SHADER_SAMPLER5, TEXTURE_BINDFLAGS_NONE, TEXTURE_NORMALIZATION_CUBEMAP_SIGNED );
 		}
 
 		if( bHasSelfIllumMap )
 		{
-			pShader->BindTexture( SHADER_SAMPLER6, info.m_nSelfIllumMap, -1 );
+			pShader->BindTexture( SHADER_SAMPLER6, TEXTURE_BINDFLAGS_NONE, info.m_nSelfIllumMap, -1 );
 		}
 
 		if( bHasFlowMap )
 		{
-			pShader->BindTexture( SHADER_SAMPLER2, info.m_nFlowMap, -1 );
+			pShader->BindTexture( SHADER_SAMPLER2, TEXTURE_BINDFLAGS_NONE, info.m_nFlowMap, -1 );
 		}
 
 		float eyePos[4];
@@ -473,7 +472,7 @@ void DrawVortWarp_DX9( CBaseVSShader *pShader, IMaterialVar** params, IShaderDyn
 			atten[0] = flashlightState.m_fConstantAtten;
 			atten[1] = flashlightState.m_fLinearAtten;
 			atten[2] = flashlightState.m_fQuadraticAtten;
-			atten[3] = flashlightState.m_FarZ;
+			atten[3] = flashlightState.m_FarZAtten;
 			pShaderAPI->SetPixelShaderConstant( 22, atten, 1 );
 
 			// Set the flashlight origin
@@ -481,7 +480,7 @@ void DrawVortWarp_DX9( CBaseVSShader *pShader, IMaterialVar** params, IShaderDyn
 			pos[0] = flashlightState.m_vecLightOrigin[0];
 			pos[1] = flashlightState.m_vecLightOrigin[1];
 			pos[2] = flashlightState.m_vecLightOrigin[2];
-			pos[3] = 1.0f;
+			pos[3] = flashlightState.m_FarZ; // didn't have this in main. . probably need this?
 			pShaderAPI->SetPixelShaderConstant( 23, pos, 1 );
 
 			pShaderAPI->SetPixelShaderConstant( 24, worldToTexture.Base(), 4 );
@@ -599,9 +598,6 @@ BEGIN_VS_SHADER( VortWarp_DX9,
 
 	SHADER_FALLBACK
 	{	
-		if (g_pHardwareConfig->GetDXSupportLevel() < 90)
-			return "vortwarp_DX8";
-
 		return 0;
 	}
 
@@ -627,7 +623,7 @@ BEGIN_VS_SHADER( VortWarp_DX9,
 		// UGH!!!  FIXME!!!!!  Should fix VertexlitGeneric_dx9_helper so that you
 		// can override the vertex shader/pixel shader used (along with the combo vars).
 		bool bHasFlashlight = UsingFlashlight( params );
-		if ( bHasFlashlight && ( IsX360() || r_flashlight_version2.GetInt() ) )
+		if ( bHasFlashlight && IsX360() )
 		{
 			DrawVortWarp_DX9( this, params, pShaderAPI, pShaderShadow, true, false, vars, vertexCompression );
 			SHADOW_STATE

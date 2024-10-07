@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -15,6 +15,9 @@
 #include "vgui_askconnectpanel.h"
 #include "keys.h"
 #include "cl_pluginhelpers.h"
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
 
 
 using namespace vgui;
@@ -116,12 +119,12 @@ void CAskConnectPanel::SetHostName( const char *pHostName )
 
 	int x2, y2, wide2, tall2;
 	wchar_t wcMessage[512];
-	g_pVGuiLocalize->ConstructString_safe( wcMessage, g_pVGuiLocalize->Find("#Valve_ServerOfferingToConnect"), 0 );
+	g_pVGuiLocalize->ConstructString( wcMessage, sizeof( wcMessage ), g_pVGuiLocalize->Find("#Valve_ServerOfferingToConnect"), 0 );
 	m_pInfoLabel->SetText( wcMessage );
 	m_pInfoLabel->SizeToContents();
 	m_pInfoLabel->GetBounds( x2, y2, wide2, tall2 );	
 
-	int desiredWidth = max(x+wide,x2+wide2) + m_HostNameLabelRightSidePadding;
+	int desiredWidth = MAX(x+wide,x2+wide2) + m_HostNameLabelRightSidePadding;
 	if ( desiredWidth < m_OriginalWidth )
 		desiredWidth = m_OriginalWidth;
 	
@@ -135,7 +138,7 @@ void CAskConnectPanel::ApplySettings(KeyValues *inResourceData)
 	const char *pStr = inResourceData->GetString( "BgColor", NULL );
 	if ( pStr )
 	{
-		int r = 0, g = 0, b = 0, a = 0;
+		int r, g, b, a;
 		if ( sscanf( pStr, "%d %d %d %d", &r, &g, &b, &a ) == 4 )
 		{
 			m_bgColor = Color( r, g, b, a );
@@ -154,7 +157,7 @@ void CAskConnectPanel::StartSlideAnimation( float flDuration )
 	{
 		wchar_t wcKeyName[64], wcMessage[512];
 		g_pVGuiLocalize->ConvertANSIToUnicode( pKeyName, wcKeyName, sizeof( wcKeyName ) );
-		g_pVGuiLocalize->ConstructString_safe( wcMessage, g_pVGuiLocalize->Find("#Valve_PressKeyToAccept"), 1, wcKeyName );
+		g_pVGuiLocalize->ConstructString( wcMessage, sizeof( wcMessage ), g_pVGuiLocalize->Find("#Valve_PressKeyToAccept"), 1, wcKeyName );
 		m_pAcceptLabel->SetText( wcMessage );
 	}
 	else
@@ -240,19 +243,6 @@ vgui::Panel* CreateAskConnectPanel( VPANEL parent )
 
 void ShowAskConnectPanel( const char *pHostName, float flDuration )
 {
-	const int cubHostName = V_strlen( pHostName );
-	if ( cubHostName <= 0 )
-		return;
-
-	// Hostname is not allowed to contain semicolon, whitespace, or control characters
-	for ( int i = 0; i < cubHostName; i++ )
-	{
-		if ( pHostName[i] == ';' || V_isspace( pHostName[i] ) || pHostName[i] < 0x20 )
-		{
-			return;
-		}
-	}
-
 	CAskConnectPanel *pPanel = CAskConnectPanel::s_pAskConnectPanel;
 	if ( pPanel )
 	{

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2003, Valve LLC, All rights reserved. ============
 //
 // Purpose: 
 //
@@ -33,7 +33,7 @@ public:
 	CBaseEntity *GenerateItemFromDefIndex( int iDefIndex, const Vector &vecOrigin, const QAngle &vecAngles );
 
 	// Generate an item from the specified item data
-	CBaseEntity *GenerateItemFromScriptData( const CEconItemView *pData, const Vector &vecOrigin, const QAngle &vecAngles, const char *pszOverrideClassName );
+	CBaseEntity *GenerateItemFromScriptData( CEconItemView *pData, const Vector &vecOrigin, const QAngle &vecAngles, const char *pszOverrideClassName );
 
 	// Generate the base item for a class's loadout slot 
 	CBaseEntity *GenerateBaseItem( struct baseitemcriteria_t *pCriteria );
@@ -41,7 +41,7 @@ public:
 private:
 	// Create a new instance of the chosen item
 	CBaseEntity *SpawnItem( int iChosenItem, const Vector &vecAbsOrigin, const QAngle &vecAbsAngles, int iItemLevel, entityquality_t entityQuality, const char *pszOverrideClassName );
-	CBaseEntity *SpawnItem( const CEconItemView *pData, const Vector &vecAbsOrigin, const QAngle &vecAbsAngles, const char *pszOverrideClassName );
+	CBaseEntity *SpawnItem( CEconItemView *pData, const Vector &vecAbsOrigin, const QAngle &vecAbsAngles, const char *pszOverrideClassName );
 	CBaseEntity *PostSpawnItem( CBaseEntity *pItem, IHasAttributes *pItemInterface, const Vector &vecAbsOrigin, const QAngle &vecAbsAngles );
 };
 

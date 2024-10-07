@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -50,6 +50,7 @@ enum ServerDataRequestType_t
 	SERVERDATA_REMOVE_VPROF, // unsubscribe from a vprof stream
 	SERVERDATA_TAKE_SCREENSHOT,
 	SERVERDATA_SEND_CONSOLE_LOG,
+	SERVERDATA_SEND_REMOTEBUG,
 };
 
 enum ServerDataResponseType_t
@@ -62,6 +63,7 @@ enum ServerDataResponseType_t
 	SERVERDATA_SCREENSHOT_RESPONSE,
 	SERVERDATA_CONSOLE_LOG_RESPONSE,
 	SERVERDATA_RESPONSE_STRING,
+	SERVERDATA_RESPONSE_REMOTEBUG,
 };
 
 /* PACKET FORMAT

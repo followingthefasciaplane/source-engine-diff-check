@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -64,6 +64,9 @@ public:
 	virtual CreateInterfaceFn SetMode( void *hWnd, int nAdapter, const ShaderDeviceInfo_t& mode );
 
 private:
+	// Returns the screen resolution
+	virtual void GetDesktopResolution( int *pWidth, int *pHeight, int nAdapter ) const;
+
 	// Initialize adapter information
 	void InitAdapterInfo();
 
@@ -81,8 +84,6 @@ private:
 
 	// Used to enumerate adapters, attach to windows
 	IDXGIFactory *m_pDXGIFactory;
-
-	bool m_bObeyDxCommandlineOverride: 1;
 
 	friend class CShaderDeviceDx10;
 };
@@ -113,16 +114,16 @@ public:
 	virtual void DestroyGeometryShader( GeometryShaderHandle_t hShader );
 	virtual PixelShaderHandle_t CreatePixelShader( IShaderBuffer* pShaderBuffer );
 	virtual void DestroyPixelShader( PixelShaderHandle_t hShader );
-	virtual void ReleaseResources() {}
+	virtual void ReleaseResources( bool bReleaseManagedResources = true ) {}
 	virtual void ReacquireResources() {}
-	virtual IMesh* CreateStaticMesh( VertexFormat_t format, const char *pTextureBudgetGroup, IMaterial * pMaterial );
+	virtual IMesh* CreateStaticMesh( VertexFormat_t format, const char *pTextureBudgetGroup, IMaterial * pMaterial, VertexStreamSpec_t *pStreamSpec );
 	virtual void DestroyStaticMesh( IMesh* mesh );
 	virtual IVertexBuffer *CreateVertexBuffer( ShaderBufferType_t type, VertexFormat_t fmt, int nVertexCount, const char *pTextureBudgetGroup );
 	virtual void DestroyVertexBuffer( IVertexBuffer *pVertexBuffer );
 	virtual IIndexBuffer *CreateIndexBuffer( ShaderBufferType_t type, MaterialIndexFormat_t fmt, int nIndexCount, const char *pTextureBudgetGroup );
 	virtual void DestroyIndexBuffer( IIndexBuffer *pIndexBuffer );
 	virtual IVertexBuffer *GetDynamicVertexBuffer( int nStreamID, VertexFormat_t vertexFormat, bool bBuffered = true );
-	virtual IIndexBuffer *GetDynamicIndexBuffer( MaterialIndexFormat_t fmt, bool bBuffered = true );
+	virtual IIndexBuffer *GetDynamicIndexBuffer();
 	virtual void SetHardwareGammaRamp( float fGamma, float fGammaTVRangeMin, float fGammaTVRangeMax, float fGammaTVExponent, bool bTVEnabled );
 
 	// A special path used to tick the front buffer while loading on the 360

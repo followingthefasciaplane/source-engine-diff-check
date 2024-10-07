@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2003, Valve LLC, All rights reserved. ============
 //
 // Purpose: 
 //
@@ -31,6 +31,27 @@
 	typedef CDOTAItemSystem		GameItemSystem_t;
 
 	#include "econ/dota_item_schema.h"
+#elif defined( PORTAL2 ) || defined( PORTAL2_GC_DLL )
+// PORTAL2
+	class CPortal2ItemSchema;
+	class CPortal2ItemDefinition;
+	class CPortal2ItemSystem;
+	
+	typedef CPortal2ItemSchema		GameItemSchema_t;
+	typedef CPortal2ItemDefinition	GameItemDefinition_t;
+	typedef CPortal2ItemSystem		GameItemSystem_t;
+
+	#include "portal2_item_schema.h"	
+#elif defined( CSTRIKE15 ) || defined( CSTRIKE_GC_DLL )
+	class CCStrike15ItemSchema;
+	class CCStrike15ItemDefinition;
+	class CCStrike15ItemSystem;
+
+	typedef CCStrike15ItemSchema		GameItemSchema_t;
+	typedef CCStrike15ItemDefinition	GameItemDefinition_t;
+	typedef CCStrike15ItemSystem		GameItemSystem_t;
+
+	#include "cstrike15_item_schema.h"
 #else
 	// Fallback Case
 	class CEconItemSchema;

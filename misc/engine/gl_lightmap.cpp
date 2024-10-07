@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -26,7 +26,8 @@
 #include "lightcache.h"
 #include "cl_main.h"
 #include "materialsystem/imaterial.h"
-
+#include "utlsortvector.h"
+#include "cache_hints.h"
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
@@ -41,14 +42,23 @@ ALIGN128 Vector4D blocklights[NUM_BUMP_VECTS+1][ MAX_LIGHTMAP_DIM_INCLUDING_BORD
 
 ConVar r_avglightmap( "r_avglightmap", "0", FCVAR_CHEAT | FCVAR_MATERIAL_SYSTEM_THREAD );
 ConVar r_maxdlights( "r_maxdlights", "32" );
+
+// Disable dlights on console by default (for the sake of memory and perf):
+#ifdef _GAMECONSOLE
+ConVar r_dlightsenable( "r_dlightsenable", "0", FCVAR_CHEAT | FCVAR_MATERIAL_SYSTEM_THREAD );
+#else
+ConVar r_dlightsenable( "r_dlightsenable", "1", FCVAR_CHEAT | FCVAR_MATERIAL_SYSTEM_THREAD );
+#endif
+
+
 extern ConVar r_unloadlightmaps;
+extern ConVar r_keepstyledlightmapsonly;
 extern bool g_bHunkAllocLightmaps;
 
 static int r_dlightvisible;
 static int r_dlightvisiblethisframe;
 static int s_nVisibleDLightCount;
 static int s_nMaxVisibleDLightCount;
-
 
 //-----------------------------------------------------------------------------
 // Visible, not visible DLights
@@ -235,7 +245,7 @@ static void AddSingleDynamicLightToBumpLighting( dlight_t& dl, SurfaceHandle_t s
 	// and compute what light would have to come in along that direction
 	// in order to produce the same illumination on the flat lightmap. That's
 	// computed by dividing the flat lightmap color by n dot l.
-	Vector lightDirection(0, 0, 0), texelWorldPosition;
+	Vector lightDirection, texelWorldPosition;
 #if 1
 	bool useLightDirection = (dl.m_OuterAngle != 0.0f) &&
 		(fabs(dl.m_Direction.LengthSqr() - 1.0f) < 1e-3);
@@ -293,7 +303,7 @@ static void AddSingleDynamicLightToBumpLighting( dlight_t& dl, SurfaceHandle_t s
 				float lDotN = DotProduct( lightDirection, MSurf_Plane( surfID ).normal );
 				if (lDotN < 1e-3)
 					lDotN = 1e-3;
-				scale /= lDotN;
+				scale *= lDotN;
 
 				int i;
 				for( i = 1; i < NUM_BUMP_VECTS + 1; i++ )
@@ -325,6 +335,12 @@ static void AddSingleDynamicLightToBumpLighting( dlight_t& dl, SurfaceHandle_t s
 //-----------------------------------------------------------------------------
 static void R_ComputeSurfaceBasis( SurfaceHandle_t surfID, Vector *pBumpNormals, Vector &luxelBasePosition )
 {
+	// NOTE!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+	// This function gives incorrect results when the plane made by the lightmapVecs isn't parallel to the surface plane.
+	// buildmodelforworld has similar code that is correct.  Probably doesn't matter too much at this point since
+	// we don't use dlights much anymore.
+	// NOTE!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
 	// Get the bump basis vects in the space of the surface.
 	Vector sVect, tVect;
 	VectorCopy( MSurf_TexInfo( surfID )->lightmapVecsLuxelsPerWorldUnits[0].AsVector3D(), sVect );
@@ -439,6 +455,10 @@ void R_AddDynamicLights( dlight_t *pLights, SurfaceHandle_t surfID, const matrix
 	ASSERT_SURF_VALID( surfID );
 	VPROF( "R_AddDynamicLights" );
 
+	// Early-out if dlights are disabled:
+	if ( !r_dlightsenable.GetBool() )
+		return;
+
 	Vector bumpNormals[3];
 	bool computedBumpBasis = false;
 	Vector luxelBasePosition;
@@ -501,6 +521,10 @@ void R_AddDynamicLights( dlight_t *pLights, SurfaceHandle_t surfID, const matrix
 #define I_BLUE		((int)(0.114*255))
 
 
+
+ConVar mat_defaultlightmap( "mat_defaultlightmap", "1", FCVAR_NONE, "Default brightness for lightmaps where none have been created in the level." );
+
+
 //-----------------------------------------------------------------------------
 // Sets all elements in a lightmap to a particular opaque greyscale value
 //-----------------------------------------------------------------------------
@@ -509,7 +533,7 @@ static void InitLMSamples( Vector4D *pSamples, int nSamples, float value )
 	for( int i=0; i < nSamples; i++ )
 	{
 		pSamples[i][0] = pSamples[i][1] = pSamples[i][2] = value;
-		pSamples[i][3] = 1.0f;
+		pSamples[i][3] = 0.0f; // Init the alpha to 0.0
 	}
 }
 
@@ -535,73 +559,284 @@ static int ComputeLightmapSize( SurfaceHandle_t surfID )
 }
 
 
-#ifndef _X360
+//#ifndef PLATFORM_PPC
+#if 1 // 7LS TODO - implement use of pLightmapExtraData in SIMD paths, especially if/when we get dynamic lightmaps working again
 //-----------------------------------------------------------------------------
 // Compute the portion of the lightmap generated from lightstyles
 //-----------------------------------------------------------------------------
-static void AccumulateLightstyles( ColorRGBExp32* pLightmap, int lightmapSize, float scalar ) 
+static void AccumulateLightstyles( ColorRGBExp32* pLightmap, unsigned char *pLightmapExtraData, int lightmapSize, float scalar ) 
 {
 	Assert( pLightmap );
 	for (int i=0; i<lightmapSize ; ++i)
 	{
-		blocklights[0][i][0] += scalar * TexLightToLinear( pLightmap[i].r, pLightmap[i].exponent );
-		blocklights[0][i][1] += scalar * TexLightToLinear( pLightmap[i].g, pLightmap[i].exponent );
-		blocklights[0][i][2] += scalar * TexLightToLinear( pLightmap[i].b, pLightmap[i].exponent );
+		float flR = scalar * TexLightToLinear( pLightmap[i].r, pLightmap[i].exponent );
+		float flG = scalar * TexLightToLinear( pLightmap[i].g, pLightmap[i].exponent );
+		float flB = scalar * TexLightToLinear( pLightmap[i].b, pLightmap[i].exponent );
+
+		blocklights[0][i][0] += flR;
+		blocklights[0][i][1] += flG;
+		blocklights[0][i][2] += flB;
+
+#if defined(_PS3)
+		blocklights[0][i][3] += pLightmapExtraData ? ( ( float )pLightmapExtraData[i] ) * ( 1.0f / 255.0f ) * ( flR * 0.2125 + flG * 0.7154 + flB * 0.0721 ) : 0.0f;
+#else
+		// this won't work on platforms that have fp lightmaps
+		// lightmapAlphaData3 implies new data in alpha for fixed CSM blending, old path for compatibility
+		if ( g_bHasLightmapAlphaData3 )
+		{
+			Assert( pLightmapExtraData );
+			blocklights[ 0 ][ i ][ 3 ] += ( (float)( pLightmapExtraData[ i * 4 ] ) ) * ( 1.0f / 255.0f );
+		}
+		else
+		{
+			blocklights[0][i][3] += pLightmapExtraData ? ( ( float )pLightmapExtraData[i] ) * ( 1.0f / 255.0f ) * ( flR * 0.2125 + flG * 0.7154 + flB * 0.0721 ) / 16.0f : 0.0f;
+		}
+#endif
 	}
 }
 
-static void AccumulateLightstylesFlat( ColorRGBExp32* pLightmap, int lightmapSize, float scalar ) 
+static void AccumulateLightstylesNoAlpha( ColorRGBExp32* pLightmap, unsigned char *pLightmapExtraData, int lightmapSize, float scalar )
+{
+	Assert( pLightmap );
+	for ( int i = 0; i < lightmapSize; ++i )
+	{
+		float flR = scalar * TexLightToLinear( pLightmap[ i ].r, pLightmap[ i ].exponent );
+		float flG = scalar * TexLightToLinear( pLightmap[ i ].g, pLightmap[ i ].exponent );
+		float flB = scalar * TexLightToLinear( pLightmap[ i ].b, pLightmap[ i ].exponent );
+
+		blocklights[ 0 ][ i ][ 0 ] += flR;
+		blocklights[ 0 ][ i ][ 1 ] += flG;
+		blocklights[ 0 ][ i ][ 2 ] += flB;
+	}
+}
+
+static void AccumulateLightstylesFlat( ColorRGBExp32* pLightmap, unsigned char *pLightmapExtraData, int lightmapSize, float scalar ) 
 {
 	Assert( pLightmap );
 	for (int i=0; i<lightmapSize ; ++i)
 	{
-		blocklights[0][i][0] += scalar * TexLightToLinear( pLightmap->r, pLightmap->exponent );
-		blocklights[0][i][1] += scalar * TexLightToLinear( pLightmap->g, pLightmap->exponent );
-		blocklights[0][i][2] += scalar * TexLightToLinear( pLightmap->b, pLightmap->exponent );
+ 		float flR =	scalar * TexLightToLinear( pLightmap->r, pLightmap->exponent );
+ 		float flG =	scalar * TexLightToLinear( pLightmap->g, pLightmap->exponent );
+ 		float flB =	scalar * TexLightToLinear( pLightmap->b, pLightmap->exponent );
+
+		blocklights[0][i][0] += flR;
+		blocklights[0][i][1] += flG;
+		blocklights[0][i][2] += flB;
+
+#if defined(_PS3)
+		blocklights[0][i][3] += pLightmapExtraData ? ( ( float )pLightmapExtraData[i] ) * ( 1.0f / 255.0f ) * ( flR * 0.2125 + flG * 0.7154 + flB * 0.0721 ) : 0.0f;
+#else
+		// this won't work on platforms that have fp lightmaps
+		if ( g_bHasLightmapAlphaData3 )
+		{
+			Assert( pLightmapExtraData );
+			blocklights[0][i][3] += ((float)(pLightmapExtraData[i*4])) * (1.0f / 255.0f);
+		}
+		else
+		{
+			blocklights[0][i][3] += pLightmapExtraData ? ( ( float )pLightmapExtraData[i] ) * ( 1.0f / 255.0f ) * ( flR * 0.2125 + flG * 0.7154 + flB * 0.0721 ) / 16.0f : 0.0f;
+		}
+#endif
+	}
+}
+
+static void AccumulateLightstylesFlatNoAlpha( ColorRGBExp32* pLightmap, unsigned char *pLightmapExtraData, int lightmapSize, float scalar )
+{
+	Assert( pLightmap );
+	for ( int i = 0; i < lightmapSize; ++i )
+	{
+		float flR = scalar * TexLightToLinear( pLightmap->r, pLightmap->exponent );
+		float flG = scalar * TexLightToLinear( pLightmap->g, pLightmap->exponent );
+		float flB = scalar * TexLightToLinear( pLightmap->b, pLightmap->exponent );
+
+		blocklights[ 0 ][ i ][ 0 ] += flR;
+		blocklights[ 0 ][ i ][ 1 ] += flG;
+		blocklights[ 0 ][ i ][ 2 ] += flB;
 	}
 }
 
 
-static void AccumulateBumpedLightstyles( ColorRGBExp32* pLightmap, int lightmapSize, float scalar ) 
+static void AccumulateBumpedLightstyles( ColorRGBExp32* pLightmap, unsigned char *pLightmapExtraData, int lightmapSize, float scalar ) 
 {
 	ColorRGBExp32 *pBumpedLightmaps[3];
 	pBumpedLightmaps[0] = pLightmap + lightmapSize;
 	pBumpedLightmaps[1] = pLightmap + 2 * lightmapSize;
 	pBumpedLightmaps[2] = pLightmap + 3 * lightmapSize;
 
+	float flR;
+	float flG;
+	float flB;
+
+	if ( g_bHasLightmapAlphaData3 )
+	{
+		Assert( pLightmapExtraData );
+	}
+
 	// I chose to split up the loops this way because it was the best tradeoff
 	// based on profiles between cache miss + loop overhead
-	for (int i=0 ; i<lightmapSize ; ++i)
+	for (int i=0, j=0; i<lightmapSize ; ++i, j+=4 )
 	{
-		blocklights[0][i][0] += scalar * TexLightToLinear( pLightmap[i].r, pLightmap[i].exponent );
-		blocklights[0][i][1] += scalar * TexLightToLinear( pLightmap[i].g, pLightmap[i].exponent );
-		blocklights[0][i][2] += scalar * TexLightToLinear( pLightmap[i].b, pLightmap[i].exponent );
+		flR = scalar * TexLightToLinear( pLightmap[i].r, pLightmap[i].exponent );
+		flG = scalar * TexLightToLinear( pLightmap[i].g, pLightmap[i].exponent );
+		flB = scalar * TexLightToLinear( pLightmap[i].b, pLightmap[i].exponent );
+		blocklights[0][i][0] += flR;
+		blocklights[0][i][1] += flG;
+		blocklights[0][i][2] += flB;
+#if defined(_PS3)
+		blocklights[0][i][3] += pLightmapExtraData ? ( ( float )pLightmapExtraData[i] ) * ( 1.0f / 255.0f ) * ( flR * 0.2125 + flG * 0.7154 + flB * 0.0721 ) : 0.0f;
+#else
+		// this won't work on platforms that have fp lightmaps
+		if ( g_bHasLightmapAlphaData3 )
+		{
+			blocklights[0][i][3] += ((float)(pLightmapExtraData[j])) * (1.0f / 255.0f);
+		}
+		else
+		{
+			blocklights[0][i][3] += pLightmapExtraData ? ( ( float )pLightmapExtraData[i] ) * ( 1.0f / 255.0f ) * ( flR * 0.2125 + flG * 0.7154 + flB * 0.0721 ) / 16.0f : 0.0f;
+		}
+#endif
 		Assert( blocklights[0][i][0] >= 0.0f );
 		Assert( blocklights[0][i][1] >= 0.0f );
 		Assert( blocklights[0][i][2] >= 0.0f );
 
-		blocklights[1][i][0] += scalar * TexLightToLinear( pBumpedLightmaps[0][i].r, pBumpedLightmaps[0][i].exponent );
-		blocklights[1][i][1] += scalar * TexLightToLinear( pBumpedLightmaps[0][i].g, pBumpedLightmaps[0][i].exponent );
-		blocklights[1][i][2] += scalar * TexLightToLinear( pBumpedLightmaps[0][i].b, pBumpedLightmaps[0][i].exponent );
+		flR = scalar * TexLightToLinear( pBumpedLightmaps[0][i].r, pBumpedLightmaps[0][i].exponent );
+		flG = scalar * TexLightToLinear( pBumpedLightmaps[0][i].g, pBumpedLightmaps[0][i].exponent );
+		flB = scalar * TexLightToLinear( pBumpedLightmaps[0][i].b, pBumpedLightmaps[0][i].exponent );
+		blocklights[1][i][0] += flR;
+		blocklights[1][i][1] += flG;
+		blocklights[1][i][2] += flB;
+#if defined(_PS3)
+		blocklights[1][i][3] += pLightmapExtraData ? ( ( float )pLightmapExtraData[i] ) * ( 1.0f / 255.0f ) * ( flR * 0.2125 + flG * 0.7154 + flB * 0.0721 ) : 0.0f;
+#else
+		// this won't work on platforms that have fp lightmaps
+		if ( g_bHasLightmapAlphaData3 )
+		{
+			blocklights[1][i][3] += ((float)pLightmapExtraData[j + 1]) * (1.0f / 255.0f);
+		}
+		else
+		{
+			blocklights[1][i][3] += pLightmapExtraData ? ( ( float )pLightmapExtraData[i] ) * ( 1.0f / 255.0f ) * ( flR * 0.2125 + flG * 0.7154 + flB * 0.0721 ) / 16.0f : 0.0f;
+		}
+#endif
+
 		Assert( blocklights[1][i][0] >= 0.0f );
 		Assert( blocklights[1][i][1] >= 0.0f );
 		Assert( blocklights[1][i][2] >= 0.0f );
 	}
-	for ( int i=0 ; i<lightmapSize ; ++i)
+
+	for ( int i=0, j=0 ; i<lightmapSize ; ++i, j+=4 )
 	{
-		blocklights[2][i][0] += scalar * TexLightToLinear( pBumpedLightmaps[1][i].r, pBumpedLightmaps[1][i].exponent );
-		blocklights[2][i][1] += scalar * TexLightToLinear( pBumpedLightmaps[1][i].g, pBumpedLightmaps[1][i].exponent );
-		blocklights[2][i][2] += scalar * TexLightToLinear( pBumpedLightmaps[1][i].b, pBumpedLightmaps[1][i].exponent );
+		flR = scalar * TexLightToLinear( pBumpedLightmaps[1][i].r, pBumpedLightmaps[1][i].exponent );
+		flG = scalar * TexLightToLinear( pBumpedLightmaps[1][i].g, pBumpedLightmaps[1][i].exponent );
+		flB = scalar * TexLightToLinear( pBumpedLightmaps[1][i].b, pBumpedLightmaps[1][i].exponent );
+		blocklights[2][i][0] += flR;
+		blocklights[2][i][1] += flG;
+		blocklights[2][i][2] += flB;
+#if defined(_PS3)
+		blocklights[2][i][3] += pLightmapExtraData ? ( ( float )pLightmapExtraData[i] ) * ( 1.0f / 255.0f ) * ( flR * 0.2125 + flG * 0.7154 + flB * 0.0721 ) : 0.0f;
+#else
+		// this won't work on platforms that have fp lightmaps
+		if ( g_bHasLightmapAlphaData3 )
+		{
+			blocklights[2][i][3] += ((float)pLightmapExtraData[j + 2]) * (1.0f / 255.0f);
+		}
+		else
+		{
+			blocklights[2][i][3] += pLightmapExtraData ? ( ( float )pLightmapExtraData[i] ) * ( 1.0f / 255.0f ) * ( flR * 0.2125 + flG * 0.7154 + flB * 0.0721 ) / 16.0f : 0.0f;
+		}
+#endif
 		Assert( blocklights[2][i][0] >= 0.0f );
 		Assert( blocklights[2][i][1] >= 0.0f );
 		Assert( blocklights[2][i][2] >= 0.0f );
 
-		blocklights[3][i][0] += scalar * TexLightToLinear( pBumpedLightmaps[2][i].r, pBumpedLightmaps[2][i].exponent );
-		blocklights[3][i][1] += scalar * TexLightToLinear( pBumpedLightmaps[2][i].g, pBumpedLightmaps[2][i].exponent );
-		blocklights[3][i][2] += scalar * TexLightToLinear( pBumpedLightmaps[2][i].b, pBumpedLightmaps[2][i].exponent );
+		flR = scalar * TexLightToLinear( pBumpedLightmaps[2][i].r, pBumpedLightmaps[2][i].exponent );
+		flG = scalar * TexLightToLinear( pBumpedLightmaps[2][i].g, pBumpedLightmaps[2][i].exponent );
+		flB = scalar * TexLightToLinear( pBumpedLightmaps[2][i].b, pBumpedLightmaps[2][i].exponent );
+		blocklights[3][i][0] += flR;
+		blocklights[3][i][1] += flG;
+		blocklights[3][i][2] += flB;
+#if defined(_PS3)
+		blocklights[3][i][3] += pLightmapExtraData ? ( ( float )pLightmapExtraData[i] ) * ( 1.0f / 255.0f ) * ( flR * 0.2125 + flG * 0.7154 + flB * 0.0721 ) : 0.0f;
+#else
+		// this won't work on platforms that have fp lightmaps
+		if ( g_bHasLightmapAlphaData3 )
+		{
+			blocklights[3][i][3] += ((float)pLightmapExtraData[j + 3]) * (1.0f / 255.0f);
+		}
+		else
+		{
+			blocklights[3][i][3] += pLightmapExtraData ? ( ( float )pLightmapExtraData[i] ) * ( 1.0f / 255.0f ) * ( flR * 0.2125 + flG * 0.7154 + flB * 0.0721 ) / 16.0f : 0.0f;
+		}
+#endif
 		Assert( blocklights[3][i][0] >= 0.0f );
 		Assert( blocklights[3][i][1] >= 0.0f );
 		Assert( blocklights[3][i][2] >= 0.0f );
+	}
+}
+
+static void AccumulateBumpedLightstylesNoAlpha( ColorRGBExp32* pLightmap, unsigned char *pLightmapExtraData, int lightmapSize, float scalar )
+{
+	ColorRGBExp32 *pBumpedLightmaps[ 3 ];
+	pBumpedLightmaps[ 0 ] = pLightmap + lightmapSize;
+	pBumpedLightmaps[ 1 ] = pLightmap + 2 * lightmapSize;
+	pBumpedLightmaps[ 2 ] = pLightmap + 3 * lightmapSize;
+
+	float flR;
+	float flG;
+	float flB;
+
+	if ( g_bHasLightmapAlphaData3 )
+	{
+		Assert( pLightmapExtraData );
+	}
+
+	// I chose to split up the loops this way because it was the best tradeoff
+	// based on profiles between cache miss + loop overhead
+	for ( int i = 0, j = 0; i < lightmapSize; ++i, j += 4 )
+	{
+		flR = scalar * TexLightToLinear( pLightmap[ i ].r, pLightmap[ i ].exponent );
+		flG = scalar * TexLightToLinear( pLightmap[ i ].g, pLightmap[ i ].exponent );
+		flB = scalar * TexLightToLinear( pLightmap[ i ].b, pLightmap[ i ].exponent );
+		blocklights[ 0 ][ i ][ 0 ] += flR;
+		blocklights[ 0 ][ i ][ 1 ] += flG;
+		blocklights[ 0 ][ i ][ 2 ] += flB;
+		Assert( blocklights[ 0 ][ i ][ 0 ] >= 0.0f );
+		Assert( blocklights[ 0 ][ i ][ 1 ] >= 0.0f );
+		Assert( blocklights[ 0 ][ i ][ 2 ] >= 0.0f );
+
+		flR = scalar * TexLightToLinear( pBumpedLightmaps[ 0 ][ i ].r, pBumpedLightmaps[ 0 ][ i ].exponent );
+		flG = scalar * TexLightToLinear( pBumpedLightmaps[ 0 ][ i ].g, pBumpedLightmaps[ 0 ][ i ].exponent );
+		flB = scalar * TexLightToLinear( pBumpedLightmaps[ 0 ][ i ].b, pBumpedLightmaps[ 0 ][ i ].exponent );
+		blocklights[ 1 ][ i ][ 0 ] += flR;
+		blocklights[ 1 ][ i ][ 1 ] += flG;
+		blocklights[ 1 ][ i ][ 2 ] += flB;
+
+		Assert( blocklights[ 1 ][ i ][ 0 ] >= 0.0f );
+		Assert( blocklights[ 1 ][ i ][ 1 ] >= 0.0f );
+		Assert( blocklights[ 1 ][ i ][ 2 ] >= 0.0f );
+	}
+
+	for ( int i = 0, j = 0; i < lightmapSize; ++i, j += 4 )
+	{
+		flR = scalar * TexLightToLinear( pBumpedLightmaps[ 1 ][ i ].r, pBumpedLightmaps[ 1 ][ i ].exponent );
+		flG = scalar * TexLightToLinear( pBumpedLightmaps[ 1 ][ i ].g, pBumpedLightmaps[ 1 ][ i ].exponent );
+		flB = scalar * TexLightToLinear( pBumpedLightmaps[ 1 ][ i ].b, pBumpedLightmaps[ 1 ][ i ].exponent );
+		blocklights[ 2 ][ i ][ 0 ] += flR;
+		blocklights[ 2 ][ i ][ 1 ] += flG;
+		blocklights[ 2 ][ i ][ 2 ] += flB;
+		Assert( blocklights[ 2 ][ i ][ 0 ] >= 0.0f );
+		Assert( blocklights[ 2 ][ i ][ 1 ] >= 0.0f );
+		Assert( blocklights[ 2 ][ i ][ 2 ] >= 0.0f );
+
+		flR = scalar * TexLightToLinear( pBumpedLightmaps[ 2 ][ i ].r, pBumpedLightmaps[ 2 ][ i ].exponent );
+		flG = scalar * TexLightToLinear( pBumpedLightmaps[ 2 ][ i ].g, pBumpedLightmaps[ 2 ][ i ].exponent );
+		flB = scalar * TexLightToLinear( pBumpedLightmaps[ 2 ][ i ].b, pBumpedLightmaps[ 2 ][ i ].exponent );
+		blocklights[ 3 ][ i ][ 0 ] += flR;
+		blocklights[ 3 ][ i ][ 1 ] += flG;
+		blocklights[ 3 ][ i ][ 2 ] += flB;
+		Assert( blocklights[ 3 ][ i ][ 0 ] >= 0.0f );
+		Assert( blocklights[ 3 ][ i ][ 1 ] >= 0.0f );
+		Assert( blocklights[ 3 ][ i ][ 2 ] >= 0.0f );
 	}
 }
 #else
@@ -613,6 +848,18 @@ static void AccumulateBumpedLightstyles( ColorRGBExp32* pLightmap, int lightmapS
 	
 }
 */
+
+
+#ifdef _PS3
+// map the names of some 360 intrinsics to the SN intriniscs
+#define __vmrghb(a,b) (fltx4) vec_vmrghb( (vector unsigned char)(a), (vector unsigned char)(b) )
+#define __vmrglb(a,b) (fltx4) vec_vmrglb( (vector unsigned char)(a), (vector unsigned char)(b) )
+#define __vupkhsb(a)  (fltx4) vec_vupkhsb( (vector signed char)(a) )
+#define __vupklsb(a)  (fltx4) vec_vupklsb( (vector signed char)(a) )
+#define __vupkhsh(a)  (fltx4) vec_vupkhsh( (vector signed short) (a) )
+#define __vupklsh(a)  (fltx4) vec_vupklsh( (vector signed short) (a) )
+#define __vcfsx(a,b)          vec_vcfsx( ((vector signed int) (a)), b )
+#endif
 
 // because the e component of the colors is signed, we need to mask
 // off the corresponding channel in the intermediate halfword expansion
@@ -627,6 +874,7 @@ static const fltx4 vOneOverTwoFiftyFive = { 1.0f / 255.0f , 1.0f / 255.0f , 1.0f
 // This function makes heavy use of the special XBOX360 opcodes for
 // packing and unpacking integer d3d data. (Not available in SSE, sadly.)
 static void AccumulateLightstyles_EightAtAtime( ColorRGBExp32* RESTRICT pLightmap, // the input lightmap (not necessarily aligned)
+													  unsigned char *pLightmapExtraData,
 													  int lightmapSize, 
 													  fltx4 vScalar,
 													  Vector4D * RESTRICT bLights // pointer to the blocklights row we'll be writing into -- should be cache aligned, but only hurts perf if it's not
@@ -637,15 +885,17 @@ static void AccumulateLightstyles_EightAtAtime( ColorRGBExp32* RESTRICT pLightma
 	// On top of that, we do two groups at once, because that's the length
 	// of a cache line, and it helps us better hide latency.
 	AssertMsg((lightmapSize & 7) == 0, "Input to Accumulate...EightAtATime not divisible by eight. Data corruption is the likely result." );
+	VPROF_2("AccumulateLightstyles_EightAtAtime", VPROF_BUDGETGROUP_OTHER_UNACCOUNTED, false, BUDGETFLAG_CLIENT);
 
-	const fltx4 vHalfWordMask = XMLoadVector4A(g_SIMD_HalfWordMask);
+
+	const fltx4 vHalfWordMask = LoadAlignedSIMD(g_SIMD_HalfWordMask);
 
 	fltx4 zero = Four_Zeros;
 	for (int i = 0 ; i < lightmapSize ; i += 8 )
 	{
 		// cache prefetch two lines ahead on bLights, and one on pLightmap
-		__dcbt(256, bLights);
-		__dcbt(128, pLightmap);
+		PREFETCH_128(bLights, 256);
+		PREFETCH_128(pLightmap, 128);
 
 		// the naming convention on these psuedoarrays (they are actually
 		// registers) is that the number before the index is the group id,
@@ -662,9 +912,9 @@ static void AccumulateLightstyles_EightAtAtime( ColorRGBExp32* RESTRICT pLightma
 		fltx4 vLight0[4], vLight1[4];
 		fltx4 colorLightMap0[4], colorLightMap1[4]; 
 
-		fltx4 bytePackedLightMap0 = XMLoadVector4(pLightmap+i); // because each colorrgbexp is actually a 32-bit struct,
+		fltx4 bytePackedLightMap0 = LoadUnalignedSIMD(pLightmap+i); // because each colorrgbexp is actually a 32-bit struct,
 		// this loads four of them into one vector -- they are ubytes for rgb and sbyte for e
-		fltx4 bytePackedLightMap1 = XMLoadVector4(pLightmap+i+4);
+		fltx4 bytePackedLightMap1 = LoadUnalignedSIMD(pLightmap+i+4);
 
 		// load group 0
 		vLight0[0] = LoadAlignedSIMD( &(bLights + i + 0)->x );
@@ -722,35 +972,35 @@ static void AccumulateLightstyles_EightAtAtime( ColorRGBExp32* RESTRICT pLightma
 
 		// manufacture exponent splats and start normalizing the rgb channels (eg *= 1/255)
 		fltx4 expW0[4], expW1[4];
-		expW0[0] = XMVectorSplatW(colorLightMap0[0]);
+		expW0[0] = SplatWSIMD(colorLightMap0[0]);
 		colorLightMap0[0] = MulSIMD(colorLightMap0[0], vOneOverTwoFiftyFive); // normalize the rgb channels
-		expW0[1] = XMVectorSplatW(colorLightMap0[1]);
+		expW0[1] = SplatWSIMD(colorLightMap0[1]);
 		colorLightMap0[1] = MulSIMD(colorLightMap0[1], vOneOverTwoFiftyFive); // normalize the rgb channels
-		expW0[2] = XMVectorSplatW(colorLightMap0[2]);
+		expW0[2] = SplatWSIMD(colorLightMap0[2]);
 		colorLightMap0[2] = MulSIMD(colorLightMap0[2], vOneOverTwoFiftyFive); // normalize the rgb channels
-		expW0[3] = XMVectorSplatW(colorLightMap0[3]);
+		expW0[3] = SplatWSIMD(colorLightMap0[3]);
 		colorLightMap0[3] = MulSIMD(colorLightMap0[3], vOneOverTwoFiftyFive); // normalize the rgb channels
 		
 		// scale each of the color channels by the exponent channel
 		// (the estimate operation is exact for integral inputs, as here)
-		expW0[0] = XMVectorExpEst( expW0[0] ); // x = 2^x
-			expW1[0] = XMVectorSplatW(colorLightMap1[0]); // interleave splats on exp group 1 (dual issue)
+		expW0[0] = Exp2EstSIMD( expW0[0] ); // x = 2^x
+			expW1[0] = SplatWSIMD(colorLightMap1[0]); // interleave splats on exp group 1 (dual issue)
 			colorLightMap1[0] = MulSIMD(colorLightMap1[0], vOneOverTwoFiftyFive); // normalize the rgb channels
-		expW0[1] = XMVectorExpEst( expW0[1] );
-			expW1[1] = XMVectorSplatW(colorLightMap1[1]);
+		expW0[1] = Exp2EstSIMD( expW0[1] );
+			expW1[1] = SplatWSIMD(colorLightMap1[1]);
 			colorLightMap1[1] = MulSIMD(colorLightMap1[1], vOneOverTwoFiftyFive); // normalize the rgb channels
-		expW0[2] = XMVectorExpEst( expW0[2] );
-			expW1[2] = XMVectorSplatW(colorLightMap1[2]);
+		expW0[2] = Exp2EstSIMD( expW0[2] );
+			expW1[2] = SplatWSIMD(colorLightMap1[2]);
 			colorLightMap1[2] = MulSIMD(colorLightMap1[2], vOneOverTwoFiftyFive); // normalize the rgb channels
-		expW0[3] = XMVectorExpEst( expW0[3] );
-			expW1[3] = XMVectorSplatW(colorLightMap1[3]);
+		expW0[3] = Exp2EstSIMD( expW0[3] );
+			expW1[3] = SplatWSIMD(colorLightMap1[3]);
 			colorLightMap1[3] = MulSIMD(colorLightMap1[3], vOneOverTwoFiftyFive); // normalize the rgb channels
 
 		// finish scale-by-exponent on group 1
-			expW1[0] = XMVectorExpEst( expW1[0] );
-			expW1[1] = XMVectorExpEst( expW1[1] );
-			expW1[2] = XMVectorExpEst( expW1[2] );
-			expW1[3] = XMVectorExpEst( expW1[3] );
+			expW1[0] = Exp2EstSIMD( expW1[0] );
+			expW1[1] = Exp2EstSIMD( expW1[1] );
+			expW1[2] = Exp2EstSIMD( expW1[2] );
+			expW1[3] = Exp2EstSIMD( expW1[3] );
 
 		colorLightMap0[0] = MulSIMD(expW0[0], colorLightMap0[0]);
 		colorLightMap0[1] = MulSIMD(expW0[1], colorLightMap0[1]);
@@ -772,28 +1022,31 @@ static void AccumulateLightstyles_EightAtAtime( ColorRGBExp32* RESTRICT pLightma
 
 
 		// accumulate into blocklights
-		vLight0[0] = XMVectorMultiplyAdd(vScalar, colorLightMap0[0], vLight0[0]);
-		vLight0[1] = XMVectorMultiplyAdd(vScalar, colorLightMap0[1], vLight0[1]);
-		vLight0[2] = XMVectorMultiplyAdd(vScalar, colorLightMap0[2], vLight0[2]);
-		vLight0[3] = XMVectorMultiplyAdd(vScalar, colorLightMap0[3], vLight0[3]);
-			vLight1[0] = XMVectorMultiplyAdd(vScalar, colorLightMap1[0], vLight1[0]);
-			vLight1[1] = XMVectorMultiplyAdd(vScalar, colorLightMap1[1], vLight1[1]);
-			vLight1[2] = XMVectorMultiplyAdd(vScalar, colorLightMap1[2], vLight1[2]);
-			vLight1[3] = XMVectorMultiplyAdd(vScalar, colorLightMap1[3], vLight1[3]);
+		vLight0[0] = MaddSIMD(vScalar, colorLightMap0[0], vLight0[0]);
+		vLight0[1] = MaddSIMD(vScalar, colorLightMap0[1], vLight0[1]);
+		vLight0[2] = MaddSIMD(vScalar, colorLightMap0[2], vLight0[2]);
+		vLight0[3] = MaddSIMD(vScalar, colorLightMap0[3], vLight0[3]);
+			vLight1[0] = MaddSIMD(vScalar, colorLightMap1[0], vLight1[0]);
+			vLight1[1] = MaddSIMD(vScalar, colorLightMap1[1], vLight1[1]);
+			vLight1[2] = MaddSIMD(vScalar, colorLightMap1[2], vLight1[2]);
+			vLight1[3] = MaddSIMD(vScalar, colorLightMap1[3], vLight1[3]);
 
 		// save 
-		XMStoreVector4A( bLights + i + 0, vLight0[0]);
-		XMStoreVector4A( bLights + i + 1, vLight0[1]);
-		XMStoreVector4A( bLights + i + 2, vLight0[2]);
-		XMStoreVector4A( bLights + i + 3, vLight0[3]);
-			XMStoreVector4A( bLights + i + 4, vLight1[0]);
-			XMStoreVector4A( bLights + i + 5, vLight1[1]);
-			XMStoreVector4A( bLights + i + 6, vLight1[2]);
-			XMStoreVector4A( bLights + i + 7, vLight1[3]);
+		StoreAlignedSIMD( (bLights + i + 0)->Base(), vLight0[0]);
+		StoreAlignedSIMD( (bLights + i + 1)->Base(), vLight0[1]);
+		StoreAlignedSIMD( (bLights + i + 2)->Base(), vLight0[2]);
+		StoreAlignedSIMD( (bLights + i + 3)->Base(), vLight0[3]);
+			StoreAlignedSIMD( (bLights + i + 4)->Base(), vLight1[0]);
+			StoreAlignedSIMD( (bLights + i + 5)->Base(), vLight1[1]);
+			StoreAlignedSIMD( (bLights + i + 6)->Base(), vLight1[2]);
+			StoreAlignedSIMD( (bLights + i + 7)->Base(), vLight1[3]);
 	}
+
 }
 
-// just like XMLoadByte4 only no asserts
+// just like XMLoadByte4 only no asserts - loads a vector from 
+// a struct { char v[4] }
+#ifdef _X360
 FORCEINLINE XMVECTOR LoadSignedByte4NoAssert ( CONST XMBYTE4* pSource )
 {
 	XMVECTOR V;
@@ -806,19 +1059,82 @@ FORCEINLINE XMVECTOR LoadSignedByte4NoAssert ( CONST XMBYTE4* pSource )
 	return V;
 }
 
+FORCEINLINE XMVECTOR LoadUnsignedByte4( ColorRGBExp32* pSource )
+{
+	return XMLoadUByte4(reinterpret_cast<XMUBYTE4 *>(pSource));
+}
+
+#elif defined(_PS3)
+typedef struct _XMBYTE4 {
+union {
+	struct {
+		CHAR x;
+		CHAR y;
+		CHAR z;
+		CHAR w;
+	};
+	UINT v;
+};
+} XMBYTE4;
+
+FORCEINLINE fltx4 LoadSignedByte4NoAssert ( const XMBYTE4* pSource )
+{
+	fltx4 V;
+
+	/*
+	V = vec_lvlx(pSource, 0);
+	V = vec_vupkhsb(V);
+	V = vec_vupkhsh(V);
+	V = vec_vcfsx(V, 0);
+
+	return V;
+	*/
+
+	return vec_vcfsx( vec_vupkhsh( vec_vupkhsb( (vector signed char) vec_lvlx(0, reinterpret_cast<const vec_float4 *>(pSource)) ) ) , 0);
+}
+
+FORCEINLINE fltx4 LoadUnsignedByte4( ColorRGBExp32* pSource )
+{
+	// this mask moves four consecutive bytes in the x word of a vec reg
+	// into the respective four words of a vreg. 
+	const static vector unsigned int PermuteMask = { 0x00000010, 0x00000011, 0x00000012, 0x00000013 };
+
+	fltx4 V = vec_lvlx( 0, reinterpret_cast<const vec_float4 *>(pSource) );
+	V = vec_perm( LoadZeroSIMD(), V, (vec_uchar16) PermuteMask  );
+
+	return vec_vcfux( (vector unsigned int) V, 	0	);
+}
+
+#else
+#error No implementation of LoadSignedByte4NoAssert for this platform
+#endif
+
+FORCEINLINE fltx4 StompW( fltx4 V ) // force w word of a vector to zero
+{
+#ifdef _X360
+	return __vrlimi(V, Four_Zeros, 1, 0);
+#elif defined(_PS3)
+	const static bi32x4 mask = { 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0 };
+	return vec_and( V, mask );
+#else
+#error Wrong platform!
+#endif
+}
 
 //-----------------------------------------------------------------------------
 // Compute the portion of the lightmap generated from lightstyles
 //-----------------------------------------------------------------------------
-static void AccumulateLightstyles( ColorRGBExp32* pLightmap, int lightmapSize, fltx4 vScalar ) 
+static void AccumulateLightstyles( ColorRGBExp32* pLightmap, unsigned char *pLightmapExtraData, int lightmapSize, fltx4 vScalar ) 
 {
 	Assert( pLightmap );
+	VPROF_2( "AccumulateLightstyles" , VPROF_BUDGETGROUP_OTHER_UNACCOUNTED, false, BUDGETFLAG_CLIENT);
 	// crush w of the scalar to zero (so we don't overwrite blocklight[x][y][3] in the madds)
-	vScalar = __vrlimi(vScalar, Four_Zeros, 1, 0);
+	vScalar = StompW(vScalar);
+
 	int lightmapSizeEightAligned = lightmapSize & (~0x07);
 
 	// crunch as many groups of eight as possible, then deal with the remainder
-	AccumulateLightstyles_EightAtAtime(pLightmap, lightmapSizeEightAligned, vScalar, blocklights[0]);
+	AccumulateLightstyles_EightAtAtime(pLightmap, pLightmapExtraData, lightmapSizeEightAligned, vScalar, blocklights[0]);
 
 	// handle remainders
 	for (int i = lightmapSizeEightAligned; i < lightmapSize ; ++i )
@@ -830,27 +1146,35 @@ static void AccumulateLightstyles( ColorRGBExp32* pLightmap, int lightmapSize, f
 
 		// unpack the color light maps
 		// load the unsigned bytes
-		colorLightMap = XMLoadUByte4(reinterpret_cast<XMUBYTE4 *>(pLightmap + i));
+		colorLightMap = LoadUnsignedByte4(pLightmap + i);
 		// fish out the exponent component from a signed load
-		fltx4 exponentiator = XMVectorExpEst(XMVectorSplatW(LoadSignedByte4NoAssert(reinterpret_cast<XMBYTE4 *>(pLightmap + i))));
+		fltx4 exponentiator = Exp2EstSIMD(SplatWSIMD(LoadSignedByte4NoAssert(reinterpret_cast<XMBYTE4 *>(pLightmap + i))));
 
 		// scale each of the color light channels by the exponent
 		colorLightMap = MulSIMD( MulSIMD(colorLightMap, vOneOverTwoFiftyFive ), exponentiator );
 
-		Assert( colorLightMap.v[0] == TexLightToLinear( pLightmap[i].r, pLightmap[i].exponent ) &&
-			colorLightMap.v[1] == TexLightToLinear( pLightmap[i].g, pLightmap[i].exponent ) &&
-			colorLightMap.v[2] == TexLightToLinear( pLightmap[i].b, pLightmap[i].exponent ) );
+#ifdef _DEBUG
+		float tltl_r = TexLightToLinear( pLightmap[i].r, pLightmap[i].exponent );
+		float tltl_g = TexLightToLinear( pLightmap[i].g, pLightmap[i].exponent );
+		float tltl_b = TexLightToLinear( pLightmap[i].b, pLightmap[i].exponent );
+#endif
+		Assert( SubFloat(colorLightMap,0) == TexLightToLinear( pLightmap[i].r, pLightmap[i].exponent ) &&
+			SubFloat(colorLightMap,1) == TexLightToLinear( pLightmap[i].g, pLightmap[i].exponent ) &&
+			SubFloat(colorLightMap,2) == TexLightToLinear( pLightmap[i].b, pLightmap[i].exponent ) );
 
 		// accumulate onto blocklights
 		vLight = MaddSIMD(vScalar, colorLightMap, vLight);
 
 		StoreAlignedSIMD(blocklights[0][i].Base(), vLight);
 	}
+
 }
 
-static void AccumulateLightstylesFlat( ColorRGBExp32* pLightmap, int lightmapSize, fltx4 vScalar ) 
+static void AccumulateLightstylesFlat( ColorRGBExp32* pLightmap, unsigned char *pLightmapExtraData, int lightmapSize, fltx4 vScalar ) 
 {
 	Assert( pLightmap );
+
+	VPROF( "AccumulateLightstylesFlat" );
 
 	// this isn't a terribly fast way of doing things, but 
 	// this function doesn't seem to be called much (so 
@@ -858,9 +1182,9 @@ static void AccumulateLightstylesFlat( ColorRGBExp32* pLightmap, int lightmapSiz
 	fltx4 colorLightMap; 
 	// unpack the color light maps
 	// load the unsigned bytes
-	colorLightMap = XMLoadUByte4(reinterpret_cast<XMUBYTE4 *>(pLightmap));
+	colorLightMap = LoadUnsignedByte4(pLightmap);
 	// fish out the exponent component from a signed load
-	fltx4 exponentiator = XMVectorExpEst(XMVectorSplatW(LoadSignedByte4NoAssert(reinterpret_cast<XMBYTE4 *>(pLightmap))));
+	fltx4 exponentiator = Exp2EstSIMD(SplatWSIMD(LoadSignedByte4NoAssert(reinterpret_cast<XMBYTE4 *>(pLightmap))));
 
 	// scale each of the color light channels by the exponent
 	colorLightMap = MulSIMD( MulSIMD(colorLightMap, vOneOverTwoFiftyFive ), exponentiator );
@@ -879,13 +1203,14 @@ static void AccumulateLightstylesFlat( ColorRGBExp32* pLightmap, int lightmapSiz
 }
 
 
-
-static void AccumulateBumpedLightstyles( ColorRGBExp32* RESTRICT pLightmap, int lightmapSize, fltx4 vScalar ) 
+static void AccumulateBumpedLightstyles( ColorRGBExp32* RESTRICT pLightmap, unsigned char *pLightmapExtraData, int lightmapSize, fltx4 vScalar ) 
 {
 	COMPILE_TIME_ASSERT(sizeof(ColorRGBExp32) == 4); // This function is carefully scheduled around four-byte colors
 
+	VPROF_2( "AccumulateBumpedLightstyles" , VPROF_BUDGETGROUP_OTHER_UNACCOUNTED, false, BUDGETFLAG_CLIENT);
+
 	// crush w of the scalar to zero (so we don't overwrite blocklight[x][y][3] in the madds)
-	vScalar = __vrlimi(vScalar, Four_Zeros, 1, 0);
+	vScalar = vScalar = StompW(vScalar);
 
 	/*
 	ColorRGBExp32 * RESTRICT pBumpedLightmaps[3];
@@ -955,11 +1280,23 @@ static void AccumulateBumpedLightstyles( ColorRGBExp32* RESTRICT pLightmap, int 
 
 	int lightmapSizeEightAligned = lightmapSize & (~0x07);
 
+
 	// crunch each of the lightmap groups.
 	for (int mapGroup = 0 ; mapGroup <= 3 ; ++mapGroup, pLightmap += lightmapSize )
 	{
 		// process the base lightmap
-		AccumulateLightstyles_EightAtAtime(pLightmap, lightmapSizeEightAligned, vScalar, blocklights[mapGroup]);
+		if ( lightmapSizeEightAligned )
+		{
+			// start loading the first couple of cache lines for the *next* group of blocklights.
+			if ( mapGroup < 3 )
+			{
+				PREFETCH_128( blocklights[mapGroup+1], 0 );
+				PREFETCH_128( blocklights[mapGroup+1], 128 );
+				PREFETCH_128( pLightmap + lightmapSize, 0 );
+			}
+			
+			AccumulateLightstyles_EightAtAtime(pLightmap, pLightmapExtraData, lightmapSizeEightAligned, vScalar, blocklights[mapGroup]);
+		}
 		// handle remainders
 		for (int i = lightmapSizeEightAligned; i < lightmapSize ; ++i )
 		{
@@ -970,16 +1307,16 @@ static void AccumulateBumpedLightstyles( ColorRGBExp32* RESTRICT pLightmap, int 
 
 			// unpack the color light maps
 			// load the unsigned bytes
-			colorLightMap = XMLoadUByte4(reinterpret_cast<XMUBYTE4 *>(pLightmap + i));
+			colorLightMap = LoadUnsignedByte4(pLightmap + i);
 			// fish out the exponent component from a signed load
-			fltx4 exponentiator = XMVectorExpEst(XMVectorSplatW(LoadSignedByte4NoAssert(reinterpret_cast<XMBYTE4 *>(pLightmap + i))));
+			fltx4 exponentiator = Exp2EstSIMD(SplatWSIMD(LoadSignedByte4NoAssert(reinterpret_cast<XMBYTE4 *>(pLightmap + i))));
 
 			// scale each of the color light channels by the exponent
 			colorLightMap = MulSIMD( MulSIMD(colorLightMap, vOneOverTwoFiftyFive ), exponentiator );
 
-			Assert( colorLightMap.v[0] == TexLightToLinear( pLightmap[i].r, pLightmap[i].exponent ) &&
-				colorLightMap.v[1] == TexLightToLinear( pLightmap[i].g, pLightmap[i].exponent ) &&
-				colorLightMap.v[2] == TexLightToLinear( pLightmap[i].b, pLightmap[i].exponent ) );
+			Assert( SubFloat(colorLightMap,0) == TexLightToLinear( pLightmap[i].r, pLightmap[i].exponent ) &&
+				SubFloat(colorLightMap,1) == TexLightToLinear( pLightmap[i].g, pLightmap[i].exponent ) &&
+				SubFloat(colorLightMap,2) == TexLightToLinear( pLightmap[i].b, pLightmap[i].exponent ) );
 
 
 			// accumulate onto blocklights
@@ -993,6 +1330,9 @@ static void AccumulateBumpedLightstyles( ColorRGBExp32* RESTRICT pLightmap, int 
 }
 #endif
 
+
+
+
 //-----------------------------------------------------------------------------
 // Compute the portion of the lightmap generated from lightstyles
 //-----------------------------------------------------------------------------
@@ -1002,6 +1342,13 @@ static void ComputeLightmapFromLightstyle( msurfacelighting_t *pLighting, bool c
 	VPROF( "ComputeLightmapFromLightstyle" );
 
 	ColorRGBExp32 *pLightmap = pLighting->m_pSamples;
+
+	// This data should only exist on the PC. We strip out the data and clear the flag in makegamedata for consoles.
+	unsigned char *pLightmapExtraData = NULL;
+	if ( g_bHasLightmapAlphaData )
+	{
+		pLightmapExtraData = ( unsigned char * )&( pLighting->m_pSamples[ hasBumpmapLightmapData ? lightmapSize * ( NUM_BUMP_VECTS + 1 ) : lightmapSize ] );
+	}
 
 	// Compute iteration range
 	int minmap, maxmap;
@@ -1030,26 +1377,126 @@ static void ComputeLightmapFromLightstyle( msurfacelighting_t *pLighting, bool c
 //		if (scalar > 0.0f && maps > 0 )
 		if (fscalar > 0.0f)
 		{
-#ifdef _X360
+//#ifdef PLATFORM_PPC
+#if 0 // 7LS
 			fltx4 scalar = ReplicateX4(fscalar); // we use SIMD versions of these functions on 360
 #else
 			const float &scalar = fscalar;
 #endif
-
 			if( computeBumpmap )
 			{
-				AccumulateBumpedLightstyles( pLightmap, lightmapSize, scalar );
+				// don't accumulate alpha for other lightstyles
+				if ( maps == 0 )
+				{
+ 					AccumulateBumpedLightstyles( pLightmap, pLightmapExtraData, lightmapSize, scalar );
+				}
+ 				else
+ 				{
+					AccumulateBumpedLightstylesNoAlpha( pLightmap, pLightmapExtraData, lightmapSize, scalar );
+				}
 			}
 			else if( computeLightmap )
 			{
 				if (r_avglightmap.GetInt())
 				{
 					pLightmap = pLighting->AvgLightColor(maps);
-					AccumulateLightstylesFlat( pLightmap, lightmapSize, scalar );
+					// don't accumulate alpha for other lightstyles
+					if ( maps == 0 )
+					{
+ 						AccumulateLightstylesFlat( pLightmap, pLightmapExtraData, lightmapSize, scalar );
+					}
+					else
+					{
+						AccumulateLightstylesFlatNoAlpha( pLightmap, pLightmapExtraData, lightmapSize, scalar );
+					}
 				}
 				else
 				{
-					AccumulateLightstyles( pLightmap, lightmapSize, scalar );
+					// don't accumulate alpha for other lightstyles
+					if ( maps == 0 )
+					{
+ 						AccumulateLightstyles( pLightmap, pLightmapExtraData, lightmapSize, scalar );
+					}
+					else
+					{
+						AccumulateLightstylesNoAlpha( pLightmap, pLightmapExtraData, lightmapSize, scalar );
+					}
+				}
+			}
+		}
+
+		// skip to next lightmap. If we store bump lightmap data, we need to jump forward 5 (1 x regular lmap, 3 x bump lmaps, 1 x extra alpha csm data)
+		// otherwise 2 (1 x regular lmap, 1 x extra alpha csm data)
+		pLightmap += hasBumpmapLightmapData ? lightmapSize * ( NUM_BUMP_VECTS + 2 ) : ( lightmapSize * 2 );
+	}
+}
+
+//-----------------------------------------------------------------------------
+// Version of above to support old lightmap lump layout (before lightstyles were fixed)
+// Added to avoid modders re-baking maps that used 'broken' lightstyle data in a manner that worked for them (i.e. without CSMs)
+//-----------------------------------------------------------------------------
+static void ComputeLightmapFromLightstyleOLD( msurfacelighting_t *pLighting, bool computeLightmap,
+										   bool computeBumpmap, int lightmapSize, bool hasBumpmapLightmapData )
+{
+	VPROF( "ComputeLightmapFromLightstyleOLD" );
+
+	ColorRGBExp32 *pLightmap = pLighting->m_pSamples;
+
+	// This data should only exist on the PC. We strip out the data and clear the flag in makegamedata for consoles.
+	unsigned char *pLightmapExtraData = NULL;
+	if ( g_bHasLightmapAlphaData )
+	{
+		pLightmapExtraData = ( unsigned char * )&( pLighting->m_pSamples[ hasBumpmapLightmapData ? lightmapSize * ( NUM_BUMP_VECTS + 1 ) : lightmapSize ] );
+	}
+
+	// Compute iteration range
+	int minmap, maxmap;
+#ifdef USE_CONVARS
+	if ( r_lightmap.GetInt() != -1 )
+	{
+		minmap = r_lightmap.GetInt();
+		maxmap = minmap + 1;
+	}
+	else
+#endif
+	{
+		minmap = 0; maxmap = MAXLIGHTMAPS;
+	}
+
+	for ( int maps = minmap; maps < maxmap && pLighting->m_nStyles[ maps ] != 255; ++maps )
+	{
+		if ( r_lightstyle.GetInt() != -1 && pLighting->m_nStyles[ maps ] != r_lightstyle.GetInt() )
+		{
+			continue;
+		}
+
+		float fscalar = LightStyleValue( pLighting->m_nStyles[ maps ] );
+
+		// hack - don't know why we are getting negative values here.
+		//		if (scalar > 0.0f && maps > 0 )
+		if ( fscalar > 0.0f )
+		{
+			//#ifdef PLATFORM_PPC
+#if 0 // 7LS
+			fltx4 scalar = ReplicateX4( fscalar ); // we use SIMD versions of these functions on 360
+#else
+			const float &scalar = fscalar;
+#endif
+
+			if ( computeBumpmap )
+			{
+				AccumulateBumpedLightstyles( pLightmap, pLightmapExtraData, lightmapSize, scalar );
+			}
+			else if ( computeLightmap )
+			{
+				if ( r_avglightmap.GetInt() )
+				{
+					pLightmap = pLighting->AvgLightColor( maps );
+					AccumulateLightstylesFlat( pLightmap, pLightmapExtraData, lightmapSize, scalar );
+				}
+				else
+				{
+					AccumulateLightstyles( pLightmap, pLightmapExtraData, lightmapSize, scalar );
 				}
 			}
 		}
@@ -1174,7 +1621,7 @@ void R_BuildLightMapGuts( dlight_t *pLights, SurfaceHandle_t surfID, const matri
 	int bumpID;
 
 	// Lightmap data can be dumped to save memory - this precludes any dynamic lighting on the world
-	Assert( !host_state.worldbrush->unloadedlightmaps );
+	Assert( !host_state.worldbrush->m_bUnloadedAllLightmaps );
 
 	// Mark the surface with the particular cached light values...
 	msurfacelighting_t *pLighting = SurfaceLighting( surfID );
@@ -1185,12 +1632,13 @@ void R_BuildLightMapGuts( dlight_t *pLights, SurfaceHandle_t surfID, const matri
 
 	bool hasBumpmap = SurfHasBumpedLightmaps( surfID );
 	bool hasLightmap = SurfHasLightmap( surfID );
+	extern bool g_bLightstylesWithCSM;
 
 	// clear to no light
 	if( needsLightmap )
 	{
 		// set to full bright if no light data
-		InitLMSamples( blocklights[0], size, hasLightmap ? 0.0f : 1.0f );
+		InitLMSamples( blocklights[0], size, hasLightmap ? 0.0f : mat_defaultlightmap.GetFloat() );
 	}
 
 	if( needsBumpmap )
@@ -1198,7 +1646,7 @@ void R_BuildLightMapGuts( dlight_t *pLights, SurfaceHandle_t surfID, const matri
 		// set to full bright if no light data
 		for( bumpID = 1; bumpID < NUM_BUMP_VECTS + 1; bumpID++ )
 		{
-			InitLMSamples( blocklights[bumpID], size, hasBumpmap ? 0.0f : 1.0f );
+			InitLMSamples( blocklights[bumpID], size, hasBumpmap ? 0.0f : mat_defaultlightmap.GetFloat() );
 		}
 	}
 
@@ -1206,14 +1654,29 @@ void R_BuildLightMapGuts( dlight_t *pLights, SurfaceHandle_t surfID, const matri
 	// Here, it's got the data it needs. So use it!
 	if( ( hasLightmap && needsLightmap ) || ( hasBumpmap && needsBumpmap ) )
 	{
-		ComputeLightmapFromLightstyle( pLighting, ( hasLightmap && needsLightmap ),
-			( hasBumpmap && needsBumpmap ), size, hasBumpmap );
+ 		if ( g_bLightstylesWithCSM )
+ 		{
+			ComputeLightmapFromLightstyle( pLighting, ( hasLightmap && needsLightmap ),
+				( hasBumpmap && needsBumpmap ), size, hasBumpmap );
+ 		}
+ 		else
+ 		{
+ 			ComputeLightmapFromLightstyleOLD( pLighting, ( hasLightmap && needsLightmap ),
+ 				( hasBumpmap && needsBumpmap ), size, hasBumpmap );
+ 		}
 	}
 	else if( !hasBumpmap && needsBumpmap && hasLightmap )
 	{
 		// make something up for the bumped lights if you need them but don't have the data
 		// if you have a lightmap, use that, otherwise fullbright
-		ComputeLightmapFromLightstyle( pLighting, true, false, size, hasBumpmap );
+		if ( g_bLightstylesWithCSM )
+		{
+			ComputeLightmapFromLightstyle( pLighting, true, false, size, hasBumpmap );
+		}
+		else
+		{
+			ComputeLightmapFromLightstyleOLD( pLighting, true, false, size, hasBumpmap );
+		}
 
 		for( bumpID = 0; bumpID < ( hasBumpmap ? ( NUM_BUMP_VECTS + 1 ) : 1 ); bumpID++ )
 		{
@@ -1296,6 +1759,7 @@ void CacheAndUnloadLightmapData()
 	Assert( !g_bHunkAllocLightmaps );
 	if ( g_bHunkAllocLightmaps )
 	{
+		// for safety, can't discard if lighting data is hunk allocated
 		return;
 	}
 
@@ -1322,15 +1786,153 @@ void CacheAndUnloadLightmapData()
 		// Copy just the 0-4 average color entries
 		Q_memcpy( pDest, pHdr, nHdrBytes );
 
-		// m_pSamples needs to point AFTER the average color data
+		// m_pSamples needs to stay pointing AFTER the average color data
+		// other code expects to back up and find it there
 		pDest += nHdrBytes;
 		pLighting->m_pSamples = (ColorRGBExp32*)pDest;
 	}
 
-	// Update the lightdata pointer
-	free( host_state.worldbrush->lightdata );
+	// discard previous and update the lightdata
+	DeallocateLightingData( host_state.worldbrush );
 	host_state.worldbrush->lightdata = (ColorRGBExp32*)pDestBase;
-	host_state.worldbrush->unloadedlightmaps = true;
+
+	// track this specific hack
+	host_state.worldbrush->m_bUnloadedAllLightmaps = true;
+}
+
+class SurfaceLessFunc
+{
+public:
+	// ascending sort the lighting pointers
+	bool Less( const int &src1, const int &src2, void *pCtx )
+	{
+		msurfacelighting_t *pLighting = (msurfacelighting_t *)pCtx;
+		return ( ( ( uintp )pLighting[src1].m_pSamples ) < ( ( uintp )pLighting[src2].m_pSamples ) );
+	}
+};
+
+
+//-----------------------------------------------------------------------------
+// All lightmaps should have been uploaded, can now compact portions of all
+// the lighting data, fixup those surfaces, and decommit the unused portion
+// of the lighting data.
+//-----------------------------------------------------------------------------
+void DiscardStaticLightmapData()
+{
+	Assert( !g_bHunkAllocLightmaps );
+	if ( g_bHunkAllocLightmaps )
+	{
+		// for safety, can't discard if lighting data is hunk allocated
+		return;
+	}
+
+	worldbrushdata_t *pBrushData = host_state.worldbrush;
+	msurfacelighting_t *pLighting = pBrushData->surfacelighting;
+	int numSurfaces = pBrushData->numsurfaces;
+
+	if ( !numSurfaces || !pBrushData->m_pLightingDataStack )
+		return;
+
+	// sort all the surfaces lighting pointers
+	// want the pointers to be numerically ascending
+	int *pSurfaceIndexes = (int *)stackalloc( numSurfaces * sizeof( int ) );
+	CUtlSortVector< int, SurfaceLessFunc > surfaceSort( pSurfaceIndexes, numSurfaces );
+	surfaceSort.SetLessContext( pLighting );
+	for ( int i = 0; i < numSurfaces; i++ )
+	{
+		surfaceSort.InsertNoSort( i );
+	}
+	surfaceSort.RedoSort();
+
+	// for saftey, validate the pointers are sorted as expected, otherwise memory corruption
+	ColorRGBExp32 *pLast = pLighting[surfaceSort[0]].m_pSamples;
+	for ( int i = 1; i < numSurfaces; i++ )
+	{
+		ColorRGBExp32 *pCurrent = pLighting[surfaceSort[i]].m_pSamples;
+		if ( pCurrent && pLast && (uintp)pCurrent == (uintp)pLast )
+		{
+			// the lighting data pointers cannot be pointing to the same valid location
+			// abandon compaction, memory corruption would occur
+			DevMsg( "DiscardStaticLightmapData: Surface Lighting data aliased.\n" );
+			Assert( 0 );
+			return;
+		}
+		else if ( (uintp)pCurrent < (uintp)pLast )
+		{
+			// the lighting data pointers must be in ascending order
+			// abandon compaction, memory corruption would occur
+			DevMsg( "DiscardStaticLightmapData: Surface Lighting data out of order.\n" );
+			Assert( 0 );
+			return;
+		}
+		pLast = pCurrent;
+	}
+
+	// iterate through sorted surfaces, compacting surface lighting by shifting over discarded regions
+	ColorRGBExp32 *pTarget = pBrushData->lightdata;
+	for ( int i = 0; i < numSurfaces; i++ )
+	{
+		int nSortedIndex = surfaceSort[i];
+
+		SurfaceHandle_t surfID = SurfaceHandleFromIndex( nSortedIndex );
+
+		if ( !SurfHasLightmap( surfID ) )
+		{
+			// not a candidate
+			continue;
+		}
+
+		int offset = ComputeLightmapSize( surfID );
+		if ( SurfHasBumpedLightmaps( surfID ) )
+		{
+			offset *= ( NUM_BUMP_VECTS + 1 );
+		}
+
+		// count this surface's number of lightmaps
+		int nNumMaps;
+		for ( nNumMaps = 0; nNumMaps < MAXLIGHTMAPS && pLighting[nSortedIndex].m_nStyles[nNumMaps] != 255; nNumMaps++ )
+		{
+		}
+
+		if ( !nNumMaps )
+		{
+			// odd, marked for lightmaps, but no styles
+			// ignore
+			continue;
+		}
+
+		// account for the avgcolors
+		int nSurfaceLightSize = nNumMaps;
+		if ( nNumMaps > 1 && ( MSurf_Flags( surfID ) & SURFDRAW_HASLIGHTSYTLES ) )
+		{
+			// account for the lightmaps
+			nSurfaceLightSize += nNumMaps * offset;
+		}
+
+		// position the source properly
+		// the avgcolors are stored behind the lightmaps
+		ColorRGBExp32 *pSource = pLighting[nSortedIndex].m_pSamples - nNumMaps;
+		if ( pSource != pTarget )
+		{
+			memmove( pTarget, pSource, nSurfaceLightSize * sizeof( ColorRGBExp32 ) );
+
+			// fixup the surface to the new location
+			// the surface points to the data AFTER the avgcolors
+			pLighting[nSortedIndex].m_pSamples = pTarget + nNumMaps;
+		}
+	
+		// advance past
+		pTarget += nSurfaceLightSize;
+	}
+	
+	unsigned int nDynamicSize = size_cast< unsigned int >( (uintp)pTarget - (uintp)pBrushData->lightdata );
+
+	// shrink the original allocation in place
+	pBrushData->m_pLightingDataStack->FreeToAllocPoint( nDynamicSize );
+
+	const char *mapName = modelloader->GetName( host_state.worldmodel );
+	Msg( "(%s) Original Full Lighting Data:           %.2f MB\n", mapName, (float)pBrushData->m_nLightingDataSize / ( 1024.0f * 1024.0f ) );
+	Msg( "(%s) Reduced To Only Dynamic Lighting Data: %.2f MB\n", mapName, (float)nDynamicSize / ( 1024.0f * 1024.0f ) );
 }
 
 //sorts the surfaces in place
@@ -1377,7 +1979,7 @@ void R_RedownloadAllLightmaps()
 {
 #ifdef _DEBUG
 	static bool initializedBlockLights = false;
-	if (!initializedBlockLights)
+	if ( !initializedBlockLights )
 	{
 		memset( &blocklights[0][0][0], 0, MAX_LIGHTMAP_DIM_INCLUDING_BORDER * MAX_LIGHTMAP_DIM_INCLUDING_BORDER * (NUM_BUMP_VECTS + 1) * sizeof( Vector ) );
 		initializedBlockLights = true;
@@ -1386,18 +1988,18 @@ void R_RedownloadAllLightmaps()
 
 	double st = Sys_FloatTime();
 
-	bool bOnlyUseLightStyles = false;
-
-	if( r_dynamic.GetInt() == 0 )
-	{
-		bOnlyUseLightStyles = true;
-	}
-
-	// Can't build lightmaps if the source data has been dumped
-	CMatRenderContextPtr pRenderContext( materials );
-	ICallQueue *pCallQueue = pRenderContext->GetCallQueue();
-	if ( !host_state.worldbrush->unloadedlightmaps )
+	if ( !host_state.worldbrush->m_bUnloadedAllLightmaps )
 	{		
+		bool bOnlyUseLightStyles = false;
+		if ( r_dynamic.GetInt() == 0 || r_keepstyledlightmapsonly.GetBool() )
+		{
+			bOnlyUseLightStyles = true;
+		}
+
+		// Can't build lightmaps if the source data has been dumped
+		CMatRenderContextPtr pRenderContext( materials );
+		ICallQueue *pCallQueue = pRenderContext->GetCallQueue();
+
 		int iSurfaceCount = host_state.worldbrush->numsurfaces;
 		
 		SurfaceHandle_t *pSortedSurfaces = (SurfaceHandle_t *)stackalloc( sizeof( SurfaceHandle_t ) * iSurfaceCount );
@@ -1429,16 +2031,30 @@ void R_RedownloadAllLightmaps()
 		else
 			materials->EndUpdateLightmaps();		
 
-		if ( !g_bHunkAllocLightmaps && r_unloadlightmaps.GetInt() == 1 )
+		if ( !g_bHunkAllocLightmaps )
 		{
-			// Delete the lightmap data from memory
-			if ( !pCallQueue )
+			if ( r_unloadlightmaps.GetInt() == 1 )
 			{
-				CacheAndUnloadLightmapData();
+				// Delete the lightmap data from memory
+				if ( !pCallQueue )
+				{
+					CacheAndUnloadLightmapData();
+				}
+				else
+				{
+					pCallQueue->QueueCall( CacheAndUnloadLightmapData );
+				}
 			}
-			else
+			else if ( r_keepstyledlightmapsonly.GetBool() )
 			{
-				pCallQueue->QueueCall( CacheAndUnloadLightmapData );
+				if ( !pCallQueue )
+				{
+					DiscardStaticLightmapData();
+				}
+				else
+				{
+					pCallQueue->QueueCall( DiscardStaticLightmapData );
+				}
 			}
 		}
 	}
@@ -1468,50 +2084,122 @@ void GL_RebuildLightmaps( void )
 #ifdef UPDATE_LIGHTSTYLES_EVERY_FRAME
 ConVar mat_updatelightstyleseveryframe( "mat_updatelightstyleseveryframe", "0" );
 #endif
-void FASTCALL R_RenderDynamicLightmaps ( dlight_t *pLights, ICallQueue *pCallQueue, SurfaceHandle_t surfID, const matrix3x4_t &xform )
+
+int __cdecl LightmapPageCompareFunc( const void *pElem0, const void *pElem1 )
 {
-	VPROF_BUDGET( "R_RenderDynamicLightmaps", VPROF_BUDGETGROUP_DLIGHT_RENDERING );
-	ASSERT_SURF_VALID( surfID );
+	const LightmapUpdateInfo_t *pSurf0 = (const LightmapUpdateInfo_t *)pElem0;
+	const LightmapUpdateInfo_t *pSurf1 = (const LightmapUpdateInfo_t *)pElem1;
+	int page0 = materialSortInfoArray[MSurf_MaterialSortID( (pSurf0->m_SurfHandle) )].lightmapPageID;
+	int page1 = materialSortInfoArray[MSurf_MaterialSortID( (pSurf1->m_SurfHandle) )].lightmapPageID;
+	return page0 - page1;
+}
 
-	int fSurfFlags = MSurf_Flags( surfID );
-
-	if( fSurfFlags & SURFDRAW_NOLIGHT )
-		return;
-
-	// check for lightmap modification
-	bool bChanged = false;
-	msurfacelighting_t *pLighting = SurfaceLighting( surfID );
-	if( fSurfFlags & SURFDRAW_HASLIGHTSYTLES )
+void R_BuildLightmapUpdateList()
+{
+	CMatRenderContextPtr pRenderContext( materials );
+	ICallQueue *pCallQueue = pRenderContext->GetCallQueue();
+	dlight_t *pLights = &cl_dlights[0];
+	// only do the copy when there are valid dlights to process and threading is on
+	if ( g_bActiveDlights && pCallQueue )
 	{
-#ifdef UPDATE_LIGHTSTYLES_EVERY_FRAME
-		if( mat_updatelightstyleseveryframe.GetBool() && ( pLighting->m_nStyles[0] != 0 || pLighting->m_nStyles[1] != 255 ) )
+		// keep a copy of the current dlight state around for the thread to work on 
+		// in parallel.  This way the main thread can continue to modify this state without
+		// generating any bad results
+		static dlight_t threadDlights[MAX_DLIGHTS*2];
+		static int threadFrameCount = 0;
+		pLights = &threadDlights[MAX_DLIGHTS*threadFrameCount];
+		Q_memcpy( pLights, cl_dlights, sizeof(dlight_t) * MAX_DLIGHTS );
+		threadFrameCount = (threadFrameCount+1) & 1;
+	}
+
+	qsort( g_LightmapUpdateList.Base(), g_LightmapUpdateList.Count(), sizeof(g_LightmapUpdateList.Element(0)), LightmapPageCompareFunc );
+	for ( int i = 0; i < g_LightmapUpdateList.Count(); i++ )
+	{
+		const LightmapUpdateInfo_t &info = g_LightmapUpdateList.Element(i);
+		if ( !pCallQueue )
 		{
-			bChanged = true;
+			R_BuildLightMapGuts( pLights, info.m_SurfHandle, g_LightmapTransformList[info.m_nTransformIndex].xform, 
+				info.m_nDlightMask, info.m_bNeedsBumpmap, info.m_bNeedsLightmap );
 		}
-#endif
-		for( int maps = 0; maps < MAXLIGHTMAPS && pLighting->m_nStyles[maps] != 255; maps++ )
+		else
 		{
-			if( d_lightstyleframe[pLighting->m_nStyles[maps]] > pLighting->m_nLastComputedFrame )
+			pCallQueue->QueueCall( R_BuildLightMapGuts, pLights, info.m_SurfHandle, RefToVal( g_LightmapTransformList[info.m_nTransformIndex].xform ), 
+				info.m_nDlightMask, info.m_bNeedsBumpmap, info.m_bNeedsLightmap );
+		}
+	}
+}
+
+void R_CheckForLightmapUpdates( SurfaceHandle_t surfID, int nTransformIndex )
+{
+	msurfacelighting_t *pLighting = SurfaceLighting( surfID );
+	if ( pLighting->m_nLastComputedFrame != r_framecount )
+	{
+		int nFlags = MSurf_Flags( surfID );
+
+		if( nFlags & SURFDRAW_NOLIGHT )
+			return;
+
+		// check for lightmap modification
+		bool bChanged = false;
+		if( nFlags & SURFDRAW_HASLIGHTSYTLES )
+		{
+#ifdef UPDATE_LIGHTSTYLES_EVERY_FRAME
+			if( mat_updatelightstyleseveryframe.GetBool() && ( pLighting->m_nStyles[0] != 0 || pLighting->m_nStyles[1] != 255 ) )
 			{
 				bChanged = true;
-				break;
+			}
+#endif
+			for( int maps = 0; maps < MAXLIGHTMAPS && pLighting->m_nStyles[maps] != 255; maps++ )
+			{
+				if( d_lightstyleframe[pLighting->m_nStyles[maps]] > pLighting->m_nLastComputedFrame )
+				{
+					bChanged = true;
+					break;
+				}
 			}
 		}
-	}
 
-	// was it dynamic this frame (pLighting->m_nDLightFrame == r_framecount) 
-	// or dynamic previously (pLighting->m_fDLightBits)
-	bool bDLightChanged = ( pLighting->m_nDLightFrame == r_framecount ) || pLighting->m_fDLightBits;
-	bool bOnlyUseLightStyles = false;
+		// was it dynamic this frame (pLighting->m_nDLightFrame == r_framecount) 
+		// or dynamic previously (pLighting->m_fDLightBits)
+		bool bDLightChanged = ( pLighting->m_nDLightFrame == r_framecount ) || pLighting->m_fDLightBits;
+		bool bOnlyUseLightStyles = false;
+		if ( r_dynamic.GetInt() == 0 || r_keepstyledlightmapsonly.GetBool() )
+		{
+			bOnlyUseLightStyles = true;
+		}
+		else
+		{
+			bChanged |= bDLightChanged;
+		}
 
-	if( r_dynamic.GetInt() == 0 )
-	{
-		bOnlyUseLightStyles = true;
-		bDLightChanged = false;
-	}
+		if ( bChanged )
+		{
+			bool bNeedsBumpmap = SurfNeedsBumpedLightmaps( surfID );
+			bool bNeedsLightmap = SurfNeedsLightmap( surfID );
 
-	if ( bChanged || bDLightChanged )
-	{
-		R_BuildLightMap( pLights, pCallQueue, surfID, xform, bOnlyUseLightStyles );
+			if( !bNeedsBumpmap && !bNeedsLightmap )
+				return;
+
+			if( materialSortInfoArray )
+			{
+				int nSortID = MSurf_MaterialSortID( surfID );
+				Assert( nSortID >= 0 && nSortID < g_WorldStaticMeshes.Count() );
+				if (( materialSortInfoArray[nSortID].lightmapPageID == MATERIAL_SYSTEM_LIGHTMAP_PAGE_WHITE )	||
+					( materialSortInfoArray[nSortID].lightmapPageID == MATERIAL_SYSTEM_LIGHTMAP_PAGE_WHITE_BUMP ) )
+				{
+					return;
+				}
+			}
+			bool bDlightsInLightmap = bNeedsLightmap || bNeedsBumpmap;
+			unsigned int nDlightMask = R_UpdateDlightState( cl_dlights, surfID, g_LightmapTransformList[nTransformIndex].xform, bOnlyUseLightStyles, bDlightsInLightmap );
+
+
+			int nIndex = g_LightmapUpdateList.AddToTail();
+			g_LightmapUpdateList[nIndex].m_SurfHandle = surfID;
+			g_LightmapUpdateList[nIndex].m_nTransformIndex = nTransformIndex;
+			g_LightmapUpdateList[nIndex].m_nDlightMask= nDlightMask;
+			g_LightmapUpdateList[nIndex].m_bNeedsLightmap = bNeedsLightmap;
+			g_LightmapUpdateList[nIndex].m_bNeedsBumpmap = bNeedsBumpmap;
+		}
 	}
 }

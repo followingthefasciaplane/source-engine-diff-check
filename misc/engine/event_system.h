@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -19,6 +19,7 @@
 #include "event_flags.h"
 #include "common.h"
 #include "enginesingleuserfilter.h"
+#include "ents_shared.h"
 
 
 class SendTable;
@@ -41,42 +42,26 @@ public:
 	{
 		classID = 0;
 		fire_delay = 0.0f;
-		bits = 0;
 		flags = 0;
 		pSendTable = NULL;
 		pClientClass = NULL;
-		pData = NULL;
+		m_Packed = SERIALIZED_ENTITY_HANDLE_INVALID;
 	}
 
 	~CEventInfo()
 	{
-		if ( pData )
-		{
-			delete pData;
-		}
+		g_pSerializedEntities->ReleaseSerializedEntity( m_Packed );
 	}
 
 	CEventInfo( const CEventInfo& src )
 	{
+		m_Packed = g_pSerializedEntities->CopySerializedEntity( src.m_Packed, __FILE__, __LINE__ );
 		classID = src.classID;
 		fire_delay = src.fire_delay;
-		bits = src.bits;
 		flags = src.flags;
 		pSendTable = src.pSendTable;
 		pClientClass = src.pClientClass;
 		filter.AddPlayersFromFilter( &src.filter );
-				
-		if ( src.pData )
-		{
-			int size = Bits2Bytes( src.bits );
-			pData = new byte[size];
-			Q_memcpy( pData, src.pData, size );
-		}
-		else
-		{
-			pData = NULL;
-		}
-
 	}
 
 	// 0 implies not in use
@@ -89,10 +74,7 @@ public:
 	const SendTable *pSendTable;
 	const ClientClass *pClientClass;
 	
-	// Length of data bits
-	int		bits;
-	// Raw event data
-	byte	*pData;
+	SerializedEntityHandle_t m_Packed;
 	// CLIENT ONLY Reliable or not, etc.
 	int		flags;
 	

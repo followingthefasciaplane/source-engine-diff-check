@@ -1,21 +1,30 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
 //=============================================================================
+
 #include "cbase.h"
 #include "toolframework/itoolentity.h"
-#include "tier1/KeyValues.h"
+#include "tier1/keyvalues.h"
 #include "Sprite.h"
 #include "enginesprite.h"
+#include "beamdraw.h"
 #include "toolframework_client.h"
 #include "particles/particles.h"
 #include "particle_parse.h"
 #include "rendertexture.h"
+#include "model_types.h"
+#include "vstdlib/ikeyvaluessystem.h"
 
 #ifdef PORTAL
-	#include "PortalRender.h"
+	#include "portalrender.h"
+	#include "c_portal_player.h"
 #endif
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
 
 #pragma warning( disable: 4355 )  // warning C4355: 'this' : used in base member initializer list
 
@@ -28,6 +37,8 @@ void DrawSpriteModel( IClientEntity *baseentity, CEngineSprite *psprite,
 float StandardGlowBlend( const pixelvis_queryparams_t &params, pixelvis_handle_t *queryHandle,
 						int rendermode, int renderfx, int alpha, float *pscale );
 
+void HandleGameEntityKeyValues( KeyValues *pKeyValues );
+
 
 // Interface from engine to tools for manipulating entities
 class CClientTools : public IClientTools, public IClientEntityListener
@@ -37,7 +48,9 @@ public:
 
 	virtual HTOOLHANDLE		AttachToEntity( EntitySearchResult entityToAttach );
 	virtual void			DetachFromEntity( EntitySearchResult entityToDetach );
+	virtual EntitySearchResult	GetEntity( HTOOLHANDLE handle );
 	virtual bool			IsValidHandle( HTOOLHANDLE handle );
+
 
 	virtual int				GetNumRecordables();
 	virtual HTOOLHANDLE		GetRecordable( int index );
@@ -57,15 +70,17 @@ public:
 
 	virtual HTOOLHANDLE		GetToolHandleForEntityByIndex( int entindex );
 
-	virtual void			AddClientRenderable( IClientRenderable *pRenderable, int renderGroup );
+	virtual void			AddClientRenderable( IClientRenderable *pRenderable, bool bRenderWithViewModels, RenderableTranslucencyType_t nType, RenderableModelType_t nModelType );
 	virtual void			RemoveClientRenderable( IClientRenderable *pRenderable );
-	virtual void			SetRenderGroup( IClientRenderable *pRenderable, int renderGroup );
+	virtual void			SetTranslucencyType( IClientRenderable *pRenderable, RenderableTranslucencyType_t nType );
 	virtual void			MarkClientRenderableDirty( IClientRenderable *pRenderable );
 
 	virtual bool			DrawSprite( IClientRenderable *pRenderable,
 										float scale, float frame,
 										int rendermode, int renderfx,
 										const Color &color, float flProxyRadius, int *pVisHandle );
+	virtual void DrawSprite( const Vector &vecOrigin, float flWidth, float flHeight, color32 color );
+
 
 	virtual bool			GetLocalPlayerEyePosition( Vector& org, QAngle& ang, float &fov );
 	virtual EntitySearchResult	GetLocalPlayer();
@@ -98,12 +113,23 @@ public:
 
 	// common and useful types to query for hierarchically
 	virtual bool			IsPlayer( EntitySearchResult entityToAttach );
-	virtual bool			IsBaseCombatCharacter( EntitySearchResult entityToAttach );
+	virtual bool			IsCombatCharacter( EntitySearchResult entityToAttach );
 	virtual bool			IsNPC( EntitySearchResult entityToAttach );
+	virtual bool			IsRagdoll( EntitySearchResult currentEnt );
+	virtual bool			IsViewModel( EntitySearchResult entityToAttach );
+	virtual bool			IsViewModelOrAttachment( EntitySearchResult entityToAttach );
+	virtual bool			IsWeapon( EntitySearchResult entityToAttach );
+	virtual bool			IsSprite( EntitySearchResult entityToAttach );
+	virtual bool			IsProp( EntitySearchResult entityToAttach );
+	virtual bool			IsBrush( EntitySearchResult entityToAttach );
 
 	virtual Vector			GetAbsOrigin( HTOOLHANDLE handle );
 	virtual QAngle			GetAbsAngles( HTOOLHANDLE handle );
 	virtual void			ReloadParticleDefintions( const char *pFileName, const void *pBufData, int nLen );
+
+	// ParticleSystem iteration, query, modification
+	virtual ParticleSystemSearchResult	NextParticleSystem( ParticleSystemSearchResult sr );
+	virtual void						SetRecording( ParticleSystemSearchResult sr, bool bRecord );
 
 	// Sends a mesage from the tool to the client
 	virtual void			PostToolMessage( KeyValues *pKeyValues );
@@ -125,7 +151,7 @@ private:
 	struct HToolEntry_t
 	{
 		HToolEntry_t() : m_Handle( 0 ) {}
-		HToolEntry_t( int handle, C_BaseEntity *pEntity = NULL )
+		explicit HToolEntry_t( int handle, C_BaseEntity *pEntity = NULL )
 			: m_Handle( handle ), m_hEntity( pEntity )
 		{
 			if ( pEntity )
@@ -204,7 +230,7 @@ void CClientTools::TriggerTempEntity( KeyValues *pKeyValues )
 int CClientTools::GetOwningWeaponEntIndex( int entindex )
 {
 	C_BaseEntity *pEnt = C_BaseEntity::Instance( entindex );
-	C_BaseViewModel *pViewModel = dynamic_cast< C_BaseViewModel* >( pEnt );
+	C_BaseViewModel *pViewModel = ToBaseViewModel( pEnt );
 	if ( pViewModel )
 	{
 		C_BaseCombatWeapon *pWeapon = pViewModel->GetOwningWeapon();
@@ -223,7 +249,7 @@ int CClientTools::GetEntIndex( EntitySearchResult entityToAttach )
 	return ent ? ent->entindex() : 0;
 }
 
-void CClientTools::AddClientRenderable( IClientRenderable *pRenderable, int renderGroup )
+void CClientTools::AddClientRenderable( IClientRenderable *pRenderable, bool bRenderWithViewModels, RenderableTranslucencyType_t nType, RenderableModelType_t nModelType )
 {
 	Assert( pRenderable );
 
@@ -233,15 +259,16 @@ void CClientTools::AddClientRenderable( IClientRenderable *pRenderable, int rend
 	if ( INVALID_CLIENT_RENDER_HANDLE == handle )
 	{
 		// create new renderer handle
-		ClientLeafSystem()->AddRenderable( pRenderable, (RenderGroup_t)renderGroup );
+		ClientLeafSystem()->AddRenderable( pRenderable, bRenderWithViewModels, nType, nModelType );
 	}
 	else
 	{
 		// handle already exists, just update group & origin
-		ClientLeafSystem()->SetRenderGroup( pRenderable->RenderHandle(), (RenderGroup_t)renderGroup );
+		ClientLeafSystem()->RenderWithViewModels( pRenderable->RenderHandle(), bRenderWithViewModels );
+		ClientLeafSystem()->SetTranslucencyType( pRenderable->RenderHandle(), nType );
+		ClientLeafSystem()->SetModelType( pRenderable->RenderHandle(), nModelType );
 		ClientLeafSystem()->RenderableChanged( pRenderable->RenderHandle() );
 	}
-
 }
 
 void CClientTools::RemoveClientRenderable( IClientRenderable *pRenderable )
@@ -264,20 +291,14 @@ void CClientTools::MarkClientRenderableDirty( IClientRenderable *pRenderable )
 	}
 }
 
-void CClientTools::SetRenderGroup( IClientRenderable *pRenderable, int renderGroup )
+void CClientTools::SetTranslucencyType( IClientRenderable *pRenderable, RenderableTranslucencyType_t nType )
 {
-	ClientRenderHandle_t handle = pRenderable->RenderHandle();
-	if ( INVALID_CLIENT_RENDER_HANDLE == handle )
-	{
-		// create new renderer handle
-		ClientLeafSystem()->AddRenderable( pRenderable, (RenderGroup_t)renderGroup );
-	}
-	else
-	{
-		// handle already exists, just update group & origin
-		ClientLeafSystem()->SetRenderGroup( pRenderable->RenderHandle(), (RenderGroup_t)renderGroup );
-		ClientLeafSystem()->RenderableChanged( pRenderable->RenderHandle() );
-	}
+	ClientLeafSystem()->SetTranslucencyType( pRenderable->RenderHandle(), nType );
+}
+
+void CClientTools::DrawSprite( const Vector &vecOrigin, float flWidth, float flHeight, color32 color )
+{
+	::DrawSprite( vecOrigin, flWidth, flHeight, color );
 }
 
 bool CClientTools::DrawSprite( IClientRenderable *pRenderable, float scale, float frame, int rendermode, int renderfx, const Color &color, float flProxyRadius, int *pVisHandle )
@@ -539,6 +560,21 @@ const char* CClientTools::GetClassname( HTOOLHANDLE handle )
 	return NULL;
 }
 
+EntitySearchResult CClientTools::GetEntity( HTOOLHANDLE handle )
+{
+	int idx = m_Handles.Find( HToolEntry_t( handle ) );
+	if ( idx == m_Handles.InvalidIndex() )
+		return reinterpret_cast< EntitySearchResult >( NULL );
+
+	HToolEntry_t *slot = &m_Handles[ idx ];
+	Assert( slot );
+	if ( slot == NULL )
+		return reinterpret_cast< EntitySearchResult >( NULL );
+
+	C_BaseEntity *ent = slot->m_hEntity.Get();
+	return reinterpret_cast< EntitySearchResult >( ent );
+}
+
 //-----------------------------------------------------------------------------
 // Purpose: 
 // Input  : handle - 
@@ -567,13 +603,14 @@ void CClientTools::OnEntityDeleted( CBaseEntity *pEntity )
 
 void CClientTools::OnEntityCreated( CBaseEntity *pEntity )
 {
-	if ( !m_bInRecordingMode )
+	if ( !ToolsEnabled() )
 		return;
 
 	HTOOLHANDLE h = AttachToEntity( pEntity );
 
 	// Send deletion message to tool interface
 	KeyValues *kv = new KeyValues( "created" );
+	kv->SetPtr( "esr", ( void* )pEntity );
 	ToolFramework_PostToolMessage( h, kv );
 	kv->deleteThis();
 }
@@ -589,12 +626,14 @@ HTOOLHANDLE CClientTools::GetToolHandleForEntityByIndex( int entindex )
 
 EntitySearchResult CClientTools::GetLocalPlayer()
 {
+	ACTIVE_SPLITSCREEN_PLAYER_GUARD( 0 );
 	C_BasePlayer *p = C_BasePlayer::GetLocalPlayer();
 	return reinterpret_cast< EntitySearchResult >( p );
 }
 
 bool CClientTools::GetLocalPlayerEyePosition( Vector& org, QAngle& ang, float &fov )
 {
+	ACTIVE_SPLITSCREEN_PLAYER_GUARD( 0 );
 	C_BasePlayer *pl = C_BasePlayer::GetLocalPlayer();
 	if ( pl == NULL )
 		return false;
@@ -606,11 +645,38 @@ bool CClientTools::GetLocalPlayerEyePosition( Vector& org, QAngle& ang, float &f
 }
 
 //-----------------------------------------------------------------------------
+// ParticleSystem iteration, query, modification
+//-----------------------------------------------------------------------------
+ParticleSystemSearchResult CClientTools::NextParticleSystem( ParticleSystemSearchResult sr )
+{
+	CNewParticleEffect *pParticleEffect = NULL;
+	if ( sr == NULL )
+	{
+		pParticleEffect = ParticleMgr()->FirstNewEffect();
+	}
+	else
+	{
+		pParticleEffect = ParticleMgr()->NextNewEffect( reinterpret_cast< CNewParticleEffect* >( sr ) );
+	}
+	return reinterpret_cast< ParticleSystemSearchResult >( pParticleEffect );
+}
+
+void CClientTools::SetRecording( ParticleSystemSearchResult sr, bool bRecord )
+{
+	Assert( sr );
+	if ( sr == NULL )
+		return;
+
+	CNewParticleEffect *pParticleEffect = reinterpret_cast< CNewParticleEffect* >( sr );
+	pParticleEffect->SetToolRecording( bRecord );
+}
+
+//-----------------------------------------------------------------------------
 // Create, destroy shadow
 //-----------------------------------------------------------------------------
 ClientShadowHandle_t CClientTools::CreateShadow( CBaseHandle h, int nFlags )
 {
-	return g_pClientShadowMgr->CreateShadow( h, nFlags );
+	return g_pClientShadowMgr->CreateShadow( h, nFlags, NULL );
 }
 
 void CClientTools::DestroyShadow( ClientShadowHandle_t h )
@@ -675,7 +741,7 @@ bool CClientTools::IsPlayer( EntitySearchResult currentEnt )
 	return ent ? ent->IsPlayer() : false;
 }
 
-bool CClientTools::IsBaseCombatCharacter( EntitySearchResult currentEnt )
+bool CClientTools::IsCombatCharacter( EntitySearchResult currentEnt )
 {
 	C_BaseEntity *ent = reinterpret_cast< C_BaseEntity* >( currentEnt );
 	return ent ? ent->IsBaseCombatCharacter() : false;
@@ -685,6 +751,51 @@ bool CClientTools::IsNPC( EntitySearchResult currentEnt )
 {
 	C_BaseEntity *ent = reinterpret_cast< C_BaseEntity* >( currentEnt );
 	return ent ? ent->IsNPC() : false;
+}
+
+bool CClientTools::IsRagdoll( EntitySearchResult currentEnt )
+{
+	C_BaseEntity *ent = reinterpret_cast< C_BaseEntity* >( currentEnt );
+	C_BaseAnimating *pBaseAnimating = ent ? ent->GetBaseAnimating() : NULL;
+	return pBaseAnimating ? pBaseAnimating->IsClientRagdoll() : false;
+}
+
+bool CClientTools::IsViewModel( EntitySearchResult currentEnt )
+{
+	C_BaseEntity *ent = reinterpret_cast< C_BaseEntity* >( currentEnt );
+	C_BaseAnimating *pBaseAnimating = ent ? ent->GetBaseAnimating() : NULL;
+	return pBaseAnimating ? pBaseAnimating->IsViewModel() : false;
+}
+
+bool CClientTools::IsViewModelOrAttachment( EntitySearchResult currentEnt )
+{
+	C_BaseEntity *ent = reinterpret_cast< C_BaseEntity* >( currentEnt );
+	C_BaseAnimating *pBaseAnimating = ent ? ent->GetBaseAnimating() : NULL;
+	return pBaseAnimating ? pBaseAnimating->IsViewModelOrAttachment() : false;
+}
+
+bool CClientTools::IsWeapon( EntitySearchResult currentEnt )
+{
+	C_BaseEntity *ent = reinterpret_cast< C_BaseEntity* >( currentEnt );
+	return ent ? ent->IsBaseCombatWeapon() : false;
+}
+
+bool CClientTools::IsSprite( EntitySearchResult currentEnt )
+{
+	C_BaseEntity *ent = reinterpret_cast< C_BaseEntity* >( currentEnt );
+	return ent ? ent->IsSprite() : false;
+}
+
+bool CClientTools::IsProp( EntitySearchResult currentEnt )
+{
+	C_BaseEntity *ent = reinterpret_cast< C_BaseEntity* >( currentEnt );
+	return ent ? ent->IsProp() : false;
+}
+
+bool CClientTools::IsBrush( EntitySearchResult currentEnt )
+{
+	C_BaseEntity *ent = reinterpret_cast< C_BaseEntity* >( currentEnt );
+	return ent ? ent->IsBrushModel() : false;
 }
 
 Vector CClientTools::GetAbsOrigin( HTOOLHANDLE handle )
@@ -754,10 +865,15 @@ void CClientTools::PostToolMessage( KeyValues *pKeyValues )
 	
 	if ( !Q_stricmp( pKeyValues->GetName(), "query CPortalRenderer" ) )
 	{
-		pKeyValues->SetInt( "IsRenderingPortal", g_pPortalRender->IsRenderingPortal() ? 1 : 0 );
+		pKeyValues->SetInt( "IsRenderingPortal", g_pPortalRender->GetViewRecursionLevel() );
 		return;
 	}
 #endif
+
+	if ( !Q_strcmp( pKeyValues->GetName(), "Game Entity KeyValues" ) )
+	{
+		HandleGameEntityKeyValues( pKeyValues );
+	}
 }
 
 
@@ -774,8 +890,13 @@ void CClientTools::EnableParticleSystems( bool bEnable )
 // Is the game rendering in 3rd person mode?
 //-----------------------------------------------------------------------------
 bool CClientTools::IsRenderingThirdPerson() const
-{			  
-	return !C_BasePlayer::LocalPlayerInFirstPersonView();
+{		
+	ACTIVE_SPLITSCREEN_PLAYER_GUARD( 0 );
+	C_BasePlayer *pLocalPlayer = C_BasePlayer::GetLocalPlayer();
+	if ( !pLocalPlayer )
+		return false;
+
+	return pLocalPlayer->ShouldDrawLocalPlayer();
 }
 
 
@@ -784,10 +905,270 @@ bool CClientTools::IsRenderingThirdPerson() const
 //-----------------------------------------------------------------------------
 void CClientTools::ReloadParticleDefintions( const char *pFileName, const void *pBufData, int nLen )
 {
-	// Remove all new effects, because we are going to free internal structures they point to
-	ParticleMgr()->RemoveAllNewEffects();
+	MDLCACHE_CRITICAL_SECTION(); // Copying particle attachment control points may end up needing to evaluate skeletons
 
-	// FIXME: Use file name to determine if we care about this data
-	CUtlBuffer buf( pBufData, nLen, CUtlBuffer::READ_ONLY );
-	g_pParticleSystemMgr->ReadParticleConfigFile( buf, true );
+	//////////////
+	// Find any systems that depend on any system in the buffer
+	// slow, but necessary if we want live reloads to work - and doesn't happen too often
+	CUtlVector<CUtlString> systemNamesToReload;
+
+	CUtlBuffer bufSystemsInBuffer(pBufData, nLen, CUtlBuffer::READ_ONLY);
+	g_pParticleSystemMgr->GetParticleSystemsInBuffer( bufSystemsInBuffer, &systemNamesToReload );
+
+	CUtlVector<CNewParticleEffect*> toReplaceEffects;
+	CUtlVector<CUtlString> toReplaceNames;
+
+	for( CNewParticleEffect *pEffect = ParticleMgr()->FirstNewEffect(); pEffect; pEffect = ParticleMgr()->NextNewEffect(pEffect) )
+	{
+		for( int i = 0; i < systemNamesToReload.Count(); ++i )
+		{
+			if ( pEffect->DependsOnSystem( systemNamesToReload[i] ) )
+			{
+				// only reload a given effect once
+				if ( -1 == toReplaceEffects.Find(pEffect) )
+				{
+					toReplaceNames.AddToTail( pEffect->GetName() );
+					toReplaceEffects.AddToTail( pEffect );
+				}
+			}
+		}
+	}
+
+	CUtlVector<CNonDrawingParticleSystem*> toReplaceEffectsNonDrawing;
+	CUtlVector<CUtlString> toReplaceNamesNonDrawing;
+	for( CNonDrawingParticleSystem *i = ParticleMgr()->m_NonDrawingParticleSystems.Head(); i ; i = i->m_pNext )
+	{
+		for( int j = 0; j < systemNamesToReload.Count(); ++j )
+		{
+			if ( i->Get()->DependsOnSystem( systemNamesToReload[j] ) )
+			{
+				if ( -1 == toReplaceEffectsNonDrawing.Find( i ) )
+				{
+					toReplaceNamesNonDrawing.AddToTail( i->Get()->GetName() );
+					toReplaceEffectsNonDrawing.AddToTail( i );
+				}
+			}
+		}
+	}
+
+	//////////////
+	// Load the data and stomp the old definitions
+	CUtlBuffer bufReadParticleConfigFile(pBufData, nLen, CUtlBuffer::READ_ONLY);
+	g_pParticleSystemMgr->ReadParticleConfigFile( bufReadParticleConfigFile, true );
+
+	//////////////
+	// Now replace all of the systems with their new versions
+	Assert( toReplaceEffects.Count() == toReplaceNames.Count() );
+
+	for( int i = 0; i < toReplaceNames.Count(); ++i )
+	{
+		CNewParticleEffect *pEffect = toReplaceEffects[i];
+		pEffect->ReplaceWith( toReplaceNames[i] );
+	}
+
+	// update all the non-drawings ones
+	for( int i = 0; i < toReplaceNamesNonDrawing.Count(); i++ )
+	{
+		CNonDrawingParticleSystem *pEffect = toReplaceEffectsNonDrawing[i];
+		delete pEffect->m_pSystem;
+		pEffect->m_pSystem = g_pParticleSystemMgr->CreateParticleCollection( toReplaceNamesNonDrawing[i] );
+	}
 }
+
+
+CIFM_EntityKeyValuesHandler_AutoRegister::CIFM_EntityKeyValuesHandler_AutoRegister( const char *szHandlerID )
+: m_szHandlerID( szHandlerID )
+{
+#if defined( DBGFLAG_ASSERT )
+	const CIFM_EntityKeyValuesHandler_AutoRegister *pWalk = s_pRegisteredHandlers;
+	while( pWalk )
+	{
+		AssertMsg( strcmp( szHandlerID, pWalk->m_szHandlerID ) != 0, "Handler already registered for this ID" );
+		pWalk = pWalk->m_pNext;
+	}
+#endif
+	m_pNext = s_pRegisteredHandlers;
+	s_pRegisteredHandlers = this;
+}
+
+void CIFM_EntityKeyValuesHandler_AutoRegister::AllHandlers_PreUpdate( void )
+{
+	CIFM_EntityKeyValuesHandler_AutoRegister *pWalk = s_pRegisteredHandlers;
+	while( pWalk )
+	{
+		pWalk->HandleData_PreUpdate();
+		pWalk = pWalk->m_pNext;
+	}
+}
+
+void CIFM_EntityKeyValuesHandler_AutoRegister::FindAndCallHandler( const char *szHandlerID, KeyValues *pKeyValues )
+{
+	CIFM_EntityKeyValuesHandler_AutoRegister *pWalk = s_pRegisteredHandlers;
+	while( pWalk )
+	{
+		if( strcmp( szHandlerID, pWalk->m_szHandlerID ) == 0 )
+		{
+			pWalk->HandleData( pKeyValues );
+			return;
+		}
+		pWalk = pWalk->m_pNext;
+	}
+
+	AssertMsg( false, "Unhandled NonConformantData update" );
+}
+
+void CIFM_EntityKeyValuesHandler_AutoRegister::AllHandlers_PostUpdate( void )
+{
+	CIFM_EntityKeyValuesHandler_AutoRegister *pWalk = s_pRegisteredHandlers;
+	while( pWalk )
+	{
+		pWalk->HandleData_PostUpdate();
+		pWalk = pWalk->m_pNext;
+	}
+}
+
+void CIFM_EntityKeyValuesHandler_AutoRegister::AllHandlers_RemoveAll( void )
+{
+	CIFM_EntityKeyValuesHandler_AutoRegister *pWalk = s_pRegisteredHandlers;
+	while( pWalk )
+	{
+		pWalk->HandleData_RemoveAll();
+		pWalk = pWalk->m_pNext;
+	}
+}
+
+CIFM_EntityKeyValuesHandler_AutoRegister *CIFM_EntityKeyValuesHandler_AutoRegister::s_pRegisteredHandlers;
+
+HKeySymbol CIFM_EntityKeyValuesHandler_AutoRegister::GetGameKeyValuesKeySymbol( void )
+{
+	static HKeySymbol s_hNonConformantSymbol = KeyValuesSystem()->GetSymbolForString( GetGameKeyValuesKeyString() );
+	return s_hNonConformantSymbol;
+}
+
+const char *CIFM_EntityKeyValuesHandler_AutoRegister::GetGameKeyValuesKeyString( void )
+{
+	return "gamekeyvalues";
+}
+
+HKeySymbol CIFM_EntityKeyValuesHandler_AutoRegister::GetHandlerIDKeySymbol( void )
+{
+	static HKeySymbol s_hHandlerIDSymbol = KeyValuesSystem()->GetSymbolForString( GetHandlerIDKeyString() );
+	return s_hHandlerIDSymbol;
+}
+
+const char *CIFM_EntityKeyValuesHandler_AutoRegister::GetHandlerIDKeyString( void )
+{
+	return "handlerID";
+}
+
+
+
+KeyValues *CIFM_EntityKeyValuesHandler_AutoRegister::FindOrCreateNonConformantKeyValues( KeyValues *pParentKV )
+{
+	KeyValues *pReturn = pParentKV->FindKey( GetGameKeyValuesKeySymbol() );
+	if( !pReturn )
+	{
+		pReturn = pParentKV->FindKey( GetGameKeyValuesKeyString(), true );
+	}
+	
+	return pReturn;
+}
+
+void HandleGameEntityKeyValues( KeyValues *pKeyValues )
+{
+	if( pKeyValues->GetBool( "RemoveAll", false ) )
+	{
+		CIFM_EntityKeyValuesHandler_AutoRegister::AllHandlers_RemoveAll();
+	}
+	else
+	{
+		HKeySymbol handlerIDsym = CIFM_EntityKeyValuesHandler_AutoRegister::GetHandlerIDKeySymbol();
+
+		CIFM_EntityKeyValuesHandler_AutoRegister::AllHandlers_PreUpdate();
+
+		for ( KeyValues *pCurr = pKeyValues->GetFirstTrueSubKey(); pCurr; pCurr = pCurr->GetNextTrueSubKey() )
+		{
+			const char *szHandler = pCurr->GetString( handlerIDsym, "" );
+			CIFM_EntityKeyValuesHandler_AutoRegister::FindAndCallHandler( szHandler, pCurr );
+		}
+
+		CIFM_EntityKeyValuesHandler_AutoRegister::AllHandlers_PostUpdate();
+	}
+}
+
+
+
+
+
+
+
+
+CIFM_EntityKeyValuesHandler_RecreateEntities::CIFM_EntityKeyValuesHandler_RecreateEntities( const char *szHandlerID )
+: CIFM_EntityKeyValuesHandler_AutoRegister( szHandlerID )
+{
+}
+
+void CIFM_EntityKeyValuesHandler_RecreateEntities::HandleData_PreUpdate( void )
+{
+	for( int i = 0; i != m_PlaybackEntities.Count(); ++i )
+	{
+		m_PlaybackEntities[i].bTouched = false;
+	}
+}
+
+void CIFM_EntityKeyValuesHandler_RecreateEntities::HandleData_PostUpdate( void )
+{
+	for( int i = m_PlaybackEntities.Count(); --i >= 0; )
+	{
+		if( !m_PlaybackEntities[i].bTouched )
+		{
+			//not updated, clear it
+			DestroyInstance( m_PlaybackEntities[i].pEntity );
+			m_PlaybackEntities.FastRemove( i );
+		}
+	}
+}
+
+void CIFM_EntityKeyValuesHandler_RecreateEntities::HandleData( KeyValues *pKeyValues )
+{
+	int iEntIndex = pKeyValues->GetInt( "entIndex", -1 );
+	Assert( iEntIndex != -1 );
+	if( iEntIndex == -1 )
+		return;
+
+	for( int i = 0; i != m_PlaybackEntities.Count(); ++i )
+	{
+		if( m_PlaybackEntities[i].iEntIndex == iEntIndex )
+		{
+			HandleInstance( m_PlaybackEntities[i].pEntity, pKeyValues );
+			m_PlaybackEntities[i].bTouched = true;
+			return;
+		}
+	}
+
+	//didn't exist, create it.
+	RecordedEntity_t temp;
+	temp.iEntIndex = iEntIndex;
+	temp.pEntity = CreateInstance();
+	temp.bTouched = true;
+
+	m_PlaybackEntities.AddToTail( temp );
+	HandleInstance( temp.pEntity, pKeyValues );
+}
+
+
+void CIFM_EntityKeyValuesHandler_RecreateEntities::HandleData_RemoveAll( void )
+{
+	for( int i = m_PlaybackEntities.Count(); --i >= 0; )
+	{
+		DestroyInstance( m_PlaybackEntities[i].pEntity );
+	}
+	m_PlaybackEntities.RemoveAll();
+}
+
+
+	
+
+
+
+

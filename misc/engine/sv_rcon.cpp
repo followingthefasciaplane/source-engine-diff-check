@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright (c) 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose:  implementation of the rcon server 
 //
@@ -10,7 +10,9 @@
 #include <winsock.h>
 #endif
 #undef SetPort // winsock screws with the SetPort string... *sigh*
-#define socklen_t int
+#define MSG_NOSIGNAL 0
+#elif defined( _PS3 )
+#include "net_ws_headers.h"
 #define MSG_NOSIGNAL 0
 #elif POSIX
 #include <sys/types.h>
@@ -33,7 +35,6 @@
 #include "proto_oob.h" // PORT_RCON define
 #include "sv_remoteaccess.h"
 #include "cl_rcon.h"
-#include "sv_filter.h"
 
 #if defined( _X360 )
 #include "xbox/xbox_win32stubs.h"
@@ -81,22 +82,13 @@ static void RconPasswordChanged_f( IConVar *pConVar, const char *pOldString, flo
 {
 	ConVarRef var( pConVar );
 	const char *pPassword = var.GetString(); 
-#ifndef SWDS
+#ifndef DEDICATED
 	RCONClient().SetPassword( pPassword );
 #endif
 	RCONServer().SetPassword( pPassword );
 
 }
-ConVar  rcon_password	( "rcon_password", "", FCVAR_SERVER_CANNOT_QUERY|FCVAR_DONTRECORD, "remote console password.", RconPasswordChanged_f );
-
-ConVar sv_rcon_banpenalty( "sv_rcon_banpenalty", "0", 0, "Number of minutes to ban users who fail rcon authentication", true, 0, false, 0 );
-ConVar sv_rcon_maxfailures( "sv_rcon_maxfailures", "10", 0, "Max number of times a user can fail rcon authentication before being banned", true, 1, true, 20 );
-ConVar sv_rcon_minfailures( "sv_rcon_minfailures", "5", 0, "Number of times a user can fail rcon authentication in sv_rcon_minfailuretime before being banned", true, 1, true, 20 );
-ConVar sv_rcon_minfailuretime( "sv_rcon_minfailuretime", "30", 0, "Number of seconds to track failed rcon authentications", true, 1, false, 0 );
-ConVar sv_rcon_whitelist_address( "sv_rcon_whitelist_address", "", 0, "When set, rcon failed authentications will never ban this address, e.g. '127.0.0.1'" );
-
-ConVar sv_rcon_maxpacketsize( "sv_rcon_maxpacketsize", "1024", 0, "The maximum number of bytes to allow in a command packet", true, 0, false, 0 );
-ConVar sv_rcon_maxpacketbans( "sv_rcon_maxpacketbans", "1", 0, "Ban IPs for sending RCON packets exceeding the value specified in sv_rcon_maxpacketsize", true, 0, true, 1 );
+ConVar  rcon_password	( "rcon_password", "", FCVAR_SERVER_CANNOT_QUERY|FCVAR_DONTRECORD|FCVAR_RELEASE, "remote console password.", RconPasswordChanged_f );
 
 //-----------------------------------------------------------------------------
 // Purpose: Constructor
@@ -130,7 +122,9 @@ bool CRConServer::ConnectToListeningClient( const netadr_t &adr, bool bSingleSoc
 {
 	if ( m_Socket.ConnectSocket( adr, bSingleSocket ) < 0 )
 	{
-		ConWarning( "Unable to connect to remote client (%s)\n", adr.ToString() );
+		// This should probably go into its own channel, but for now send it where it was already going (the "console" channel).
+		LoggingChannelID_t consoleChannel = LoggingSystem_FindChannel( "Console" );
+		Log_Warning( consoleChannel, "Unable to connect to remote client (%s)\n", adr.ToString() );
 		return false;
 	}
 	return true;
@@ -190,7 +184,7 @@ bool CRConServer::CreateSocket()
 //-----------------------------------------------------------------------------
 bool CRConServer::ShouldAcceptSocket( SocketHandle_t hSocket, const netadr_t & netAdr )
 {
-	return !Filter_ShouldDiscard( netAdr );
+	return true;
 }
 
 void CRConServer::OnSocketAccepted( SocketHandle_t hSocket, const netadr_t &netAdr, void** ppData )
@@ -284,16 +278,21 @@ void CRConServer::RunFrame()
 		}
 
 		// find out how much we have to read
+#ifdef _PS3
+		ExecuteNTimes( 5, Warning( "PS3 implementation of SV_RCON is disabled!\n" ) );
+		readLen = 0;
+#else
 		ioctlsocket( hSocket, FIONREAD, &readLen );
+#endif
 		if ( readLen > sizeof(int) ) // we have a command to process
 		{
 			CUtlBuffer & response = pData->packetbuffer;
 			response.EnsureCapacity( response.TellPut() + readLen );
-			char *recvBuf = (char *)_alloca( min( 1024ul, readLen ) ); // a buffer used for recv()
+			char *recvBuf = (char *)stackalloc( MIN( 1024, readLen ) ); // a buffer used for recv()
 			unsigned int len = 0;
 			while ( len < readLen )
 			{
-				int recvLen = recv( hSocket, recvBuf , min(1024ul, readLen - len) , 0 );
+				int recvLen = recv( hSocket, recvBuf , MIN(1024, readLen - len) , 0 );
 				if ( recvLen == 0 ) // socket was closed
 				{
 					m_Socket.CloseAcceptedSocket( i );
@@ -314,13 +313,9 @@ void CRConServer::RunFrame()
 
 			int size = response.GetInt();
 		
-			if ( sv_rcon_maxpacketsize.GetInt() > 0 && size > sv_rcon_maxpacketsize.GetInt() )
+			if ( size > RCON_MAX_RCON_COMMAND_LEN )
 			{
-				if ( sv_rcon_maxpacketbans.GetBool() )
-				{
-					HandleFailedRconAuth( socketAdr );
-				}
-
+				HandleFailedRconAuth( socketAdr );
 				m_Socket.CloseAcceptedSocket( i );
 				continue;
 			}
@@ -354,20 +349,16 @@ void CRConServer::RunFrame()
 
 			if ( size > 0 || (response.TellPut() - response.TellGet() > 0))
 			{
-				// trim the bytes that were just processed
 				CUtlBuffer tmpBuf;
 				if ( response.TellPut() - response.TellGet() > 0 )
 				{
 					tmpBuf.Put( response.PeekGet(), response.TellPut() - response.TellGet() );
 				}
-
 				response.Purge();
-
 				if ( size > 0 )
 				{
 					response.Put( &size, sizeof(size));
 				}
-
 				if ( tmpBuf.TellPut() > 0 )
 				{
 					response.Put( tmpBuf.Base(), tmpBuf.TellPut() );
@@ -463,9 +454,17 @@ bool CRConServer::SendRCONResponse( int nIndex, const void *data, int len, bool 
 	Assert( !( fromQueue && data != (pSocketData->m_OutstandingSends[pSocketData->m_OutstandingSends.Head()].Base())));
 
 	int sendLen = 0;
+#if defined(OSX)
+	int true_val = 1;
+	setsockopt( hSocket, SOL_SOCKET, SO_NOSIGPIPE, &true_val, sizeof(true_val));
+#endif
 	while ( sendLen < len )
 	{
+#if defined(OSX)
+		int ret = send( hSocket, (const char *)data + sendLen, len - sendLen, 0 );
+#else
 		int ret = send( hSocket, (const char *)data + sendLen, len - sendLen, MSG_NOSIGNAL );
+#endif
 		if ( ret == -1 )
 		{
 			// can't finish sending this right now, push it back
@@ -498,6 +497,12 @@ bool CRConServer::SendRCONResponse( int nIndex, const void *data, int len, bool 
 //	OutputDebugString( va("RCON: Sending packet %i in len\n", len) ); // can't use DevMsg(), we are potentially inside the RedirectFlush() function
 	return true;
 }
+
+ConVar sv_rcon_banpenalty( "sv_rcon_banpenalty", "0", 0, "Number of minutes to ban users who fail rcon authentication", true, 0, false, 0 );
+ConVar sv_rcon_maxfailures( "sv_rcon_maxfailures", "10", 0, "Max number of times a user can fail rcon authentication before being banned", true, 1, true, 20 );
+ConVar sv_rcon_minfailures( "sv_rcon_minfailures", "5", 0, "Number of times a user can fail rcon authentication in sv_rcon_minfailuretime before being banned", true, 1, true, 20 );
+ConVar sv_rcon_minfailuretime( "sv_rcon_minfailuretime", "30", 0, "Number of seconds to track failed rcon authentications", true, 1, false, 0 );
+ConVar sv_rcon_whitelist_address( "sv_rcon_whitelist_address", "", FCVAR_RELEASE, "When set, rcon failed authentications will never ban this address, e.g. '127.0.0.1'" );
 
 //-----------------------------------------------------------------------------
 // Purpose: compares failed rcons based on most recent failure time
@@ -595,7 +600,7 @@ bool CRConServer::HandleFailedRconAuth( const netadr_t & adr )
 	if ( failedRcon->badPasswordCount > sv_rcon_maxfailures.GetInt() )
 	{
 		ConMsg( "Banning %s for rcon hacking attempts\n", failedRcon->adr.ToString( true ) );
-		Cbuf_AddText( va( "addip %i %s\n", sv_rcon_banpenalty.GetInt(), failedRcon->adr.ToString( true ) ) );
+		Cbuf_AddText( Cbuf_GetCurrentPlayer(), va( "addip %i %s\n", sv_rcon_banpenalty.GetInt(), failedRcon->adr.ToString( true ) ) );
 		Cbuf_Execute();
 		return true;
 	}
@@ -612,7 +617,7 @@ bool CRConServer::HandleFailedRconAuth( const netadr_t & adr )
 	if ( recentFailures > sv_rcon_minfailures.GetInt() )
 	{
 		ConMsg( "Banning %s for rcon hacking attempts\n", failedRcon->adr.ToString( true ) );
-		Cbuf_AddText( va( "addip %i %s\n", sv_rcon_banpenalty.GetInt(), failedRcon->adr.ToString( true ) ) );
+		Cbuf_AddText( Cbuf_GetCurrentPlayer(), va( "addip %i %s\n", sv_rcon_banpenalty.GetInt(), failedRcon->adr.ToString( true ) ) );
 		Cbuf_Execute();
 		return true;
 	}

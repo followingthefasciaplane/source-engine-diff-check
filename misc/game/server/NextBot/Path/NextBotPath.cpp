@@ -1,7 +1,7 @@
 // NextBotPath.cpp
 // Encapsulate and manipulate a path through the world
 // Author: Michael Booth, February 2006
-//========= Copyright Valve Corporation, All rights reserved. ============//
+// Copyright (c) 2006 Turtle Rock Studios, Inc. - All Rights Reserved
 
 #include "cbase.h"
 
@@ -88,21 +88,7 @@ bool Path::ComputePathDetails( INextBot *bot, const Vector &start )
 			to->pos.z = from->area->GetZ( to->pos );
 
 			// if this is a "jump down" connection, we must insert an additional point on the path
-			//float expectedHeightDrop = from->area->GetZ( from->pos ) - to->area->GetZ( to->pos );
-
-			// measure the drop distance relative to the actual slope of the ground
-			Vector fromPos = from->pos;
-			fromPos.z = from->area->GetZ( fromPos );
-
-			Vector toPos = to->pos;
-			toPos.z = to->area->GetZ( toPos );
-
-			Vector groundNormal;
-			from->area->ComputeNormal( &groundNormal );
-
-			Vector alongPath = toPos - fromPos;
-
-			float expectedHeightDrop = -DotProduct( alongPath, groundNormal );
+			float expectedHeightDrop = from->area->GetZ( from->pos ) - to->area->GetZ( to->pos );
 
 			if ( expectedHeightDrop > mover->GetStepHeight() )
 			{
@@ -114,8 +100,8 @@ bool Path::ComputePathDetails( INextBot *bot, const Vector &start )
 				DirectionToVector2D( (NavDirType)to->how, &dir );
 
 				// shift top of "jump down" out a bit to "get over the ledge"
-				const float inc = 10.0f; // 0.25f * hullWidth;
-				const float maxPushDist = 2.0f * hullWidth; // 75.0f;
+				const float inc = 0.25f * hullWidth;
+				const float maxPushDist = 75.0f;
 				float halfWidth = hullWidth/2.0f;
 				float hullHeight = ( body ) ? body->GetCrouchHullHeight() : 1.0f;
 				
@@ -123,15 +109,14 @@ bool Path::ComputePathDetails( INextBot *bot, const Vector &start )
 				for( pushDist = 0.0f; pushDist <= maxPushDist; pushDist += inc )
 				{
 					Vector pos = to->pos + Vector( pushDist * dir.x, pushDist * dir.y, 0.0f );
-					Vector lowerPos = Vector( pos.x, pos.y, toPos.z );
 					
-					trace_t result;
+					trace_t ground;
 					NextBotTraceFilterIgnoreActors filter( bot->GetEntity(), COLLISION_GROUP_NONE );
-					UTIL_TraceHull( pos, lowerPos,
-									Vector( -halfWidth, -halfWidth, stepHeight ), Vector( halfWidth, halfWidth, hullHeight ), 
-									bot->GetBodyInterface()->GetSolidMask(), &filter, &result );
+					UTIL_TraceHull( pos, pos + Vector( 0, 0, -stepHeight ),
+									Vector( -halfWidth, -halfWidth, 0 ), Vector( halfWidth, halfWidth, hullHeight ), 
+									MASK_NPCSOLID, &filter, &ground );
 					
-					if ( result.fraction >= 1.0f )
+					if (ground.fraction >= 1.0f)
 					{
 						// found clearance to drop
 						break;
@@ -143,22 +128,22 @@ bool Path::ComputePathDetails( INextBot *bot, const Vector &start )
 
 				if ( bot->IsDebugging( NEXTBOT_PATH ) )
 				{
-					NDebugOverlay::Cross3D( startDrop, 5.0f, 255, 0, 255, true, 5.0f );
-					NDebugOverlay::Cross3D( endDrop, 5.0f, 255, 255, 0, true, 5.0f );
-					NDebugOverlay::VertArrow( startDrop, endDrop, 5.0f, 255, 100, 0, 255, true, 5.0f );
+					NDebugOverlay::Cross3D( startDrop, 5.0f, 255, 0, 0, true, 5.0f );
+					NDebugOverlay::Cross3D( endDrop, 5.0f, 0, 255, 0, true, 5.0f );
+					NDebugOverlay::HorzArrow( startDrop, endDrop, 5.0f, 255, 100, 0, 255, true, 5.0f );
 				}
 				
 				// verify that there is actually ground down there in case this is a far jump dropdown
 				float ground;
-				if ( TheNavMesh->GetGroundHeight( endDrop, &ground ) )
+				if ( TheNavMesh->GetGroundHeight( startDrop, &ground ) )
 				{
 					if ( startDrop.z > ground + stepHeight )
 					{
 						// if "ground" is lower than the next segment along the path
 						// there is a chasm between - this is not a drop down
 						// NOTE next->pos is not yet valid - this loop is computing it!
-						// const Segment *next = NextSegment( to );
-						// if ( !next || next->area->GetCenter().z < ground + stepHeight )
+						const Segment *next = NextSegment( to );
+						if ( !next || next->area->GetCenter().z < ground + stepHeight )
 						{
 							// this is a "jump down" link
 							to->pos = startDrop;
@@ -963,10 +948,10 @@ const Path::Data &Path::GetCursorData( void ) const
 			else if ( m_cursorPos > GetLength() - epsilon )
 			{
 				// end of path
-				m_cursorData.pos = m_path[ m_segmentCount-1 ].pos;
-				m_cursorData.forward = m_path[ m_segmentCount-1 ].forward;
-				m_cursorData.curvature = m_path[ m_segmentCount-1 ].curvature;
-				m_cursorData.segmentPrior = &m_path[ m_segmentCount-1 ];
+				m_cursorData.pos = m_path[ m_segmentCount-2 ].pos;
+				m_cursorData.forward = m_path[ m_segmentCount-2 ].forward;
+				m_cursorData.curvature = m_path[ m_segmentCount-2 ].curvature;
+				m_cursorData.segmentPrior = &m_path[ m_segmentCount-2 ];
 			}
 			else
 			{

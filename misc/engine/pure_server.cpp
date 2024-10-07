@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -12,19 +12,52 @@
 #include "userid.h"
 #include "pure_server.h"
 #include "common.h"
-#include "tier1/KeyValues.h"
+#include "tier1/keyvalues.h"
 #include "convar.h"
 #include "filesystem_engine.h"
 #include "server.h"
 #include "sv_filter.h"
-#include "tier1/UtlSortVector.h"
-
-// NOTE: This has to be the last file included!
-#include "tier0/memdbgon.h"
+#include <utlsortvector.h>
 
 extern ConVar sv_pure_consensus;
 extern ConVar sv_pure_retiretime;
 extern ConVar sv_pure_trace;
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
+static char *g_SvPure2_ProtectedDirs[] =
+{
+	"sound",
+	"models",
+	"materials"
+};
+
+static bool IsProtectedBySvPure2( const char *pFilename )
+{
+	for ( int i=0; i < ARRAYSIZE( g_SvPure2_ProtectedDirs ); i++ )
+	{
+		const char *pProtectedDir = g_SvPure2_ProtectedDirs[i];
+		int len = V_strlen( pProtectedDir );
+		
+		if ( V_strlen( pFilename ) < len+1 )
+			return false;
+		
+		char tempStr[512];
+		Assert( len < ARRAYSIZE( tempStr ) );
+		memcpy( tempStr, pFilename, len );
+		tempStr[len] = 0;
+		
+		if ( V_stricmp( tempStr, pProtectedDir ) == 0 )
+		{
+			if ( pFilename[len] == '/' || pFilename[len] == '\\' )
+				return true;
+		}		
+	}
+	return false;
+}
+
+
 
 CPureServerWhitelist::CCommand::CCommand()
 {
@@ -47,7 +80,10 @@ CPureServerWhitelist::CPureServerWhitelist()
 {
 	m_pFileSystem = NULL;
 	m_LoadCounter = 0;
+	m_AllowFromDiskList.m_pWhitelist = this;
+	m_ForceMatchList.m_pWhitelist = this;
 	m_RefCount = 1;
+	m_bFullyPureMode = false;
 }
 
 
@@ -63,137 +99,18 @@ void CPureServerWhitelist::Init( IFileSystem *pFileSystem )
 	m_pFileSystem = pFileSystem;
 }
 
-void CPureServerWhitelist::Load( int iPureMode )
-{
-	Term();
-
-	// Not pure at all?
-	if ( iPureMode < 0 )
-		return;
-
-	// Load base trusted keys
-	{
-		KeyValues *kv = new KeyValues( "" );
-		bool bLoaded = kv->LoadFromFile( g_pFileSystem, "cfg/trusted_keys_base.txt", "game" );
-		if ( bLoaded )
-			bLoaded = LoadTrustedKeysFromKeyValues( kv );
-		else
-			Warning( "Error loading cfg/trusted_keys_base.txt\n" );
-		kv->deleteThis();
-	}
-
-	// sv_pure 0: minimal rules only
-	if ( iPureMode == 0 )
-	{
-		KeyValues *kv = new KeyValues( "" );
-		bool bLoaded = kv->LoadFromFile( g_pFileSystem, "cfg/pure_server_minimal.txt", "game" );
-		if ( bLoaded )
-			bLoaded = LoadCommandsFromKeyValues( kv );
-		else
-			Warning( "Error loading cfg/pure_server_minimal.txt\n" );
-		kv->deleteThis();
-		return;
-	}
-
-	// Load up full pure rules
-	{
-		KeyValues *kv = new KeyValues( "" );
-		bool bLoaded = kv->LoadFromFile( g_pFileSystem, "cfg/pure_server_full.txt", "game" );
-		if ( bLoaded )
-			bLoaded = LoadCommandsFromKeyValues( kv );
-		else
-			Warning( "Error loading cfg/pure_server_full.txt\n" );
-		kv->deleteThis();
-	}
-
-	// Now load user customizations
-	if ( iPureMode == 1 )
-	{
-
-		// Load custom whitelist
-		KeyValues *kv = new KeyValues( "" );
-		bool bLoaded = kv->LoadFromFile( g_pFileSystem, "cfg/pure_server_whitelist.txt", "game" );
-		if ( !bLoaded )
-			// Check the old location
-			bLoaded = kv->LoadFromFile( g_pFileSystem, "pure_server_whitelist.txt", "game" );
-		if ( bLoaded )
-			bLoaded = LoadCommandsFromKeyValues( kv );
-		else
-			Msg( "pure_server_whitelist.txt not present; pure server using only base file rules\n" );
-		kv->deleteThis();
-
-		// Load custom trusted keys
-		kv = new KeyValues( "" );
-		bLoaded = kv->LoadFromFile( g_pFileSystem, "cfg/trusted_keys.txt", "game" );
-		if ( bLoaded )
-			bLoaded = LoadTrustedKeysFromKeyValues( kv );
-		else
-			Msg( "trusted_keys.txt not present; pure server using only base trusted key list\n" );
-		kv->deleteThis();
-	}
-
-	// Hardcoded rules last
-	AddHardcodedFileCommands();
-}		
-
-bool operator==( const PureServerPublicKey_t &a, const PureServerPublicKey_t &b )
-{
-	return a.Count() == b.Count() && V_memcmp( a.Base(), b.Base(), a.Count() ) == 0;
-}
-
-bool CPureServerWhitelist::CommandDictDifferent( const CUtlDict<CCommand*,int> &a, const CUtlDict<CCommand*,int> &b )
-{
-	FOR_EACH_DICT( a, idxA )
-	{
-		if ( a[idxA]->m_LoadOrder == kLoadOrder_HardcodedOverride )
-			continue;
-		int idxB = b.Find( a.GetElementName( idxA ) );
-		if ( !b.IsValidIndex( idxB ) )
-			return true;
-		if ( b[idxB]->m_LoadOrder == kLoadOrder_HardcodedOverride )
-			continue;
-		if ( a[idxA]->m_eFileClass != b[idxB]->m_eFileClass
-			|| a[idxA]->m_LoadOrder != b[idxB]->m_LoadOrder )
-			return true;
-	}
-
-	return false;
-}
-
-bool CPureServerWhitelist::operator==( const CPureServerWhitelist &x ) const
-{
-
-	// Compare rule dictionaries
-	if ( CommandDictDifferent( m_FileCommands, x.m_FileCommands )
-		|| CommandDictDifferent( x.m_FileCommands, m_FileCommands )
-		|| CommandDictDifferent( m_RecursiveDirCommands, x.m_RecursiveDirCommands )
-		|| CommandDictDifferent( x.m_RecursiveDirCommands, m_RecursiveDirCommands )
-		|| CommandDictDifferent( m_NonRecursiveDirCommands, x.m_NonRecursiveDirCommands )
-		|| CommandDictDifferent( x.m_NonRecursiveDirCommands, m_NonRecursiveDirCommands ) )
-		return false;
-
-	// Compare trusted key list
-	if ( m_vecTrustedKeys.Count() != x.m_vecTrustedKeys.Count() )
-		return false;
-	for ( int i = 0 ; i < m_vecTrustedKeys.Count() ; ++i )
-		if ( !( m_vecTrustedKeys[i] == x.m_vecTrustedKeys[i] ) )
-			return false;
-
-	// they are the same
-	return true;
-}
 
 void CPureServerWhitelist::Term()
 {
 	m_FileCommands.PurgeAndDeleteElements();
 	m_RecursiveDirCommands.PurgeAndDeleteElements();
 	m_NonRecursiveDirCommands.PurgeAndDeleteElements();
-	m_vecTrustedKeys.Purge();
+	m_pFileSystem = NULL;
 	m_LoadCounter = 0;
 }
 
 
-bool CPureServerWhitelist::LoadCommandsFromKeyValues( KeyValues *kv )
+bool CPureServerWhitelist::LoadFromKeyValues( KeyValues *kv )
 {
 	for ( KeyValues *pCurItem = kv->GetFirstValue(); pCurItem; pCurItem = pCurItem->GetNextValue() )
 	{
@@ -208,138 +125,92 @@ bool CPureServerWhitelist::LoadCommandsFromKeyValues( KeyValues *kv )
 		const char *pValue = szPathName;
 
 		// Figure out the modifiers.
-		bool bFromTrustedSource = false, bAllowFromDisk = false, bCheckCRC = false, bAny = false;
-		CUtlVector<char*> mods;
-		V_SplitString( pModifiers, "+", mods );
+		bool bFromSteam = false, bAllowFromDisk = false, bCheckCRC = false;
+		CSplitString mods( pModifiers, "+" );
 		for ( int i=0; i < mods.Count(); i++ )
 		{
-			if (
-				V_stricmp( mods[i], "from_steam" ) == 0
-				|| V_stricmp( mods[i], "trusted_source" ) == 0
-			)
-				bFromTrustedSource = true;
+			if ( V_stricmp( mods[i], "from_steam" ) == 0 )
+				bFromSteam = true;
 			else if ( V_stricmp( mods[i], "allow_from_disk" ) == 0 )
 				bAllowFromDisk = true;
-			else if (
-				V_stricmp( mods[i], "check_crc" ) == 0
-				|| V_stricmp( mods[i], "check_hash" ) == 0
-			)
+			else if ( V_stricmp( mods[i], "check_crc" ) == 0 )
 				bCheckCRC = true;
-			else if ( V_stricmp( mods[i], "any" ) == 0 )
-				bAny = true;
 			else
 				Warning( "Unknown modifier in whitelist file: %s.\n", mods[i] );
 		}
-		mods.PurgeAndDeleteElements();
-		if (
-			( bFromTrustedSource && ( bAllowFromDisk || bCheckCRC || bAny ) )
-			|| ( bAny && bCheckCRC ) )
+		// we don't have to purge really; and if we do, we CAN'T delete elements 
+		if ( bFromSteam && (bAllowFromDisk || bCheckCRC) )
 		{
-			Warning( "Whitelist: incompatible flags used on %s.\n", pValue );
-			continue;
+			bAllowFromDisk = bCheckCRC = false;
+			Warning( "Whitelist: from_steam not compatible with other modifiers (used on %s).\n", pValue );
+			Warning( "           Other markers removed.\n" );
 		}
 
-		EPureServerFileClass eFileClass;
-		if ( bCheckCRC )
-			eFileClass = ePureServerFileClass_CheckHash;
-		else if ( bFromTrustedSource )
-			eFileClass = ePureServerFileClass_AnyTrusted;
-		else
-			eFileClass = ePureServerFileClass_Any;
-
+		
 		// Setup a new CCommand to hold this command.
-		AddFileCommand( pValue, eFileClass, m_LoadCounter++ );
+		CPureServerWhitelist::CCommand *pCommand = new CPureServerWhitelist::CCommand;
+		pCommand->m_LoadOrder = m_LoadCounter++;
+		pCommand->m_bAllowFromDisk = bAllowFromDisk;
+		pCommand->m_bCheckCRC = bCheckCRC;
+
+		// Figure out if they're referencing a file, a recursive directory, or a nonrecursive directory.		
+		CUtlDict<CCommand*,int> *pList;
+		const char *pEndPart = V_UnqualifiedFileName( pValue );
+		if ( Q_stricmp( pEndPart, "..." ) == 0 )
+			pList = &m_RecursiveDirCommands;
+		else if ( Q_stricmp( pEndPart, "*.*" ) == 0 )
+			pList = &m_NonRecursiveDirCommands;
+		else
+			pList = &m_FileCommands;
+		
+		// If it's a directory command, get rid of the *.* or ...
+		char filePath[MAX_PATH];
+		if ( pList == &m_RecursiveDirCommands || pList == &m_NonRecursiveDirCommands )
+			V_ExtractFilePath( pValue, filePath, sizeof( filePath ) );
+		else
+			V_strncpy( filePath, pValue, sizeof( filePath ) );
+		
+		V_FixSlashes( filePath );
+
+		// Add the command to the appropriate list.
+		if ( pList->Find( filePath ) == pList->InvalidIndex() )
+		{
+			pList->Insert( filePath, pCommand );
+		}
+		else
+		{
+			Error( "Pure server whitelist entry '%s' is a duplicate.\n", filePath );
+		}		
 	}	
 	
 	return true;
 }
 
-void CPureServerWhitelist::AddHardcodedFileCommands()
+
+void CPureServerWhitelist::EnableFullyPureMode()
 {
-	AddFileCommand( "materials/vgui/replay/thumbnails/...", ePureServerFileClass_Any, kLoadOrder_HardcodedOverride );
-	AddFileCommand( "sound/ui/hitsound.wav", ePureServerFileClass_Any, kLoadOrder_HardcodedOverride );
-	AddFileCommand( "sound/ui/killsound.wav", ePureServerFileClass_Any, kLoadOrder_HardcodedOverride );
-	AddFileCommand( "materials/vgui/logos/...", ePureServerFileClass_Any, kLoadOrder_HardcodedOverride );
+	// In this mode, all files must come from Steam.
+	m_FileCommands.PurgeAndDeleteElements();
+	m_RecursiveDirCommands.PurgeAndDeleteElements();
+	m_NonRecursiveDirCommands.PurgeAndDeleteElements();
+	m_bFullyPureMode = true;
 }
 
-void CPureServerWhitelist::AddFileCommand( const char *pszFilePath, EPureServerFileClass eFileClass, unsigned short nLoadOrder )
+
+bool CPureServerWhitelist::IsInFullyPureMode() const
 {
-
-	CPureServerWhitelist::CCommand *pCommand = new CPureServerWhitelist::CCommand;
-	pCommand->m_LoadOrder = nLoadOrder;
-	pCommand->m_eFileClass = eFileClass;
-
-	// Figure out if they're referencing a file, a recursive directory, or a nonrecursive directory.		
-	CUtlDict<CCommand*,int> *pList;
-	const char *pEndPart = V_UnqualifiedFileName( pszFilePath );
-	if ( Q_stricmp( pEndPart, "..." ) == 0 )
-		pList = &m_RecursiveDirCommands;
-	else if ( Q_stricmp( pEndPart, "*.*" ) == 0 )
-		pList = &m_NonRecursiveDirCommands;
-	else
-		pList = &m_FileCommands;
-		
-	// If it's a directory command, get rid of the *.* or ...
-	char filePath[MAX_PATH];
-	if ( pList == &m_RecursiveDirCommands || pList == &m_NonRecursiveDirCommands )
-		V_ExtractFilePath( pszFilePath, filePath, sizeof( filePath ) );
-	else
-		V_strncpy( filePath, pszFilePath, sizeof( filePath ) );
-
-	V_FixSlashes( filePath );
-
-	int idxExisting = pList->Find( filePath );
-	if ( idxExisting != pList->InvalidIndex() )
-	{
-		delete pList->Element( idxExisting );
-		pList->RemoveAt( idxExisting );
-	}
-	pList->Insert( filePath, pCommand );
+	return m_bFullyPureMode;
 }
 
-bool CPureServerWhitelist::LoadTrustedKeysFromKeyValues( KeyValues *kv )
-{
-	for ( KeyValues *pCurItem = kv->GetFirstTrueSubKey(); pCurItem; pCurItem = pCurItem->GetNextTrueSubKey() )
-	{
-		if ( V_stricmp( pCurItem->GetName(), "public_key" ) != 0 )
-		{
-			Warning( "Trusted key list has unexpected block '%s'; expected only 'public_key' blocks\n", pCurItem->GetName() );
-			continue;
-		}
-
-		const char *pszType = pCurItem->GetString( "type", "(none)" );
-		if ( V_stricmp( pszType, "rsa" ) != 0 )
-		{
-			Warning( "Trusted key type '%s' not supported.\n", pszType );
-			continue;
-		}
-
-		const char *pszKeyData = pCurItem->GetString( "rsa_public_key", "" );
-		if ( *pszKeyData == '\0' )
-		{
-			Warning( "trusted key is missing 'rsa_public_key' data; ignored\n" );
-			continue;
-		}
-
-		PureServerPublicKey_t &key = m_vecTrustedKeys[ m_vecTrustedKeys.AddToTail() ];
-		int nKeyDataLen = V_strlen( pszKeyData );
-		key.SetSize( nKeyDataLen / 2 );
-		// Aaaannnnnnnnddddd V_hextobinary has no return code.
-		// Because nobody could *ever* possible attempt to parse bad data.  It could never possibly happen.
-		V_hextobinary( pszKeyData, nKeyDataLen, key.Base(), key.Count() );
-	}
-
-	return true;
-}
 
 void CPureServerWhitelist::UpdateCommandStats( CUtlDict<CPureServerWhitelist::CCommand*,int> &commands, int *pHighest, int *pLongestPathName )
 {
 	for ( int i=commands.First(); i != commands.InvalidIndex(); i=commands.Next( i ) )
 	{
-		*pHighest = max( *pHighest, (int)commands[i]->m_LoadOrder );
+		*pHighest = MAX( *pHighest, commands[i]->m_LoadOrder );
 		
 		int len = V_strlen( commands.GetElementName( i ) );
-		*pLongestPathName = max( *pLongestPathName, len );
+		*pLongestPathName = MAX( *pLongestPathName, len );
 	}
 }
 
@@ -351,41 +222,25 @@ void CPureServerWhitelist::PrintCommand( const char *pFileSpec, const char *pExt
 	int len = V_strlen( tempFileSpec );
 	if ( len > 0 && (tempFileSpec[len-1] == '/' || tempFileSpec[len-1] == '\\') )
 		tempFileSpec[len-1] = 0;
-
-	CUtlString buf;
+		
 	if ( pExt )
-		buf.Format( "%s%c%s", tempFileSpec, CORRECT_PATH_SEPARATOR, pExt );
+		Msg( "%s%c%s", tempFileSpec, CORRECT_PATH_SEPARATOR, pExt );
 	else
-		buf.Format( "%s", tempFileSpec );
+		Msg( "%s", tempFileSpec );
 
 	len = V_strlen( pFileSpec );
 	for ( int i=len; i < maxPathnameLen+6; i++ )
 	{
-		buf += " ";
-	}
-
-	buf += "\t";
-	switch ( pCommand->m_eFileClass )
-	{
-		default:
-			buf += va( "(bogus value %d)", (int)pCommand->m_eFileClass );
-			Assert( false );
-			break;
-
-		case ePureServerFileClass_Any:
-			buf += "any";
-			break;
-
-		case ePureServerFileClass_AnyTrusted:
-			buf += "trusted_source";
-			break;
-
-		case ePureServerFileClass_CheckHash:
-			buf += "check_crc";
-			break;
+		Msg( " " );
 	}
 	
-	Msg( "%s\n", buf.String() );
+	Msg( "\t" );
+	if ( pCommand->m_bCheckCRC )
+		Msg( "check_crc" );
+	else
+		Msg( "allow_from_disk" );
+	
+	Msg( "\n" );
 }
 
 
@@ -439,44 +294,26 @@ void CPureServerWhitelist::PrintWhitelistContents()
 
 void CPureServerWhitelist::Encode( CUtlBuffer &buf )
 {
-	// Put dummy version number
-	buf.PutUnsignedInt( 0xffff );
-
-	// Encode rules
 	EncodeCommandList( m_FileCommands, buf );
 	EncodeCommandList( m_RecursiveDirCommands, buf );
 	EncodeCommandList( m_NonRecursiveDirCommands, buf );
-
-	// Encode trusted keys
-	buf.PutUnsignedInt( m_vecTrustedKeys.Count() );
-	FOR_EACH_VEC( m_vecTrustedKeys, i )
-	{
-		uint32 nKeySize = m_vecTrustedKeys[i].Count();
-		buf.PutUnsignedInt( nKeySize );
-		buf.Put( m_vecTrustedKeys[i].Base(), nKeySize );
-	}
+	buf.PutChar( (char)m_bFullyPureMode );
 }
+
 
 void CPureServerWhitelist::EncodeCommandList( CUtlDict<CPureServerWhitelist::CCommand*,int> &theList, CUtlBuffer &buf )
 {
-	// Count how many we're really going to write
-	int nCount = 0;
-	for ( int i=theList.First(); i != theList.InvalidIndex(); i = theList.Next( i ) )
-	{
-		if ( theList[i]->m_LoadOrder != kLoadOrder_HardcodedOverride )
-			++nCount;
-	}
-	buf.PutInt( nCount );
-
-	// Write them
+	buf.PutInt( theList.Count() );
 	for ( int i=theList.First(); i != theList.InvalidIndex(); i = theList.Next( i ) )
 	{
 		CPureServerWhitelist::CCommand *pCommand = theList[i];
-		if ( pCommand->m_LoadOrder == kLoadOrder_HardcodedOverride )
-			continue;
-
-		unsigned char val = (unsigned char)pCommand->m_eFileClass;
-
+		
+		unsigned char val = 0;
+		if ( pCommand->m_bAllowFromDisk )
+			val |= 0x01;
+		if ( pCommand->m_bCheckCRC )
+			val |= 0x02;
+		
 		buf.PutUnsignedChar( val );
 		buf.PutUnsignedShort( pCommand->m_LoadOrder );
 		buf.PutString( theList.GetElementName( i ) );
@@ -486,39 +323,17 @@ void CPureServerWhitelist::EncodeCommandList( CUtlDict<CPureServerWhitelist::CCo
 
 void CPureServerWhitelist::Decode( CUtlBuffer &buf )
 {
-	Term();
+	DecodeCommandList( m_FileCommands, buf );
+	DecodeCommandList( m_RecursiveDirCommands, buf );
+	DecodeCommandList( m_NonRecursiveDirCommands, buf );
 
-	uint32 nVersionTag = *(uint32 *)buf.PeekGet();
-	uint32 nFormatVersion = 0;
-	if ( nVersionTag == 0xffff )
+	if ( buf.GetBytesRemaining() >= 1 )
 	{
-		buf.GetUnsignedInt();
-		nFormatVersion = 1;
+		m_bFullyPureMode = (buf.GetChar() != 0);
 	}
 	else
 	{
-		// Talking to legacy server -- load up default rules,
-		// the rest of his list are supposed to be exceptions to
-		// the base
-		Load( 2 );
-	}
-	DecodeCommandList( m_FileCommands, buf, nFormatVersion );
-	DecodeCommandList( m_RecursiveDirCommands, buf, nFormatVersion );
-	DecodeCommandList( m_NonRecursiveDirCommands, buf, nFormatVersion );
-
-	// Hardcoded
-	AddHardcodedFileCommands();
-
-	if ( nFormatVersion >= 1 )
-	{
-		uint32 nKeyCount = buf.GetUnsignedInt();
-		m_vecTrustedKeys.SetCount( nKeyCount );
-		FOR_EACH_VEC( m_vecTrustedKeys, i )
-		{
-			uint32 nKeySize = buf.GetUnsignedInt();
-			m_vecTrustedKeys[i].SetCount( nKeySize );
-			buf.Get( m_vecTrustedKeys[i].Base(), nKeySize );
-		}
+		m_bFullyPureMode = false;
 	}
 }
 
@@ -531,45 +346,36 @@ void CPureServerWhitelist::CacheFileCRCs()
 }
 
 
-// !SV_PURE FIXME! Do we need this?
 void CPureServerWhitelist::InternalCacheFileCRCs( CUtlDict<CCommand*,int> &theList, ECacheCRCType eType )
 {
-//	for ( int i=theList.First(); i != theList.InvalidIndex(); i = theList.Next( i ) )
-//	{
-//		CCommand *pCommand = theList[i];
-//		if ( pCommand->m_bCheckCRC )
-//		{
-//			const char *pPathname = theList.GetElementName( i );
-//			m_pFileSystem->CacheFileCRCs( pPathname, eType, &m_ForceMatchList );
-//		}
-//	}
+	for ( int i=theList.First(); i != theList.InvalidIndex(); i = theList.Next( i ) )
+	{
+		CCommand *pCommand = theList[i];
+		if ( pCommand->m_bCheckCRC )
+		{
+			const char *pPathname = theList.GetElementName( i );
+			m_pFileSystem->CacheFileCRCs( pPathname, eType, &m_ForceMatchList );
+		}
+	}
 }
 
 
-void CPureServerWhitelist::DecodeCommandList( CUtlDict<CPureServerWhitelist::CCommand*,int> &theList, CUtlBuffer &buf, uint32 nFormatVersion )
+void CPureServerWhitelist::DecodeCommandList( CUtlDict<CPureServerWhitelist::CCommand*,int> &theList, CUtlBuffer &buf )
 {
 	int nCommands = buf.GetInt();
 	
 	for ( int i=0; i < nCommands; i++ )
 	{
 		CPureServerWhitelist::CCommand *pCommand = new CPureServerWhitelist::CCommand;
-
+		
 		unsigned char val = buf.GetUnsignedChar();
-		unsigned short nLoadOrder = buf.GetUnsignedShort();
+		pCommand->m_bAllowFromDisk = (( val & 0x01 ) != 0);
+		pCommand->m_bCheckCRC      = (( val & 0x02 ) != 0);
 
-		if ( nFormatVersion == 0 )
-		{
-			pCommand->m_eFileClass = ( val & 1 ) ? ePureServerFileClass_Any : ePureServerFileClass_AnyTrusted;
-			pCommand->m_LoadOrder = nLoadOrder + m_LoadCounter;
-		}
-		else
-		{
-			pCommand->m_eFileClass = (EPureServerFileClass)val;
-			pCommand->m_LoadOrder = nLoadOrder;
-		}
+		pCommand->m_LoadOrder = buf.GetUnsignedShort();
 
 		char str[MAX_PATH];
-		buf.GetString( str );
+		buf.GetString( str, sizeof( str )-1 );
 		V_FixSlashes( str );
 		
 		theList.Insert( str, pCommand );
@@ -635,45 +441,73 @@ CPureServerWhitelist::CCommand* CPureServerWhitelist::CheckEntry(
 }
 
 
-void CPureServerWhitelist::AddRef()
-{
-	ThreadInterlockedIncrement( &m_RefCount );
-}
-
 void CPureServerWhitelist::Release()
 {
-	if ( ThreadInterlockedDecrement( &m_RefCount ) <= 0 )
+	if ( --m_RefCount <= 0 )
 		delete this;
 }
 
-int CPureServerWhitelist::GetTrustedKeyCount() const
+
+IFileList* CPureServerWhitelist::GetAllowFromDiskList()
 {
-	return m_vecTrustedKeys.Count();
+	++m_RefCount;
+	return &m_AllowFromDiskList;
 }
 
-const byte *CPureServerWhitelist::GetTrustedKey( int iKeyIndex, int *nKeySize ) const
+
+IFileList* CPureServerWhitelist::GetForceMatchList()
 {
-	Assert( nKeySize != NULL );
-	if ( !m_vecTrustedKeys.IsValidIndex( iKeyIndex ) )
+	++m_RefCount;
+	return &m_ForceMatchList;
+}
+
+
+// --------------------------------------------------------------------------------------------------- //
+// CAllowFromDiskList/CForceMatchList implementation.
+// --------------------------------------------------------------------------------------------------- //
+
+bool CPureServerWhitelist::CAllowFromDiskList::IsFileInList( const char *pFilename )
+{
+	// In "fully pure" mode, all files must come from disk.
+	if ( m_pWhitelist->m_bFullyPureMode )
 	{
-		*nKeySize = 0;
-		return NULL;
+		// Only protect maps, models, and sounds.
+		if ( IsProtectedBySvPure2( pFilename ) )
+			return false;
+		else
+			return true;
 	}
-
-	*nKeySize = m_vecTrustedKeys[iKeyIndex].Count();
-	return m_vecTrustedKeys[iKeyIndex].Base();
-}
-
-
-EPureServerFileClass	CPureServerWhitelist::GetFileClass( const char *pszFilename )
-{
-	CCommand *pCommand = GetBestEntry( pszFilename );
+		
+	CCommand *pCommand = m_pWhitelist->GetBestEntry( pFilename );
 	if ( pCommand )
-		return pCommand->m_eFileClass;
-
-	// Default action is to be permissive.  (The default whitelist protects certain directories and files at a root level.)
-	return ePureServerFileClass_Any;
+		return pCommand->m_bAllowFromDisk;
+	else
+		return true;	// All files are allowed to come from disk by default.
 }
+
+void CPureServerWhitelist::CAllowFromDiskList::Release()
+{
+	m_pWhitelist->Release();
+}
+
+bool CPureServerWhitelist::CForceMatchList::IsFileInList( const char *pFilename )
+{
+	// In "fully pure" mode, all files must match the server files
+	if ( m_pWhitelist->m_bFullyPureMode )
+		return true;
+
+	CCommand *pCommand = m_pWhitelist->GetBestEntry( pFilename );
+	if ( pCommand )
+		return pCommand->m_bCheckCRC;
+	else
+		return false;	// By default, no files require the CRC check.
+}
+
+void CPureServerWhitelist::CForceMatchList::Release()
+{
+	m_pWhitelist->Release();
+}
+
 
 void CPureFileTracker::AddUserReportedFileHash( int idxFile, FileHash_t *pFileHash, USERID_t userID, bool bAddMasterRecord )
 {
@@ -766,7 +600,7 @@ void FileRenderHelper( USERID_t userID, const char *pchMessage, const char *pchP
 	}
 	else
 	{
-		Q_snprintf( rgch, 256, "Pure server: file: %s\\%s ( %d %d %x ) %s : %s : %s\n", 
+		Q_snprintf( rgch, 256, "Pure server: file: %s\\%s ( %d %d %lx ) %s : %s : %s\n", 
 			pchPath, pchFileName,
 			pFileHash->m_eFileHashType, pFileHash->m_cbFileLen, pFileHash->m_eFileHashType ? pFileHash->m_crcIOSequence : 0,
 			pchMessage, 
@@ -782,162 +616,162 @@ void FileRenderHelper( USERID_t userID, const char *pchMessage, const char *pchP
 
 bool CPureFileTracker::DoesFileMatch( const char *pPathID, const char *pRelativeFilename, int nFileFraction, FileHash_t *pFileHash, USERID_t userID )
 {
-//	// if the server has been idle for more than 15 minutes, discard all this data
-//	const float flRetireTime = sv_pure_retiretime.GetFloat();
-//	float flCurTime = Plat_FloatTime();
-//	if ( ( flCurTime - m_flLastFileReceivedTime ) > flRetireTime )
-//	{
-//		m_treeMasterFileHashes.RemoveAll();
-//		m_treeUserReportedFileHash.RemoveAll();
-//		m_treeMasterFileHashes.RemoveAll();
-//	}
-//	m_flLastFileReceivedTime = flCurTime;
-//
-//	// The clients must send us all files. We decide if it is whitelisted or not
-//	// That way the clients can not hide modified files in a whitelisted directory
-//	if ( pFileHash->m_PackFileID == 0 && 
-//		sv.GetPureServerWhitelist()->GetFileClass( pRelativeFilename ) != ePureServerFileClass_CheckHash )
-//	{
-//
-//		if ( sv_pure_trace.GetInt() == 4 )
-//		{
-//			char warningStr[1024] = {0};
-//			V_snprintf( warningStr, sizeof( warningStr ), "Pure server: file [%s]\\%s ignored by whitelist.", pPathID, pRelativeFilename );
-//			Msg( "[%s] %s\n", GetUserIDString(userID), warningStr );
-//		}
-//
-//		return true;
-//	}
-//
-//	char rgchFilenameFixed[MAX_PATH];
-//	Q_strncpy( rgchFilenameFixed, pRelativeFilename, sizeof( rgchFilenameFixed ) );
-//	Q_FixSlashes( rgchFilenameFixed );
-//
-//	// first look up the file and see if we have ever seen it before
-//	CRC32_t crcFilename;
-//	CRC32_Init( &crcFilename );
-//	CRC32_ProcessBuffer( &crcFilename, rgchFilenameFixed, Q_strlen( rgchFilenameFixed ) );
-//	CRC32_ProcessBuffer( &crcFilename, pPathID, Q_strlen( pPathID ) );
-//	CRC32_Final( &crcFilename );
-//	UserReportedFile_t ufile;
-//	ufile.m_crcIdentifier = crcFilename;
-//	ufile.m_filename = rgchFilenameFixed;
-//	ufile.m_path = pPathID;
-//	ufile.m_nFileFraction = nFileFraction;
-//	int idxFile = m_treeAllReportedFiles.Find( ufile );
-//	if ( idxFile == m_treeAllReportedFiles.InvalidIndex() )
-//	{
-//		idxFile = m_treeAllReportedFiles.Insert( ufile );
-//	}
-//	else
-//	{
-//		m_cMatchedFile++;
-//	}
-//	// then check if we have a master CRC for the file
-//	MasterFileHash_t masterFileHash;
-//	masterFileHash.m_idxFile = idxFile;
-//	int idxMaster = m_treeMasterFileHashes.Find( masterFileHash );
-//	// dont do anything with this yet
-//
-//	// check to see if we have loaded the file locally and can match it
-//	FileHash_t filehashLocal;
-//	EFileCRCStatus eStatus = g_pFileSystem->CheckCachedFileHash( pPathID, rgchFilenameFixed, nFileFraction, &filehashLocal );
-//	if ( eStatus == k_eFileCRCStatus_FileInVPK)
-//	{
-//		// you managed to load a file outside a VPK that the server has in the VPK
-//		// this is possible if the user explodes the VPKs into individual files and then deletes the VPKs
-//		FileRenderHelper( userID, "file should be in VPK", pPathID, rgchFilenameFixed, pFileHash, nFileFraction, NULL );
-//		return false;
-//	}
-//	// if the user sent us a full file hash, but we dont have one, hash it now
-//	if ( pFileHash->m_eFileHashType == FileHash_t::k_EFileHashTypeEntireFile && 
-//		( eStatus != k_eFileCRCStatus_GotCRC || filehashLocal.m_eFileHashType != FileHash_t::k_EFileHashTypeEntireFile ) )
-//	{
-//		// lets actually read the file so we get a complete file hash
-//		FileHandle_t f = g_pFileSystem->Open( rgchFilenameFixed, "rb", pPathID);
-//		// try to load the file and really compute the hash - should only have to do this once ever
-//		if ( f )
-//		{
-//			// load file into a null-terminated buffer
-//			int fileSize = g_pFileSystem->Size( f );
-//			unsigned bufSize = g_pFileSystem->GetOptimalReadSize( f, fileSize );
-//
-//			char *buffer = (char*)g_pFileSystem->AllocOptimalReadBuffer( f, bufSize );
-//			Assert( buffer );
-//
-//			// read into local buffer
-//			bool bRetOK = ( g_pFileSystem->ReadEx( buffer, bufSize, fileSize, f ) != 0 );
-//			bRetOK;
-//			g_pFileSystem->FreeOptimalReadBuffer( buffer );
-//
-//			g_pFileSystem->Close( f );	// close file after reading
-//
-//			eStatus = g_pFileSystem->CheckCachedFileHash( pPathID, rgchFilenameFixed, nFileFraction, &filehashLocal );
-//		}
-//		else
-//		{
-//			// what should we do if we couldn't open the file? should probably kick
-//			FileRenderHelper( userID, "could not open file to hash ( benign for now )", pPathID, rgchFilenameFixed, pFileHash, nFileFraction, NULL );
-//		}
-//	}
-//	if ( eStatus == k_eFileCRCStatus_GotCRC )
-//	{
-//		if ( filehashLocal.m_eFileHashType == FileHash_t::k_EFileHashTypeEntireFile &&
-//			pFileHash->m_eFileHashType == FileHash_t::k_EFileHashTypeEntireFile )
-//		{
-//			if ( filehashLocal == *pFileHash )
-//			{
-//				m_cMatchedFileFullHash++;
-//				return true;
-//			}
-//			else
-//			{
-//				// don't need to check anything else
-//				// did not match - record so that we have a record of the file that did not match ( just for reporting )
-//				AddUserReportedFileHash( idxFile, pFileHash, userID, false );
-//				FileRenderHelper( userID, "file does not match", pPathID, rgchFilenameFixed, pFileHash, nFileFraction, &filehashLocal );
-//				return false;
-//			}
-//		}
-//	}
-//
-//	// if this is a VPK file, we have completely cataloged all the VPK files, so no suprises are allowed
-//	if ( pFileHash->m_PackFileID )
-//	{
-//		AddUserReportedFileHash( idxFile, pFileHash, userID, false );
-//		FileRenderHelper( userID, "unrecognized vpk file", pPathID, rgchFilenameFixed, pFileHash, nFileFraction, NULL );
-//		return false;
-//	}
-//
-//
-//	// now lets see if we have a master file hash for this
-//	if ( idxMaster != m_treeMasterFileHashes.InvalidIndex() )
-//	{
-//		m_cMatchedMasterFile++;
-//
-//		FileHash_t *pFileHashLocal = &m_treeMasterFileHashes[idxMaster].m_FileHash;
-//		if ( *pFileHashLocal == *pFileHash )
-//		{
-//			m_cMatchedMasterFileHash++;
-//			return true;
-//		}
-//		else
-//		{
-//			// did not match - record so that we have a record of the file that did not match ( just for reporting )
-//			AddUserReportedFileHash( idxFile, pFileHash, userID, false );
-//			// and then return failure
-//			FileRenderHelper( userID, "file does not match server master file", pPathID, rgchFilenameFixed, pFileHash, nFileFraction, pFileHashLocal );
-//			return false;
-//		}
-//	}
-//
-//	// no master record, accumulate individual record so we can get a consensus
-//	if ( sv_pure_trace.GetInt() == 3 )
-//	{
-//		FileRenderHelper( userID, "server does not have hash for this file. Waiting for consensus", pPathID, rgchFilenameFixed, pFileHash, nFileFraction, NULL );
-//	}
-//
-//	AddUserReportedFileHash( idxFile, pFileHash, userID, true );
+	// if the server has been idle for more than 15 minutes, discard all this data
+	const float flRetireTime = sv_pure_retiretime.GetFloat();
+	float flCurTime = Plat_FloatTime();
+	if ( ( flCurTime - m_flLastFileReceivedTime ) > flRetireTime )
+	{
+		m_treeMasterFileHashes.RemoveAll();
+		m_treeUserReportedFileHash.RemoveAll();
+		m_treeMasterFileHashes.RemoveAll();
+	}
+	m_flLastFileReceivedTime = flCurTime;
+
+	// The clients must send us all files. We decide if it is whitelisted or not
+	// That way the clients can not hide modified files in a whitelisted directory
+	if ( pFileHash->m_PackFileID == 0 && 
+		!sv.GetPureServerWhitelist()->GetForceMatchList()->IsFileInList( pRelativeFilename ) )
+	{
+
+		if ( sv_pure_trace.GetInt() == 4 )
+		{
+			char warningStr[1024] = {0};
+			V_snprintf( warningStr, sizeof( warningStr ), "Pure server: file [%s]\\%s ignored by whitelist.", pPathID, pRelativeFilename );
+			Msg( "[%s] %s\n", GetUserIDString(userID), warningStr );
+		}
+
+		return true;
+	}
+
+	char rgchFilenameFixed[MAX_PATH];
+	Q_strncpy( rgchFilenameFixed, pRelativeFilename, sizeof( rgchFilenameFixed ) );
+	Q_FixSlashes( rgchFilenameFixed );
+
+	// first look up the file and see if we have ever seen it before
+	CRC32_t crcFilename;
+	CRC32_Init( &crcFilename );
+	CRC32_ProcessBuffer( &crcFilename, rgchFilenameFixed, Q_strlen( rgchFilenameFixed ) );
+	CRC32_ProcessBuffer( &crcFilename, pPathID, Q_strlen( pPathID ) );
+	CRC32_Final( &crcFilename );
+	UserReportedFile_t ufile;
+	ufile.m_crcIdentifier = crcFilename;
+	ufile.m_filename = rgchFilenameFixed;
+	ufile.m_path = pPathID;
+	ufile.m_nFileFraction = nFileFraction;
+	int idxFile = m_treeAllReportedFiles.Find( ufile );
+	if ( idxFile == m_treeAllReportedFiles.InvalidIndex() )
+	{
+		idxFile = m_treeAllReportedFiles.Insert( ufile );
+	}
+	else
+	{
+		m_cMatchedFile++;
+	}
+	// then check if we have a master CRC for the file
+	MasterFileHash_t masterFileHash;
+	masterFileHash.m_idxFile = idxFile;
+	int idxMaster = m_treeMasterFileHashes.Find( masterFileHash );
+	// dont do anything with this yet
+
+	// check to see if we have loaded the file locally and can match it
+	FileHash_t filehashLocal;
+	EFileCRCStatus eStatus = g_pFileSystem->CheckCachedFileHash( pPathID, rgchFilenameFixed, nFileFraction, &filehashLocal );
+	if ( eStatus == k_eFileCRCStatus_FileInVPK)
+	{
+		// you managed to load a file outside a VPK that the server has in the VPK
+		// this is possible if the user explodes the VPKs into individual files and then deletes the VPKs
+		FileRenderHelper( userID, "file should be in VPK", pPathID, rgchFilenameFixed, pFileHash, nFileFraction, NULL );
+		return false;
+	}
+	// if the user sent us a full file hash, but we dont have one, hash it now
+	if ( pFileHash->m_eFileHashType == FileHash_t::k_EFileHashTypeEntireFile && 
+		( eStatus != k_eFileCRCStatus_GotCRC || filehashLocal.m_eFileHashType != FileHash_t::k_EFileHashTypeEntireFile ) )
+	{
+		// lets actually read the file so we get a complete file hash
+		FileHandle_t f = g_pFileSystem->Open( rgchFilenameFixed, "rb", pPathID);
+		// try to load the file and really compute the hash - should only have to do this once ever
+		if ( f )
+		{
+			// load file into a null-terminated buffer
+			int fileSize = g_pFileSystem->Size( f );
+			unsigned bufSize = g_pFileSystem->GetOptimalReadSize( f, fileSize );
+
+			char *buffer = (char*)g_pFileSystem->AllocOptimalReadBuffer( f, bufSize );
+			Assert( buffer );
+
+			// read into local buffer
+			bool bRetOK = ( g_pFileSystem->ReadEx( buffer, bufSize, fileSize, f ) != 0 );
+			bRetOK;
+			g_pFileSystem->FreeOptimalReadBuffer( buffer );
+
+			g_pFileSystem->Close( f );	// close file after reading
+
+			eStatus = g_pFileSystem->CheckCachedFileHash( pPathID, rgchFilenameFixed, nFileFraction, &filehashLocal );
+		}
+		else
+		{
+			// what should we do if we couldn't open the file? should probably kick
+			FileRenderHelper( userID, "could not open file to hash ( benign for now )", pPathID, rgchFilenameFixed, pFileHash, nFileFraction, NULL );
+		}
+	}
+	if ( eStatus == k_eFileCRCStatus_GotCRC )
+	{
+		if ( filehashLocal.m_eFileHashType == FileHash_t::k_EFileHashTypeEntireFile &&
+			pFileHash->m_eFileHashType == FileHash_t::k_EFileHashTypeEntireFile )
+		{
+			if ( filehashLocal == *pFileHash )
+			{
+				m_cMatchedFileFullHash++;
+				return true;
+			}
+			else
+			{
+				// don't need to check anything else
+				// did not match - record so that we have a record of the file that did not match ( just for reporting )
+				AddUserReportedFileHash( idxFile, pFileHash, userID, false );
+				FileRenderHelper( userID, "file does not match", pPathID, rgchFilenameFixed, pFileHash, nFileFraction, &filehashLocal );
+				return false;
+			}
+		}
+	}
+
+	// if this is a VPK file, we have completely cataloged all the VPK files, so no suprises are allowed
+	if ( pFileHash->m_PackFileID )
+	{
+		AddUserReportedFileHash( idxFile, pFileHash, userID, false );
+		FileRenderHelper( userID, "unrecognized vpk file", pPathID, rgchFilenameFixed, pFileHash, nFileFraction, NULL );
+		return false;
+	}
+
+
+	// now lets see if we have a master file hash for this
+	if ( idxMaster != m_treeMasterFileHashes.InvalidIndex() )
+	{
+		m_cMatchedMasterFile++;
+
+		FileHash_t *pFileHashLocal = &m_treeMasterFileHashes[idxMaster].m_FileHash;
+		if ( *pFileHashLocal == *pFileHash )
+		{
+			m_cMatchedMasterFileHash++;
+			return true;
+		}
+		else
+		{
+			// did not match - record so that we have a record of the file that did not match ( just for reporting )
+			AddUserReportedFileHash( idxFile, pFileHash, userID, false );
+			// and then return failure
+			FileRenderHelper( userID, "file does not match server master file", pPathID, rgchFilenameFixed, pFileHash, nFileFraction, pFileHashLocal );
+			return false;
+		}
+	}
+
+	// no master record, accumulate individual record so we can get a consensus
+	if ( sv_pure_trace.GetInt() == 3 )
+	{
+		FileRenderHelper( userID, "server does not have hash for this file. Waiting for consensus", pPathID, rgchFilenameFixed, pFileHash, nFileFraction, NULL );
+	}
+
+	AddUserReportedFileHash( idxFile, pFileHash, userID, true );
 
 	// we dont have enough data to decide if you match or not yet - so we call it a match
 	return true;
@@ -975,8 +809,7 @@ int CPureFileTracker::ListUserFiles( bool bListAll, const char *pchFilenameFind 
 
 			if ( eStatus == k_eFileCRCStatus_GotCRC )
 			{
-				USERID_t useridFake;
-				useridFake.idtype = IDTYPE_STEAM;
+				USERID_t useridFake = { 0, 0 };
 				FileRenderHelper( useridFake, "Found: ",ufile.m_path.String(),ufile.m_filename.String(), &filehashLocal, 0, NULL );
 				FindFileIndex_t ffi;
 				ffi.idxFindFile = idxFindFile;
@@ -1046,7 +879,7 @@ int CPureFileTracker::ListUserFiles( bool bListAll, const char *pchFilenameFind 
 		if ( ctMatches != ctFiles || idxMaster != m_treeMasterFileHashes.InvalidIndex() || bListAll || ( pchFilenameFind && m_vecReportedFiles.Find( ffi ) != -1 ) || bOutput )
 		{
 			char rgch[256];
-			Q_snprintf( rgch, 256, "reports=%d matches=%d Hash details:", ctFiles, ctMatches );
+			V_sprintf_safe( rgch, "reports=%d matches=%d Hash details:", ctFiles, ctMatches );
 			FileHash_t *pFileHashMaster = NULL;
 			if ( idxMaster != m_treeMasterFileHashes.InvalidIndex() )
 				pFileHashMaster = &m_treeMasterFileHashes[idxMaster].m_FileHash;
@@ -1074,8 +907,7 @@ int CPureFileTracker::ListAllTrackedFiles( bool bListAll, const char *pchFilenam
 
 		if ( count && ( bListAll || ( pchFilenameFind && Q_stristr( rgUnverifiedFiles[0].m_Filename, pchFilenameFind ) && rgUnverifiedFiles[0].m_nFileFraction >= nFileFractionMin && rgUnverifiedFiles[0].m_nFileFraction <= nFileFractionMax ) ) )
 		{
-			USERID_t useridFake;
-			useridFake.idtype = IDTYPE_STEAM;
+			USERID_t useridFake = { 0, 0 };
 			FileRenderHelper( useridFake, "", rgUnverifiedFiles[0].m_PathID, rgUnverifiedFiles[0].m_Filename, &rgUnverifiedFiles[0].m_FileHash, rgUnverifiedFiles[0].m_nFileFraction, NULL );
 			if ( rgUnverifiedFiles[0].m_FileHash.m_PackFileID )
 			{
@@ -1095,7 +927,7 @@ int CPureFileTracker::ListAllTrackedFiles( bool bListAll, const char *pchFilenam
 
 CPureFileTracker g_PureFileTracker;
 
-//#define DEBUG_PURE_SERVER
+#define DEBUG_PURE_SERVER
 #ifdef DEBUG_PURE_SERVER
 void CC_ListPureServerFiles(const CCommand &args)
 {
@@ -1134,10 +966,10 @@ static ConCommand svpurelistfiles("sv_pure_listfiles", CC_PureServerListTrackedF
 void CC_PureServerCheckVPKFiles(const CCommand &args)
 {
 	if ( sv.IsDedicated() )
-		Plat_BeginWatchdogTimer( 5 * 60 );							// reset watchdog timer to allow 5 minutes for the VPK check
+		BeginWatchdogTimer( 5 * 60 );							// reset watchdog timer to allow 5 minutes for the VPK check
 	g_pFileSystem->CacheAllVPKFileHashes( false, true );
 	if ( sv.IsDedicated() )
-		Plat_EndWatchdogTimer();
+		EndWatchdogTimer();
 }
 
 static ConCommand svpurecheckvpks("sv_pure_checkvpk", CC_PureServerCheckVPKFiles, "CheckPureServerVPKFiles");

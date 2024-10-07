@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright  1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -12,6 +12,7 @@
 
 #include "demofile.h"
 #include "cl_demoactionmanager.h"
+#include "netmessages_signon.h"
 
 struct DemoCommandQueue
 {
@@ -24,13 +25,22 @@ struct DemoCommandQueue
 	int				filepos;
 };
 
-// When skipping forward through a replay it is important to stop
-// occasionally and process the backlog of packets. Otherwise if you
-// skip forward too far you will cause data structures to grow far
-// beyond their intended size. This can lead to overflows and out-of-memory
-// errors, and it can waste memory because some of these data structures
-// never release their memory after hitting a high-water mark.
-const unsigned nMaxConsecutiveSkipPackets = 100;
+struct DemoCustomDataCallbackMapping_t
+{
+	pfnDemoCustomDataCallback pCallback;
+	CUtlString name;
+};
+
+struct DemoHighlightEntry_t
+{
+	int nSeekToTick;
+	int nFastForwardToTick;
+	int nPlayToTick;
+	int nActualFirstEventTick;
+	int nActualLastEventTick;
+	int nNumEvents;
+	uint32 unAccountID;
+};
 
 class CDemoPlayer : public IDemoPlayer
 {
@@ -39,37 +49,40 @@ public: // IDemoPlayer interface implementation:
 	CDemoPlayer();
 	~CDemoPlayer();
 
-	virtual CDemoFile *GetDemoFile();
+	bool	StartPlayback( const char *filename, bool bAsTimeDemo, CDemoPlaybackParameters_t const *pPlaybackParameters, int nStartingTick = -1 ) ;
+	bool StartBroadcastPlayback( int nStartingTick );
+	virtual bool	IsPlayingBack( void ) const OVERRIDE; // true if demo loaded and playing back
+	virtual bool	IsPlaybackPaused( void ) const OVERRIDE; // true if playback paused
+	virtual bool	IsPlayingTimeDemo( void ) const OVERRIDE; // true if playing back in timedemo mode
+	CDemoPlaybackParameters_t const * GetDemoPlaybackParameters() OVERRIDE;
+	void	PausePlayback( float seconds );
+	void	SkipToTick( int tick, bool bRelative, bool bPause );
+	void	SkipToImportantTick( const DemoImportantTick_t *pTick );
 
-	virtual bool	StartPlayback( const char *filename, bool bAsTimeDemo );
-	virtual void	PausePlayback( float seconds );
-	virtual void	SkipToTick( int tick, bool bRelative, bool bPause );
-	virtual void	SetEndTick( int tick );
-	virtual void	ResumePlayback( void );
-	virtual void	StopPlayback( void );
+	void	ResumePlayback( void );
+	void	StopPlayback( void );
+	void	RestartPlayback( void );
 
-	virtual int		GetPlaybackStartTick( void );
-	virtual int		GetPlaybackTick( void );
-	virtual float	GetPlaybackTimeScale( void );
-	virtual int		GetTotalTicks( void );
+	int		GetPlaybackStartTick( void );
+	int		GetPlaybackTick( void );
+	virtual int 	GetPlaybackDeltaTick( void ) ;
+	virtual int		GetPacketTick( void ) ;
+	float	GetPlaybackTimeScale( void );
+	int		GetTotalTicks( void );
 
-	virtual bool	IsPlayingBack( void );
-	virtual bool	IsPlaybackPaused( void );
-	virtual bool	IsPlayingTimeDemo( void );
-	virtual bool	IsSkipping( void );
-	virtual bool	CanSkipBackwards( void ) { return false; }
+	virtual bool	IsSkipping( void ) const OVERRIDE; // true, if demo player skipping trough packets
+	// true if demoplayer can skip backwards
+	virtual bool	CanSkipBackwards( void ) const OVERRIDE { return false; }
 	
-	virtual void	SetPlaybackTimeScale( float timescale );
-	virtual void	InterpolateViewpoint(); // override viewpoint
-	virtual netpacket_t *ReadPacket( void );
-	virtual void	ResetDemoInterpolation( void );
-	virtual int		GetProtocolVersion();
+	void	SetPlaybackTimeScale( float timescale );
+	void	InterpolateViewpoint(); // override viewpoint
+	netpacket_t *ReadPacket( void );
+	void	ResetDemoInterpolation( void );
 
-	virtual bool	ShouldLoopDemos() { return true; }
-	virtual void	OnLastDemoInLoopPlayed() {}
+	void	SetPacketReadSuspended( bool bSuspendPacketReading );
 
-	virtual bool	IsLoading( void );
 
+	virtual IDemoStream* GetDemoStream() OVERRIDE { return &m_DemoFile; }
 public:	// other public functions
 	void	MarkFrame( float flFPSVariability );
 	void	SetBenchframe( int tick, const char *filename );
@@ -77,12 +90,28 @@ public:	// other public functions
 	bool	CheckPausedPlayback( void );
 	void	WriteTimeDemoResults( void );
 	bool	ParseAheadForInterval( int curtick, int intervalticks );
-	void	InterpolateDemoCommand( int targettick, DemoCommandQueue& prev, DemoCommandQueue& next );
+	void	InterpolateDemoCommand( int nSlot, int targettick, DemoCommandQueue& prev, DemoCommandQueue& next );
+
+	void	SetImportantEventData( const KeyValues *pData ) OVERRIDE;
+	void	GetImportantGameEventIDs();
+	void	ScanForImportantTicks( void );
+	int		FindNextImportantTick( int nCurrentTick, const char *pEventName = NULL ) OVERRIDE; // -1 = no next important tick
+	int		FindPreviousImportantTick( int nCurrentTick, const char *pEventName = NULL ) OVERRIDE; // -1 = no previous important tick
+	int		FindNextImportantTickByXuidAndEvent( int nCurrentTick, const CSteamID &steamID, const char *pKeyWithXuid, const char *pEventName = NULL ); // -1 = no next important tick
+	int		FindPreviousImportantTickByXuidAndEvent( int nCurrentTick, const CSteamID &steamID, const char *pKeyWithXuid, const char *pEventName = NULL ); // -1 = no next important tick
+	int		FindNextImportantTickByXuid( int nCurrentTick, const CSteamID &steamID ); // -1 = no next important tick
+
+	const DemoImportantTick_t *GetImportantTick( int nIndex ) OVERRIDE;
+	const DemoImportantGameEvent_t *GetImportantGameEvent( const char *pszEventName ) OVERRIDE;
+	void	ListImportantTicks( void ) OVERRIDE;
+	void	SetHighlightXuid( uint64 xuid, bool bLowlights ) OVERRIDE;
+	void	ListHighlightData( void ) OVERRIDE;
+
+	bool	ScanDemo( const char *filename, const char* pszMode ) OVERRIDE;
 
 protected:
 	bool	OverrideView( democmdinfo_t& info );
-
-	virtual void	OnStopCommand();
+	void	BuildHighlightList( void );
 
 public:
 	
@@ -95,10 +124,11 @@ public:
 	float			m_flAutoResumeTime; // how long do we pause demo playback
 	float			m_flPlaybackRateModifier;
 	int				m_nSkipToTick;	// skip to tick ASAP, -1 = off
-	int				m_nEndTick; // if nonzero, stop playback once we reach this tick
-	bool			m_bLoading; // true if demo is loading
+	bool			m_bPacketReadSuspended;
+	int				m_nTickToPauseOn;
+	
 
-	unsigned		m_nSkipPacketsPlayed; // Track consecutive skip packets returned to avoid excess
+	CDemoPlaybackParameters_t const *m_pPlaybackParameters;
 
 	// view origin/angle interpolation:
 	CUtlVector< DemoCommandQueue >	m_DestCmdInfo;
@@ -113,10 +143,30 @@ public:
 	double			m_flTimeDemoStartTime;	// Sys_FloatTime() at second frame of timedemo
 	float			m_flTotalFPSVariability; // Frame rate variability
 	int				m_nTimeDemoCurrentFrame; // last frame we read a packet
-	
+	int				m_nPacketTick;
+
 	// benchframe stuff
 	int				m_nSnapshotTick;
 	char			m_SnapshotFilename[MAX_OSPATH];
+
+	CUtlVector< DemoCustomDataCallbackMapping_t >	m_CustomDataCallbackMap; //maps callbacks in the file to callbacks in the dll when reading
+
+	// important tick stuff
+	CUtlVector< DemoImportantGameEvent_t >			m_ImportantGameEvents;
+	CUtlVector< DemoImportantTick_t >				m_ImportantTicks;
+	KeyValues										*m_pImportantEventData;
+
+private:
+	int				m_nRestartFilePos;
+	bool			m_bSavedInterpolateState;
+	CSteamID		m_highlightSteamID;
+	int				m_nHighlightPlayerIndex;
+	bool			m_bDoHighlightScan;
+	CUtlVector< DemoHighlightEntry_t > m_highlights;
+	int				m_nCurrentHighlight;
+	bool			m_bLowlightsMode;
+	bool			m_bScanMode;
+	char			m_szScanMode[ 64 ];
 };
 
 class CDemoRecorder : public IDemoRecorder 
@@ -129,11 +179,11 @@ public:
 	int		GetRecordingTick( void );
 
 	void	StartRecording( const char *filename, bool bContinuously );
-	void	SetSignonState( int state );
+	void	SetSignonState( SIGNONSTATE state );
 	bool	IsRecording( void );
 	void	PauseRecording( void );
 	void	ResumeRecording( void );
-	void	StopRecording( void );
+	void	StopRecording( const CGameInfo *pGameInfo = NULL );
 	
 	void	RecordCommand( const char *cmdstring );  // record a console command
 	void	RecordUserInput( int cmdnumber );  // record a user input command
@@ -141,6 +191,7 @@ public:
 	void	RecordPacket( void ); // packet finished, write all recorded stuff to file
 	void	RecordServerClasses( ServerClass *pClasses ); // packet finished, write all recorded stuff to file
 	void	RecordStringTables(); 
+	void	RecordCustomData( int iCallbackIndex, const void *pData, size_t iDataLength ); //record a chunk of custom data
 
 	void	ResetDemoInterpolation( void );
 
@@ -153,6 +204,7 @@ protected:
 	void	GetClientCmdInfo( democmdinfo_t& info );
 	void	WriteDemoCvars( void );
 	void	WriteBSPDecals( void );
+	void	WriteSplitScreenPlayers( void );
 	void	WriteMessages( bf_write &message );
 	bool	ComputeNextIncrementalDemoFilename( char *name, int namesize );
 
@@ -179,11 +231,14 @@ public:
 	bool			m_bResetInterpolation;
 };
 
+extern CDemoPlayer *g_pClientDemoPlayer;
 extern CDemoRecorder *g_pClientDemoRecorder;
 
-inline CDemoPlayer *ToClientDemoPlayer( IDemoPlayer *pDemoPlayer )
+struct RegisteredDemoCustomDataCallbackPair_t
 {
-	return static_cast< CDemoPlayer * >( pDemoPlayer );
-}
+	pfnDemoCustomDataCallback pCallback;
+	string_t szSaveID;
+};
+extern CUtlVector<RegisteredDemoCustomDataCallbackPair_t> g_RegisteredDemoCustomDataCallbacks;
 
 #endif // CL_DEMO_H

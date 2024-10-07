@@ -1,44 +1,24 @@
+// ALL SKIP STATEMENTS THAT AFFECT THIS SHADER!!!
+// defined $PIXELFOGTYPE && defined $WRITEWATERFOGTODESTALPHA && ( $PIXELFOGTYPE != 1 ) && $WRITEWATERFOGTODESTALPHA
+// defined $LIGHTING_PREVIEW && defined $FASTPATHENVMAPTINT && $LIGHTING_PREVIEW && $FASTPATHENVMAPTINT
+// defined $LIGHTING_PREVIEW && defined $FASTPATHENVMAPCONTRAST && $LIGHTING_PREVIEW && $FASTPATHENVMAPCONTRAST
+// defined $LIGHTING_PREVIEW && defined $FASTPATH && $LIGHTING_PREVIEW && $FASTPATH
+// ($FLASHLIGHT || $FLASHLIGHTSHADOWS) && $LIGHTING_PREVIEW
 #include "shaderlib/cshader.h"
 class colorcorrection_ps20b_Static_Index
 {
-private:
-	int m_nCONVERT_TO_SRGB;
-#ifdef _DEBUG
-	bool m_bCONVERT_TO_SRGB;
-#endif
 public:
-	void SetCONVERT_TO_SRGB( int i )
+	// CONSTRUCTOR
+	colorcorrection_ps20b_Static_Index( IShaderShadow *pShaderShadow, IMaterialVar **params )
 	{
-		Assert( i >= 0 && i <= 0 );
-		m_nCONVERT_TO_SRGB = i;
-#ifdef _DEBUG
-		m_bCONVERT_TO_SRGB = true;
-#endif
-	}
-	void SetCONVERT_TO_SRGB( bool i )
-	{
-		m_nCONVERT_TO_SRGB = i ? 1 : 0;
-#ifdef _DEBUG
-		m_bCONVERT_TO_SRGB = true;
-#endif
-	}
-public:
-	colorcorrection_ps20b_Static_Index( )
-	{
-#ifdef _DEBUG
-		m_bCONVERT_TO_SRGB = true;
-#endif // _DEBUG
-		m_nCONVERT_TO_SRGB =  0;
 	}
 	int GetIndex()
 	{
 		// Asserts to make sure that we aren't using any skipped combinations.
 		// Asserts to make sure that we are setting all of the combination vars.
 #ifdef _DEBUG
-		bool bAllStaticVarsDefined = m_bCONVERT_TO_SRGB;
-		Assert( bAllStaticVarsDefined );
 #endif // _DEBUG
-		return ( 5 * m_nCONVERT_TO_SRGB ) + 0;
+		return 0;
 	}
 };
 #define shaderStaticTest_colorcorrection_ps20b 0
@@ -60,13 +40,15 @@ public:
 	}
 	void SetNUM_LOOKUPS( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 4 );
 		m_nNUM_LOOKUPS = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bNUM_LOOKUPS = true;
 #endif
 	}
 public:
-	colorcorrection_ps20b_Dynamic_Index()
+	// CONSTRUCTOR
+	colorcorrection_ps20b_Dynamic_Index( IShaderDynamicAPI *pShaderAPI )
 	{
 #ifdef _DEBUG
 		m_bNUM_LOOKUPS = false;
@@ -85,3 +67,23 @@ public:
 	}
 };
 #define shaderDynamicTest_colorcorrection_ps20b psh_forgot_to_set_dynamic_NUM_LOOKUPS + 0
+
+static const ShaderComboInformation_t s_DynamicComboArray_colorcorrection_ps20b[1] = 
+{
+	{ "NUM_LOOKUPS", 0, 4 },
+};
+static const ShaderComboSemantics_t colorcorrection_ps20b_combos =
+{
+	"colorcorrection_ps20b", s_DynamicComboArray_colorcorrection_ps20b, 1, NULL, 0 
+};
+
+class ConstructMe_colorcorrection_ps20b
+{
+public:
+	ConstructMe_colorcorrection_ps20b()
+	{
+		GetShaderDLL()->AddShaderComboInformation( &colorcorrection_ps20b_combos );
+	}
+};
+
+static ConstructMe_colorcorrection_ps20b s_ConstructMe_colorcorrection_ps20b;

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -19,11 +19,15 @@
 #include "sv_main.h"
 #include "demo.h"
 #include <ctype.h>
+#include "vstdlib/vstrtools.h"
 #ifdef POSIX
 #include <wctype.h>
 #endif
+#ifdef _PS3
+#include <ps3/ps3_console.h>
+#endif
 
-#ifndef SWDS
+#ifndef DEDICATED
 #include <vgui_controls/Controls.h>
 #include <vgui/ILocalize.h>
 #endif
@@ -35,7 +39,7 @@
 // Singleton CCvarUtilities
 //-----------------------------------------------------------------------------
 static CCvarUtilities g_CvarUtilities;
-CCvarUtilities *cv = &g_CvarUtilities;
+CCvarUtilities *ConVarUtilities = &g_CvarUtilities;
 
 
 //-----------------------------------------------------------------------------
@@ -57,13 +61,17 @@ static void ConVarNetworkChangeCallback( IConVar *pConVar, const char *pOldValue
 
 	if ( var.IsFlagSet( FCVAR_USERINFO ) )
 	{
+#ifndef DEDICATED
+		ACTIVE_SPLITSCREEN_PLAYER_GUARD( var.GetSplitScreenPlayerSlot() );
+
 		// Are we not a server, but a client and have a change?
-		if ( cl.IsConnected() )
+		if ( GetLocalClient().IsConnected() )
 		{
 			// send changed cvar to server
-			NET_SetConVar convar( var.GetName(), var.GetString() );
-			cl.m_NetChannel->SendNetMsg( convar );
+			CNETMsg_SetConVar_t convar( var.GetBaseName(), var.GetString() );
+			GetLocalClient().m_NetChannel->SendNetMsg( convar );
 		}
+#endif
 	} 
 
 	// Log changes to server variables
@@ -104,6 +112,15 @@ static void ConVarNetworkChangeCallback( IConVar *pConVar, const char *pOldValue
 class CCvarQuery : public CBaseAppSystem< ICvarQuery >
 {
 public:
+
+	bool m_bCallbackInstalled;
+
+
+	CCvarQuery( void )
+	{
+		m_bCallbackInstalled = false;
+	}
+
 	virtual bool Connect( CreateInterfaceFn factory )
 	{
 		ICvar *pCVar = (ICvar*)factory( CVAR_INTERFACE_VERSION, 0 );
@@ -120,13 +137,18 @@ public:
 		// NOTE: this will only happen for non-FCVAR_NEVER_AS_STRING vars.
 		// Also, this happened in SetDirect for older clients that don't have the
 		// callback interface.
-		g_pCVar->InstallGlobalChangeCallback( ConVarNetworkChangeCallback );
+		if (! m_bCallbackInstalled )
+		{
+			m_bCallbackInstalled = true;
+			g_pCVar->InstallGlobalChangeCallback( ConVarNetworkChangeCallback );
+		}
 		return INIT_OK;
 	}
 
 	virtual void Shutdown()
 	{
 		g_pCVar->RemoveGlobalChangeCallback( ConVarNetworkChangeCallback );
+		m_bCallbackInstalled = false;
 	}
 
 	virtual void *QueryInterface( const char *pInterfaceName )
@@ -208,6 +230,11 @@ public:
 //-----------------------------------------------------------------------------
 static CCvarQuery s_CvarQuery;
 EXPOSE_SINGLE_INTERFACE_GLOBALVAR( CCvarQuery, ICvarQuery, CVAR_QUERY_INTERFACE_VERSION, s_CvarQuery );
+void InstallConVarHook( void )
+{
+	s_CvarQuery.Init();
+}
+
 
 
 //-----------------------------------------------------------------------------
@@ -256,7 +283,7 @@ void CCvarUtilities::SetDirect( ConVar *var, const char *value )
 	if ( var->IsFlagSet( FCVAR_PRINTABLEONLY ) )
 	{
 		wchar_t unicode[ 512 ];
-#ifndef SWDS
+#ifndef DEDICATED
 		if ( sv.IsDedicated() )
 		{
 			// Dedicated servers don't have g_pVGuiLocalize, so fall back
@@ -302,7 +329,7 @@ void CCvarUtilities::SetDirect( ConVar *var, const char *value )
 			newUnicode[ ( sizeof( newUnicode ) / sizeof( wchar_t ) ) - 1 ] = L'\0';
 		}
 
-#ifndef SWDS
+#ifndef DEDICATED
 		if ( sv.IsDedicated() )
 		{
 			V_UnicodeToUTF8( newUnicode, szNew, sizeof( szNew ) );
@@ -336,7 +363,7 @@ void CCvarUtilities::SetDirect( ConVar *var, const char *value )
 //-----------------------------------------------------------------------------
 
 // If you are changing this, please take a look at IsValidToggleCommand()
-bool CCvarUtilities::IsCommand( const CCommand &args )
+bool CCvarUtilities::IsCommand( const CCommand &args, const int iSplitscreenSlot /*= -1*/ )
 {
 	int c = args.ArgC();
 	if ( c == 0 )
@@ -346,6 +373,17 @@ bool CCvarUtilities::IsCommand( const CCommand &args )
 
 	// check variables
 	v = g_pCVar->FindVar( args[0] );
+	if ( !v )
+		return false;
+
+	// adjust for split screen convars for slots 2, 3, 4
+	if ( iSplitscreenSlot > 0 && v->IsFlagSet( FCVAR_SS ) )
+	{
+		char buf[512];
+		Q_snprintf( buf, sizeof(buf), "%s%d", args[0], iSplitscreenSlot+1 );
+		v = g_pCVar->FindVar( buf );
+	}
+
 	if ( !v )
 		return false;
 
@@ -362,12 +400,12 @@ bool CCvarUtilities::IsCommand( const CCommand &args )
 
 	if ( v->IsFlagSet( FCVAR_SPONLY ) )
 	{
-#ifndef SWDS
+#ifndef DEDICATED
 		// Connected to server?
-		if ( cl.IsConnected() )
+		if ( GetBaseLocalClient().IsConnected() )
 		{
 			// Is it not a single player game?
-			if ( cl.m_nMaxClients > 1 )
+			if ( GetBaseLocalClient().m_nMaxClients > 1 )
 			{
 				ConMsg( "Can't set %s in multiplayer\n", v->GetName() );
 				return true;
@@ -378,9 +416,9 @@ bool CCvarUtilities::IsCommand( const CCommand &args )
 
 	if ( v->IsFlagSet( FCVAR_NOT_CONNECTED ) )
 	{
-#ifndef SWDS
+#ifndef DEDICATED
 		// Connected to server?
-		if ( cl.IsConnected() )
+		if ( GetBaseLocalClient().IsConnected() )
 		{
 			extern IBaseClientDLL *g_ClientDLL;
 			if ( v->IsFlagSet( FCVAR_USERINFO ) && g_ClientDLL && g_ClientDLL->IsConnectedUserInfoChangeAllowed( v ) )
@@ -400,10 +438,10 @@ bool CCvarUtilities::IsCommand( const CCommand &args )
 	if ( v->IsFlagSet( FCVAR_CHEAT ) )
 	{
 		if ( !Host_IsSinglePlayerGame() && !CanCheat() 
-#if !defined(SWDS)
-			&& !cl.ishltv
+#if !defined(DEDICATED)
+			&& !GetBaseLocalClient().ishltv
 #if defined( REPLAY_ENABLED )
-			&& !cl.isreplay
+			&& !GetBaseLocalClient().isreplay
 #endif
 			&& !demoplayer->IsPlayingBack() 
 #endif
@@ -417,24 +455,23 @@ bool CCvarUtilities::IsCommand( const CCommand &args )
 	// Text invoking the command was typed into the console, decide what to do with it
 	//  if this is a replicated ConVar, except don't worry about restrictions if playing a .dem file
 	if ( v->IsFlagSet( FCVAR_REPLICATED ) 
-#if !defined(SWDS)
+#if !defined(DEDICATED)
 		&& !demoplayer->IsPlayingBack()
 #endif
 		)
 	{
+#ifndef DEDICATED
 		// If not running a server but possibly connected as a client, then
 		//  if the message came from console, don't process the command
-		if ( !sv.IsActive() &&
-			!sv.IsLoading() &&
-			(cmd_source == src_command) &&
-			cl.IsConnected() )
+		if ( !sv.IsActive()
+			 && !sv.IsLoading()
+			 && GetBaseLocalClient().IsConnected()
+		   )
 		{
 			ConMsg( "Can't change replicated ConVar %s from console of client, only server operator can change its value\n", v->GetName() );
 			return true;
 		}
-
-		// FIXME:  Do we need a case where cmd_source == src_client?
-		Assert( cmd_source != src_client );
+#endif
 	}
 
 	// Note that we don't want the tokenized list, send down the entire string
@@ -494,12 +531,12 @@ bool CCvarUtilities::IsValidToggleCommand( const char *cmd )
 
 	if ( v->IsFlagSet( FCVAR_SPONLY ) )
 	{
-#ifndef SWDS
+#ifndef DEDICATED
 		// Connected to server?
-		if ( cl.IsConnected() )
+		if ( GetBaseLocalClient().IsConnected() )
 		{
 			// Is it not a single player game?
-			if ( cl.m_nMaxClients > 1 )
+			if ( GetBaseLocalClient().m_nMaxClients > 1 )
 			{
 				ConMsg( "Can't set %s in multiplayer\n", v->GetName() );
 				return false;
@@ -510,9 +547,9 @@ bool CCvarUtilities::IsValidToggleCommand( const char *cmd )
 
 	if ( v->IsFlagSet( FCVAR_NOT_CONNECTED ) )
 	{
-#ifndef SWDS
+#ifndef DEDICATED
 		// Connected to server?
-		if ( cl.IsConnected() )
+		if ( GetBaseLocalClient().IsConnected() )
 		{
 			extern IBaseClientDLL *g_ClientDLL;
 			if ( v->IsFlagSet( FCVAR_USERINFO ) && g_ClientDLL && g_ClientDLL->IsConnectedUserInfoChangeAllowed( v ) )
@@ -532,7 +569,7 @@ bool CCvarUtilities::IsValidToggleCommand( const char *cmd )
 	if ( v->IsFlagSet( FCVAR_CHEAT ) )
 	{
 		if ( !Host_IsSinglePlayerGame() && !CanCheat() 
-#if !defined(SWDS) && !defined(_XBOX)
+#if !defined(DEDICATED)
 			&& !demoplayer->IsPlayingBack() 
 #endif
 			)
@@ -545,52 +582,155 @@ bool CCvarUtilities::IsValidToggleCommand( const char *cmd )
 	// Text invoking the command was typed into the console, decide what to do with it
 	//  if this is a replicated ConVar, except don't worry about restrictions if playing a .dem file
 	if ( v->IsFlagSet( FCVAR_REPLICATED ) 
-#if !defined(SWDS) && !defined(_XBOX)
+#if !defined(DEDICATED)
 		&& !demoplayer->IsPlayingBack()
 #endif
 		)
 	{
+#ifndef DEDICATED
 		// If not running a server but possibly connected as a client, then
 		//  if the message came from console, don't process the command
-		if ( !sv.IsActive() &&
-			!sv.IsLoading() &&
-			(cmd_source == src_command) &&
-			cl.IsConnected() )
+		if ( !sv.IsActive()
+			 && !sv.IsLoading()
+			 && GetBaseLocalClient().IsConnected() 
+		   )
 		{
 			ConMsg( "Can't change replicated ConVar %s from console of client, only server operator can change its value\n", v->GetName() );
 			return false;
 		}
+#endif
 	}
 
-	// FIXME:  Do we need a case where cmd_source == src_client?
-	Assert( cmd_source != src_client );
 	return true;
 }
 
+void CCvarUtilities::ResetConVarsToDefaultValues( const char *pMatchStr )
+{
+	ICvar::Iterator iter( g_pCVar );
+	for ( iter.SetFirst() ; iter.IsValid() ; iter.Next() )
+	{
+		ConCommandBase *var = iter.Get();
+		if ( var->IsCommand() )
+			continue;
+		
+		ConVar *cv = (ConVar *)var;
+		
+		if ( ( ! pMatchStr ) || 							// null pattern match?
+			 ( memcmp( pMatchStr, cv->GetName(), strlen( pMatchStr ) ) == 0 ) // first chars match
+			)
+		{
+			cv->Revert();
+		}
+		
+	}
+}
+
+
+static bool CVarSortFunc( ConVar * const &lhs, ConVar * const &rhs )
+{
+	return ( CaselessStringLessThan( lhs->GetName(), rhs->GetName() ) );
+}
 //-----------------------------------------------------------------------------
 // Purpose: 
 // Input  : *f - 
 //-----------------------------------------------------------------------------
-void CCvarUtilities::WriteVariables( CUtlBuffer &buff, bool bAllVars )
+void CCvarUtilities::WriteVariables( CUtlBuffer *buff, const int iSplitscreenSlot /*= -1*/, bool bSlotRequired /* = false */, void *pConvarsListVoid /*= NULL*/ )
 {
-	const ConCommandBase	*var;
+	CUtlRBTree< ConVar *, int > sorted( 0, 0, CVarSortFunc );
+	CUtlVector< ConVar * > *pConvarsList = (CUtlVector< ConVar * > *)pConvarsListVoid;
 
-	for (var = g_pCVar->GetCommands() ; var ; var = var->GetNext())
+	ICvar::Iterator iter( g_pCVar );
+	for ( iter.SetFirst() ; iter.IsValid() ; iter.Next() )
 	{
+		ConCommandBase *var = iter.Get();
 		if ( var->IsCommand() )
 			continue;
 
-		bool archive = var->IsFlagSet( IsX360() ? FCVAR_ARCHIVE_XBOX : FCVAR_ARCHIVE );
+		ConVar *cv = (ConVar *)var;
+
+		bool archive = cv->IsFlagSet( IsGameConsole() ? FCVAR_ARCHIVE_GAMECONSOLE : FCVAR_ARCHIVE );
 		if ( archive )
 		{
-			const ConVar *pConvar = assert_cast<const ConVar *>( var );
-			// Only write out values that differ from the defaults.
-			if ( bAllVars || Q_strcmp( pConvar->GetString(), pConvar->GetDefault() ) != 0 )
+			if ( iSplitscreenSlot >= 0 )
 			{
-				buff.Printf( "%s \"%s\"\n", var->GetName(), ((ConVar *)var)->GetString() );
+				bool bSlotSpecificConvar = false;
+
+				if ( cv->IsFlagSet( FCVAR_SS ) )
+				{
+					// only valid for the 0'th player
+					if ( iSplitscreenSlot != 0 )
+					{
+						continue;
+					}
+
+					bSlotSpecificConvar = true;
+				}
+
+				if ( cv->IsFlagSet( FCVAR_SS_ADDED ) )
+				{
+					// which added player is this relevant to
+					CSplitScreenAddedConVar *pCheck = dynamic_cast< CSplitScreenAddedConVar * >( cv );
+					if ( pCheck && pCheck->GetSplitScreenPlayerSlot() != iSplitscreenSlot )
+					{
+						continue;
+					}
+
+					bSlotSpecificConvar = true;
+				}
+
+				if ( bSlotRequired != bSlotSpecificConvar )
+				{
+					continue;
+				}
 			}
+
+			sorted.Insert( cv );
 		}
 	}
+
+	for ( int i = sorted.FirstInorder(); i != sorted.InvalidIndex(); i = sorted.NextInorder( i ) )
+	{
+		ConVar *var = sorted[ i ];
+
+		// If we are saving per-controller, we always want to write the base name ( joy_inverty as opposed to joy_inverty2 )
+		const char *name = ( iSplitscreenSlot >= 0 ) ? var->GetBaseName() : var->GetName();
+		DevMsg( 2, "%s \"%s\"\n", name, var->GetString() );
+
+		if ( buff )
+			buff->Printf( "%s \"%s\"\n", name, var->GetString() );
+
+		if ( pConvarsList )
+			pConvarsList->AddToTail( var );
+	}
+}
+
+static void Cmd_SetPlayer( int slot, const CCommand &args )
+{
+	if ( slot >= host_state.max_splitscreen_players )
+	{
+		DevMsg( 1, "ignore:  %d '%s'\n", slot, args.ArgS() );
+		return;
+	}
+
+	// Strip the cmdN and pass the rest of the command to the appropriate slot
+	Cbuf_AddText( (ECommandTarget_t)slot, args.ArgS() );
+}
+
+CON_COMMAND( cmd1, "sets userinfo string for split screen player in slot 1" )
+{
+	Cmd_SetPlayer( 0, args );
+}
+CON_COMMAND( cmd2, "sets userinfo string for split screen player in slot 2" )
+{
+	Cmd_SetPlayer( 1, args );
+}
+CON_COMMAND( cmd3, "sets userinfo string for split screen player in slot 3" )
+{
+	Cmd_SetPlayer( 2, args );
+}
+CON_COMMAND( cmd4, "sets userinfo string for split screen player in slot 4" )
+{
+	Cmd_SetPlayer( 3, args );
 }
 
 static char *StripTabsAndReturns( const char *inbuffer, char *outbuffer, int outbufferSize )
@@ -679,6 +819,9 @@ static ConVarFlags_t g_ConVarFlags[]=
 	CONVARFLAG( SERVER_CAN_EXECUTE, "server_can_execute" ),
 	CONVARFLAG( CLIENTCMD_CAN_EXECUTE, "clientcmd_can_execute" ),
 	CONVARFLAG( CLIENTDLL, "cl" ),
+	CONVARFLAG( SS, "ss" ),
+	CONVARFLAG( SS_ADDED, "ss_added" ),
+	CONVARFLAG( DEVELOPMENTONLY, "dev_only" ),
 };
 
 static void PrintListHeader( FileHandle_t& f )
@@ -705,7 +848,7 @@ static void PrintListHeader( FileHandle_t& f )
 // Input  : *var - 
 //			*f - 
 //-----------------------------------------------------------------------------
-static void PrintCvar( const ConVar *var, bool logging, FileHandle_t& fh )
+static void PrintCvar( const ConVar *var, bool logging, FileHandle_t& f )
 {
 	char flagstr[ 128 ];
 	char csvflagstr[ 1024 ];
@@ -738,7 +881,7 @@ static void PrintCvar( const ConVar *var, bool logging, FileHandle_t& fh )
 
 
 	char valstr[ 32 ];
-	char tempbuff[512] = { 0 };
+	char tempbuff[128];
 
 	// Clean up integers
 	if ( var->GetInt() == (int)var->GetFloat() )   
@@ -752,16 +895,17 @@ static void PrintCvar( const ConVar *var, bool logging, FileHandle_t& fh )
 
 	// Print to console
 	ConMsg( "%-40s : %-8s : %-16s : %s\n", var->GetName(), valstr, flagstr, StripTabsAndReturns( var->GetHelpText(), tempbuff, sizeof(tempbuff) ) );
+
 	if ( logging )
 	{
-		g_pFileSystem->FPrintf( fh,"\"%s\",\"%s\",%s,\"%s\"\n", var->GetName(), valstr, csvflagstr, StripQuotes( var->GetHelpText(), tempbuff, sizeof(tempbuff) ) );
+		g_pFileSystem->FPrintf( f,"\"%s\",\"%s\",%s,\"%s\"\n", var->GetName(), valstr, csvflagstr, StripQuotes( var->GetHelpText(), tempbuff, sizeof(tempbuff) ) );
 	}
 }
 
 static void PrintCommand( const ConCommand *cmd, bool logging, FileHandle_t& f )
 {
 	// Print to console
-	char tempbuff[512] = { 0 };
+	char tempbuff[128];
 	ConMsg ("%-40s : %-8s : %-16s : %s\n",cmd->GetName(), "cmd", "", StripTabsAndReturns( cmd->GetHelpText(), tempbuff, sizeof(tempbuff) ) );
 	if ( logging )
 	{
@@ -783,6 +927,7 @@ static void PrintCommand( const ConCommand *cmd, bool logging, FileHandle_t& f )
 		{
 			Q_snprintf( name, sizeof( name ), "'%s'", cmd->GetName() );
 		}
+		char tempbuff[128];
 		g_pFileSystem->FPrintf( f, "\"%s\",\"%s\",%s,\"%s\"\n", name, "cmd", emptyflags, StripQuotes( cmd->GetHelpText(), tempbuff, sizeof(tempbuff) ) );
 	}
 }
@@ -857,8 +1002,10 @@ void CCvarUtilities::CvarList( const CCommand &args )
 	CUtlRBTree< const ConCommandBase * > sorted( 0, 0, ConCommandBaseLessFunc );
 
 	// Loop through cvars...
-	for ( var= g_pCVar->GetCommands(); var; var=var->GetNext() )
+	ICvar::Iterator iter( g_pCVar );
+	for ( iter.SetFirst() ; iter.IsValid() ; iter.Next() )
 	{
+		ConCommandBase *var = iter.Get();
 		bool print = false;
 
 		if ( var->IsFlagSet(FCVAR_DEVELOPMENTONLY) || var->IsFlagSet(FCVAR_HIDDEN) )
@@ -917,27 +1064,42 @@ void CCvarUtilities::CvarList( const CCommand &args )
 }
 
 //-----------------------------------------------------------------------------
+// Purpose: Removes the FCVAR_DEVELOPMENTONLY flag from all cvars, making them accessible
+//-----------------------------------------------------------------------------
+void CCvarUtilities::EnableDevCvars()
+{
+	// Loop through cvars...
+	ICvar::Iterator iter( g_pCVar );
+	for ( iter.SetFirst() ; iter.IsValid() ; iter.Next() )
+	{
+		ConCommandBase *var = iter.Get();
+		// remove flag from all cvars
+		var->RemoveFlags( FCVAR_DEVELOPMENTONLY );
+	}
+}
+
+//-----------------------------------------------------------------------------
 // Purpose: 
 // Input  : 
 // Output : int
 //-----------------------------------------------------------------------------
 int CCvarUtilities::CountVariablesWithFlags( int flags )
 {
-	int i = 0;
-	const ConCommandBase *var;
-
-	for ( var = g_pCVar->GetCommands(); var; var = var->GetNext() )
+	int c = 0;
+	ICvar::Iterator iter( g_pCVar );
+	for ( iter.SetFirst() ; iter.IsValid() ; iter.Next() )
 	{
+		ConCommandBase *var = iter.Get();
 		if ( var->IsCommand() )
 			continue;
 
 		if ( var->IsFlagSet( flags ) )
 		{
-			i++;
+			++c;
 		}
 	}
 
-	return i;
+	return c;
 }
 
 
@@ -976,11 +1138,10 @@ void CCvarUtilities::CvarHelp( const CCommand &args )
 //-----------------------------------------------------------------------------
 void CCvarUtilities::CvarDifferences( const CCommand &args )
 {
-	const ConCommandBase *var;
-
-	// Loop through vars and print out findings
-	for ( var = g_pCVar->GetCommands(); var; var=var->GetNext() )
+	ICvar::Iterator iter( g_pCVar );
+	for ( iter.SetFirst() ; iter.IsValid() ; iter.Next() )
 	{
+		ConCommandBase *var = iter.Get();
 		if ( var->IsCommand( ) )
 			continue;
 		if ( var->IsFlagSet(FCVAR_DEVELOPMENTONLY) || var->IsFlagSet(FCVAR_HIDDEN) )
@@ -1044,6 +1205,42 @@ void CCvarUtilities::CvarToggle( const CCommand &args )
 	}
 }
 
+int CCvarUtilities::CvarFindFlagsCompletionCallback( const char *partial, char commands[ COMMAND_COMPLETION_MAXITEMS ][ COMMAND_COMPLETION_ITEM_LENGTH ] )
+{
+	int flagC = ARRAYSIZE( g_ConVarFlags );
+	char const *pcmd = "findflags ";
+	int len = Q_strlen( partial );
+
+	if ( len < Q_strlen( pcmd ) )
+	{
+		int i = 0;
+		for ( ; i < MIN( flagC, COMMAND_COMPLETION_MAXITEMS ); i++ )
+		{
+			Q_snprintf( commands[ i ], sizeof( commands[ i ] ), "%s %s", pcmd, g_ConVarFlags[i].desc );
+			Q_strlower( commands[ i ] );
+		}
+		return i;
+	}
+
+	char const *pSub = partial + Q_strlen( pcmd );
+	int nSubLen = Q_strlen( pSub );
+
+	int values = 0;
+	for ( int i=0; i < flagC; ++i )
+	{
+		if ( Q_strnicmp( g_ConVarFlags[i].desc, pSub, nSubLen ) )
+			continue;
+
+		Q_snprintf( commands[ values ], sizeof( commands[ values ] ), "%s %s", pcmd, g_ConVarFlags[i].desc );
+		Q_strlower( commands[ values ] );
+		++values;
+
+		if ( values >= COMMAND_COMPLETION_MAXITEMS )
+			break;
+	}
+	return values;
+}
+
 void CCvarUtilities::CvarFindFlags_f( const CCommand &args )
 {
 	if ( args.ArgC() < 2 )
@@ -1060,20 +1257,21 @@ void CCvarUtilities::CvarFindFlags_f( const CCommand &args )
 
 	// Get substring to find
 	const char *search = args[1];
-	const ConCommandBase *var;
 
 	// Loop through vars and print out findings
-	for (var=g_pCVar->GetCommands() ; var ; var=var->GetNext())
+	ICvar::Iterator iter( g_pCVar );
+	for ( iter.SetFirst() ; iter.IsValid() ; iter.Next() )
 	{
+		ConCommandBase *var = iter.Get();
 		if ( var->IsFlagSet(FCVAR_DEVELOPMENTONLY) || var->IsFlagSet(FCVAR_HIDDEN) )
 			continue;
 
-		for ( int i=0; i < ARRAYSIZE( g_ConVarFlags ); i++ )
+		for ( int j=0; j < ARRAYSIZE( g_ConVarFlags ); ++j )
 		{
-			if ( !var->IsFlagSet( g_ConVarFlags[i].bit ) )
+			if ( !var->IsFlagSet( g_ConVarFlags[j].bit ) )
 				continue;
 			
-			if ( !V_stristr( g_ConVarFlags[i].desc, search ) )
+			if ( Q_stricmp( g_ConVarFlags[j].desc, search ) )
 				continue;
 
 			ConVar_PrintDescription( var );	
@@ -1081,13 +1279,17 @@ void CCvarUtilities::CvarFindFlags_f( const CCommand &args )
 	}	
 }
 
+int FindFlagsCompletionCallback( const char *partial, char commands[ COMMAND_COMPLETION_MAXITEMS ][ COMMAND_COMPLETION_ITEM_LENGTH ] )
+{
+	return ConVarUtilities->CvarFindFlagsCompletionCallback( partial, commands );
+}
 
 //-----------------------------------------------------------------------------
 // Purpose: Hook to command
 //-----------------------------------------------------------------------------
-CON_COMMAND( findflags, "Find concommands by flags." )
+CON_COMMAND_F_COMPLETION( findflags, "Find concommands by flags.", 0, FindFlagsCompletionCallback )
 {
-	cv->CvarFindFlags_f( args );
+	ConVarUtilities->CvarFindFlags_f( args );
 }
 
 
@@ -1096,7 +1298,7 @@ CON_COMMAND( findflags, "Find concommands by flags." )
 //-----------------------------------------------------------------------------
 CON_COMMAND( cvarlist, "Show the list of convars/concommands." )
 {
-	cv->CvarList( args );
+	ConVarUtilities->CvarList( args );
 }
 
 
@@ -1105,7 +1307,7 @@ CON_COMMAND( cvarlist, "Show the list of convars/concommands." )
 //-----------------------------------------------------------------------------
 CON_COMMAND( help, "Find help about a convar/concommand." )
 {
-	cv->CvarHelp( args );
+	ConVarUtilities->CvarHelp( args );
 }
 
 //-----------------------------------------------------------------------------
@@ -1113,7 +1315,7 @@ CON_COMMAND( help, "Find help about a convar/concommand." )
 //-----------------------------------------------------------------------------
 CON_COMMAND( differences, "Show all convars which are not at their default values." )
 {
-	cv->CvarDifferences( args );
+	ConVarUtilities->CvarDifferences( args );
 }
 
 //-----------------------------------------------------------------------------
@@ -1121,17 +1323,103 @@ CON_COMMAND( differences, "Show all convars which are not at their default value
 //-----------------------------------------------------------------------------
 CON_COMMAND( toggle, "Toggles a convar on or off, or cycles through a set of values." )
 {
-	cv->CvarToggle( args );
+	ConVarUtilities->CvarToggle( args );
 }
 
+
+void ResetGameConVarsToDefaults( void )
+{
+#if defined( LEFT4DEAD )
+	ConVarRef testprocess( "test_progression_loop" );
+	ConVarUtilities->ResetConVarsToDefaultValues( "z_" );
+	if ( ! testprocess.GetInt() )
+	{
+		ConVarUtilities->ResetConVarsToDefaultValues( "sb_" );
+	}
+	ConVarUtilities->ResetConVarsToDefaultValues( "survivor_" );
+	ConVarUtilities->ResetConVarsToDefaultValues( "director_" );
+	ConVarUtilities->ResetConVarsToDefaultValues( "intensity_" );
+	ConVarUtilities->ResetConVarsToDefaultValues( "rescue_" );
+	ConVarUtilities->ResetConVarsToDefaultValues( "tongue_" );
+	ConVarUtilities->ResetConVarsToDefaultValues( "inferno_" );
+	ConVarUtilities->ResetConVarsToDefaultValues( "boomer_" );
+	ConVarUtilities->ResetConVarsToDefaultValues( "hunter_" );
+	ConVarUtilities->ResetConVarsToDefaultValues( "smoker_" );
+	ConVarUtilities->ResetConVarsToDefaultValues( "tank_" );
+	ConVarUtilities->ResetConVarsToDefaultValues( "nav_" );
+#endif
+}
+
+CON_COMMAND_F( reset_gameconvars, "Reset a bunch of game convars to default values", FCVAR_CHEAT )
+{
+	ResetGameConVarsToDefaults();
+}
 
 //-----------------------------------------------------------------------------
 // Purpose: Send the cvars to VXConsole
 //-----------------------------------------------------------------------------
-#if defined( _X360 )
+#if defined( USE_VXCONSOLE )
 CON_COMMAND( getcvars, "" )
 {
-	g_pCVar->PublishToVXConsole();
+	{
+		// avoid noisy requests
+		// outer logic to prevent multiple requests more complicated than doing just this
+#if defined( _X360 )
+		bool bConnected = XBX_IsConsoleConnected();
+		if ( !bConnected )
+		{
+			return;
+		}
+#endif
+		static float s_flLastPublishTime = 0;
+		if ( s_flLastPublishTime && Plat_FloatTime() < s_flLastPublishTime + 2.0f )
+		{
+			return;
+		}
+		s_flLastPublishTime = Plat_FloatTime();
+	}
+
+#if defined( _X360 )
+	// get the version from the image
+	// regardles of where the image came from (DVD, HDD) this cracks the embedded version info
+	int nVersion = 0;
+	if ( !IsCert() )
+	{
+		HANDLE hFile = CreateFile( "d:\\version.xtx", GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL );
+		if ( hFile != INVALID_HANDLE_VALUE )
+		{
+			DWORD nFileSize = GetFileSize( hFile, NULL );
+			if ( nFileSize != (DWORD)-1 && nFileSize > 0 )
+			{
+				char versionData[1024];
+				DWORD nBufferSize = MIN( nFileSize, sizeof( versionData ) - 1 );			
+				DWORD nBytesRead = 0;
+				BOOL bResult = ReadFile( hFile, versionData, nBufferSize, &nBytesRead, NULL );
+				if ( bResult )
+				{
+					versionData[nBytesRead] = '\0';
+					nVersion = atoi( versionData );
+				}
+			}
+			CloseHandle( hFile );
+		}
+	}
+
+	XBX_rVersion( nVersion );
+#endif
+
+	// Host_Init() will be calling us again, so defer this expensive operation until then
+	if ( host_initialized )
+	{
+#ifdef _PS3
+		if ( g_pValvePS3Console )
+		{
+			g_pCVar->PublishToVXConsole();
+		}
+#else
+		g_pCVar->PublishToVXConsole();
+#endif
+	}
 }
 #endif
 

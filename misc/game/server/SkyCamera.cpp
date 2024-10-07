@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -16,12 +16,37 @@
 CEntityClassList<CSkyCamera> g_SkyList;
 template <> CSkyCamera *CEntityClassList<CSkyCamera>::m_pClassList = NULL;
 
+CHandle<CSkyCamera> g_hActiveSkybox = INVALID_EHANDLE;
+
+#ifdef PORTAL2
+
+//------------------------------------------------------------------------------
+// Purpose: NPC step trough AI
+//------------------------------------------------------------------------------
+void CC_SkyboxSwap( void )
+{
+	// Make this cyclical for now!
+	if ( g_SkyList.m_pClassList->m_pNext )
+	{
+		g_SkyList.m_pClassList->m_pNext->m_pNext = g_SkyList.m_pClassList;
+	}
+	
+	g_SkyList.m_pClassList = g_SkyList.m_pClassList->m_pNext;
+}
+static ConCommand skybox_swap("skybox_swap", CC_SkyboxSwap, "Swap through the skyboxes in our queue", FCVAR_CHEAT );
+
+#endif // PORTAL2
+
 //-----------------------------------------------------------------------------
 // Retrives the current skycamera
 //-----------------------------------------------------------------------------
 CSkyCamera*	GetCurrentSkyCamera()
 {
-	return g_SkyList.m_pClassList;
+	if (g_hActiveSkybox.Get() == NULL)
+	{
+		g_hActiveSkybox = GetSkyCameraList();
+	}
+	return g_hActiveSkybox.Get();
 }
 
 CSkyCamera*	GetSkyCameraList()
@@ -55,6 +80,9 @@ BEGIN_DATADESC( CSkyCamera )
 	DEFINE_KEYFIELD( m_skyboxData.fog.start,			FIELD_FLOAT, "fogstart" ),
 	DEFINE_KEYFIELD( m_skyboxData.fog.end,				FIELD_FLOAT, "fogend" ),
 	DEFINE_KEYFIELD( m_skyboxData.fog.maxdensity,		FIELD_FLOAT, "fogmaxdensity" ),
+	DEFINE_KEYFIELD( m_skyboxData.fog.HDRColorScale,	FIELD_FLOAT, "HDRColorScale" ),
+
+	DEFINE_INPUTFUNC( FIELD_VOID,	"ActivateSkybox",	InputActivateSkybox ),
 
 END_DATADESC()
 
@@ -93,6 +121,7 @@ CSkyCamera::CSkyCamera()
 {
 	g_SkyList.Insert( this );
 	m_skyboxData.fog.maxdensity = 1.0f;
+	m_skyboxData.fog.HDRColorScale = 1.0f;
 }
 
 CSkyCamera::~CSkyCamera()
@@ -144,4 +173,12 @@ void CSkyCamera::Activate( )
 		}
 	}
 #endif
+}
+
+//-----------------------------------------------------------------------------
+// Activate!
+//-----------------------------------------------------------------------------
+void CSkyCamera::InputActivateSkybox( inputdata_t &inputdata )
+{
+	g_hActiveSkybox = this;
 }

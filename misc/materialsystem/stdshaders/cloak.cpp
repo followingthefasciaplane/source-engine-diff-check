@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright (c) 1996-2006, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Cloaking shader for Spy in TF2 (and probably many other things to come)
 //
@@ -8,6 +8,10 @@
 #include "BaseVSShader.h"
 #include "convar.h"
 #include "cloak_dx9_helper.h"
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
 
 DEFINE_FALLBACK_SHADER( Cloak, Cloak_DX90 )
 
@@ -99,9 +103,6 @@ BEGIN_VS_SHADER( Cloak_DX90, "Help for Cloak" )
 
 	SHADER_FALLBACK
 	{
-		if( g_pHardwareConfig->GetDXSupportLevel() < 82 )
-			return "Refract_DX80";
-
 		return 0;
 	}
 

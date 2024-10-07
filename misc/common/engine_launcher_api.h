@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ========//
 //
 // Purpose: 
 //
@@ -12,7 +12,7 @@
 #pragma once
 #endif
 
-#include "appframework/IAppSystem.h"
+#include "appframework/iappsystem.h"
 
 class CAppSystemGroup;
 
@@ -58,7 +58,7 @@ abstract_class IEngineAPI : public IAppSystem
 // Functions
 public:
 	// This function must be called before init
-	virtual void SetStartupInfo( StartupInfo_t &info ) = 0;
+	virtual bool SetStartupInfo( StartupInfo_t &info ) = 0;
 
 	// Run the engine
 	virtual int Run( ) = 0;
@@ -77,7 +77,6 @@ public:
 
 	// Reset the map we're on
 	virtual void SetMap( const char *pMapName ) = 0;
-
 };
 
 

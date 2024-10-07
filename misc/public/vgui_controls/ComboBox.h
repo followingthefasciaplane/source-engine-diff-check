@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright (c) 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -18,6 +18,8 @@
 
 namespace vgui
 {
+
+
 //-----------------------------------------------------------------------------
 // Purpose: Scroll bar button
 //-----------------------------------------------------------------------------
@@ -41,6 +43,7 @@ private:
 	Color m_DisabledBgColor;
 };
 
+
 //-----------------------------------------------------------------------------
 // Purpose: Text entry with drop down options list
 //-----------------------------------------------------------------------------
@@ -63,7 +66,7 @@ public:
 	virtual int AddItem(const char *itemText, const KeyValues *userData);
 	virtual int AddItem(const wchar_t *itemText, const KeyValues *userData);
 
-	virtual int GetItemCount() const;
+	virtual int GetItemCount();
 	int GetItemIDFromRow( int row );
 
 	// update the item
@@ -96,9 +99,6 @@ public:
 	// menu item had been selected by the user
 	MESSAGE_FUNC_INT( ActivateItem, "ActivateItem", itemID );
 	void ActivateItemByRow(int row);
-
-	void SilentActivateItem(int itemID);	// Sets the menu to the appropriate row without sending a TextChanged message
-	void SilentActivateItemByRow(int row);	// Sets the menu to the appropriate row without sending a TextChanged message
 
 	int GetActiveItem();
 	KeyValues *GetActiveItemUserData();
@@ -140,14 +140,13 @@ protected:
 	MESSAGE_FUNC( OnMenuItemSelected, "MenuItemSelected" );
 	virtual void OnCommand( const char *command );
 	virtual void ApplySchemeSettings(IScheme *pScheme);
-	virtual void ApplySettings( KeyValues *pInResourceData );
 	virtual void OnCursorEntered();
 	virtual void OnCursorExited();
 
 	// custom message handlers
 	MESSAGE_FUNC_WCHARPTR( OnSetText, "SetText", text );
 	virtual void OnSetFocus();						// called after the panel receives the keyboard focus
-#ifdef _X360
+#ifdef _GAMECONSOLE
 	virtual void OnKeyCodePressed(KeyCode code);
 #endif
     virtual void OnKeyCodeTyped(KeyCode code);
@@ -157,28 +156,16 @@ protected:
     void MoveAlongMenuItemList(int direction);
 	void MoveToFirstMenuItem();
 	void MoveToLastMenuItem();
+
 private:
 	void DoMenuLayout();
 
 	Menu 				*m_pDropDown;
 	ComboBoxButton 		*m_pButton;
-	bool				m_bPreventTextChangeMessage;
 
-//=============================================================================
-// HPE_BEGIN:
-// [pfreese] This member variable is never initialized and not used correctly
-//=============================================================================
-
-// 	bool 				m_bAllowEdit;
-
-//=============================================================================
-// HPE_END
-//=============================================================================
 	bool 				m_bHighlight;
 	Menu::MenuDirection_e 	m_iDirection;
 	int 				m_iOpenOffsetY;
-
-	char				m_szBorderOverride[64];
 };
 
 } // namespace vgui

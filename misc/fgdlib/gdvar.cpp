@@ -1,10 +1,10 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ====
 //
 //=============================================================================
 
 #include "fgdlib/fgdlib.h"
-#include "fgdlib/GameData.h"
-#include "fgdlib/WCKeyValues.h"
+#include "fgdlib/gamedata.h"
+#include "fgdlib/wckeyvalues.h"
 #include "fgdlib/gdvar.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
@@ -34,6 +34,7 @@ static TypeMap_t TypeMap[] =
 	{ ivSound,				"sound",				STRING },
 	{ ivSprite,				"sprite",				STRING },
 	{ ivString,				"string",				STRING },
+	{ ivStringInstanced,	"string_instanced",		STRING },
 	{ ivStudioModel,		"studio",				STRING },
 	{ ivTargetDest,			"target_destination",	STRING },
 	{ ivTargetSrc,			"target_source",		STRING },
@@ -51,10 +52,15 @@ static TypeMap_t TypeMap[] =
 	{ ivVecLine,			"vecline",				STRING },
 	{ ivPointEntityClass,	"pointentityclass",		STRING },
 	{ ivNodeDest,			"node_dest",			INTEGER },
+	{ ivScript,				"script",				STRING },
+	{ ivScriptList,			"scriptlist",			STRING },
+	{ ivParticleSystem,		"particlesystem",		STRING },
 	{ ivInstanceFile,		"instance_file",		STRING },
 	{ ivAngleNegativePitch,	"angle_negative_pitch",	STRING },
 	{ ivInstanceVariable,	"instance_variable",	STRING },
 	{ ivInstanceParm,		"instance_parm",		STRING },
+	{ ivBoolean,			"boolean",				STRING },
+	{ ivNodeID,				"node_id",				INTEGER },
 };
 
 
@@ -98,7 +104,7 @@ GDinputvariable::GDinputvariable( const char *szType, const char *szName )
 //-----------------------------------------------------------------------------
 GDinputvariable::~GDinputvariable(void)
 {
-	delete [] m_pszDescription;
+	delete m_pszDescription;
 	m_Items.RemoveAll();
 }
 
@@ -116,7 +122,7 @@ GDinputvariable &GDinputvariable::operator =(GDinputvariable &Other)
 	//
 	// Copy the description.
 	//
-	delete [] m_pszDescription;
+	delete m_pszDescription;
 	if (Other.m_pszDescription != NULL)
 	{
 		m_pszDescription = new char[strlen(Other.m_pszDescription) + 1];
@@ -220,7 +226,8 @@ BOOL GDinputvariable::InitFromTokens(TokenReader& tr)
 		return FALSE;
 	}
 
-	// check for "reportable" marker
+	// check for "reportable" marker.
+	// NOTE: This has been deprecated in favor of the "report" keyword below.
 	trtoken_t ttype = tr.NextToken(szToken, sizeof(szToken));
 	if (ttype == OPERATOR)
 	{
@@ -267,6 +274,20 @@ BOOL GDinputvariable::InitFromTokens(TokenReader& tr)
 	{
 		tr.NextToken(szToken, sizeof(szToken));
 		m_bReadOnly = true;
+
+		//
+		// Look ahead at the next token.
+		//
+		ttype = tr.PeekTokenType(szToken,sizeof(szToken));
+	}
+
+	//
+	// Check for the "report" specifier.
+	//
+	if ((ttype == IDENT) && IsToken(szToken, "report"))
+	{
+		tr.NextToken(szToken, sizeof(szToken));
+		m_bReportable = true;
 
 		//
 		// Look ahead at the next token.
@@ -369,13 +390,6 @@ BOOL GDinputvariable::InitFromTokens(TokenReader& tr)
 			//
 			// Read the description.
 			//
-
-			// If we've already read a description then free it to avoid memory leaks.
-			if ( m_pszDescription )
-			{
-				delete [] m_pszDescription;
-				m_pszDescription = NULL;
-			}
 			if (!GDGetTokenDynamic(tr, &m_pszDescription, STRING))
 			{
 				return(FALSE);
@@ -408,6 +422,42 @@ BOOL GDinputvariable::InitFromTokens(TokenReader& tr)
 			GDError(tr, "no %s specified", m_eType == ivFlags ? "flags" : "choices");
 			return(FALSE);
 		}
+		
+		// For boolean values, we construct it as if it were a choices dialog
+		if ( m_eType == ivBoolean )
+		{
+			m_eType = ivChoices;
+
+			GDIVITEM ivi;
+			
+			// Yes
+			strncpy( ivi.szValue, "1", MAX_STRING );
+			strncpy( ivi.szCaption, "Yes", MAX_STRING );
+			m_Items.AddToTail(ivi);
+			
+			// No
+			strncpy( ivi.szValue, "0", MAX_STRING );
+			strncpy( ivi.szCaption, "No", MAX_STRING );
+			m_Items.AddToTail(ivi);
+
+			// Clean up string usages!
+			if ( stricmp( m_szDefault, "no" ) == 0 )
+			{
+				strncpy( m_szDefault, "0", MAX_STRING );
+			}
+			else if ( stricmp( m_szDefault, "yes" ) == 0 )
+			{
+				strncpy( m_szDefault, "1", MAX_STRING );
+			}
+			
+			// Sanity check it!
+			if ( strcmp( m_szDefault, "0" ) && strcmp( m_szDefault, "1" ) )
+			{
+				GDError(tr, "boolean type specified with nonsensical default value: %s", m_szDefault );
+				return(FALSE);
+			}
+		}
+
 		return(TRUE);
 	}
 
@@ -539,7 +589,7 @@ void GDinputvariable::FromKeyValue(MDkeyvalue *pkv)
 
 	if (eStoreAs == STRING)
 	{
-		strcpy(m_szValue, pkv->szValue);
+		V_strcpy_safe(m_szValue, pkv->szValue);
 	}
 	else if (eStoreAs == INTEGER)
 	{
@@ -669,7 +719,7 @@ void GDinputvariable::ToKeyValue(MDkeyvalue *pkv)
 	}
 	else if (eStoreAs == INTEGER)
 	{
-		itoa(m_nValue, pkv->szValue, 10);
+		Q_snprintf(pkv->szValue, sizeof(pkv->szValue), "%d", m_nValue);
 	}
 }
 

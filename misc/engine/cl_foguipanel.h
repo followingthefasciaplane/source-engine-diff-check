@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -41,6 +41,8 @@ public:
 	virtual void	OnMessage(const KeyValues *params,  vgui::VPANEL fromPanel);
 
 	static	void	InstallFogUI( vgui::Panel *parent );
+
+	void			InitControls();
 	
 	void			UpdateFogStartSlider();
 	void			UpdateFogEndSlider();
@@ -95,6 +97,8 @@ protected:
 	vgui::CheckButton	*m_pFarZOverride;
 	vgui::Slider		*m_pFarZ;
 	vgui::TextEntry		*m_pFarZText;
+
+	bool m_bControlsInitialized;
 };
 
 extern CFogUIPanel *g_pFogUI;

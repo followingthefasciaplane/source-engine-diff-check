@@ -1,9 +1,6 @@
-//========= Copyright © 1996-2006, Valve Corporation, All rights reserved. ============//
+//========== Copyright (c) Valve Corporation, All rights reserved. ==========//
 
 // Includes =======================================================================================
-// STATIC: "CONVERT_TO_SRGB" "0..1"	[ps20b][= g_pHardwareConfig->NeedsShaderSRGBConversion()] [PC]
-// STATIC: "CONVERT_TO_SRGB" "0..1"	[ps30][= g_pHardwareConfig->NeedsShaderSRGBConversion()] [PC]
-// STATIC: "CONVERT_TO_SRGB" "0..0"	[= 0] [XBOX]
 #include "common_vertexlitgeneric_dx9.h"
 
 // Texture Samplers ===============================================================================
@@ -27,7 +24,7 @@ struct PS_INPUT
 
 // Main ===========================================================================================
 //float4 main( PS_INPUT i ) : COLOR // Non-HDR for debugging
-float4 main( PS_INPUT i ) : COLOR
+float4_color_return_type main( PS_INPUT i ) : COLOR
 {
 	// Color texture
 	float4 cBaseColor = tex2D( g_tBaseSampler, i.vTexCoord0.xy );

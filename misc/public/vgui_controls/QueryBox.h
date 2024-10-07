@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Creates a Message box with a question in it and yes/no buttons
 //
@@ -12,7 +12,7 @@
 #pragma once
 #endif
 
-#include <KeyValues.h>
+#include <keyvalues.h>
 #include <vgui_controls/MessageBox.h>
 #include <vgui_controls/Button.h>
 
@@ -48,8 +48,7 @@ public:
 	void SetOKCommandValue(const char *keyName, int value);
 
 protected:
-	virtual void OnKeyCodeTyped( KeyCode code );
-	virtual void OnKeyCodePressed( KeyCode code );
+	virtual void OnKeyCodeTyped(KeyCode code);
 	virtual void OnCommand(const char *command);
 	Button		*m_pCancelButton;
 

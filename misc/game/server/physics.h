@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: This is the abstraction layer for the physics simulation system
 // Any calls to the external physics library (ipion) should be made through this
@@ -40,6 +40,8 @@ class IPhysicsObjectEvent;
 extern IPhysicsCollisionSolver * const g_pCollisionSolver;
 extern IPhysicsCollisionEvent * const g_pCollisionEventHandler;
 extern IPhysicsObjectEvent * const g_pObjectEventHandler;
+
+extern ConVar sv_phys_props_block_movers;
 
 // HACKHACK: We treat anything >= 500kg as a special "large mass" that does more impact damage
 // and has special recovery on crushing/killing other objects
@@ -181,7 +183,6 @@ struct masscenteroverride_t
 void PhysSetMassCenterOverride( masscenteroverride_t &override );
 // NOTE: this removes the entry from the table as well as retrieving it
 void PhysGetMassCenterOverride( CBaseEntity *pEntity, vcollide_t *pCollide, solid_t &solidOut );
-float PhysGetEntityMass( CBaseEntity *pEntity );
 void PhysSetEntityGameFlags( CBaseEntity *pEntity, unsigned short flags );
 
 void DebugDrawContactPoints(IPhysicsObject *pPhysics);

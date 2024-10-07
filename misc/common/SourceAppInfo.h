@@ -1,4 +1,3 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
 #ifndef SOURCE_APP_INFO_H
 #define SOURCE_APP_INFO_H
 #ifdef _WIN32
@@ -18,6 +17,10 @@ enum ESourceApp
 	k_App_PORTAL,
 	k_App_HL2_EP2,
 	k_App_TF2,
+	k_App_L4D,
+	k_App_PORTAL2,
+	k_App_CSS15_DEV,
+	k_App_CSS15,
 	k_App_MAX
 };
 

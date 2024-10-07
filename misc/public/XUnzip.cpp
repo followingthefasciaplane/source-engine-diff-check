@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright (c) 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -93,7 +93,14 @@
 //
 ///////////////////////////////////////////////////////////////////////////////
 
-#if defined( WIN32 ) && !defined( _X360 )
+#if defined( PROTECTED_THINGS_ENABLE )
+#undef PROTECTED_THINGS_ENABLE // from protected_things.h
+#endif
+#if !defined ( _USE_32BIT_TIME_T ) && !defined( PLATFORM_64BITS )
+#define _USE_32BIT_TIME_T // This file assumes 32 bit time_t types
+#endif 
+#include "tier0/platform.h"
+#ifdef IS_WINDOWS_PC
 #define STRICT
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -119,21 +126,27 @@
 #define _T( arg ) arg
 #endif
 #define INVALID_HANDLE_VALUE (void*)-1
-#define CloseHandle( arg ) close( (int) arg )
+#define CloseHandle( arg ) close( size_cast< int >( (intp) arg ) )
+#if !defined(_PS3) && !defined(POSIX)
 #define ZeroMemory( ptr, size ) memset( ptr, 0, size )
+#endif
+#ifdef _PS3
+#define CreateDirectory( dir, ign ) (-1)
+#else
+#define CreateDirectory( dir, ign ) mkdir( dir, S_IRWXU | S_IRWXG | S_IRWXO )
 #define FILE_CURRENT SEEK_CUR
 #define FILE_BEGIN SEEK_SET
 #define FILE_END SEEK_END
-#define CreateDirectory( dir, ign ) mkdir( dir, S_IRWXU | S_IRWXG | S_IRWXO )
-#define SetFilePointer( handle, pos, ign, dir ) lseek( (int) handle, pos, dir )
-bool ReadFile( void *handle, void *outbuf, unsigned int toread, unsigned int *nread, void *ignored )
+#endif
+#define SetFilePointer( handle, pos, ign, dir ) lseek( size_cast<int> ( (intp) handle ), pos, dir )
+bool ReadFile( void *handle, void *outbuf, unsigned int toread, DWORD *nread, void *ignored )
 {
-	*nread = read( (int) handle, outbuf, toread );
+	*nread = read( size_cast< int >( (intp) handle ), outbuf, toread );
 	return *nread == toread;
 }
-bool WriteFile( void *handle, void *buf, unsigned int towrite, unsigned int *written, void *ignored )
+bool WriteFile( void *handle, void *buf, unsigned int towrite, DWORD *written, void *ignored )
 {
-	*written = write( (int) handle, buf, towrite );
+	*written = write( size_cast< int >( (intp) handle ), buf, towrite );
 	return *written == towrite;
 }
 
@@ -144,11 +157,25 @@ bool WriteFile( void *handle, void *buf, unsigned int towrite, unsigned int *wri
 #define FILE_ATTRIBUTE_READONLY	 0
 #define FILE_ATTRIBUTE_SYSTEM    0
 typedef unsigned char BYTE;
-#endif // POSIX
+#endif
 
 #if defined( _X360 )
 #include "xbox/xbox_win32stubs.h"
 #endif
+
+#if defined( _PS3 )
+#include "basetypes.h"
+#include "ps3/ps3_core.h"
+#include "ps3/ps3_win32stubs.h"
+#include "tls_ps3.h"
+#endif
+
+#include "tier1/strtools.h"
+#include "tier0/dbg.h"
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
 
 
 // THIS FILE is almost entirely based upon code by Jean-loup Gailly
@@ -1810,16 +1837,16 @@ uInt *v)               // working area: values in order of bit length
   uInt f;                       // i repeats in table every f entries 
   int g;                        // maximum code length 
   int h;                        // table level 
-  uInt i;              // counter, current code 
-  uInt j;              // counter
-  int k;               // number of bits in current code 
+  register uInt i;              // counter, current code 
+  register uInt j;              // counter
+  register int k;               // number of bits in current code 
   int l;                        // bits per table (returned in m) 
   uInt mask;                    // (1 << w) - 1, to avoid cc -O bug on HP 
-  uInt *p;            // pointer into c[], b[], or v[]
+  register uInt *p;            // pointer into c[], b[], or v[]
   inflate_huft *q;              // points to current table 
   struct inflate_huft_s r;      // table entry for structure assignment 
   inflate_huft *u[BMAX];        // table stack 
-  int w;               // bits before this table == (l * h) 
+  register int w;               // bits before this table == (l * h) 
   uInt x[BMAX+1];               // bit offsets, then code stack 
   uInt *xp;                    // pointer into x 
   int y;                        // number of dummy codes added 
@@ -2774,12 +2801,15 @@ LUFILE *lufopen(void *z,unsigned int len,DWORD flags,ZRESULT *err)
 		if (flags==ZIP_HANDLE)
 		{ 
 			HANDLE hf = z;
-			bool res;
+			bool res = false;
 #ifdef _WIN32		
 			res = DuplicateHandle(GetCurrentProcess(),hf,GetCurrentProcess(),&h,0,FALSE,DUPLICATE_SAME_ACCESS) == TRUE;
+#elif defined( _PS3 )
+			*err=ZR_NODUPH;
+			return NULL;
 #else
-			h = (void*) dup( (int)hf );
-			res = (int) dup >= 0;
+			h = (HANDLE) (intp) dup( size_cast<int>( (intp) hf ) );
+			res = (intp) h >= 0;
 #endif
 			if (!res) 
 			{
@@ -2793,7 +2823,7 @@ LUFILE *lufopen(void *z,unsigned int len,DWORD flags,ZRESULT *err)
 			h = CreateFile((const TCHAR *)z, GENERIC_READ, FILE_SHARE_READ, 
 					NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
 #else
-			h = (void*) open( (const TCHAR *)z, O_RDONLY );
+			h = (void*) (intp) open( (const TCHAR *)z, O_RDONLY );
 #endif
 			if (h == INVALID_HANDLE_VALUE) 
 			{
@@ -2806,7 +2836,7 @@ LUFILE *lufopen(void *z,unsigned int len,DWORD flags,ZRESULT *err)
 		canseek = (type==FILE_TYPE_DISK);
 #else
 		struct stat buf;
-		fstat( (int)h, &buf );
+		fstat( size_cast< int >( (intp)h ), &buf );
 		canseek = buf.st_mode & S_IFREG;
 #endif
 	}
@@ -2979,7 +3009,7 @@ int unzlocal_getByte(LUFILE *fin,int *pi)
 int unzlocal_getShort (LUFILE *fin,uLong *pX)
 {
     uLong x ;
-    int i;
+    int i = 0;
     int err;
 
     err = unzlocal_getByte(fin,&i);
@@ -2999,7 +3029,7 @@ int unzlocal_getShort (LUFILE *fin,uLong *pX)
 int unzlocal_getLong (LUFILE *fin,uLong *pX)
 {
     uLong x ;
-    int i;
+    int i = 0;
     int err;
 
     err = unzlocal_getByte(fin,&i);
@@ -3232,12 +3262,10 @@ int unzlocal_GetCurrentFileInfoInternal (unzFile file, unz_file_info *pfile_info
 
 	// we check the magic
 	if (err==UNZ_OK)
-	{
 		if (unzlocal_getLong(s->file,&uMagic) != UNZ_OK)
 			err=UNZ_ERRNO;
 		else if (uMagic!=0x02014b50)
 			err=UNZ_BADZIPFILE;
-	}
 
 	if (unzlocal_getShort(s->file,&file_info.version) != UNZ_OK)
 		err=UNZ_ERRNO;
@@ -3314,12 +3342,10 @@ int unzlocal_GetCurrentFileInfoInternal (unzFile file, unz_file_info *pfile_info
 			uSizeRead = extraFieldBufferSize;
 
 		if (lSeek!=0)
-		{
 			if (lufseek(s->file,lSeek,SEEK_CUR)==0)
 				lSeek=0;
 			else
 				err=UNZ_ERRNO;
-		}
 		if ((file_info.size_file_extra>0) && (extraFieldBufferSize>0))
 			if (lufread(extraField,(uInt)uSizeRead,1,s->file)!=1)
 				err=UNZ_ERRNO;
@@ -3341,12 +3367,10 @@ int unzlocal_GetCurrentFileInfoInternal (unzFile file, unz_file_info *pfile_info
 			uSizeRead = commentBufferSize;
 
 		if (lSeek!=0)
-		{
 			if (lufseek(s->file,lSeek,SEEK_CUR)==0)
 				{} // unused lSeek=0;
 			else
 				err=UNZ_ERRNO;
-		}
 		if ((file_info.size_file_comment>0) && (commentBufferSize>0))
 			if (lufread(szComment,(uInt)uSizeRead,1,s->file)!=1)
 				err=UNZ_ERRNO;
@@ -3482,9 +3506,9 @@ int unzLocateFile (unzFile file, const TCHAR *szFileName, int iCaseSensitivity)
 int unzlocal_CheckCurrentFileCoherencyHeader (unz_s *s,uInt *piSizeVar,
   uLong *poffset_local_extrafield, uInt  *psize_local_extrafield)
 {
-	uLong uMagic,uData,uFlags;
-	uLong size_filename;
-	uLong size_extra_field;
+	uLong uMagic = 0,uData = 0,uFlags = 0;
+	uLong size_filename = 0;
+	uLong size_extra_field = 0;
 	int err=UNZ_OK;
 
 	*piSizeVar = 0;
@@ -3496,12 +3520,10 @@ int unzlocal_CheckCurrentFileCoherencyHeader (unz_s *s,uInt *piSizeVar,
 
 
 	if (err==UNZ_OK)
-	{
 		if (unzlocal_getLong(s->file,&uMagic) != UNZ_OK)
 			err=UNZ_ERRNO;
 		else if (uMagic!=0x04034b50)
 			err=UNZ_BADZIPFILE;
-	}
 
 	if (unzlocal_getShort(s->file,&uData) != UNZ_OK)
 		err=UNZ_ERRNO;
@@ -3569,11 +3591,11 @@ int unzOpenCurrentFile (unzFile file)
 {
 	int err;
 	int Store;
-	uInt iSizeVar;
+	uInt iSizeVar = 0;
 	unz_s* s;
 	file_in_zip_read_info_s* pfile_in_zip_read_info;
-	uLong offset_local_extrafield;  // offset of the local extra field
-	uInt  size_local_extrafield;    // size of the local extra field
+	uLong offset_local_extrafield = 0;  // offset of the local extra field
+	uInt  size_local_extrafield = 0;    // size of the local extra field
 
 	if (file==NULL)
 		return UNZ_PARAMERROR;
@@ -3669,7 +3691,7 @@ int unzReadCurrentFile  (unzFile file, voidp buf, unsigned len)
 
   file_in_zip_read_info_s* pfile_in_zip_read_info = s->pfile_in_zip_read;
   if (pfile_in_zip_read_info==NULL) return UNZ_PARAMERROR;
-  if (pfile_in_zip_read_info->read_buffer == NULL) return UNZ_END_OF_LIST_OF_FILE;
+  if ((pfile_in_zip_read_info->read_buffer == NULL)) return UNZ_END_OF_LIST_OF_FILE;
   if (len==0) return 0;
 
   pfile_in_zip_read_info->stream.next_out = (Byte*)buf;
@@ -3937,7 +3959,7 @@ ZRESULT TUnzip::Open(void *z,unsigned int len,DWORD flags)
 			return ZR_SEEK;
 	}
 #endif
-	ZRESULT e; 
+	ZRESULT e = 0;
 	LUFILE *f = lufopen(z,len,flags,&e);
 	if (f==NULL) 
 		return e;
@@ -3956,15 +3978,9 @@ ZRESULT TUnzip::Get(int index,ZIPENTRY *ze)
   { ze->index = uf->gi.number_entry;
     ze->name[0]=0;
     ze->attr=0;
-#ifdef _WIN32
-    ze->atime.dwLowDateTime=0; ze->atime.dwHighDateTime=0;
-    ze->ctime.dwLowDateTime=0; ze->ctime.dwHighDateTime=0;
-    ze->mtime.dwLowDateTime=0; ze->mtime.dwHighDateTime=0;
-#else
-	ze->atime = 0;
-	ze->ctime = 0;
-	ze->mtime = 0;
-#endif
+	memset( &ze->atime, 0, sizeof( ze->atime ) );
+	memset( &ze->ctime, 0, sizeof( ze->ctime ) );
+	memset( &ze->mtime, 0, sizeof( ze->mtime ) );
     ze->comp_size=0;
     ze->unc_size=0;
     return ZR_OK;
@@ -4014,6 +4030,8 @@ ZRESULT TUnzip::Get(int index,ZIPENTRY *ze)
   FILETIME ft;
   DosDateTimeToFileTime(dosdate,dostime,&ft);
   ze->atime=ft; ze->ctime=ft; ze->mtime=ft;
+#elif defined( _PS3 )
+  // PS3 TODO: ze->atime=ufi.dosDate; ze->ctime=ufi.dosDate; ze->mtime=ufi.dosDate;
 #else
   ze->atime=ufi.dosDate; ze->ctime=ufi.dosDate; ze->mtime=ufi.dosDate;
 #endif
@@ -4033,6 +4051,8 @@ ZRESULT TUnzip::Get(int index,ZIPENTRY *ze)
     { time_t mtime = *(time_t*)(extra+epos); epos+=4;
 #ifdef _WIN32
       ze->mtime = timet2filetime(mtime);
+#elif defined( _PS3 )
+	// PS3 TODO: ze->mtime = mtime;
 #else
 	  ze->mtime = mtime;
 #endif
@@ -4041,6 +4061,8 @@ ZRESULT TUnzip::Get(int index,ZIPENTRY *ze)
     { time_t atime = *(time_t*)(extra+epos); epos+=4;
 #ifdef _WIN32
       ze->atime = timet2filetime(atime);
+#elif defined( _PS3 )
+	// PS3 TODO: ze->atime = atime;
 #else
 	  ze->atime = atime;
 #endif
@@ -4049,6 +4071,8 @@ ZRESULT TUnzip::Get(int index,ZIPENTRY *ze)
     { time_t ctime = *(time_t*)(extra+epos); 
 #ifdef _WIN32
       ze->ctime = timet2filetime(ctime);
+#elif defined( _PS3 )
+	// PS3 TODO: ze->ctime = ctime;
 #else
 	  ze->ctime = ctime;
 #endif
@@ -4075,8 +4099,7 @@ ZRESULT TUnzip::Find(const TCHAR *name, bool ic, int *index, ZIPENTRY *ze)
 		return ZR_NOTFOUND;
 	}
 	if (currentfile!=-1) 
-		unzCloseCurrentFile(uf);
-	currentfile=-1;
+		unzCloseCurrentFile(uf); currentfile=-1;
 	int i = (int)uf->num_file;
 	if (index!=NULL) 
 		*index=i;
@@ -4198,7 +4221,7 @@ ZRESULT TUnzip::Unzip(int index,void *dst,unsigned int len,DWORD flags)
 		h = ::CreateFile((const TCHAR*)dst, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 
 				ze.attr, NULL);
 #else
-		h = (void*) open( (const TCHAR*)dst, O_WRONLY | O_CREAT, S_IRWXU | S_IRWXG | S_IRWXO );
+		h = (void*) (intp) open( (const TCHAR*)dst, O_WRONLY | O_CREAT, S_IRWXU | S_IRWXG | S_IRWXO );
 #endif
 	}
 
@@ -4235,7 +4258,7 @@ ZRESULT TUnzip::Unzip(int index,void *dst,unsigned int len,DWORD flags)
 		settime=true;
 #else
 	struct stat sbuf;
-	fstat( (int)h, &sbuf );
+	fstat( size_cast<int>( (intp)h ), &sbuf );
 	settime = ( sbuf.st_mode & S_IFREG );
 #endif
 
@@ -4243,13 +4266,15 @@ ZRESULT TUnzip::Unzip(int index,void *dst,unsigned int len,DWORD flags)
 	{
 #ifdef _WIN32
 		SetFileTime(h,&ze.ctime,&ze.atime,&ze.mtime);
+#elif defined( _PS3 )
+		// PS3 TODO: SetFileTime
 #else
 		struct timeval tv[2];
 		tv[0].tv_sec = ze.atime;
 		tv[0].tv_usec = 0;
 		tv[1].tv_sec = ze.mtime;
 		tv[1].tv_usec = 0;
-		futimes( (int)h, tv );
+		futimes( size_cast< int >( (intp) h ), tv );
 #endif
 	}
 	if (flags!=ZIP_HANDLE) 
@@ -4301,7 +4326,7 @@ unsigned int FormatZipMessageU(ZRESULT code, char *buf,unsigned int len)
   unsigned int mlen=(unsigned int)strlen(msg);
   if (buf==0 || len==0) return mlen;
   unsigned int n=mlen; if (n+1>len) n=len-1;
-  memcpy(buf,msg,n); buf[n]=0;
+  Q_strncpy(buf,msg,n); buf[n]=0;
   return mlen;
 }
 
@@ -4475,7 +4500,19 @@ bool SafeUnzipMemory( const void *pvZipped, int cubZipped, void *pvDest, int cub
 	int iRes = ZR_CORRUPT;
 	if ( hZip )
 	{
+#ifdef _PS3
 		iRes = UnzipItem( hZip, 0, pvDest, cubDest, ZIP_MEMORY );
+#else
+		try
+		{
+			iRes = UnzipItem( hZip, 0, pvDest, cubDest, ZIP_MEMORY );
+		}
+		catch ( ... )
+		{
+			// failed to unzip, try to continue
+			iRes = ZR_CORRUPT;
+		}
+#endif
 		CloseZip( hZip );
 	}
 

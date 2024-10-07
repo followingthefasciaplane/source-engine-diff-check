@@ -1,11 +1,13 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =====//
 //
 // Dme version of a collisionmodel
 //
 //===========================================================================//
 
+
 #include "mdlobjects/dmecollisionmodel.h"
 #include "datamodel/dmelementfactoryhelper.h"
+
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -18,30 +20,31 @@ IMPLEMENT_ELEMENT_FACTORY( DmeCollisionModel, CDmeCollisionModel );
 
 
 //-----------------------------------------------------------------------------
-// Purpose: 
+//
 //-----------------------------------------------------------------------------
 void CDmeCollisionModel::OnConstruction()
 {
-	m_flMass.Init( this, "mass" );
-	m_bAutomaticMassComputation.Init( this, "automaticMassComputation" );
-	m_flInertia.Init( this, "inertia" );
-	m_flDamping.Init( this, "damping" );
-	m_flRotationalDamping.Init( this, "rotationalDamping" );
-	m_flDrag.Init( this, "drag" );
-	m_flRollingDrag.Init( this, "rollingDrag" );
-	m_nMaxConvexPieces.Init( this, "maxConvexPieces" );
-	m_bRemove2D.Init( this, "remove2d" );
-	m_bConcavePerJoint.Init( this, "concavePerJoint" );
-	m_flWeldPositionTolerance.Init( this, "weldPositionTolerance" );
-	m_flWeldNormalTolerance.Init( this, "weldNormalTolerance" );
-	m_bConcave.Init( this, "concave" );
-	m_bForceMassCenter.Init( this, "forceMassCenter" );
-	m_vecMassCenter.Init( this, "massCenter" );
-	m_bNoSelfCollisions.Init( this, "noSelfCollisions" );
-	m_bAssumeWorldSpace.Init( this, "assumeWorldSpace" );
+	m_flMass.InitAndSet( this, "mass", 0.0f );
+	m_bAutomaticMassComputation.InitAndSet( this, "automaticMassComputation", true );
+	m_flInertia.InitAndSet( this, "inertia", 1.0f );
+	m_flDamping.InitAndSet( this, "damping", 0.0f );
+	m_flRotationalDamping.InitAndSet( this, "rotationalDamping", 0.0f );
+	m_flDrag.InitAndSet( this, "drag", -1.0f );
+	m_nMaxConvexPieces.InitAndSet( this, "maxConvexPieces", 40 );
+	m_bRemove2D.InitAndSet( this, "remove2d", false );
+	m_flWeldPositionTolerance.InitAndSet( this, "weldPositionTolerance", 0.0f );
+	m_flWeldNormalTolerance.InitAndSet( this, "weldNormalTolerance", 0.999f );
+	m_bConcave.InitAndSet( this, "concave", false );
+	m_bForceMassCenter.InitAndSet( this, "forceMassCenter", false );
+	m_vecMassCenter.InitAndSet( this, "massCenter", Vector( 0.0f, 0.0f, 0.0f ) );
+	m_bAssumeWorldSpace.InitAndSet( this, "assumeWorldSpace", false );
 	m_SurfaceProperty.InitAndSet( this, "surfaceProperty", "default" );
 }
 
+
+//-----------------------------------------------------------------------------
+//
+//-----------------------------------------------------------------------------
 void CDmeCollisionModel::OnDestruction()
 {
 }

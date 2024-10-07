@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -26,11 +26,15 @@ CDatatableStack::CDatatableStack( CSendTablePrecalc *pPrecalc, unsigned char *pS
 #ifdef _DEBUG
 	memset( m_pProxies, 0xFF, sizeof( m_pProxies ) );
 #endif
+
+	m_bLocalNetworkBackDoor = false;
 }
 
 
-void CDatatableStack::Init( bool bExplicitRoutes )
+void CDatatableStack::Init( bool bExplicitRoutes, bool bLocalNetworkBackDoor )
 {
+	m_bLocalNetworkBackDoor = bLocalNetworkBackDoor;
+
 	if ( bExplicitRoutes )
 	{
 		memset( m_pProxies, 0xFF, sizeof( m_pProxies[0] ) * m_pPrecalc->m_ProxyPaths.Count() );

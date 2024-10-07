@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -12,7 +12,8 @@
 #include "filesystem_engine.h"
 #include "utldict.h"
 #include "demo.h"
-#ifndef SWDS
+#include "tier2/fileutils.h"
+#ifndef DEDICATED
 #include "vgui_baseui_interface.h"
 #endif
 
@@ -21,10 +22,14 @@
 
 // Imported from other .cpp files
 void Host_Map_f( const CCommand &args );
+void Host_MapGroup_f( const CCommand &args );
+void Host_SplitScreen_Map_f( const CCommand &args );
 void Host_Map_Background_f( const CCommand &args );
 void Host_Map_Commentary_f( const CCommand &args );
 void Host_Changelevel_f( const CCommand &args );
 void Host_Changelevel2_f( const CCommand &args );
+
+ConVar host_maplist_recurse_subdirs( "host_maplist_recurse_subdirs", "1" );
 
 //-----------------------------------------------------------------------------
 // Purpose: For each map, stores when the map last changed on disk and whether
@@ -131,7 +136,7 @@ long CMapListItem::GetFSTimeStamp( char const *name )
 //-----------------------------------------------------------------------------
 int CMapListItem::CheckFSHeaderVersion( char const *name )
 {
-	dheader_t header;
+	BSPHeader_t header;
 	memset( &header, 0, sizeof( header ) );
 
 	FileHandle_t fp = g_pFileSystem->Open ( name, "rb" );
@@ -141,7 +146,7 @@ int CMapListItem::CheckFSHeaderVersion( char const *name )
 		g_pFileSystem->Close( fp );
 	}
 
-	return ( header.version >= MINBSPVERSION && header.version <= BSPVERSION ) ? VALID : INVALID;
+	return ( header.m_nVersion >= MINBSPVERSION && header.m_nVersion <= BSPVERSION ) ? VALID : INVALID;
 }
 
 // How often to check the filesystem for updated map info
@@ -217,7 +222,7 @@ void CMapListManager::Think( void )
 	if ( !m_bDirty )
 		return;
 
-#ifndef SWDS
+#ifndef DEDICATED
 	// Only update pending files if console is visible to avoid slamming FS while in a map
 	if ( !EngineVGui()->IsConsoleVisible() )
 		return;
@@ -261,68 +266,102 @@ void CMapListManager::RefreshList( void )
 
 	ConDMsg( "Refreshing map list...\n" );
 
-	// Search the directory structure.
-	char mapwild[MAX_QPATH];
-	Q_strncpy(mapwild,"maps/*.bsp", sizeof( mapwild ) );
-	char const *findfn = Sys_FindFirst( mapwild, NULL, 0 );
-	while ( findfn )
-	{
-		if ( IsPC() && V_stristr( findfn, ".360.bsp" ) )
-		{
-			// ignore 360 bsp
-			findfn = Sys_FindNext( NULL, 0 );
-			continue;
-		}
-		else if ( IsX360() && !V_stristr( findfn, ".360.bsp" ) )
-		{
-			// ignore pc bsp
-			findfn = Sys_FindNext( NULL, 0 );
-			continue;
-		}
+	if ( host_maplist_recurse_subdirs.GetBool() )
+	{		
+		char mapwild[MAX_QPATH];
+		Q_snprintf( mapwild, sizeof( mapwild ), "*.%sbsp", IsX360() ? "360." : "" );
 
-		// Make full fileame (maps/foo.bsp) and map name (foo)
-		char szFileName[ MAX_QPATH ] = { 0 };
-		V_snprintf( szFileName, sizeof( szFileName ), "maps/%s", findfn );
+		CUtlVector<CUtlString> outList;
+		RecursiveFindFilesMatchingName( &outList, "maps", mapwild, "GAME" );
 
-		char szMapName[256] = { 0 };
-		V_strncpy( szMapName, findfn, sizeof( szMapName ) );
-		char *pExt = V_stristr( szMapName, ".bsp" );
-		if ( pExt )
+		FOR_EACH_VEC( outList, i )
 		{
-			*pExt = '\0';
-		}
-
-		int idx = m_Items.Find( szMapName );
-		if ( idx == m_Items.InvalidIndex() )
-		{
-			CMapListItem item;
-			item.SetFileTimestamp( item.GetFSTimeStamp( szFileName ) );
-			item.SetValid( CMapListItem::PENDING );
-			// Insert into dictionary
-			m_Items.Insert( szMapName, item );
-
-			m_bDirty = true;
-		}
-		else
-		{
-			CMapListItem *item = &m_Items[ idx ];
-			Assert( item );
-
-			// Make sure data is up to date
-			long timestamp = g_pFileSystem->GetFileTime( szFileName );
-			if ( !item->IsSameTime( timestamp ) )
+			const char* curMap = outList[i].Access();
+			int idx = m_Items.Find( curMap );
+			if ( idx == m_Items.InvalidIndex() )
 			{
-				item->SetFileTimestamp( timestamp );
-				item->SetValid( CMapListItem::PENDING );
+				CMapListItem item;
+				item.SetFileTimestamp( item.GetFSTimeStamp( curMap ) );
+				item.SetValid( CMapListItem::PENDING );
+				// Insert into dictionary
+				m_Items.Insert( curMap, item );
 
 				m_bDirty = true;
 			}
-		}
+			else
+			{
+				CMapListItem *item = &m_Items[ idx ];
+				Assert( item );
 
-		findfn = Sys_FindNext( NULL, 0 );
+				// Make sure data is up to date
+				long timestamp = g_pFileSystem->GetFileTime( curMap );
+				if ( !item->IsSameTime( timestamp ) )
+				{
+					item->SetFileTimestamp( timestamp );
+					item->SetValid( CMapListItem::PENDING );
+
+					m_bDirty = true;
+				}
+			}
+		}
+	}
+	else
+	{
+		// Search the directory structure.
+		char mapwild[MAX_QPATH];
+		Q_strncpy(mapwild,"maps/*.bsp", sizeof( mapwild ) );
+		char const *findfn = Sys_FindFirst( mapwild, NULL, 0 );
+		while ( findfn )
+		{
+			if ( IsPC() && V_stristr( findfn, ".360.bsp" ) )
+			{
+				// ignore 360 bsp
+				findfn = Sys_FindNext( NULL, 0 );
+				continue;
+			}
+			else if ( IsX360() && !V_stristr( findfn, ".360.bsp" ) )
+			{
+				// ignore pc bsp
+				findfn = Sys_FindNext( NULL, 0 );
+				continue;
+			}
+
+			char sz[ MAX_QPATH ];
+			Q_snprintf( sz, sizeof( sz ), "maps/%s", findfn );
+
+			int idx = m_Items.Find( sz );
+			if ( idx == m_Items.InvalidIndex() )
+			{
+				CMapListItem item;
+				item.SetFileTimestamp( item.GetFSTimeStamp( sz ) );
+				item.SetValid( CMapListItem::PENDING );
+				// Insert into dictionary
+				m_Items.Insert( sz, item );
+
+				m_bDirty = true;
+			}
+			else
+			{
+				CMapListItem *item = &m_Items[ idx ];
+				Assert( item );
+
+				// Make sure data is up to date
+				long timestamp = g_pFileSystem->GetFileTime( sz );
+				if ( !item->IsSameTime( timestamp ) )
+				{
+					item->SetFileTimestamp( timestamp );
+					item->SetValid( CMapListItem::PENDING );
+
+					m_bDirty = true;
+				}
+			}
+
+			findfn = Sys_FindNext( NULL, 0 );
+		}
+		Sys_FindClose();
 	}
 
-	Sys_FindClose();
+
 
 	m_flLastRefreshTime = realtime;
 }
@@ -380,52 +419,80 @@ void CMapListManager::BuildList( void )
 {
 	ClearList();
 
-	// Search the directory structure.
-	char mapwild[MAX_QPATH];
-	Q_strncpy(mapwild,"maps/*.bsp", sizeof( mapwild ) );
-	char const *findfn = Sys_FindFirst( mapwild, NULL, 0 );
-	while ( findfn )
+	if ( host_maplist_recurse_subdirs.GetBool() )
 	{
-		if ( IsPC() && V_stristr( findfn, ".360.bsp" ) )
+
+		char mapwild[MAX_QPATH];
+		Q_snprintf( mapwild, sizeof( mapwild ), "*.%sbsp", IsX360() ? "360." : "" );
+
+		CUtlVector<CUtlString> outList;
+		RecursiveFindFilesMatchingName( &outList, "maps", mapwild, "GAME" );
+
+		FOR_EACH_VEC( outList, i )
 		{
-			// ignore 360 bsp
+			const char* curMap = outList[i].Access();
+			if ( IsPC() && V_stristr( curMap, ".360.bsp" ) )
+			{
+				// ignore 360 bsp
+				continue;
+			}
+			else if ( IsX360() && !V_stristr( curMap, ".360.bsp" ) )
+			{
+				// ignore pc bsp
+				continue;
+			}
+
+			CMapListItem item;
+			item.SetFileTimestamp( item.GetFSTimeStamp( curMap ) );
+			item.SetValid( CMapListItem::PENDING );
+
+			// Insert into dictionary
+			int idx = m_Items.Find( curMap );
+			if ( idx == m_Items.InvalidIndex() )
+			{
+				m_Items.Insert( curMap, item );
+			}
+		}
+	} 
+	else
+	{
+		// Search the directory structure.
+		char mapwild[MAX_QPATH];
+		Q_snprintf( mapwild, sizeof( mapwild ), "maps/*.%sbsp", IsX360() ? "360." : "" );
+		char const *findfn = Sys_FindFirst( mapwild, NULL, 0 );
+		while ( findfn )
+		{
+			if ( IsPC() && V_stristr( findfn, ".360.bsp" ) )
+			{
+				// ignore 360 bsp
+				findfn = Sys_FindNext( NULL, 0 );
+				continue;
+			}
+			else if ( IsX360() && !V_stristr( findfn, ".360.bsp" ) )
+			{
+				// ignore pc bsp
+				findfn = Sys_FindNext( NULL, 0 );
+				continue;
+			}
+
+			char sz[ MAX_QPATH ];
+			Q_snprintf( sz, sizeof( sz ), "maps/%s", findfn );
+
+			CMapListItem item;
+			item.SetFileTimestamp( item.GetFSTimeStamp( sz ) );
+			item.SetValid( CMapListItem::PENDING );
+
+			// Insert into dictionary
+			int idx = m_Items.Find( sz );
+			if ( idx == m_Items.InvalidIndex() )
+			{
+				m_Items.Insert( sz, item );
+			}
+
 			findfn = Sys_FindNext( NULL, 0 );
-			continue;
 		}
-		else if ( IsX360() && !V_stristr( findfn, ".360.bsp" ) )
-		{
-			// ignore pc bsp
-			findfn = Sys_FindNext( NULL, 0 );
-			continue;
-		}
-
-		// Make full fileame (maps/foo.bsp) and map name (foo)
-		char szFileName[ MAX_QPATH ] = { 0 };
-		V_snprintf( szFileName, sizeof( szFileName ), "maps/%s", findfn );
-
-		char szMapName[256] = { 0 };
-		V_strncpy( szMapName, findfn, sizeof( szMapName ) );
-		char *pExt = V_stristr( szMapName, ".bsp" );
-		if ( pExt )
-		{
-			*pExt = '\0';
-		}
-
-		CMapListItem item;
-		item.SetFileTimestamp( item.GetFSTimeStamp( szFileName ) );
-		item.SetValid( CMapListItem::PENDING );
-
-		// Insert into dictionary
-		int idx = m_Items.Find( szMapName );
-		if ( idx == m_Items.InvalidIndex() )
-		{
-			m_Items.Insert( szMapName, item );
-		}
-
-		findfn = Sys_FindNext( NULL, 0 );
+		Sys_FindClose();
 	}
-
-	Sys_FindClose();
 
 	// Remember time we build the list
 	m_flLastRefreshTime = realtime;
@@ -491,7 +558,7 @@ static int MapList_CountMaps( const char *pszSubString, bool listobsolete, int& 
 	{
 		substringlength = strlen(pszSubString);
 	}
-
+	
 	//
 	// search through the path, one element at a time
 	//
@@ -504,11 +571,11 @@ static int MapList_CountMaps( const char *pszSubString, bool listobsolete, int& 
 			char const *mapname = g_MapListMgr.GetMapName( i );
 			int valid = g_MapListMgr.IsMapValid( i );
 
-			if ( !substringlength || V_stristr( mapname, pszSubString ) )
+			if ( !substringlength || ( V_stristr( &mapname[ 5 ], pszSubString ) != NULL ) )
 			{
-				if ( MapList_CheckPrintMap( "(fs)", mapname, valid, showOutdated ? true : false, false ) )
+				if ( MapList_CheckPrintMap( "(fs)", &mapname[ 5 ], valid, showOutdated ? true : false, false ) )
 				{
-					maxitemlength = max( maxitemlength, (int)( strlen( mapname ) + 1 ) );
+					maxitemlength = MAX( maxitemlength, (int)( strlen( &mapname[ 5 ] ) + 1 ) );
 					count++;
 				}
 			}
@@ -516,7 +583,7 @@ static int MapList_CountMaps( const char *pszSubString, bool listobsolete, int& 
 	}
 
 	return count;
-}
+}	
 
 //-----------------------------------------------------------------------------
 // Purpose: 
@@ -524,9 +591,8 @@ static int MapList_CountMaps( const char *pszSubString, bool listobsolete, int& 
 //  If the substring is empty, or "*", then lists all maps
 // Input  : *pszSubString - 
 //-----------------------------------------------------------------------------
-int MapList_ListMaps( const char *pszSubString, bool listobsolete, bool verbose, int maxcount, int maxitemlength, char maplist[][ 64 ] )
+static int MapList_ListMaps( const char *pszSubString, bool listobsolete, bool verbose, int maxcount, int maxitemlength, char maplist[][ 64 ] )
 {
-	g_MapListMgr.RefreshList();
 	int substringlength = 0;
 	if (pszSubString && pszSubString[0])
 	{
@@ -558,13 +624,13 @@ int MapList_ListMaps( const char *pszSubString, bool listobsolete, bool verbose,
 			char const *mapname = g_MapListMgr.GetMapName( i );
 			int valid = g_MapListMgr.IsMapValid( i );
 
-			if ( !substringlength || V_stristr( mapname, pszSubString ) )
+			if ( !substringlength || ( V_stristr( &mapname[ 5 ], pszSubString ) != NULL ) )
 			{
-				if ( MapList_CheckPrintMap( "(fs)", mapname, valid, showOutdated ? true : false, verbose ) )
+				if ( MapList_CheckPrintMap( "(fs)", &mapname[ 5 ], valid, showOutdated ? true : false, verbose ) )
 				{
 					if ( maxitemlength != 0 )
 					{
-						Q_strncpy( maplist[ count ], mapname, maxitemlength );
+						Q_strncpy( maplist[ count ], &mapname[ 5 ], maxitemlength );
 					}
 					count++;
 				}
@@ -593,7 +659,7 @@ int _Host_Map_f_CompletionFunc( char const *cmdname, char const *partial, char c
 	}
 
 	int longest = 0;
-	int count = min( MapList_CountMaps( substring, false, longest ), COMMAND_COMPLETION_MAXITEMS );
+	int count = MIN( MapList_CountMaps( substring, false, longest ), COMMAND_COMPLETION_MAXITEMS );
 	if ( count > 0 )
 	{
 		MapList_ListMaps( substring, false, false, COMMAND_COMPLETION_MAXITEMS, longest, commands );
@@ -605,6 +671,7 @@ int _Host_Map_f_CompletionFunc( char const *cmdname, char const *partial, char c
 			char old[ COMMAND_COMPLETION_ITEM_LENGTH ];
 			Q_strncpy( old, commands[ i ], sizeof( old ) );
 			Q_snprintf( commands[ i ], sizeof( commands[ i ] ), "%s%s", cmdname, old );
+			commands[ i ][ strlen( commands[ i ] ) - 4 ] = 0;
 		}
 	}
 
@@ -620,9 +687,39 @@ int _Host_Map_f_CompletionFunc( char const *cmdname, char const *partial, char c
 //			**commands - 
 // Output : int
 //-----------------------------------------------------------------------------
+static int Host_SSMap_f_CompletionFunc( char const *partial, char commands[ COMMAND_COMPLETION_MAXITEMS ][ COMMAND_COMPLETION_ITEM_LENGTH ] )
+{
+	char const *cmdname = "ss_map ";
+	return _Host_Map_f_CompletionFunc( cmdname, partial, commands );
+}
+
+//-----------------------------------------------------------------------------
+// Purpose: 
+// Input  : *partial - 
+//			context - 
+//			longest - 
+//			maxcommands - 
+//			**commands - 
+// Output : int
+//-----------------------------------------------------------------------------
 static int Host_Map_f_CompletionFunc( char const *partial, char commands[ COMMAND_COMPLETION_MAXITEMS ][ COMMAND_COMPLETION_ITEM_LENGTH ] )
 {
 	char const *cmdname = "map ";
+	return _Host_Map_f_CompletionFunc( cmdname, partial, commands );
+}
+
+//-----------------------------------------------------------------------------
+// Purpose: 
+// Input  : *partial - 
+//			context - 
+//			longest - 
+//			maxcommands - 
+//			**commands - 
+// Output : int
+//-----------------------------------------------------------------------------
+static int Host_Background_f_CompletionFunc( char const *partial, char commands[ COMMAND_COMPLETION_MAXITEMS ][ COMMAND_COMPLETION_ITEM_LENGTH ] )
+{
+	char const *cmdname = "map_background ";
 	return _Host_Map_f_CompletionFunc( cmdname, partial, commands );
 }
 
@@ -706,7 +803,9 @@ static void Host_Maps_f( const CCommand &args )
 #ifndef BENCHMARK
 static ConCommand maps("maps", Host_Maps_f, "Displays list of maps." );
 static ConCommand map("map", Host_Map_f, "Start playing on specified map.", FCVAR_DONTRECORD, Host_Map_f_CompletionFunc );
-static ConCommand map_background("map_background", Host_Map_Background_f, "Runs a map as the background to the main menu.", FCVAR_DONTRECORD, Host_Map_f_CompletionFunc );
+static ConCommand mapgroup( "mapgroup", Host_MapGroup_f, "Specify a map group", FCVAR_DONTRECORD );
+static ConCommand ss_map("ss_map", Host_SplitScreen_Map_f, "Start playing on specified map with max allowed splitscreen players.", FCVAR_DONTRECORD, Host_SSMap_f_CompletionFunc );
+static ConCommand map_background("map_background", Host_Map_Background_f, "Runs a map as the background to the main menu.", FCVAR_DONTRECORD, Host_Background_f_CompletionFunc );
 static ConCommand map_commentary("map_commentary", Host_Map_Commentary_f, "Start playing, with commentary, on a specified map.", FCVAR_DONTRECORD, Host_Map_Commentary_f_CompletionFunc );
 static ConCommand changelevel("changelevel", Host_Changelevel_f, "Change server to the specified map", FCVAR_DONTRECORD, Host_Changelevel_f_CompletionFunc );
 static ConCommand changelevel2("changelevel2", Host_Changelevel2_f, "Transition to the specified map in single player", FCVAR_DONTRECORD, Host_Changelevel2_f_CompletionFunc );

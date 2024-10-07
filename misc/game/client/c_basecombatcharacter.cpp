@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Client's C_BaseCombatCharacter entity
 //
@@ -12,7 +12,7 @@
 //=============================================================================//
 #include "cbase.h"
 #include "c_basecombatcharacter.h"
-
+#include "c_cs_player.h"
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
@@ -26,16 +26,7 @@
 C_BaseCombatCharacter::C_BaseCombatCharacter()
 {
 	for ( int i=0; i < m_iAmmo.Count(); i++ )
-	{
 		m_iAmmo.Set( i, 0 );
-	}
-
-#ifdef GLOWS_ENABLE
-	m_pGlowEffect = NULL;
-	m_bGlowEnabled = false;
-	m_bOldGlowEnabled = false;
-	m_bClientSideGlowEnabled = false;
-#endif // GLOWS_ENABLE
 }
 
 //-----------------------------------------------------------------------------
@@ -43,9 +34,6 @@ C_BaseCombatCharacter::C_BaseCombatCharacter()
 //-----------------------------------------------------------------------------
 C_BaseCombatCharacter::~C_BaseCombatCharacter()
 {
-#ifdef GLOWS_ENABLE
-	DestroyGlowEffect();
-#endif // GLOWS_ENABLE
 }
 
 /*
@@ -57,33 +45,6 @@ int	C_BaseCombatCharacter::GetAmmoCount( char *szName ) const
 	return GetAmmoCount( g_pGameRules->GetAmmoDef()->Index(szName) );
 }
 */
-
-//-----------------------------------------------------------------------------
-// Purpose: 
-//-----------------------------------------------------------------------------
-void C_BaseCombatCharacter::OnPreDataChanged( DataUpdateType_t updateType )
-{
-	BaseClass::OnPreDataChanged( updateType );
-
-#ifdef GLOWS_ENABLE
-	m_bOldGlowEnabled = m_bGlowEnabled;
-#endif // GLOWS_ENABLE
-}
-
-//-----------------------------------------------------------------------------
-// Purpose: 
-//-----------------------------------------------------------------------------
-void C_BaseCombatCharacter::OnDataChanged( DataUpdateType_t updateType )
-{
-	BaseClass::OnDataChanged( updateType );
-
-#ifdef GLOWS_ENABLE
-	if ( m_bOldGlowEnabled != m_bGlowEnabled )
-	{
-		UpdateGlowEffect();
-	}
-#endif // GLOWS_ENABLE
-}
 
 //-----------------------------------------------------------------------------
 // Purpose: Overload our muzzle flash and send it to any actively held weapon
@@ -103,66 +64,103 @@ void C_BaseCombatCharacter::DoMuzzleFlash()
 	}
 }
 
-#ifdef GLOWS_ENABLE
-//-----------------------------------------------------------------------------
-// Purpose: 
-//-----------------------------------------------------------------------------
-void C_BaseCombatCharacter::GetGlowEffectColor( float *r, float *g, float *b )
+void C_BaseCombatCharacter::OnDataChanged( DataUpdateType_t updateType )
 {
-	*r = 0.76f;
-	*g = 0.76f;
-	*b = 0.76f;
-}
+	BaseClass::OnDataChanged( updateType );
 
-//-----------------------------------------------------------------------------
-// Purpose: 
-//-----------------------------------------------------------------------------
-/*
-void C_BaseCombatCharacter::EnableGlowEffect( float r, float g, float b )
-{
-	// destroy the existing effect
-	if ( m_pGlowEffect )
+	// view weapon model cache monitoring
+	// NOTE: expected to be updated ONLY once per frame for the primary player ONLY!
+	// the expectation is that there is ONLY one customer that requires view models
+	// otherwise the lower level code will thrash as it tries to maintain a single player's view model inventory
 	{
-		DestroyGlowEffect();
+		const char *viewWeapons[MAX_WEAPONS];
+		int nNumViewWeapons = 0;
+
+		C_BasePlayer *pLocalPlayer = C_BasePlayer::GetLocalPlayer();
+		if ( pLocalPlayer == this && !pLocalPlayer->IsObserver() )
+		{
+			// want to know what this player's weapon inventory is to keep all of these in cache
+			for ( int i = 0; i < MAX_WEAPONS; i++ )
+			{
+				C_BaseCombatWeapon *pWeapon = GetWeapon( i );
+				if ( !pWeapon )
+					continue;
+
+				viewWeapons[nNumViewWeapons] = pWeapon->GetViewModel();
+				nNumViewWeapons++;
+			}
+		}
+		else if ( pLocalPlayer && pLocalPlayer->GetObserverMode() == OBS_MODE_IN_EYE && pLocalPlayer->GetObserverTarget() == this ) 
+		{
+			// once spectating, PURPOSELY only the active view weapon gets tracked
+			// cycling through spectators is the more common pattern and tracking just the active weapon prevents massive cache thrashing 
+			// otherwise maintaining the observer targets inventories would needlessly thrash the cache as the player rapidly cycles
+			C_BaseCombatWeapon *pWeapon = pLocalPlayer->GetActiveWeapon();
+			if ( pWeapon )
+			{
+				viewWeapons[nNumViewWeapons] = pWeapon->GetViewModel();
+				nNumViewWeapons++;
+			}
+		}
+
+		if ( nNumViewWeapons )
+		{
+			// view model weapons are subject to a cache policy that needs to be kept accurate for a SINGLE Player
+			modelinfo->UpdateViewWeaponModelCache( viewWeapons, nNumViewWeapons );
+		}
 	}
 
-	m_pGlowEffect = new CGlowObject( this, Vector( r, g, b ), 1.0, true );
-}
-*/
+	// world weapon model cache monitoring
+	// world weapons have a much looser cache policy and just needs to monitor the important set of world weapons
+	{
+		const char *worldWeapons[MAX_WEAPONS];
+		int nNumWorldWeapons = 0;
 
-//-----------------------------------------------------------------------------
-// Purpose: 
-//-----------------------------------------------------------------------------
-void C_BaseCombatCharacter::UpdateGlowEffect( void )
+		// want to track any world models that are active weapons
+		// the world weapons lying on the ground are the ones that become LRU purge candidates
+		C_BasePlayer *pPlayer = ToBasePlayer( this );
+		if ( pPlayer )
+		{
+			C_BaseCombatWeapon *pWeapon = pPlayer->GetActiveWeapon();
+			if ( pWeapon )
+			{
+				worldWeapons[nNumWorldWeapons] = pWeapon->GetWorldModel();
+				nNumWorldWeapons++;
+			}
+		}
+
+		C_CSPlayer *pCSPlayer = C_CSPlayer::GetLocalCSPlayer();
+		if ( pCSPlayer == this )
+		{
+			int weaponEntIndex = pCSPlayer->GetTargetedWeapon();
+			if ( weaponEntIndex > 0 ) //0 is a valid entity index, but will never be used for a weapon
+			{			
+				C_BaseEntity *pEnt = cl_entitylist->GetEnt( weaponEntIndex );
+				C_BaseCombatWeapon *pWeapon = dynamic_cast< C_BaseCombatWeapon * >( pEnt );
+				if ( pWeapon )
+				{
+					worldWeapons[nNumWorldWeapons] = pWeapon->GetWorldModel();
+					nNumWorldWeapons++;
+				}
+			}
+		}
+
+		if ( nNumWorldWeapons )
+		{
+			modelinfo->TouchWorldWeaponModelCache( worldWeapons, nNumWorldWeapons );
+		}
+	}
+}
+
+bool C_BaseCombatCharacter::HasEverBeenInjured( void ) const
 {
-	// destroy the existing effect
-	if ( m_pGlowEffect )
-	{
-		DestroyGlowEffect();
-	}
-
-	// create a new effect
-	if ( m_bGlowEnabled || m_bClientSideGlowEnabled )
-	{
-		float r, g, b;
-		GetGlowEffectColor( &r, &g, &b );
-
-		m_pGlowEffect = new CGlowObject( this, Vector( r, g, b ), 1.0, true );
-	}
+	return ( m_flTimeOfLastInjury != 0.0f );
 }
 
-//-----------------------------------------------------------------------------
-// Purpose: 
-//-----------------------------------------------------------------------------
-void C_BaseCombatCharacter::DestroyGlowEffect( void )
+float C_BaseCombatCharacter::GetTimeSinceLastInjury( void ) const
 {
-	if ( m_pGlowEffect )
-	{
-		delete m_pGlowEffect;
-		m_pGlowEffect = NULL;
-	}
+	return gpGlobals->curtime - m_flTimeOfLastInjury;
 }
-#endif // GLOWS_ENABLE
 
 IMPLEMENT_CLIENTCLASS(C_BaseCombatCharacter, DT_BaseCombatCharacter, CBaseCombatCharacter);
 
@@ -171,14 +169,21 @@ BEGIN_RECV_TABLE_NOBASE( C_BaseCombatCharacter, DT_BCCLocalPlayerExclusive )
 	RecvPropTime( RECVINFO( m_flNextAttack ) ),
 END_RECV_TABLE();
 
+BEGIN_RECV_TABLE_NOBASE( C_BaseCombatCharacter, DT_BCCNonLocalPlayerExclusive )
+#if defined( CSTRIKE15 )
+	// In CS:GO send active weapon index to all players except local
+	RecvPropArray3( RECVINFO_ARRAY(m_hMyWeapons), RecvPropEHandle( RECVINFO( m_hMyWeapons[0] ) ) ),
+#endif
+END_RECV_TABLE();
 
 BEGIN_RECV_TABLE(C_BaseCombatCharacter, DT_BaseCombatCharacter)
 	RecvPropDataTable( "bcc_localdata", 0, 0, &REFERENCE_RECV_TABLE(DT_BCCLocalPlayerExclusive) ),
+	RecvPropDataTable( "bcc_nonlocaldata", 0, 0, &REFERENCE_RECV_TABLE(DT_BCCNonLocalPlayerExclusive) ),
+	RecvPropInt( RECVINFO( m_LastHitGroup ) ),
 	RecvPropEHandle( RECVINFO( m_hActiveWeapon ) ),
+	RecvPropTime( RECVINFO( m_flTimeOfLastInjury ) ),
+	RecvPropInt( RECVINFO( m_nRelativeDirectionOfLastInjury ) ),
 	RecvPropArray3( RECVINFO_ARRAY(m_hMyWeapons), RecvPropEHandle( RECVINFO( m_hMyWeapons[0] ) ) ),
-#ifdef GLOWS_ENABLE
-	RecvPropBool( RECVINFO( m_bGlowEnabled ) ),
-#endif // GLOWS_ENABLE
 
 #ifdef INVASION_CLIENT_DLL
 	RecvPropInt( RECVINFO( m_iPowerups ) ),

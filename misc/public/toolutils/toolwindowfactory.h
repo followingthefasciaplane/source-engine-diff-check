@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -52,6 +52,7 @@ vgui::ToolWindow *CToolWindowFactory<T>::InstanceToolWindow( vgui::Panel *parent
 	{
 		container->SetBounds( mx, my, TOOLWINDOW_DEFAULT_WIDTH, TOOLWINDOW_DEFAULT_HEIGHT );
 		container->SetMinimumSize( TOOLWINDOW_MIN_WIDTH, TOOLWINDOW_MIN_HEIGHT );
+		container->SetToolWindowFactory( this );
 	}
 	return container;
 }

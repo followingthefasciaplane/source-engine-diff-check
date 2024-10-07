@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2001, Valve LLC, All rights reserved. ============
 //
 // Purpose: 
 //
@@ -60,6 +60,9 @@ public:
 	void DrawJoints( bool bDrawJoint );
 	void DrawJointNames( bool bDrawJointNames );
 	void DrawGrid( bool bDrawGrid );
+	void DrawAxis( bool bDrawAxis );
+	void ModelInEngineCoordinates( bool bModelInEngineCoordinates );
+	void ModelZUp( bool bModelZUp );
 
 	CDmeDag *GetDmeElement();
 
@@ -96,6 +99,12 @@ private:
 	// Draw joint names
 	void DrawJointNames( CDmeDag *pRoot, CDmeDag *pDag, const matrix3x4_t& parentToWorld );
 
+	// Draw highlighted vertices
+	void DrawHighlightPoints();
+
+	// Draw the coordinate axis
+	void DrawAxis();
+
 	// Rebuilds the list of operators
 	void RebuildOperatorList();
 
@@ -104,10 +113,21 @@ private:
 	CTextureReference m_DefaultEnvCubemap;
 	CTextureReference m_DefaultHDREnvCubemap;
 	vgui::HFont m_hFont;
+	CMaterialReference m_axisMaterial;
 
 	bool m_bDrawJointNames : 1;
 	bool m_bDrawJoints : 1;
 	bool m_bDrawGrid : 1;
+	bool m_bDrawAxis : 1;
+
+	// NOTE: m_bModelInEngineCoordinates overrides m_bZUp
+	bool m_bModelInEngineCoordinates : 1;	// Is the model already in engine coordinates
+
+	// Note: m_bZUp implies the data is in Z Up coordinates with -Y as the forward axis
+	bool m_bModelZUp : 1;					// Is the model Z Up?
+
+	// NOTE: If neither m_bModelInEngineCoordinates nor m_bModelZUp is true then
+	//       the model is in Y Up coordinates with Z as the forward axis
 
 	CDmeHandle< CDmeAnimationList > m_hAnimationList;
 	CDmeHandle< CDmeAnimationList > m_hVertexAnimationList;
@@ -118,7 +138,7 @@ private:
 	CDmeHandle< CDmeDag > m_hDag;
 
 	CDmeDrawSettings *m_pDrawSettings;
-	CDmeHandle< CDmeDrawSettings, true > m_hDrawSettings;
+	CDmeHandle< CDmeDrawSettings, HT_STRONG > m_hDrawSettings;
 
 	vgui::MenuBar *m_pMenuBar;
 

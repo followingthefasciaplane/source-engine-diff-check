@@ -1,7 +1,7 @@
 // NextBotLocomotionInterface.cpp
 // Common functionality for all NextBot locomotors
 // Author: Michael Booth, April 2005
-//========= Copyright Valve Corporation, All rights reserved. ============//
+// Copyright (c) 2006 Turtle Rock Studios, Inc. - All Rights Reserved
 
 #include "cbase.h"
 
@@ -196,7 +196,7 @@ bool ILocomotion::IsPotentiallyTraversable( const Vector &from, const Vector &to
 	NextBotTraversableTraceFilter filter( GetBot(), when );
 
 	// use a small hull since we cannot simulate collision resolution and avoidance along the way
-	const float probeSize = 0.25f * GetBot()->GetBodyInterface()->GetHullWidth(); // Cant be TOO small, or open stairwells/grates/etc will cause problems
+	const float probeSize = 0.25f * GetBot()->GetBodyInterface()->GetHullWidth(); // 1.0f;  Cant be TOO small, or open stairwells/grates/etc will cause problems
 	const float probeZ = GetStepHeight();
 
 	Vector hullMin( -probeSize, -probeSize, probeZ );
@@ -510,11 +510,3 @@ void ILocomotion::StuckMonitor( void )
 		}
 	}
 }
-
-
-//--------------------------------------------------------------------------------------------------------------
-const Vector &ILocomotion::GetFeet( void ) const
-{
-	return GetBot()->GetEntity()->GetAbsOrigin();
-}
-

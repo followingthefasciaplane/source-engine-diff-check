@@ -1,8 +1,8 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright (c) Valve Corporation, All rights reserved. ====
 //
 // Purpose: Implements buttons.
 //
-//=============================================================================
+//====================================================================
 
 #include "cbase.h"
 #include "doors.h"
@@ -30,6 +30,8 @@ string_t MakeButtonSound( int sound );				// get string of button sound number
 #define SF_BUTTON_LOCKED				2048	// Whether the button is initially locked.
 #define	SF_BUTTON_SPARK_IF_OFF			4096	// button sparks in OFF state
 #define	SF_BUTTON_JIGGLE_ON_USE_LOCKED	8192	// whether to jiggle if someone uses us when we're locked
+#define SF_BUTTON_NOTSOLID				16384
+
 
 BEGIN_DATADESC( CBaseButton )
 
@@ -78,6 +80,8 @@ END_DATADESC()
 
 LINK_ENTITY_TO_CLASS( func_button, CBaseButton );
 
+IMPLEMENT_SERVERCLASS_ST( CBaseButton, DT_BaseButton )
+END_SEND_TABLE()
 
 
 void CBaseButton::Precache( void )
@@ -157,6 +161,10 @@ bool CBaseButton::KeyValue( const char *szKeyName, const char *szValue )
 	{
 		m_bUnlockedSentence = atof(szValue);
 	}
+	else if (FStrEq(szKeyName, "min_use_angle"))
+	{
+		SetUseLookAtAngle( atof(szValue) );
+	}
 	else
 	{
 		return BaseClass::KeyValue( szKeyName, szValue );
@@ -235,7 +243,7 @@ void CBaseButton::Press( CBaseEntity *pActivator, BUTTON_CODE eCode )
 	// Temporarily disable the touch function, until movement is finished.
 	SetTouch( NULL );
 
-	if ( ( ( eCode == BUTTON_PRESS ) && ( m_toggle_state == TS_AT_TOP ) ) ||
+	if ( ( eCode == BUTTON_PRESS ) && ( m_toggle_state == TS_AT_TOP ) ||
 		 ( ( eCode == BUTTON_RETURN ) && ( m_toggle_state == TS_AT_TOP || m_toggle_state == TS_GOING_UP ) ) )
 	{
 		if ( m_sNoise != NULL_STRING )
@@ -385,7 +393,18 @@ void CBaseButton::Spawn( )
 	AngleVectors( angMoveDir, &m_vecMoveDir );
 
 	SetMoveType( MOVETYPE_PUSH );
-	SetSolid( SOLID_BSP );
+
+	if ( HasSpawnFlags( SF_BUTTON_NOTSOLID ) )
+	{
+		SetSolid( SOLID_NONE );
+		AddEFlags( EFL_USE_PARTITION_WHEN_NOT_SOLID );
+		AddSolidFlags( FSOLID_NOT_SOLID );
+	}
+	else
+	{
+		SetSolid( SOLID_BSP );
+	}
+
 	SetModel( STRING( GetModelName() ) );
 	
 	if (m_flSpeed == 0)
@@ -802,7 +821,7 @@ int CBaseButton::DrawDebugTextOverlays()
 
 	if (m_debugOverlays & OVERLAY_TEXT_BIT) 
 	{
-		static const char *pszStates[] =
+		static char *pszStates[] =
 		{
 			"Pressed",
 			"Unpressed",
@@ -864,11 +883,7 @@ void CRotButton::Spawn( void )
 
 	SetMoveType( MOVETYPE_PUSH );
 	
-#ifdef HL1_DLL
-	SetSolid( SOLID_BSP );
-#else
 	SetSolid( SOLID_VPHYSICS );
-#endif
 	if ( HasSpawnFlags( SF_ROTBUTTON_NOTSOLID ) )
 	{
 		AddEFlags( EFL_USE_PARTITION_WHEN_NOT_SOLID );
@@ -987,10 +1002,10 @@ void CMomentaryRotButton::Spawn( void )
 	}
 
 	// Clamp start position and issue bounds warning
-	if (m_flStartPosition < 0.0f || m_flStartPosition > 1.0f)
+	if (m_flStartPosition < 0.0 || m_flStartPosition > 1.0)
 	{
 		Warning("WARNING: Momentary door (%s) start position not between 0 and 1.  Clamping.\n",GetDebugName());
-		m_flStartPosition = clamp(m_IdealYaw, 0.f, 1.f);
+		m_flStartPosition = clamp(m_IdealYaw, 0, 1);
 	}
 
 	// Check direction fields (for backward compatibility)
@@ -1041,11 +1056,7 @@ void CMomentaryRotButton::Spawn( void )
 		UpdateTarget(0,this);
 	}
 
-#ifdef HL1_DLL
-	SetSolid( SOLID_BSP );
-#else
 	SetSolid( SOLID_VPHYSICS );
-#endif
 	if (HasSpawnFlags(SF_ROTBUTTON_NOTSOLID))
 	{
 		AddEFlags( EFL_USE_PARTITION_WHEN_NOT_SOLID );
@@ -1124,7 +1135,7 @@ float CMomentaryRotButton::GetPos( const QAngle &vecAngles )
 	}
 
 	float flPos = flScale * CBaseToggle::AxisDelta( m_spawnflags, vecAngles, m_start ) / m_flMoveDistance;
-	return( clamp( flPos, 0.f, 1.f ));
+	return( clamp( flPos, 0, 1 ));
 }
 
 
@@ -1134,7 +1145,7 @@ float CMomentaryRotButton::GetPos( const QAngle &vecAngles )
 //------------------------------------------------------------------------------
 void CMomentaryRotButton::InputSetPosition( inputdata_t &inputdata )
 {
-	m_IdealYaw = clamp( inputdata.value.Float(), 0.f, 1.f );
+	m_IdealYaw = clamp( inputdata.value.Float(), 0, 1 );
 
 	float flCurPos = GetPos( GetLocalAngles() );
 	if ( flCurPos < m_IdealYaw )
@@ -1187,7 +1198,7 @@ void CMomentaryRotButton::InputSetPosition( inputdata_t &inputdata )
 //------------------------------------------------------------------------------
 void CMomentaryRotButton::InputSetPositionImmediately( inputdata_t &inputdata )
 {
-	m_IdealYaw = clamp( inputdata.value.Float(), 0.f, 1.f );
+	m_IdealYaw = clamp( inputdata.value.Float(), 0, 1 );
 	SetLocalAngles( m_start + m_vecMoveAng * ( m_IdealYaw * m_flMoveDistance ) );
 }
 

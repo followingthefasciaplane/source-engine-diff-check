@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -12,9 +12,10 @@
 
 #include "networkstringtabledefs.h"
 #include "networkstringtableitem.h"
-
-#include <utldict.h>
-#include <utlbuffer.h>
+#include "checksum_crc.h"
+#include "netmessages.h"
+#include "tier1/utldict.h"
+#include "tier1/utlbuffer.h"
 #include "tier1/bitbuf.h"
 
 class SVC_CreateStringTable;
@@ -31,18 +32,34 @@ public:
 	virtual bool IsValidIndex( int index ) = 0;
 	virtual int Insert( const char *pString ) = 0;
 	virtual int Find( const char *pString ) = 0;
+	virtual void UpdateDictionary( int index ) = 0;
+	virtual int DictionaryIndex( int index ) = 0;
 	virtual CNetworkStringTableItem	&Element( int index ) = 0;
 	virtual const CNetworkStringTableItem &Element( int index ) const = 0;
 };
+
+abstract_class INetworkStringTableDictionaryMananger
+{
+public:
+	virtual bool OnLevelLoadStart( char const *pchMapName, CRC32_t *pStringTableCRC ) = 0;
+	// Indicates .bsp file is fully unloaded, safe to overwrite.
+	virtual void OnBSPFullyUnloaded() = 0;
+
+	virtual CRC32_t GetCRC() = 0;
+};
+
+extern INetworkStringTableDictionaryMananger *g_pStringTableDictionary;
 
 //-----------------------------------------------------------------------------
 // Purpose: Client/Server shared string table definition
 //-----------------------------------------------------------------------------
 class CNetworkStringTable  : public INetworkStringTable
 {
+	enum ConstEnum_t {MIRROR_TABLE_MAX_COUNT = 2};
+
 public:
 	// Construction
-					CNetworkStringTable( TABLEID id, const char *tableName, int maxentries, int userdatafixedsize, int userdatanetworkbits, bool bIsFilenames );
+					CNetworkStringTable( TABLEID id, const char *tableName, int maxentries, int userdatafixedsize, int userdatanetworkbits, int flags );
 	virtual			~CNetworkStringTable( void );
 
 public:
@@ -59,23 +76,26 @@ public:
 	bool			ChangedSinceTick( int tick ) const;
 
 	int				AddString( bool bIsServer, const char *value, int length = -1, const void *userdata = NULL ); 
-	const char		*GetString( int stringNumber );
+	const char		*GetString( int stringNumber ) const;
 
 	void			SetStringUserData( int stringNumber, int length, const void *userdata );
-	const void		*GetStringUserData( int stringNumber, int *length );
+	const void		*GetStringUserData( int stringNumber, int *length ) const;
 	int				FindStringIndex( char const *string );
 
 	void			SetStringChangedCallback( void *object, pfnStringChanged changeFunc );
 
-	bool			HasFileNameStrings() const;
+// other public apis
 	bool			IsUserDataFixedSize() const;
 	int				GetUserDataSizeBits() const;
 	int				GetUserDataSize() const;
 
+	bool			IsUsingDictionary() const;
+	void			UpdateDictionaryString( int stringNumber );
+
 public:
 	
 #ifndef SHARED_NET_STRING_TABLES
-	int				WriteUpdate( CBaseClient *client, bf_write &buf, int tick_ack );
+	int				WriteUpdate( CBaseClient *client, bf_write &buf, int tick_ack ) const;
 	void			ParseUpdate( bf_read &buf, int entries );
 
 	// HLTV change history & rollback
@@ -83,14 +103,15 @@ public:
 	void			RestoreTick(int tick);
 	
 	// local backdoor tables
-	void			SetMirrorTable( INetworkStringTable *table );
+	void			SetMirrorTable( uint nIndex, INetworkStringTable *table );
 	void			UpdateMirrorTable( int tick_ack  );
 	void			CopyStringTable(CNetworkStringTable * table);
 	// buffer IO
 	void			WriteStringTable( bf_write& buf );
 	bool			ReadStringTable( bf_read& buf );
 
-	bool			WriteBaselines( SVC_CreateStringTable &msg, char *msg_buffer, int msg_buffer_size );
+	bool			WriteBaselines( CSVCMsg_CreateStringTable_t &msg );
+
 #endif
 
 	void			TriggerCallbacks( int tick_ack  );
@@ -99,7 +120,7 @@ public:
 	
 	// debug ouptput
 	virtual void	Dump( void );
-	virtual void	Lock( bool bLock );
+	virtual bool	Lock( bool bLock );
 	
 	void SetAllowClientSideAddString( bool state );
 	pfnStringChanged	GetCallback();
@@ -109,6 +130,7 @@ protected:
 
 	// Destroy string table
 	void			DeleteAllStrings( void );
+	void			CheckDictionary( int stringNumber );
 
 	CNetworkStringTable( const CNetworkStringTable & ); // not implemented, not allowed
 
@@ -124,7 +146,8 @@ protected:
 	bool					m_bLocked : 1;
 	bool					m_bAllowClientSideAddString : 1;
 	bool					m_bUserDataFixedSize : 1;
-	bool					m_bIsFilenames : 1;
+
+	int						m_nFlags; // NSF_*
 
 	int						m_nUserDataSize;
 	int						m_nUserDataSizeBits;
@@ -135,7 +158,7 @@ protected:
 	void					*m_pObject;
 
 	// pointer to local backdoor table 
-	INetworkStringTable		*m_pMirrorTable;
+	INetworkStringTable		*m_pMirrorTable[ MIRROR_TABLE_MAX_COUNT ];
 
 	INetworkStringDict		*m_pItems;
 	INetworkStringDict		*m_pItemsClientSide;	 // For m_bAllowClientSideAddString, these items are non-networked and are referenced by a negative string index!!!
@@ -154,8 +177,7 @@ public:
 public:
 
 	// Implement INetworkStringTableContainer
-	INetworkStringTable	*CreateStringTable( const char *tableName, int maxentries, int userdatafixedsize = 0, int userdatanetworkbits = 0 )	{ return CreateStringTableEx( tableName, maxentries, userdatafixedsize, userdatanetworkbits, false ); }
-	INetworkStringTable	*CreateStringTableEx( const char *tableName, int maxentries, int userdatafixedsize = 0, int userdatanetworkbits = 0, bool bIsFilenames = false );
+	INetworkStringTable	*CreateStringTable( const char *tableName, int maxentries, int userdatafixedsize = 0, int userdatanetworkbits = 0, int flags = NSF_NONE );
 	void				RemoveAllTables( void );
 	
 	// table infos
@@ -164,6 +186,8 @@ public:
 	int					GetNumTables( void ) const;
 
 	virtual void				SetAllowClientSideAddString( INetworkStringTable *table, bool bAllowClientSideAddString );
+	virtual void				CreateDictionary( char const *pchMapName );
+	void						UpdateDictionaryStrings();
 
 public:
 
@@ -180,7 +204,7 @@ public:
 	bool		ReadStringTables( bf_read& buf );
 
 	void		WriteUpdateMessage( CBaseClient *client, int tick_ack, bf_write &buf );
-	void		WriteBaselines( bf_write &buf );
+	void		WriteBaselines( char const *pchMapName, bf_write &buf );
 	void		DirectUpdate( int tick_ack );	// fill mirror table directly with updates
 #endif
 

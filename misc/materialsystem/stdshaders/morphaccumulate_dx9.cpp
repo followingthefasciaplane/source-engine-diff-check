@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -56,7 +56,7 @@ BEGIN_VS_SHADER_FLAGS( MorphAccumulate_DX9, "Help for MorphAccumulate", SHADER_N
 			pShaderShadow->EnableTexture( SHADER_SAMPLER0, true );
 			pShaderShadow->EnableTexture( SHADER_SAMPLER1, true );
 			pShaderShadow->EnableTexture( SHADER_SAMPLER2, true );
-			pShaderShadow->FogMode( SHADER_FOGMODE_DISABLED );
+			pShaderShadow->FogMode( SHADER_FOGMODE_DISABLED, false );
 
  			DECLARE_STATIC_VERTEX_SHADER( morphaccumulate_vs30 );
 			SET_STATIC_VERTEX_SHADER_COMBO( CONSTANTBASEDMORPH, bUseConstantBasedAccum );
@@ -74,12 +74,12 @@ BEGIN_VS_SHADER_FLAGS( MorphAccumulate_DX9, "Help for MorphAccumulate", SHADER_N
 		}
 		DYNAMIC_STATE
 		{
-			BindTexture( SHADER_SAMPLER0, DELTA );
-			BindTexture( SHADER_SAMPLER1, SIDESPEED );
+			BindTexture( SHADER_SAMPLER0, TEXTURE_BINDFLAGS_NONE, DELTA );
+			BindTexture( SHADER_SAMPLER1, TEXTURE_BINDFLAGS_NONE, SIDESPEED );
 
 			if ( !bUseConstantBasedAccum )
 			{
-				pShaderAPI->BindStandardTexture( SHADER_SAMPLER2, TEXTURE_MORPH_WEIGHTS );
+				pShaderAPI->BindStandardTexture( SHADER_SAMPLER2, TEXTURE_BINDFLAGS_NONE, TEXTURE_MORPH_WEIGHTS );
 
 				int nXOffset = pShaderAPI->GetIntRenderingParameter( INT_RENDERPARM_MORPH_WEIGHT_X_OFFSET );
 				int nYOffset = pShaderAPI->GetIntRenderingParameter( INT_RENDERPARM_MORPH_WEIGHT_Y_OFFSET );

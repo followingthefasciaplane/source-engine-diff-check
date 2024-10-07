@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright (c) 1996-2009, Valve Corporation, All rights reserved. ============//
 //
 //=======================================================================================//
 
@@ -50,12 +50,15 @@ struct TGAHeader {
 	byte  descriptor;         // image descriptor bits (vh flip bits)
 };
 
+class CUtlBuffer;
+
 ConversionErrorType ImgUtl_ConvertJPEGToTGA( const char *jpgPath, const char *tgaPath, bool bRequirePowerOfTwoSize = true );
 ConversionErrorType ImgUtl_ConvertBMPToTGA( const char *bmpPath, const char *tgaPath );
 ConversionErrorType ImgUtl_ConvertTGA( const char *tgaPath, int nMaxWidth = -1, int nMaxHeight = -1 );
 unsigned char		*ImgUtl_ReadVTFAsRGBA( const char *vtfPath, int &width, int &height, ConversionErrorType &errcode );
 unsigned char		*ImgUtl_ReadTGAAsRGBA( const char *tgaPath, int &width, int &height, ConversionErrorType &errcode, TGAHeader &tgaHeader );
 unsigned char		*ImgUtl_ReadJPEGAsRGBA( const char *jpegPath, int &width, int &height, ConversionErrorType &errcode );
+ConversionErrorType ImgUtl_ReadJPEGAsRGBA( CUtlBuffer &srcBuf, CUtlBuffer &dstBuf, int &width, int &height );
 unsigned char		*ImgUtl_ReadBMPAsRGBA( const char *bmpPath, int &width, int &height, ConversionErrorType &errcode );
 unsigned char		*ImgUtl_ReadPNGAsRGBA( const char *bmpPath, int &width, int &height, ConversionErrorType &errcode );
 unsigned char		*ImgUtl_ReadPNGAsRGBAFromBuffer( CUtlBuffer &buffer, int &width, int &height, ConversionErrorType &errcode );
@@ -66,6 +69,8 @@ ConversionErrorType ImgUtl_ConvertTGAToVTF( const char *tgaPath, int nMaxWidth =
 ConversionErrorType ImgUtl_WriteGenericVMT( const char *vtfPath, const char *pMaterialsSubDir );
 ConversionErrorType ImgUtl_WriteRGBAAsPNGToBuffer( const unsigned char *pRGBAData, int nWidth, int nHeight, CUtlBuffer &bufOutData, int nStride = 0 );
 ConversionErrorType ImgUtl_WriteRGBAAsJPEGToBuffer( const unsigned char *pRGBAData, int nWidth, int nHeight, CUtlBuffer &bufOutData, int nStride = 0 );
+ConversionErrorType ImgUtl_ReadJPEGToRGB( CUtlBuffer &srcBuf,CUtlBuffer &dstBuf, int &width, int &height );
+bool				ImgUtl_WriteRGBAToJPEG( unsigned char *pSrcBuf, unsigned int nSrcWidth, unsigned int nSrcHeight, const char *lpszFilename );
 
 //
 // Converts pInPath (which can be a TGA, BMP, or JPG file) to a VTF in pMaterialsSubDir, where
@@ -95,5 +100,7 @@ ConversionErrorType ImgUtl_SavePNGBitmapToBuffer( CUtlBuffer &fileData, const Bi
 
 /// Resize a bitmap.  This currently only works for RGBA images!
 ConversionErrorType ImgUtl_ResizeBitmap( Bitmap_t &destBitmap, int nWidth, int nHeight, const Bitmap_t *pImgSource = NULL );
+
+ConversionErrorType ImgUtl_CropRGBA( int x0, int y0, int nSrcWidth, int nSrcHeight, int nDestWidth, int nDestHeight, const unsigned char *pIn, unsigned char *pOut );
 
 #endif // IMAGECONVERSION_H

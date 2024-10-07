@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose:
 //
@@ -25,7 +25,5 @@ typedef memhandle_t DataCacheHandle_t;
 //-----------------------------------------------------------------------------
 // Console commands
 //-----------------------------------------------------------------------------
-extern ConVar developer;
-
 
 #endif // DATACACHE_COMMON_H

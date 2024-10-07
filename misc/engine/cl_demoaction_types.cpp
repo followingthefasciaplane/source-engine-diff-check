@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -142,7 +142,7 @@ void CDemoActionStopPlayback::FireAction( void )
 {
 	if ( demoplayer->IsPlayingBack() )
 	{
-		Cbuf_AddText( "disconnect\n" );
+		Cbuf_AddText( Cbuf_GetCurrentPlayer(), "disconnect\n" );
 	}
 	SetActionFired( true );
 }
@@ -191,7 +191,7 @@ void CDemoActionPlayCommands::FireAction( void )
 {
 	if( GetCommandStream()[0] )
 	{
-		Cbuf_AddText( va( "%s\n", GetCommandStream() ) );
+		Cbuf_AddText( Cbuf_GetCurrentPlayer(), va( "%s\n", GetCommandStream() ) );
 	}
 	SetFinishedAction( true );
 }
@@ -611,7 +611,7 @@ void CDemoActionPlaySoundStart::FireAction( void )
 	{
 		StartSoundParams_t params;
 		params.staticsound = false;
-		params.soundsource = cl.m_nViewEntity;
+		params.soundsource = GetLocalClient().GetViewEntity();
 		params.entchannel = CHAN_AUTO;
 		params.pSfx = pSound;
 		params.origin = vDummyOrigin;
@@ -897,8 +897,8 @@ bool CDemoActionZoom::Init( KeyValues *pInitData )
 	if ( !BaseClass::Init( pInitData ) )
 		return false;
 
-	m_bSpline = pInitData->GetInt( "spline", 1 ) ? true : false;
-	m_bStayout = pInitData->GetInt( "stayout", 1 ) ? true : false;
+	m_bSpline = pInitData->GetBool( "spline", true );
+	m_bStayout = pInitData->GetBool( "stayout", true );
 
 	m_flFinalFOV = pInitData->GetFloat( "finalfov", 0.0f );
 	m_flFOVRateOut = pInitData->GetFloat( "fovrateout", 0.0f );

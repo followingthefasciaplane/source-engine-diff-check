@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Save game read and write. Any *.hl? files may be stored in memory, so use
 //			g_pSaveRestoreFileSystem when accessing them. The .sav file is always stored
@@ -61,6 +61,7 @@
 #include "enginebugreporter.h"
 #include "tier1/memstack.h"
 #include "vstdlib/jobthread.h"
+#include "tier1/fmtstr.h"
 
 #if !defined( _X360 )
 #include "xbox/xboxstubs.h"
@@ -68,8 +69,24 @@
 #include "xbox/xbox_launch.h"
 #endif
 
+#if defined (_PS3)
+#include "ps3_pathinfo.h"
+#include "sys_dll.h"
+#include "saverestore_filesystem_passthrough.h"
+#endif
+
+#if !defined( DEDICATED ) && !defined( NO_STEAM )
+#include "cl_steamauth.h"
+#endif
+
 #include "ixboxsystem.h"
 extern IXboxSystem *g_pXboxSystem;
+
+extern IVEngineClient *engineClient;
+
+#include "csaverestore.h"
+
+#include "matchmaking/imatchframework.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -83,16 +100,25 @@ extern CGlobalVars g_ServerGlobalVariables;
 
 extern CNetworkStringTableContainer *networkStringTableContainerServer;
 
+extern bool scr_drawloading;
+
 // Keep the last 1 autosave / quick saves
 ConVar save_history_count("save_history_count", "1", 0, "Keep this many old copies in history of autosaves and quicksaves." );
 ConVar sv_autosave( "sv_autosave", "1", 0, "Set to 1 to autosave game on level transition. Does not affect autosave triggers." );
 ConVar save_async( "save_async", "1" );
 ConVar save_disable( "save_disable", "0" );
+ConVar map_wants_save_disable( "map_wants_save_disable", "0" ); // Same as save_disable, but is cleared on disconnect
 ConVar save_noxsave( "save_noxsave", "0" );
 
 ConVar save_screenshot( "save_screenshot", "1", 0, "0 = none, 1 = non-autosave, 2 = always" );
 
 ConVar save_spew( "save_spew", "0" );
+
+// Enables saves in multiplayer games, for testing only
+ConVar save_multiplayer_override( "save_multiplayer_override", "0", FCVAR_DEVELOPMENTONLY | FCVAR_HIDDEN );
+
+static ConVar save_console( "save_console", "0", 0, "Autosave on the PC behaves like it does on the consoles." );
+static ConVar save_huddelayframes( "save_huddelayframes", "1", 0, "Number of frames to defer for drawing the Saving message." );
 
 #define SaveMsg if ( !save_spew.GetBool() ) ; else Msg
 
@@ -105,45 +131,69 @@ static bool g_ConsoleInput = false;
 
 static char g_szMapLoadOverride[32];
 
-#define MOD_DIR ( IsX360() ? "DEFAULT_WRITE_PATH" : "MOD" )
+#define MOD_DIR "DEFAULT_WRITE_PATH"
+
+//-----------------------------------------------------------------------------
+//		For the declaration of CSaveRestore,
+//		see csaverestore.h.
+//-----------------------------------------------------------------------------
+
 
 //-----------------------------------------------------------------------------
 
 IThreadPool *g_pSaveThread;
 
-static bool g_bSaveInProgress = false;
+CInterlockedInt g_bSaveInProgress = false;
+CInterlockedInt g_bAutoSaveDangerousInProgress = false;
+CInterlockedInt g_bAutoSaveInProgress = false;
+
+CSaveRestore g_SaveRestore;
+ISaveRestore *saverestore = (ISaveRestore *)&g_SaveRestore;
+CSaveRestore *g_pSaveRestore = &g_SaveRestore;
 
 //-----------------------------------------------------------------------------
-static bool HaveExactMap( const char *pszMapName )
+
+#ifdef _PS3
+struct QueuedAutoSave_t
 {
-	char szCanonName[64] = { 0 };
-	V_strncpy( szCanonName, pszMapName, sizeof( szCanonName ) );
-	IVEngineServer::eFindMapResult eResult = g_pVEngineServer->FindMap( szCanonName, sizeof( szCanonName ) );
-
-	switch ( eResult )
-	{
-	case IVEngineServer::eFindMap_Found:
-		return true;
-	case IVEngineServer::eFindMap_NonCanonical:
-	case IVEngineServer::eFindMap_NotFound:
-	case IVEngineServer::eFindMap_FuzzyMatch:
-	case IVEngineServer::eFindMap_PossiblyAvailable:
-		return false;
-	}
-
-	AssertMsg( false, "Unhandled engine->FindMap return value\n" );
-	return false;
-}
+	CUtlString	m_Filename;
+	CUtlString	m_Comment;
+};
+CTSQueue< QueuedAutoSave_t >	g_QueuedAutoSavesToCommit;
+#endif
 
 void FinishAsyncSave()
 {
 	LOCAL_THREAD_LOCK();
+
 	SaveMsg( "FinishAsyncSave() (%d/%d)\n", ThreadInMainThread(), ThreadGetCurrentId() );
+	VPROF("FinishAsyncSave");
+
 	if ( g_AsyncSaveCallQueue.Count() )
 	{
 		g_AsyncSaveCallQueue.CallQueued();
 		g_pFileSystem->AsyncFinishAllWrites();
+
+#ifdef _PS3
+		const char *pLastSavePath;
+		const char *pLastSaveComment;
+		bool bValid = g_SaveRestore.GetMostRecentSaveInfo( &pLastSavePath, &pLastSaveComment, NULL );
+		if ( bValid && V_stristr( pLastSavePath, "autosave" ) && !V_stristr( pLastSavePath, "autosavedangerous" ) )
+		{
+			// only queue autosaves for commit
+			// autosavedangerous are handled elsewhere when they are re-classified as safe to commit
+			QueuedAutoSave_t saveParams;
+			saveParams.m_Filename = pLastSavePath;
+			saveParams.m_Comment = pLastSaveComment;
+			g_QueuedAutoSavesToCommit.PushItem( saveParams );
+		}
+#endif
 	}
+
+	g_SaveRestore.MarkMostRecentSaveInfoInvalid();
+
+	g_bAutoSaveInProgress = false;
+	g_bAutoSaveDangerousInProgress = false;
 	g_bSaveInProgress = false;
 }
 
@@ -152,29 +202,33 @@ void DispatchAsyncSave()
 	Assert( !g_bSaveInProgress );
 	g_bSaveInProgress = true;
 
+	const char *pLastSavePath;
+	bool bValid = g_SaveRestore.GetMostRecentSaveInfo( &pLastSavePath, NULL, NULL );
+	g_bAutoSaveInProgress = bValid && ( V_stristr( pLastSavePath, "autosave" ) != NULL );
+	g_bAutoSaveDangerousInProgress = bValid && ( V_stristr( pLastSavePath, "autosavedangerous" ) != NULL );
+
+	if ( !IsGameConsole() && !g_bAutoSaveDangerousInProgress && !g_bAutoSaveInProgress )
+	{
+		g_ClientDLL->Hud_SaveStarted();
+	}
+
 	if ( save_async.GetBool() )
 	{
-		g_pSaveThread->QueueCall( &FinishAsyncSave );
+		g_pSaveThread->QueueCall( saverestore, &ISaveRestore::FinishAsyncSave );
 	}
 	else
 	{
-		FinishAsyncSave();
+		saverestore->FinishAsyncSave();
 	}
 }
 
 //-----------------------------------------------------------------------------
 
-inline void GetServerSaveCommentEx( char *comment, int maxlength, float flMinutes, float flSeconds )
+void GetServerSaveCommentEx( char *comment, int maxlength, float flMinutes, float flSeconds )
 {
-	if ( g_iServerGameDLLVersion >= 5 )
-	{
-		serverGameDLL->GetSaveComment( comment, maxlength, flMinutes, flSeconds );
-	}
-	else
-	{
-		Assert( 0 );
-	}
+	serverGameDLL->GetSaveComment( comment, maxlength, flMinutes, flSeconds );
 }
+
 
 //-----------------------------------------------------------------------------
 // Purpose: Alloc/free memory for save games
@@ -186,8 +240,7 @@ class CSaveMemory : public CMemoryStack
 public:
 	CSaveMemory()
 	{
-		MEM_ALLOC_CREDIT();
-		Init( 32*1024*1024, 64, 2*1024*1024 + 192*1024 );
+		Init( "g_SaveMemory", 32*1024*1024, 64*1024 );
 	}
 
 	int m_nSaveAllocs;
@@ -216,220 +269,32 @@ void SaveFreeMemory( void *pSaveMem )
 	--GetSaveMemory().m_nSaveAllocs;
 	if ( !GetSaveMemory().m_nSaveAllocs )
 	{
-		GetSaveMemory().FreeAll( false );
+		GetSaveMemory().FreeAll( true );
 	}
 }
 
 //-----------------------------------------------------------------------------
 // Reset save memory stack, as some failed save/load paths will leak
 //-----------------------------------------------------------------------------
-void SaveResetMemory()
+void SaveResetMemory( void )
 {
+	if ( GetSaveMemory().GetCurrentAllocPoint() )
+	{
+		// Everything should be freed in Finish(), so this message should never fire.
+		Msg( "\n\n !!!! SAVEGAME: !!!! %3.1fMB(%d) remain in SaveResetMemory\n\n\n" , GetSaveMemory().GetCurrentAllocPoint()/(1024.0f*1024.0f), GetSaveMemory().m_nSaveAllocs );
+	}
+
 	GetSaveMemory().m_nSaveAllocs = 0;
-	GetSaveMemory().FreeAll( false );
+	GetSaveMemory().FreeAll( true );
 }
 
 
-//-----------------------------------------------------------------------------
-// 
-//-----------------------------------------------------------------------------
-struct GAME_HEADER
-{
-	DECLARE_SIMPLE_DATADESC();
-
-	char	mapName[32];
-	char	comment[80];
-	int		mapCount;		// the number of map state files in the save file.  This is usually number of maps * 3 (.hl1, .hl2, .hl3 files)
-	char	originMapName[32];
-	char	landmark[256];
-};
-
-struct SAVE_HEADER 
-{
-	DECLARE_SIMPLE_DATADESC();
-
-	int		saveId;
-	int		version;
-	int		skillLevel;
-	int		connectionCount;
-	int		lightStyleCount;
-	int		mapVersion;
-	float	time__USE_VCR_MODE; // This is renamed to include the __USE_VCR_MODE prefix due to a #define on win32 from the VCR mode changes
-								// The actual save games have the string "time__USE_VCR_MODE" in them
-	char	mapName[32];
-	char	skyName[32];
-};
-
-struct SAVELIGHTSTYLE 
-{
-	DECLARE_SIMPLE_DATADESC();
-
-	int		index;
-	char	style[64];
-};
 
 //-----------------------------------------------------------------------------
-// Purpose: 
+//		For the declaration of CSaveRestore,
+//		see csaverestore.h.
 //-----------------------------------------------------------------------------
-class CSaveRestore : public ISaveRestore
-{
-public:
-	CSaveRestore()
-	{
-		m_bClearSaveDir = false;
-		m_szSaveGameScreenshotFile[0] = 0;
-		SetMostRecentElapsedMinutes( 0 );
-		SetMostRecentElapsedSeconds( 0 );
-		m_szMostRecentSaveLoadGame[0] = 0;
-		m_szSaveGameName[ 0 ] = 0;
-		m_bIsXSave = IsX360();
-	}
 
-	void					Init( void );
-	void					Shutdown( void );
-	void					OnFrameRendered();
-	virtual bool			SaveFileExists( const char *pName );
-	bool					LoadGame( const char *pName );
-	char					*GetSaveDir(void);
-	void					ClearSaveDir( void );
-	void					DoClearSaveDir( bool bIsXSave );
-	void					RequestClearSaveDir( void );
-	int						LoadGameState( char const *level, bool createPlayers );
-	void					LoadAdjacentEnts( const char *pOldLevel, const char *pLandmarkName );
-	const char				*FindRecentSave( char *pNameBuf, int nameBufLen );
-	void					ForgetRecentSave( void );
-	int						SaveGameSlot( const char *pSaveName, const char *pSaveComment, bool onlyThisLevel, bool bSetMostRecent, const char *pszDestMap = NULL, const char *pszLandmark = NULL );
-	bool					SaveGameState( bool bTransition, CSaveRestoreData ** = NULL, bool bOpenContainer = true, bool bIsAutosaveOrDangerous = false );
-	void					RestoreClientState( char const *fileName, bool adjacent );
-	void					RestoreAdjacenClientState( char const *map );
-	int						IsValidSave( void );
-	void					Finish( CSaveRestoreData *save );
-	void					ClearRestoredIndexTranslationTables();
-	void					OnFinishedClientRestore();
-	void					AutoSaveDangerousIsSafe();
-	virtual void			UpdateSaveGameScreenshots();
-	virtual char const		*GetMostRecentlyLoadedFileName();
-	virtual char const		*GetSaveFileName();
-
-	virtual void			SetIsXSave( bool bIsXSave ) { m_bIsXSave = bIsXSave; }
-	virtual bool			IsXSave() { return ( m_bIsXSave && !save_noxsave.GetBool() ); }
-
-	virtual void			FinishAsyncSave() { ::FinishAsyncSave(); }
-
-	void					AddDeferredCommand( char const *pchCommand );
-	virtual bool			StorageDeviceValid( void );
-
-	virtual bool			IsSaveInProgress();
-
-private:
-	bool					SaveClientState( const char *name );
-
-	void					EntityPatchWrite( CSaveRestoreData *pSaveData, const char *level, bool bAsync = false );
-	void					EntityPatchRead( CSaveRestoreData *pSaveData, const char *level );
-	void					DirectoryCount( const char *pPath, int *pResult );
-	void					DirectoryCopy( const char *pPath, const char *pDestFileName, bool bIsXSave );
-	bool					DirectoryExtract( FileHandle_t pFile, int mapCount );
-	void					DirectoryClear( const char *pPath );
-
-	void					AgeSaveList( const char *pName, int count, bool bIsXSave );
-	void					AgeSaveFile( const char *pName, const char *ext, int count, bool bIsXSave );
-	int						SaveReadHeader( FileHandle_t pFile, GAME_HEADER *pHeader, int readGlobalState, bool *pbOldSave );
-	CSaveRestoreData		*LoadSaveData( const char *level );
-	void					ParseSaveTables( CSaveRestoreData *pSaveData, SAVE_HEADER *pHeader, int updateGlobals );
-	int						FileSize( FileHandle_t pFile );
-
-	bool					CalcSaveGameName( const char *pName, char *output, int outputStringLength );
-
-	CSaveRestoreData *		SaveGameStateInit( void );
-	void 					SaveGameStateGlobals( CSaveRestoreData *pSaveData );
-	int						SaveReadNameAndComment( FileHandle_t f, OUT_Z_CAP(nameSize) char *name, int nameSize, OUT_Z_CAP(commentSize) char *comment, int commentSize ) OVERRIDE;
-	void					BuildRestoredIndexTranslationTable( char const *mapname, CSaveRestoreData *pSaveData, bool verbose );
-	char const				*GetSaveGameMapName( char const *level );
-
-	void					SetMostRecentSaveGame( const char *pSaveName );
-	int						GetMostRecentElapsedMinutes( void );
-	int						GetMostRecentElapsedSeconds( void );
-	int						GetMostRecentElapsedTimeSet( void );
-	void					SetMostRecentElapsedMinutes( const int min );
-	void					SetMostRecentElapsedSeconds( const int sec );
-
-	struct SaveRestoreTranslate
-	{
-		string_t classname;
-		int savedindex;
-		int restoredindex;
-	};
-
-	struct RestoreLookupTable
-	{
-		RestoreLookupTable() :
-			m_vecLandMarkOffset( 0, 0, 0 )
-		{
-		}
-
-		void Clear()
-		{
-			lookup.RemoveAll();
-			m_vecLandMarkOffset.Init();
-		}
-
-		RestoreLookupTable( const RestoreLookupTable& src )
-		{
-			int c = src.lookup.Count();
-			for ( int i = 0 ; i < c; i++ )
-			{
-				lookup.AddToTail( src.lookup[ i ] );
-			}
-
-			m_vecLandMarkOffset = src.m_vecLandMarkOffset;
-		}
-
-		RestoreLookupTable& operator=( const RestoreLookupTable& src )
-		{
-			if ( this == &src )
-				return *this;
-
-			int c = src.lookup.Count();
-			for ( int i = 0 ; i < c; i++ )
-			{
-				lookup.AddToTail( src.lookup[ i ] );
-			}
-
-			m_vecLandMarkOffset = src.m_vecLandMarkOffset;
-
-			return *this;
-		}
-
-		CUtlVector< SaveRestoreTranslate >	lookup;
-		Vector								m_vecLandMarkOffset;
-	};
-
-	RestoreLookupTable		*FindOrAddRestoreLookupTable( char const *mapname );
-	int						LookupRestoreSpotSaveIndex( RestoreLookupTable *table, int save );
-	void					ReapplyDecal( bool adjacent, RestoreLookupTable *table, decallist_t *entry );
-
-	CUtlDict< RestoreLookupTable, int >	m_RestoreLookup;
-
-	bool	m_bClearSaveDir;
-	char	m_szSaveGameScreenshotFile[MAX_OSPATH];
-	float	m_flClientSaveRestoreTime;
-
-	char	m_szMostRecentSaveLoadGame[MAX_OSPATH];
-	char	m_szSaveGameName[MAX_OSPATH];
-
-	int		m_MostRecentElapsedMinutes;
-	int		m_MostRecentElapsedSeconds;
-	int		m_MostRecentElapsedTimeSet;
-
-	bool	m_bWaitingForSafeDangerousSave;
-	bool	m_bIsXSave;
-
-	int		m_nDeferredCommandFrames;
-	CUtlVector< CUtlSymbol > m_sDeferredCommands;
-};
-
-CSaveRestore g_SaveRestore;
-ISaveRestore *saverestore = (ISaveRestore *)&g_SaveRestore;
 
 BEGIN_SIMPLE_DATADESC( GAME_HEADER )
 
@@ -456,7 +321,7 @@ BEGIN_SIMPLE_DATADESC( SAVE_HEADER )
 	DEFINE_FIELD( connectionCount, FIELD_INTEGER ),
 	DEFINE_FIELD( lightStyleCount, FIELD_INTEGER ),
 	DEFINE_FIELD( mapVersion, FIELD_INTEGER ),
-	DEFINE_FIELD( time__USE_VCR_MODE, FIELD_TIME ),
+	DEFINE_FIELD( time, FIELD_TIME ),
 	DEFINE_ARRAY( mapName, FIELD_CHARACTER, 32 ),
 	DEFINE_ARRAY( skyName, FIELD_CHARACTER, 32 ),
 END_DATADESC()
@@ -511,12 +376,23 @@ void CSaveRestore::ForgetRecentSave()
 //-----------------------------------------------------------------------------
 // Purpose: Returns the save game directory for the current player profile
 //-----------------------------------------------------------------------------
-char *CSaveRestore::GetSaveDir(void)
+const char *CSaveRestore::GetSaveDir(void)
 {
-	static char szDirectory[MAX_OSPATH];
-	Q_memset(szDirectory, 0, MAX_OSPATH);
-	Q_strncpy(szDirectory, "save/", sizeof( szDirectory ) );
+#ifdef _PS3
+	return g_pPS3PathInfo->SaveShadowPath();
+#else
+	static char szDirectory[MAX_OSPATH] = {0};
+	if ( !szDirectory[0] )
+	{
+		#if defined( _GAMECONSOLE ) || defined( DEDICATED ) || defined( NO_STEAM )
+		Q_strncpy( szDirectory, "SAVE/", sizeof( szDirectory ) );
+		#else
+		Q_snprintf( szDirectory, sizeof( szDirectory ), "SAVE/%llu/", Steam3Client().SteamUser() ? Steam3Client().SteamUser()->GetSteamID().ConvertToUint64() : 0ull );
+		g_pFileSystem->CreateDirHierarchy( szDirectory, MOD_DIR );
+		#endif
+	}
 	return szDirectory;
+#endif
 }
 
 //-----------------------------------------------------------------------------
@@ -527,8 +403,8 @@ void CSaveRestore::AgeSaveList( const char *pName, int count, bool bIsXSave )
 	// age all the previous save files (including screenshots)
 	while ( count > 0 )
 	{
-		AgeSaveFile( pName, IsX360() ? "360.sav" : "sav", count, bIsXSave );
-		if ( !IsX360() )
+		AgeSaveFile( pName, "sav", count, bIsXSave );
+		if ( !IsGameConsole() )
 		{
 			AgeSaveFile( pName, "tga", count, bIsXSave );
 		}
@@ -547,27 +423,27 @@ void CSaveRestore::AgeSaveFile( const char *pName, const char *ext, int count, b
 	{
 		if ( count == 1 )
 		{
-			Q_snprintf( oldName, sizeof( oldName ), "//%s/%s%s.%s", MOD_DIR, GetSaveDir(), pName, ext );// quick.sav. DON'T FixSlashes on this, it needs to be //MOD
+			Q_snprintf( oldName, sizeof( oldName ), "//%s/%s%s" PLATFORM_EXT ".%s", MOD_DIR, GetSaveDir(), pName, ext );// quick.sav. DON'T FixSlashes on this, it needs to be //MOD
 		}
 		else
 		{
-			Q_snprintf( oldName, sizeof( oldName ), "//%s/%s%s%02d.%s", MOD_DIR, GetSaveDir(), pName, count-1, ext );	// quick04.sav, etc. DON'T FixSlashes on this, it needs to be //MOD
+			Q_snprintf( oldName, sizeof( oldName ), "//%s/%s%s%02d" PLATFORM_EXT ".%s", MOD_DIR, GetSaveDir(), pName, count-1, ext );	// quick04.sav, etc. DON'T FixSlashes on this, it needs to be //MOD
 		}
 
-		Q_snprintf( newName, sizeof( newName ), "//%s/%s%s%02d.%s", MOD_DIR, GetSaveDir(), pName, count, ext ); // DON'T FixSlashes on this, it needs to be //MOD
+		Q_snprintf( newName, sizeof( newName ), "//%s/%s%s%02d" PLATFORM_EXT ".%s", MOD_DIR, GetSaveDir(), pName, count, ext ); // DON'T FixSlashes on this, it needs to be //MOD
 	}
 	else
 	{
 		if ( count == 1 )
 		{
-			Q_snprintf( oldName, sizeof( oldName ), "%s:\\%s.%s", GetCurrentMod(), pName, ext );
+			PREPARE_XSAVE_FILENAME( XBX_GetPrimaryUserId(), oldName ) "%s" PLATFORM_EXT ".%s", pName, ext );
 		}
 		else
 		{
-			Q_snprintf( oldName, sizeof( oldName ), "%s:\\%s%02d.%s", GetCurrentMod(), pName, count-1, ext );
+			PREPARE_XSAVE_FILENAME( XBX_GetPrimaryUserId(), oldName ) "%s%02d" PLATFORM_EXT ".%s", pName, count-1, ext );
 		}
 
-		Q_snprintf( newName, sizeof( newName ), "%s:\\%s%02d.%s", GetCurrentMod(), pName, count, ext );
+		PREPARE_XSAVE_FILENAME( XBX_GetPrimaryUserId(), newName ) "%s%02d" PLATFORM_EXT ".%s", pName, count, ext );
 	}
 
 	// Scroll the name list down (rename quick04.sav to quick05.sav)
@@ -591,9 +467,6 @@ void CSaveRestore::AgeSaveFile( const char *pName, const char *ext, int count, b
 //-----------------------------------------------------------------------------
 int CSaveRestore::IsValidSave( void )
 {
-	if (cmd_source != src_command)
-		return 0;
-
 	// Don't parse autosave/transition save/restores during playback!
 	if ( demoplayer->IsPlayingBack() )
 	{
@@ -606,13 +479,13 @@ int CSaveRestore::IsValidSave( void )
 		return 0;
 	}
 
-	if ( !cl.IsActive() )
+	if ( !GetBaseLocalClient().IsActive() )
 	{
 		ConMsg ("Can't save if not active.\n");
 		return 0;
 	}
 
-	if ( sv.IsMultiplayer() )
+	if ( sv.IsMultiplayer() &&!save_multiplayer_override.GetBool() )
 	{
 		ConMsg ("Can't save multiplayer games.\n");
 		return 0;
@@ -621,8 +494,8 @@ int CSaveRestore::IsValidSave( void )
 	if ( sv.GetClientCount() > 0 && sv.GetClient(0)->IsActive() )
 	{
 		Assert( serverGameClients );
-		CGameClient *pGameClient = sv.Client( 0 );
-		CPlayerState *pl = serverGameClients->GetPlayerState( pGameClient->edict );
+		CGameClient *cl = sv.Client( 0 );
+		CPlayerState *pl = serverGameClients->GetPlayerState( cl->edict );
 		if ( !pl )
 		{
 			ConMsg ("Can't savegame without a player!\n");
@@ -649,7 +522,9 @@ static ConVar save_asyncdelay( "save_asyncdelay", "0", 0, "For testing, adds thi
 //-----------------------------------------------------------------------------
 int CSaveRestore::SaveGameSlot( const char *pSaveName, const char *pSaveComment, bool onlyThisLevel, bool bSetMostRecent, const char *pszDestMap, const char *pszLandmark )
 {
-	if ( save_disable.GetBool()  )
+	int iX360controller = XBX_GetPrimaryUserId();
+
+	if ( save_disable.GetBool() )
 	{
 		return 0;
 	}
@@ -659,28 +534,54 @@ int CSaveRestore::SaveGameSlot( const char *pSaveName, const char *pSaveComment,
 		Sys_Sleep( clamp( save_asyncdelay.GetInt(), 0, 3000 ) );
 	}
 
-	SaveMsg( "Start save... (%d/%d)\n", ThreadInMainThread(), ThreadGetCurrentId() );
+	bool bClearFile = true;
+	bool bIsQuick = ( stricmp( pSaveName, "quick" ) == 0 );
+	bool bIsAutosave = ( !bIsQuick && stricmp( pSaveName,"autosave" ) == 0 );
+	bool bIsAutosaveDangerous = ( !bIsAutosave && stricmp( pSaveName,"autosavedangerous" ) == 0 );
+
+	if ( !( bIsAutosave || bIsAutosaveDangerous ) && map_wants_save_disable.GetBool() )
+	{
+		Warning( "*** REJECTING: %s, due to map_wants_save_disable.\n", pSaveName );
+		return 0;
+	}
+
+	SaveMsg( "Start save...\n" );
 	VPROF_BUDGET( "SaveGameSlot", "Save" );
-	char			hlPath[256], name[256], *pTokenData;
+	char			hlPath[256], *pTokenData;
+	char			name[ MAX_OSPATH ];    
 	int				tag, i, tokenSize;
 	CSaveRestoreData	*pSaveData;
-	GAME_HEADER		gameHeader;
+	GAME_HEADER			gameHeader;
 
 #if defined( _MEMTEST )
-	Cbuf_AddText( "mem_dump\n" );
+	Cbuf_AddText( Cbuf_GetCurrentPlayer(), "mem_dump\n" );
 #endif
 
-	g_pSaveRestoreFileSystem->AsyncFinishAllWrites();
+	{
+		VPROF( "SaveGameSlot finish previous save" );
+		g_pSaveRestoreFileSystem->AsyncFinishAllWrites();
 
-	S_ExtraUpdate();
-	FinishAsyncSave();
-	SaveResetMemory();
-	S_ExtraUpdate();
+		S_ExtraUpdate();
+		FinishAsyncSave();
+		SaveResetMemory();
+		S_ExtraUpdate();
+	}
 
 	g_AsyncSaveCallQueue.DisableQueue( !save_async.GetBool() );
 
+#if defined( _PS3 )
+	if ( ( bIsAutosave || bIsAutosaveDangerous ) && !m_PS3AutoSaveAsyncStatus.JobDone() )
+	{
+		// we can't have more than 1 autosave in progress due to local renames that occurr to to aging logic
+		// the ps3saveapi expects the filenames to survive the duration of its operations
+		Warning( "*** REJECTING: %s, current autosave in progress.\n", pSaveName );
+		return 0;
+	}
+#endif
+
 	// Figure out the name for this save game
 	CalcSaveGameName( pSaveName, name, sizeof( name ) );
+
 	ConDMsg( "Saving game to %s...\n", name );
 
 	Q_strncpy( m_szSaveGameName, name, sizeof( m_szSaveGameName )) ;
@@ -706,19 +607,15 @@ int CSaveRestore::SaveGameSlot( const char *pSaveName, const char *pSaveComment,
 	{
 		if ( onlyThisLevel )
 		{
-			Q_snprintf( hlPath, sizeof( hlPath ), "%s:\\%s*.HL?", GetCurrentMod(), sv.GetMapName() );
+			PREPARE_XSAVE_FILENAME( iX360controller, hlPath ) "%s*.HL?", sv.GetMapName() );
 		}
 		else
 		{
-			Q_snprintf( hlPath, sizeof( hlPath ), "%s:\\*.HL?", GetCurrentMod() );
+			PREPARE_XSAVE_FILENAME( iX360controller, hlPath ) "*.HL?" );
 		}
 	}
 
 	// Output to disk
-	bool bClearFile = true;
-	bool bIsQuick = ( stricmp(pSaveName, "quick") == 0 );
-	bool bIsAutosave = ( !bIsQuick && stricmp(pSaveName,"autosave") == 0 );
-	bool bIsAutosaveDangerous = ( !bIsAutosave && stricmp(pSaveName,"autosavedangerous") == 0 );
 	if ( bIsQuick || bIsAutosave || bIsAutosaveDangerous )
 	{
 		bClearFile = false;
@@ -782,19 +679,17 @@ int CSaveRestore::SaveGameSlot( const char *pSaveName, const char *pSaveComment,
 	tokenSize = pSaveData->AccessCurPos() - pTokenData;
 	pSaveData->Rewind( tokenSize );
 
-
 	// open the file to validate it exists, and to clear it
-	if ( bClearFile && !IsX360() )
+	if ( bClearFile && !IsGameConsole() )
 	{		
 		FileHandle_t pSaveFile = g_pSaveRestoreFileSystem->Open( name, "wb" );
-		if (!pSaveFile && g_pFileSystem->FileExists( name, "GAME" ) )
+		if (!pSaveFile)
 		{
 			Msg("Save failed: invalid file name '%s'\n", pSaveName);
 			m_szSaveGameName[ 0 ] = 0;
 			return 0;
 		}
-		if ( pSaveFile )
-			g_pSaveRestoreFileSystem->Close( pSaveFile );
+		g_pSaveRestoreFileSystem->Close( pSaveFile );
 		S_ExtraUpdate();
 	}
 
@@ -837,7 +732,7 @@ int CSaveRestore::SaveGameSlot( const char *pSaveName, const char *pSaveComment,
 	if ( IsXSave() && StorageDeviceValid() )
 	{
 		// Finish all pending I/O to the storage devices
-		g_AsyncSaveCallQueue.QueueCall( g_pXboxSystem, &IXboxSystem::FinishContainerWrites );
+		g_AsyncSaveCallQueue.QueueCall( g_pXboxSystem, &IXboxSystem::FinishContainerWrites, iX360controller );
 	}
 
 	S_ExtraUpdate();
@@ -845,19 +740,33 @@ int CSaveRestore::SaveGameSlot( const char *pSaveName, const char *pSaveComment,
 	S_ExtraUpdate();
 
 	// queue up to save a matching screenshot
-	if ( !IsX360() && save_screenshot.GetBool() ) // X360TBD: Faster savegame screenshots
+	if ( save_screenshot.GetBool() && !( bIsAutosave || bIsAutosaveDangerous ) || save_screenshot.GetInt() == 2 )
 	{
-		if ( !( bIsAutosave || bIsAutosaveDangerous ) || save_screenshot.GetInt() == 2 )
+		if ( IsXSave() )
+		{
+			// xsaves have filenames of the form foo.360.sav
+			// want screenshots to be named foo.360.tga (other code expects this)
+			V_StripExtension( m_szSaveGameName, m_szSaveGameScreenshotFile, sizeof( m_szSaveGameScreenshotFile ) );
+			V_strncat( m_szSaveGameScreenshotFile, ".tga", sizeof( m_szSaveGameScreenshotFile ) );
+		}
+		else
 		{
 			Q_snprintf( m_szSaveGameScreenshotFile, sizeof( m_szSaveGameScreenshotFile ), "%s%s%s.tga", GetSaveDir(), pSaveName, GetPlatformExt() );
 		}
 	}
 
-	S_ExtraUpdate();
+	// save has been finalized
+	// set prior to possible dispatch
+	SetMostRecentSaveInfo( m_szSaveGameName, pSaveComment );
 
-	DispatchAsyncSave();
+	// game consoles need to delay the dispatch until after the screenshot
+	if ( !IsGameConsole() || !m_szSaveGameScreenshotFile[0] )
+	{
+		DispatchAsyncSave();
+	}
 
 	m_szSaveGameName[ 0 ] = 0;
+
 	return 1;
 }
 
@@ -867,15 +776,23 @@ int CSaveRestore::SaveGameSlot( const char *pSaveName, const char *pSaveComment,
 void CSaveRestore::UpdateSaveGameScreenshots()
 {
 	if ( IsPC() && g_LostVideoMemory )
+	{
+		m_szSaveGameScreenshotFile[0] = '\0';
 		return;
+	}
 
-#ifndef SWDS
+#ifndef DEDICATED
 	if ( m_szSaveGameScreenshotFile[0] )
 	{
 		host_framecount++;
 		g_ClientGlobalVariables.framecount = host_framecount;
 		g_ClientDLL->WriteSaveGameScreenshot( m_szSaveGameScreenshotFile );
 		m_szSaveGameScreenshotFile[0] = 0;
+
+		if ( IsGameConsole() )
+		{
+			DispatchAsyncSave();
+		}
 	}
 #endif
 }
@@ -884,7 +801,7 @@ void CSaveRestore::UpdateSaveGameScreenshots()
 //-----------------------------------------------------------------------------
 // Purpose: 
 //-----------------------------------------------------------------------------
-int CSaveRestore::SaveReadHeader( FileHandle_t pFile, GAME_HEADER *pHeader, int readGlobalState, bool *pbOldSave )
+int CSaveRestore::SaveReadHeader( FileHandle_t pFile, GAME_HEADER *pHeader, int readGlobalState )
 {
 	int					i, tag, size, tokenCount, tokenSize;
 	char				*pszTokenList;
@@ -981,10 +898,7 @@ int CSaveRestore::SaveReadHeader( FileHandle_t pFile, GAME_HEADER *pHeader, int 
 		g_szMapLoadOverride[0] = 0;
 	}
 
-	if ( pHeader->mapCount != 0 && pbOldSave)
-		*pbOldSave = true;
-
-	if ( readGlobalState && pHeader->mapCount == 0 ) // Alfred: Only load save games from the OB era engine where mapCount is forced to zero
+	if ( readGlobalState )
 	{
 		serverGameDLL->RestoreGlobalState( pSaveData );
 	}
@@ -1013,13 +927,17 @@ bool CSaveRestore::CalcSaveGameName( const char *pName, char *output, int output
 
 	if ( IsXSave() )
 	{
-		Q_snprintf( output, outputStringLength, "%s:/%s", GetCurrentMod(), pName );
+		PREPARE_XSAVE_FILENAME_EX( XBX_GetPrimaryUserId(), output, outputStringLength ) "%s", pName );
+	}
+	else if ( IsPS3() && pName[0] == '/' ) // on the ps3, check to see if it's an absolute path already
+	{
+		V_strncpy( output, pName, outputStringLength );
 	}
 	else
 	{
 		Q_snprintf( output, outputStringLength, "%s%s", GetSaveDir(), pName );
 	}
-	Q_DefaultExtension( output, IsX360() ? ".360.sav" : ".sav", outputStringLength );
+	Q_DefaultExtension( output, PLATFORM_EXT ".sav", outputStringLength );
 	Q_FixSlashes( output );
 
 	return true;
@@ -1064,7 +982,7 @@ bool CSaveRestore::SaveFileExists( const char *pName )
 //-----------------------------------------------------------------------------
 bool CL_HL2Demo_MapCheck( const char *name ); // in host_cmd.cpp
 bool CL_PortalDemo_MapCheck( const char *name ); // in host_cmd.cpp
-bool CSaveRestore::LoadGame( const char *pName )
+bool CSaveRestore::LoadGame( const char *pName, bool bLetToolsOverrideLoadGameEnts )
 {
 	FileHandle_t	pFile;
 	GAME_HEADER		gameHeader;
@@ -1104,7 +1022,6 @@ bool CSaveRestore::LoadGame( const char *pName )
 	
 	int iElapsedMinutes = 0;
 	int iElapsedSeconds = 0;
-	bool bOldSave = false;
 
 	pFile = g_pSaveRestoreFileSystem->Open( name, "rb", MOD_DIR );
 	if ( pFile )
@@ -1113,7 +1030,7 @@ bool CSaveRestore::LoadGame( const char *pName )
 		char szComment[ MAX_PATH ];
 		char szElapsedTime[ MAX_PATH ];
 
-		if ( SaveReadNameAndComment( pFile, szDummyName, sizeof(szDummyName), szComment, sizeof(szComment) ) )
+		if ( SaveReadNameAndComment( pFile, szDummyName, szComment ) )
 		{
 			// Elapsed time is the last 6 characters in comment. (mmm:ss)
 			int i;
@@ -1142,12 +1059,12 @@ bool CSaveRestore::LoadGame( const char *pName )
 		// Reset the file pointer to the start of the file
 		g_pSaveRestoreFileSystem->Seek( pFile, 0, FILESYSTEM_SEEK_HEAD );
 
-		if ( SaveReadHeader( pFile, &gameHeader, 1, &bOldSave ) )
+		if ( SaveReadHeader( pFile, &gameHeader, 1 ) )
 		{
 			validload = DirectoryExtract( pFile, gameHeader.mapCount );
 		}
 
-		if ( !HaveExactMap( gameHeader.mapName ) )
+		if ( !g_pVEngineServer->IsMapValid( gameHeader.mapName ) )
 		{
 			Msg( "Map '%s' missing or invalid\n", gameHeader.mapName );
 			validload = false;
@@ -1173,7 +1090,7 @@ bool CSaveRestore::LoadGame( const char *pName )
 	}
 
 	// stop demo loop in case this fails
-	cl.demonum = -1;		
+	GetBaseLocalClient().demonum = -1;		
 
 	deathmatch.SetValue( 0 );
 	coop.SetValue( 0 );
@@ -1192,7 +1109,11 @@ bool CSaveRestore::LoadGame( const char *pName )
 
 	bool bIsTransitionSave = ( gameHeader.originMapName[0] != 0 );
 
-	bool retval = Host_NewGame( gameHeader.mapName, true, false, ( bIsTransitionSave ) ? gameHeader.originMapName : NULL, ( bIsTransitionSave ) ? gameHeader.landmark : NULL, bOldSave );
+	m_bOverrideLoadGameEntsOn = bLetToolsOverrideLoadGameEnts;
+
+	bool retval = Host_NewGame( gameHeader.mapName, NULL, true, false, false, ( bIsTransitionSave ) ? gameHeader.originMapName : NULL, ( bIsTransitionSave ) ? gameHeader.landmark : NULL );
+
+	m_bOverrideLoadGameEntsOn = false;
 
 	SetMostRecentElapsedMinutes( iElapsedMinutes );
 	SetMostRecentElapsedSeconds( iElapsedSeconds );
@@ -1200,13 +1121,18 @@ bool CSaveRestore::LoadGame( const char *pName )
 	return retval;
 }
 
+bool CSaveRestore::IsOverrideLoadGameEntsOn()
+{
+	return m_bOverrideLoadGameEntsOn;
+}
+
 //-----------------------------------------------------------------------------
 // Purpose: Remebers the most recent save game
 //-----------------------------------------------------------------------------
 void CSaveRestore::SetMostRecentSaveGame( const char *pSaveName )
 {
-	// Only remember xsaves in the x360 case
-	if ( IsX360() && IsXSave() == false )
+	// Only remember xsaves in the 360 case when signed in
+	if ( IsX360() && ( IsXSave() == false && XBX_GetPrimaryUserId() != -1 ) )
 		return;
 
 	if ( pSaveName )
@@ -1303,6 +1229,7 @@ struct SaveFileSections_t
 
 void CSaveRestore::SaveGameStateGlobals( CSaveRestoreData *pSaveData )
 {
+	VPROF("CSaveRestore::SaveGameStateGlobals");
 	SAVE_HEADER header;
 
 	INetworkStringTable * table = sv.GetLightStyleTable();
@@ -1313,7 +1240,7 @@ void CSaveRestore::SaveGameStateGlobals( CSaveRestoreData *pSaveData )
 	header.version 			= build_number( );
 	header.skillLevel 		= skill.GetInt();	// This is created from an int even though it's a float
 	header.connectionCount 	= pSaveData->levelInfo.connectionCount;
-	header.time__USE_VCR_MODE	= sv.GetTime();
+	header.time 			= sv.GetTime();
 	ConVarRef skyname( "sv_skyname" );
 	if ( skyname.IsValid() )
 	{
@@ -1338,7 +1265,7 @@ void CSaveRestore::SaveGameStateGlobals( CSaveRestoreData *pSaveData )
 
 	pSaveData->levelInfo.time = 0; // prohibits rebase of header.time (why not just save time as a field_float and ditch this hack?)
 	serverGameDLL->SaveWriteFields( pSaveData, "Save Header", &header, NULL, SAVE_HEADER::m_DataMap.dataDesc, SAVE_HEADER::m_DataMap.dataNumFields );
-	pSaveData->levelInfo.time = header.time__USE_VCR_MODE;
+	pSaveData->levelInfo.time = header.time;
 
 	// Write adjacency list
 	for ( i = 0; i < pSaveData->levelInfo.connectionCount; i++ )
@@ -1366,18 +1293,14 @@ CSaveRestoreData *CSaveRestore::SaveGameStateInit( void )
 	return pSaveData;
 }
 
-bool CSaveRestore::SaveGameState( bool bTransition, CSaveRestoreData **ppReturnSaveData, bool bOpenContainer, bool bIsAutosaveOrDangerous )
+bool CSaveRestore::SaveGameState( bool bTransition, ISaveRestoreDataCallback *pCallback, bool bOpenContainer, bool bIsAutosaveOrDangerous )
 {
+	VPROF("SaveGameState");
 	MDLCACHE_COARSE_LOCK_(g_pMDLCache);
 	SaveMsg( "SaveGameState...\n" );
 	int i;
 	SaveFileSectionsInfo_t sectionsInfo;
 	SaveFileSections_t sections;
-
-	if ( ppReturnSaveData )
-	{
-		*ppReturnSaveData = NULL;
-	}
 
 	if ( bTransition )
 	{
@@ -1401,21 +1324,23 @@ bool CSaveRestore::SaveGameState( bool bTransition, CSaveRestoreData **ppReturnS
 	// Save the data
 	sections.pData = pSaveData->AccessCurPos();
 	
-	//---------------------------------
-	// Pre-save
-
-	serverGameDLL->PreSave( pSaveData );
-	// Build the adjacent map list (after entity table build by game in presave)
-	if ( bTransition )
 	{
-		serverGameDLL->BuildAdjacentMapList();
-	}
-	else
-	{
-		pSaveData->levelInfo.connectionCount = 0;
-	}
-	S_ExtraUpdate();
+		VPROF("SaveGameState pre-save");
+		//---------------------------------
+		// Pre-save
 
+		serverGameDLL->PreSave( pSaveData );
+		// Build the adjacent map list (after entity table build by game in presave)
+		if ( bTransition )
+		{
+			serverGameDLL->BuildAdjacentMapList();
+		}
+		else
+		{
+			pSaveData->levelInfo.connectionCount = 0;
+		}
+		S_ExtraUpdate();
+	}
 	//---------------------------------
 
 	SaveGameStateGlobals( pSaveData );
@@ -1423,33 +1348,47 @@ bool CSaveRestore::SaveGameState( bool bTransition, CSaveRestoreData **ppReturnS
 	S_ExtraUpdate();
 	serverGameDLL->Save( pSaveData );
 	S_ExtraUpdate();
-	
+
 	sectionsInfo.nBytesData = pSaveData->AccessCurPos() - sections.pData;
-
 	
-	//---------------------------------
-	// Save necessary tables/dictionaries/directories
-	sections.pDataHeaders = pSaveData->AccessCurPos();
-	
-	serverGameDLL->WriteSaveHeaders( pSaveData );
-	
-	sectionsInfo.nBytesDataHeaders = pSaveData->AccessCurPos() - sections.pDataHeaders;
 
-	//---------------------------------
-	// Write the save file symbol table
-	sections.pSymbols = pSaveData->AccessCurPos();
 
-	for( i = 0; i < pSaveData->SizeSymbolTable(); i++ )
 	{
-		const char *pszToken = ( pSaveData->StringFromSymbol( i ) ) ? pSaveData->StringFromSymbol( i ) : "";
-		if ( !pSaveData->Write( pszToken, strlen(pszToken) + 1 ) )
-		{
-			break;
-		}
-	}	
+		VPROF("SaveGameState WriteSaveHeaders");
 
-	sectionsInfo.nBytesSymbols = pSaveData->AccessCurPos() - sections.pSymbols;
-	sectionsInfo.nSymbols = pSaveData->SizeSymbolTable();
+		//---------------------------------
+		// Save necessary tables/dictionaries/directories
+		sections.pDataHeaders = pSaveData->AccessCurPos();
+
+		serverGameDLL->WriteSaveHeaders( pSaveData );
+
+		sectionsInfo.nBytesDataHeaders = pSaveData->AccessCurPos() - sections.pDataHeaders;
+	}
+
+	{
+		VPROF( "SaveGameState Write the save file symbol table");
+			//---------------------------------
+			// Write the save file symbol table
+			sections.pSymbols = pSaveData->AccessCurPos();
+
+		for( i = 0; i < pSaveData->SizeSymbolTable(); i++ )
+		{
+			const char *pszToken = ( pSaveData->StringFromSymbol( i ) ) ? pSaveData->StringFromSymbol( i ) : "";
+			if ( !pSaveData->Write( pszToken, strlen(pszToken) + 1 ) )
+			{
+				break;
+			}
+		}	
+
+		sectionsInfo.nBytesSymbols = pSaveData->AccessCurPos() - sections.pSymbols;
+		sectionsInfo.nSymbols = pSaveData->SizeSymbolTable();
+	}
+
+
+#if VPROF_LEVEL >= 1
+	// another scope inside the first (without having to indent everything below)
+	CVProfScope VProfInner("SaveGameState write to disk", 1, VPROF_BUDGETGROUP_OTHER_UNACCOUNTED, false, 0);
+#endif
 
 	//---------------------------------
 	// Output to disk
@@ -1482,7 +1421,7 @@ bool CSaveRestore::SaveGameState( bool bTransition, CSaveRestoreData **ppReturnS
 	}
 	else
 	{
-		Q_snprintf( name, 256, "%s:/%s.HL1", GetCurrentMod(), GetSaveGameMapName( sv.GetMapName() ) ); // DON'T FixSlashes on this, it needs to be //MOD
+		PREPARE_XSAVE_FILENAME( XBX_GetPrimaryUserId(), name ) "%s.HL1", GetSaveGameMapName( sv.GetMapName() ) ); // DON'T FixSlashes on this, it needs to be //MOD
 	}
 
 	S_ExtraUpdate();
@@ -1494,14 +1433,13 @@ bool CSaveRestore::SaveGameState( bool bTransition, CSaveRestoreData **ppReturnS
 	//---------------------------------
 	
 	EntityPatchWrite( pSaveData, GetSaveGameMapName( sv.GetMapName() ), true );
-	if ( !ppReturnSaveData )
+
+	if ( pCallback )
 	{
-		Finish( pSaveData );
+		pCallback->Execute( pSaveData );
 	}
-	else
-	{
-		*ppReturnSaveData = pSaveData;
-	}
+
+	Finish( pSaveData );
 
 	if ( !IsXSave() )
 	{
@@ -1509,7 +1447,7 @@ bool CSaveRestore::SaveGameState( bool bTransition, CSaveRestoreData **ppReturnS
 	}
 	else
 	{
-		Q_snprintf(name, sizeof( name ), "%s:/%s.HL2", GetCurrentMod(), GetSaveGameMapName( sv.GetMapName() ) );// DON'T FixSlashes on this, it needs to be //MOD
+		PREPARE_XSAVE_FILENAME( XBX_GetPrimaryUserId(), name ) "%s.HL2", GetSaveGameMapName( sv.GetMapName() ) );// DON'T FixSlashes on this, it needs to be //MOD
 	}
 	// Let the client see the server entity to id lookup tables, etc.
 	S_ExtraUpdate();
@@ -1533,6 +1471,9 @@ bool CSaveRestore::SaveGameState( bool bTransition, CSaveRestoreData **ppReturnS
 //-----------------------------------------------------------------------------
 void CSaveRestore::Finish( CSaveRestoreData *save )
 {
+	// TODO: use this spew to find maps with egregious numbers of entities (and thus large savegame files) before we ship:
+	Msg( "SAVEGAME: %6.1fkb, %6.1fkb used by %3d entities (%s)\n", ( save->GetCurPos() / 1024.0f ), ( save->m_nEntityDataSize / 1024.0f ), save->NumEntities(), sv.GetMapName() );
+
 	char **pTokens = save->DetachSymbolTable();
 	if ( pTokens )
 		SaveFreeMemory( pTokens );
@@ -1542,6 +1483,7 @@ void CSaveRestore::Finish( CSaveRestoreData *save )
 		SaveFreeMemory( pEntityTable );
 
 	save->PurgeEntityHash();
+	DevMsg( "Freeing %d bytes of save data\n", save->GetCurPos() );
 	SaveFreeMemory( save );
 
 
@@ -1554,6 +1496,20 @@ BEGIN_SIMPLE_DATADESC( musicsave_t )
 	DEFINE_FIELD( sampleposition, FIELD_INTEGER ),
 	DEFINE_FIELD( master_volume, FIELD_SHORT ),
 
+END_DATADESC()
+
+BEGIN_SIMPLE_DATADESC( channelsave )
+
+	DEFINE_ARRAY( soundName, FIELD_CHARACTER, 64 ),
+	DEFINE_FIELD( origin, FIELD_VECTOR ),
+	DEFINE_FIELD( soundLevel, FIELD_INTEGER ),
+	DEFINE_FIELD( soundSource, FIELD_INTEGER ),
+	DEFINE_FIELD( entChannel, FIELD_INTEGER ),
+	DEFINE_FIELD( pitch, FIELD_INTEGER ),
+	DEFINE_FIELD( opStackElapsedTime, FIELD_FLOAT ),
+	DEFINE_FIELD( opStackElapsedStopTime, FIELD_FLOAT ),
+	DEFINE_FIELD( masterVolume, FIELD_SHORT )
+	
 END_DATADESC()
 
 BEGIN_SIMPLE_DATADESC( decallist_t )
@@ -1597,16 +1553,16 @@ struct baseclientsections_t
 	int entitysize;
 	int headersize;
 	int decalsize;
-	int musicsize;
+	int channelsize;
 	int symbolsize;
 
 	int decalcount;
-	int	musiccount;
+	int channelcount;
 	int symbolcount;
 
 	int SumBytes()
 	{
-		return entitysize + headersize + decalsize + symbolsize + musicsize;
+		return entitysize + headersize + decalsize + symbolsize + channelsize;
 	}
 };
 
@@ -1616,7 +1572,7 @@ struct clientsections_t : public baseclientsections_t
 	char	*entitydata;
 	char	*headerdata;
 	char	*decaldata;
-	char	*musicdata;
+	char	*channeldata;
 };
 
 int CSaveRestore::LookupRestoreSpotSaveIndex( RestoreLookupTable *table, int save )
@@ -1693,7 +1649,7 @@ void CSaveRestore::ReapplyDecal( bool adjacent, RestoreLookupTable *table, decal
 							clientEntity->GetModel(), 
 							clientEntity->GetAbsOrigin(), 
 							clientEntity->GetAbsAngles(),
-							entry->position, 0, flags );
+							entry->position, 0, flags, &tr.plane.normal );
 					}
 				}
 			}
@@ -1754,6 +1710,8 @@ void CSaveRestore::ReapplyDecal( bool adjacent, RestoreLookupTable *table, decal
 
 void CSaveRestore::RestoreClientState( char const *fileName, bool adjacent )
 {
+	FinishAsyncSave();
+
 	FileHandle_t pFile;
 
 	pFile = g_pSaveRestoreFileSystem->Open( fileName, "rb" );
@@ -1828,7 +1786,7 @@ void CSaveRestore::RestoreClientState( char const *fileName, bool adjacent )
 
 	if ( sections.symbolsize > 0 )
 	{
-		pSaveMemory = SaveAllocMemory( sections.symbolcount, sizeof(char *), true );
+		void *pSaveMemory = SaveAllocMemory( sections.symbolcount, sizeof(char *), true );
 		if ( !pSaveMemory )
 		{
 			SaveFreeMemory( pSaveData );
@@ -1901,12 +1859,12 @@ void CSaveRestore::RestoreClientState( char const *fileName, bool adjacent )
 	//Adrian: Fix up model string tables to make sure they match on both sides.
 	if ( bFixTable == true )
 	{
-		int iCount = cl.m_pModelPrecacheTable->GetNumStrings();
+		int iCount = GetBaseLocalClient().m_pModelPrecacheTable->GetNumStrings();
 
 		while ( iCount < sv.GetModelPrecacheTable()->GetNumStrings() )
 		{
 			string_t szString = MAKE_STRING( sv.GetModelPrecacheTable()->GetString( iCount ) );
-			cl.m_pModelPrecacheTable->AddString( true, STRING( szString ) );
+			GetBaseLocalClient().m_pModelPrecacheTable->AddString( true, STRING( szString ) );
 			iCount++;
 		}
 	}
@@ -1924,14 +1882,16 @@ void CSaveRestore::RestoreClientState( char const *fileName, bool adjacent )
 		}
 	}
 
-	for ( int i = 0; i < sections.musiccount; i++ )
+	for( int i = 0; i < sections.channelcount; ++i )
 	{
-		musicsave_t song;
+		// Read the saved fields
+		channelsave channel;
+		g_ClientDLL->SaveReadFields( pSaveData, "CHANNELLIST", &channel, NULL, channelsave::m_DataMap.dataDesc, channelsave::m_DataMap.dataNumFields );
 
-		g_ClientDLL->SaveReadFields( pSaveData, "MUSICLIST", &song, NULL, musicsave_t::m_DataMap.dataDesc, musicsave_t::m_DataMap.dataNumFields );
+		// Translate entity index
+		channel.soundSource = LookupRestoreSpotSaveIndex( table, channel.soundSource );
 
-		// Tell sound system to restart the music
-		S_RestartSong( &song );
+		S_RestartChannel( channel );
 	}
 
 	Finish( pSaveData );
@@ -1946,7 +1906,7 @@ void CSaveRestore::RestoreAdjacenClientState( char const *map )
 	}
 	else
 	{
-		Q_snprintf( name, sizeof( name ), "%s:/%s.HL2", GetCurrentMod(), GetSaveGameMapName( map ) );// DON'T FixSlashes on this, it needs to be //MOD
+		PREPARE_XSAVE_FILENAME( XBX_GetPrimaryUserId(), name ) "%s.HL2", GetSaveGameMapName( map ) );// DON'T FixSlashes on this, it needs to be //MOD
 	}
 	COM_CreatePath( name );
 
@@ -1959,7 +1919,7 @@ void CSaveRestore::RestoreAdjacenClientState( char const *map )
 //-----------------------------------------------------------------------------
 bool CSaveRestore::SaveClientState( const char *name )
 {
-#ifndef SWDS
+#ifndef DEDICATED
 	decallist_t		*decalList;
 	int				i;
 
@@ -1999,28 +1959,24 @@ bool CSaveRestore::SaveClientState( const char *name )
 
 	sections.decalsize = pSaveData->AccessCurPos() - sections.decaldata;
 
-	sections.musicdata = pSaveData->AccessCurPos();
+	// Ask sound system for channels with save/restore enabled
+	ChannelSaveVector channels;
+	S_GetActiveSaveRestoreChannels( channels );
+	sections.channelcount = channels.Count();
 
-	CUtlVector< musicsave_t >	music;
-
-	// Ask sound system for current music tracks
-	S_GetCurrentlyPlayingMusic( music );
-
-	sections.musiccount = music.Count();
-
-	for ( i = 0; i < sections.musiccount; ++i )
+	sections.channeldata = pSaveData->AccessCurPos();
+	for( i = 0; i < sections.channelcount; ++i )
 	{
-		musicsave_t *song = &music[ i ];
+		channelsave* channel = &channels[i];
 
-		g_ClientDLL->SaveWriteFields( pSaveData, "MUSICLIST", song, NULL, musicsave_t::m_DataMap.dataDesc, musicsave_t::m_DataMap.dataNumFields );
+		g_ClientDLL->SaveWriteFields( pSaveData, "CHANNELLIST", channel, NULL, channelsave::m_DataMap.dataDesc, channelsave::m_DataMap.dataNumFields );
 	}
-
-	sections.musicsize = pSaveData->AccessCurPos() - sections.musicdata;
+	sections.channelsize = pSaveData->AccessCurPos() - sections.channeldata;
 
 	// Write string token table
 	sections.symboldata = pSaveData->AccessCurPos();
 
-	for( i = 0; i < pSaveData->SizeSymbolTable(); i++ )
+	for( i = 0; i < pSaveData->SizeSymbolTable(); ++i )
 	{
 		const char *pszToken = (pSaveData->StringFromSymbol( i )) ? pSaveData->StringFromSymbol( i ) : "";
 		if ( !pSaveData->Write( pszToken, strlen(pszToken) + 1 ) )
@@ -2044,7 +2000,7 @@ bool CSaveRestore::SaveClientState( const char *name )
 						sections.headersize + 
 						sections.entitysize + 
 						sections.decalsize + 
-						sections.musicsize;
+						sections.channelsize;
 
 
 
@@ -2058,7 +2014,7 @@ bool CSaveRestore::SaveClientState( const char *name )
 	buffer.Put( sections.headerdata, sections.headersize );
 	buffer.Put( sections.entitydata, sections.entitysize );
 	buffer.Put( sections.decaldata, sections.decalsize );
-	buffer.Put( sections.musicdata, sections.musicsize );
+	buffer.Put( sections.channeldata, sections.channelsize );
 
 	SaveMsg( "Queue AsyncWrite (%s)\n", name );
 	g_AsyncSaveCallQueue.QueueCall( g_pSaveRestoreFileSystem, &ISaveRestoreFileSystem::AsyncWrite, CUtlEnvelope<const char *>(name), pBuffer, nBytes, true, false, (FSAsyncControl_t *)NULL );
@@ -2073,15 +2029,12 @@ bool CSaveRestore::SaveClientState( const char *name )
 //-----------------------------------------------------------------------------
 // Purpose: Parses and confirms save information. Pulled from PC UI
 //-----------------------------------------------------------------------------
-int CSaveRestore::SaveReadNameAndComment( FileHandle_t f, OUT_Z_CAP(nameSize) char *name, int nameSize, OUT_Z_CAP(commentSize) char *comment, int commentSize )
+int CSaveRestore::SaveReadNameAndComment( FileHandle_t f, char *name, char *comment )
 {
 	int i, tag, size, tokenSize, tokenCount;
 	char *pSaveData = NULL;
 	char *pFieldName = NULL;
 	char **pTokenList = NULL;
-
-	name[0] = '\0';
-	comment[0] = '\0';
 
 	// Make sure we can at least read in the first five fields
 	unsigned int tagsize = sizeof(int) * 5;
@@ -2092,6 +2045,8 @@ int CSaveRestore::SaveReadNameAndComment( FileHandle_t f, OUT_Z_CAP(nameSize) ch
 	if ( ( nRead != sizeof(int) ) || tag != MAKEID('J','S','A','V') )
 		return 0;
 
+	name[0] = '\0';
+	comment[0] = '\0';
 	if ( g_pSaveRestoreFileSystem->Read( &tag, sizeof(int), f ) != sizeof(int) )
 		return 0;
 
@@ -2180,13 +2135,11 @@ int CSaveRestore::SaveReadNameAndComment( FileHandle_t f, OUT_Z_CAP(nameSize) ch
 
 		if ( !Q_stricmp( pFieldName, "comment" ) )
 		{
-			int copySize = MAX( commentSize, nFieldSize );
-			Q_strncpy( comment, pData, copySize );
+			Q_strncpy(comment, pData, nFieldSize);
 		}
 		else if ( !Q_stricmp( pFieldName, "mapName" ) )
 		{
-			int copySize = MAX( commentSize, nFieldSize );
-			Q_strncpy( name, pData, copySize );
+			Q_strncpy( name, pData, nFieldSize );
 		};
 
 		// Move to Start of next field.
@@ -2219,7 +2172,7 @@ CSaveRestoreData *CSaveRestore::LoadSaveData( const char *level )
 	}
 	else
 	{
-		Q_snprintf( name, sizeof( name ), "%s:/%s.HL1", GetCurrentMod(), level);// DON'T FixSlashes on this, it needs to be //MOD
+		PREPARE_XSAVE_FILENAME( XBX_GetPrimaryUserId(), name ) "%s.HL1", level);// DON'T FixSlashes on this, it needs to be //MOD
 	}
 	ConMsg ("Loading game from %s...\n", name);
 
@@ -2332,7 +2285,7 @@ void CSaveRestore::ParseSaveTables( CSaveRestoreData *pSaveData, SAVE_HEADER *pH
 
 	pSaveData->levelInfo.mapVersion = pHeader->mapVersion;
 	pSaveData->levelInfo.connectionCount = pHeader->connectionCount;
-	pSaveData->levelInfo.time = pHeader->time__USE_VCR_MODE;
+	pSaveData->levelInfo.time = pHeader->time;
 	pSaveData->levelInfo.fUseLandmark = true;
 	VectorCopy( vec3_origin, pSaveData->levelInfo.vecLandmarkOffset );
 
@@ -2374,7 +2327,7 @@ void CSaveRestore::EntityPatchWrite( CSaveRestoreData *pSaveData, const char *le
 	}
 	else
 	{
-		Q_snprintf( name, sizeof( name ), "%s:/%s.HL3", GetCurrentMod(), level);// DON'T FixSlashes on this, it needs to be //MOD
+		PREPARE_XSAVE_FILENAME( XBX_GetPrimaryUserId(), name ) "%s.HL3", level );// DON'T FixSlashes on this, it needs to be //MOD
 	}
 
 	size = 0;
@@ -2427,7 +2380,7 @@ void CSaveRestore::EntityPatchRead( CSaveRestoreData *pSaveData, const char *lev
 	}
 	else
 	{
-		Q_snprintf(name, sizeof( name ), "%s:/%s.HL3", GetCurrentMod(), GetSaveGameMapName( level ) );// DON'T FixSlashes on this, it needs to be //MOD
+		PREPARE_XSAVE_FILENAME( XBX_GetPrimaryUserId(), name ) "%s.HL3", GetSaveGameMapName( level ) );// DON'T FixSlashes on this, it needs to be //MOD
 	}
 
 	pFile = g_pSaveRestoreFileSystem->Open( name, "rb" );
@@ -2465,7 +2418,7 @@ int CSaveRestore::LoadGameState( char const *level, bool createPlayers )
 	ParseSaveTables( pSaveData, &header, 1 );
 	EntityPatchRead( pSaveData, level );
 	
-	if ( !IsX360() )
+	if ( !IsGameConsole() )
 	{
 		skill.SetValue( header.skillLevel );
 	}
@@ -2486,7 +2439,7 @@ int CSaveRestore::LoadGameState( char const *level, bool createPlayers )
 
 	Finish( pSaveData );
 
-	sv.m_nTickCount = (int)( header.time__USE_VCR_MODE / host_state.interval_per_tick );
+	sv.m_nTickCount = (int)( header.time / host_state.interval_per_tick );
 	// SUCCESS!
 	return 1;
 }
@@ -2664,8 +2617,9 @@ void CSaveRestore::LoadAdjacentEnts( const char *pOldLevel, const char *pLandmar
 	if ( !foundprevious )
 	{
 		// Host_Error( "Level transition ERROR\nCan't find connection to %s from %s\n", pOldLevel, sv.GetMapName() );
-		Warning( "Level transition ERROR\nCan't find connection to %s from %s\n", pOldLevel, sv.GetMapName() );
-		Cbuf_AddText( "disconnect\n" );
+		Warning( "\nLevel transition ERROR\nCan't find connection to %s from %s\nFalling back to 'map' command...\n\n", pOldLevel, sv.GetMapName() );
+		// Disconnect and 'map' to the destination map directly, since we can't do a proper transition:
+		Cbuf_AddText( Cbuf_GetCurrentPlayer(), CFmtStr( "disconnect; map %s\n", sv.GetMapName() ) );
 	}
 }
 
@@ -2688,6 +2642,7 @@ int CSaveRestore::FileSize( FileHandle_t pFile )
 void CSaveRestore::DirectoryCopy( const char *pPath, const char *pDestFileName, bool bIsXSave )
 {
 	SaveMsg( "Directory copy (%s)\n", pPath );
+	VPROF("CSaveRestore::DirectoryCopy");
 
 	g_pSaveRestoreFileSystem->AsyncFinishAllWrites();
 	int nMaps = g_pSaveRestoreFileSystem->DirectoryCount( pPath );
@@ -2757,11 +2712,11 @@ void CSaveRestore::DoClearSaveDir( bool bIsXSave )
 		Q_snprintf(szName, sizeof( szName ), "%s", GetSaveDir() );
 		Q_FixSlashes( szName );
 		// Create save directory if it doesn't exist
-		Sys_mkdir( szName );
+		Sys_mkdir( szName, MOD_DIR );
 	}
 	else
 	{
-		Q_snprintf( szName, sizeof( szName ), "%s:\\", GetCurrentMod() );
+		PREPARE_XSAVE_FILENAME( XBX_GetPrimaryUserId(), szName ) );
 	}
 
 	Q_strncat( szName, "*.HL?", sizeof( szName ), COPY_ALL_CHARACTERS );
@@ -2789,6 +2744,8 @@ void CSaveRestore::OnFinishedClientRestore()
 
 void CSaveRestore::AutoSaveDangerousIsSafe()
 {
+	int iX360controller = XBX_GetPrimaryUserId();
+
 	if ( save_async.GetBool() && ThreadInMainThread() && g_pSaveThread )
 	{
 		g_pSaveThread->QueueCall(  this, &CSaveRestore::FinishAsyncSave );
@@ -2799,14 +2756,16 @@ void CSaveRestore::AutoSaveDangerousIsSafe()
 	}
 
 	if ( !m_bWaitingForSafeDangerousSave )
+	{
+		DevMsg( "No AutoSaveDangerous Outstanding...Nothing to do.\n" );
 		return;
+	}
 
 	m_bWaitingForSafeDangerousSave = false;
+	ConDMsg( "Committing AutoSaveDangerous...\n" );
 
-	ConDMsg( "Committing autosavedangerous...\n" );
-
-	char szOldName[MAX_PATH];
-	char szNewName[MAX_PATH];
+	char szOldName[MAX_PATH] = {0};
+	char szNewName[MAX_PATH] = {0};
 
 	// Back up the old autosaves
 	if ( StorageDeviceValid() )
@@ -2815,7 +2774,7 @@ void CSaveRestore::AutoSaveDangerousIsSafe()
 	}
 
 	// Rename the screenshot
-	if ( !IsX360() )
+	if ( !IsGameConsole() )
 	{
 		Q_snprintf( szOldName, sizeof( szOldName ), "//%s/%sautosavedangerous%s.tga", MOD_DIR, GetSaveDir(), GetPlatformExt() );
 		Q_snprintf( szNewName, sizeof( szNewName ), "//%s/%sautosave%s.tga", MOD_DIR, GetSaveDir(), GetPlatformExt() );
@@ -2844,8 +2803,8 @@ void CSaveRestore::AutoSaveDangerousIsSafe()
 	}
 	else
 	{
-		Q_snprintf( szOldName, sizeof( szOldName ), "%s:\\autosavedangerous%s.sav", GetCurrentMod(), GetPlatformExt() );
-		Q_snprintf( szNewName, sizeof( szNewName ), "%s:\\autosave%s.sav", GetCurrentMod(), GetPlatformExt() );
+		PREPARE_XSAVE_FILENAME( iX360controller, szOldName ) "autosavedangerous%s.sav", GetPlatformExt() );
+		PREPARE_XSAVE_FILENAME( iX360controller, szNewName ) "autosave%s.sav", GetPlatformExt() );
 	}
 
 	// there could be an old version, remove it
@@ -2863,10 +2822,24 @@ void CSaveRestore::AutoSaveDangerousIsSafe()
 	// Use this as the most recent now that it's safe
 	SetMostRecentSaveGame( "autosave" );
 
+#ifdef _PS3
+	char fixedFilename[MAX_PATH];
+	Q_snprintf( fixedFilename, sizeof( fixedFilename ), "%s%s", GetSaveDir(), V_GetFileName( szNewName ) );
+
+	const char *pLastAutosaveDangerousComment;
+	GetMostRecentSaveInfo( NULL, NULL, &pLastAutosaveDangerousComment );
+
+	// only queue autosaves for commit
+	QueuedAutoSave_t saveParams;
+	saveParams.m_Filename = fixedFilename;
+	saveParams.m_Comment = pLastAutosaveDangerousComment;
+	g_QueuedAutoSavesToCommit.PushItem( saveParams );
+#endif
+
 	// Finish off all writes
 	if ( IsXSave() )
 	{
-		g_pXboxSystem->FinishContainerWrites();
+		g_pXboxSystem->FinishContainerWrites( iX360controller );
 	}
 }
 
@@ -2926,10 +2899,6 @@ static void SaveGame( const CCommand &args )
 		// HACK: Put the original name back
 		Q_strncpy( sv.m_szMapname, szMapName, sizeof(sv.m_szMapname) );
 	}
-
-#if !defined (SWDS)
-	CL_HudMessage( IsX360() ? "GAMESAVED_360" : "GAMESAVED" );
-#endif
 }
 
 //-----------------------------------------------------------------------------
@@ -2942,6 +2911,12 @@ CON_COMMAND_F( save, "Saves current game.", FCVAR_DONTRECORD )
 	if ( !saverestore->IsValidSave() )
 		return;
 
+	if ( !serverGameDLL->SupportsSaveRestore() )
+	{
+		ConMsg ("This game doesn't support save/restore.");
+		return;
+	}
+
 	if ( args.ArgC() < 2 )
 	{
 		ConDMsg("save <savename> [wait]: save a game\n");
@@ -2960,7 +2935,12 @@ CON_COMMAND_F( save, "Saves current game.", FCVAR_DONTRECORD )
 		return;
 	}
 
-	g_SaveRestore.SetIsXSave( false );
+	if ( ( engineClient->IsInCommentaryMode() || ( scr_drawloading && EngineVGui()->IsGameUIVisible() ) ) && V_stristr( args[1], "quick" ) )
+	{
+		return;
+	}
+
+	saverestore->SetIsXSave( false );
 	SaveGame( args );
 }
 
@@ -2968,11 +2948,17 @@ CON_COMMAND_F( save, "Saves current game.", FCVAR_DONTRECORD )
 // Purpose: 
 // Output : void Host_Savegame_f
 //-----------------------------------------------------------------------------
-CON_COMMAND_F( xsave, "Saves current game to a 360 storage device.", FCVAR_DONTRECORD )
+CON_COMMAND_F( xsave, "Saves current game to a console storage device.", FCVAR_DONTRECORD )
 {
 	// Can we save at this point?
 	if ( !saverestore->IsValidSave() )
 		return;
+
+	if ( !serverGameDLL->SupportsSaveRestore() )
+	{
+		ConMsg ("This game doesn't support save/restore.");
+		return;
+	}
 
 	if ( args.ArgC() < 2 )
 	{
@@ -2992,7 +2978,7 @@ CON_COMMAND_F( xsave, "Saves current game to a 360 storage device.", FCVAR_DONTR
 		return;
 	}
 
-	g_SaveRestore.SetIsXSave( IsX360() );
+	saverestore->SetIsXSave( IsGameConsole() ); // deliberately for both consoles here so you can force an xsave on the PS3 if you need to (whatever that means)
 	SaveGame( args );
 }
 
@@ -3007,6 +2993,12 @@ CON_COMMAND_F( minisave, "Saves game (for current level only!)", FCVAR_DONTRECOR
 	if ( !saverestore->IsValidSave() )
 		return;
 
+	if ( !serverGameDLL->SupportsSaveRestore() )
+	{
+		ConMsg ("This game doesn't support save/restore.");
+		return;
+	}
+
 	if (args.ArgC() != 2 || strstr(args[1], ".."))
 		return;
 
@@ -3020,13 +3012,23 @@ CON_COMMAND_F( minisave, "Saves game (for current level only!)", FCVAR_DONTRECOR
 		sizeof( comment ),
 		saverestore->GetMostRecentElapsedMinutes() + iAdditionalMinutes,
 		saverestore->GetMostRecentElapsedSeconds() + iAdditionalSeconds );
-	saverestore->SaveGameSlot( args[1], comment, true, true );
+
+	bool bIsXSave = saverestore->IsXSave();
+	saverestore->SetIsXSave( false );
+	saverestore->SaveGameSlot( args[1], comment, true, false );
+	saverestore->SetIsXSave( bIsXSave );
 }
 
 static void AutoSave_Silent( bool bDangerous )
 {
+	if ( g_bInCommentaryMode )
+		return;
+
 	// Can we save at this point?
 	if ( !saverestore->IsValidSave() )
+		return;
+
+	if ( !serverGameDLL->SupportsSaveRestore() )
 		return;
 
 	int iAdditionalSeconds = g_ServerGlobalVariables.curtime - saverestore->GetMostRecentElapsedTimeSet();
@@ -3040,7 +3042,7 @@ static void AutoSave_Silent( bool bDangerous )
 		saverestore->GetMostRecentElapsedMinutes() + iAdditionalMinutes,
 		saverestore->GetMostRecentElapsedSeconds() + iAdditionalSeconds );
 
-	g_SaveRestore.SetIsXSave( IsX360() );
+	saverestore->SetIsXSave( IsX360() );
 	if ( !bDangerous )
 	{
 		saverestore->SaveGameSlot( "autosave", comment, false, true );
@@ -3051,22 +3053,9 @@ static void AutoSave_Silent( bool bDangerous )
 	}
 }
 
-static ConVar save_console( "save_console", "0", 0, "Autosave on the PC behaves like it does on the consoles." );
-static ConVar save_huddelayframes( "save_huddelayframes", "1", 0, "Number of frames to defer for drawing the Saving message." );
-
 CON_COMMAND( _autosave, "Autosave" )
 {
 	AutoSave_Silent( false );
-	bool bConsole = save_console.GetBool();
-#if defined ( _X360 )
-	bConsole = true;
-#endif
-	if ( bConsole )
-	{
-#if !defined (SWDS)
-		CL_HudMessage( IsX360() ? "GAMESAVED_360" : "GAMESAVED" );
-#endif
-	}
 }
 
 CON_COMMAND( _autosavedangerous, "AutoSaveDangerous" )
@@ -3076,16 +3065,6 @@ CON_COMMAND( _autosavedangerous, "AutoSaveDangerous" )
 		return;
 
 	AutoSave_Silent( true );
-	bool bConsole = save_console.GetBool();
-#if defined ( _X360 )
-	bConsole = true;
-#endif
-	if ( bConsole )
-	{
-#if !defined (SWDS)
-		CL_HudMessage( IsX360() ? "GAMESAVED_360" : "GAMESAVED" );
-#endif
-	}
 }
 
 //-----------------------------------------------------------------------------
@@ -3098,18 +3077,16 @@ CON_COMMAND( autosave, "Autosave" )
 	if ( !saverestore->IsValidSave() || !sv_autosave.GetBool() )
 		return;
 
-	bool bConsole = save_console.GetBool();
-	char const *pchSaving = IsX360() ? "GAMESAVING_360" : "GAMESAVING";
-#if defined ( _X360 )
-	bConsole = true;
-#endif
+	if ( !serverGameDLL->SupportsSaveRestore() )
+		return;
 
+	if ( g_bInCommentaryMode )
+		return;
+
+	bool bConsole = IsGameConsole() || save_console.GetBool();
 	if ( bConsole )
 	{
-#if !defined (SWDS)
-		CL_HudMessage( pchSaving );
-#endif
-		g_SaveRestore.AddDeferredCommand( "_autosave" );
+		g_pSaveRestore->AddDeferredCommand( "_autosave" );
 	}
 	else
 	{
@@ -3131,19 +3108,16 @@ CON_COMMAND( autosavedangerous, "AutoSaveDangerous" )
 	if ( saverestore->StorageDeviceValid() == false )
 		return;
 
-	//Don't print out "SAVED" unless we're running on an Xbox (in which case it prints "CHECKPOINT").
-	bool bConsole = save_console.GetBool();
-	char const *pchSaving = IsX360() ? "GAMESAVING_360" : "GAMESAVING";
-#if defined ( _X360 )
-	bConsole = true;
-#endif
+	if ( !serverGameDLL->SupportsSaveRestore() )
+		return;
 
+	if ( g_bInCommentaryMode )
+		return;
+
+	bool bConsole = IsGameConsole() || save_console.GetBool();
 	if ( bConsole )
 	{
-#if !defined (SWDS)
-		CL_HudMessage( pchSaving );
-#endif
-		g_SaveRestore.AddDeferredCommand( "_autosavedangerous" );
+		g_pSaveRestore->AddDeferredCommand( "_autosavedangerous" );
 	}
 	else
 	{
@@ -3163,7 +3137,7 @@ CON_COMMAND( autosavedangerousissafe, "" )
 //-----------------------------------------------------------------------------
 // Purpose: Load a save game in response to a console command (load or xload)
 //-----------------------------------------------------------------------------
-static void LoadSaveGame( const char *savename )
+static void LoadSaveGame( const char *savename, bool bLetToolsOverrideLoadGameEnts )
 {
 	// Make sure the freaking save file exists....
 	if ( !saverestore->SaveFileExists( savename ) )
@@ -3183,9 +3157,27 @@ static void LoadSaveGame( const char *savename )
 	// Put up loading plaque
 	SCR_BeginLoadingPlaque();
 
+	{
+		// Prepare the offline session for server reload
+		KeyValues *pEvent = new KeyValues( "OnEngineClientSignonStatePrepareChange" );
+		pEvent->SetString( "reason", "load" );
+		g_pMatchFramework->GetEventsSubscription()->BroadcastEvent( pEvent );
+	}
+
 	Host_Disconnect( false );	// stop old game
 
-	HostState_LoadGame( savename, false );
+	HostState_LoadGame( savename, false, bLetToolsOverrideLoadGameEnts );
+}
+
+void SetLoadLaunchOptions()
+{
+	if ( g_pLaunchOptions )
+	{
+		g_pLaunchOptions->deleteThis();
+	}
+	g_pLaunchOptions = new KeyValues( "LaunchOptions" );
+	g_pLaunchOptions->SetString( "Arg0", "load" );
+	g_pLaunchOptions->SetString( "Arg1", "reserved" );
 }
 
 //-----------------------------------------------------------------------------
@@ -3194,51 +3186,82 @@ static void LoadSaveGame( const char *savename )
 //-----------------------------------------------------------------------------
 void Host_Loadgame_f( const CCommand &args )
 {
-	if ( cmd_source != src_command )
-		return;
-
-	if ( sv.IsMultiplayer() )
+	if ( sv.IsMultiplayer() && !save_multiplayer_override.GetBool() )
 	{
 		ConMsg ("Can't load in multiplayer games.\n");
+		return;
+	}
+
+#ifdef PORTAL2
+	if ( g_pMatchFramework->GetMatchSession() &&
+		V_stricmp( g_pMatchFramework->GetMatchSession()->GetSessionSettings()->GetString( "game/mode" ), "sp" ) )
+	{
+		ConMsg( "Loading is only allowed in single-player game.\n" );
+		return;
+	}
+#endif
+
+	if ( !serverGameDLL->SupportsSaveRestore() )
+	{
+		ConMsg ("This game doesn't support save/restore.");
 		return;
 	}
 
 	if (args.ArgC() < 2)
 	{
-		ConMsg ("load <savename> : load a game\n");
+		ConMsg( "load <savename>: load a game\n" );
+		return;
+	}
+
+	if ( ( engineClient->IsInCommentaryMode() || ( scr_drawloading && EngineVGui()->IsGameUIVisible() ) ) && V_stristr( args[1], "quick" ) )
+	{
 		return;
 	}
 
 	g_szMapLoadOverride[0] = 0;
+	bool bLetToolsOverrideLoadGameEnts = false;
 
 	if ( args.ArgC() > 2)
 	{
 		V_strncpy( g_szMapLoadOverride, args[2], sizeof( g_szMapLoadOverride ) );
+		if ( g_szMapLoadOverride[0] == '*' && args.ArgC() > 3 && V_stricmp( args[3], "LetToolsOverrideLoadGameEnts" ) == 0 )
+		{
+			g_szMapLoadOverride[0] = 0;
+			bLetToolsOverrideLoadGameEnts = true;
+		}
 	}
 
-	g_SaveRestore.SetIsXSave( false );
-	LoadSaveGame( args[1] );
+	saverestore->SetIsXSave( false );
+	SetLoadLaunchOptions();
+	LoadSaveGame( args[1], bLetToolsOverrideLoadGameEnts );
 }
 
 // Always loads saves from DEFAULT_WRITE_PATH, regardless of platform
-CON_COMMAND_AUTOCOMPLETEFILE( load, Host_Loadgame_f, "Load a saved game.", "save", sav );
+CON_COMMAND_AUTOCOMPLETEFILE( load, Host_Loadgame_f, "Load a saved game.", saverestore->GetSaveDir(), sav );
 
-// Loads saves from the 360 storage device
-CON_COMMAND( xload, "Load a saved game from a 360 storage device." )
+// Loads saves from the console storage device
+CON_COMMAND( xload, "Load a saved game from a console storage device." )
 {
-	if ( sv.IsMultiplayer() )
+	if ( sv.IsMultiplayer() && !save_multiplayer_override.GetBool() )
 	{
 		ConMsg ("Can't load in multiplayer games.\n");
 		return;
 	}
+	if ( !serverGameDLL->SupportsSaveRestore() )
+	{
+		ConMsg ("This game doesn't support save/restore.");
+		return;
+	}
+
 	if (args.ArgC() != 2)
 	{
 		ConMsg ("xload <savename>\n");
 		return;
 	}
 
-	g_SaveRestore.SetIsXSave( IsX360() );
-	LoadSaveGame( args[1] );
+	saverestore->SetIsXSave( IsGameConsole() ); // deliberately for both consoles here so you can force an xsave on the PS3 if you need to (whatever that means)
+	SetLoadLaunchOptions();
+	LoadSaveGame( args[1], false );
 }
 
 CON_COMMAND( save_finish_async, "" )
@@ -3265,7 +3288,9 @@ void CSaveRestore::Init( void )
 	if ( !serverGameClients || 
 		( minplayers == 1 ) )
 	{
-		GetSaveMemory();
+		// Don't prealloc save memory, since CS:GO doesn't actually save and it's a waste of
+		// precious address space.
+		//GetSaveMemory();
 
 		Assert( !g_pSaveThread );
 
@@ -3281,7 +3306,7 @@ void CSaveRestore::Init( void )
 			threadPoolStartParams.bUseAffinityTable = true;
 		}
 
-		g_pSaveThread = CreateThreadPool();
+		g_pSaveThread = CreateNewThreadPool();
 		g_pSaveThread->Start( threadPoolStartParams, "SaveJob" );
 	}
 
@@ -3293,12 +3318,22 @@ void CSaveRestore::Init( void )
 	}
 }
 
+void CSaveRestore::SetIsXSave( bool bIsXSave ) 
+{ 
+	AssertMsg( !IsPS3() || !bIsXSave, "XSave is not meaningful on PS3.\n" ); 
+	m_bIsXSave = bIsXSave; 
+}
+
 //-----------------------------------------------------------------------------
 // Purpose: 
 //-----------------------------------------------------------------------------
 void CSaveRestore::Shutdown( void )
 {
 	FinishAsyncSave();
+#ifdef _PS3
+	extern void SaveUtilV2_Shutdown();
+	SaveUtilV2_Shutdown();
+#endif
 	if ( g_pSaveThread )
 	{
 		g_pSaveThread->Stop();
@@ -3336,27 +3371,64 @@ void CSaveRestore::OnFrameRendered()
 			// Dispatch deferred command
 			for ( int i = 0; i < m_sDeferredCommands.Count(); ++i )
 			{
-				Cbuf_AddText( m_sDeferredCommands[ i ].String() );
+				Cbuf_AddText( Cbuf_GetCurrentPlayer(), m_sDeferredCommands[ i ].String() );
 			}
 			m_sDeferredCommands.Purge();
 		}
 	}
+
+#ifdef _PS3
+	if ( !ps3saveuiapi->IsSaveUtilBusy() && g_QueuedAutoSavesToCommit.Count() )
+	{
+		QueuedAutoSave_t queuedSave;
+		if ( g_QueuedAutoSavesToCommit.PopItem( &queuedSave ) )
+		{
+			DevMsg( "Committing AutoSave: %s\n", queuedSave.m_Filename.Get() );
+
+			m_PS3AutoSaveAsyncStatus.m_nCurrentOperationTag = kSAVE_TAG_WRITE_AUTOSAVE;
+
+			ps3saveuiapi->WriteAutosave( 
+				&m_PS3AutoSaveAsyncStatus, 
+				queuedSave.m_Filename.Get(), 
+				queuedSave.m_Comment.Get(), 
+				save_history_count.GetInt() );
+		}
+	}
+#endif
 }
 
 bool CSaveRestore::StorageDeviceValid( void )
 {
 	// PC is always valid
-	if ( !IsX360() )
+	if ( !IsGameConsole() )
 		return true;
 
 	// Non-XSaves are always valid
 	if ( !IsXSave() )
 		return true;
 
-#ifdef _X360
-	// Otherwise, we must have a real storage device
-	int nStorageDeviceID = XBX_GetStorageDeviceId();
-	return ( nStorageDeviceID != XBX_INVALID_STORAGE_ID && nStorageDeviceID != XBX_STORAGE_DECLINED );
+#ifdef _GAMECONSOLE
+	if ( IsPS3() ) // PS3 always has a hard drive
+	{	
+		return true;
+	}
+	else 
+	{
+		// Savegames storage device is mounted only for single-player modes
+		if ( XBX_GetNumGameUsers() != 1 )
+			return false;
+
+		// Otherwise, we must have a real storage device
+		int iSlot = GET_ACTIVE_SPLITSCREEN_SLOT();
+		int iController = XBX_GetUserId( iSlot );
+		if ( iController < 0 ||
+			XBX_GetUserIsGuest( iSlot ) )
+			return false;
+
+		DWORD nStorageDevice = XBX_GetStorageDeviceId( iController );
+		if ( !XBX_DescribeStorageDevice( nStorageDevice ) )
+			return false;
+	}
 #endif
 
 	return true;
@@ -3364,6 +3436,103 @@ bool CSaveRestore::StorageDeviceValid( void )
 
 bool CSaveRestore::IsSaveInProgress()
 {
-	return g_bSaveInProgress;
+	bool bSaveInProgress = !!(int)g_bSaveInProgress;
+
+#ifdef _PS3
+	// Save In Progress, needs to mean exactly that, a game save in progress/
+	// The container state could still be busy, that state needs has to be resolved elsewhere
+	bSaveInProgress |= g_QueuedAutoSavesToCommit.Count();
+	if ( ps3saveuiapi->IsSaveUtilBusy() )
+	{
+		uint32 nOpTag = ps3saveuiapi->GetCurrentOpTag();
+		if ( nOpTag == kSAVE_TAG_WRITE_AUTOSAVE || nOpTag == kSAVE_TAG_WRITE_SAVE )
+		{
+			bSaveInProgress = true;
+		}
+	}
+#endif
+
+	return bSaveInProgress;
+}
+
+bool CSaveRestore::IsAutoSaveDangerousInProgress()
+{
+	return !!(int)g_bAutoSaveDangerousInProgress;
+}
+
+bool CSaveRestore::IsAutoSaveInProgress()
+{
+	return !!(int)g_bAutoSaveInProgress;
+}
+
+bool CSaveRestore::SaveGame( const char *pSaveFilename, bool bIsXSave, char *pOutName, int nOutNameSize, char *pOutComment, int nOutCommentSize )
+{
+	if ( !saverestore->IsValidSave() )
+		return false;
+
+	if ( !serverGameDLL->SupportsSaveRestore() )
+		return false;
+
+	saverestore->SetIsXSave( bIsXSave );
+
+	int iAdditionalSeconds = g_ServerGlobalVariables.curtime - saverestore->GetMostRecentElapsedTimeSet();
+	int iAdditionalMinutes = iAdditionalSeconds / 60;
+	iAdditionalSeconds -= iAdditionalMinutes * 60;
+
+	char comment[80];
+	GetServerSaveCommentEx( 
+		comment, 
+		sizeof( comment ), 
+		saverestore->GetMostRecentElapsedMinutes() + iAdditionalMinutes,
+		saverestore->GetMostRecentElapsedSeconds() + iAdditionalSeconds );
+
+	// caller needs decorated filename
+	CalcSaveGameName( pSaveFilename, pOutName, nOutNameSize );
+	V_strncpy( pOutComment, comment, nOutCommentSize );
+
+	// start async operation, caller will monitor
+	bool bStarted = saverestore->SaveGameSlot( pSaveFilename, comment, false, !IsPS3() ) ? true : false;
+	return bStarted;
+}
+
+void CSaveRestore::SetMostRecentSaveInfo( const char *pMostRecentSavePath, const char *pMostRecentSaveComment )
+{
+	V_strncpy( m_MostRecentSaveInfo.m_MostRecentSavePath, pMostRecentSavePath, sizeof( m_MostRecentSaveInfo.m_MostRecentSavePath ) );
+	V_strncpy( m_MostRecentSaveInfo.m_MostRecentSaveComment, pMostRecentSaveComment, sizeof( m_MostRecentSaveInfo.m_MostRecentSaveComment ) );
+
+	bool bIsAutoSaveDangerous = ( V_stristr( pMostRecentSavePath, "autosavedangerous" ) != NULL );
+	if ( bIsAutoSaveDangerous )
+	{
+		V_strncpy( m_MostRecentSaveInfo.m_LastAutosaveDangerousComment, pMostRecentSaveComment, sizeof( m_MostRecentSaveInfo.m_LastAutosaveDangerousComment ) );
+	}
+
+	m_MostRecentSaveInfo.m_bValid = true;
+}
+
+bool CSaveRestore::GetMostRecentSaveInfo( const char **ppMostRecentSavePath, const char **ppMostRecentSaveComment, const char **ppLastAutosaveDangerousComment )
+{
+	if ( ppMostRecentSavePath )
+	{
+		*ppMostRecentSavePath = m_MostRecentSaveInfo.m_MostRecentSavePath;
+	}
+
+	if ( ppMostRecentSaveComment )
+	{
+		*ppMostRecentSaveComment = m_MostRecentSaveInfo.m_MostRecentSaveComment;
+	}
+
+	if ( ppLastAutosaveDangerousComment )
+	{
+		*ppLastAutosaveDangerousComment = m_MostRecentSaveInfo.m_LastAutosaveDangerousComment;
+	}
+
+	return m_MostRecentSaveInfo.m_bValid;
+}
+
+void CSaveRestore::MarkMostRecentSaveInfoInvalid()
+{
+	// caller's can still get the info
+	// but the contents could be stale
+	m_MostRecentSaveInfo.m_bValid = false;
 }
 

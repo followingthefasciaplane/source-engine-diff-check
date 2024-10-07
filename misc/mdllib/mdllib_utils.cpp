@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2007, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -95,18 +95,18 @@ void * CInsertionTracker::ComputePointer( void *ptrNothingInserted ) const
 
 //////////////////////////////////////////////////////////////////////////
 //
-// CRemoveTracker implementation
+// CMemoryMovingTracker implementation
 //
 //////////////////////////////////////////////////////////////////////////
 
 
-void CRemoveTracker::RemoveBytes( void *pos, int length )
+void CMemoryMovingTracker::RegisterBytes( void *pos, int length )
 {
-	if ( length <= 0 )
+	if ( length <= 0 && m_ePolicy != MEMORY_MODIFY )
 		return;
 
 	// -- hint
-	if ( m_map.Count() )
+	if ( m_map.Count() && m_ePolicy == MEMORY_REMOVE )
 	{
 		if ( m_hint.ptr < pos )
 		{
@@ -141,65 +141,137 @@ void CRemoveTracker::RemoveBytes( void *pos, int length )
 	m_hint.len = length;
 }
 
-int CRemoveTracker::GetNumBytesRemoved() const
+int CMemoryMovingTracker::GetNumBytesRegistered() const
 {
-	int iRemoved = 0;
+	int iRegistered = 0;
 
 	for ( Map::IndexType_t idx = m_map.FirstInorder();
 		idx != m_map.InvalidIndex(); idx = m_map.NextInorder( idx ) )
 	{
 		int numBytes = m_map.Element( idx );
-		iRemoved += numBytes;
+		if ( m_ePolicy == MEMORY_MODIFY && numBytes <= 0 )
+			continue;
+		iRegistered += numBytes;
 	}
 
-	return iRemoved;
+	return iRegistered;
 }
 
-void CRemoveTracker::Finalize()
+void CMemoryMovingTracker::RegisterBaseDelta( void *pOldBase, void *pNewBase )
+{
+	for ( Map::IndexType_t idx = m_map.FirstInorder();
+		idx != m_map.InvalidIndex(); idx = m_map.NextInorder( idx ) )
+	{
+		m_map.Key( idx ) = BYTE_OFF_PTR( m_map.Key( idx ), BYTE_DIFF_PTR( pOldBase, pNewBase ) );
+	}
+	m_hint.ptr = BYTE_OFF_PTR( m_hint.ptr, BYTE_DIFF_PTR( pOldBase, pNewBase ) );
+}
+
+void CMemoryMovingTracker::Finalize()
 {
 	// Iterate the map and find all the adjacent removal data blocks
 	// TODO:
 }
 
-void CRemoveTracker::MemMove( void *ptrBase, int &length ) const
+void CMemoryMovingTracker::MemMove( void *ptrBase, int &length ) const
 {
-	int iRemoved = 0;
-
-	for ( Map::IndexType_t idx = m_map.FirstInorder();
-		idx != m_map.InvalidIndex(); idx = m_map.NextInorder( idx ) )
+	if ( m_ePolicy == MEMORY_REMOVE )
 	{
-		byte *ptr = m_map.Key( idx );
-		byte *ptrDest = BYTE_OFF_PTR( ptr, - iRemoved );
-		int numBytes = m_map.Element( idx );
-		memmove( ptrDest, BYTE_OFF_PTR( ptrDest, numBytes ), BYTE_DIFF_PTR( BYTE_OFF_PTR( ptr, numBytes ), BYTE_OFF_PTR( ptrBase, length ) ) );
-		iRemoved += numBytes;
+		int iRemoved = 0;
+
+		for ( Map::IndexType_t idx = m_map.FirstInorder();
+			idx != m_map.InvalidIndex(); idx = m_map.NextInorder( idx ) )
+		{
+			byte *ptr = m_map.Key( idx );
+			int numBytes = m_map.Element( idx );
+			byte *ptrDest = BYTE_OFF_PTR( ptr, - iRemoved );
+			memmove( ptrDest, BYTE_OFF_PTR( ptrDest, numBytes ), BYTE_DIFF_PTR( BYTE_OFF_PTR( ptr, numBytes ), BYTE_OFF_PTR( ptrBase, length ) ) );
+			iRemoved += numBytes;
+		}
+
+		length -= iRemoved;
 	}
 
-	length -= iRemoved;
+	if ( m_ePolicy == MEMORY_INSERT )
+	{
+		for ( Map::IndexType_t idx = m_map.LastInorder();
+			idx != m_map.InvalidIndex(); idx = m_map.PrevInorder( idx ) )
+		{
+			byte *ptr = m_map.Key( idx );
+			int numBytes = m_map.Element( idx );
+			byte *ptrDest = BYTE_OFF_PTR( ptr, numBytes );
+			memmove( ptrDest, ptr, BYTE_DIFF_PTR( ptr, BYTE_OFF_PTR( ptrBase, length ) ) );
+			length += numBytes;
+		}
+	}
+
+	if ( m_ePolicy == MEMORY_MODIFY )
+	{
+		// Perform insertions first:
+		for ( Map::IndexType_t idx = m_map.LastInorder();
+			idx != m_map.InvalidIndex(); idx = m_map.PrevInorder( idx ) )
+		{
+			byte *ptr = m_map.Key( idx );
+			int numBytes = m_map.Element( idx );
+			if ( numBytes <= 0 )
+				continue;	// this is removal
+			byte *ptrDest = BYTE_OFF_PTR( ptr, numBytes );
+			memmove( ptrDest, ptr, BYTE_DIFF_PTR( ptr, BYTE_OFF_PTR( ptrBase, length ) ) );
+			length += numBytes;
+		}
+
+		// Now perform removals accounting for all insertions
+		// that has happened up to the moment
+		int numInsertedToPoint = 0;
+		int iRemoved = 0;
+		for ( Map::IndexType_t idx = m_map.FirstInorder();
+			idx != m_map.InvalidIndex(); idx = m_map.NextInorder( idx ) )
+		{
+			byte *ptr = m_map.Key( idx );
+			int numBytes = m_map.Element( idx );
+			if ( numBytes >= 0 )
+			{
+				numInsertedToPoint += numBytes;
+				continue;	// this is insertion that already happened
+			}
+			numBytes = -numBytes;
+			ptr = BYTE_OFF_PTR( ptr, numInsertedToPoint );
+			byte *ptrDest = BYTE_OFF_PTR( ptr, - iRemoved );
+			memmove( ptrDest, BYTE_OFF_PTR( ptrDest, numBytes ), BYTE_DIFF_PTR( BYTE_OFF_PTR( ptr, numBytes ), BYTE_OFF_PTR( ptrBase, length ) ) );
+			iRemoved += numBytes;
+		}
+		length -= iRemoved;
+	}
 }
 
-int CRemoveTracker::ComputeOffset( void *ptrBase, int off ) const
+int CMemoryMovingTracker::ComputeOffset( void *ptrBase, int off ) const
 {
 	void *ptrNewBase = ComputePointer( ptrBase );
 	void *ptrNewData = ComputePointer( BYTE_OFF_PTR( ptrBase, off ) );
 	return BYTE_DIFF_PTR( ptrNewBase, ptrNewData );
 }
 
-void * CRemoveTracker::ComputePointer( void *ptrNothingRemoved ) const
+void * CMemoryMovingTracker::ComputePointer( void *ptrNothingRemoved ) const
 {
-	int iRemoved = 0;
+	int iAffected = 0;
 
-	// Iterate the map and find all the data that would be removed before the given pointer
+	// Iterate the map and find all the data that would be removed/inserted before the given pointer
 	for ( Map::IndexType_t idx = m_map.FirstInorder();
 		idx != m_map.InvalidIndex(); idx = m_map.NextInorder( idx ) )
 	{
 		if ( m_map.Key( idx ) < ptrNothingRemoved )
-			iRemoved += m_map.Element( idx );
+			iAffected += m_map.Element( idx );
 		else
 			break;
 	}
 
-	return BYTE_OFF_PTR( ptrNothingRemoved, - iRemoved );
+	if ( m_ePolicy == MEMORY_REMOVE )
+		return BYTE_OFF_PTR( ptrNothingRemoved, - iAffected );
+
+	if ( m_ePolicy == MEMORY_INSERT || m_ePolicy == MEMORY_MODIFY )
+		return BYTE_OFF_PTR( ptrNothingRemoved, iAffected );
+
+	return ptrNothingRemoved;
 }
 
 

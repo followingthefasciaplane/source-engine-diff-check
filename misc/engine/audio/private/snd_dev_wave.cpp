@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -10,8 +10,8 @@
 #include "tier0/memdbgon.h"
 
 extern bool snd_firsttime;
-extern bool MIX_ScaleChannelVolume( paintbuffer_t *ppaint, channel_t *pChannel, int volume[CCHANVOLUMES], int mixchans );
-extern void S_SpatializeChannel( int volume[6], int master_vol, const Vector *psourceDir, float gain, float mono );
+extern bool MIX_ScaleChannelVolume( paintbuffer_t *ppaint, channel_t *pChannel, float volume[CCHANVOLUMES], int mixchans );
+//extern void S_SpatializeChannel( int nSlot, int volume[6], int master_vol, const Vector *psourceDir, float gain, float mono );
 
 // 64K is > 1 second at 16-bit, 22050 Hz
 // 44k: UNDONE - need to double buffers now that we're playing back at 44100?
@@ -40,9 +40,8 @@ public:
 	bool		Should3DMix( void );
 	void		StopAllSounds( void );
 
-	int			PaintBegin( float mixAheadTime, int soundtime, int paintedtime );
+	int64		PaintBegin( float mixAheadTime, int64 soundtime, int64 paintedtime );
 	void		ClearBuffer( void );
-	void		UpdateListener( const Vector& position, const Vector& forward, const Vector& right, const Vector& up );
 	void		MixBegin( int sampleCount );
 	void		MixUpsample( int sampleCount, int filtertype );
 	void		Mix8Mono( channel_t *pChannel, char *pData, int outputOffset, int inputOffset, fixedint rateScaleFix, int outCount, int timecompress );
@@ -51,7 +50,7 @@ public:
 	void		Mix16Stereo( channel_t *pChannel, short *pData, int outputOffset, int inputOffset, fixedint rateScaleFix, int outCount, int timecompress );
 
 	void		TransferSamples( int end );
-	void		SpatializeChannel( int volume[CCHANVOLUMES/2], int master_vol, const Vector& sourceDir, float gain, float mono);
+//	void		SpatializeChannel( int nSlot, int volume[CCHANVOLUMES/2], int master_vol, const Vector& sourceDir, float gain, float mono);
 	void		ApplyDSPEffects( int idsp, portable_samplepair_t *pbuffront, portable_samplepair_t *pbufrear, portable_samplepair_t *pbufcenter, int samplecount );
 
 	const char *DeviceName( void )			{ return "Windows WAVE"; }
@@ -95,7 +94,7 @@ private:
 //-----------------------------------------------------------------------------
 IAudioDevice *Audio_CreateWaveDevice( void )
 {
-	CAudioDeviceWave *wave = NULL;
+	static CAudioDeviceWave *wave = NULL;
 	if ( !wave )
 	{
 		wave = new CAudioDeviceWave;
@@ -116,9 +115,6 @@ IAudioDevice *Audio_CreateWaveDevice( void )
 //-----------------------------------------------------------------------------
 bool CAudioDeviceWave::Init( void )
 {
-	m_bSurround = false;
-	m_bSurroundCenter = false;
-	m_bHeadphone = false;
 	m_buffersSent = 0;
 	m_buffersCompleted = 0;
 	m_pauseCount = 0;
@@ -321,13 +317,13 @@ void CAudioDeviceWave::FreeOutputBuffers()
 //-----------------------------------------------------------------------------
 // Mixing setup
 //-----------------------------------------------------------------------------
-int CAudioDeviceWave::PaintBegin( float mixAheadTime, int soundtime, int paintedtime )
+int64 CAudioDeviceWave::PaintBegin( float mixAheadTime, int64 soundtime, int64 paintedtime )
 {
 	//  soundtime - total samples that have been played out to hardware at dmaspeed
 	//  paintedtime - total samples that have been mixed at speed
 	//  endtime - target for samples in mixahead buffer at speed
 
-	unsigned int endtime = soundtime + mixAheadTime * DeviceDmaSpeed();
+	int64 endtime = soundtime + mixAheadTime * DeviceDmaSpeed();
 	
 	int samps = DeviceSampleCount() >> (DeviceChannels()-1);
 
@@ -463,10 +459,6 @@ void CAudioDeviceWave::ClearBuffer( void )
 	Q_memset(m_pBuffer, clear, DeviceSampleCount() * DeviceSampleBytes() );
 }
 
-void CAudioDeviceWave::UpdateListener( const Vector& position, const Vector& forward, const Vector& right, const Vector& up )
-{
-}
-
 
 void CAudioDeviceWave::MixBegin( int sampleCount )
 {
@@ -488,7 +480,7 @@ void CAudioDeviceWave::MixUpsample( int sampleCount, int filtertype )
 
 void CAudioDeviceWave::Mix8Mono( channel_t *pChannel, char *pData, int outputOffset, int inputOffset, fixedint rateScaleFix, int outCount, int timecompress )
 {
-	int volume[CCHANVOLUMES];
+	float volume[CCHANVOLUMES];
 	paintbuffer_t *ppaint = MIX_GetCurrentPaintbufferPtr();
 
 	if (!MIX_ScaleChannelVolume( ppaint, pChannel, volume, 1))
@@ -500,7 +492,7 @@ void CAudioDeviceWave::Mix8Mono( channel_t *pChannel, char *pData, int outputOff
 
 void CAudioDeviceWave::Mix8Stereo( channel_t *pChannel, char *pData, int outputOffset, int inputOffset, fixedint rateScaleFix, int outCount, int timecompress )
 {
-	int volume[CCHANVOLUMES];
+	float volume[CCHANVOLUMES];
 	paintbuffer_t *ppaint = MIX_GetCurrentPaintbufferPtr();
 
 	if (!MIX_ScaleChannelVolume( ppaint, pChannel, volume, 2 ))
@@ -512,7 +504,7 @@ void CAudioDeviceWave::Mix8Stereo( channel_t *pChannel, char *pData, int outputO
 
 void CAudioDeviceWave::Mix16Mono( channel_t *pChannel, short *pData, int outputOffset, int inputOffset, fixedint rateScaleFix, int outCount, int timecompress )
 {
-	int volume[CCHANVOLUMES];
+	float volume[CCHANVOLUMES];
 	paintbuffer_t *ppaint = MIX_GetCurrentPaintbufferPtr();
 
 	if (!MIX_ScaleChannelVolume( ppaint, pChannel, volume, 1 ))
@@ -524,7 +516,7 @@ void CAudioDeviceWave::Mix16Mono( channel_t *pChannel, short *pData, int outputO
 
 void CAudioDeviceWave::Mix16Stereo( channel_t *pChannel, short *pData, int outputOffset, int inputOffset, fixedint rateScaleFix, int outCount, int timecompress )
 {
-	int volume[CCHANVOLUMES];
+	float volume[CCHANVOLUMES];
 	paintbuffer_t *ppaint = MIX_GetCurrentPaintbufferPtr();
 
 	if (!MIX_ScaleChannelVolume( ppaint, pChannel, volume, 2 ))
@@ -541,8 +533,8 @@ void CAudioDeviceWave::ChannelReset( int entnum, int channelIndex, float distanc
 
 void CAudioDeviceWave::TransferSamples( int end )
 {
-	int		lpaintedtime = g_paintedtime;
-	int		endtime = end;
+	int64	lpaintedtime = g_paintedtime;
+	int64	endtime = end;
 	
 	// resumes playback...
 
@@ -552,12 +544,13 @@ void CAudioDeviceWave::TransferSamples( int end )
 	}
 }
 
-void CAudioDeviceWave::SpatializeChannel( int volume[CCHANVOLUMES/2], int master_vol, const Vector& sourceDir, float gain, float mono )
+// temporarily deprecating to be sure which version of SpatializeChannel is used
+/*void CAudioDeviceWave::SpatializeChannel( int nSlot, int volume[CCHANVOLUMES/2], int master_vol, const Vector& sourceDir, float gain, float mono )
 {
 	VPROF("CAudioDeviceWave::SpatializeChannel");
-	S_SpatializeChannel( volume, master_vol, &sourceDir, gain, mono );
+	S_SpatializeChannel( nSlot, volume, master_vol, &sourceDir, gain, mono );
 }
-
+*/
 void CAudioDeviceWave::StopAllSounds( void )
 {
 }

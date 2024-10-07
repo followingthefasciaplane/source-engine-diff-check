@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright (C), Valve Corporation, All rights reserved. =======
 //
 // Purpose:  A group of players stored on the GC.
 //			 Implementation and networking via shared objects is done in game specific derived classes.
@@ -29,33 +29,31 @@ public:
 	virtual const char* GetSenderName() const = 0;
 
 	virtual CSharedObject* GetSharedObject() = 0;
+	virtual const CSharedObject* GetSharedObject() const = 0;
 
 #ifdef GC
 	virtual void SetSenderID( const CSteamID &steamID ) = 0;
 	virtual void SetGroupID( PlayerGroupID_t nGroupID ) = 0;
 	virtual void SetSenderName( const char *szName ) = 0;
+	virtual void SetTeamInvite( uint32 unTeamID ) = 0;
 
-	virtual void YldInitFromPlayerGroup( IPlayerGroup *pPlayerGroup ) = 0;
+	virtual void YldInitFromPlayerGroup( const IPlayerGroup *pPlayerGroup ) = 0;
 #endif
 };
 
 class IPlayerGroup
 {
 public:
-	virtual ~IPlayerGroup() {}
+	virtual ~IPlayerGroup() { }
 
 	virtual PlayerGroupID_t GetGroupID() const = 0;
-
+	
 	virtual int GetNumMembers() const = 0;
 	virtual const CSteamID GetMember( int i ) const = 0;
 	virtual int GetMemberIndexBySteamID( const CSteamID &steamID ) const = 0;
 
-	// Can be NULL if this player group should not put shared objects on members.
-	// If this object exists, it should do so for the duration of the player's membership in the group.
-	virtual CSharedObject* GetSharedObjectForMember( const CSteamID &steamID ) = 0;
-
-	// Called to debug-dump a player group
-	virtual void Dump() const = 0;
+	virtual CSharedObject* GetSharedObject() = 0;
+	virtual const CSharedObject* GetSharedObject() const = 0;
 
 	virtual const CSteamID GetLeader() const = 0;
 
@@ -68,11 +66,14 @@ public:
 #ifdef GC
 	virtual void SetGroupID( PlayerGroupID_t nPartyID ) = 0;
 	virtual void AddMember( const CSteamID &steamID ) = 0;
-	virtual void RemoveMember( const CSteamID &steamID ) = 0;
+	virtual void RemoveMember( const CSteamID &steamID, bool bLoading = false ) = 0;
 
 	virtual void SetLeader( const CSteamID &steamID ) = 0;
 	virtual void AddPendingInvite( const CSteamID &steamID ) = 0;
 	virtual void RemovePendingInvite( const CSteamID &steamID ) = 0;
+
+	virtual bool ShouldDeleteFromMemcache() const = 0;
+	virtual bool BAttemptUpdate( bool bUpdateMemcached ) = 0;
 #endif
 };
 

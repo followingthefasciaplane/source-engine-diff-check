@@ -1,7 +1,7 @@
 // NextBotPlayerLocomotion.h
 // Locomotor for CBasePlayer derived bots
 // Author: Michael Booth, November 2005
-//========= Copyright Valve Corporation, All rights reserved. ============//
+// Copyright (c) 2005 Turtle Rock Studios, Inc. - All Rights Reserved
 
 #ifndef _NEXT_BOT_PLAYER_LOCOMOTION_H_
 #define _NEXT_BOT_PLAYER_LOCOMOTION_H_
@@ -210,10 +210,6 @@ inline bool PlayerLocomotion::IsAscendingOrDescendingLadder( void ) const
 	case DISMOUNTING_LADDER_TOP:
 	case DISMOUNTING_LADDER_BOTTOM:
 		return true;
-	default:
-		// Explicitly handle the default so that clang knows not to warn us.
-		// warning: enumeration values 'NO_LADDER', 'APPROACHING_ASCENDING_LADDER', and 'APPROACHING_DESCENDING_LADDER' not handled in switch [-Wswitch-enum]
-		break;
 	}
 
 	return false;

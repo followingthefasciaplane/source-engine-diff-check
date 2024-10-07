@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =======
 //
 // Purpose: represent a canonical list of the languages we support, 
 //
@@ -14,7 +14,6 @@
 enum ELanguage
 {
 	k_Lang_None = -1,
-	k_Lang_First = 0,
 	k_Lang_English = 0,
 	k_Lang_German,
 	k_Lang_French,
@@ -39,18 +38,16 @@ enum ELanguage
 	k_Lang_Czech,
 	k_Lang_Brazilian,
 	k_Lang_Bulgarian,
-	k_Lang_Greek,
-	k_Lang_Ukrainian,
 	k_Lang_MAX
 };
 
-#define FOR_EACH_LANGUAGE( eLang )		for ( int eLang = (int)k_Lang_First; eLang < k_Lang_MAX; ++eLang )
-
-ELanguage PchLanguageToELanguage(const char *pchShortName, ELanguage eDefault = k_Lang_English);
+ELanguage PchLanguageToELanguage(const char *pchShortName, ELanguage eDefault = k_Lang_English );
 ELanguage PchLanguageICUCodeToELanguage( const char *pchICUCode, ELanguage eDefault = k_Lang_English );
 const char *GetLanguageShortName( ELanguage eLang );
 const char *GetLanguageICUName( ELanguage eLang );
 const char *GetLanguageVGUILocalization( ELanguage eLang );
-const char *GetLanguageName( ELanguage eLang );
+const char *GetLangugeCLocaleName( ELanguage eLang );
+int GetLanguageCodeID(ELanguage eLang);
 
 #endif /* LANG_H */
+

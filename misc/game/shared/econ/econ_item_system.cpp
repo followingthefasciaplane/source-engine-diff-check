@@ -1,16 +1,15 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2003, Valve LLC, All rights reserved. ============
 //
 // Purpose: 
 //
 //=============================================================================
 
 #include "cbase.h"
-#include "tier1/KeyValues.h"
+#include "tier1/keyvalues.h"
 #include "econ_gcmessages.h"
 #include "econ_item_system.h"
 #include "econ_item_inventory.h"
 #include "game_item_schema.h"
-#include "gc_clientsystem.h"
 
 #include "utldict.h"
 #include "filesystem.h"
@@ -18,13 +17,13 @@
 
 
 #if defined(CLIENT_DLL) || defined(GAME_DLL)
-#include "gamestringpool.h"
 #include "ihasattributes.h"
 #include "tier0/icommandline.h"
 #endif
 
 #if defined(CLIENT_DLL)
 #include "igameevents.h"
+
 #endif
 
 // FIXME FIXME FIXME
@@ -36,18 +35,21 @@
 	#include "econ/dota_item_system.h"
 #endif // defined (DOTA_CLIENT_DLL) || defined (DOTA_DLL)
 
+#if defined( CSTRIKE_CLIENT_DLL ) || defined( CSTRIKE15 )
+	#include "cstrike15_item_system.h"
+#endif
+
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
-#if ( defined( GAME_DLL ) || defined( CLIENT_DLL ) ) && ( defined( _DEBUG ) || defined( STAGING_ONLY ) )
+#if (defined(GAME_DLL) || defined(CLIENT_DLL)) && defined(_DEBUG)
 ConVar item_debug( "item_debug", "0", FCVAR_REPLICATED | FCVAR_DEVELOPMENTONLY );
-ConVar items_game_use_gc_copy( "items_game_use_gc_copy", "1", FCVAR_CHEAT | FCVAR_REPLICATED | FCVAR_ARCHIVE, "If set, items_game.txt will be stomped by the GC." );
 ConVar item_debug_validation( "item_debug_validation", "1", FCVAR_REPLICATED | FCVAR_ARCHIVE, "If set, CEconEntity::ValidateEntityAttachedToPlayer behaves as it would in release builds and also allows bot players to take the same code path as real players." );
-#endif
 
 static ConVar item_quality_chance_unique( "item_quality_chance_unique", "0.1", FCVAR_REPLICATED | FCVAR_DEVELOPMENTONLY, "Percentage chance that a random item is unique." );
 static ConVar item_quality_chance_rare( "item_quality_chance_rare", "0.5", FCVAR_REPLICATED | FCVAR_DEVELOPMENTONLY, "Percentage chance that a random item is a rare." );
 static ConVar item_quality_chance_common( "item_quality_chance_common", "1.0", FCVAR_REPLICATED | FCVAR_DEVELOPMENTONLY, "Percentage chance that a random item is common." );
+#endif
 
 
 //-----------------------------------------------------------------------------
@@ -63,7 +65,6 @@ CEconItemSystem *ItemSystem( void )
 
 	return pSystem;
 }
-
 
 //-----------------------------------------------------------------------------
 // Purpose: Global schema access, declared in game_item_schema.h
@@ -94,10 +95,6 @@ CEconItemSystem::~CEconItemSystem( void )
 //-----------------------------------------------------------------------------
 void CEconItemSystem::Init( void )
 {
-#if defined(USES_ECON_ITEMS)
-	ParseItemSchemaFile( "scripts/items/items_game.txt" );
-#endif
-
 #ifdef CLIENT_DLL
 	IGameEvent *event = gameeventmanager->CreateEvent( "item_schema_initialized" );
 	if ( event )
@@ -129,7 +126,7 @@ void CEconItemSystem::ReloadWhitelist( void )
 	bool bDefault = true;
 	bool bFoundWhitelist = false;
 
-	KeyValues *pWhitelistKV = new KeyValues( "item_whitelist" );
+	KeyValues::AutoDelete pWhitelistKV( "item_whitelist" );
 
 #ifdef GAME_DLL
 	if ( mp_tournament.GetBool() && mp_tournament_whitelist.GetString() )
@@ -160,12 +157,11 @@ void CEconItemSystem::ReloadWhitelist( void )
 
 	// Otherwise, go through the KVs and turn on the matching items.
 	Msg("Parsing item whitelist (default: %s)\n", bDefault ? "allowed" : "disallowed" );
-	pWhitelistKV = pWhitelistKV->GetFirstSubKey();
-	while ( pWhitelistKV )
+	for ( KeyValues *pKey = pWhitelistKV->GetFirstSubKey(); pKey != NULL; pKey = pKey->GetNextKey() )
 	{
-		bool bAllow = pWhitelistKV->GetBool();
+		bool bAllow = pKey->GetBool();
 
-		const char *pszItemName = pWhitelistKV->GetName();
+		const char *pszItemName = pKey->GetName();
 		if ( pszItemName && pszItemName[0] && !FStrEq("unlisted_items_default_to", pszItemName) )
 		{
 			CEconItemDefinition *pItemDef = m_itemSchema.GetItemDefinitionByName( pszItemName );
@@ -179,37 +175,20 @@ void CEconItemSystem::ReloadWhitelist( void )
 				Warning(" -> Could not find an item definition named '%s'\n", pszItemName );
 			}
 		}
-
-		pWhitelistKV = pWhitelistKV->GetNextKey();
 	}
 	Msg("Finished.\n");
 }
-
-#ifdef GAME_DLL
-CON_COMMAND_F( item_show_whitelistable_definitions, "Lists the item definitions that can be whitelisted in the item_whitelist.txt file in tournament mode.", FCVAR_CHEAT )
-{
-	Msg("Available item definitions for whitelisting:\n");
-	const CEconItemSchema::SortedItemDefinitionMap_t& mapItemDefs = ItemSystem()->GetItemSchema()->GetSortedItemDefinitionMap();
-	FOR_EACH_MAP( mapItemDefs, i )
-	{
-		const CEconItemDefinition *pItemDef = mapItemDefs[i];
-		if ( pItemDef && pItemDef->GetQuality() != AE_NORMAL && !pItemDef->IsHidden() )
-		{
-			Msg("   '%s'\n", pItemDef->GetDefinitionName() );
-		}
-	}
-}
-#endif // GAME_DLL
 
 //-----------------------------------------------------------------------------
 // Purpose: 
 //-----------------------------------------------------------------------------
 void CEconItemSystem::ResetAttribStringCache( void )
 {
-	const CUtlMap<int, CEconItemAttributeDefinition, int> &mapDefs = m_itemSchema.GetAttributeDefinitionMap();
-	FOR_EACH_MAP_FAST( mapDefs, i )
+	CEconItemSchema::EconAttrDefsContainer_t &mapDefs = m_itemSchema.GetAttributeDefinitionContainer();
+	FOR_EACH_VEC( mapDefs, i )
 	{
-		mapDefs[i].ClearStringCache();
+		if ( mapDefs[i] )
+			mapDefs[i]->ClearStringCache();
 	}
 }
 
@@ -265,9 +244,7 @@ void CEconItemSystem::ParseItemSchemaFile( const char *pFilename )
 	{
 		FOR_EACH_VEC( vecErrors, nError )
 		{
-			// we want this to be an Error because several
-			// places rely on loading a valid item schema 
-			Error( "%s\n", vecErrors[nError].String() );
+			Msg( "%s", vecErrors[nError].String() );
 		}
 	}
 }
@@ -275,7 +252,7 @@ void CEconItemSystem::ParseItemSchemaFile( const char *pFilename )
 //-----------------------------------------------------------------------------
 // Purpose: Generate a random item matching the specified criteria
 //-----------------------------------------------------------------------------
-item_definition_index_t CEconItemSystem::GenerateRandomItem( CItemSelectionCriteria *pCriteria, entityquality_t *outEntityQuality )
+int CEconItemSystem::GenerateRandomItem( CItemSelectionCriteria *pCriteria, entityquality_t *outEntityQuality )
 {
 	// First, pick a random item quality (use the one passed in first)
 	if ( !pCriteria->BQualitySet() )
@@ -286,13 +263,13 @@ item_definition_index_t CEconItemSystem::GenerateRandomItem( CItemSelectionCrite
 	pCriteria->SetIgnoreEnabledFlag( true );
 
 	// Determine which item templates match the criteria
-	CUtlVector<item_definition_index_t> vecMatches;
+	CUtlVector<int> vecMatches;
 	const CEconItemSchema::ItemDefinitionMap_t &mapDefs = m_itemSchema.GetItemDefinitionMap();
 
 HackMakeValidList:
 	FOR_EACH_MAP_FAST( mapDefs, i )
 	{
-		if ( pCriteria->BEvaluate( mapDefs[i] ) )
+		if ( pCriteria->BEvaluate( mapDefs[i], m_itemSchema ) )
 		{
 			vecMatches.AddToTail( mapDefs.Key( i ) );
 		}
@@ -308,16 +285,16 @@ HackMakeValidList:
 			pCriteria->SetQuality( GetRandomQualityForItem( true ) );
 			goto HackMakeValidList;
 		}
-		return INVALID_ITEM_DEF_INDEX;
+		return INVALID_ITEM_INDEX;
 	}
 
 	// Choose a random match
 	int iChosenIdx = RandomInt( 0, (iValidItems-1) );
-	item_definition_index_t iChosenItem = vecMatches[iChosenIdx];
+	int iChosenItem = vecMatches[iChosenIdx];
 
 	const CEconItemDefinition *pItemDef = m_itemSchema.GetItemDefinition( iChosenItem );
 	if ( !pItemDef )
-		return INVALID_ITEM_DEF_INDEX;
+		return INVALID_ITEM_INDEX;
 
 	// If we haven't specified an entity quality, we want to use the item's specified one
 	if ( pCriteria->GetQuality() == AE_USE_SCRIPT_VALUE )
@@ -344,6 +321,7 @@ HackMakeValidList:
 //-----------------------------------------------------------------------------
 entityquality_t CEconItemSystem::GetRandomQualityForItem( bool bPreventUnique )
 {
+	/*
 	// Start on the rarest, and work backwards
 	if ( !bPreventUnique )
 	{
@@ -356,8 +334,39 @@ entityquality_t CEconItemSystem::GetRandomQualityForItem( bool bPreventUnique )
 
 	if ( RandomFloat(0,1) < item_quality_chance_common.GetFloat() )
 		return AE_RARITY1;
+	*/
 
 	return AE_NORMAL;
+}
+
+//-----------------------------------------------------------------------------
+// Purpose: 
+//-----------------------------------------------------------------------------
+CEconItemAttribute *CEconItemSystem::GenerateAttribute( attrib_definition_index_t iAttributeDefinition, float flValue )
+{
+	// Create a new instance of the chosen attribute
+	CEconItemAttribute *pAttribute = new CEconItemAttribute( iAttributeDefinition, flValue );
+	return pAttribute;
+}
+
+//-----------------------------------------------------------------------------
+// Purpose: Generate an attribute by name. Used for debugging.
+//-----------------------------------------------------------------------------
+CEconItemAttribute *CEconItemSystem::GenerateAttribute( const char *pszName, float flValue )
+{
+	// Find the attribute index matching the class
+	CEconItemSchema::EconAttrDefsContainer_t &mapDefs = m_itemSchema.GetAttributeDefinitionContainer();
+	FOR_EACH_VEC( mapDefs, i )
+	{
+		if ( !mapDefs[i] )
+			continue;
+		if ( Q_stricmp(pszName, mapDefs[i]->GetDefinitionName()) )
+			continue;
+
+		return GenerateAttribute( mapDefs[i]->GetDefinitionIndex(), flValue );
+	}
+
+	return NULL;
 }
 
 static ISteamHTTP *GetISteamHTTP()
@@ -381,7 +390,7 @@ static ISteamHTTP *GetISteamHTTP()
 //-----------------------------------------------------------------------------
 bool IDelayedSchemaData::InitializeSchemaInternal( CEconItemSchema *pItemSchema, CUtlBuffer& bufRawData, bool bInitAsBinary, uint32 nExpectedVersion )
 {
-	Msg( "Applying new item schema, version %08X\n", nExpectedVersion );
+	DevMsg( 2, "Applying new item schema, version %08X\n", nExpectedVersion );
 
 	CUtlVector<CUtlString> vecErrors;
 	bool bSuccess = bInitAsBinary
@@ -429,15 +438,13 @@ private:
 	CUtlBuffer m_bufRawData;
 };
 
-extern bool CheckValveSignature( const void *data, uint32 nDataSize, const void *signature, uint32 nSignatureSize );
-
 //-----------------------------------------------------------------------------
 // Purpose: We received a text file from an HTML request.
 //-----------------------------------------------------------------------------
 class DelayedSchemaData_HTTPResponseData : public IDelayedSchemaData
 {
 public:
-	DelayedSchemaData_HTTPResponseData( ISteamHTTP *pHTTP, HTTPRequestHandle handleHTTPRequest, uint32 unBodySize, uint32 nExpectedVersion, const std::string &sSignature )
+	DelayedSchemaData_HTTPResponseData( ISteamHTTP *pHTTP, HTTPRequestHandle handleHTTPRequest, uint32 unBodySize, uint32 nExpectedVersion )
 		: m_nExpectedVersion( nExpectedVersion )
 	{
 		Assert( pHTTP );
@@ -446,8 +453,6 @@ public:
 		m_bufRawData.SeekPut( CUtlBuffer::SEEK_HEAD, unBodySize );
 
 		m_bValid = pHTTP->GetHTTPResponseBodyData( handleHTTPRequest, (uint8*)m_bufRawData.Base(), m_bufRawData.TellPut() );
-		if ( m_bValid )
-			m_bValid = CheckValveSignature( m_bufRawData.Base(), m_bufRawData.TellPut(), sSignature.c_str(), sSignature.length() );
 	}
 
 	virtual bool InitializeSchema( CEconItemSchema *pItemSchema )
@@ -464,9 +469,7 @@ private:
 	uint32 m_nExpectedVersion;
 };
 
-#define GC_ITEM_SCHEMA_UPDATE_APPLIED "Applied updated item schema from GC. %d bytes, version %08X.\n"
-#define GC_ITEM_SCHEMA_UPDATE_QUEUED "Received %d bytes item schema version %08X direct data; update is queued.\n"
-
+#if GC_UPDATE_ITEM_SCHEMA_SUPPORTED
 //-----------------------------------------------------------------------------
 // Purpose: Update the item schema from the GC
 //-----------------------------------------------------------------------------
@@ -483,19 +486,23 @@ public:
 	uint32 m_nExpectedVersion;
 	bool bHTTPCompleted;
 	CCallResult< CGCUpdateItemSchema, HTTPRequestCompleted_t > callback;
-	std::string m_sSignature;
 
 	virtual bool BYieldingRunGCJob( GCSDK::IMsgNetPacket *pNetPacket )
 	{
 		GCSDK::CProtoBufMsg< CMsgUpdateItemSchema > msg( pNetPacket );
 
-#if ( defined( GAME_DLL ) || defined( CLIENT_DLL ) ) && ( defined( _DEBUG ) || defined( STAGING_ONLY ) )
-		const bool bUseGCCopy = items_game_use_gc_copy.GetBool();
+#if (defined(GAME_DLL) || defined(CLIENT_DLL))
+		bool bUseGCCopy = true;
+
+		if ( steamapicontext && steamapicontext->SteamUtils() && steamapicontext->SteamUtils()->GetConnectedUniverse() != k_EUniversePublic )
+		{
+			bUseGCCopy = CommandLine()->FindParm( "-use_local_item_data" ) == 0;
+		}
 #else
-		const bool bUseGCCopy = true;
+		bool bUseGCCopy = true;
 #endif
 
-		if ( bUseGCCopy == false && k_EUniversePublic != GetUniverse() )
+		if ( bUseGCCopy == false )
 		{
 			Msg( "Loading item schema from local file.\n" );
 			KeyValuesAD pItemsGameKV( "ItemsGameFile" );
@@ -527,14 +534,12 @@ public:
 			return true;
 		}
 
-		m_sSignature = msg.Body().signature();
-
 		// !TEST!
-		//const char *szURL = "http://cdn.beta.steampowered.com/apps/440/scripts/items/items_game.b8b7a85b4dd98b139957004b86ec0bc070a59d18.txt";
+		//const char *szURL = "http://cdntest.steampowered.com/apps/440/scripts/items/items_game.b8b7a85b4dd98b139957004b86ec0bc070a59d18.txt";
 		if ( msg.Body().has_items_game() )
 		{
-			bool bDidInit = ItemSystem()->GetItemSchema()->MaybeInitFromBuffer( new DelayedSchemaData_GCDirectData( msg.Body().items_game() ) );
-			Msg( bDidInit ? GC_ITEM_SCHEMA_UPDATE_APPLIED : GC_ITEM_SCHEMA_UPDATE_QUEUED, (int)msg.Body().items_game().size(), m_nExpectedVersion );
+			DevMsg( 2, "Received %d bytes item schema version %08X direct data; update is queued.\n", (int)msg.Body().items_game().size(), m_nExpectedVersion );
+			ItemSystem()->GetItemSchema()->MaybeInitFromBuffer( new DelayedSchemaData_GCDirectData( msg.Body().items_game() ) );
 		}
 		else
 		{
@@ -553,7 +558,8 @@ public:
 				ISteamHTTP *pHTTP = GetISteamHTTP();
 				if ( !pHTTP )
 				{
-					//Warning( "Can't get ISteamHTTP to update item schema\n");
+					// We must be a game server.  Request the direct data.
+					Msg( "ISteamHTTP not available to update item schema, requesting direct data for version %08X\n", m_nExpectedVersion );
 					return true;
 				}
 				HTTPRequestHandle hReq = pHTTP->CreateHTTPRequest( k_EHTTPMethodGET, m_szUrl );
@@ -621,8 +627,8 @@ public:
 				}
 				else
 				{
-					bool bDidInit = ItemSystem()->GetItemSchema()->MaybeInitFromBuffer( new DelayedSchemaData_HTTPResponseData( pHTTP, arg->m_hRequest, unBodySize, m_nExpectedVersion, m_sSignature ) );
-					Msg( bDidInit ? GC_ITEM_SCHEMA_UPDATE_APPLIED : GC_ITEM_SCHEMA_UPDATE_QUEUED, unBodySize, m_nExpectedVersion );
+					DevMsg( 2, "Fetched %d bytes item schema version %08X via HTTP; update is queued.\n", unBodySize, m_nExpectedVersion );
+					ItemSystem()->GetItemSchema()->MaybeInitFromBuffer( new DelayedSchemaData_HTTPResponseData( pHTTP, arg->m_hRequest, unBodySize, m_nExpectedVersion ) );
 				}
 			}
 
@@ -635,7 +641,9 @@ public:
 		pHTTP->ReleaseHTTPRequest( arg->m_hRequest );
 	}
 };
-GC_REG_JOB( GCSDK::CGCClient, CGCUpdateItemSchema, "CGCUpdateItemSchema", k_EMsgGCUpdateItemSchema, GCSDK::k_EServerTypeGCClient );
+GC_REG_CLIENT_JOB( CGCUpdateItemSchema, k_EMsgGCUpdateItemSchema );
+#endif
+
 
 #ifdef CLIENT_DLL
 //-----------------------------------------------------------------------------
@@ -659,36 +667,129 @@ CON_COMMAND_F( econ_show_items_with_tag, "Lists the item definitions that have a
 }
 #endif // CLIENT_DLL
 
-#ifdef STAGING_ONLY
-//-----------------------------------------------------------------------------
-// Purpose: Update the item schema from the GC
-//-----------------------------------------------------------------------------
 #ifdef CLIENT_DLL
-CON_COMMAND_F( cl_reload_local_item_schema, "Reloads the local item schema copy.", FCVAR_CLIENTDLL )
-#else
-CON_COMMAND_F( sv_reload_local_item_schema, "Reloads the local item schema copy.", FCVAR_GAMEDLL )
-#endif
+//-----------------------------------------------------------------------------
+// Purpose: Get a file from a given URL.
+// Generalized version of the item schema update.
+//-----------------------------------------------------------------------------
+CGCFetchWebResource::CGCFetchWebResource( GCSDK::CGCClient *pClient, CUtlString strName, CUtlString strURL, bool bForceSkipCache/*=false*/, KeyValues *pkvGETParams/*=NULL*/ ) : GCSDK::CGCClientJob( pClient )
 {
-#ifdef CLIENT_DLL
-	engine->ClientCmd_Unrestricted( "cmd sv_reload_local_item_schema" );
-#endif
+	m_strName = strName;
+	m_strURL = strURL;
+	m_bHTTPCompleted = false;
+	m_bForceSkipCache = bForceSkipCache;
+	m_pkvGETParams = pkvGETParams->MakeCopy();
+}
 
-	Msg( "Loading item schema from local file.\n" );
-	KeyValuesAD pItemsGameKV( "ItemsGameFile" );
-	if ( pItemsGameKV->LoadFromFile( g_pFullFileSystem, "scripts/items/items_game.txt", "GAME" ) )
+CGCFetchWebResource::~CGCFetchWebResource()
+{
+	if ( m_pkvGETParams )
 	{
-		CUtlBuffer buffer;
-		pItemsGameKV->WriteAsBinary( buffer );
-
-		CUtlVector< CUtlString > vecErrors;
-		bool bSuccess = ItemSystem()->GetItemSchema()->BInitBinaryBuffer( buffer, &vecErrors );
-		if( !bSuccess )
-		{
-			FOR_EACH_VEC( vecErrors, nError )
-			{
-				Warning( "%s\n", vecErrors[nError].Get() );
-			}
-		}
+		m_pkvGETParams->deleteThis();
 	}
 }
+
+bool CGCFetchWebResource::BYieldingRunGCJob()
+{
+	ISteamHTTP *pHTTP = GetISteamHTTP();
+	if ( !pHTTP )
+	{
+		// We must be a game server.
+		Msg( "ISteamHTTP not available to update web resource.\n" );
+		return true;
+	}
+
+	// Send an HTTP request for the file.
+	HTTPRequestHandle hReq = pHTTP->CreateHTTPRequest( k_EHTTPMethodGET, m_strURL.Get() );
+	pHTTP->SetHTTPRequestNetworkActivityTimeout( hReq, 10 );
+
+	// Skip any data that may be cached in the Steam client or elsewhere
+	if ( m_bForceSkipCache )
+	{
+		pHTTP->SetHTTPRequestHeaderValue( hReq, "Cache-Control", "no-cache, no-store" );
+	}
+
+	// Add any GET params
+	if ( m_pkvGETParams )
+	{
+		FOR_EACH_VALUE( m_pkvGETParams, kvSubKey )
+		{
+			pHTTP->SetHTTPRequestGetOrPostParameter( hReq, kvSubKey->GetName(), kvSubKey->GetString() );
+		}
+	}
+
+	SteamAPICall_t hCall;
+	if ( !pHTTP->SendHTTPRequest( hReq, &hCall ) )
+	{
+		Warning( "Failed to update web resource: couldn't fetch %s\n", m_strURL.Get() );
+		return true;
+	}
+	
+	// Wait for completion.
+	m_bHTTPCompleted = false;
+	callback.Set( hCall, this, &CGCFetchWebResource::OnHTTPCompleted );
+	
+	// Wait for it to finish.
+	while ( !m_bHTTPCompleted )
+	{
+		BYieldingWaitOneFrame();
+	}
+	
+	return true;
+}
+
+void CGCFetchWebResource::OnHTTPCompleted( HTTPRequestCompleted_t *arg, bool bFailed )
+{
+	// Clear flag so we can stop yielding.
+	m_bHTTPCompleted = true;
+	
+	ISteamHTTP *pHTTP = GetISteamHTTP();
+	Assert( pHTTP );
+	if ( !pHTTP )
+		return;
+	
+	if ( arg->m_eStatusCode != k_EHTTPStatusCode200OK )
+	{
+		Warning( "Failed to update web resource: HTTP status %d fetching %s\n", arg->m_eStatusCode, m_strURL.Get() );
+	}
+	else
+	{
+		if ( !arg->m_bRequestSuccessful )
+		{
+			bFailed = true;
+		}
+		if ( !bFailed )
+		{
+			uint32 unBodySize;
+			if ( !pHTTP->GetHTTPResponseBodySize( arg->m_hRequest, &unBodySize ) )
+			{
+				Assert( false );
+				bFailed = true;
+			}
+			else
+			{
+				DevMsg( 2, "Fetched %d bytes for web resource via HTTP.\n", unBodySize );
+
+				CUtlBuffer bufRawData;
+				bufRawData.SetBufferType( true, true );
+				bufRawData.SeekPut( CUtlBuffer::SEEK_HEAD, unBodySize );
+				bool bValid = pHTTP->GetHTTPResponseBodyData( arg->m_hRequest, (uint8*) bufRawData.Base(), bufRawData.TellPut() );
+				if ( bValid )
+				{
+					KeyValues* pResourceKV = new KeyValues( ""  );
+					pResourceKV->LoadFromBuffer( "", bufRawData );
+					ItemSystem()->GetItemSchema()->SetWebResource( m_strName, pResourceKV );
+				}
+			}
+		}
+
+		if ( bFailed )
+		{
+			Warning( "Failed to update web resource from %s\n", m_strURL.Get() );
+		}
+	}
+
+	pHTTP->ReleaseHTTPRequest( arg->m_hRequest );
+}
+
 #endif

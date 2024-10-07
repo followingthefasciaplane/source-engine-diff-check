@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -17,7 +17,7 @@
 #include "tier0/memdbgon.h"
 
 #ifdef CLIENT_DLL
-ConVar cl_showhelp( "cl_showhelp", "1", FCVAR_USERINFO | FCVAR_ARCHIVE, "Set to 0 to not show on-screen help" );
+ConVar cl_showhelp( "cl_showhelp", "1", FCVAR_ARCHIVE, "Set to 0 to not show on-screen help" );
 #endif
 
 //-----------------------------------------------------------------------------

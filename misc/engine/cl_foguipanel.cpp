@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -10,7 +10,7 @@
 #include <vgui/ISystem.h>
 #include <vgui/ISurface.h>
 #include <vgui/IVGui.h>
-#include <KeyValues.h>
+#include <keyvalues.h>
 
 #include <vgui_controls/BuildGroup.h>
 #include <vgui_controls/Tooltip.h>
@@ -53,124 +53,66 @@ CFogUIPanel::CFogUIPanel( vgui::Panel *parent ) : vgui::Frame( parent, "FogUIPan
 {
 	SetTitle( "FogUI", true );
 
+	m_bControlsInitialized = false;
+
 	m_pFogOverride = new vgui::CheckButton( this, "FogOverride", "FogOverride" );
 
 	//
 	// World
 	//
 	m_pFogEnable = new vgui::CheckButton( this, "FogEnable", "FogEnable" );
-	m_pFogEnable->SetSelected( true );
+
 	// FogStart
 	m_pFogStart = new vgui::Slider( this, "FogStart" );
-	m_pFogStart->SetRange( -10000, 30000 );
-	m_pFogStart->SetValue( 1 );
-	m_pFogStart->AddActionSignalTarget( this );
-	m_pFogStart->SetDragOnRepositionNob( true );
 	m_pFogStartText = new vgui::TextEntry( this, "FogStartText" );
-	m_pFogStartText->SendNewLine( true );
-	m_pFogStartText->SetCatchEnterKey( true );
+
 	// FogEnd
 	m_pFogEnd = new vgui::Slider( this, "FogEnd" );
-	m_pFogEnd->SetRange( -10000, 30000  );
-	m_pFogEnd->SetValue( 1 );
-	m_pFogEnd->AddActionSignalTarget( this );
-	m_pFogEnd->SetDragOnRepositionNob( true );
 	m_pFogEndText = new vgui::TextEntry( this, "FogEndText" );
-	m_pFogEndText->SendNewLine( true );
-	m_pFogEndText->SetCatchEnterKey( true );
+
 	// Red
 	m_pFogColorRed = new vgui::Slider( this, "FogColorRed" );
-	m_pFogColorRed->SetRange( 1, 255 );
-	m_pFogColorRed->SetValue( 1 );
-	m_pFogColorRed->AddActionSignalTarget( this );
-	m_pFogColorRed->SetDragOnRepositionNob( true );
 	m_pFogColorRedText = new vgui::TextEntry( this, "FogColorRedText" );
-	m_pFogColorRedText->SendNewLine( true );
-	m_pFogColorRedText->SetCatchEnterKey( true );
+
 	// Green
 	m_pFogColorGreen = new vgui::Slider( this, "FogColorGreen" );
-	m_pFogColorGreen->SetRange( 1, 255 );
-	m_pFogColorGreen->SetValue( 1 );
-	m_pFogColorGreen->AddActionSignalTarget( this );
-	m_pFogColorGreen->SetDragOnRepositionNob( true );
 	m_pFogColorGreenText = new vgui::TextEntry( this, "FogColorGreenText" );
-	m_pFogColorGreenText->SendNewLine( true );
-	m_pFogColorGreenText->SetCatchEnterKey( true );
+
 	// Blue
 	m_pFogColorBlue = new vgui::Slider( this, "FogColorBlue" );
-	m_pFogColorBlue->SetRange( 1, 255 );
-	m_pFogColorBlue->SetValue( 1 );
-	m_pFogColorBlue->AddActionSignalTarget( this );
-	m_pFogColorBlue->SetDragOnRepositionNob( true );
 	m_pFogColorBlueText = new vgui::TextEntry( this, "FogColorBlueText" );
-	m_pFogColorBlueText->SendNewLine( true );
-	m_pFogColorBlueText->SetCatchEnterKey( true );
 
 	//
 	// Skybox
 	//
 	m_pFogEnableSky = new vgui::CheckButton( this, "FogEnableSky", "FogEnableSky" );
-	m_pFogEnableSky->SetSelected( true );
+
 	// Start
 	m_pFogStartSky = new vgui::Slider( this, "FogStartSky" );
-	m_pFogStartSky->SetRange( -10000, 30000  );
-	m_pFogStartSky->SetValue( 1 );
-	m_pFogStartSky->AddActionSignalTarget( this );
-	m_pFogStartSky->SetDragOnRepositionNob( true );
 	m_pFogStartTextSky = new vgui::TextEntry( this, "FogStartTextSky" );
-	m_pFogStartTextSky->SendNewLine( true );
-	m_pFogStartTextSky->SetCatchEnterKey( true );
+
 	// End
 	m_pFogEndSky = new vgui::Slider( this, "FogEndSky" );
-	m_pFogEndSky->SetRange( -10000, 30000  );
-	m_pFogEndSky->SetValue( 1 );
-	m_pFogEndSky->AddActionSignalTarget( this );
-	m_pFogEndSky->SetDragOnRepositionNob( true );
 	m_pFogEndTextSky = new vgui::TextEntry( this, "FogEndTextSky" );
-	m_pFogEndTextSky->SendNewLine( true );
-	m_pFogEndTextSky->SetCatchEnterKey( true );
+
 	// Red
 	m_pFogColorRedSky = new vgui::Slider( this, "FogColorRedSky" );
-	m_pFogColorRedSky->SetRange( 1, 255 );
-	m_pFogColorRedSky->SetValue( 1 );
-	m_pFogColorRedSky->AddActionSignalTarget( this );
-	m_pFogColorRedSky->SetDragOnRepositionNob( true );
 	m_pFogColorRedTextSky = new vgui::TextEntry( this, "FogColorRedTextSky" );
-	m_pFogColorRedTextSky->SendNewLine( true );
-	m_pFogColorRedTextSky->SetCatchEnterKey( true );
+
 	// Green
 	m_pFogColorGreenSky = new vgui::Slider( this, "FogColorGreenSky" );
-	m_pFogColorGreenSky->SetRange( 1, 255 );
-	m_pFogColorGreenSky->SetValue( 1 );
-	m_pFogColorGreenSky->AddActionSignalTarget( this );
-	m_pFogColorGreenSky->SetDragOnRepositionNob( true );
 	m_pFogColorGreenTextSky = new vgui::TextEntry( this, "FogColorGreenTextSky" );
-	m_pFogColorGreenTextSky->SendNewLine( true );
-	m_pFogColorGreenTextSky->SetCatchEnterKey( true );
+
 	// Blue
 	m_pFogColorBlueSky = new vgui::Slider( this, "FogColorBlueSky" );
-	m_pFogColorBlueSky->SetRange( 1, 255 );
-	m_pFogColorBlueSky->SetValue( 1 );
-	m_pFogColorBlueSky->AddActionSignalTarget( this );
-	m_pFogColorBlueSky->SetDragOnRepositionNob( true );
 	m_pFogColorBlueTextSky = new vgui::TextEntry( this, "FogColorBlueTextSky" );
-	m_pFogColorBlueTextSky->SendNewLine( true );
-	m_pFogColorBlueTextSky->SetCatchEnterKey( true );
 
 	//
 	// Far Z
 	//
 	m_pFarZOverride = new vgui::CheckButton( this, "FarZOverride", "FarZOverride" );
-	m_pFarZOverride->SetSelected( false );
 	m_pFarZ = new vgui::Slider( this, "FarZ" );
-	m_pFarZ->SetRange( 1, 30000 );
-	m_pFarZ->SetValue( 30000 );
-	m_pFarZ->AddActionSignalTarget( this );
-	m_pFarZ->SetDragOnRepositionNob( true );
 	m_pFarZText = new vgui::TextEntry( this, "FarZText" );
-	m_pFarZText->SendNewLine( true );
-	m_pFarZText->SetCatchEnterKey( true );
-	m_pFarZText->SetText( va( "%i", m_pFarZ->GetValue() ) );
 
 	// TODO:
 	// - fog_maxdensity
@@ -203,6 +145,8 @@ void CFogUIPanel::OnTick()
 
 	if ( !IsVisible() )
 		return;
+
+	InitControls();
 
 	bool bEnabled = m_pFogOverride->IsSelected();
 
@@ -247,33 +191,33 @@ void CFogUIPanel::OnCommand( const char *command )
 	{
 		if ( m_pFogOverride->IsSelected() == true )
 		{
-			Cbuf_AddText( "fog_override 1\n" );
+			Cbuf_AddText( Cbuf_GetCurrentPlayer(), "fog_override 1\n" );
 		}
 		else
 		{
-			Cbuf_AddText( "fog_override 0\n" );
+			Cbuf_AddText( Cbuf_GetCurrentPlayer(), "fog_override 0\n" );
 		}
 	}
 	else if ( !Q_strcasecmp( command, "FogEnable" ) )
 	{
 		if ( m_pFogEnable->IsSelected() == true )
 		{
-			Cbuf_AddText( "fog_enable 1\n" );
+			Cbuf_AddText( Cbuf_GetCurrentPlayer(), "fog_enable 1\n" );
 		}
 		else
 		{
-			Cbuf_AddText( "fog_enable 0\n" );
+			Cbuf_AddText( Cbuf_GetCurrentPlayer(), "fog_enable 0\n" );
 		}
 	}
 	else if ( !Q_strcasecmp( command, "FogEnableSky" ) )
 	{
 		if ( m_pFogEnableSky->IsSelected() == true )
 		{
-			Cbuf_AddText( "fog_enableskybox 1\n" );
+			Cbuf_AddText( Cbuf_GetCurrentPlayer(), "fog_enableskybox 1\n" );
 		}
 		else
 		{
-			Cbuf_AddText( "fog_enableskybox 0\n" );
+			Cbuf_AddText( Cbuf_GetCurrentPlayer(), "fog_enableskybox 0\n" );
 		}
 	}
 	else if ( !Q_strcasecmp( command, "FarZOverride" ) )
@@ -281,11 +225,11 @@ void CFogUIPanel::OnCommand( const char *command )
 		if ( m_pFarZOverride->IsSelected() == true )
 		{
 			//m_pFarZText->SetText( va( "%i", m_pFarZ->GetValue() ) );
-			Cbuf_AddText( va( "r_farz %i\n", m_pFarZ->GetValue() ) );
+			Cbuf_AddText( Cbuf_GetCurrentPlayer(), va( "r_farz %i\n", m_pFarZ->GetValue() ) );
 		}
 		else
 		{
-			Cbuf_AddText( "r_farz -1\n" );
+			Cbuf_AddText( Cbuf_GetCurrentPlayer(), "r_farz -1\n" );
 		}
 	}
 	else
@@ -406,12 +350,12 @@ void CFogUIPanel::OnMessage( const KeyValues *params, VPANEL fromPanel )
 		// World
 		if ( fromPanel == m_pFogStart->GetVPanel() )
 		{
-			Cbuf_AddText( va( "fog_start %i\n", m_pFogStart->GetValue() ) );
+			Cbuf_AddText( Cbuf_GetCurrentPlayer(), va( "fog_start %i\n", m_pFogStart->GetValue() ) );
 			m_pFogStartText->SetText( va( "%i", m_pFogStart->GetValue() ) );
 		}
 		if ( fromPanel == m_pFogEnd->GetVPanel() )
 		{
-			Cbuf_AddText( va( "fog_end %i\n", m_pFogEnd->GetValue() ) );
+			Cbuf_AddText( Cbuf_GetCurrentPlayer(), va( "fog_end %i\n", m_pFogEnd->GetValue() ) );
 			m_pFogEndText->SetText( va( "%i", m_pFogEnd->GetValue() ) );
 		}
 		if ( fromPanel == m_pFogColorRed->GetVPanel() )
@@ -432,12 +376,12 @@ void CFogUIPanel::OnMessage( const KeyValues *params, VPANEL fromPanel )
 		// Skybox
 		if ( fromPanel == m_pFogStartSky->GetVPanel() )
 		{
-			Cbuf_AddText( va( "fog_startskybox %i\n", m_pFogStartSky->GetValue() ) );
+			Cbuf_AddText( Cbuf_GetCurrentPlayer(), va( "fog_startskybox %i\n", m_pFogStartSky->GetValue() ) );
 			m_pFogStartTextSky->SetText( va( "%i", m_pFogStartSky->GetValue() ) );
 		}
 		if ( fromPanel == m_pFogEndSky->GetVPanel() )
 		{
-			Cbuf_AddText( va( "fog_endskybox %i\n", m_pFogEndSky->GetValue() ) );
+			Cbuf_AddText( Cbuf_GetCurrentPlayer(), va( "fog_endskybox %i\n", m_pFogEndSky->GetValue() ) );
 			m_pFogEndTextSky->SetText( va( "%i", m_pFogEndSky->GetValue() ) );
 		}
 		if ( fromPanel == m_pFogColorRedSky->GetVPanel() )
@@ -458,10 +402,131 @@ void CFogUIPanel::OnMessage( const KeyValues *params, VPANEL fromPanel )
 		// FarZ
 		if ( fromPanel == m_pFarZ->GetVPanel() )
 		{
-			Cbuf_AddText( va( "r_farz %i\n", m_pFarZ->GetValue() ) );
+			Cbuf_AddText( Cbuf_GetCurrentPlayer(), va( "r_farz %i\n", m_pFarZ->GetValue() ) );
 			m_pFarZText->SetText( va( "%i", m_pFarZ->GetValue() ) );
 		}
 	}
+}
+
+void CFogUIPanel::InitControls( void )
+{
+	if ( m_bControlsInitialized )
+	{
+		return;
+	}
+
+	m_pFogEnable->SetSelected( true );
+
+	// FogStart
+	m_pFogStart->SetRange( -10000, 30000 );
+	m_pFogStart->SetValue( 1 );
+	m_pFogStart->AddActionSignalTarget( this );
+	m_pFogStart->SetDragOnRepositionNob( true );
+
+	m_pFogStartText->SendNewLine( true );
+	m_pFogStartText->SetCatchEnterKey( true );
+
+	// FogEnd
+	m_pFogEnd->SetRange( -10000, 30000  );
+	m_pFogEnd->SetValue( 1 );
+	m_pFogEnd->AddActionSignalTarget( this );
+	m_pFogEnd->SetDragOnRepositionNob( true );
+
+	m_pFogEndText->SendNewLine( true );
+	m_pFogEndText->SetCatchEnterKey( true );
+
+	// Red
+	m_pFogColorRed->SetRange( 1, 255 );
+	m_pFogColorRed->SetValue( 1 );
+	m_pFogColorRed->AddActionSignalTarget( this );
+	m_pFogColorRed->SetDragOnRepositionNob( true );
+
+	m_pFogColorRedText->SendNewLine( true );
+	m_pFogColorRedText->SetCatchEnterKey( true );
+
+	// Green
+	m_pFogColorGreen->SetRange( 1, 255 );
+	m_pFogColorGreen->SetValue( 1 );
+	m_pFogColorGreen->AddActionSignalTarget( this );
+	m_pFogColorGreen->SetDragOnRepositionNob( true );
+
+	m_pFogColorGreenText->SendNewLine( true );
+	m_pFogColorGreenText->SetCatchEnterKey( true );
+
+	// Blue
+	m_pFogColorBlue->SetRange( 1, 255 );
+	m_pFogColorBlue->SetValue( 1 );
+	m_pFogColorBlue->AddActionSignalTarget( this );
+	m_pFogColorBlue->SetDragOnRepositionNob( true );
+
+	m_pFogColorBlueText->SendNewLine( true );
+	m_pFogColorBlueText->SetCatchEnterKey( true );
+
+	//
+	// Skybox
+	//
+	m_pFogEnableSky->SetSelected( true );
+
+	// Start
+	m_pFogStartSky->SetRange( -10000, 30000  );
+	m_pFogStartSky->SetValue( 1 );
+	m_pFogStartSky->AddActionSignalTarget( this );
+	m_pFogStartSky->SetDragOnRepositionNob( true );
+
+	m_pFogStartTextSky->SendNewLine( true );
+	m_pFogStartTextSky->SetCatchEnterKey( true );
+
+	// End
+	m_pFogEndSky->SetRange( -10000, 30000  );
+	m_pFogEndSky->SetValue( 1 );
+	m_pFogEndSky->AddActionSignalTarget( this );
+	m_pFogEndSky->SetDragOnRepositionNob( true );
+
+	m_pFogEndTextSky->SendNewLine( true );
+	m_pFogEndTextSky->SetCatchEnterKey( true );
+
+	// Red
+	m_pFogColorRedSky->SetRange( 1, 255 );
+	m_pFogColorRedSky->SetValue( 1 );
+	m_pFogColorRedSky->AddActionSignalTarget( this );
+	m_pFogColorRedSky->SetDragOnRepositionNob( true );
+
+	m_pFogColorRedTextSky->SendNewLine( true );
+	m_pFogColorRedTextSky->SetCatchEnterKey( true );
+
+	// Green
+	m_pFogColorGreenSky->SetRange( 1, 255 );
+	m_pFogColorGreenSky->SetValue( 1 );
+	m_pFogColorGreenSky->AddActionSignalTarget( this );
+	m_pFogColorGreenSky->SetDragOnRepositionNob( true );
+
+	m_pFogColorGreenTextSky->SendNewLine( true );
+	m_pFogColorGreenTextSky->SetCatchEnterKey( true );
+
+	// Blue
+	m_pFogColorBlueSky->SetRange( 1, 255 );
+	m_pFogColorBlueSky->SetValue( 1 );
+	m_pFogColorBlueSky->AddActionSignalTarget( this );
+	m_pFogColorBlueSky->SetDragOnRepositionNob( true );
+
+	m_pFogColorBlueTextSky->SendNewLine( true );
+	m_pFogColorBlueTextSky->SetCatchEnterKey( true );
+
+	//
+	// Far Z
+	//
+	m_pFarZOverride->SetSelected( false );
+
+	m_pFarZ->SetRange( 1, 30000 );
+	m_pFarZ->SetValue( 30000 );
+	m_pFarZ->AddActionSignalTarget( this );
+	m_pFarZ->SetDragOnRepositionNob( true );
+
+	m_pFarZText->SendNewLine( true );
+	m_pFarZText->SetCatchEnterKey( true );
+	m_pFarZText->SetText( va( "%i", m_pFarZ->GetValue() ) );
+
+	m_bControlsInitialized = true;
 }
 
 //-----------------------------------------------------------------------------
@@ -505,11 +570,11 @@ void CFogUIPanel::UpdateFogColors()
 	int iRed = m_pFogColorRed->GetValue();
 	int iGreen = m_pFogColorGreen->GetValue();
 	int iBlue = m_pFogColorBlue->GetValue();
-	Cbuf_AddText( va( "fog_color %i %i %i\n", iRed, iGreen, iBlue ) );
+	Cbuf_AddText( Cbuf_GetCurrentPlayer(), va( "fog_color %i %i %i\n", iRed, iGreen, iBlue ) );
 	int iRedSky = m_pFogColorRedSky->GetValue();
 	int iGreenSky = m_pFogColorGreenSky->GetValue();
 	int iBlueSky = m_pFogColorBlueSky->GetValue();
-	Cbuf_AddText( va( "fog_colorskybox %i %i %i\n", iRedSky, iGreenSky, iBlueSky ) );
+	Cbuf_AddText( Cbuf_GetCurrentPlayer(), va( "fog_colorskybox %i %i %i\n", iRedSky, iGreenSky, iBlueSky ) );
 }
 
 //-----------------------------------------------------------------------------

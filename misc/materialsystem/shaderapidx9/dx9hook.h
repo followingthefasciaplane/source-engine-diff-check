@@ -1,4 +1,3 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
 /* 
 TODO: add option to null out drawprim calls.
  
@@ -27,8 +26,8 @@ Might be interesting to make it so dx9hook.h paid attention to the PIX_ENABLE na
 	class CD3DCallTimer
 	{
 	public:
-		inline CD3DCallTimer() { g_nTotalD3DCalls++; g_nTotalD3DCycles -= tmFastTime(); }
-		inline ~CD3DCallTimer() {  g_nTotalD3DCycles += tmFastTime(); }
+		inline CD3DCallTimer() { g_nTotalD3DCalls++; g_nTotalD3DCycles -= TM_FAST_TIME(); }
+		inline ~CD3DCallTimer() {  g_nTotalD3DCycles += TM_FAST_TIME(); }
 	};
 	
 	#define D3D_BATCH_PERF(...) __VA_ARGS__
@@ -44,7 +43,7 @@ Might be interesting to make it so dx9hook.h paid attention to the PIX_ENABLE na
 	#define XXX																													\
 		if( ThreadInMainThread() )  																							\
 		{   																													\
-			tmMessage( TELEMETRY_LEVEL0, TMMF_ICON_NOTE | TMMF_SEVERITY_WARNING, "(source/d3d)%s", __FUNCTION__ );				\
+			tmMessage( TELEMETRY_LEVEL0, TMMF_ICON_NOTE | TMMF_SEVERITY_WARNING, "(dota/d3d)%s", __FUNCTION__ );				\
 			tmZoneFiltered( TELEMETRY_LEVEL0, 50, TMZF_NONE, "%s", __FUNCTION__ );												\
 		}
 #endif
@@ -966,12 +965,12 @@ public:
 
 			if ( s_rdtsc_to_ms == 0.0f )
 			{
-				TmU64 t0 = tmFastTime();
+				TmU64 t0 = TM_FAST_TIME();
 				double d0 = Plat_FloatTime();
 
 				ThreadSleep( 1 );
 
-				TmU64 t1 = tmFastTime();
+				TmU64 t1 = TM_FAST_TIME();
 				double d1 = Plat_FloatTime();
 
 				s_rdtsc_to_ms = ( 1000.0f * ( d1 - d0 ) ) / ( t1 - t0 );

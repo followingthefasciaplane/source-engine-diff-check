@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -16,6 +16,7 @@
 #include "interface.h"
 #include "mathlib/mathlib.h"
 #include "istudiorender.h"
+#include "datacache/idatacache.h"
 
 //-----------------------------------------------------------------------------
 // forward declarations
@@ -28,6 +29,7 @@ class Vector;
 struct studiohdr_t;
 class IMaterial;
 class CStudioHdr;
+struct MaterialLightingState_t;
 
 FORWARD_DECLARE_HANDLE( LightCacheHandle_t ); 
 
@@ -91,9 +93,23 @@ struct StaticPropRenderInfo_t
 	const model_t			*pModel;
 	IClientRenderable		*pRenderable;
 	Vector					*pLightingOrigin;
-	short					skin;
 	ModelInstanceHandle_t	instance;
+	uint8					skin;
+	uint8					alpha;
 };
+
+struct LightingQuery_t
+{
+	Vector m_LightingOrigin;
+	ModelInstanceHandle_t m_InstanceHandle;
+	bool m_bAmbientBoost;
+};
+
+struct StaticLightingQuery_t : public LightingQuery_t
+{
+	IClientRenderable *m_pRenderable;
+};
+
 
 // UNDONE: Move this to hud export code, subsume previous functions
 abstract_class IVModelRender
@@ -114,7 +130,8 @@ public:
 
 	// This causes a material to be used when rendering the model instead 
 	// of the materials the model was compiled with
-	virtual void	ForcedMaterialOverride( IMaterial *newMaterial, OverrideType_t nOverrideType = OVERRIDE_NORMAL ) = 0;
+	virtual void	ForcedMaterialOverride( IMaterial *newMaterial, OverrideType_t nOverrideType = OVERRIDE_NORMAL, int nMaterialIndex = -1 ) = 0;
+	virtual bool	IsForcedMaterialOverride() = 0;
 
 	virtual void	SetViewTarget( const CStudioHdr *pStudioHdr, int nBodyIndex, const Vector& target ) = 0;
 
@@ -137,17 +154,20 @@ public:
 	// along the ray. The material is the decal material, the radius is the
 	// radius of the decal to create.
 	virtual void AddDecal( ModelInstanceHandle_t handle, Ray_t const& ray, 
-		Vector const& decalUp, int decalIndex, int body, bool noPokeThru = false, int maxLODToDecal = ADDDECAL_TO_ALL_LODS ) = 0;
+		Vector const& decalUp, int decalIndex, int body, bool noPokeThru = false, int maxLODToDecal = ADDDECAL_TO_ALL_LODS, IMaterial *pSpecifyMaterial = NULL, float w=1.0f, float h=1.0f, void *pvProxyUserData = NULL, int nAdditionalDecalFlags = 0 ) = 0;
 
 	// Removes all the decals on a model instance
 	virtual void RemoveAllDecals( ModelInstanceHandle_t handle ) = 0;
 
+	// Returns true if the model instance is valid and the decal list is not empty
+	virtual bool ModelHasDecals( ModelInstanceHandle_t handle ) = 0;
+
 	// Remove all decals from all models
-	virtual void RemoveAllDecalsFromAllModels() = 0;
+	virtual void RemoveAllDecalsFromAllModels( bool bRenderContextValid ) = 0;
 
 	// Shadow rendering, DrawModelShadowSetup returns the address of the bone-to-world array, NULL in case of error
-	virtual matrix3x4_t* DrawModelShadowSetup( IClientRenderable *pRenderable, int body, int skin, DrawModelInfo_t *pInfo, matrix3x4_t *pCustomBoneToWorld = NULL ) = 0;
-	virtual void DrawModelShadow(  IClientRenderable *pRenderable, const DrawModelInfo_t &info, matrix3x4_t *pCustomBoneToWorld = NULL ) = 0;
+	virtual matrix3x4a_t* DrawModelShadowSetup( IClientRenderable *pRenderable, int body, int skin, DrawModelInfo_t *pInfo, matrix3x4a_t *pCustomBoneToWorld = NULL ) = 0;
+	virtual void DrawModelShadow(  IClientRenderable *pRenderable, const DrawModelInfo_t &info, matrix3x4a_t *pCustomBoneToWorld = NULL ) = 0;
 
 	// This gets called when overbright, etc gets changed to recompute static prop lighting.
 	virtual bool RecomputeStaticLighting( ModelInstanceHandle_t handle ) = 0;
@@ -158,10 +178,10 @@ public:
 	// Extended version of drawmodel
 	virtual int	DrawModelEx( ModelRenderInfo_t &pInfo ) = 0;
 
-	virtual int	DrawModelExStaticProp( ModelRenderInfo_t &pInfo ) = 0;
+	virtual int	DrawModelExStaticProp( IMatRenderContext *pRenderContext, ModelRenderInfo_t &pInfo ) = 0;
 
-	virtual bool DrawModelSetup( ModelRenderInfo_t &pInfo, DrawModelState_t *pState, matrix3x4_t *pCustomBoneToWorld, matrix3x4_t** ppBoneToWorldOut ) = 0;
-	virtual void DrawModelExecute( const DrawModelState_t &state, const ModelRenderInfo_t &pInfo, matrix3x4_t *pCustomBoneToWorld = NULL ) = 0;
+	virtual bool DrawModelSetup( IMatRenderContext *pRenderContext, ModelRenderInfo_t &pInfo, DrawModelState_t *pState, matrix3x4_t **ppBoneToWorldOut ) = 0;
+	virtual void DrawModelExecute( IMatRenderContext *pRenderContext, const DrawModelState_t &state, const ModelRenderInfo_t &pInfo, matrix3x4_t *pCustomBoneToWorld = NULL ) = 0;
 
 	// Sets up lighting context for a point in space
 	virtual void SetupLighting( const Vector &vecCenter ) = 0;
@@ -175,10 +195,25 @@ public:
 
 	virtual void SetupColorMeshes( int nTotalVerts ) = 0;
 
-	virtual void AddColoredDecal( ModelInstanceHandle_t handle, Ray_t const& ray, 
-		Vector const& decalUp, int decalIndex, int body, Color cColor, bool noPokeThru = false, int maxLODToDecal = ADDDECAL_TO_ALL_LODS ) = 0;
+	// Sets up lighting context for a point in space, with smooth interpolation per model.
+	// Passing MODEL_INSTANCE_INVALID as a handle is equivalent to calling SetupLighting.
+	virtual void SetupLightingEx( const Vector &vecCenter, ModelInstanceHandle_t handle ) = 0;
 
-	virtual void GetMaterialOverride( IMaterial** ppOutForcedMaterial, OverrideType_t* pOutOverrideType ) = 0;
+	// Finds the brightest light source illuminating a point. Returns false if there isn't any.
+	virtual bool GetBrightestShadowingLightSource( const Vector &vecCenter, Vector& lightPos, Vector& lightBrightness, bool bAllowNonTaggedLights ) = 0;
+
+	// Computes lighting state for an array of lighting requests
+	virtual void ComputeLightingState( int nCount, const LightingQuery_t *pQuery, MaterialLightingState_t *pState, ITexture **ppEnvCubemapTexture ) = 0;
+
+	// Gets an array of decal handles given model instances
+	virtual void GetModelDecalHandles( StudioDecalHandle_t *pDecals, int nDecalStride, int nCount, const ModelInstanceHandle_t *pHandles ) = 0;
+
+	// Computes lighting state for an array of lighting requests for renderables which use static lighting
+	virtual void ComputeStaticLightingState( int nCount, const StaticLightingQuery_t *pQuery, MaterialLightingState_t *pState, MaterialLightingState_t *pDecalState, ColorMeshInfo_t **ppStaticLighting, ITexture **ppEnvCubemapTexture, DataCacheHandle_t *pColorMeshHandles ) = 0;
+
+	// Cleans up lighting state. Must be called after the draw call that uses
+	// the color meshes return from ComputeStaticLightingState has been issued
+	virtual void CleanupStaticLightingState( int nCount, DataCacheHandle_t *pColorMeshHandles ) = 0;
 };
 
 

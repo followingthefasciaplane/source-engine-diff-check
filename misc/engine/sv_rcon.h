@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -18,13 +18,11 @@
 #include "utllinkedlist.h"
 #include "netadr.h"
 #include "sv_remoteaccess.h"
-#include "socketcreator.h"
+#include "tier2/socketcreator.h"
 #include "igameserverdata.h"
 
-// memdbgon must be the last include file in a .cpp file!!!
-#include "tier0/memdbgon.h"
-
 #define RCON_MAX_OUTSTANDING_SENDS 100 // max packets to queue before dropping connection
+#define RCON_MAX_RCON_COMMAND_LEN 1024  // max size of an incoming command in bytes
 
 //-----------------------------------------------------------------------------
 // container class to handle network streams

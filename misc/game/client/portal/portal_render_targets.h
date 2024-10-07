@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Portal mod render targets are specified by and accessable through this singleton
 //
@@ -36,16 +36,12 @@ public:
 	ITexture* GetDepthDoublerTexture( void );
 
 	//recursive views require different water textures
-	ITexture* GetWaterReflectionTextureForStencilDepth( int iStencilDepth );
-	ITexture* GetWaterRefractionTextureForStencilDepth( int iStencilDepth );
 
 private:
 	CTextureReference m_Portal1Texture;
 	CTextureReference m_Portal2Texture;
 	CTextureReference m_DepthDoublerTexture;
 
-	CTextureReference m_WaterRefractionTextures[2];
-	CTextureReference m_WaterReflectionTextures[2];
 
 	ITexture* InitPortal1Texture ( IMaterialSystem* pMaterialSystem );
 	ITexture* InitPortal2Texture ( IMaterialSystem* pMaterialSystem );
@@ -57,5 +53,6 @@ private:
 
 extern CPortalRenderTargets* portalrendertargets;
 
+const char *GetSubTargetNameForPortalRecursionLevel( int iRecursionLevel );
 
 #endif //PORTALRENDERTARGETS_H_

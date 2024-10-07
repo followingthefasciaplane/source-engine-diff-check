@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose:	Debugging overlay functions
 //
@@ -39,15 +39,12 @@ int GetOverlayTick()
 	if ( sv.IsActive() )
 		return sv.m_nTickCount;
 
-	return cl.GetClientTickCount();
+	return GetBaseLocalClient().GetClientTickCount();
 }
 
 bool OverlayText_t::IsDead()
 {
-	if ( IsXbox() && cl.IsPaused() )
-		return false;
-
-	if ( m_nServerCount != cl.m_nServerCount )
+	if ( m_nServerCount != GetBaseLocalClient().m_nServerCount )
 		return true;
 
 	if ( m_nCreationTick != -1 )
@@ -61,12 +58,12 @@ bool OverlayText_t::IsDead()
 	if ( m_flEndTime == NDEBUG_PERSIST_TILL_NEXT_SERVER )
 		return false;
 
-	return (cl.GetTime() >= m_flEndTime);
+	return (GetBaseLocalClient().GetTime() >= m_flEndTime);
 }
 
 void OverlayText_t::SetEndTime( float duration )
 {
-	m_nServerCount = cl.m_nServerCount;
+	m_nServerCount = GetBaseLocalClient().m_nServerCount;
 
 	if ( duration <= 0.0f )
 	{
@@ -81,7 +78,7 @@ void OverlayText_t::SetEndTime( float duration )
 	}
 	else
 	{
-	m_flEndTime = cl.GetTime() + duration;
+		m_flEndTime = GetBaseLocalClient().GetTime() + duration;
 	}
 }
 
@@ -95,7 +92,8 @@ enum OverlayType_t
 	OVERLAY_LINE,
 	OVERLAY_TRIANGLE,
 	OVERLAY_SWEPT_BOX,
-	OVERLAY_BOX2
+	OVERLAY_BOX2,
+	OVERLAY_CAPSULE
 };
 
 struct OverlayBase_t
@@ -111,10 +109,7 @@ struct OverlayBase_t
 
 	bool IsDead()
 	{
-		if ( IsXbox() && cl.IsPaused() )
-			return false;
-
-		if ( m_nServerCount != cl.m_nServerCount )
+		if ( m_nServerCount != GetBaseLocalClient().m_nServerCount )
 			return true;
 
 		if ( m_nCreationTick != -1 )
@@ -128,12 +123,12 @@ struct OverlayBase_t
 		if ( m_flEndTime == NDEBUG_PERSIST_TILL_NEXT_SERVER )
 			return false;
 
-		return (cl.GetTime() >= m_flEndTime) ;
+		return (GetBaseLocalClient().GetTime() >= m_flEndTime) ;
 	}
 
 	void SetEndTime( float duration )
 	{
-		m_nServerCount = cl.m_nServerCount;
+		m_nServerCount = GetBaseLocalClient().m_nServerCount;
 
 		if ( duration <= 0.0f )
 		{
@@ -147,7 +142,7 @@ struct OverlayBase_t
 		}
 		else
 		{
-			m_flEndTime = cl.GetTime() + duration;
+			m_flEndTime = GetBaseLocalClient().GetTime() + duration;
 		}
 	}
 
@@ -196,6 +191,7 @@ struct OverlaySphere_t : public OverlayBase_t
 	int				g;
 	int				b;
 	int				a;
+	bool			m_bWireframe;
 };
 
 struct OverlayLine_t : public OverlayBase_t 
@@ -240,6 +236,20 @@ struct OverlaySweptBox_t : public OverlayBase_t
 	int				a;
 };
 
+
+struct OverlayCapsule_t : public OverlayBase_t
+{
+	OverlayCapsule_t() { m_Type = OVERLAY_CAPSULE; }
+
+	Vector			start;
+	Vector			end;
+	float			flRadius;
+	int				r;
+	int				g;
+	int				b;
+	int				a;
+	bool			m_bWireframe;
+};
 
 //-----------------------------------------------------------------------------
 // Forward declarations
@@ -356,8 +366,12 @@ int ScreenPosition(float flXPos, float flYPos, Vector& screen)
 //-----------------------------------------------------------------------------
 void AddEntityTextOverlay(int ent_index, int line_offset, float duration, int r, int g, int b, int a, const char *text)
 {
-	if ( cl.IsPaused() )
+	if ( GetBaseLocalClient().IsPaused() )
 		return;
+
+#if defined( _X360 ) && defined( _CERT )
+	return;
+#endif
 
 	AUTO_LOCK( s_OverlayMutex );
 	OverlayText_t *new_overlay = new OverlayText_t;
@@ -387,7 +401,7 @@ void AddEntityTextOverlay(int ent_index, int line_offset, float duration, int r,
 //-----------------------------------------------------------------------------
 void AddGridOverlay(const Vector& vPos) 
 {
-	if ( cl.IsPaused() )
+	if ( GetBaseLocalClient().IsPaused() )
 		return;
 
 	AUTO_LOCK( s_OverlayMutex );
@@ -436,8 +450,12 @@ void AddCoordFrameOverlay(const matrix3x4_t& frame, float flScale, int vColorTab
 //-----------------------------------------------------------------------------
 void AddTextOverlay(const Vector& textPos, float duration, const char *text) 
 {
-	if ( cl.IsPaused() )
+	if ( GetBaseLocalClient().IsPaused() )
 		return;
+
+#if defined( _X360 ) && defined( _CERT )
+	return;
+#endif
 
 	AUTO_LOCK( s_OverlayMutex );
 	OverlayText_t *new_overlay = new OverlayText_t;
@@ -463,8 +481,12 @@ void AddTextOverlay(const Vector& textPos, float duration, const char *text)
 //-----------------------------------------------------------------------------
 void AddTextOverlay(const Vector& textPos, float duration, float alpha, const char *text) 
 {
-	if ( cl.IsPaused() )
+	if ( GetBaseLocalClient().IsPaused() )
 		return;
+
+#if defined( _X360 ) && defined( _CERT )
+	return;
+#endif
 
 	AUTO_LOCK( s_OverlayMutex );
 	OverlayText_t *new_overlay = new OverlayText_t;
@@ -490,8 +512,12 @@ void AddTextOverlay(const Vector& textPos, float duration, float alpha, const ch
 //------------------------------------------------------------------------------
 void AddScreenTextOverlay(float flXPos, float flYPos, int line_offset, float duration, int r, int g, int b, int a, const char *text)
 {
-	if ( cl.IsPaused() )
+	if ( GetBaseLocalClient().IsPaused() )
 		return;
+
+#if defined( _X360 ) && defined( _CERT )
+	return;
+#endif
 
 	AUTO_LOCK( s_OverlayMutex );
 	OverlayText_t *new_overlay = new OverlayText_t;
@@ -525,8 +551,12 @@ void AddScreenTextOverlay( float flXPos, float flYPos, float duration, int r, in
 //-----------------------------------------------------------------------------
 void AddTextOverlay(const Vector& textPos, int line_offset, float duration, const char *text) 
 {
-	if ( cl.IsPaused() )
+	if ( GetBaseLocalClient().IsPaused() )
 		return;
+
+#if defined( _X360 ) && defined( _CERT )
+	return;
+#endif
 
 	AUTO_LOCK( s_OverlayMutex );
 	OverlayText_t *new_overlay = new OverlayText_t;
@@ -548,8 +578,12 @@ void AddTextOverlay(const Vector& textPos, int line_offset, float duration, cons
 
 void AddTextOverlay(const Vector& textPos, int line_offset, float duration, float alpha, const char *text)
 {
-	if ( cl.IsPaused() )
+	if ( GetBaseLocalClient().IsPaused() )
 		return;
+
+#if defined( _X360 ) && defined( _CERT )
+	return;
+#endif
 
 	AUTO_LOCK( s_OverlayMutex );
 	OverlayText_t *new_overlay = new OverlayText_t;
@@ -571,8 +605,12 @@ void AddTextOverlay(const Vector& textPos, int line_offset, float duration, floa
 
 void AddTextOverlay(const Vector& textPos, int line_offset, float duration, float r, float g, float b, float alpha, const char *text)
 {
-	if ( cl.IsPaused() )
+	if ( GetBaseLocalClient().IsPaused() )
 		return;
+
+#if defined( _X360 ) && defined( _CERT )
+	return;
+#endif
 
 	AUTO_LOCK( s_OverlayMutex );
 	OverlayText_t *new_overlay = new OverlayText_t;
@@ -603,7 +641,7 @@ void AddTextOverlay(const Vector& textPos, int line_offset, float duration, floa
 //-----------------------------------------------------------------------------
 void AddBoxOverlay(const Vector& origin, const Vector& mins, const Vector& maxs, QAngle const& angles, int r, int g, int b, int a, float flDuration) 
 {
-	if ( cl.IsPaused() )
+	if ( GetBaseLocalClient().IsPaused() )
 		return;
 
 	AUTO_LOCK( s_OverlayMutex );
@@ -634,7 +672,7 @@ void AddBoxOverlay(const Vector& origin, const Vector& mins, const Vector& maxs,
 
 void AddBoxOverlay2( const Vector& origin, const Vector& mins, const Vector& maxs, QAngle const& orientation, const Color& faceColor, const Color& edgeColor, float duration )
 {
-	if ( cl.IsPaused() )
+	if ( GetBaseLocalClient().IsPaused() )
 		return;
 
 	AUTO_LOCK( s_OverlayMutex );
@@ -661,6 +699,30 @@ void AddBoxOverlay2( const Vector& origin, const Vector& mins, const Vector& max
 	s_pOverlays = new_overlay;
 }
 
+void AddCapsuleOverlay( const Vector &vStart, const Vector &vEnd, const float &flRadius, int r, int g, int b, int a, float flDuration)
+{
+	if ( GetBaseLocalClient().IsPaused() )
+		return;
+
+	AUTO_LOCK( s_OverlayMutex );
+	OverlayCapsule_t *new_overlay = new OverlayCapsule_t;
+
+	new_overlay->start = vStart;
+	new_overlay->end = vEnd;
+	
+	new_overlay->flRadius = flRadius;
+
+	new_overlay->r = r;
+	new_overlay->g = g;
+	new_overlay->b = b;
+	new_overlay->a = a;
+
+	new_overlay->SetEndTime( flDuration );
+
+	new_overlay->m_pNextOverlay = s_pOverlays;
+	s_pOverlays = new_overlay;
+}
+
 //-----------------------------------------------------------------------------
 // Purpose: Add new overlay sphere
 // Input  : Position of sphere
@@ -669,9 +731,9 @@ void AddBoxOverlay2( const Vector& origin, const Vector& mins, const Vector& max
 //			duration
 // Output :
 //-----------------------------------------------------------------------------
-void AddSphereOverlay(const Vector& vOrigin, float flRadius, int nTheta, int nPhi, int r, int g, int b, int a, float flDuration)
+void AddSphereOverlay(const Vector& vOrigin, float flRadius, int nTheta, int nPhi, int r, int g, int b, int a, float flDuration, bool bWireframe)
 {
-	if ( cl.IsPaused() )
+	if ( GetBaseLocalClient().IsPaused() )
 		return;
 
 	AUTO_LOCK( s_OverlayMutex );
@@ -687,6 +749,7 @@ void AddSphereOverlay(const Vector& vOrigin, float flRadius, int nTheta, int nPh
 	new_overlay->g = g;
 	new_overlay->b = b;
 	new_overlay->a = a;
+	new_overlay->m_bWireframe = bWireframe;
 
 	new_overlay->SetEndTime( flDuration );
 
@@ -698,7 +761,7 @@ void AddSphereOverlay(const Vector& vOrigin, float flRadius, int nTheta, int nPh
 void AddSweptBoxOverlay(const Vector& start, const Vector& end, 
 	const Vector& mins, const Vector& maxs, QAngle const& angles, int r, int g, int b, int a, float flDuration)
 {
-	if ( cl.IsPaused() )
+	if ( GetBaseLocalClient().IsPaused() )
 		return;
 
 	AUTO_LOCK( s_OverlayMutex );
@@ -738,7 +801,7 @@ void AddSweptBoxOverlay(const Vector& start, const Vector& end,
 //-----------------------------------------------------------------------------
 void AddLineOverlay(const Vector& origin, const Vector& dest, int r, int g, int b, int a, bool noDepthTest, float flDuration) 
 {
-	if ( cl.IsPaused() )
+	if ( GetBaseLocalClient().IsPaused() )
 		return;
 
 	AUTO_LOCK( s_OverlayMutex );
@@ -772,7 +835,7 @@ void AddLineOverlay(const Vector& origin, const Vector& dest, int r, int g, int 
 void AddTriangleOverlay(const Vector& p1, const Vector& p2, const Vector &p3, 
 				int r, int g, int b, int a, bool noDepthTest, float flDuration)
 {
-	if ( cl.IsPaused() )
+	if ( GetBaseLocalClient().IsPaused() )
 		return;
 
 	AUTO_LOCK( s_OverlayMutex );
@@ -883,7 +946,10 @@ void DrawOverlay( OverlayBase_t *pOverlay )
 			{
 				RenderBox( pCurrBox->origin, pCurrBox->angles, pCurrBox->mins, pCurrBox->maxs, Color( pCurrBox->r, pCurrBox->g, pCurrBox->b, pCurrBox->a ), false );
 			}
-			RenderWireframeBox( pCurrBox->origin, pCurrBox->angles, pCurrBox->mins, pCurrBox->maxs, Color( pCurrBox->r, pCurrBox->g, pCurrBox->b, 255 ), true );
+			if ( pCurrBox->a < 255 )
+			{
+				RenderWireframeBox( pCurrBox->origin, pCurrBox->angles, pCurrBox->mins, pCurrBox->maxs, Color( pCurrBox->r, pCurrBox->g, pCurrBox->b, 255 ), true );
+			}
 		}
 		break;
 
@@ -906,7 +972,8 @@ void DrawOverlay( OverlayBase_t *pOverlay )
 		{
 			// Draw the sphere
 			OverlaySphere_t *pSphere = static_cast<OverlaySphere_t*>(pOverlay);
-			RenderSphere( pSphere->vOrigin, pSphere->flRadius, pSphere->nTheta, pSphere->nPhi, Color( pSphere->r, pSphere->g, pSphere->b, pSphere->a ), g_pMaterialAmbientCube );
+			RenderSphere( pSphere->vOrigin, pSphere->flRadius, pSphere->nTheta, pSphere->nPhi, Color( pSphere->r, pSphere->g, pSphere->b, pSphere->a ), 
+						 ( pSphere->m_bWireframe ? g_pMaterialWireframeVertexColor : g_pMaterialAmbientCube ) );
 		}
 		break;
 
@@ -922,6 +989,15 @@ void DrawOverlay( OverlayBase_t *pOverlay )
 			OverlayTriangle_t *pTriangle = static_cast<OverlayTriangle_t*>(pOverlay);
 			RenderTriangle( pTriangle->p1, pTriangle->p2, pTriangle->p3, 
 				Color( pTriangle->r, pTriangle->g, pTriangle->b, pTriangle->a ), !pTriangle->noDepthTest );
+		}
+		break;
+
+	case OVERLAY_CAPSULE:
+		{
+			OverlayCapsule_t *pCapsule = static_cast<OverlayCapsule_t*>(pOverlay);
+			RenderCapsule( pCapsule->start, pCapsule->end, pCapsule->flRadius,
+				Color( pCapsule->r, pCapsule->g, pCapsule->b, pCapsule->a ), 
+				( pCapsule->m_bWireframe ? g_pMaterialWireframeVertexColor : g_pMaterialAmbientCube ) );
 		}
 		break;
 
@@ -975,6 +1051,13 @@ void DestroyOverlay( OverlayBase_t *pOverlay )
 		{
 			OverlayTriangle_t *pTriangle = static_cast<OverlayTriangle_t*>(pOverlay);
 			delete pTriangle;
+		}
+		break;
+
+	case OVERLAY_CAPSULE:
+		{
+			OverlayCapsule_t *pCapsule = static_cast<OverlayCapsule_t*>(pOverlay);
+			delete pCapsule;
 		}
 		break;
 
@@ -1044,7 +1127,7 @@ void PurgeServerOverlays( void )
 	{
 		if ( pCurrOverlay->m_flEndTime == NDEBUG_PERSIST_TILL_NEXT_SERVER )
 		{
-			pCurrOverlay->m_flEndTime = cl.GetTime() + host_state.interval_per_tick;
+			pCurrOverlay->m_flEndTime = GetBaseLocalClient().GetTime() + host_state.interval_per_tick;
 		}
 
 		pCurrOverlay = pCurrOverlay->m_pNextOverlay;
@@ -1055,7 +1138,7 @@ void PurgeServerOverlays( void )
 	{
 		if ( pCurrText->m_flEndTime == NDEBUG_PERSIST_TILL_NEXT_SERVER )
 		{
-			pCurrText->m_flEndTime = cl.GetTime() + host_state.interval_per_tick;
+			pCurrText->m_flEndTime = GetBaseLocalClient().GetTime() + host_state.interval_per_tick;
 		}
 
 		pCurrText = pCurrText->nextOverlayText;
@@ -1087,10 +1170,10 @@ void Draw3DOverlays(void)
 	// Clear overlays every frame
 	AUTO_LOCK( s_OverlayMutex );
 	static int previous_servercount = 0;
-	if ( previous_servercount != cl.m_nServerCount )
+	if ( previous_servercount != GetBaseLocalClient().m_nServerCount )
 	{
 		ClearAllOverlays();
-		previous_servercount = cl.m_nServerCount;
+		previous_servercount = GetBaseLocalClient().m_nServerCount;
 	}
 
 	DrawAllOverlays();
@@ -1189,6 +1272,11 @@ public:
 		CDebugOverlay::AddBoxOverlay(origin, mins, max, angles, r, g, b, a, duration);
 	}
 
+	void AddSphereOverlay(const Vector& vOrigin, float flRadius, int nTheta, int nPhi, int r, int g, int b, int a, float flDuration)
+	{
+		CDebugOverlay::AddSphereOverlay( vOrigin, flRadius, nTheta, nPhi, r, g, b, a, flDuration, true );
+	}
+
 	void AddSweptBoxOverlay(const Vector& start, const Vector& end, const Vector& mins, const Vector& max, const QAngle & angles, int r, int g, int b, int a, float flDuration)
 	{
 		CDebugOverlay::AddSweptBoxOverlay(start, end, mins, max, angles, r, g, b, a, flDuration);
@@ -1197,6 +1285,16 @@ public:
 	void AddLineOverlay(const Vector& origin, const Vector& dest, int r, int g, int b, bool noDepthTest, float duration)
 	{
 		CDebugOverlay::AddLineOverlay(origin, dest, r, g, b, 255, noDepthTest, duration);
+	}
+
+	void AddLineOverlay(const Vector& origin, const Vector& dest, int r, int g, int b, int a, float thickness, float duration)
+	{
+		Vector vecLocal = ( dest - origin );
+		Vector max = Vector( vecLocal.Length(), thickness * 0.5, thickness * 0.5 );
+		Vector mins = Vector( 0, -thickness * 0.5, -thickness * 0.5 );
+		QAngle angles;
+		VectorAngles( vecLocal.Normalized(), angles );
+		CDebugOverlay::AddBoxOverlay(origin, mins, max, angles, r, g, b, a, duration);
 	}
 
 	void AddTriangleOverlay(const Vector& p1, const Vector& p2, const Vector &p3, int r, int g, int b, int a, bool noDepthTest, float duration)
@@ -1298,6 +1396,11 @@ public:
 	void PurgeTextOverlays()
 	{
 		CDebugOverlay::PurgeTextOverlays();
+	}
+
+	void AddCapsuleOverlay( const Vector &vStart, const Vector &vEnd, const float &flRadius, int r, int g, int b, int a, float flDuration )
+	{
+		CDebugOverlay::AddCapsuleOverlay( vStart, vEnd, flRadius, r, g, b, a, flDuration );
 	}
 };
 

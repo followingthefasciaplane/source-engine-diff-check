@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -10,7 +10,7 @@
 #include "tier0/memdbgon.h"
 
 #if !defined( CLIENT_DLL )
-/*static*/ ConVar sv_showladders( "sv_showladders", "0", 0, "Show bbox and dismount points for all ladders (must be set before level load.)\n" );
+ConVar sv_showladders( "sv_showladders", "0", 0, "Show bbox and dismount points for all ladders (must be set before level load.)\n" );
 #endif
 
 CUtlVector< CFuncLadder * >	CFuncLadder::s_Ladders;
@@ -326,11 +326,11 @@ int CFuncLadder::GetDismountCount() const
 // Input  : index - 
 // Output : CInfoLadderDismountHandle
 //-----------------------------------------------------------------------------
-CInfoLadderDismount *CFuncLadder::GetDismount( int index_ )
+CInfoLadderDismount *CFuncLadder::GetDismount( int index )
 {
-	if ( index_ < 0 || index_ >= m_Dismounts.Count() )
+	if ( index < 0 || index >= m_Dismounts.Count() )
 		return NULL;
-	return m_Dismounts[index_];
+	return m_Dismounts[ index ];
 }
 
 //-----------------------------------------------------------------------------
@@ -443,7 +443,7 @@ BEGIN_NETWORK_TABLE( CFuncLadder, DT_FuncLadder )
 #endif
 END_NETWORK_TABLE()
 
-LINK_ENTITY_TO_CLASS( func_useableladder, CFuncLadder );
+LINK_ENTITY_TO_CLASS_ALIASED( func_useableladder, FuncLadder );
 
 //---------------------------------------------------------
 // Save/Restore
@@ -497,7 +497,7 @@ IMPLEMENT_NETWORKCLASS_ALIASED( InfoLadderDismount, DT_InfoLadderDismount );
 BEGIN_NETWORK_TABLE( CInfoLadderDismount, DT_InfoLadderDismount )
 END_NETWORK_TABLE()
 
-LINK_ENTITY_TO_CLASS( info_ladder_dismount, CInfoLadderDismount );
+LINK_ENTITY_TO_CLASS_ALIASED( info_ladder_dismount, InfoLadderDismount );
 
 #if defined(GAME_DLL)
 const char *FuncLadder_GetSurfaceprops(CBaseEntity *pLadderEntity)

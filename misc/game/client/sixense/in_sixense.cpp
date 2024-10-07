@@ -1,10 +1,9 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
 #ifndef _XBOX
 //#include <windows.h>
 #endif
 #include "cbase.h"
 #include "convar.h"
-
+#include "igameevents.h"
 
 
 #ifdef SIXENSE
@@ -29,7 +28,6 @@
 #include "backpack_panel.h"
 #include "baseviewport.h"
 extern ConVar _cl_classmenuopen;
-extern const char *COM_GetModDirectory();
 #endif
 
 #if defined( CSTRIKE15 ) || defined (CSTRIKE_DLL)
@@ -52,17 +50,16 @@ using sixenseMath::Line;
 #include <winlite.h>
 
 #include "vgui/IVGui.h"
-#include "vgui/IInput.h"
+#include "vgui/iinput.h"
 #include "vgui/ISurface.h"
-#include "vgui_controls/Label.h"
+#include "vgui_controls/label.h"
 #include "ienginevgui.h"
-#include "vgui_controls/ImagePanel.h"
+#include "vgui_controls/imagepanel.h"
 #include "flashlighteffect.h"
 #include "weapon_selection.h"
 #include "iinput.h"
 #include "game/client/iviewport.h"
 #include "filesystem.h"
-#include "sourcevr/isourcevirtualreality.h"
 
 #ifdef TF_CLIENT_DLL
 #include "tf_hud_menu_engy_build.h"
@@ -71,7 +68,7 @@ using sixenseMath::Line;
 #endif 
 
 #ifdef PORTAL2
-#include "BasePanel.h"
+#include "basepanel.h"
 #include "usermessages.h"
 #include "cdll_int.h"
 #include "iclientmode.h"
@@ -87,6 +84,11 @@ using sixenseMath::Line;
 
 #ifdef CSTRIKE15
 #include "basepanel.h"
+
+#ifdef CreateEvent
+#undef CreateEvent
+#endif
+
 #endif
 
 using sixenseMath::Plane;
@@ -196,8 +198,8 @@ ConVar sixense_feet_angles_offset_stick_spin_vert_multiplier( "sixense_feet_angl
 ConVar sixense_feet_angles_offset_stick_spin_invert_pitch( "sixense_feet_angles_offset_stick_spin_invert_pitch", "1.0", FCVAR_ARCHIVE );
 ConVar sixense_feet_angles_offset_stick_spin_exponent( "sixense_feet_angles_offset_stick_spin_exponent", "1.0", FCVAR_ARCHIVE );
 
-ConVar sixense_aim_scope_heading_multiplier( "sixense_aim_scope_heading_multiplier", "0.6", FCVAR_ARCHIVE );
-ConVar sixense_aim_scope_pitch_multiplier( "sixense_aim_scope_pitch_multiplier", "0.6", FCVAR_ARCHIVE );
+ConVar sixense_aim_scope_heading_multiplier( "sixense_aim_scope_heading_multiplier", "0.5", FCVAR_ARCHIVE );
+ConVar sixense_aim_scope_pitch_multiplier( "sixense_aim_scope_pitch_multiplier", "0.5", FCVAR_ARCHIVE );
 
 ConVar sixense_melee_pitch_blend_val( "sixense_melee_pitch_blend_val", "0.99", FCVAR_ARCHIVE );
 
@@ -220,7 +222,6 @@ CSysModule *g_pSixenseUtilsModule = NULL;
 // to let us know if there are any changes
 void SixenseInput::InstallConvarCallbacks() 
 {
-
 	sixense_mode.InstallChangeCallback( SixenseConvarChanged );
 
 	sixense_weapon_select_sensitivity.InstallChangeCallback( SixenseConvarChanged );
@@ -244,7 +245,6 @@ void SixenseInput::InstallConvarCallbacks()
 	sixense_auto_one_to_one_stop_xy_dist.InstallChangeCallback( SixenseConvarChanged );
 	sixense_auto_one_to_one_stop_z_dist.InstallChangeCallback( SixenseConvarChanged );
 #endif
-
 
 	sixense_aim_freeaim_switch_blend_time_exit.InstallChangeCallback( SixenseConvarChanged );
 	sixense_roll_correct_blend.InstallChangeCallback( SixenseConvarChanged );
@@ -872,7 +872,7 @@ SixenseInput::~SixenseInput()
 bool SixenseInput::IsSixenseMap()
 {
 #ifdef PORTAL2
-	if ( Q_strncmp( engine->GetLevelName(), "maps/sixense_", 13 ) == 0 )
+	if ( StringHasPrefixCaseSensitive( engine->GetLevelName(), "maps/sixense_" ) )
 	{
 		return true;
 	}
@@ -1258,8 +1258,8 @@ void SixenseInput::Init()
 	m_pFPSViewAngles->setGame( "portal" );
 	m_pFPSEvents->setGame( "portal" );
 #else 
-	m_pFPSViewAngles->setGame( "cstrike15" );
-	m_pFPSEvents->setGame( "cstrike15" );
+	m_pFPSViewAngles->setGame( "csgo" );
+	m_pFPSEvents->setGame( "csgo" );
 #endif
 
 }
@@ -1609,7 +1609,7 @@ bool SixenseInput::SixenseFrame( float flFrametime, CUserCmd *pCmd )
 		m_nRightIndex = m_pControllerManager->getIndex( sixenseUtils::IControllerManager::P1L );
 	}
 
-	if( m_nLeftIndex < 0 || m_nRightIndex < 0 ) return false;
+	if( m_nLeftIndex < 0 || m_nLeftIndex < 0 ) return false;
 
 	// If the controllers are docked we are inactive, return until they are picked up
 	if( !m_bIsActive )
@@ -1687,7 +1687,7 @@ bool SixenseInput::SixenseFrame( float flFrametime, CUserCmd *pCmd )
 			if( vecScale[2] > fMaxScale ) fMaxScale = vecScale[2];
 
 			float fSpinMult = 1.0 - sqrt( clamp( ( fMaxScale-1.0f ) / ( sixense_scaling_max.GetFloat() - 1.0f ), 0.0f, 1.0f ) );
-			freeAimSpinSpeed = MAX( freeAimSpinSpeed * fSpinMult, sixense_hold_spin_speed.GetFloat() );
+			freeAimSpinSpeed = max( freeAimSpinSpeed * fSpinMult, sixense_hold_spin_speed.GetFloat() );
 		}
 #endif
 	}
@@ -2151,7 +2151,7 @@ void SixenseInput::SetPlayerHandPositions( CUserCmd *pCmd, float flFrametime )
 
 	// This 'slides' the hold origin if you pull the object back into the player
 	float min_z_dist = sixense_hold_slide_z_min_dist.GetFloat();
-	float xy_radius = sixense_hold_slide_xy_radius.GetFloat();
+	float xy_radius = sixense_hold_slide_xy_radius.GetFloat();;
 
 	if ( !m_bScalingLockedOneToOne && (Vector3( ss_right_pos[0], ss_right_pos[1], 0.0f ).length() < xy_radius) && (ss_right_pos[2] > min_z_dist) )
 	{
@@ -2424,12 +2424,6 @@ void SixenseInput::SetView( float flInputSampleFrametime, CUserCmd *pCmd )
 	// server really cares about.
 	QAngle spin_speed = -1.0f * FixAngles( m_pFPSViewAngles->getSpinSpeed() );
 
-	if( UseVR() )
-	{
-		spin_speed[PITCH] = 0.f;
-		spin_speed[ROLL] = 0.f;
-	}
-
 #if defined( TF_CLIENT_DLL )
 
 	static bool last_charge = false, charging = false;
@@ -2602,11 +2596,21 @@ void SixenseInput::SixenseUpdateKeys( float flFrametime, CUserCmd *pCmd )
 		{
 			if( m_pLeftButtonStates->stickJustPressed( sixenseUtils::IButtonStates::DIR_RIGHT ) )
 			{
-				engine->ExecuteClientCmd( "spec_next" );
+				IGameEvent * event = gameeventmanager->CreateEvent( "cs_prev_next_spectator" );
+				if ( event )
+				{
+					event->SetInt( "next", true );
+					gameeventmanager->FireEventClientSide( event );
+				}
 			}
 			if( m_pLeftButtonStates->stickJustPressed( sixenseUtils::IButtonStates::DIR_LEFT ) )
 			{
-				engine->ExecuteClientCmd( "spec_prev" );
+				IGameEvent * event = gameeventmanager->CreateEvent( "cs_prev_next_spectator" );
+				if ( event )
+				{
+					event->SetInt( "next", false );
+					gameeventmanager->FireEventClientSide( event );
+				}
 			}
 			if( m_pLeftButtonStates->stickJustPressed( sixenseUtils::IButtonStates::DIR_UP ) )
 			{
@@ -2619,11 +2623,24 @@ void SixenseInput::SixenseUpdateKeys( float flFrametime, CUserCmd *pCmd )
 
 			if( m_pRightButtonStates->stickJustPressed( sixenseUtils::IButtonStates::DIR_RIGHT ) )
 			{
-				engine->ExecuteClientCmd( "spec_next" );
+				IGameEvent * event = gameeventmanager->CreateEvent( "cs_prev_next_spectator" );
+				if ( event )
+				{
+					event->SetInt( "next", true );
+					gameeventmanager->FireEventClientSide( event );
+				}
+
+//				engine->ExecuteClientCmd( "spec_next" );
 			}
 			if( m_pRightButtonStates->stickJustPressed( sixenseUtils::IButtonStates::DIR_LEFT ) )
 			{
-				engine->ExecuteClientCmd( "spec_prev" );
+				IGameEvent * event = gameeventmanager->CreateEvent( "cs_prev_next_spectator" );
+				if ( event )
+				{
+					event->SetInt( "next", false );
+					gameeventmanager->FireEventClientSide( event );
+				}
+//				engine->ExecuteClientCmd( "spec_prev" );
 			}
 			if( m_pRightButtonStates->stickJustPressed( sixenseUtils::IButtonStates::DIR_UP ) )
 			{
@@ -3263,22 +3280,7 @@ void SixenseInput::SixenseUpdateMouseCursor()
 	const char *window_name = "Half-Life 2";
 #endif
 #ifdef TF_CLIENT_DLL
-	
-	const int str_len = 128;
-	static char window_name[str_len] = "\0";
-
-	if( window_name[0] == '\0' )
-	{
-		const char *pGameDir = COM_GetModDirectory();
-		if ( FStrEq( pGameDir, "tf_beta" ) )
-		{
-			Q_strncpy( window_name, "Team Fortress 2 Beta", str_len );
-		}
-		else
-		{
-			Q_strncpy( window_name, "Team Fortress 2", str_len );
-		}
-	}
+	const char *window_name = "Team Fortress 2";
 #endif
 #ifdef TERROR
 	const char *window_name = "Left 4 Dead 2";
@@ -3462,7 +3464,7 @@ QAngle SixenseInput::GetViewAngles()
 QAngle SixenseInput::GetViewAngleOffset()
 {
 
-	if ( m_pSixenseAPI->sixenseIsControllerEnabled( 0 ) && !UseVR() )
+	if ( m_pSixenseAPI->sixenseIsControllerEnabled( 0 ) )
 	{
 		if ( m_pFPSViewAngles )
 		{
@@ -3483,7 +3485,7 @@ QAngle SixenseInput::GetViewAngleOffset()
 		}
 	}
 
-	return QAngle(0.f, 0.f, 0.f );
+	return QAngle();
 
 }
 

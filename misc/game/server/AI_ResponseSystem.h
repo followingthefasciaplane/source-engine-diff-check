@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -13,27 +13,14 @@
 #pragma once
 #endif
 
-#include "AI_Criteria.h"
+#include "ai_criteria.h"
+#include "../../public/responserules/response_types.h"
 
-abstract_class IResponseFilter
-{
-public:
-	virtual ~IResponseFilter(){}
-	virtual bool IsValidResponse( ResponseType_t type, const char *pszValue ) = 0;
-};
+// using ResponseRules::IResponseFilter;
+// using ResponseRules::IResponseSystem;
 
-abstract_class IResponseSystem
-{
-public:
-	virtual ~IResponseSystem() {}
-
-	virtual bool FindBestResponse( const AI_CriteriaSet& set, AI_Response& response, IResponseFilter *pFilter = NULL ) = 0;
-	virtual void GetAllResponses( CUtlVector<AI_Response *> *pResponses ) = 0;
-	virtual void PrecacheResponses( bool bEnable ) = 0;
-};
-
-IResponseSystem *PrecacheCustomResponseSystem( const char *scriptfile );
-IResponseSystem *BuildCustomResponseSystemGivenCriteria( const char *pszBaseFile, const char *pszCustomName, AI_CriteriaSet &criteriaSet, float flCriteriaScore );
+ResponseRules::IResponseSystem *PrecacheCustomResponseSystem( const char *scriptfile );
+ResponseRules::IResponseSystem *BuildCustomResponseSystemGivenCriteria( const char *pszBaseFile, const char *pszCustomName, AI_CriteriaSet &criteriaSet, float flCriteriaScore );
 void DestroyCustomResponseSystems();
 
 class ISaveRestoreBlockHandler *GetDefaultResponseSystemSaveRestoreBlockHandler();

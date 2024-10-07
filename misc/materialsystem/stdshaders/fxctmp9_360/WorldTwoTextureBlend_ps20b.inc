@@ -1,27 +1,28 @@
+// ALL SKIP STATEMENTS THAT AFFECT THIS SHADER!!!
+// $DETAILTEXTURE && ( $BUMPMAP && !$DETAIL_ALPHA_MASK_BASE_TEXTURE )
+// $VERTEXCOLOR && $BUMPMAP
+// $FLASHLIGHT && $SELFILLUM
+// $FLASHLIGHT && $DETAIL_ALPHA_MASK_BASE_TEXTURE
+// $FLASHLIGHT && $BUMPMAP
+// ( $FLASHLIGHT == 0 ) && ( $FLASHLIGHTSHADOWS == 1 )	 [ps30]
+// defined $PIXELFOGTYPE && defined $WRITEWATERFOGTODESTALPHA && ( $PIXELFOGTYPE != 1 ) && $WRITEWATERFOGTODESTALPHA
+// defined $LIGHTING_PREVIEW && defined $FASTPATHENVMAPTINT && $LIGHTING_PREVIEW && $FASTPATHENVMAPTINT
+// defined $LIGHTING_PREVIEW && defined $FASTPATHENVMAPCONTRAST && $LIGHTING_PREVIEW && $FASTPATHENVMAPCONTRAST
+// defined $LIGHTING_PREVIEW && defined $FASTPATH && $LIGHTING_PREVIEW && $FASTPATH
+// ($FLASHLIGHT || $FLASHLIGHTSHADOWS) && $LIGHTING_PREVIEW
+// defined $PIXELFOGTYPE && defined $WRITEWATERFOGTODESTALPHA && ( $PIXELFOGTYPE != 1 ) && $WRITEWATERFOGTODESTALPHA
+// defined $LIGHTING_PREVIEW && defined $FASTPATHENVMAPTINT && $LIGHTING_PREVIEW && $FASTPATHENVMAPTINT
+// defined $LIGHTING_PREVIEW && defined $FASTPATHENVMAPCONTRAST && $LIGHTING_PREVIEW && $FASTPATHENVMAPCONTRAST
+// defined $LIGHTING_PREVIEW && defined $FASTPATH && $LIGHTING_PREVIEW && $FASTPATH
+// ($FLASHLIGHT || $FLASHLIGHTSHADOWS) && $LIGHTING_PREVIEW
+// defined $PIXELFOGTYPE && defined $WRITEWATERFOGTODESTALPHA && ( $PIXELFOGTYPE != 1 ) && $WRITEWATERFOGTODESTALPHA
+// defined $LIGHTING_PREVIEW && defined $FASTPATHENVMAPTINT && $LIGHTING_PREVIEW && $FASTPATHENVMAPTINT
+// defined $LIGHTING_PREVIEW && defined $FASTPATHENVMAPCONTRAST && $LIGHTING_PREVIEW && $FASTPATHENVMAPCONTRAST
+// defined $LIGHTING_PREVIEW && defined $FASTPATH && $LIGHTING_PREVIEW && $FASTPATH
+// ($FLASHLIGHT || $FLASHLIGHTSHADOWS) && $LIGHTING_PREVIEW
 #include "shaderlib/cshader.h"
 class worldtwotextureblend_ps20b_Static_Index
 {
-private:
-	int m_nCONVERT_TO_SRGB;
-#ifdef _DEBUG
-	bool m_bCONVERT_TO_SRGB;
-#endif
-public:
-	void SetCONVERT_TO_SRGB( int i )
-	{
-		Assert( i >= 0 && i <= 0 );
-		m_nCONVERT_TO_SRGB = i;
-#ifdef _DEBUG
-		m_bCONVERT_TO_SRGB = true;
-#endif
-	}
-	void SetCONVERT_TO_SRGB( bool i )
-	{
-		m_nCONVERT_TO_SRGB = i ? 1 : 0;
-#ifdef _DEBUG
-		m_bCONVERT_TO_SRGB = true;
-#endif
-	}
 private:
 	int m_nDETAILTEXTURE;
 #ifdef _DEBUG
@@ -38,6 +39,7 @@ public:
 	}
 	void SetDETAILTEXTURE( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nDETAILTEXTURE = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bDETAILTEXTURE = true;
@@ -59,6 +61,7 @@ public:
 	}
 	void SetBUMPMAP( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nBUMPMAP = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bBUMPMAP = true;
@@ -80,6 +83,7 @@ public:
 	}
 	void SetVERTEXCOLOR( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nVERTEXCOLOR = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bVERTEXCOLOR = true;
@@ -101,30 +105,10 @@ public:
 	}
 	void SetSELFILLUM( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nSELFILLUM = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bSELFILLUM = true;
-#endif
-	}
-private:
-	int m_nDIFFUSEBUMPMAP;
-#ifdef _DEBUG
-	bool m_bDIFFUSEBUMPMAP;
-#endif
-public:
-	void SetDIFFUSEBUMPMAP( int i )
-	{
-		Assert( i >= 0 && i <= 1 );
-		m_nDIFFUSEBUMPMAP = i;
-#ifdef _DEBUG
-		m_bDIFFUSEBUMPMAP = true;
-#endif
-	}
-	void SetDIFFUSEBUMPMAP( bool i )
-	{
-		m_nDIFFUSEBUMPMAP = i ? 1 : 0;
-#ifdef _DEBUG
-		m_bDIFFUSEBUMPMAP = true;
 #endif
 	}
 private:
@@ -143,6 +127,7 @@ public:
 	}
 	void SetDETAIL_ALPHA_MASK_BASE_TEXTURE( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nDETAIL_ALPHA_MASK_BASE_TEXTURE = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bDETAIL_ALPHA_MASK_BASE_TEXTURE = true;
@@ -164,6 +149,7 @@ public:
 	}
 	void SetFLASHLIGHT( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nFLASHLIGHT = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bFLASHLIGHT = true;
@@ -185,6 +171,7 @@ public:
 	}
 	void SetSEAMLESS( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nSEAMLESS = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bSEAMLESS = true;
@@ -206,18 +193,38 @@ public:
 	}
 	void SetFLASHLIGHTDEPTHFILTERMODE( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 0 );
 		m_nFLASHLIGHTDEPTHFILTERMODE = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bFLASHLIGHTDEPTHFILTERMODE = true;
 #endif
 	}
-public:
-	worldtwotextureblend_ps20b_Static_Index( )
-	{
+private:
+	int m_nSHADER_SRGB_READ;
 #ifdef _DEBUG
-		m_bCONVERT_TO_SRGB = true;
-#endif // _DEBUG
-		m_nCONVERT_TO_SRGB =  0;
+	bool m_bSHADER_SRGB_READ;
+#endif
+public:
+	void SetSHADER_SRGB_READ( int i )
+	{
+		Assert( i >= 0 && i <= 1 );
+		m_nSHADER_SRGB_READ = i;
+#ifdef _DEBUG
+		m_bSHADER_SRGB_READ = true;
+#endif
+	}
+	void SetSHADER_SRGB_READ( bool i )
+	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
+		m_nSHADER_SRGB_READ = i ? 1 : 0;
+#ifdef _DEBUG
+		m_bSHADER_SRGB_READ = true;
+#endif
+	}
+public:
+	// CONSTRUCTOR
+	worldtwotextureblend_ps20b_Static_Index( IShaderShadow *pShaderShadow, IMaterialVar **params )
+	{
 #ifdef _DEBUG
 		m_bDETAILTEXTURE = false;
 #endif // _DEBUG
@@ -235,10 +242,6 @@ public:
 #endif // _DEBUG
 		m_nSELFILLUM = 0;
 #ifdef _DEBUG
-		m_bDIFFUSEBUMPMAP = false;
-#endif // _DEBUG
-		m_nDIFFUSEBUMPMAP = 0;
-#ifdef _DEBUG
 		m_bDETAIL_ALPHA_MASK_BASE_TEXTURE = false;
 #endif // _DEBUG
 		m_nDETAIL_ALPHA_MASK_BASE_TEXTURE = 0;
@@ -254,19 +257,23 @@ public:
 		m_bFLASHLIGHTDEPTHFILTERMODE = false;
 #endif // _DEBUG
 		m_nFLASHLIGHTDEPTHFILTERMODE = 0;
+#ifdef _DEBUG
+		m_bSHADER_SRGB_READ = false;
+#endif // _DEBUG
+		m_nSHADER_SRGB_READ = 0;
 	}
 	int GetIndex()
 	{
 		// Asserts to make sure that we aren't using any skipped combinations.
 		// Asserts to make sure that we are setting all of the combination vars.
 #ifdef _DEBUG
-		bool bAllStaticVarsDefined = m_bCONVERT_TO_SRGB && m_bDETAILTEXTURE && m_bBUMPMAP && m_bVERTEXCOLOR && m_bSELFILLUM && m_bDIFFUSEBUMPMAP && m_bDETAIL_ALPHA_MASK_BASE_TEXTURE && m_bFLASHLIGHT && m_bSEAMLESS && m_bFLASHLIGHTDEPTHFILTERMODE;
+		bool bAllStaticVarsDefined = m_bDETAILTEXTURE && m_bBUMPMAP && m_bVERTEXCOLOR && m_bSELFILLUM && m_bDETAIL_ALPHA_MASK_BASE_TEXTURE && m_bFLASHLIGHT && m_bSEAMLESS && m_bFLASHLIGHTDEPTHFILTERMODE && m_bSHADER_SRGB_READ;
 		Assert( bAllStaticVarsDefined );
 #endif // _DEBUG
-		return ( 8 * m_nCONVERT_TO_SRGB ) + ( 8 * m_nDETAILTEXTURE ) + ( 16 * m_nBUMPMAP ) + ( 32 * m_nVERTEXCOLOR ) + ( 64 * m_nSELFILLUM ) + ( 128 * m_nDIFFUSEBUMPMAP ) + ( 256 * m_nDETAIL_ALPHA_MASK_BASE_TEXTURE ) + ( 512 * m_nFLASHLIGHT ) + ( 1024 * m_nSEAMLESS ) + ( 2048 * m_nFLASHLIGHTDEPTHFILTERMODE ) + 0;
+		return ( 8 * m_nDETAILTEXTURE ) + ( 16 * m_nBUMPMAP ) + ( 32 * m_nVERTEXCOLOR ) + ( 64 * m_nSELFILLUM ) + ( 128 * m_nDETAIL_ALPHA_MASK_BASE_TEXTURE ) + ( 256 * m_nFLASHLIGHT ) + ( 512 * m_nSEAMLESS ) + ( 1024 * m_nFLASHLIGHTDEPTHFILTERMODE ) + ( 1024 * m_nSHADER_SRGB_READ ) + 0;
 	}
 };
-#define shaderStaticTest_worldtwotextureblend_ps20b psh_forgot_to_set_static_DETAILTEXTURE + psh_forgot_to_set_static_BUMPMAP + psh_forgot_to_set_static_VERTEXCOLOR + psh_forgot_to_set_static_SELFILLUM + psh_forgot_to_set_static_DIFFUSEBUMPMAP + psh_forgot_to_set_static_DETAIL_ALPHA_MASK_BASE_TEXTURE + psh_forgot_to_set_static_FLASHLIGHT + psh_forgot_to_set_static_SEAMLESS + psh_forgot_to_set_static_FLASHLIGHTDEPTHFILTERMODE + 0
+#define shaderStaticTest_worldtwotextureblend_ps20b psh_forgot_to_set_static_DETAILTEXTURE + psh_forgot_to_set_static_BUMPMAP + psh_forgot_to_set_static_VERTEXCOLOR + psh_forgot_to_set_static_SELFILLUM + psh_forgot_to_set_static_DETAIL_ALPHA_MASK_BASE_TEXTURE + psh_forgot_to_set_static_FLASHLIGHT + psh_forgot_to_set_static_SEAMLESS + psh_forgot_to_set_static_FLASHLIGHTDEPTHFILTERMODE + psh_forgot_to_set_static_SHADER_SRGB_READ + 0
 class worldtwotextureblend_ps20b_Dynamic_Index
 {
 private:
@@ -285,6 +292,7 @@ public:
 	}
 	void SetWRITEWATERFOGTODESTALPHA( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nWRITEWATERFOGTODESTALPHA = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bWRITEWATERFOGTODESTALPHA = true;
@@ -306,6 +314,7 @@ public:
 	}
 	void SetPIXELFOGTYPE( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nPIXELFOGTYPE = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bPIXELFOGTYPE = true;
@@ -327,6 +336,7 @@ public:
 	}
 	void SetWRITE_DEPTH_TO_DESTALPHA( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 0 );
 		m_nWRITE_DEPTH_TO_DESTALPHA = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bWRITE_DEPTH_TO_DESTALPHA = true;
@@ -348,22 +358,24 @@ public:
 	}
 	void SetFLASHLIGHTSHADOWS( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nFLASHLIGHTSHADOWS = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bFLASHLIGHTSHADOWS = true;
 #endif
 	}
 public:
-	worldtwotextureblend_ps20b_Dynamic_Index()
+	// CONSTRUCTOR
+	worldtwotextureblend_ps20b_Dynamic_Index( IShaderDynamicAPI *pShaderAPI )
 	{
 #ifdef _DEBUG
 		m_bWRITEWATERFOGTODESTALPHA = false;
 #endif // _DEBUG
 		m_nWRITEWATERFOGTODESTALPHA = 0;
 #ifdef _DEBUG
-		m_bPIXELFOGTYPE = false;
+		m_bPIXELFOGTYPE = true;
 #endif // _DEBUG
-		m_nPIXELFOGTYPE = 0;
+		m_nPIXELFOGTYPE = ( pShaderAPI->GetSceneFogMode() == MATERIAL_FOG_LINEAR_BELOW_FOG_Z ) ;
 #ifdef _DEBUG
 		m_bWRITE_DEPTH_TO_DESTALPHA = false;
 #endif // _DEBUG
@@ -384,4 +396,40 @@ public:
 		return ( 1 * m_nWRITEWATERFOGTODESTALPHA ) + ( 2 * m_nPIXELFOGTYPE ) + ( 4 * m_nWRITE_DEPTH_TO_DESTALPHA ) + ( 4 * m_nFLASHLIGHTSHADOWS ) + 0;
 	}
 };
-#define shaderDynamicTest_worldtwotextureblend_ps20b psh_forgot_to_set_dynamic_WRITEWATERFOGTODESTALPHA + psh_forgot_to_set_dynamic_PIXELFOGTYPE + psh_forgot_to_set_dynamic_WRITE_DEPTH_TO_DESTALPHA + psh_forgot_to_set_dynamic_FLASHLIGHTSHADOWS + 0
+#define shaderDynamicTest_worldtwotextureblend_ps20b psh_forgot_to_set_dynamic_WRITEWATERFOGTODESTALPHA + psh_forgot_to_set_dynamic_WRITE_DEPTH_TO_DESTALPHA + psh_forgot_to_set_dynamic_FLASHLIGHTSHADOWS + 0
+
+static const ShaderComboInformation_t s_DynamicComboArray_WorldTwoTextureBlend_ps20b[4] = 
+{
+	{ "WRITEWATERFOGTODESTALPHA", 0, 1 },
+	{ "PIXELFOGTYPE", 0, 1 },
+	{ "WRITE_DEPTH_TO_DESTALPHA", 0, 0 },
+	{ "FLASHLIGHTSHADOWS", 0, 1 },
+};
+
+static const ShaderComboInformation_t s_StaticComboArray_WorldTwoTextureBlend_ps20b[9] = 
+{
+	{ "DETAILTEXTURE", 0, 1 },
+	{ "BUMPMAP", 0, 1 },
+	{ "VERTEXCOLOR", 0, 1 },
+	{ "SELFILLUM", 0, 1 },
+	{ "DETAIL_ALPHA_MASK_BASE_TEXTURE", 0, 1 },
+	{ "FLASHLIGHT", 0, 1 },
+	{ "SEAMLESS", 0, 1 },
+	{ "FLASHLIGHTDEPTHFILTERMODE", 0, 0 },
+	{ "SHADER_SRGB_READ", 0, 1 },
+};
+static const ShaderComboSemantics_t WorldTwoTextureBlend_ps20b_combos =
+{
+	"WorldTwoTextureBlend_ps20b", s_DynamicComboArray_WorldTwoTextureBlend_ps20b, 4, s_StaticComboArray_WorldTwoTextureBlend_ps20b, 9 
+};
+
+class ConstructMe_WorldTwoTextureBlend_ps20b
+{
+public:
+	ConstructMe_WorldTwoTextureBlend_ps20b()
+	{
+		GetShaderDLL()->AddShaderComboInformation( &WorldTwoTextureBlend_ps20b_combos );
+	}
+};
+
+static ConstructMe_WorldTwoTextureBlend_ps20b s_ConstructMe_WorldTwoTextureBlend_ps20b;

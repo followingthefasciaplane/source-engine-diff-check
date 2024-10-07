@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose:	Debugging overlay functions
 //
@@ -19,7 +19,7 @@ namespace CDebugOverlay
 #ifndef DEDICATED
 	void AddEntityTextOverlay(int ent_index, int line_offset, float flDuration, int r, int g, int b, int a, const char *text);
 	void AddBoxOverlay(const Vector& origin, const Vector& mins, const Vector& max, const QAngle & angles, int r, int g, int b, int a, float flDuration);
-	void AddSphereOverlay(const Vector& vOrigin, float flRadius, int nTheta, int nPhi, int r, int g, int b, int a, float flDuration);
+	void AddSphereOverlay(const Vector& vOrigin, float flRadius, int nTheta, int nPhi, int r, int g, int b, int a, float flDuration, bool bWireframe = false);
 	void AddSweptBoxOverlay(const Vector& start, const Vector& end, const Vector& mins, const Vector& max, const QAngle & angles, int r, int g, int b, int a, float flDuration);
 	void AddGridOverlay(const Vector& vPos );
 	void AddCoordFrameOverlay(const matrix3x4_t& frame, float flScale, int ppColorTable[3][3] = NULL);
@@ -33,6 +33,7 @@ namespace CDebugOverlay
 	void AddScreenTextOverlay(float flXPos, float flYPos, int line_offset, float flDuration, int r, int g, int b, int a, const char *text);
 	void AddTextOverlay(const Vector& textPos, float duration, float alpha, const char *text) ;
 	void Draw3DOverlays(void);
+	void AddCapsuleOverlay(const Vector &vStart, const Vector &vEnd, const float &flRadius, int r, int g, int b, int a, float flDuration);
 #endif
 }
 

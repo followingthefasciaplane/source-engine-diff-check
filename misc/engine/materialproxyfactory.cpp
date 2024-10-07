@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -6,21 +6,26 @@
 //=============================================================================//
 
 #include <stdlib.h>
-#include <malloc.h>
 #include <string.h>
 #include "materialsystem/imaterialproxy.h"
 #include "materialproxyfactory.h"
 #include "toolframework/itoolframework.h"
 #include "toolframework/itoolsystem.h"
+#include "server.h"
+#include "cdll_int.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
+
+extern IBaseClientDLL *g_ClientDLL;
+#ifndef DEDICATED
 extern CSysModule		*g_ClientDLLModule;
+#endif
 
 IMaterialProxy *CMaterialProxyFactory::CreateProxy( const char *proxyName )
 {
-#if !defined(SWDS)
-	IMaterialProxy *materialProxy = LookupProxy( proxyName, Sys_GetFactory( g_ClientDLLModule ) );
+#if !defined(DEDICATED)
+	IMaterialProxy *materialProxy = g_ClientDLL->InstantiateMaterialProxy( proxyName );
 
 	// If the client didn't have it and we're in tool mode, ask the tools...
 	if ( toolframework->InToolMode() && !materialProxy )
@@ -28,7 +33,7 @@ IMaterialProxy *CMaterialProxyFactory::CreateProxy( const char *proxyName )
 		materialProxy = toolframework->LookupProxy( proxyName );
 	}
 
-	if( !materialProxy )
+	if( !materialProxy && !sv.IsDedicated() )
 	{
 		ConDMsg( "Can't find material proxy \"%s\"\n", proxyName );
 		return NULL;
@@ -48,24 +53,11 @@ void CMaterialProxyFactory::DeleteProxy( IMaterialProxy *pProxy )
 	}
 }
 
-
-//-----------------------------------------------------------------------------
-// Look up proxy
-//-----------------------------------------------------------------------------
-IMaterialProxy *CMaterialProxyFactory::LookupProxy( const char *proxyName, CreateInterfaceFn factory )
+CreateInterfaceFn CMaterialProxyFactory::GetFactory()
 {
-	if( !factory )
-		return NULL;
-
-	// allocate exactly enough memory for the versioned name on the stack.
-	char *proxyVersionedName;
-	int buflen = Q_strlen( proxyName ) + Q_strlen( IMATERIAL_PROXY_INTERFACE_VERSION ) + 1;
-
-	proxyVersionedName = ( char * )_alloca( buflen );
-	Q_strncpy( proxyVersionedName, proxyName, buflen );
-	Q_strncat( proxyVersionedName, IMATERIAL_PROXY_INTERFACE_VERSION, buflen, COPY_ALL_CHARACTERS );
-	return ( IMaterialProxy * )factory( proxyVersionedName, NULL );
+#ifndef DEDICATED
+	return Sys_GetFactory( g_ClientDLLModule );
+#else
+	return NULL;
+#endif
 }
-
-
-

@@ -1,12 +1,14 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright (c) Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
 //=====================================================================================//
 
-#ifdef PROTECTED_THINGS_ENABLE
-	#undef PROTECTED_THINGS_ENABLE
-#endif
+#ifndef _X360
+	#ifdef PROTECTED_THINGS_ENABLE
+		#undef PROTECTED_THINGS_ENABLE
+	#endif
+#endif 
 
 #include "platform.h"
 
@@ -17,8 +19,8 @@
 #pragma comment ( lib, "shell32"  )
 #endif
 
-#include "materialsystem_global.h"
 #include "shaderapi/ishaderapi.h"
+#include "materialsystem_global.h"
 #include "itextureinternal.h"
 #include "utlsymbol.h"
 #include "time.h"
@@ -32,7 +34,9 @@
 #endif
 #include "colorspace.h"
 #include "string.h"
+#ifndef _PS3
 #include <malloc.h>
+#endif
 #include <stdlib.h>
 #include "utlmemory.h"
 #include "IHardwareConfigInternal.h"
@@ -55,7 +59,14 @@
 #include "ctype.h"
 #include "ifilelist.h"
 #include "tier0/icommandline.h"
+#include "datacache/imdlcache.h"
 #include "tier0/vprof.h"
+
+#ifndef _PS3
+#define MATSYS_INTERNAL
+#endif
+
+#include "cmaterialsystem.h"
 
 // NOTE: This must be the last file included!!!
 #include "tier0/memdbgon.h"
@@ -63,100 +74,15 @@
 // this allows the command line to force the "all mips" flag to on for all textures
 bool g_bForceTextureAllMips = false;
 
-#if defined(IS_WINDOWS_PC)
-static void ConVarChanged_mat_managedtextures( IConVar *var, const char *pOldValue, float flOldValue );
-static ConVar mat_managedtextures( "mat_managedtextures", "1", FCVAR_ARCHIVE, "If set, allows Direct3D to manage texture uploading at the cost of extra system memory", &ConVarChanged_mat_managedtextures );
-static void ConVarChanged_mat_managedtextures( IConVar *var, const char *pOldValue, float flOldValue )
-{
-	if ( mat_managedtextures.GetBool() != (flOldValue != 0) )
-	{
-		materials->ReleaseResources();
-		materials->ReacquireResources();
-	}
-}
-#endif
+#define TEXTURE_FNAME_EXTENSION			PLATFORM_EXT ".vtf"
+#define TEXTURE_FNAME_EXTENSION_NORMAL	"_normal" PLATFORM_EXT ".vtf"
+#define TEXTURE_FNAME_EXTENSION_LEN		( sizeof( TEXTURE_FNAME_EXTENSION ) - 1 )
 
-static ConVar mat_spew_on_texture_size( "mat_spew_on_texture_size", "0", 0, "Print warnings about vtf content that isn't of the expected size" );
-static ConVar mat_lodin_time( "mat_lodin_time", "5.0", FCVAR_DEVELOPMENTONLY );
-static ConVar mat_lodin_hidden_pop( "mat_lodin_hidden_pop", "1", FCVAR_DEVELOPMENTONLY );
+ConVar mat_spewalloc( "mat_spewalloc", "0", FCVAR_ARCHIVE );
 
-#define TEXTURE_FNAME_EXTENSION			".vtf"
-#define TEXTURE_FNAME_EXTENSION_LEN		4
-#define TEXTURE_FNAME_EXTENSION_NORMAL	"_normal.vtf"
+ConVar mat_exclude_async_update( "mat_exclude_async_update", "1" );
 
-#ifdef STAGING_ONLY
-	ConVar mat_spewalloc( "mat_spewalloc", "0" );
-#else
-	ConVar mat_spewalloc( "mat_spewalloc", "0", FCVAR_ARCHIVE | FCVAR_DEVELOPMENTONLY );
-#endif
-
-struct TexDimensions_t
-{
-	uint16 m_nWidth;
-	uint16 m_nHeight;
-	uint16 m_nMipCount;
-	uint16 m_nDepth;
-
-	TexDimensions_t( uint16 nWidth = 0, uint nHeight = 0, uint nMipCount = 0, uint16 nDepth = 1 )
-	: m_nWidth( nWidth )
-	, m_nHeight( nHeight )
-	, m_nMipCount( nMipCount )
-	, m_nDepth( nDepth )
-	{ }
-};
-
-#ifdef STAGING_ONLY
-	struct TexInfo_t 
-	{
-		CUtlString m_Name;
-		unsigned short m_nWidth;
-		unsigned short m_nHeight;
-		unsigned short m_nDepth;
-		unsigned short m_nMipCount;
-		unsigned short m_nFrameCount;
-		unsigned short m_nCopies;
-		ImageFormat m_Format;
-
-		uint64 ComputeTexSize() const 
-		{
-			uint64 total = 0;
-			unsigned short width = m_nWidth;
-			unsigned short height = m_nHeight;
-			unsigned short depth = m_nDepth;
-
-			for ( int mip = 0; mip < m_nMipCount; ++mip ) 
-			{
-				// Make sure that mip count lines up with the count
-				Assert( width > 1 || height > 1 || depth > 1 || ( mip == ( m_nMipCount - 1 ) ) );
-
-				total += ImageLoader::GetMemRequired( width, height, depth, m_Format, false );
-
-				width = Max( 1, width >> 1 );
-				height = Max( 1, height >> 1 );
-				depth = Max( 1, depth >> 1 );
-			}
-
-			return total * Min( (unsigned short) 1, m_nFrameCount ) * Min( (unsigned short) 1, m_nCopies );
-		}
-
-		TexInfo_t( const char* name = "", unsigned short w = 0, unsigned short h = 0, unsigned short d = 0, unsigned short mips = 0, unsigned short frames = 0, unsigned short copies = 0, ImageFormat fmt = IMAGE_FORMAT_UNKNOWN )
-		: m_nWidth( w )
-		, m_nHeight( h )
-		, m_nDepth( d )
-		, m_nMipCount( mips )
-		, m_nFrameCount( frames )
-		, m_nCopies( copies )
-		, m_Format( fmt )
-		{ 
-			if ( name && name[0] )
-				m_Name = name;
-			else
-				m_Name = "<unnamed>";
-		}
-	};
-
-	CUtlMap< ITexture*, TexInfo_t > g_currentTextures( DefLessFunc( ITexture* ) );
-#endif
+extern CMaterialSystem g_MaterialSystem;
 
 //-----------------------------------------------------------------------------
 // Internal texture flags
@@ -165,19 +91,19 @@ enum InternalTextureFlags
 {
 	TEXTUREFLAGSINTERNAL_ERROR				= 0x00000001,
 	TEXTUREFLAGSINTERNAL_ALLOCATED			= 0x00000002,
-	TEXTUREFLAGSINTERNAL_PRELOADED			= 0x00000004, // 360: textures that went through the preload process
-	TEXTUREFLAGSINTERNAL_QUEUEDLOAD			= 0x00000008, // 360: load using the queued loader
+	TEXTUREFLAGSINTERNAL_PRELOADED			= 0x00000004, // CONSOLE:	textures that went through the preload process
+	TEXTUREFLAGSINTERNAL_QUEUEDLOAD			= 0x00000008, // CONSOLE:	load using the queued loader
 	TEXTUREFLAGSINTERNAL_EXCLUDED			= 0x00000020, // actual exclusion state
 	TEXTUREFLAGSINTERNAL_SHOULDEXCLUDE		= 0x00000040, // desired exclusion state
-	TEXTUREFLAGSINTERNAL_TEMPRENDERTARGET	= 0x00000080, // 360: should only allocate texture bits upon first resolve, destroy at level end
+	TEXTUREFLAGSINTERNAL_TEMPRENDERTARGET	= 0x00000080, // 360:		should only allocate texture bits upon first resolve, destroy at level end
+	TEXTUREFLAGSINTERNAL_CACHEABLE			= 0x00000100, // 360:		candidate for cacheing
+	TEXTUREFLAGSINTERNAL_REDUCED            = 0x00000200, // CONSOLE: true dimensions forced smaller (i.e. exclusion)
+	TEXTUREFLAGSINTERNAL_TEMPEXCLUDED		= 0x00000400, // actual temporary exclusion state
+	TEXTUREFLAGSINTERNAL_SHOULDTEMPEXCLUDE	= 0x00000800, // desired temporary exclusion state	
+	TEXTUREFLAGSINTERNAL_TEMPEXCLUDE_UPDATE = 0x00001000, // private state bit used by temp exclusions
+	TEXTUREFLAGSINTERNAL_FORCED_TO_EXCLUDE  = 0x00002000, // private state bit used to track/undo an artifical exclusion
+	TEXTUREFLAGSINTERNAL_ASYNC_DONE			= 0x00004000, // async download for texture is done
 };
-
-static int  GetThreadId();
-static bool SLoadTextureBitsFromFile( IVTFTexture **ppOutVtfTexture, FileHandle_t hFile, unsigned int nFlags, TextureLODControlSettings_t* pInOutCachedFileLodSettings, int nDesiredDimensionLimit, unsigned short* pOutStreamedMips, const char* pName, const char* pCacheFileName, TexDimensions_t* pOptOutMappingDims = NULL, TexDimensions_t* pOptOutActualDims = NULL, TexDimensions_t* pOptOutAllocatedDims = NULL, unsigned int* pOptOutStripFlags = NULL );
-static int  ComputeActualMipCount( const TexDimensions_t& actualDims, unsigned int nFlags );
-static int  ComputeMipSkipCount( const char* pName, const TexDimensions_t& mappingDims, bool bIgnorePicmip, IVTFTexture *pOptVTFTexture, unsigned int nFlags, int nDesiredDimensionLimit, unsigned short* pOutStreamedMips, TextureLODControlSettings_t* pInOutCachedFileLodSettings, TexDimensions_t* pOptOutActualDims, TexDimensions_t* pOptOutAllocatedDims, unsigned int* pOptOutStripFlags  );
-static int  GetOptimalReadBuffer( CUtlBuffer *pOutOptimalBuffer, FileHandle_t hFile, int nFileSize );
-static void FreeOptimalReadBuffer( int nMaxSize );
 
 //-----------------------------------------------------------------------------
 // Use Warning to show texture flags.
@@ -191,10 +117,6 @@ static void PrintFlags( unsigned int flags )
 	if ( flags & TEXTUREFLAGS_NOLOD )
 	{
 		Warning( "TEXTUREFLAGS_NOLOD|" );
-	}
-	if ( flags & TEXTUREFLAGS_SRGB )
-	{
-		Warning( "TEXTUREFLAGS_SRGB|" );
 	}
 	if ( flags & TEXTUREFLAGS_POINTSAMPLE )
 	{
@@ -228,21 +150,13 @@ static void PrintFlags( unsigned int flags )
 	{
 		Warning( "TEXTUREFLAGS_ALL_MIPS|" );
 	}
+	if ( flags & TEXTUREFLAGS_MOST_MIPS )
+	{
+		Warning( "TEXTUREFLAGS_MOST_MIPS|" );
+	}
 	if ( flags & TEXTUREFLAGS_SINGLECOPY )
 	{
 		Warning( "TEXTUREFLAGS_SINGLECOPY|" );
-	}
-	if ( flags & TEXTUREFLAGS_STAGING_MEMORY )
-	{
-		Warning( "TEXTUREFLAGS_STAGING_MEMORY|" );
-	}
-	if ( flags & TEXTUREFLAGS_IGNORE_PICMIP )
-	{
-		Warning( "TEXTUREFLAGS_IGNORE_PICMIP|" );
-	}
-	if ( flags & TEXTUREFLAGS_IMMEDIATE_CLEANUP )
-	{
-		Warning( "TEXTUREFLAGS_IMMEDIATE_CLEANUP|" );
 	}
 }
 
@@ -281,7 +195,42 @@ namespace TextureLodOverride
 
 }; // end namespace TextureLodOverride
 
-class CTextureStreamingJob;
+
+namespace TextureLodExclude
+{
+	typedef CUtlStringMap< int > ExcludeMap_t;
+	ExcludeMap_t s_ExcludeMap;
+
+	int Get( char const *szName )
+	{
+		UtlSymId_t idx = s_ExcludeMap.Find( szName );
+		if ( idx != s_ExcludeMap.InvalidIndex() )
+		{
+			return s_ExcludeMap[ idx ];
+		}
+		else
+		{
+			return -1;
+		}
+	}
+
+	void Add( char const *szName, int iOverride )
+	{
+		UtlSymId_t idx = s_ExcludeMap.Find( szName );
+		if ( idx != s_ExcludeMap.InvalidIndex() )
+		{
+			int &x = s_ExcludeMap[ idx ];
+			x = iOverride;
+		}
+		else
+		{
+			s_ExcludeMap[ szName ] = iOverride;
+		}
+	}
+}; // end namespace TextureLodExclude
+
+
+
 
 //-----------------------------------------------------------------------------
 // Base texture class
@@ -298,7 +247,6 @@ public:
 
 	// Stats about the texture itself
 	virtual ImageFormat GetImageFormat() const;
-	NormalDecodeMode_t GetNormalDecodeMode() const { return NORMAL_DECODE_NONE; }
 	virtual int GetMappingWidth() const;
 	virtual int GetMappingHeight() const;
 	virtual int GetActualWidth() const;
@@ -310,10 +258,10 @@ public:
 	// Reference counting
 	virtual void IncrementReferenceCount( );
 	virtual void DecrementReferenceCount( );
-	virtual int GetReferenceCount( );
+	virtual int GetReferenceCount() const;
 
 	// Used to modify the texture bits (procedural textures only)
-	virtual void SetTextureRegenerator( ITextureRegenerator *pTextureRegen );
+	virtual void SetTextureRegenerator( ITextureRegenerator *pTextureRegen, bool releaseExisting = true );
 
 	// Little helper polling methods
 	virtual bool IsNormalMap( ) const;
@@ -323,6 +271,7 @@ public:
 	virtual bool IsProcedural() const;
 	virtual bool IsMipmapped() const;
 	virtual bool IsError() const;
+	virtual bool IsDefaultPool() const;
 
 	// For volume textures
 	virtual bool IsVolumeTexture() const;
@@ -331,15 +280,15 @@ public:
 
 	// Various ways of initializing the texture
 	void InitFileTexture( const char *pTextureFile, const char *pTextureGroupName );
-	void InitProceduralTexture( const char *pTextureName, const char *pTextureGroupName, int w, int h, int d, ImageFormat fmt, int nFlags, ITextureRegenerator* generator = NULL );
+	void InitProceduralTexture( const char *pTextureName, const char *pTextureGroupName, int w, int h, int d, ImageFormat fmt, int nFlags );
 
 	// Releases the texture's hw memory
-	void ReleaseMemory();
+	void Release();
 
 	virtual void OnRestore();
 
 	// Sets the filtering modes on the texture we're modifying
-	void SetFilteringAndClampingMode( bool bOnlyLodValues = false );
+	void SetFilteringAndClampingMode();
 	void Download( Rect_t *pRect = NULL, int nAdditionalCreationFlags = 0 );
 
 	// Loads up information about the texture 
@@ -369,8 +318,8 @@ public:
 	virtual ShaderAPITextureHandle_t GetTextureHandle( int nFrame, int nChannel = 0 );
 
 	// Sets the texture as the render target
-	virtual void Bind( Sampler_t sampler );
-	virtual void Bind( Sampler_t sampler1, int nFrame, Sampler_t sampler2 = (Sampler_t) -1 );
+	virtual void Bind( Sampler_t sampler, TextureBindFlags_t nBindFlags );
+	virtual void Bind( Sampler_t sampler1, TextureBindFlags_t nBindFlags, int nFrame, Sampler_t sampler2 = SHADER_SAMPLER_INVALID );
 	virtual void BindVertexTexture( VertexTextureSampler_t stage, int nFrame );
 
 	// Set this texture as a render target	
@@ -382,38 +331,41 @@ public:
 	virtual void MarkAsPreloaded( bool bSet );
 	virtual bool IsPreloaded() const;
 
-	virtual void MarkAsExcluded( bool bSet, int nDimensionsLimit );
-	virtual bool UpdateExcludedState( void );
+	virtual void MarkAsExcluded( bool bSet, int nDimensionsLimit, bool bMarkAsTrumpedExclude );
+	virtual bool UpdateExcludedState();
 
 	// Retrieve the vtf flags mask
 	virtual unsigned int GetFlags( void ) const;
 
 	virtual void ForceLODOverride( int iNumLodsOverrideUpOrDown );
+	virtual void ForceExcludeOverride( int iExcludeOverride );
+
+	//this isn't a MultiRenderTarget texture, do nothing
+	virtual void AddDownsizedSubTarget( const char *pName, int iDownsizePow2, MaterialRenderTargetDepth_t depth ) {}
+	virtual void SetActiveSubTarget( const char *pName ) {}
 
 	void GetFilename( char *pOut, int maxLen ) const;
 	virtual void ReloadFilesInList( IFileList *pFilesToReload );
 
-	// Save texture to a file.
-	virtual bool SaveToFile( const char *fileName );
-	
-	// Load the texture from a file.
-	bool AsyncReadTextureFromFile( IVTFTexture* pVTFTexture, unsigned int nAdditionalCreationFlags );
-	void AsyncCancelReadTexture( );
+#ifdef _PS3
+	virtual void Ps3gcmRawBufferAlias( char const *pRTName );
+#endif
 
-	virtual void Map( void** pOutBits, int* pOutPitch );
-	virtual void Unmap();
+	virtual bool MarkAsTempExcluded( bool bSet, int nExcludedDimensionLimit );
 
-	virtual ResidencyType_t GetCurrentResidence() const { return m_residenceCurrent; }
-	virtual ResidencyType_t GetTargetResidence() const { return m_residenceTarget; }
-	virtual bool MakeResident( ResidencyType_t newResidence );
-	virtual void UpdateLodBias();
+	virtual bool IsTempExcluded() const;
+	virtual bool CanBeTempExcluded() const;
+
+	virtual bool FinishAsyncDownload( AsyncTextureContext_t *pContext, void *pData, int nNumReadBytes, bool bAbort, float flMaxTimeMs );
+
+	virtual bool IsForceExcluded() const;
+	virtual bool ClearForceExclusion();
+
+	virtual bool IsAsyncDone() const;
 
 protected:
 	bool IsDepthTextureFormat( ImageFormat fmt );
-	void ReconstructTexture( bool bCopyFromCurrent );
-	void GetCacheFilename( char* pOutBuffer, int bufferSize ) const;
-	bool GetFileHandle( FileHandle_t *pOutFileHandle, char *pCacheFilename, char **ppResolvedFilename ) const;
-
+	void ReconstructTexture( void *pSourceData = NULL, int nSourceDataSize = 0 );
 	void ReconstructPartialTexture( const Rect_t *pRect );
 	bool HasBeenAllocated() const;
 	void WriteDataToShaderAPITexture( int nFrameCount, int nFaceCount, int nFirstFace, int nMipCount, IVTFTexture *pVTFTexture, ImageFormat fmt );
@@ -426,25 +378,27 @@ protected:
 	void SetName( const char* pName );
 
 	// Assigns/releases texture IDs for our animation frames
-	void AllocateTextureHandles( );
-	void ReleaseTextureHandles( );
+	void AllocateTextureHandles();
+	void ReleaseTextureHandles();
 
 	// Calculates info about whether we can make the texture smaller and by how much
 	// Returns the number of skipped mip levels
-	int ComputeActualSize( bool bIgnorePicmip = false, IVTFTexture *pVTFTexture = NULL, bool bTextureMigration = false );
+	int ComputeActualSize( bool bIgnorePicmip = false, IVTFTexture *pVTFTexture = NULL );
 
 	// Computes the actual format of the texture given a desired src format
 	ImageFormat ComputeActualFormat( ImageFormat srcFormat );
 
+	// Compute the actual mip count based on the actual size
+	int ComputeActualMipCount( ) const;
+
 	// Creates/releases the shader api texture
-	bool AllocateShaderAPITextures();
-	void FreeShaderAPITextures();
-	void MigrateShaderAPITextures();
-	void NotifyUnloadedFile();
+	virtual bool AllocateShaderAPITextures();
+	virtual void FreeShaderAPITextures();
 
 	// Download bits
-	void DownloadTexture( Rect_t *pRect, bool bCopyFromCurrent = false );
-	void ReconstructTextureBits(Rect_t *pRect);
+	void DownloadTexture( Rect_t *pRect, void *pSourceData = NULL, int nSourceDataSize = 0 );
+	bool DownloadAsyncTexture( AsyncTextureContext_t *pContext, void *pSourceData, int nSourceDataSize, float flMaxTimeMs );
+	void ReconstructTextureBits( Rect_t *pRect );
 
 	// Gets us modifying a particular frame of our texture
 	void Modify( int iFrame );
@@ -455,11 +409,10 @@ protected:
 	// Sets the texture filtering state on the currently modified frame
 	void SetFilterState();
 
-	// Sets the lod state on the currently modified frame
-	void SetLodState();
-
 	// Loads the texture bits from a file. Optionally provides absolute path
+	IVTFTexture *LoadTexttureBitsFromFileOrData( void *pSourceData, int nSourceDataSize, char **pResolvedFilename );
 	IVTFTexture *LoadTextureBitsFromFile( char *pCacheFileName, char **pResolvedFilename );
+	IVTFTexture *LoadTextureBitsFromData( char *pCacheFileName, void *pSourceData, int nSourceDataSize );
 	IVTFTexture *HandleFileLoadFailedTexture( IVTFTexture *pVTFTexture );
 
 	// Generates the procedural bits
@@ -471,6 +424,9 @@ protected:
 
 	// Generate a texture that shows the various mip levels
 	void GenerateShowMipLevelsTextures( IVTFTexture *pTexture );
+
+	// Generate a RGBA 128 128 128 255 gray texture
+	void GenerateGrayTexture( IVTFTexture *pTexture );
 
 	void Cleanup( void );
 
@@ -484,22 +440,18 @@ protected:
 	void GetDownloadFaceCount( int &nFirstFace, int &nFaceCount );
 	void ComputeMipLevelSubRect( const Rect_t* pSrcRect, int nMipLevel, Rect_t *pSubRect );
 
-	IVTFTexture *GetScratchVTFTexture( );
-	void ReleaseScratchVTFTexture( IVTFTexture* tex );
+	IVTFTexture *GetScratchVTFTexture();
+	IVTFTexture *GetScratchVTFAsyncTexture();
+
+	int GetOptimalReadBuffer( FileHandle_t hFile, int nFileSize, CUtlBuffer &optimalBuffer );
+	void FreeOptimalReadBuffer( int nMaxSize );
 
 	void ApplyRenderTargetSizeMode( int &width, int &height, ImageFormat fmt );
 
-	virtual void CopyToStagingTexture( ITexture* pDstTex );
+	virtual bool IsMultiRenderTarget( void ) { return false; }
 
-	virtual void SetErrorTexture( bool _isErrorTexture );
-
-	// Texture streaming
-	void MakeNonResident();
-	void MakePartiallyResident();
-	bool MakeFullyResident();
-
-	void CancelStreamingJob( bool bJobMustExist = true );
-	void OnStreamingJobComplete( ResidencyType_t newResidenceCurrent );
+	void LoadResourceData( IVTFTexture *pTexture );
+	void FreeResourceData();
 
 protected:
 #ifdef _DEBUG
@@ -510,6 +462,10 @@ protected:
 	Vector m_vecReflectivity;
 
 	CUtlSymbol m_Name;
+
+	CUtlSymbol m_ExcludedResolvedFileName;
+	CUtlSymbol m_ResolvedFileName;
+	FSAsyncControl_t m_hAsyncControl;
 
 	// What texture group this texture is in (winds up setting counters based on the group name,
 	// then the budget panel views the counters).
@@ -523,19 +479,21 @@ protected:
 	// This is the *desired* image format, which may or may not represent reality
 	ImageFormat m_ImageFormat;
 
-	// mapping dimensions and actual dimensions can/will vary due to user settings, hardware support, etc.
-	// Allocated is what is physically allocated on the hardware at this instant, and considers texture streaming.
-	TexDimensions_t m_dimsMapping;
-	TexDimensions_t m_dimsActual;
-	TexDimensions_t m_dimsAllocated;
+	// mappingWidth/Height and actualWidth/Height only differ 
+	// if g_config.skipMipLevels != 0, or if the card has a hard limit
+	// on the maximum texture size
+	// This is the iWidth/iHeight for the data that m_pImageData points to.
+	unsigned short m_nMappingWidth;
+	unsigned short m_nMappingHeight;
+	unsigned short m_nMappingDepth;
 
-	// This is the iWidth/iHeight for whatever is downloaded to the card, ignoring current streaming settings
-	// Some callers want to know how big the texture is if all data was present, and that's this. 
-	// TODO: Rename this before check in.
+	// This is the iWidth/iHeight for whatever is downloaded to the card.
+	unsigned short m_nActualWidth;		// needed for procedural
+	unsigned short m_nActualHeight;		// needed for procedural
+	unsigned short m_nActualDepth;
+
+	unsigned short m_nActualMipCount;	// Mip count when it's actually used
 	unsigned short m_nFrameCount;
-
-	// These are the values for what is truly allocated on the card, including streaming settings. 
-	unsigned short m_nStreamingMips;
 
 	unsigned short m_nOriginalRTWidth;	// The values they initially specified. We generated a different width
 	unsigned short m_nOriginalRTHeight;	// and height based on screen size and the flags they specify.
@@ -543,35 +501,25 @@ protected:
 	unsigned char m_LowResImageWidth;
 	unsigned char m_LowResImageHeight;
 
-	unsigned short m_nDesiredDimensionLimit;	// part of texture exclusion
-	unsigned short m_nActualDimensionLimit;		// value not necessarily accurate, but mismatch denotes dirty state
-
-	// m_pStreamingJob is refcounted, but it is not safe to call SafeRelease directly on it--you must call 
-	// CancelStreamingJob to ensure that releasing it doesn't cause a crash.
-	CTextureStreamingJob* m_pStreamingJob;
-	IVTFTexture* m_pStreamingVTF;
-	ResidencyType_t m_residenceTarget;
-	ResidencyType_t m_residenceCurrent;
-	int m_lodClamp;
-	int m_lastLodBiasAdjustFrame;
-	float m_lodBiasInitial;
-	float m_lodBiasCurrent; 
-	double m_lodBiasStartTime;
-
-	// If the read failed, this will be true. We can't just return from the function because the call may
-	// happen in the async thread.
-	bool m_bStreamingFileReadFailed;
-
+	short m_nDesiredDimensionLimit;			// part of texture exclusion
+	short m_nDesiredTempDimensionLimit;
+	short m_nActualDimensionLimit;			// value not necessarily accurate, but mismatch denotes dirty state
+	unsigned short m_nMipSkipCount;
 
 	// The set of texture ids for each animation frame
 	ShaderAPITextureHandle_t *m_pTextureHandles;
 
-	TextureLODControlSettings_t m_cachedFileLodSettings;
+	// a temporary copy of the texture handles used to support the temporary exclude feature
+	ShaderAPITextureHandle_t *m_pTempTextureHandles;
 
 	// lowresimage info - used for getting color data from a texture
 	// without having a huge system mem overhead.
 	// FIXME: We should keep this in compressed form. .is currently decompressed at load time.
+#if !defined( _GAMECONSOLE )
 	unsigned char *m_pLowResImage;
+#else
+	unsigned char m_LowResImageSample[4];
+#endif
 
 	ITextureRegenerator *m_pTextureRegenerator;
 
@@ -587,6 +535,14 @@ public:
 		unsigned int renderTargetFlags );
 	
 	virtual void DeleteIfUnreferenced();
+
+#if defined( _GAMECONSOLE )
+	virtual bool ClearTexture( int r, int g, int b, int a );
+#endif
+
+#if defined( _X360 )
+	virtual bool CreateRenderTargetSurface( int width, int height, ImageFormat format, bool bSameAsTexture, RTMultiSampleCount360_t multiSampleCount = RT_MULTISAMPLE_NONE );
+#endif
 
 	void FixupTexture( const void *pData, int nSize, LoaderError_t loaderError );
 
@@ -609,46 +565,428 @@ protected:
 	};
 	CUtlVector< DataChunk > m_arrDataChunks;
 
-	struct ScratchVTF
-	{
-		ScratchVTF( CTexture* _tex ) : m_pParent( _tex ), m_pScratchVTF( _tex->GetScratchVTFTexture( ) ) { }
-		~ScratchVTF( ) 
-		{
-			if ( m_pScratchVTF ) 
-				m_pParent->ReleaseScratchVTFTexture( m_pScratchVTF ); 
-			m_pScratchVTF = NULL; 
-		}
-
-		IVTFTexture* Get() const { return m_pScratchVTF; }
-		void TakeOwnership() { m_pScratchVTF = NULL; }
-
-		CTexture* m_pParent;
-		IVTFTexture* m_pScratchVTF;
-	};
-
-	friend class CTextureStreamingJob;
+private:
+	bool ScheduleExcludeAsyncDownload();
+	bool ScheduleAsyncDownload();
 };
 
-class CTextureStreamingJob : public IAsyncTextureOperationReceiver
+//a render target that is actually multiple textures that can be swapped out depending on the situation. Mostly to support recursive water in portal
+class CTexture_MultipleRenderTarget : public CTexture
 {
 public:
-	CTextureStreamingJob( CTexture* pTex ) : m_referenceCount( 0 ), m_pOwner( pTex ) { Assert( m_pOwner != NULL ); m_pOwner->AddRef(); } 
-	virtual ~CTextureStreamingJob() { SafeRelease( &m_pOwner ); }
+	typedef CTexture BaseClass;
 
-	virtual int AddRef() OVERRIDE { return ++m_referenceCount; }
-	virtual int Release() OVERRIDE { int retVal = --m_referenceCount; Assert( retVal >= 0 ); if ( retVal == 0 ) { delete this; } return retVal; }
-	virtual int GetRefCount() const OVERRIDE { return m_referenceCount; }
+	CTexture_MultipleRenderTarget() :
+	m_nActiveTarget( -1 ),
+	m_nQueuedActiveTarget( -1 )
+	{
 
-	virtual void OnAsyncCreateComplete( ITexture* pTex, void* pExtraArgs ) OVERRIDE { Assert( !"unimpl" ); }
-	virtual void OnAsyncFindComplete( ITexture* pTex, void* pExtraArgs ) OVERRIDE;
-	virtual void OnAsyncMapComplete( ITexture* pTex, void* pExtraArgs, void* pMemory, int nPitch ) { Assert( !"unimpl" ); }
-	virtual void OnAsyncReadbackBegin( ITexture* pDst, ITexture* pSrc, void* pExtraArgs ) OVERRIDE { Assert( !"unimpl" ); }
+	}
 
-	void ForgetOwner( ITextureInternal* pTex ) { Assert( pTex == m_pOwner ); SafeRelease( &m_pOwner ); }
+	virtual void Bind( Sampler_t sampler, TextureBindFlags_t nBindFlags )
+	{
+		Assert( materials->GetRenderContext()->GetCallQueue() == NULL );
+		Assert( m_nActiveTarget < m_Targets.Count() );
 
-private:
-	CInterlockedInt m_referenceCount;
-	CTexture* m_pOwner;
+		if( m_nActiveTarget < 0 )
+			return BaseClass::Bind( sampler, nBindFlags );
+		
+		if( m_nActiveTarget < m_Targets.Count() )
+		{
+			g_pShaderAPI->BindTexture( sampler, nBindFlags, m_Targets[m_nActiveTarget].handle );
+		}
+		else
+		{
+			g_pShaderAPI->BindTexture( sampler, nBindFlags, INVALID_SHADERAPI_TEXTURE_HANDLE );
+		}
+	}
+
+	virtual void Bind( Sampler_t sampler1, TextureBindFlags_t nBindFlags, int nFrame, Sampler_t sampler2 = SHADER_SAMPLER_INVALID )
+	{
+		Assert( materials->GetRenderContext()->GetCallQueue() == NULL );
+		Assert( m_nActiveTarget < m_Targets.Count() );
+		if( m_nActiveTarget < 0 )
+			return BaseClass::Bind( sampler1, nBindFlags, nFrame, sampler2 );
+
+		if ( g_pShaderDevice->IsUsingGraphics() )
+		{
+			if( m_nActiveTarget < m_Targets.Count() )
+			{
+				g_pShaderAPI->BindTexture( sampler1, nBindFlags, m_Targets[m_nActiveTarget].handle );
+			}
+			else
+			{
+				g_pShaderAPI->BindTexture( sampler1, nBindFlags, INVALID_SHADERAPI_TEXTURE_HANDLE );
+			}
+		}		
+	}
+
+	virtual ShaderAPITextureHandle_t GetTextureHandle( int nFrame, int nTextureChannel =0 )
+	{
+		Assert( materials->GetRenderContext()->GetCallQueue() == NULL );
+		Assert( m_nActiveTarget < m_Targets.Count() );
+
+		if( m_nActiveTarget < 0 )
+			return BaseClass::GetTextureHandle( nFrame, nTextureChannel );
+
+		if( m_nActiveTarget < m_Targets.Count() )
+		{
+			return m_Targets[m_nActiveTarget].handle;
+		}
+		else
+		{
+			return INVALID_SHADERAPI_TEXTURE_HANDLE;
+		}
+	}
+
+	virtual void AddDownsizedSubTarget( const char *szName, int iDownsizePow2, MaterialRenderTargetDepth_t depth )
+	{
+		// normalize and convert to a symbol
+		char szCleanName[MAX_PATH];
+		SubTarget_t temp;
+		temp.name = NormalizeTextureName( szName, szCleanName, sizeof( szCleanName ) );
+		temp.iDownSizePow2 = iDownsizePow2;
+		temp.handle = INVALID_SHADERAPI_TEXTURE_HANDLE;
+		temp.depthHandle = INVALID_SHADERAPI_TEXTURE_HANDLE;
+		temp.bHasSeparateDepth = (depth == MATERIAL_RT_DEPTH_SEPARATE) || (depth == MATERIAL_RT_DEPTH_ONLY);
+
+		if( IsX360() )
+		{
+			if( HasBeenAllocated() )
+			{
+				//need to initialize these handles now
+				extern int GetCreationFlags( int iTextureFlags, int iInternalTextureFlags, ImageFormat fmt ); //defined about 1000 lines down where it makes more logical sense to be
+				int nCreateFlags = GetCreationFlags( m_nFlags, m_nInternalFlags, m_ImageFormat );
+
+				// For depth only render target: adjust texture width/height
+				// Currently we just leave it the same size, will update with further testing
+				int nShaderApiCreateTextureDepth = ( ( m_nFlags & TEXTUREFLAGS_DEPTHRENDERTARGET ) && ( m_nOriginalRenderTargetType == RENDER_TARGET_ONLY_DEPTH ) ) ? 1 : m_nActualDepth;
+
+				
+				// Create all animated texture frames in a single call
+				g_pShaderAPI->CreateTextures(
+					&temp.handle, 1,
+					m_nActualWidth / iDownsizePow2, m_nActualHeight / iDownsizePow2, nShaderApiCreateTextureDepth, m_ImageFormat, m_nActualMipCount,
+					1, nCreateFlags, GetName(), GetTextureGroupName() );
+
+				// Create the depth render target buffer
+				if ( temp.bHasSeparateDepth )
+				{
+					MEM_ALLOC_CREDIT();
+
+					char debugName[128];
+					sprintf( debugName, "%s_ZBuffer", GetName() );
+
+					temp.depthHandle = g_pShaderAPI->CreateDepthTexture( 
+						m_ImageFormat, 
+						m_nActualWidth / iDownsizePow2, 
+						m_nActualHeight / iDownsizePow2,
+						debugName,
+						( m_nOriginalRenderTargetType == RENDER_TARGET_ONLY_DEPTH ) );
+				}
+
+
+#if defined( PLATFORM_X360 )
+				//if ( !( renderTargetFlags & CREATERENDERTARGETFLAGS_NOEDRAM ) )
+				{
+					// RT surface is expected at end of array
+					temp.surfaceHandle = g_pShaderAPI->CreateRenderTargetSurface( m_nActualWidth / iDownsizePow2, m_nActualHeight / iDownsizePow2, m_ImageFormat, RT_MULTISAMPLE_NONE, GetName(), TEXTURE_GROUP_RENDER_TARGET_SURFACE );
+				}
+#endif
+			}
+		}
+		else
+		{
+			Assert( HasBeenAllocated() );
+		}
+
+		m_Targets.AddToTail( temp );
+	}
+
+	virtual void SetActiveSubTarget( const char *szName )
+	{
+		ICallQueue *pCallQueue = materials->GetRenderContext()->GetCallQueue();
+		if ( pCallQueue )
+		{
+			m_nQueuedActiveTarget = -1;
+			if( szName == NULL )
+			{
+				return;
+			}
+
+			char szCleanName[MAX_PATH];
+			NormalizeTextureName( szName, szCleanName, sizeof( szCleanName ) );
+
+			for( int i = 0; i != m_Targets.Count(); ++i )
+			{
+				if( m_Targets[i].name == szCleanName )
+				{
+					m_nQueuedActiveTarget = i;
+					break;
+				}
+			}
+
+			pCallQueue->QueueCall( this, &CTexture_MultipleRenderTarget::SetActiveSubTarget, szName );
+			return;
+		}
+		else
+		{
+			m_nActiveTarget = -1;
+			if( szName == NULL )
+			{
+				return;
+			}
+
+			char szCleanName[MAX_PATH];
+			NormalizeTextureName( szName, szCleanName, sizeof( szCleanName ) );
+			
+			for( int i = 0; i != m_Targets.Count(); ++i )
+			{
+				if( m_Targets[i].name == szCleanName )
+				{
+					m_nActiveTarget = i;
+					break;
+				}
+			}
+		}
+	}
+
+
+	virtual int GetActualWidth() const
+	{
+		int iDownSize = 1;
+		
+		ICallQueue *pCallQueue = materials->GetRenderContext()->GetCallQueue();
+		if ( pCallQueue )
+		{
+			Assert( m_nQueuedActiveTarget < m_Targets.Count() );
+			if( (m_nQueuedActiveTarget >= 0) && (m_nQueuedActiveTarget < m_Targets.Count()) )
+			{
+				iDownSize = m_Targets[m_nQueuedActiveTarget].iDownSizePow2;
+			}
+		}
+		else
+		{
+			Assert( m_nActiveTarget < m_Targets.Count() );
+			if( (m_nActiveTarget >= 0) && (m_nActiveTarget < m_Targets.Count()) )
+			{
+				iDownSize = m_Targets[m_nActiveTarget].iDownSizePow2;
+			}
+		}
+
+		return BaseClass::GetActualWidth() / iDownSize;
+	}
+
+	virtual int GetActualHeight() const
+	{
+		int iDownSize = 1;
+
+		ICallQueue *pCallQueue = materials->GetRenderContext()->GetCallQueue();
+		if ( pCallQueue )
+		{
+			Assert( m_nQueuedActiveTarget < m_Targets.Count() );
+			if( (m_nQueuedActiveTarget >= 0) && (m_nQueuedActiveTarget < m_Targets.Count()) )
+			{
+				iDownSize = m_Targets[m_nQueuedActiveTarget].iDownSizePow2;
+			}
+		}
+		else
+		{
+			Assert( m_nActiveTarget < m_Targets.Count() );
+			if( (m_nActiveTarget >= 0) && (m_nActiveTarget < m_Targets.Count()) )
+			{
+				iDownSize = m_Targets[m_nActiveTarget].iDownSizePow2;
+			}
+		}
+
+		return BaseClass::GetActualHeight() / iDownSize;
+	}
+
+	virtual bool AllocateShaderAPITextures()
+	{
+		Assert( materials->GetRenderContext()->GetCallQueue() == NULL );
+		Assert( !HasBeenAllocated() );
+
+		if ( !BaseClass::AllocateShaderAPITextures() )
+			return false;
+
+		if( m_Targets.Count() == 0 )
+			return true;
+
+		extern int GetCreationFlags( int iTextureFlags, int iInternalTextureFlags, ImageFormat fmt ); //defined about 1000 lines down where it makes more logical sense to be
+		int nCreateFlags = GetCreationFlags( m_nFlags, m_nInternalFlags, m_ImageFormat );
+
+		// For depth only render target: adjust texture width/height
+		// Currently we just leave it the same size, will update with further testing
+		int nShaderApiCreateTextureDepth = ( ( m_nFlags & TEXTUREFLAGS_DEPTHRENDERTARGET ) && ( m_nOriginalRenderTargetType == RENDER_TARGET_ONLY_DEPTH ) ) ? 1 : m_nActualDepth;
+
+		for( int i = 0; i != m_Targets.Count(); ++i )
+		{
+			// Create all animated texture frames in a single call
+			g_pShaderAPI->CreateTextures(
+				&m_Targets[i].handle, 1,
+				m_nActualWidth / m_Targets[i].iDownSizePow2, m_nActualHeight / m_Targets[i].iDownSizePow2, nShaderApiCreateTextureDepth, m_ImageFormat, m_nActualMipCount,
+				1, nCreateFlags, GetName(), GetTextureGroupName() );
+
+			// Create the depth render target buffer
+			if ( m_Targets[i].bHasSeparateDepth )
+			{
+				MEM_ALLOC_CREDIT();
+
+				char debugName[128];
+				sprintf( debugName, "%s_ZBuffer", GetName() );
+
+				m_Targets[i].depthHandle = g_pShaderAPI->CreateDepthTexture( 
+					m_ImageFormat, 
+					m_nActualWidth / m_Targets[i].iDownSizePow2, 
+					m_nActualHeight / m_Targets[i].iDownSizePow2,
+					debugName,
+					( m_nOriginalRenderTargetType == RENDER_TARGET_ONLY_DEPTH ) );
+			}
+
+
+#if defined( PLATFORM_X360 )
+			//if ( !( renderTargetFlags & CREATERENDERTARGETFLAGS_NOEDRAM ) )
+			{
+				// RT surface is expected at end of array
+				m_Targets[i].surfaceHandle = g_pShaderAPI->CreateRenderTargetSurface( m_nActualWidth / m_Targets[i].iDownSizePow2, m_nActualHeight / m_Targets[i].iDownSizePow2, m_ImageFormat, RT_MULTISAMPLE_NONE, GetName(), TEXTURE_GROUP_RENDER_TARGET_SURFACE );
+			}
+#endif
+		}		
+
+		return true;
+	}
+
+
+	virtual void FreeShaderAPITextures()
+	{
+		Assert( materials->GetRenderContext()->GetCallQueue() == NULL );
+		for( int i = 0; i != m_Targets.Count(); ++i )
+		{
+			if ( g_pShaderAPI->IsTexture( m_Targets[i].handle ) )
+			{
+				g_pShaderAPI->DeleteTexture( m_Targets[i].handle );
+				m_Targets[i].handle = INVALID_SHADERAPI_TEXTURE_HANDLE;
+			}
+
+			if ( g_pShaderAPI->IsTexture( m_Targets[i].depthHandle ) )
+			{
+				g_pShaderAPI->DeleteTexture( m_Targets[i].depthHandle );
+				m_Targets[i].depthHandle = INVALID_SHADERAPI_TEXTURE_HANDLE;
+			}
+
+#if defined( PLATFORM_X360 )
+			if ( g_pShaderAPI->IsTexture( m_Targets[i].surfaceHandle ) )
+			{
+				g_pShaderAPI->DeleteTexture( m_Targets[i].surfaceHandle );
+				m_Targets[i].surfaceHandle = INVALID_SHADERAPI_TEXTURE_HANDLE;
+			}
+#endif
+		}
+
+		BaseClass::FreeShaderAPITextures();
+	}
+
+	//-----------------------------------------------------------------------------
+	// Set this texture as a render target
+	//-----------------------------------------------------------------------------
+	virtual bool SetRenderTarget( int nRenderTargetID )
+	{
+		Assert( materials->GetRenderContext()->GetCallQueue() == NULL );
+		return SetRenderTarget( nRenderTargetID, NULL );
+	}
+
+	//-----------------------------------------------------------------------------
+	// Set this texture as a render target
+	// Optionally bind pDepthTexture as depth buffer
+	//-----------------------------------------------------------------------------
+	bool SetRenderTarget( int nRenderTargetID, ITexture *pDepthTexture )
+	{
+		Assert( materials->GetRenderContext()->GetCallQueue() == NULL );
+		Assert( m_nActiveTarget < m_Targets.Count() );
+		if( (m_nActiveTarget < 0) || (m_nActiveTarget >= m_Targets.Count()) )
+			return BaseClass::SetRenderTarget( nRenderTargetID, pDepthTexture );
+
+		if ( ( m_nFlags & TEXTUREFLAGS_RENDERTARGET ) == 0 )
+			return false;
+
+		// Make sure we've actually allocated the texture handles
+		Assert( HasBeenAllocated() );
+
+		ShaderAPITextureHandle_t textureHandle;
+#if !defined( PLATFORM_X360 )
+		{
+			textureHandle = m_Targets[m_nActiveTarget].handle;
+		}
+#else
+		{
+			textureHandle = m_Targets[m_nActiveTarget].surfaceHandle;
+		}
+#endif
+		ShaderAPITextureHandle_t depthTextureHandle = (unsigned int)SHADER_RENDERTARGET_DEPTHBUFFER;
+
+		if ( m_Targets[m_nActiveTarget].bHasSeparateDepth )
+		{
+			depthTextureHandle = m_Targets[m_nActiveTarget].depthHandle;
+		} 
+		else if ( m_nFlags & TEXTUREFLAGS_NODEPTHBUFFER )
+		{
+			// GR - render target without depth buffer	
+			depthTextureHandle = (unsigned int)SHADER_RENDERTARGET_NONE;
+		}
+
+		if ( pDepthTexture)
+		{
+			depthTextureHandle = static_cast<ITextureInternal *>(pDepthTexture)->GetTextureHandle(0);
+		}
+
+		g_pShaderAPI->SetRenderTargetEx( nRenderTargetID, textureHandle, depthTextureHandle );
+		return true;
+	}
+
+	// Stretch blit the framebuffer into this texture.
+	virtual void CopyFrameBufferToMe( int nRenderTargetID = 0, Rect_t *pSrcRect = NULL, Rect_t *pDstRect = NULL )
+	{
+		Assert( materials->GetRenderContext()->GetCallQueue() == NULL );
+		Assert( m_nActiveTarget < m_Targets.Count() );
+		if( (m_nActiveTarget < 0) || (m_nActiveTarget >= m_Targets.Count()) )
+			return BaseClass::CopyFrameBufferToMe( nRenderTargetID, pSrcRect, pDstRect );
+
+		Assert( m_pTextureHandles && m_nFrameCount >= 1 );
+
+		if ( IsX360() &&
+			( m_nInternalFlags & TEXTUREFLAGSINTERNAL_TEMPRENDERTARGET ) &&
+			!HasBeenAllocated() )
+		{
+			//need to create the texture bits now
+			//to avoid creating the texture bits previously, we simply skipped this step
+			if ( !AllocateShaderAPITextures() )
+				return;
+		}
+
+		if ( m_pTextureHandles && m_nFrameCount >= 1 )
+		{
+			g_pShaderAPI->CopyRenderTargetToTextureEx( m_Targets[m_nActiveTarget].handle, nRenderTargetID, pSrcRect, pDstRect );
+		}
+	}
+
+	virtual bool IsMultiRenderTarget( void ) { return true; }
+
+	struct SubTarget_t
+	{
+		CUtlSymbol name;
+		int iDownSizePow2;
+		ShaderAPITextureHandle_t handle;
+		ShaderAPITextureHandle_t depthHandle;
+#if defined( PLATFORM_X360 )
+		ShaderAPITextureHandle_t surfaceHandle;
+#endif
+		bool bHasSeparateDepth;
+	};
+
+	CUtlVector< SubTarget_t > m_Targets;
+	int m_nActiveTarget;
+	int m_nQueuedActiveTarget;
 };
 
 //////////////////////////////////////////////////////////////////////////
@@ -670,11 +1008,10 @@ public:
 
 	// Stats about the texture itself
 	virtual ImageFormat GetImageFormat() const { return IMAGE_FORMAT_UNKNOWN; }
-	virtual NormalDecodeMode_t GetNormalDecodeMode() const { return NORMAL_DECODE_NONE; }
 	virtual int GetMappingWidth() const { return 1; }
 	virtual int GetMappingHeight() const { return 1; }
-	virtual int GetActualWidth() const { return 1; }
-	virtual int GetActualHeight() const { return 1; }
+	virtual int GetActualWidth() const { return m_nActualWidth; }
+	virtual int GetActualHeight() const { return m_nActualHeight; }
 	virtual int GetNumAnimationFrames() const { return 1; }
 	virtual bool IsTranslucent() const { return false; }
 	virtual void GetReflectivity( Vector& reflectivity ) { reflectivity.Zero(); }
@@ -682,10 +1019,10 @@ public:
 	// Reference counting
 	virtual void IncrementReferenceCount( ) { ++ m_nRefCount; }
 	virtual void DecrementReferenceCount( ) { -- m_nRefCount; }
-	virtual int GetReferenceCount( ) { return m_nRefCount; }
+	virtual int GetReferenceCount( ) const { return m_nRefCount; }
 
 	// Used to modify the texture bits (procedural textures only)
-	virtual void SetTextureRegenerator( ITextureRegenerator *pTextureRegen ) { NULL; }
+	virtual void SetTextureRegenerator( ITextureRegenerator *pTextureRegen, bool releaseExisting = true ) { NULL; }
 
 	// Little helper polling methods
 	virtual bool IsNormalMap( ) const { return false; }
@@ -695,6 +1032,7 @@ public:
 	virtual bool IsProcedural() const { return true; }
 	virtual bool IsMipmapped() const { return false; }
 	virtual bool IsError() const { return false; }
+	virtual bool IsDefaultPool() const { return false; }
 
 	// For volume textures
 	virtual bool IsVolumeTexture() const { return false; }
@@ -702,12 +1040,12 @@ public:
 	virtual int GetActualDepth() const { return 1; }
 
 	// Releases the texture's hw memory
-	void ReleaseMemory() { NULL; }
+	void Release() { NULL; }
 
 	virtual void OnRestore() { NULL; }
 
 	// Sets the filtering modes on the texture we're modifying
-	void SetFilteringAndClampingMode( bool bOnlyLodValues = false ) { NULL; }
+	void SetFilteringAndClampingMode() { NULL; }
 	void Download( Rect_t *pRect = NULL, int nAdditionalCreationFlags = 0 ) { NULL; }
 
 	// Loads up information about the texture 
@@ -737,8 +1075,8 @@ public:
 	virtual ShaderAPITextureHandle_t GetTextureHandle( int nFrame, int nTextureChannel = 0 ) { return m_hTexture; }
 
 	// Bind the texture
-	virtual void Bind( Sampler_t sampler );
-	virtual void Bind( Sampler_t sampler1, int nFrame, Sampler_t sampler2 = (Sampler_t) -1 );
+	virtual void Bind( Sampler_t sampler, TextureBindFlags_t nBindFlags );
+	virtual void Bind( Sampler_t sampler1, TextureBindFlags_t nBindFlags, int nFrame, Sampler_t sampler2 = SHADER_SAMPLER_INVALID );
 	virtual void BindVertexTexture( VertexTextureSampler_t stage, int nFrame );
 
 	// Set this texture as a render target	
@@ -750,34 +1088,36 @@ public:
 	virtual void MarkAsPreloaded( bool bSet ) { NULL; }
 	virtual bool IsPreloaded() const { return true; }
 
-	virtual void MarkAsExcluded( bool bSet, int nDimensionsLimit ) { NULL; }
-	virtual bool UpdateExcludedState( void ) { return true; }
+	virtual void MarkAsExcluded( bool bSet, int nDimensionsLimit, bool bMarkAsTrumpedExclude ) { NULL; }
+	virtual bool UpdateExcludedState() { return true; }
 
 	// Retrieve the vtf flags mask
 	virtual unsigned int GetFlags( void ) const { return 0; }
 
 	virtual void ForceLODOverride( int iNumLodsOverrideUpOrDown ) { NULL; }
+	virtual void ForceExcludeOverride( int iExcludeOverride ) { NULL; };
 
 	virtual void ReloadFilesInList( IFileList *pFilesToReload ) {}
 
-	// Save texture to a file.
-	virtual bool SaveToFile( const char *fileName ) { return false; }
+#ifdef _PS3
+	virtual void Ps3gcmRawBufferAlias( char const *pRTName ) {}
+#endif
 
-	virtual bool AsyncReadTextureFromFile( IVTFTexture* pVTFTexture, unsigned int nAdditionalCreationFlags ) { Assert( !"Should never get here." ); return false; }
-	virtual void AsyncCancelReadTexture() { Assert( !"Should never get here." ); }
+	virtual void AddDownsizedSubTarget( const char *szName, int iDownsizePow2, MaterialRenderTargetDepth_t depth ) { NULL; }
+	virtual void SetActiveSubTarget( const char *szName ) { NULL; }
+	virtual bool IsMultiRenderTarget( void ) { return false; }
 
-	virtual void CopyToStagingTexture( ITexture* pDstTex ) { Assert( !"Should never get here." ); };
+	virtual bool MarkAsTempExcluded( bool bSet, int nExcludedDimensionLimit ) { return false; }
 
-	// Map and unmap. These can fail. And can cause a very significant perf penalty. Be very careful with them.
-	virtual void Map( void** pOutBits, int* pOutPitch ) { }
-	virtual void Unmap() { }
+	virtual bool IsTempExcluded() const { return false; }
+	virtual bool CanBeTempExcluded() const { return false; }
 
-	virtual ResidencyType_t GetCurrentResidence() const { return RESIDENT_FULL; }
-	virtual ResidencyType_t GetTargetResidence() const { return RESIDENT_FULL; }
-	virtual bool MakeResident( ResidencyType_t newResidence ) { Assert( !"Unimpl" ); return true; }
-	virtual void UpdateLodBias() {}
+	virtual bool FinishAsyncDownload( AsyncTextureContext_t *pContext, void *pData, int nNumReadBytes, bool bAbort, float flMaxTimeMs ) { return true; }
 
-	virtual void SetErrorTexture( bool isErrorTexture ) { }
+	virtual bool IsForceExcluded() const { return false; }
+	virtual bool ClearForceExclusion() { return false; }
+
+	virtual bool IsAsyncDone() const { return true; }
 
 protected:
 #ifdef _DEBUG
@@ -796,8 +1136,20 @@ protected:
 	// Refcount
 	int m_nRefCount;
 
+	int m_nActualWidth;
+	int m_nActualHeight;
+	int m_nActualDepth;
+
 public:
 	virtual void DeleteIfUnreferenced();
+
+#if defined( _GAMECONSOLE )
+	virtual bool ClearTexture( int r, int g, int b, int a ) { return false; }
+#endif
+
+#if defined( _X360 )	
+	virtual bool CreateRenderTargetSurface( int width, int height, ImageFormat format, bool bSameAsTexture, RTMultiSampleCount360_t multiSampleCount = RT_MULTISAMPLE_NONE ) { return false; }
+#endif
 
 	void FixupTexture( const void *pData, int nSize, LoaderError_t loaderError ) { NULL; }
 
@@ -816,7 +1168,10 @@ CReferenceToHandleTexture::CReferenceToHandleTexture() :
 #ifdef _DEBUG
 	m_pDebugName( NULL ),
 #endif
-	m_nRefCount( 0 )
+	m_nRefCount( 0 ),
+	m_nActualWidth( 0 ),
+	m_nActualHeight( 0 ),
+	m_nActualDepth( 1 )
 {
 	NULL;
 }
@@ -857,23 +1212,22 @@ void CReferenceToHandleTexture::InitFromHandle( const char *pTextureName, const 
 	SetName( pTextureName );
 	m_TextureGroupName = pTextureGroupName;
 	m_hTexture = hTexture;
+	g_pShaderAPI->GetTextureDimensions( hTexture, m_nActualWidth, m_nActualHeight, m_nActualDepth );
 }
 
-void CReferenceToHandleTexture::Bind( Sampler_t sampler )
+void CReferenceToHandleTexture::Bind( Sampler_t sampler, TextureBindFlags_t nBindFlags )
 {
 	if ( g_pShaderDevice->IsUsingGraphics() )
 	{
-		g_pShaderAPI->BindTexture( sampler, m_hTexture );
+		g_pShaderAPI->BindTexture( sampler, nBindFlags, m_hTexture );
 	}
 }
 
-
-// TODO: make paired textures work with mat_texture_list
-void CReferenceToHandleTexture::Bind( Sampler_t sampler1, int nFrame, Sampler_t sampler2 /* = -1 */ )
+void CReferenceToHandleTexture::Bind( Sampler_t sampler1, TextureBindFlags_t nBindFlags, int nFrame, Sampler_t sampler2 /* = -1 */ )
 {
 	if ( g_pShaderDevice->IsUsingGraphics() )
 	{
-		g_pShaderAPI->BindTexture( sampler1, m_hTexture );
+		g_pShaderAPI->BindTexture( sampler1, nBindFlags, m_hTexture );
 	}
 }
 
@@ -904,17 +1258,11 @@ void CReferenceToHandleTexture::DeleteIfUnreferenced()
 //-----------------------------------------------------------------------------
 // Static instance of VTF texture
 //-----------------------------------------------------------------------------
-#define MAX_RENDER_THREADS 4
+static IVTFTexture *s_pVTFTexture = NULL;
+static IVTFTexture *s_pVTFAsyncTexture = NULL;
 
-// For safety's sake, we allow any of the threads that intersect with rendering
-// to have their own state vars. In practice, we expect only the matqueue thread 
-// and the main thread to ever hit s_pVTFTexture. 
-static IVTFTexture *s_pVTFTexture[ MAX_RENDER_THREADS ] = { NULL };
-
-// We only expect that the main thread or the matqueue thread to actually touch 
-// these, but we still need a NULL and size of 0 for the other threads. 
-static void *s_pOptimalReadBuffer[ MAX_RENDER_THREADS ] = { NULL };
-static int s_nOptimalReadBufferSize[ MAX_RENDER_THREADS ] = { 0 };
+static void *s_pOptimalReadBuffer = NULL;
+static int s_nOptimalReadBufferSize = 0;
 
 //-----------------------------------------------------------------------------
 // Class factory methods
@@ -943,11 +1291,10 @@ ITextureInternal *ITextureInternal::CreateProceduralTexture(
 	int					h, 
 	int					d,
 	ImageFormat			fmt, 
-	int					nFlags,
-	ITextureRegenerator *generator)
+	int					nFlags )
 {
 	CTexture *pTex = new CTexture;
-	pTex->InitProceduralTexture( pTextureName, pTextureGroupName, w, h, d, fmt, nFlags, generator );
+	pTex->InitProceduralTexture( pTextureName, pTextureGroupName, w, h, d, fmt, nFlags );
 	pTex->IncrementReferenceCount();
 	return pTex;
 }
@@ -961,9 +1308,10 @@ ITextureInternal *ITextureInternal::CreateRenderTarget(
 	ImageFormat fmt, 
 	RenderTargetType_t type, 
 	unsigned int textureFlags, 
-	unsigned int renderTargetFlags )
+	unsigned int renderTargetFlags,
+	bool bMultipleTargets )
 {
-	CTexture *pTex = new CTexture;
+	CTexture *pTex = bMultipleTargets ? new CTexture_MultipleRenderTarget : new CTexture;
 	pTex->InitRenderTarget( pRTName, w, h, sizeMode, fmt, type, textureFlags, renderTargetFlags );
 
 	return pTex;
@@ -982,30 +1330,12 @@ void ITextureInternal::ChangeRenderTarget(
 	unsigned int textureFlags, 
 	unsigned int renderTargetFlags )
 {
-	pTex->ReleaseMemory();
+	pTex->Release();
 	dynamic_cast< CTexture * >(pTex)->InitRenderTarget( pTex->GetName(), w, h, sizeMode, fmt, type, textureFlags, renderTargetFlags );
 }
 
-void ITextureInternal::Destroy( ITextureInternal *pTex, bool bSkipTexMgrCheck )
+void ITextureInternal::Destroy( ITextureInternal *pTex )
 {
-	#ifdef STAGING_ONLY
-		if ( !bSkipTexMgrCheck && TextureManager()->HasPendingTextureDestroys() )
-		{
-			// Multithreading badness. This will cause a crash later! Grab JohnS or McJohn know!
-			DebuggerBreakIfDebugging_StagingOnly();
-		}
-	#endif
-
-	int iIndex = g_pTextureRefList->Find( static_cast<ITexture*>( pTex ) );
-	if ( iIndex != g_pTextureRefList->InvalidIndex () )
-	{
-		if ( g_pTextureRefList->Element(iIndex) != 0 )
-		{
-			int currentCount = g_pTextureRefList->Element( iIndex );
-			Warning( "Destroying a texture that is in the queue: %s (%p): %d!\n", pTex->GetName(), pTex, currentCount );
-		}
-	}
-
 	delete pTex;
 }
 
@@ -1014,22 +1344,18 @@ void ITextureInternal::Destroy( ITextureInternal *pTex, bool bSkipTexMgrCheck )
 //-----------------------------------------------------------------------------
 CTexture::CTexture() : m_ImageFormat( IMAGE_FORMAT_UNKNOWN )
 {
-	m_dimsActual.m_nMipCount = 0;
-	m_dimsMapping.m_nWidth = 0;
-	m_dimsMapping.m_nHeight = 0;
-	m_dimsMapping.m_nDepth = 1;
-	m_dimsActual.m_nWidth = 0;
-	m_dimsActual.m_nHeight = 0;
-	m_dimsActual.m_nDepth = 1;
-	m_dimsAllocated.m_nWidth = 0;
-	m_dimsAllocated.m_nHeight = 0;
-	m_dimsAllocated.m_nDepth = 0;
-	m_dimsAllocated.m_nMipCount = 0;
-	m_nStreamingMips = 0;
+	m_nActualMipCount = 0;
+	m_nMappingWidth = 0;
+	m_nMappingHeight = 0;
+	m_nMappingDepth = 1;
+	m_nActualWidth = 0;
+	m_nActualHeight = 0;
+	m_nActualDepth = 1;
 	m_nRefCount = 0;
 	m_nFlags = 0;
 	m_nInternalFlags = 0;
 	m_pTextureHandles = NULL;
+	m_pTempTextureHandles = NULL;
 	m_nFrameCount = 0;
 	VectorClear( m_vecReflectivity );
 	m_pTextureRegenerator = NULL;
@@ -1039,26 +1365,22 @@ CTexture::CTexture() : m_ImageFormat( IMAGE_FORMAT_UNKNOWN )
 
 	m_LowResImageWidth = 0;
 	m_LowResImageHeight = 0;
+#if !defined( _GAMECONSOLE )
 	m_pLowResImage = NULL;
-
-	m_pStreamingJob = NULL;
-	m_residenceTarget = RESIDENT_NONE;
-	m_residenceCurrent = RESIDENT_NONE;
-	m_lodClamp = 0;	
-	m_lodBiasInitial = 0;
-	m_lodBiasCurrent = 0;
+#else
+	*(unsigned int *)m_LowResImageSample = 0;
+#endif
 
 	m_nDesiredDimensionLimit = 0;
-	m_nActualDimensionLimit = 0;
+	m_nDesiredTempDimensionLimit = 0;
+	m_nActualDimensionLimit = 0;	
+	m_hAsyncControl = NULL;
 
-	memset( &m_cachedFileLodSettings, 0, sizeof( m_cachedFileLodSettings ) );
+	m_nMipSkipCount = 0;
 
 #ifdef _DEBUG
 	m_pDebugName = NULL;
 #endif
-
-	m_pStreamingVTF = NULL;
-	m_bStreamingFileReadFailed = false;
 }
 
 CTexture::~CTexture()
@@ -1068,16 +1390,13 @@ CTexture::~CTexture()
 	{
 		Warning( "Reference Count(%d) != 0 in ~CTexture for texture \"%s\"\n", (int)m_nRefCount, m_Name.String() );
 	}
+	if ( m_pDebugName )
+	{
+		delete [] m_pDebugName;
+	}
 #endif
 
 	Shutdown();
-
-#ifdef _DEBUG
-	if ( m_pDebugName )
-	{
-		// delete[] m_pDebugName;
-	}
-#endif
 
 	// Deliberately stomp our VTable so that we can detect cases where code tries to access freed materials.
 	int *p = (int *)this;
@@ -1094,7 +1413,7 @@ void CTexture::Init( int w, int h, int d, ImageFormat fmt, int iFlags, int iFram
 
 	// This is necessary to prevent blowing away the allocated state,
 	// which is necessary for the ReleaseTextureHandles call below to work.
-	SetErrorTexture( false );
+	m_nInternalFlags &= ~TEXTUREFLAGSINTERNAL_ERROR;
 
 	// free and release previous data
 	// cannot change to new intialization parameters yet
@@ -1103,33 +1422,17 @@ void CTexture::Init( int w, int h, int d, ImageFormat fmt, int iFlags, int iFram
 
 	// update to new initialization parameters
 	// these are the *desired* new values
-	m_dimsMapping.m_nWidth = w;
-	m_dimsMapping.m_nHeight = h;
-	m_dimsMapping.m_nDepth = d;
+	m_nMappingWidth = w;
+	m_nMappingHeight = h;
+	m_nMappingDepth = d;
 	m_ImageFormat = fmt;
 	m_nFrameCount = iFrameCount;
 	// We don't know the actual width and height until we get it ready to render
-	m_dimsActual.m_nWidth = m_dimsActual.m_nHeight = 0;
-	m_dimsActual.m_nDepth = 1;
-	m_dimsActual.m_nMipCount = 0;
-
-	m_dimsAllocated.m_nWidth = 0;
-	m_dimsAllocated.m_nHeight = 0;
-	m_dimsAllocated.m_nDepth = 0;
-	m_dimsAllocated.m_nMipCount = 0;
-	m_nStreamingMips = 0;
-
-	// Clear the m_nFlags bit. If we don't, then m_nFrameCount may end up being 1, and
-	//  TEXTUREFLAGS_DEPTHRENDERTARGET could be set.
-	m_nFlags &= ~TEXTUREFLAGS_DEPTHRENDERTARGET;
-	m_nFlags |= iFlags;
-
-	CancelStreamingJob( false );
-	m_residenceTarget = RESIDENT_NONE;
-	m_residenceCurrent = RESIDENT_NONE;
-	m_lodClamp = 0;
-	m_lodBiasInitial = 0;
-	m_lodBiasCurrent = 0;
+	m_nActualWidth = m_nActualHeight = 0;
+	m_nActualDepth = 1;
+	m_nActualMipCount = 0;
+	m_nFlags = iFlags;
+	m_nMipSkipCount = 0;
 
 	AllocateTextureHandles();
 }
@@ -1140,20 +1443,13 @@ void CTexture::Init( int w, int h, int d, ImageFormat fmt, int iFlags, int iFram
 //-----------------------------------------------------------------------------
 void CTexture::Shutdown()
 {
-	Assert( m_pStreamingVTF == NULL );
-	
 	// Clean up the low-res texture
+#if !defined( _GAMECONSOLE )
 	delete[] m_pLowResImage;
 	m_pLowResImage = 0;
+#endif
 
-	// Clean up the resources data
-	for ( DataChunk const *pDataChunk = m_arrDataChunks.Base(),
-		  *pDataChunkEnd = pDataChunk + m_arrDataChunks.Count();
-		  pDataChunk < pDataChunkEnd; ++pDataChunk )
-	{
-		pDataChunk->Deallocate();
-	}
-	m_arrDataChunks.RemoveAll();
+	FreeResourceData();
 
 	// Frees the texture regen class
 	if ( m_pTextureRegenerator )
@@ -1162,63 +1458,85 @@ void CTexture::Shutdown()
 		m_pTextureRegenerator = NULL;
 	}
 
-	CancelStreamingJob( false );
-
-	m_residenceTarget = RESIDENT_NONE;
-	m_residenceCurrent = RESIDENT_NONE;
-	m_lodClamp = 0;
-	m_lodBiasInitial = 0;
-	m_lodBiasCurrent = 0;
-
 	// This deletes the textures
 	FreeShaderAPITextures();
 	ReleaseTextureHandles();
-	NotifyUnloadedFile();
 }
 
-void CTexture::ReleaseMemory()
+void CTexture::Release()
 {
 	FreeShaderAPITextures();
-	NotifyUnloadedFile();
 }
 
-IVTFTexture *CTexture::GetScratchVTFTexture( )
+IVTFTexture *CTexture::GetScratchVTFTexture()
 {
-	const bool cbThreadInMatQueue = ( MaterialSystem()->GetRenderThreadId() == ThreadGetCurrentId() ); cbThreadInMatQueue;
-	Assert( cbThreadInMatQueue || ThreadInMainThread() );
-
-	const int ti = GetThreadId();
-
-	if ( !s_pVTFTexture[ ti ] )
-		s_pVTFTexture[ ti ] = CreateVTFTexture();
-	return s_pVTFTexture[ ti ];
-}
-
-void CTexture::ReleaseScratchVTFTexture( IVTFTexture* tex )
-{
-	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
-
-	const bool cbThreadInMatQueue = ( MaterialSystem()->GetRenderThreadId() == ThreadGetCurrentId() ); cbThreadInMatQueue;
-	Assert( cbThreadInMatQueue || ThreadInMainThread() );
-	Assert( m_pStreamingVTF == NULL || ThreadInMainThread() );	// Can only manipulate m_pStreamingVTF to release safely in main thread.
-
-	if ( m_pStreamingVTF )
+	if ( !s_pVTFTexture )
 	{
-		Assert( tex == m_pStreamingVTF );
-		TextureManager()->ReleaseAsyncScratchVTF( m_pStreamingVTF );
-		m_pStreamingVTF = NULL;
-		return;
+		s_pVTFTexture = CreateVTFTexture();
+	}
+	return s_pVTFTexture;
+}
+
+IVTFTexture *CTexture::GetScratchVTFAsyncTexture()
+{
+	if (!s_pVTFAsyncTexture)
+	{
+		s_pVTFAsyncTexture = CreateVTFTexture();
+	}
+	return s_pVTFAsyncTexture;
+}
+
+//-----------------------------------------------------------------------------
+// Get an optimal read buffer, persists and avoids excessive allocations
+//-----------------------------------------------------------------------------
+int CTexture::GetOptimalReadBuffer( FileHandle_t hFile, int nSize, CUtlBuffer &optimalBuffer )
+{
+	// get an optimal read buffer, only resize if necessary
+	int minSize = IsGameConsole() ? 0 : 2 * 1024 * 1024;	// 360 has no min, PC uses 2MB min to avoid fragmentation
+	nSize = MAX(nSize, minSize);
+	int nBytesOptimalRead = g_pFullFileSystem->GetOptimalReadSize( hFile, nSize );
+	if ( nBytesOptimalRead > s_nOptimalReadBufferSize )
+	{
+		FreeOptimalReadBuffer( 0 );
+
+		s_nOptimalReadBufferSize = nBytesOptimalRead;
+		s_pOptimalReadBuffer = g_pFullFileSystem->AllocOptimalReadBuffer( hFile, nSize );
+		if ( mat_spewalloc.GetBool() )
+		{
+			Msg( "Allocated optimal read buffer of %d bytes @ 0x%p\n", s_nOptimalReadBufferSize, s_pOptimalReadBuffer );
+		}
 	}
 
-	// Normal scratch main-thread vtf doesn't need to do anything.
+	// set external buffer and reset to empty
+	optimalBuffer.SetExternalBuffer( s_pOptimalReadBuffer, s_nOptimalReadBufferSize, 0, CUtlBuffer::READ_ONLY );
 
+	// return the optimal read size
+	return nBytesOptimalRead;
 }
 
+//-----------------------------------------------------------------------------
+// Free the optimal read buffer if it grows too large
+//-----------------------------------------------------------------------------
+void CTexture::FreeOptimalReadBuffer( int nMaxSize )
+{
+	if ( s_pOptimalReadBuffer && s_nOptimalReadBufferSize >= nMaxSize )
+	{
+		if ( mat_spewalloc.GetBool() )
+		{
+			Msg( "Freeing optimal read buffer of %d bytes @ 0x%p\n", s_nOptimalReadBufferSize, s_pOptimalReadBuffer );
+		}
+		g_pFullFileSystem->FreeOptimalReadBuffer( s_pOptimalReadBuffer );
+		s_pOptimalReadBuffer = NULL;
+		s_nOptimalReadBufferSize = 0;
+	}
+}
 //-----------------------------------------------------------------------------
 //
 // Various initialization methods
 //
 //-----------------------------------------------------------------------------
+
+
 void CTexture::ApplyRenderTargetSizeMode( int &width, int &height, ImageFormat fmt )
 {
 	width = m_nOriginalRTWidth;
@@ -1228,30 +1546,20 @@ void CTexture::ApplyRenderTargetSizeMode( int &width, int &height, ImageFormat f
 	{
 		case RT_SIZE_FULL_FRAME_BUFFER:
 		{
-			MaterialSystem()->GetRenderTargetFrameBufferDimensions( width, height );
-			if( !HardwareConfig()->SupportsNonPow2Textures() )
-			{
-				width = FloorPow2( width + 1 );
-				height = FloorPow2( height + 1 );
-			}
+			MaterialSystem()->GetBackBufferDimensions( width, height );
 		}
 		break;
 
 		case RT_SIZE_FULL_FRAME_BUFFER_ROUNDED_UP:
 		{
-			MaterialSystem()->GetRenderTargetFrameBufferDimensions( width, height );
-			if( !HardwareConfig()->SupportsNonPow2Textures() )
-			{
-				width = CeilPow2( width );
-				height = CeilPow2( height );
-			}
+			MaterialSystem()->GetBackBufferDimensions( width, height );
 		}
 		break;
 
 		case RT_SIZE_PICMIP:
 		{
 			int fbWidth, fbHeight;
-			MaterialSystem()->GetRenderTargetFrameBufferDimensions( fbWidth, fbHeight );
+			MaterialSystem()->GetBackBufferDimensions( fbWidth, fbHeight );
 			int picmip = g_config.skipMipLevels;
 			while( picmip > 0 )
 			{
@@ -1277,7 +1585,7 @@ void CTexture::ApplyRenderTargetSizeMode( int &width, int &height, ImageFormat f
 			Assert( ( width & ( width - 1 ) ) == 0 );
 			Assert( ( height & ( height - 1 ) ) == 0 );
 			int fbWidth, fbHeight;
-			MaterialSystem()->GetRenderTargetFrameBufferDimensions( fbWidth, fbHeight );
+			MaterialSystem()->GetBackBufferDimensions( fbWidth, fbHeight );
 			while( width > fbWidth )
 			{
 				width >>= 1;
@@ -1291,7 +1599,7 @@ void CTexture::ApplyRenderTargetSizeMode( int &width, int &height, ImageFormat f
 
 		case RT_SIZE_HDR:
 		{
-			MaterialSystem()->GetRenderTargetFrameBufferDimensions( width, height );
+			MaterialSystem()->GetBackBufferDimensions( width, height );
 			width = width / 4;
 			height = height / 4;
 		}
@@ -1300,369 +1608,34 @@ void CTexture::ApplyRenderTargetSizeMode( int &width, int &height, ImageFormat f
 		case RT_SIZE_OFFSCREEN:
 		{
 			int fbWidth, fbHeight;
-			MaterialSystem()->GetRenderTargetFrameBufferDimensions( fbWidth, fbHeight );
+			MaterialSystem()->GetBackBufferDimensions( fbWidth, fbHeight );
 
-			// Shrink the buffer if it's bigger than back buffer.  Otherwise, don't mess with it.
-			while( (width > fbWidth) || (height > fbHeight) )
+			// On 360, don't do this resizing for formats related to the shadow depth texture
+#if defined( _GAMECONSOLE )
+			if ( !( (fmt == IMAGE_FORMAT_D16) || (fmt == IMAGE_FORMAT_D24S8) || (fmt == IMAGE_FORMAT_D24FS8) || (fmt == IMAGE_FORMAT_BGR565) || (fmt == IMAGE_FORMAT_D24X8_SHADOW) || (fmt == IMAGE_FORMAT_D16_SHADOW) ) )
+#endif
 			{
-				width >>= 1;
-				height >>= 1;
+				// Shrink the buffer if it's bigger than back buffer.  Otherwise, don't mess with it.
+				while( (width > fbWidth) || (height > fbHeight) )
+				{
+					width >>= 1;
+					height >>= 1;
+				}
 			}
+
 		}
 		break;
-
-		case RT_SIZE_LITERAL:
-		{
-			// Literal means literally don't mess with the dimensions. Unlike what OFFSCREEN does,
-			// which is totally to mess with the dimensions.
-		}
-		break;
-
-		case RT_SIZE_LITERAL_PICMIP:
-		{
-			// Don't do anything here, like literal. Later, we will pay attention to picmip settings s.t. 
-			// these render targets look like other textures wrt Mapping Dimensions vs Actual Dimensions.
-		}
-		break;
-
-		case RT_SIZE_REPLAY_SCREENSHOT:
-			{
-				// Compute all possible resolutions if first time we're running this function
-				static bool			bReplayInit = false;
-				static int			m_aScreenshotWidths[ 3 ][ 2 ];
-				static ConVarRef	replay_screenshotresolution( "replay_screenshotresolution" );
-
-				if ( !bReplayInit )
-				{
-					bReplayInit = true;
-					for ( int iAspect = 0; iAspect < 3; ++iAspect )
-					{
-						for ( int iRes = 0; iRes < 2; ++iRes )
-						{
-							int nWidth = (int)FastPow2( 9 + iRes );
-							m_aScreenshotWidths[ iAspect ][ iRes ] = nWidth;
-						}
-					}
-				}
-
-				// Get dimensions for unpadded image
-				int nUnpaddedWidth, nUnpaddedHeight;
-
-				// Figure out the proper screenshot size to use based on the aspect ratio
-				int nScreenWidth, nScreenHeight;
-				MaterialSystem()->GetRenderTargetFrameBufferDimensions( nScreenWidth, nScreenHeight );
-				float flAspectRatio = (float)nScreenWidth / nScreenHeight;
-
-				// Get the screenshot res
-				int iRes = clamp( replay_screenshotresolution.GetInt(), 0, 1 );
-
-				int iAspect;
-				if ( flAspectRatio == 16.0f/9 )
-				{
-					iAspect = 0;
-				}
-				else if ( flAspectRatio == 16.0f/10 )
-				{
-					iAspect = 1;
-				}
-				else
-				{
-					iAspect = 2;	// 4:3
-				}
-
-				static float s_flInvAspectRatios[3] = { 9.0f/16.0f, 10.0f/16, 3.0f/4 };
-				nUnpaddedWidth = min( nScreenWidth, m_aScreenshotWidths[ iAspect ][ iRes ] );
-				nUnpaddedHeight = m_aScreenshotWidths[ iAspect ][ iRes ] * s_flInvAspectRatios[ iAspect ];
-
-				// Get dimensions for padded image based on unpadded size - must be power of 2 for a material/texture
-				width = SmallestPowerOfTwoGreaterOrEqual( nUnpaddedWidth );
-				height = SmallestPowerOfTwoGreaterOrEqual( nUnpaddedHeight ); 
-			}
-			break;
 
 		default:
 		{
-			if ( !HushAsserts() )
-			{
-				Assert( m_RenderTargetSizeMode == RT_SIZE_NO_CHANGE );
-				Assert( m_nOriginalRenderTargetType == RENDER_TARGET_NO_DEPTH );	// Only can use NO_CHANGE if we don't have a depth buffer.
-			}
+			Assert( m_RenderTargetSizeMode == RT_SIZE_NO_CHANGE );
+			
+			// Cannot use RT_SIZE_NO_CHANGE if they are sharing the depth buffer.
+			Assert( m_nOriginalRenderTargetType != RENDER_TARGET );
 		}
 		break;
 	}
 }
-
-void CTexture::CopyToStagingTexture( ITexture* pDstTex )
-{
-	Assert( pDstTex );
-
-	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
-
-	// Need to flush any commands in flight on our side of things
-	materials->Flush( false );
-
-	CTexture* pDstTexActual = assert_cast< CTexture* >( pDstTex );
-
-	// Then do the copy if everything is on the up and up.
-	if ( ( m_pTextureHandles == NULL || m_nFrameCount == 0 ) || ( pDstTexActual->m_pTextureHandles == NULL || pDstTexActual->m_nFrameCount == 0 ) ) 
-	{
-		Assert( !"Can't copy to a non-existent texture, may need to generate or something." );
-		return;
-	}
-
-	// Make sure we've actually got the right surface types.
-	Assert( m_nFlags & TEXTUREFLAGS_RENDERTARGET );
-	Assert( pDstTex->GetFlags() & TEXTUREFLAGS_STAGING_MEMORY );
-
-	g_pShaderAPI->CopyRenderTargetToScratchTexture( m_pTextureHandles[0], pDstTexActual->m_pTextureHandles[0] );
-}
-
-void CTexture::Map( void** pOutBits, int* pOutPitch )
-{
-	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
-
-	// Must be a staging texture to avoid catastrophic perf fail.
-	Assert( m_nFlags & TEXTUREFLAGS_STAGING_MEMORY );
-
-	if ( m_pTextureHandles == NULL || m_nFrameCount == 0 )
-	{
-		Assert( !"Can't map a non-existent texture, may need to generate or something." );
-		return;
-	}
-
-	g_pShaderAPI->LockRect( pOutBits, pOutPitch, m_pTextureHandles[ 0 ], 0, 0, 0, GetActualWidth(), GetActualHeight(), false, true );
-}
-
-void CTexture::Unmap()
-{
-	if ( m_pTextureHandles == NULL || m_nFrameCount == 0 )
-	{
-		Assert( !"Can't unmap a non-existent texture, may need to generate or something." );
-		return;
-	}
-
-	g_pShaderAPI->UnlockRect( m_pTextureHandles[ 0 ], 0 );
-}
-
-bool CTexture::MakeResident( ResidencyType_t newResidence )
-{
-	Assert( ( GetFlags() & TEXTUREFLAGS_STREAMABLE ) != 0 );
-
-	// If we already think we're supposed to go here, nothing to do and we should report success.
-	if ( m_residenceTarget == newResidence )
-		return true;
-
-	TM_ZONE_DEFAULT( TELEMETRY_LEVEL0 );
-
-	// What are we moving towards?
-	switch ( newResidence )
-	{
-	case RESIDENT_NONE:
-		MakeNonResident();
-		return true;
-
-	case RESIDENT_PARTIAL:
-		MakePartiallyResident();
-		return true;
-
-	case RESIDENT_FULL:
-		return MakeFullyResident();
-
-	default:
-		Assert( !"Missing switch statement" );
-	};
-
-	return false;
-}
-
-void CTexture::UpdateLodBias()
-{
-	if ( m_lodBiasInitial == 0.0f )
-		return;
-
-	// Only perform adjustment once per frame.
-	if ( m_lastLodBiasAdjustFrame == g_FrameNum )
-		return;
-
-	bool bPopIn = mat_lodin_time.GetFloat() == 0;
-
-	if ( bPopIn && m_lodBiasInitial == 0.0f )
-		return;
-
-	if ( !bPopIn )
-		m_lodBiasCurrent = m_lodBiasInitial - ( Plat_FloatTime() - m_lodBiasStartTime ) / mat_lodin_time.GetFloat() * m_lodBiasInitial;
-	else
-		m_lodBiasCurrent = m_lodBiasInitial = 0.0f;
-
-	// If we're supposed to pop in when the object isn't visible and we have the opportunity...
-	if ( mat_lodin_hidden_pop.GetBool() && m_lastLodBiasAdjustFrame != g_FrameNum - 1 )
-		m_lodBiasCurrent = m_lodBiasInitial = 0.0f;
-
-	if ( m_lodBiasCurrent <= 0.0f )
-	{
-		m_lodBiasCurrent = m_lodBiasInitial = 0.0f;
-		m_lodBiasStartTime = 0;
-	}
-
-	m_lastLodBiasAdjustFrame = g_FrameNum;
-	SetFilteringAndClampingMode( true );
-}
-
-void CTexture::MakeNonResident()
-{
-	if ( m_residenceCurrent != RESIDENT_NONE )
-		Shutdown();
-
-	m_residenceCurrent = m_residenceTarget = RESIDENT_NONE;
-
-	// Clear our the streamable fine flag to ensure we reload properly.
-	m_nFlags &= ~TEXTUREFLAGS_STREAMABLE_FINE;
-}
-
-void CTexture::MakePartiallyResident()
-{
-	TM_ZONE_DEFAULT( TELEMETRY_LEVEL0 );
-
-	ResidencyType_t oldCurrentResidence = m_residenceCurrent;
-	ResidencyType_t oldTargetResidence = m_residenceTarget;
-
-	m_residenceCurrent = m_residenceTarget = RESIDENT_PARTIAL;
-
-	if ( oldCurrentResidence == RESIDENT_PARTIAL )
-	{
-		Assert( oldTargetResidence == RESIDENT_FULL ); oldTargetResidence;
-		// If we are already partially resident, then just cancel our job to stream in, 
-		// cause we don't need that data anymore.
-		CancelStreamingJob();
-
-		return;
-	}
-
-	Assert( oldCurrentResidence == RESIDENT_FULL );
-
-	// Clear the fine bit.
-	m_nFlags &= ~TEXTUREFLAGS_STREAMABLE_FINE;
-
-	if ( HardwareConfig()->CanStretchRectFromTextures() )
-	{
-		m_lodClamp = 0;
-		m_lodBiasInitial = m_lodBiasCurrent = 0;
-		m_lastLodBiasAdjustFrame = g_FrameNum;
-		DownloadTexture( NULL, true );
-	}
-	else
-	{
-		// Oops. We were overzealous above--restore the residency to what it was.
-		m_residenceCurrent = oldCurrentResidence;
-
-		// Immediately display it as lower res (for consistency) but if we can't (efficiently)
-		// copy we just have to re-read everything from disk. Lame!
-		m_lodClamp = 3;
-		m_lodBiasInitial = m_lodBiasCurrent = 0;
-		m_lastLodBiasAdjustFrame = g_FrameNum;
-		SetFilteringAndClampingMode( true );
-
-		SafeAssign( &m_pStreamingJob, new CTextureStreamingJob( this ) );
-		MaterialSystem()->AsyncFindTexture( GetName(), GetTextureGroupName(), m_pStreamingJob, (void*) RESIDENT_PARTIAL, false, TEXTUREFLAGS_STREAMABLE_COARSE );
-	}
-}
-
-bool CTexture::MakeFullyResident()
-{
-	TM_ZONE_DEFAULT( TELEMETRY_LEVEL0 );
-
-	ResidencyType_t oldCurrentResidence = m_residenceCurrent;
-	ResidencyType_t oldTargetResidence = m_residenceTarget;
-
-	if ( oldCurrentResidence == RESIDENT_FULL )
-	{
-		// This isn't a requirement, but right now it would be a mistake 
-		Assert( !HardwareConfig()->CanStretchRectFromTextures() );
-		Assert( oldTargetResidence == RESIDENT_PARTIAL ); oldTargetResidence;
-		
-		m_residenceCurrent = m_residenceTarget = RESIDENT_FULL;
-		m_lodClamp = 0;
-		m_lodBiasInitial = m_lodBiasCurrent = 0;
-		m_lastLodBiasAdjustFrame = g_FrameNum;
-		SetFilteringAndClampingMode( true );
-
-		CancelStreamingJob();
-		return true;
-	}
-
-	Assert( m_residenceTarget == RESIDENT_PARTIAL && m_residenceCurrent == RESIDENT_PARTIAL );
-	Assert( m_pStreamingJob == NULL );
-
-	SafeAssign( &m_pStreamingJob, new CTextureStreamingJob( this ) );
-	MaterialSystem()->AsyncFindTexture( GetName(), GetTextureGroupName(), m_pStreamingJob, (void*) RESIDENT_FULL, false, TEXTUREFLAGS_STREAMABLE_FINE );
-
-	m_residenceTarget = RESIDENT_FULL;
-
-	return true;
-}
-
-void CTexture::CancelStreamingJob( bool bJobMustExist )
-{
-	bJobMustExist; // Only used by asserts ensuring correctness, so reference it for release builds. 
-
-	// Most callers should be aware of whether the job exists, but for cleanup we don't know and we 
-	// should be safe in that case.
-	Assert( !bJobMustExist || m_pStreamingJob ); 
-	if ( !m_pStreamingJob )
-		return;
-
-	// The streaming job and this (this texture) have a circular reference count--each one holds one for the other.
-	// As a result, this means that having the streaming job forget about the texture may cause the texture to go
-	// away completely! So we need to ensure that after we call "ForgetOwner" that we don't touch any instance 
-	// variables.
-	CTextureStreamingJob* pJob = m_pStreamingJob;
-	m_pStreamingJob = NULL;
-
-	pJob->ForgetOwner( this );
-	SafeRelease( &pJob );
-}
-
-void CTexture::OnStreamingJobComplete( ResidencyType_t newResidenceCurrent )
-{
-	Assert( m_pStreamingJob );
-
-	// It's probable that if this assert fires, we should just do nothing in here and return--but I'd 
-	// like to see that happen to be sure. 
-	Assert( newResidenceCurrent == m_residenceTarget );
-
-	m_residenceCurrent = newResidenceCurrent;
-
-	// Only do lod biasing for stream in. For stream out, just dump to lowest quality right away.
-	if ( m_residenceCurrent == RESIDENT_FULL )
-	{
-		if ( mat_lodin_time.GetFloat() > 0 )
-		{
-			m_lodBiasCurrent = m_lodBiasInitial = 1.0 * m_nStreamingMips;
-			m_lodBiasStartTime = Plat_FloatTime();
-		}
-		else
-			m_lodBiasCurrent = m_lodBiasInitial = 0.0f;
-
-		m_lastLodBiasAdjustFrame = g_FrameNum;
-	}
-	
-	m_lodClamp = 0;
-	m_nStreamingMips = 0;
-
-	SetFilteringAndClampingMode( true );
-
-	// The job is complete, Cancel handles cleanup correctly.
-	CancelStreamingJob();
-}
-
-void CTexture::SetErrorTexture( bool bIsErrorTexture )
-{
-	if ( bIsErrorTexture )
-		m_nInternalFlags |= TEXTUREFLAGSINTERNAL_ERROR;
-	else
-		m_nInternalFlags &= ( ~TEXTUREFLAGSINTERNAL_ERROR );
-}
-
 
 
 
@@ -1710,9 +1683,15 @@ void CTexture::InitRenderTarget(
 	{
 		nFlags |= TEXTUREFLAGS_NODEPTHBUFFER;
 	}
-	else if ( type == RENDER_TARGET_WITH_DEPTH || type == RENDER_TARGET_ONLY_DEPTH || g_pShaderAPI->DoRenderTargetsNeedSeparateDepthBuffer() )
+	else if ( type == RENDER_TARGET_WITH_DEPTH || type == RENDER_TARGET_ONLY_DEPTH || g_pShaderAPI->DoRenderTargetsNeedSeparateDepthBuffer() ) 
 	{
 		nFlags |= TEXTUREFLAGS_DEPTHRENDERTARGET;
+		++nFrameCount;
+	}
+
+	if ( IsX360() )
+	{
+		// 360 RT needs its coupled surface, expected at [nFrameCount-1]
 		++nFrameCount;
 	}
 
@@ -1726,14 +1705,21 @@ void CTexture::InitRenderTarget(
 	m_nOriginalRTWidth = w;
 	m_nOriginalRTHeight = h;
 
-	if ( ImageLoader::ImageFormatInfo(fmt).m_NumAlphaBits > 1 )
+	if ( ImageLoader::ImageFormatInfo(fmt).m_nNumAlphaBits > 1 )
 	{
 		nFlags  |= TEXTUREFLAGS_EIGHTBITALPHA;
 	}
-	else if ( ImageLoader::ImageFormatInfo(fmt).m_NumAlphaBits == 1 )
+	else if ( ImageLoader::ImageFormatInfo(fmt).m_nNumAlphaBits == 1 )
 	{
 		nFlags  |= TEXTUREFLAGS_ONEBITALPHA;
 	}
+
+#ifdef _X360
+	if ( renderTargetFlags & CREATERENDERTARGETFLAGS_ALIASCOLORANDDEPTHSURFACES )
+	{
+		nFlags |= TEXTUREFLAGS_ALIAS_COLOR_AND_DEPTH_SURFACES;
+	}
+#endif
 
 	ApplyRenderTargetSizeMode( w, h, fmt );
 
@@ -1746,7 +1732,7 @@ void CTexture::OnRestore()
 { 
 	// May have to change whether or not we have a depth buffer.
 	// Are we a render target?
-	if ( m_nFlags & TEXTUREFLAGS_RENDERTARGET )
+	if ( IsPC() && ( m_nFlags & TEXTUREFLAGS_RENDERTARGET ) )
 	{
 		// Did they not ask for a depth buffer?
 		if ( m_nOriginalRenderTargetType == RENDER_TARGET )
@@ -1785,18 +1771,11 @@ void CTexture::OnRestore()
 		// got smaller than we are.
 		int newWidth, newHeight;
 		ApplyRenderTargetSizeMode( newWidth, newHeight, m_ImageFormat );
-		if ( newWidth != m_dimsMapping.m_nWidth || newHeight != m_dimsMapping.m_nHeight )
+		if ( newWidth != m_nMappingWidth || newHeight != m_nMappingHeight )
 		{
 			Shutdown();
 			Init( newWidth, newHeight, 1, m_ImageFormat, m_nFlags, m_nFrameCount );
 			return;
-		}
-	}
-	else
-	{
-		if ( m_nFlags & TEXTUREFLAGS_STREAMABLE_FINE )
-		{
-			MakeResident( RESIDENT_NONE );
 		}
 	}
 }
@@ -1805,8 +1784,11 @@ void CTexture::OnRestore()
 //-----------------------------------------------------------------------------
 // Creates a procedural texture
 //-----------------------------------------------------------------------------
-void CTexture::InitProceduralTexture( const char *pTextureName, const char *pTextureGroupName, int w, int h, int d, ImageFormat fmt, int nFlags, ITextureRegenerator* generator )
+void CTexture::InitProceduralTexture( const char *pTextureName, const char *pTextureGroupName, int w, int h, int d, ImageFormat fmt, int nFlags )
 {
+	// Compressed textures aren't allowed for procedural textures, except the runtime ones
+	Assert( !ImageLoader::IsCompressed( fmt ) || ImageLoader::IsRuntimeCompressed( fmt ) );
+
 	// We shouldn't be asking for render targets here
 	Assert( (nFlags & (TEXTUREFLAGS_RENDERTARGET | TEXTUREFLAGS_DEPTHRENDERTARGET)) == 0 );
 
@@ -1818,7 +1800,7 @@ void CTexture::InitProceduralTexture( const char *pTextureName, const char *pTex
 
 	// Insert required flags
 	nFlags |= TEXTUREFLAGS_PROCEDURAL;
-	int nAlphaBits = ImageLoader::ImageFormatInfo(fmt).m_NumAlphaBits;
+	int nAlphaBits = ImageLoader::ImageFormatInfo(fmt).m_nNumAlphaBits;
 	if (nAlphaBits > 1)
 	{
 		nFlags |= TEXTUREFLAGS_EIGHTBITALPHA;
@@ -1827,11 +1809,9 @@ void CTexture::InitProceduralTexture( const char *pTextureName, const char *pTex
 	{
 		nFlags |= TEXTUREFLAGS_ONEBITALPHA;
 	}
-		
+	
 	// Procedural textures are always one frame only
 	Init( w, h, d, fmt, nFlags, 1 );
-
-	SetTextureRegenerator(generator);
 
 	m_TextureGroupName = pTextureGroupName;
 }
@@ -1855,17 +1835,27 @@ void CTexture::InitFileTexture( const char *pTextureFile, const char *pTextureGr
 void CTexture::AllocateTextureHandles()
 {
 	Assert( !m_pTextureHandles );
-	Assert( m_nFrameCount > 0 );
-#ifdef DBGFLAG_ASSERT
-	if( m_nFlags & TEXTUREFLAGS_DEPTHRENDERTARGET )
+
+	if ( m_nFrameCount <= 0 )
 	{
-		Assert( m_nFrameCount >= 2 );
+		AssertMsg( false, "CTexture::AllocateTextureHandles attempted to allocate 0 frames of texture handles!" );
+		Warning( "CTexture::AllocateTextureHandles \"%s\" attempted to allocate 0 frames of texture handles!", GetName() );
+		m_nFrameCount = 1;
 	}
-#endif
 
 	m_pTextureHandles = new ShaderAPITextureHandle_t[m_nFrameCount];
-	for( int i = 0; i != m_nFrameCount; ++i )
-		m_pTextureHandles[i] = INVALID_SHADERAPI_TEXTURE_HANDLE;
+
+	if ( m_pTextureHandles == NULL )
+	{
+		MemOutOfMemory( sizeof(ShaderAPITextureHandle_t) * m_nFrameCount );
+	}
+	else
+	{
+		for( int i = 0; i != m_nFrameCount; ++i )
+		{
+			m_pTextureHandles[i] = INVALID_SHADERAPI_TEXTURE_HANDLE;
+		}
+	}
 }
 
 void CTexture::ReleaseTextureHandles()
@@ -1877,6 +1867,107 @@ void CTexture::ReleaseTextureHandles()
 	}
 }
 
+int GetCreationFlags( int iTextureFlags, int iInternalTextureFlags, ImageFormat fmt )
+{
+	int nCreateFlags = 0;
+	if ( iTextureFlags & TEXTUREFLAGS_ENVMAP )
+	{
+		nCreateFlags |= TEXTURE_CREATE_CUBEMAP;
+	}
+
+	bool bIsFloat = ( fmt == IMAGE_FORMAT_RGBA16161616F ) || ( fmt == IMAGE_FORMAT_R32F ) || 
+					( fmt == IMAGE_FORMAT_RGB323232F ) || ( fmt == IMAGE_FORMAT_RGBA32323232F );
+	
+	// Don't do sRGB on floating point textures
+	if ( ( iTextureFlags & TEXTUREFLAGS_SRGB ) && !bIsFloat )
+	{
+		nCreateFlags |= TEXTURE_CREATE_SRGB;	// for Posix/GL only
+	}
+	
+	if ( iTextureFlags & TEXTUREFLAGS_ANISOTROPIC )
+	{
+		nCreateFlags |= TEXTURE_CREATE_ANISOTROPIC;	// for Posix/GL only
+	}
+	
+
+	if ( iTextureFlags & TEXTUREFLAGS_RENDERTARGET )
+	{
+		nCreateFlags |= TEXTURE_CREATE_RENDERTARGET;
+	}
+	else
+	{
+		// If it's not a render target, use the texture manager in dx
+		nCreateFlags |= TEXTURE_CREATE_MANAGED;
+	}
+
+	if ( iTextureFlags & TEXTUREFLAGS_DEFAULT_POOL ) 
+	{
+		// Needs to be created in default pool, and be marked as dynamic.
+		nCreateFlags &= ~TEXTURE_CREATE_MANAGED;
+		nCreateFlags |= TEXTURE_CREATE_DYNAMIC;
+	}
+
+	if ( iTextureFlags & TEXTUREFLAGS_POINTSAMPLE )
+	{
+		nCreateFlags |= TEXTURE_CREATE_UNFILTERABLE_OK;
+	}
+
+	if ( iTextureFlags & TEXTUREFLAGS_VERTEXTEXTURE )
+	{
+		nCreateFlags |= TEXTURE_CREATE_VERTEXTEXTURE;
+	}
+
+	if ( IsGameConsole() )
+	{
+		if ( iInternalTextureFlags & TEXTUREFLAGSINTERNAL_QUEUEDLOAD )
+		{
+			// queued load, no d3d bits until data arrival
+			nCreateFlags |= TEXTURE_CREATE_NOD3DMEMORY;
+		}
+		if ( iInternalTextureFlags & TEXTUREFLAGSINTERNAL_REDUCED )
+		{
+			// propagate this information
+			nCreateFlags |= TEXTURE_CREATE_REDUCED;
+		}
+		if ( iInternalTextureFlags & TEXTUREFLAGSINTERNAL_ERROR )
+		{
+			// propagate this information
+			nCreateFlags |= TEXTURE_CREATE_ERROR;
+		}
+		if ( iInternalTextureFlags & ( TEXTUREFLAGSINTERNAL_SHOULDEXCLUDE | TEXTUREFLAGSINTERNAL_SHOULDTEMPEXCLUDE ) )
+		{
+			// propagate this information
+			nCreateFlags |= TEXTURE_CREATE_EXCLUDED;
+		}
+
+		if ( IsPS3() )
+		{
+			if ( iTextureFlags & TEXTUREFLAGS_PROCEDURAL )
+			{
+				nCreateFlags |= TEXTURE_CREATE_DYNAMIC;
+			}
+		}
+
+		if ( IsX360() )
+		{
+			if ( iTextureFlags & TEXTUREFLAGS_PROCEDURAL )
+			{
+				nCreateFlags |= TEXTURE_CREATE_CANCONVERTFORMAT;
+			}
+			if ( iTextureFlags & TEXTUREFLAGS_PWL_CORRECTED )
+			{
+				nCreateFlags |= TEXTURE_CREATE_PWLCORRECTED;
+			}
+			if ( iInternalTextureFlags & TEXTUREFLAGSINTERNAL_CACHEABLE )
+			{
+				nCreateFlags |= TEXTURE_CREATE_CACHEABLE;
+			}
+		}
+	}
+
+	return nCreateFlags;
+}
+
 
 //-----------------------------------------------------------------------------
 // Creates the texture
@@ -1884,63 +1975,25 @@ void CTexture::ReleaseTextureHandles()
 bool CTexture::AllocateShaderAPITextures()
 {
 	Assert( !HasBeenAllocated() );
-	
-	TM_ZONE_DEFAULT( TELEMETRY_LEVEL0 );
+
+	if ( !g_pShaderAPI->CanDownloadTextures() )
+		return false;
+
+	int nCreateFlags = GetCreationFlags( m_nFlags, m_nInternalFlags, m_ImageFormat );
 
 	int nCount = m_nFrameCount;
-
-	int nCreateFlags = 0;
-	if ( ( m_nFlags & TEXTUREFLAGS_ENVMAP ) && HardwareConfig()->SupportsCubeMaps() )
-	{
-		nCreateFlags |= TEXTURE_CREATE_CUBEMAP;
-	}
-	
-	bool bIsFloat = ( m_ImageFormat == IMAGE_FORMAT_RGBA16161616F ) || ( m_ImageFormat == IMAGE_FORMAT_R32F ) || 
-					( m_ImageFormat == IMAGE_FORMAT_RGB323232F ) || ( m_ImageFormat == IMAGE_FORMAT_RGBA32323232F );
-	
-	// Don't do sRGB on floating point textures
-	if ( ( m_nFlags & TEXTUREFLAGS_SRGB ) && !bIsFloat )
-	{
-		nCreateFlags |= TEXTURE_CREATE_SRGB;	// for Posix/GL only
-	}
-
 	if ( m_nFlags & TEXTUREFLAGS_RENDERTARGET )
 	{
-		nCreateFlags |= TEXTURE_CREATE_RENDERTARGET;
-
 		// This here is simply so we can use a different call to
 		// create the depth texture below	
-		if ( ( m_nFlags & TEXTUREFLAGS_DEPTHRENDERTARGET ) && ( nCount == 2 ) ) //nCount must be 2 on pc
+		// nCount must be 2 on pc/ps3, must be 3 on 360
+		if ( ( m_nFlags & TEXTUREFLAGS_DEPTHRENDERTARGET ) &&
+			 ( ( ( IsPC() || IsPS3() ) && (nCount == 2)) || (IsX360() && (nCount == 3)) ) )
 		{
 			--nCount;
 		}
 	}
-	else
-	{
-		// If it's not a render target, use the texture manager in dx
-		if ( m_nFlags & TEXTUREFLAGS_STAGING_MEMORY )
-			nCreateFlags |= TEXTURE_CREATE_SYSMEM;
-		else
-		{
-#if defined(IS_WINDOWS_PC)
-			static ConVarRef mat_dxlevel("mat_dxlevel");
-			if ( mat_dxlevel.GetInt() < 90 || mat_managedtextures.GetBool() )
-#endif
-			{
-				nCreateFlags |= TEXTURE_CREATE_MANAGED;
-			}
-		}
-	}
-
-	if ( m_nFlags & TEXTUREFLAGS_POINTSAMPLE )
-	{
-		nCreateFlags |= TEXTURE_CREATE_UNFILTERABLE_OK;
-	}
-
-	if ( m_nFlags & TEXTUREFLAGS_VERTEXTEXTURE )
-	{
-		nCreateFlags |= TEXTURE_CREATE_VERTEXTEXTURE;
-	}
+	
 
 	int nCopies = 1;
 	if ( IsProcedural() )
@@ -1955,17 +2008,42 @@ bool CTexture::AllocateShaderAPITextures()
 		}
 	}
 
+	if ( IsGameConsole() )
+	{
+		if ( IsX360() && ( m_nFlags & TEXTUREFLAGS_RENDERTARGET ) )
+		{
+			// 360 render targets allocates one additional handle for optional EDRAM surface
+			--nCount;
+			m_pTextureHandles[m_nFrameCount - 1] = INVALID_SHADERAPI_TEXTURE_HANDLE; 
+		}
+
+		if ( m_nInternalFlags & TEXTUREFLAGSINTERNAL_QUEUEDLOAD )
+		{
+			// Artificially increment reference count (per frame) to ensure
+			// a queued texture stays resident until it's wholly finalized.
+			m_nRefCount += nCount;
+		}
+	}	
+								   
 	// For depth only render target: adjust texture width/height
 	// Currently we just leave it the same size, will update with further testing
-	int nShaderApiCreateTextureDepth = ( ( m_nFlags & TEXTUREFLAGS_DEPTHRENDERTARGET ) && ( m_nOriginalRenderTargetType == RENDER_TARGET_ONLY_DEPTH ) ) ? 1 : m_dimsAllocated.m_nDepth;
+	int nShaderApiCreateTextureDepth = ( ( m_nFlags & TEXTUREFLAGS_DEPTHRENDERTARGET ) && ( m_nOriginalRenderTargetType == RENDER_TARGET_ONLY_DEPTH ) ) ? 1 : m_nActualDepth;
+
+	if ( m_pTempTextureHandles )
+	{
+		// send the prior handles (should be available) for expected reuse
+		nCreateFlags |= TEXTURE_CREATE_REUSEHANDLES;
+		for ( int i = 0; i < m_nFrameCount; i++ )
+		{
+			m_pTextureHandles[i] = m_pTempTextureHandles[i];
+		}
+	}
 
 	// Create all animated texture frames in a single call
 	g_pShaderAPI->CreateTextures(
 		m_pTextureHandles, nCount,
-		m_dimsAllocated.m_nWidth, m_dimsAllocated.m_nHeight, nShaderApiCreateTextureDepth, m_ImageFormat, m_dimsAllocated.m_nMipCount,
+		m_nActualWidth, m_nActualHeight, nShaderApiCreateTextureDepth, m_ImageFormat, m_nActualMipCount,
 		nCopies, nCreateFlags, GetName(), GetTextureGroupName() );
-
-	int accountingCount = nCount;
 
 	// Create the depth render target buffer
 	if ( m_nFlags & TEXTUREFLAGS_DEPTHRENDERTARGET )
@@ -1974,23 +2052,25 @@ bool CTexture::AllocateShaderAPITextures()
 		Assert( nCount == 1 );
 
 		char debugName[128];
-		Q_snprintf( debugName, ARRAYSIZE( debugName ), "%s_ZBuffer", GetName() );
-		Assert( m_nFrameCount >= 2 );
+		sprintf( debugName, "%s_ZBuffer", GetName() );
+
+		bool bAliasColorAndDepthSurfaces360 = false;
+#ifdef _X360
+		bAliasColorAndDepthSurfaces360 = ( m_nFlags & TEXTUREFLAGS_ALIAS_COLOR_AND_DEPTH_SURFACES ) != 0;
+#endif
 		m_pTextureHandles[1] = g_pShaderAPI->CreateDepthTexture( 
 				m_ImageFormat, 
-				m_dimsAllocated.m_nWidth, 
-				m_dimsAllocated.m_nHeight,
+				m_nActualWidth, 
+				m_nActualHeight,
 				debugName,
-				( m_nOriginalRenderTargetType == RENDER_TARGET_ONLY_DEPTH ) );
-		accountingCount += 1;
+				( m_nOriginalRenderTargetType == RENDER_TARGET_ONLY_DEPTH ),
+				bAliasColorAndDepthSurfaces360 );
 	}
 
-	STAGING_ONLY_EXEC( g_currentTextures.InsertOrReplace( this, TexInfo_t( GetName(), m_dimsAllocated.m_nWidth, m_dimsAllocated.m_nHeight, m_dimsAllocated.m_nDepth, m_dimsAllocated.m_nMipCount, accountingCount, nCopies, m_ImageFormat ) ) );
-
 	m_nInternalFlags |= TEXTUREFLAGSINTERNAL_ALLOCATED;
-
 	return true;
 }
+
 
 //-----------------------------------------------------------------------------
 // Releases the texture's hardware memory
@@ -1999,13 +2079,6 @@ void CTexture::FreeShaderAPITextures()
 {
 	if ( m_pTextureHandles && HasBeenAllocated() )
 	{
-		#ifdef STAGING_ONLY
-			// If this hits, there's a leak because we're not deallocating enough textures. Yikes!
-			Assert( g_currentTextures[ g_currentTextures.Find( this ) ].m_nFrameCount == m_nFrameCount );
-			// Remove ourselves from the list.
-			g_currentTextures.Remove( this );
-		#endif
-
 		// Release the frames
 		for ( int i = m_nFrameCount; --i >= 0; )
 		{
@@ -2014,61 +2087,14 @@ void CTexture::FreeShaderAPITextures()
 #ifdef WIN32
 				Assert( _heapchk() == _HEAPOK );
 #endif
-
 				g_pShaderAPI->DeleteTexture( m_pTextureHandles[i] );
 				m_pTextureHandles[i] = INVALID_SHADERAPI_TEXTURE_HANDLE;
 			}
 		}
 	}
 	m_nInternalFlags &= ~TEXTUREFLAGSINTERNAL_ALLOCATED;
-
-	// Clear texture streaming stuff, too. 
-	if ( ( m_nFlags & TEXTUREFLAGS_STREAMABLE ) != 0 )
-	{
-		m_nFlags &= ~TEXTUREFLAGS_STREAMABLE_FINE;
-		m_residenceCurrent = m_residenceTarget = RESIDENT_NONE;
-		m_lodClamp = 0;
-		m_lodBiasCurrent = m_lodBiasInitial = 0;
-		m_lodBiasStartTime = 0;
-	}
 }
 
-void CTexture::MigrateShaderAPITextures()
-{
-	TM_ZONE_DEFAULT( TELEMETRY_LEVEL0 );
-
-	const int cBytes = m_nFrameCount * sizeof ( ShaderAPITextureHandle_t );
-
-	ShaderAPITextureHandle_t *pTextureHandles =	( ShaderAPITextureHandle_t * ) stackalloc( cBytes );
-
-	Assert( pTextureHandles );
-	if ( !pTextureHandles )
-		return;
-
-	V_memcpy( pTextureHandles, m_pTextureHandles, cBytes );
-
-	// Pretend we haven't been allocated yet.
-	m_nInternalFlags &= ~TEXTUREFLAGSINTERNAL_ALLOCATED;
-
-	AllocateShaderAPITextures();
-
-	for ( int i = 0; i < m_nFrameCount; ++i ) 
-	{
-		Assert( g_pShaderAPI->IsTexture( pTextureHandles[ i ] ) == g_pShaderAPI->IsTexture( m_pTextureHandles[ i ] ) );
-		if ( !g_pShaderAPI->IsTexture( pTextureHandles[ i ] ) )
-			continue;
-
-		g_pShaderAPI->CopyTextureToTexture( pTextureHandles[ i ], m_pTextureHandles[ i ] );
-	}
-
-	for ( int i = 0; i < m_nFrameCount; ++i )
-	{
-		if ( !g_pShaderAPI->IsTexture( pTextureHandles[ i ] ) )
-			continue;
-
-		g_pShaderAPI->DeleteTexture( pTextureHandles[ i ] );
-	}
-}
 
 //-----------------------------------------------------------------------------
 // Computes the actual format of the texture
@@ -2077,7 +2103,7 @@ ImageFormat CTexture::ComputeActualFormat( ImageFormat srcFormat )
 {
 	ImageFormat dstFormat;
 	bool bIsCompressed = ImageLoader::IsCompressed( srcFormat );
-	if ( g_config.bCompressedTextures && HardwareConfig()->SupportsCompressedTextures() && bIsCompressed )
+	if ( g_config.bCompressedTextures && bIsCompressed )
 	{
 		// for the runtime compressed formats the srcFormat won't equal the dstFormat, and we need to return srcFormat here
 		if ( ImageLoader::IsRuntimeCompressed( srcFormat ) )
@@ -2090,6 +2116,19 @@ ImageFormat CTexture::ComputeActualFormat( ImageFormat srcFormat )
 		Assert( dstFormat == srcFormat );
 		return dstFormat;
 	}
+
+	if ( IsGameConsole() && ( srcFormat == IMAGE_FORMAT_A8 ) )
+	{
+		// these are the right alpha formats for xbox
+		return IMAGE_FORMAT_A8;
+	}
+
+#if defined( _X360 )
+	if ( srcFormat == IMAGE_FORMAT_LINEAR_I8 )
+	{
+		return IMAGE_FORMAT_LINEAR_I8;
+	}
+#endif
 
 	// NOTE: Below this piece of code is only called when compressed textures are
 	// turned off, or if the source texture is not compressed.
@@ -2106,9 +2145,10 @@ ImageFormat CTexture::ComputeActualFormat( ImageFormat srcFormat )
 	// We use the TEXTUREFLAGS_EIGHTBITALPHA and TEXTUREFLAGS_ONEBITALPHA flags
 	// to decide how many bits of alpha we need; vtex checks the alpha channel
 	// for all white, etc.
-	if( ( srcFormat == IMAGE_FORMAT_UVWQ8888 ) || ( srcFormat == IMAGE_FORMAT_UV88 ) || 
+	if( (srcFormat == IMAGE_FORMAT_UVWQ8888) || ( srcFormat == IMAGE_FORMAT_UV88 ) || 
 		( srcFormat == IMAGE_FORMAT_UVLX8888 ) || ( srcFormat == IMAGE_FORMAT_RGBA16161616 ) ||
-		( srcFormat == IMAGE_FORMAT_RGBA16161616F ) )
+		( srcFormat == IMAGE_FORMAT_RGBA16161616F ) || ( srcFormat == IMAGE_FORMAT_RGBA32323232F ) ||
+		( srcFormat == IMAGE_FORMAT_R32F ) )
 	{
 #ifdef DX_TO_GL_ABSTRACTION		
 		dstFormat = g_pShaderAPI->GetNearestSupportedFormat( srcFormat, false );  // Stupid HACK!
@@ -2132,25 +2172,391 @@ ImageFormat CTexture::ComputeActualFormat( ImageFormat srcFormat )
 }
 
 //-----------------------------------------------------------------------------
+// Compute the actual mip count based on the actual size
+//-----------------------------------------------------------------------------
+int CTexture::ComputeActualMipCount() const
+{
+	bool bForceTextureAllMips = g_bForceTextureAllMips; // Init with global set from -forceallmips on the command line
+
+	// If the current hardware doesn't support mipped cubemaps, return 1
+	if ( ( m_nFlags & TEXTUREFLAGS_ENVMAP ) && ( !HardwareConfig()->SupportsMipmappedCubemaps() ) )
+	{
+		return 1;
+	}
+
+	// "nomip 1" - If the artists requested no mips in the .txt file of their source art, return 1
+	if ( m_nFlags & TEXTUREFLAGS_NOMIP )
+	{
+		return 1;
+	}
+
+	// "allmips 1" - If the artists requested all mips in the .txt file of their source art, load all mips on all platforms
+	if ( m_nFlags & TEXTUREFLAGS_ALL_MIPS )
+	{
+		bForceTextureAllMips = true;
+	}
+
+	// "mostmips 1" - If the artists requested most mips in the .txt file of their source art, don't load the bottom mips, ever
+	bool bMostMips = false;
+	if ( m_nFlags & TEXTUREFLAGS_MOST_MIPS )
+	{
+		bMostMips = true;
+	}
+
+	// OpenGL - Don't ever drop mips
+	if ( IsOpenGL() )
+	{
+		bForceTextureAllMips = true;
+		bMostMips = false;
+	}
+
+	// If on the PC and running a newer OS than WinXP, then don't drop mips.
+	// XP can crash if we run out of paged pool memory since each mip consumes ~1kb of paged pool memory.
+	#if defined( WIN32 ) && !defined( _GAMECONSOLE )
+	{
+		OSVERSIONINFOEX osvi;
+		ZeroMemory( &osvi, sizeof( OSVERSIONINFOEX ) );
+		osvi.dwOSVersionInfoSize = sizeof( OSVERSIONINFOEX );
+		if ( GetVersionEx( ( OSVERSIONINFO * )&osvi ) )
+		{
+			if ( osvi.dwMajorVersion >= 6 ) // Major version 6 is Windows Vista and Win7
+			{
+				// Windows Vista or newer, so it's safe to load all mips
+				bForceTextureAllMips = true;
+			}
+		}
+	}
+	#endif
+
+	if ( IsX360() )
+	{
+		bForceTextureAllMips  = true;
+	}
+
+	bool bIsFlashlightTextureOnGL = false;
+#ifdef DX_TO_GL_ABSTRACTION
+	 // Hack to only recognize the border bit (for the purposes of truncating the mip chain) on "flashlight" textures on Mac
+	const char *pTexName = m_Name.String();
+	bIsFlashlightTextureOnGL =  ( m_nFlags & TEXTUREFLAGS_BORDER ) && V_stristr( pTexName, "flashlight" );
+#endif
+	
+	// If we are not loading all mips, then count the number of mips we want to load
+	if ( ( !IsOpenGL() && !bForceTextureAllMips ) || bMostMips || bIsFlashlightTextureOnGL )
+	{
+		// Stop loading mips when width or height is < 32
+		int nMaxMipSize = 32; // Default for windows XP
+		if ( IsPS3() )
+		{
+			nMaxMipSize = 4;
+		}
+
+		if ( bMostMips )
+		{
+			// !!! This overrides all other settings !!!
+			nMaxMipSize = 32;
+		}
+
+		int nNumMipLevels = 1;
+		int h = m_nActualWidth;
+		int w = m_nActualHeight;
+		while (	MIN( w, h ) > nMaxMipSize )
+		{
+			nNumMipLevels++;
+			
+			w >>= 1;
+			h >>= 1;
+		}
+		return nNumMipLevels;
+	}
+	else
+	{
+		// Load all mips
+		return ImageLoader::GetNumMipMapLevels( m_nActualWidth, m_nActualHeight, m_nActualDepth );
+	}
+}
+
+//-----------------------------------------------------------------------------
 // Calculates info about whether we can make the texture smaller and by how much
 //-----------------------------------------------------------------------------
-int CTexture::ComputeActualSize( bool bIgnorePicmip, IVTFTexture *pVTFTexture, bool bTextureMigration )
+int CTexture::ComputeActualSize( bool bIgnorePicmip, IVTFTexture *pVTFTexture )
 {
-	unsigned int stripFlags = 0;
-	return ComputeMipSkipCount( GetName(), m_dimsMapping, bIgnorePicmip, pVTFTexture, m_nFlags, m_nDesiredDimensionLimit, &m_nStreamingMips, &m_cachedFileLodSettings, &m_dimsActual, &m_dimsAllocated, &stripFlags );
-	Assert( stripFlags == 0 ); // Not necessarily illegal, just needs investigating. 
+	// Must skip mip levels if the texture is too large for our board to handle
+	m_nActualWidth = m_nMappingWidth;
+	m_nActualHeight = m_nMappingHeight;
+	m_nActualDepth = m_nMappingDepth;
+
+	int nClampX = m_nActualWidth;	// no clamping (clamp to texture dimensions)
+	int nClampY = m_nActualHeight;
+	int nClampZ = m_nActualDepth;
+
+	//
+	// PC:
+	// Fetch clamping dimensions from special LOD control settings block
+	// or runtime texture lod override.
+	//
+	if ( IsPC() )
+	{
+		// Fetch LOD settings from the VTF if available
+		TextureLODControlSettings_t lcs;
+		memset( &lcs, 0, sizeof( lcs ) );
+		TextureLODControlSettings_t const *pLODInfo = NULL;
+		if ( pVTFTexture )
+		{
+			pLODInfo = reinterpret_cast<TextureLODControlSettings_t const *> (
+					pVTFTexture->GetResourceData( VTF_RSRC_TEXTURE_LOD_SETTINGS, NULL ) );
+			if ( pLODInfo )
+				lcs = *pLODInfo;
+		}
+
+		// Prepare the default LOD settings (that essentially result in no clamping)
+		TextureLODControlSettings_t default_lod_settings;
+		memset( &default_lod_settings, 0, sizeof( default_lod_settings ) );
+		{
+			for ( int w = m_nActualWidth; w > 1; w >>= 1 )
+				  ++ default_lod_settings.m_ResolutionClampX;
+			for ( int h = m_nActualHeight; h > 1; h >>= 1 )
+				  ++ default_lod_settings.m_ResolutionClampY;
+		}
+
+		// Check for LOD control override
+		{
+			TextureLodOverride::OverrideInfo oi = TextureLodOverride::Get( GetName() );
+			
+			if ( oi.x && oi.y && !pLODInfo )	// If overriding texture that doesn't have lod info yet, then use default
+				lcs = default_lod_settings;
+
+			lcs.m_ResolutionClampX += oi.x;
+			lcs.m_ResolutionClampY += oi.y;
+			if ( int8( lcs.m_ResolutionClampX ) < 0 )
+				lcs.m_ResolutionClampX = 0;
+			if ( int8( lcs.m_ResolutionClampY ) < 0 )
+				lcs.m_ResolutionClampY = 0;
+		}
+
+		// Compute the requested mip0 dimensions
+		if ( lcs.m_ResolutionClampX && lcs.m_ResolutionClampY )
+		{
+			nClampX = (1 << lcs.m_ResolutionClampX );
+			nClampY = (1 << lcs.m_ResolutionClampY );
+		}
+
+		// Check for exclude settings
+		{
+			int iExclude = TextureLodExclude::Get( GetName() );
+			if ( iExclude > 0 )
+			{
+				// Mip request by exclude rules
+				nClampX = MIN( iExclude, nClampX );
+				nClampY = MIN( iExclude, nClampY );
+			}
+			else if ( iExclude == 0 )
+			{
+				// Texture should be excluded completely
+				// we cannot actually exclude it, we need
+				// to clamp it down to 4x4 for dxt to work.
+				// The texture will never be loaded when honoring
+				// the real exclude list rules.
+				nClampX = MIN( 4, nClampX );
+				nClampY = MIN( 4, nClampY );
+			}
+		}
+
+		// In case clamp values exceed texture dimensions, then fix up
+		// the clamping values
+		nClampX = MIN( nClampX, m_nActualWidth );
+		nClampY = MIN( nClampY, m_nActualHeight );
+	}
+
+	//
+	// Honor dimension limit restrictions
+	//
+	int nDimensionLimit = 0;
+	if ( m_nInternalFlags & TEXTUREFLAGSINTERNAL_SHOULDTEMPEXCLUDE )
+	{
+		nDimensionLimit = m_nDesiredTempDimensionLimit;
+	}
+	else
+	{
+		nDimensionLimit = m_nDesiredDimensionLimit;
+	}
+	if ( nDimensionLimit < 0 )
+	{
+		nDimensionLimit = 0;
+	}
+
+	if ( IsGameConsole() )
+	{
+		// limiting large textures 
+		static int s_nMaxDimensionLimit = 0;
+		if ( !s_nMaxDimensionLimit )
+		{
+			bool bNo256 = ( CommandLine()->FindParm( "-no256" ) != 0 );
+			bool bNo512 = ( CommandLine()->FindParm( "-no512" ) != 0 );
+			bool bNo1024 = CommandLine()->FindParm( "-no1024" ) && !CommandLine()->FindParm( "-allow1024" );
+			if ( bNo256 )
+			{
+				s_nMaxDimensionLimit = 128;
+			}
+			else if ( bNo512 )
+			{
+				s_nMaxDimensionLimit = 256;
+			}
+			else if ( g_pFullFileSystem->IsDVDHosted() || bNo1024 )
+			{
+				s_nMaxDimensionLimit = 512;
+			}
+			else
+			{
+				s_nMaxDimensionLimit = 1024;
+			}
+		}
+		if ( nDimensionLimit > 0 )
+		{
+			nDimensionLimit = MIN( nDimensionLimit, s_nMaxDimensionLimit );
+		}
+		else if ( !( m_nFlags & (TEXTUREFLAGS_NOLOD|TEXTUREFLAGS_NOMIP|TEXTUREFLAGS_PROCEDURAL|TEXTUREFLAGS_RENDERTARGET|TEXTUREFLAGS_DEPTHRENDERTARGET) ) )
+		{
+			nDimensionLimit = s_nMaxDimensionLimit;
+		}
+	}
+	else if ( IsPlatformOSX() )
+	{
+		// limiting large textures on OSX to 1024, override with -allow2048 on cl
+		static int s_nMaxDimensionLimit = 0;
+
+		if (!s_nMaxDimensionLimit)
+		{
+			bool bAllow2048 = !!CommandLine()->FindParm( "-allow2048" );
+
+			if ( !bAllow2048 && !( m_nFlags & (TEXTUREFLAGS_NOLOD | TEXTUREFLAGS_NOMIP | TEXTUREFLAGS_PROCEDURAL | TEXTUREFLAGS_RENDERTARGET | TEXTUREFLAGS_DEPTHRENDERTARGET) ) )
+			{
+				s_nMaxDimensionLimit = 1024;
+			}
+		}
+
+		if ( !( m_nFlags & (TEXTUREFLAGS_NOLOD | TEXTUREFLAGS_NOMIP | TEXTUREFLAGS_PROCEDURAL | TEXTUREFLAGS_RENDERTARGET | TEXTUREFLAGS_DEPTHRENDERTARGET) ) )
+		{
+			nDimensionLimit = s_nMaxDimensionLimit;
+		}
+	}
+
+	// Special case: If the top mipmap level is <= 128KB, and the width is really wide (2048), and its height is <= 64, and we know it's mipmapped, then allow one axis to be > 1024, otherwise just restrict to 1024.
+	// This purposely convoluted logic is useful on things like the confetti particle effect's texture (used in sp_a2_column_blocker), which is 2048x64, and is very noticeable when it's cut down to 1024x32.
+	if ( nDimensionLimit == 1024 )
+	{
+		if ( ( ImageLoader::GetMemRequired( m_nActualWidth, m_nActualHeight, 1, m_ImageFormat, false ) <= 128 * 1024 ) &&
+			( m_nActualWidth == 2048 ) && ( m_nActualHeight <= 64 ) && 
+			( pVTFTexture ) && ( pVTFTexture->MipCount() > 1 ) )
+		{
+			nDimensionLimit = 2048;
+		}
+	}
+
+	//
+	// Unless ignoring picmip, reflect the global picmip level in clamp dimensions
+	//
+	if ( !bIgnorePicmip )
+	{
+		// If picmip requests texture degradation, then honor it
+		// for loddable textures only
+		if ( !( m_nFlags & TEXTUREFLAGS_NOLOD ) &&
+			  ( g_config.skipMipLevels > 0 ) )
+		{
+			for ( int iDegrade = 0; iDegrade < g_config.skipMipLevels; ++ iDegrade )
+			{
+				// don't go lower than 4, or dxt textures won't work properly
+				if ( nClampX > 4 &&
+					 nClampY > 4 )
+				{
+					nClampX >>= 1;
+					nClampY >>= 1;
+				}
+			}
+		}
+
+		// If picmip requests quality upgrade, then always honor it
+		if ( g_config.skipMipLevels < 0 )
+		{
+			for ( int iUpgrade = 0; iUpgrade < - g_config.skipMipLevels; ++ iUpgrade )
+			{
+				if ( nClampX < m_nActualWidth &&
+					 nClampY < m_nActualHeight )
+				{
+					nClampX <<= 1;
+					nClampY <<= 1;
+				}
+				else
+					break;
+			}
+		}
+	}
+
+	// honor dimension limit after picmip downgrade/upgrade
+	if ( nDimensionLimit > 0 )
+	{
+		while ( nClampX > nDimensionLimit ||
+				nClampY > nDimensionLimit )
+		{
+			nClampX >>= 1;
+			nClampY >>= 1;
+		}
+	}
+
+	//
+	// Now use hardware settings to clamp our "clamping dimensions"
+	//
+	int iHwWidth = HardwareConfig()->MaxTextureWidth();
+	int iHwHeight = HardwareConfig()->MaxTextureHeight();
+	int iHwDepth = HardwareConfig()->MaxTextureDepth();
+
+	nClampX = MIN( nClampX, MAX( iHwWidth, 4 ) );
+	nClampY = MIN( nClampY, MAX( iHwHeight, 4 ) );
+	nClampZ = MIN( nClampZ, MAX( iHwDepth, 1 ) );
+
+	Assert( nClampZ >= 1 );
+
+	// In case clamp values exceed texture dimensions, then fix up
+	// the clamping values.
+	nClampX = MIN( nClampX, m_nActualWidth );
+	nClampY = MIN( nClampY, m_nActualHeight );
+	nClampZ = MIN( nClampZ, m_nActualDepth );
+	
+	//
+	// Clamp to the determined dimensions
+	//
+	int numMipsSkipped = 0; // will compute now when clamping how many mips we drop
+	while ( ( m_nActualWidth  > nClampX ) ||
+		    ( m_nActualHeight > nClampY ) ||
+			( m_nActualDepth  > nClampZ ) )
+	{
+		m_nActualWidth  >>= 1;
+		m_nActualHeight >>= 1;
+		m_nActualDepth  >>= 1;
+		if ( m_nActualDepth < 1 )
+			m_nActualDepth = 1;
+
+		++ numMipsSkipped;
+	}
+
+	Assert( m_nActualWidth > 0 && m_nActualHeight > 0 && m_nActualDepth > 0 );
+
+	// Now that we've got the actual size, we can figure out the mip count
+	m_nActualMipCount = ComputeActualMipCount();
+
+	// Returns the number we skipped
+	return numMipsSkipped;
 }
 
 
 //-----------------------------------------------------------------------------
 // Used to modify the texture bits (procedural textures only)
 //-----------------------------------------------------------------------------
-void CTexture::SetTextureRegenerator( ITextureRegenerator *pTextureRegen )
+void CTexture::SetTextureRegenerator( ITextureRegenerator *pTextureRegen, bool releaseExisting )
 {
 	// NOTE: These can only be used by procedural textures
 	Assert( IsProcedural() );
 
-	if (m_pTextureRegenerator)
+	if ( m_pTextureRegenerator && releaseExisting )
 	{
 		m_pTextureRegenerator->Release();
 	}
@@ -2165,6 +2571,7 @@ void CTexture::Modify( int iFrame )
 {
 	Assert( iFrame >= 0 && iFrame < m_nFrameCount );
 	Assert( HasBeenAllocated() );
+
 	g_pShaderAPI->ModifyTexture( m_pTextureHandles[iFrame] );
 }
 
@@ -2238,21 +2645,15 @@ void CTexture::SetFilterState()
 	}
 
 	// Determing the filtering mode
-	bool bIsAnisotropic = false, bIsTrilinear = false;
-	if ( HardwareConfig()->GetDXSupportLevel() >= 80 && (g_config.m_nForceAnisotropicLevel > 1) && 
-		(HardwareConfig()->MaximumAnisotropicLevel() > 1) )
+	bool bIsAnisotropic = false; bool bIsTrilinear = false;
+	if ( (g_config.m_nForceAnisotropicLevel > 1) && (HardwareConfig()->MaximumAnisotropicLevel() > 1) )
 	{
 		bIsAnisotropic = true;
-	}
-	else if ( g_config.ForceTrilinear() )
-	{
-		bIsAnisotropic = (( m_nFlags & TEXTUREFLAGS_ANISOTROPIC ) != 0) && (HardwareConfig()->MaximumAnisotropicLevel() > 1);
-		bIsTrilinear = true;
 	}
 	else
 	{
 		bIsAnisotropic = (( m_nFlags & TEXTUREFLAGS_ANISOTROPIC ) != 0) && (HardwareConfig()->MaximumAnisotropicLevel() > 1);
-		bIsTrilinear = ( m_nFlags & TEXTUREFLAGS_TRILINEAR ) != 0;
+		bIsTrilinear = ( g_config.m_nForceAnisotropicLevel == 1 ) || ( ( m_nFlags & TEXTUREFLAGS_TRILINEAR ) != 0 );
 	}
 
 	if ( bIsAnisotropic )
@@ -2262,7 +2663,6 @@ void CTexture::SetFilterState()
 	}
 	else
 	{
-		// force trilinear if we are on a dx8 card or above
 		if ( bIsTrilinear )
 		{
 			g_pShaderAPI->TexMinFilter( SHADER_TEXFILTERMODE_LINEAR_MIPMAP_LINEAR );
@@ -2274,38 +2674,41 @@ void CTexture::SetFilterState()
 			g_pShaderAPI->TexMagFilter( SHADER_TEXFILTERMODE_LINEAR );
 		}
 	}
-
-	SetLodState();
 }
 
-//-----------------------------------------------------------------------------
-// Sets the lod state on the currently modified frame
-//-----------------------------------------------------------------------------
-void CTexture::SetLodState()
-{
-	// Set the lod clamping value to ensure we don't see anything we're not supposed to.
-	g_pShaderAPI->TexLodClamp( m_lodClamp );
-	g_pShaderAPI->TexLodBias( m_lodBiasCurrent );
-}
 
 //-----------------------------------------------------------------------------
 // Download bits main entry point!!
 //-----------------------------------------------------------------------------
-void CTexture::DownloadTexture( Rect_t *pRect, bool bCopyFromCurrent )
+void CTexture::DownloadTexture( Rect_t *pRect, void *pSourceData, int nSourceDataSize )
 {
 	// No downloading necessary if there's no graphics
 	if ( !g_pShaderDevice->IsUsingGraphics() )
 		return;
 
+	if ( m_nInternalFlags & ( TEXTUREFLAGSINTERNAL_SHOULDTEMPEXCLUDE|TEXTUREFLAGSINTERNAL_TEMPEXCLUDED|TEXTUREFLAGSINTERNAL_TEMPEXCLUDE_UPDATE ) )
+	{
+		// temp exclusions are allowed to occur anytime during gameplay
+		// for expected stability, the ShaderAPITextureHandle_t must stay as-is
+		// store them off prior to their expected release, so they can be sent back down as a hint to the allocator for the expected re-allocation
+		// this allows the underlying d3d bits to be changed, but other system that have stored off the prior handles need not be aware
+		if ( m_nFrameCount > 0 )
+		{
+			m_pTempTextureHandles = new ShaderAPITextureHandle_t[m_nFrameCount];
+			for ( int i = 0; i != m_nFrameCount; ++i )
+			{
+				m_pTempTextureHandles[i] = m_pTextureHandles[i];
+			}
+		}
+	}
+
 	// We don't know the actual size of the texture at this stage...
 	if ( !pRect )
 	{
-		ReconstructTexture( bCopyFromCurrent );
+		ReconstructTexture( pSourceData, nSourceDataSize );
 	}
 	else
 	{
-		// Not implemented yet.
-		Assert( bCopyFromCurrent == false );
 		ReconstructPartialTexture( pRect );
 	}
 
@@ -2323,15 +2726,138 @@ void CTexture::DownloadTexture( Rect_t *pRect, bool bCopyFromCurrent )
 	}
 
 	// texture bits have been picmipped, update the picmip state
-	m_nActualDimensionLimit = m_nDesiredDimensionLimit;
+	if ( m_nInternalFlags & TEXTUREFLAGSINTERNAL_SHOULDTEMPEXCLUDE )
+	{
+		m_nInternalFlags |= TEXTUREFLAGSINTERNAL_TEMPEXCLUDED;
+		m_nActualDimensionLimit = m_nDesiredTempDimensionLimit;
+	}
+	else
+	{
+		m_nInternalFlags &= ~TEXTUREFLAGSINTERNAL_TEMPEXCLUDED;
+		m_nActualDimensionLimit = m_nDesiredDimensionLimit;
+	}
+
+	// any possible temp exclude update is finished
+	m_nInternalFlags &= ~TEXTUREFLAGSINTERNAL_TEMPEXCLUDE_UPDATE;
+
+	if ( m_pTempTextureHandles )
+	{
+		// check for handle stability
+		// the handles MUST stay the same across a ReconstructTexture(), various threaded systems have already cached/queued off the handles
+		for ( int i = 0; i < m_nFrameCount; i++ )
+		{
+			if ( m_pTextureHandles[i] != m_pTempTextureHandles[i] )
+			{
+				// crash will be imminent, the handles have changed and they should not have
+				// shaderapi will crash on next texture access because stored handles reference the freed texture handles, not the valid allocated ones
+				Assert( 0 );
+				Warning( "ERROR! - Crash Expected. DownloadTexture(): Texture Handle Difference: %d expected:0x%8.8x actual:0x%8.8x\n", i, m_pTempTextureHandles[i], m_pTextureHandles[i] );
+			}
+		}
+
+		delete[] m_pTempTextureHandles;
+		m_pTempTextureHandles = NULL;
+	}
+}
+
+//-----------------------------------------------------------------------------
+// Download bits main entry point for async textures (based on CTexture::DownloadTexture)
+// Very controlled environment: no procedural textures, no render target, console not supported
+// The download is done is 2 parts:
+//		* Generating the VTF
+//		* Using VTF to create the shader api texture (effectively the corresponding d3d resource)
+// In order to reduce spikes on the main thread (cf CMaterialSystem::ServiceAsyncTextureLoads), the flMaxTimeMs
+// limit has been introduced =>  you can safely exit after generating the VTF and resume it at a later date
+// Note that async textures are sharing the same scratch VTF therefore, if the download of an async texture
+// has been interuped, it is important not to start downloading a new async texture (that would effectively invalidate
+// the VTF of the other texture) - Done in CMaterialSystem::ServiceAsyncTextureLoads)
+// Returns true if the download has been completed (ie interrupted after generating the VTF), false otherwise
+//-----------------------------------------------------------------------------
+bool CTexture::DownloadAsyncTexture( AsyncTextureContext_t *pContext, void *pSourceData, int nSourceDataSize, float flMaxTimeMs )
+{
+	// No downloading necessary if there's no graphics
+	if (!g_pShaderDevice->IsUsingGraphics())
+		return true;
+	
+	Assert( m_nFlags & TEXTUREFLAGS_ASYNC_DOWNLOAD );
+	Assert( !IsGameConsole() );
+	Assert( !IsRenderTarget() );
+	Assert( !IsTempRenderTarget() );
+	Assert( !IsProcedural() );
+
+	if ( !pContext->m_pVTFTexture )
+	{
+		double flStartTime = Plat_FloatTime();
+
+		int oldWidth = m_nActualWidth;
+		int oldHeight = m_nActualHeight;
+		int oldDepth = m_nActualDepth;
+		int oldMipCount = m_nActualMipCount;
+		int oldFrameCount = m_nFrameCount;
+
+		pContext->m_pVTFTexture = LoadTexttureBitsFromFileOrData( pSourceData, nSourceDataSize, NULL );
+
+		if (!HasBeenAllocated() ||
+			m_nActualWidth != oldWidth ||
+			m_nActualHeight != oldHeight ||
+			m_nActualDepth != oldDepth ||
+			m_nActualMipCount != oldMipCount ||
+			m_nFrameCount != oldFrameCount)
+		{
+			if (HasBeenAllocated())
+			{
+				// This is necessary for the reload case, we may discover there
+				// are more frames of a texture animation, for example, which means
+				// we can't rely on having the same number of texture frames.
+				FreeShaderAPITextures();
+			}
+
+			// Create the shader api textures
+			if (!AllocateShaderAPITextures())
+				return true;
+		}
+
+		// Safe point to interrupt teh texture download
+		float flElapsedMs = (Plat_FloatTime() - flStartTime) * 1000.0f;
+		if (flElapsedMs > flMaxTimeMs)
+		{
+			// Running out of time - the shader api texture will be created later (most probably on the next frame)
+			return false;
+		}
+	}
+
+	// Blit down the texture faces, frames, and mips into the board memory
+	int nFirstFace, nFaceCount;
+	GetDownloadFaceCount( nFirstFace, nFaceCount );
+
+	WriteDataToShaderAPITexture( m_nFrameCount, nFaceCount, nFirstFace, m_nActualMipCount, pContext->m_pVTFTexture, m_ImageFormat );
+
+	// Iterate over all the frames and set the appropriate wrapping + filtering state
+	SetFilteringAndClampingMode();
+
+	pContext->m_pVTFTexture = NULL;
+
+	return true;
 }
 
 void CTexture::Download( Rect_t *pRect, int nAdditionalCreationFlags /* = 0 */ )
 {
-	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
+	if ( nAdditionalCreationFlags & TEXTUREFLAGS_ASYNC_DOWNLOAD )
+	{
+		m_nFlags |= nAdditionalCreationFlags;
+		if ( ScheduleAsyncDownload() )
+		{
+			return;
+		}
+		else
+		{
+			// failed to find file so remove async download flag
+			m_nFlags &= ~TEXTUREFLAGS_ASYNC_DOWNLOAD;
+			// and intentionally fall through to normal Download() which will use the error texture
+		}
+	}
 
-	// Only download the bits if we can...
-	if ( g_pShaderAPI->CanDownloadTextures() )
+	if ( g_pShaderAPI->CanDownloadTextures() ) // Only download the bits if we can...
 	{
 		MaterialLock_t hLock = MaterialSystem()->Lock();
 		m_nFlags |= nAdditionalCreationFlags; // Path to let stdshaders drive settings like sRGB-ness at creation time
@@ -2340,180 +2866,35 @@ void CTexture::Download( Rect_t *pRect, int nAdditionalCreationFlags /* = 0 */ )
 	}
 }
 
-// Save texture to a file.
-bool CTexture::SaveToFile( const char *fileName )
+#ifdef _PS3
+void CTexture::Ps3gcmRawBufferAlias( char const *pRTName )
 {
-	bool bRet = false;
-	ITexture *pTexture = materials->FindTexture( "_rt_FullFrameFB1", TEXTURE_GROUP_RENDER_TARGET );
-
-	if ( !pTexture )
-		return bRet;
-
-	const int width = GetActualWidth();
-	const int height = GetActualHeight();
-
-	if ( pTexture->GetImageFormat() == IMAGE_FORMAT_RGBA8888 ||
-		 pTexture->GetImageFormat() == IMAGE_FORMAT_ABGR8888 ||
-		 pTexture->GetImageFormat() == IMAGE_FORMAT_ARGB8888 ||
-		 pTexture->GetImageFormat() == IMAGE_FORMAT_BGRA8888 ||
-		 pTexture->GetImageFormat() == IMAGE_FORMAT_BGRX8888 )
-	{
-		bool bCleanupTexture = false;
-
-		// Need to allocate a temporarily renderable surface. Sadness.
-		if ( width > pTexture->GetActualWidth() || height > pTexture->GetActualHeight() )
-		{
-			materials->OverrideRenderTargetAllocation( true );
-			// This one bumps the ref automatically for us.
-			pTexture = materials->CreateNamedRenderTargetTextureEx( "_rt_savetofile", width, height, RT_SIZE_LITERAL, IMAGE_FORMAT_BGRA8888, MATERIAL_RT_DEPTH_NONE, TEXTUREFLAGS_IMMEDIATE_CLEANUP );
-			materials->OverrideRenderTargetAllocation( false );
-
-			if ( !pTexture || pTexture->IsError() )
-			{
-				SafeRelease( &pTexture );
-				Msg( "SaveToFile: texture '_rt_FullFrameFB1' failed. Ptr:%p Format:%d\n", pTexture, ( pTexture ? pTexture->GetImageFormat() : 0 ) );
-				return false;
-			}
-
-			bCleanupTexture = true;
-		}
-
-		Rect_t SrcRect = { 0, 0, width, height };
-		Rect_t DstRect = SrcRect;
-
-		if ( ( width > 0 ) && ( height > 0 ) )
-		{
-			void *pixelValue = malloc( width * height * 2 * sizeof( BGRA8888_t ) );
-
-			if( pixelValue )
-			{
-				CMatRenderContextPtr pRenderContext( MaterialSystem() );
-
-				// Set the clear color to opaque black
-				pRenderContext->ClearColor4ub( 0, 0, 0, 0xFF );
-				pRenderContext->ClearBuffers( true, true, true );
-				pRenderContext->PushRenderTargetAndViewport( pTexture, 0, 0, width, height );
-				pRenderContext->CopyTextureToRenderTargetEx( 0, this, &SrcRect, &DstRect );
-
-				pRenderContext->ReadPixels( 0, 0, width, height, ( unsigned char * )pixelValue, pTexture->GetImageFormat() );
-
-				// Slap the alpha channel at the bottom of the tga file so we don't have to deal with crappy tools that can't
-				//  handle rgb + alpha well. This means we can just do a "mat_texture_save_fonts" concommand, and then use
-				//	something like Beyond Compare to look at the fonts differences between various platforms, etc.
-				CPixelWriter pixelWriterSrc;
-				CPixelWriter pixelWriterDst;
-				pixelWriterSrc.SetPixelMemory( pTexture->GetImageFormat(), pixelValue, width * sizeof( BGRA8888_t ) );
-				pixelWriterDst.SetPixelMemory( pTexture->GetImageFormat(), pixelValue, width * sizeof( BGRA8888_t ) );
-
-				for (int y = 0; y < height; ++y)
-				{
-					pixelWriterSrc.Seek( 0, y );
-					pixelWriterDst.Seek( 0, y + height );
-
-					for (int x = 0; x < width; ++x)
-					{
-						int r, g, b, a;
-
-						pixelWriterSrc.ReadPixelNoAdvance( r, g, b, a );
-						pixelWriterSrc.WritePixel( a, a, a, 255 );
-						pixelWriterDst.WritePixel( r, g, b, 255 );
-					}
-				}
-
-				if ( TGAWriter::WriteTGAFile( fileName, width, height * 2, pTexture->GetImageFormat(), ( uint8 * )pixelValue, width * sizeof( BGRA8888_t ) ) )
-				{
-					bRet = true;
-				}
-
-				// restore our previous state
-				pRenderContext->PopRenderTargetAndViewport();
-
-				free( pixelValue );
-			}
-		}
-
-		if ( bCleanupTexture )
-			SafeRelease( &pTexture );
-	}
+	ComputeActualSize( true );
+	m_nActualDimensionLimit = m_nDesiredDimensionLimit;
+	m_nInternalFlags |= TEXTUREFLAGSINTERNAL_ALLOCATED;
+	extern ShaderAPITextureHandle_t Ps3gcmGetArtificialTextureHandle( int iHandle );
+	if ( !Q_strcmp( pRTName, "^PS3^BACKBUFFER" ) )
+		m_pTextureHandles[0] = Ps3gcmGetArtificialTextureHandle( PS3GCM_ARTIFICIAL_TEXTURE_HANDLE_INDEX_BACKBUFFER );
+	else if ( !Q_strcmp( pRTName, "^PS3^DEPTHBUFFER" ) )
+		m_pTextureHandles[0] = Ps3gcmGetArtificialTextureHandle( PS3GCM_ARTIFICIAL_TEXTURE_HANDLE_INDEX_DEPTHBUFFER );
 	else
-	{
-		Msg( "SaveToFile: texture '_rt_FullFrameFB1' failed. Ptr:%p Format:%d\n", pTexture, ( pTexture ? pTexture->GetImageFormat() : 0 ) );
-	}
-
-	return bRet;
+		Error( "<vitaliy> Unexpected raw buffer alias: %s!\n", pRTName );
 }
+#endif
 
-bool CTexture::AsyncReadTextureFromFile( IVTFTexture* pVTFTexture, unsigned int nAdditionalCreationFlags )
+
+void CTexture::Bind( Sampler_t sampler, TextureBindFlags_t nBindFlags )
 {
-	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
-	
-	m_bStreamingFileReadFailed = false; // Optimism!
-
-	char pCacheFileName[ MATERIAL_MAX_PATH ];
-	FileHandle_t fileHandle = FILESYSTEM_INVALID_HANDLE;
-
-	GetCacheFilename( pCacheFileName, MATERIAL_MAX_PATH );
-	if ( !GetFileHandle( &fileHandle, pCacheFileName, NULL ) )
-	{
-		m_bStreamingFileReadFailed = true;
-		return false;
-	}
-
-	if ( V_strstr( GetName(), "c_sniperrifle_scope" ) )
-	{
-		int i = 0;
-		i = 3;
-	}
-
-
-	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s - %s", __FUNCTION__, tmDynamicString( TELEMETRY_LEVEL0, pCacheFileName ) );
-	
-	// OSX hackery
-	int nPreserveFlags = nAdditionalCreationFlags;
-	if ( m_nFlags & TEXTUREFLAGS_SRGB )
-		nPreserveFlags |= TEXTUREFLAGS_SRGB;
-
-	uint16 dontCareStreamedMips = m_nStreamingMips;
-	TextureLODControlSettings_t settings = m_cachedFileLodSettings;
-
-	if ( !SLoadTextureBitsFromFile( &pVTFTexture, fileHandle, m_nFlags | nPreserveFlags, &settings, m_nDesiredDimensionLimit, &dontCareStreamedMips, GetName(), pCacheFileName, &m_dimsMapping ) )
-	{
-		g_pFullFileSystem->Close( fileHandle );
-		m_bStreamingFileReadFailed = true;
-		return false;
-	}
-
-	g_pFullFileSystem->Close( fileHandle );
-
-	m_pStreamingVTF = pVTFTexture;
-
-	return true;
-}
-
-void CTexture::AsyncCancelReadTexture( )
-{
-	Assert( m_bStreamingFileReadFailed || m_pStreamingVTF != NULL );
-	if ( m_pStreamingVTF )
-	{
-		TextureManager()->ReleaseAsyncScratchVTF( m_pStreamingVTF );
-		m_pStreamingVTF = NULL;
-	}
-}
-
-void CTexture::Bind( Sampler_t sampler )
-{
-	Bind( sampler, 0 );
+	Bind( sampler, nBindFlags, 0 );
 }
 
 //-----------------------------------------------------------------------------
-// Binds a particular texture (possibly paired)
+// Binds a particular texture
 //-----------------------------------------------------------------------------
-void CTexture::Bind( Sampler_t sampler1, int nFrame, Sampler_t sampler2 /* = -1 */ )
+void CTexture::Bind( Sampler_t sampler1, TextureBindFlags_t nBindFlags, int nFrame, Sampler_t sampler2 /* = -1 */ )
 {
 	if ( g_pShaderDevice->IsUsingGraphics() )
 	{
-		TextureManager()->RequestAllMipmaps( this );
-
 		if ( nFrame < 0 || nFrame >= m_nFrameCount )
 		{
 			// FIXME: Use the well-known 'error' id instead of frame 0
@@ -2524,12 +2905,12 @@ void CTexture::Bind( Sampler_t sampler1, int nFrame, Sampler_t sampler2 /* = -1 
 		// Make sure we've actually allocated the texture handle
 		if ( HasBeenAllocated() )
 		{
-			g_pShaderAPI->BindTexture( sampler1, m_pTextureHandles[nFrame] );
+			g_pShaderAPI->BindTexture( sampler1, nBindFlags, m_pTextureHandles[nFrame] );
 		}
 		else
 		{
-			ExecuteNTimes( 20, Warning( "Trying to bind texture %s, but texture handles are not valid. Binding a white texture!\n", GetName() ) );
-			g_pShaderAPI->BindStandardTexture( sampler1, TEXTURE_WHITE );
+			Warning( "Trying to bind texture %s, but texture handles are not valid. Binding a white texture!", GetName() );
+			g_pShaderAPI->BindStandardTexture( sampler1, nBindFlags, TEXTURE_WHITE );
 		}
 	}
 }
@@ -2575,9 +2956,18 @@ bool CTexture::SetRenderTarget( int nRenderTargetID, ITexture *pDepthTexture )
 	// Make sure we've actually allocated the texture handles
 	Assert( HasBeenAllocated() );
 
-	ShaderAPITextureHandle_t textureHandle = m_pTextureHandles[0];
+	ShaderAPITextureHandle_t textureHandle;
+	if ( !IsX360() )
+	{
+		textureHandle = m_pTextureHandles[0];
+	}
+	else
+	{
+		Assert( m_nFrameCount > 1 );
+		textureHandle = m_pTextureHandles[m_nFrameCount-1];
+	}
 
-	ShaderAPITextureHandle_t depthTextureHandle = (unsigned int)SHADER_RENDERTARGET_DEPTHBUFFER;
+	ShaderAPITextureHandle_t depthTextureHandle = (ShaderAPITextureHandle_t)SHADER_RENDERTARGET_DEPTHBUFFER;
 
 	if ( m_nFlags & TEXTUREFLAGS_DEPTHRENDERTARGET )
 	{
@@ -2587,7 +2977,7 @@ bool CTexture::SetRenderTarget( int nRenderTargetID, ITexture *pDepthTexture )
 	else if ( m_nFlags & TEXTUREFLAGS_NODEPTHBUFFER )
 	{
 		// GR - render target without depth buffer	
-		depthTextureHandle = (unsigned int)SHADER_RENDERTARGET_NONE;
+		depthTextureHandle = (ShaderAPITextureHandle_t)SHADER_RENDERTARGET_NONE;
 	}
 
 	if ( pDepthTexture)
@@ -2610,15 +3000,15 @@ void CTexture::IncrementReferenceCount( void )
 
 void CTexture::DecrementReferenceCount( void )
 {
-	if ( ( --m_nRefCount <= 0 ) && ( m_nFlags & TEXTUREFLAGS_IMMEDIATE_CLEANUP ) != 0 )
-	{
-		Assert( m_nRefCount == 0 );
-		// Just inform the texture manager, it will decide to free us at a later date.
-		TextureManager()->MarkUnreferencedTextureForCleanup( this );
-	}
+	--m_nRefCount;
+
+	/* FIXME: Probably have to remove this from the texture manager too..?
+	if (IsProcedural() && (m_nRefCount < 0))
+		delete this;
+	*/
 }
 
-int CTexture::GetReferenceCount( )
+int CTexture::GetReferenceCount() const
 {
 	return m_nRefCount;
 }
@@ -2661,32 +3051,32 @@ ImageFormat CTexture::GetImageFormat()	const
 
 int CTexture::GetMappingWidth()	const
 {
-	return m_dimsMapping.m_nWidth;
+	return m_nMappingWidth;
 }
 
 int CTexture::GetMappingHeight() const
 {
-	return m_dimsMapping.m_nHeight;
+	return m_nMappingHeight;
 }
 
 int CTexture::GetMappingDepth() const
 {
-	return m_dimsMapping.m_nDepth;
+	return m_nMappingDepth;
 }
 
 int CTexture::GetActualWidth() const
 {
-	return m_dimsActual.m_nWidth;
+	return m_nActualWidth;
 }
 
 int CTexture::GetActualHeight()	const
 {
-	return m_dimsActual.m_nHeight;
+	return m_nActualHeight;
 }
 
 int CTexture::GetActualDepth()	const
 {
-	return m_dimsActual.m_nDepth;
+	return m_nActualDepth;
 }
 
 int CTexture::GetNumAnimationFrames() const
@@ -2745,8 +3135,27 @@ unsigned int CTexture::GetFlags() const
 
 void CTexture::ForceLODOverride( int iNumLodsOverrideUpOrDown )
 {
+	if ( IsGameConsole() )
+	{
+		// not supporting
+		Assert( 0 );
+		return;
+	}
+
 	TextureLodOverride::OverrideInfo oi( iNumLodsOverrideUpOrDown, iNumLodsOverrideUpOrDown );
 	TextureLodOverride::Add( GetName(), oi );
+	Download( NULL );
+}
+
+void CTexture::ForceExcludeOverride( int iExcludeOverride )
+{
+	if ( IsGameConsole() )
+	{
+		Assert( 0 );
+		return;
+	}
+
+	TextureLodExclude::Add( GetName(), iExcludeOverride );
 	Download( NULL );
 }
 
@@ -2756,6 +3165,11 @@ bool CTexture::IsError() const
 	return ( (m_nInternalFlags & TEXTUREFLAGSINTERNAL_ERROR) != 0 );
 }
 
+bool CTexture::IsDefaultPool() const
+{
+	return ( ( m_nFlags & TEXTUREFLAGS_DEFAULT_POOL ) != 0 );
+}
+
 bool CTexture::HasBeenAllocated() const
 {
 	return ( (m_nInternalFlags & TEXTUREFLAGSINTERNAL_ALLOCATED) != 0 );
@@ -2763,30 +3177,30 @@ bool CTexture::HasBeenAllocated() const
 
 bool CTexture::IsVolumeTexture() const
 {
-	return (m_dimsMapping.m_nDepth > 1);
+	return (m_nMappingDepth > 1);
 }
 
 //-----------------------------------------------------------------------------
 // Sets the filtering + clamping modes on the texture
 //-----------------------------------------------------------------------------
-void CTexture::SetFilteringAndClampingMode( bool bOnlyLodValues )
+void CTexture::SetFilteringAndClampingMode()
 {
-	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
-
 	if( !HasBeenAllocated() )
 		return;
 
-	for ( int iFrame = 0; iFrame < m_nFrameCount; ++iFrame )
+	int nCount = m_nFrameCount;
+	if ( IsX360() && IsRenderTarget() )
+	{
+		// 360 render targets have a reserved surface
+		nCount--;
+	}
+
+	for ( int iFrame = 0; iFrame < nCount; ++iFrame )
 	{
 		Modify( iFrame );			// Indicate we're changing state with respect to a particular frame
-		if ( !bOnlyLodValues )
-		{
-			SetWrapState();			// Send the appropriate wrap/clamping modes to the shaderapi.
-			SetFilterState();		// Set the filtering mode for the texture after downloading it.
+		SetWrapState();				// Send the appropriate wrap/clamping modes to the shaderapi.
+		SetFilterState();			// Set the filtering mode for the texture after downloading it.
 									// NOTE: Apparently, the filter state cannot be set until after download
-		}
-		else
-			SetLodState();
 	}
 }
 
@@ -2795,6 +3209,8 @@ void CTexture::SetFilteringAndClampingMode( bool bOnlyLodValues )
 //-----------------------------------------------------------------------------
 void CTexture::Precache()
 {
+	int nHackExtraFlags = 0;
+
 	// We only have to do something in the case of a file texture
 	if ( IsRenderTarget() || IsProcedural() )
 		return;
@@ -2806,20 +3222,13 @@ void CTexture::Precache()
 	if ( !Q_strnicmp( m_Name.String(), "env_cubemap", 12 ))
 		return;
 	
-	int nAdditionalFlags = 0;
-	if ( ( m_nFlags & TEXTUREFLAGS_STREAMABLE ) != 0 ) 
+	if ( IsGameConsole() && m_nFlags )
 	{
-		// If we were previously streamed in, make sure we still do this time around.
-		nAdditionalFlags = TEXTUREFLAGS_STREAMABLE_COARSE;
-		Assert( ( m_nFlags & TEXTUREFLAGS_STREAMABLE_FINE ) == 0 );
-		Assert( m_residenceCurrent == RESIDENT_NONE && m_residenceTarget == RESIDENT_NONE );
-		Assert( m_lodClamp == 0 );
-		Assert( m_lodBiasCurrent == 0 && m_lodBiasInitial == 0 );
-		Assert( m_lodBiasStartTime == 0 );
+		// 360 can be assured that precaching has already been done
+		return;
 	}
 
-	ScratchVTF scratch( this );
-	IVTFTexture *pVTFTexture = scratch.Get();
+	IVTFTexture *pVTFTexture = GetScratchVTFTexture();
 
 	// The texture name doubles as the relative file name
 	// It's assumed to have already been set by this point	
@@ -2827,7 +3236,20 @@ void CTexture::Precache()
 	char pCacheFileName[MATERIAL_MAX_PATH];
 	Q_snprintf( pCacheFileName, sizeof( pCacheFileName ), "materials/%s" TEXTURE_FNAME_EXTENSION, m_Name.String() );
 
-	int nHeaderSize = VTFFileHeaderSize( VTF_MAJOR_VERSION );
+#if defined( _GAMECONSOLE )
+	// generate native texture
+	pVTFTexture->UpdateOrCreate( pCacheFileName );
+#endif
+
+	int nVersion = -1;
+	if ( IsPC() )
+		nVersion = VTF_MAJOR_VERSION;
+	else if ( IsX360() )
+		nVersion = VTF_X360_MAJOR_VERSION;
+	else if ( IsPS3() )
+		nVersion = VTF_PS3_MAJOR_VERSION;
+
+	int nHeaderSize = VTFFileHeaderSize( nVersion );
 	unsigned char *pMem = (unsigned char *)stackalloc( nHeaderSize );
 	CUtlBuffer buf( pMem, nHeaderSize );
 	if ( !g_pFullFileSystem->ReadFile( pCacheFileName, NULL, buf, nHeaderSize ) )	
@@ -2835,42 +3257,41 @@ void CTexture::Precache()
 		goto precacheFailed;
 	}
 
+	// Unserialize the header only
+#if !defined( _GAMECONSOLE )
 	if ( !pVTFTexture->Unserialize( buf, true ) )
+#else
+	if ( !pVTFTexture->UnserializeFromBuffer( buf, true, true, true, 0 ) )
+#endif
 	{
 		Warning( "Error reading material \"%s\"\n", pCacheFileName );
 		goto precacheFailed;
 	}
 
+	// FIXME: Hack for L4D
+	if ( !Q_strnicmp( pCacheFileName, "materials/graffiti/", 19 ) )
+	{
+		nHackExtraFlags = TEXTUREFLAGS_NOLOD; 
+	}
+
 	// NOTE: Don't set the image format in case graphics are active
 	VectorCopy( pVTFTexture->Reflectivity(), m_vecReflectivity );
-	m_dimsMapping.m_nWidth = pVTFTexture->Width();
-	m_dimsMapping.m_nHeight = pVTFTexture->Height();
-	m_dimsMapping.m_nDepth = pVTFTexture->Depth();
-	m_nFlags = pVTFTexture->Flags() | nAdditionalFlags;
+	m_nMappingWidth = pVTFTexture->Width();
+	m_nMappingHeight = pVTFTexture->Height();
+	m_nMappingDepth = pVTFTexture->Depth();
+	m_nFlags = pVTFTexture->Flags() | nHackExtraFlags;
 	m_nFrameCount = pVTFTexture->FrameCount();
-	if ( !m_pTextureHandles )
-	{
-		// NOTE: m_nFrameCount and m_pTextureHandles are strongly associated
-		// whenever one is modified the other must also be modified
-		AllocateTextureHandles();
-	}
 
 	return;
 
 precacheFailed:
 	m_vecReflectivity.Init( 0, 0, 0 );
-	m_dimsMapping.m_nWidth = 32;
-	m_dimsMapping.m_nHeight = 32;
-	m_dimsMapping.m_nDepth = 1;
+	m_nMappingWidth = 32;
+	m_nMappingHeight = 32;
+	m_nMappingDepth = 1;
 	m_nFlags = TEXTUREFLAGS_NOMIP;
-	SetErrorTexture( true );
+	m_nInternalFlags |= TEXTUREFLAGSINTERNAL_ERROR;
 	m_nFrameCount = 1;
-	if ( !m_pTextureHandles )
-	{
-		// NOTE: m_nFrameCount and m_pTextureHandles are strongly associated
-		// whenever one is modified the other must also be modified
-		AllocateTextureHandles();
-	}
 }
 
 
@@ -2880,10 +3301,10 @@ precacheFailed:
 //-----------------------------------------------------------------------------
 void CTexture::LoadLowResTexture( IVTFTexture *pTexture )
 {
-	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
-
+#if !defined( _GAMECONSOLE )
 	delete [] m_pLowResImage;
 	m_pLowResImage = NULL;
+#endif
 
 	if ( pTexture->LowResWidth() == 0 || pTexture->LowResHeight() == 0 )
 	{
@@ -2894,13 +3315,19 @@ void CTexture::LoadLowResTexture( IVTFTexture *pTexture )
 	m_LowResImageWidth = pTexture->LowResWidth();
 	m_LowResImageHeight = pTexture->LowResHeight();
 
+#if !defined( _GAMECONSOLE )
 	m_pLowResImage = new unsigned char[m_LowResImageWidth * m_LowResImageHeight * 3];
-#ifdef DBGFLAG_ASSERT
+#ifdef _DEBUG
 	bool retVal = 
 #endif
 		ImageLoader::ConvertImageFormat( pTexture->LowResImageData(), pTexture->LowResFormat(), 
 			m_pLowResImage, IMAGE_FORMAT_RGB888, m_LowResImageWidth, m_LowResImageHeight );
+#ifdef _DEBUG
 	Assert( retVal );
+#endif
+#else
+	*(unsigned int*)m_LowResImageSample = *(unsigned int*)pTexture->LowResImageSample();
+#endif
 }
 
 void *CTexture::GetResourceData( uint32 eDataType, size_t *pnumBytes ) const
@@ -2929,6 +3356,70 @@ void *CTexture::GetResourceData( uint32 eDataType, size_t *pnumBytes ) const
 	if ( pnumBytes )
 		pnumBytes = 0;
 	return NULL;
+}
+
+void CTexture::FreeResourceData()
+{
+	// Clean up the resources data
+	for ( DataChunk const *pDataChunk = m_arrDataChunks.Base(),
+		*pDataChunkEnd = pDataChunk + m_arrDataChunks.Count();
+		pDataChunk < pDataChunkEnd; ++pDataChunk )
+	{
+		pDataChunk->Deallocate();
+	}
+	m_arrDataChunks.RemoveAll();
+}
+
+void CTexture::LoadResourceData( IVTFTexture *pVTFTexture )
+{
+	// purge any prior resource data
+	FreeResourceData();
+
+	// Load the resources
+	if ( unsigned int uiRsrcCount = pVTFTexture->GetResourceTypes( NULL, 0 ) )
+	{
+		uint32 *arrRsrcTypes = ( uint32 * )stackalloc( uiRsrcCount * sizeof( unsigned int ) );
+		pVTFTexture->GetResourceTypes( arrRsrcTypes, uiRsrcCount );
+
+		m_arrDataChunks.EnsureCapacity( uiRsrcCount );
+		for ( uint32 *arrRsrcTypesEnd = arrRsrcTypes + uiRsrcCount;
+			arrRsrcTypes < arrRsrcTypesEnd; ++arrRsrcTypes )
+		{
+			switch ( *arrRsrcTypes )
+			{
+			case VTF_LEGACY_RSRC_LOW_RES_IMAGE:
+			case VTF_LEGACY_RSRC_IMAGE:
+				// These stock types use specific load routines
+				continue;
+
+			default:
+				{
+					DataChunk dc;
+					dc.m_eType = *arrRsrcTypes;
+					dc.m_eType &= ~RSRCF_MASK;
+
+					size_t numBytes;
+					if ( void *pvData = pVTFTexture->GetResourceData( dc.m_eType, &numBytes ) )
+					{
+						Assert( numBytes >= sizeof( uint32 ) );
+						if ( numBytes == sizeof( dc.m_numBytes ) )
+						{
+							dc.m_eType |= RSRCF_HAS_NO_DATA_CHUNK;
+							dc.m_pvData = NULL;
+							memcpy( &dc.m_numBytes, pvData, numBytes );
+						}
+						else
+						{
+							dc.Allocate( numBytes );
+							memcpy( dc.m_pvData, pvData, numBytes );
+						}
+
+						m_arrDataChunks.AddToTail( dc );
+					}
+				}
+			}
+		}
+	}
 }
 
 #pragma pack(1)
@@ -3009,25 +3500,69 @@ static void FillCompressedTextureWithSingleColor( int red, int green, int blue, 
 	}
 }
 
-// This table starts out like the programmatic logic that used to be here,
-// but then has some other colors, so that we don't see repeats.
-// Also, there is no black, which seems to be an error condition on OpenGL.
-// There also aren't any zeros in this table, since these colors may get
-// multiplied with, say, vertex colors which are tinted, resulting in black pixels.
-int sg_nMipLevelColors[14][3] = { {  64, 255,  64 },  // Green
-								  { 255,  64,  64 },  // Red
-								  { 255, 255,  64 },  // Yellow
-								  {  64,  64, 255 },  // Blue
-								  {  64, 255, 255 },  // Cyan
-								  { 255,  64, 255 },  // Magenta
-								  { 255, 255, 255 },  // White
-								  { 255, 150, 150 },  // Light Red
-								  { 255, 255, 150 },  // Light Yellow
-								  { 150, 150, 255 },  // Light Blue
-								  { 150, 255, 255 },  // Light Cyan
-								  { 255, 150, 255 },  // Light Magenta
-								  { 150, 150, 128 },  // Light Gray
-								  { 138, 131,  64 } };// Brown
+//-----------------------------------------------------------------------------
+// Generate a gray texture
+//-----------------------------------------------------------------------------
+void CTexture::GenerateGrayTexture( IVTFTexture *pTexture )
+{
+	if( pTexture->FaceCount() > 1 )
+		return;
+
+	if( pTexture->IsCubeMap() )
+		return;
+
+	switch( pTexture->Format() )
+	{
+		// These are formats that we don't bother with
+	case IMAGE_FORMAT_RGBA16161616F:
+	case IMAGE_FORMAT_R32F:
+	case IMAGE_FORMAT_RGB323232F:
+	case IMAGE_FORMAT_RGBA32323232F:
+	case IMAGE_FORMAT_UV88:
+		break;
+	default:
+		for (int iFrame = 0; iFrame < pTexture->FrameCount(); ++iFrame )
+		{
+			for (int iFace = 0; iFace < pTexture->FaceCount(); ++iFace )
+			{
+				for (int iMip = 0; iMip < pTexture->MipCount(); ++iMip )
+				{
+					int green  =	128;
+					int red	   =	128;
+					int blue   =	128;
+
+					int nWidth, nHeight, nDepth;
+					pTexture->ComputeMipLevelDimensions( iMip, &nWidth, &nHeight, &nDepth );
+					if( pTexture->Format() == IMAGE_FORMAT_DXT1  || pTexture->Format() == IMAGE_FORMAT_DXT5 ||
+						pTexture->Format() == IMAGE_FORMAT_ATI1N || pTexture->Format() == IMAGE_FORMAT_ATI2N )
+					{
+						unsigned char *pImageData = pTexture->ImageData( iFrame, iFace, iMip, 0, 0, 0 );
+						FillCompressedTextureWithSingleColor( red, green, blue, 255, pImageData, nWidth, nHeight, nDepth, pTexture->Format() );
+					}
+					else
+					{
+						for ( int z = 0; z < nDepth; ++z )
+						{
+							CPixelWriter pixelWriter;
+							pixelWriter.SetPixelMemory( pTexture->Format(), 
+								pTexture->ImageData( iFrame, iFace, iMip, 0, 0, z ), pTexture->RowSizeInBytes( iMip ) );
+
+							for (int y = 0; y < nHeight; ++y)
+							{
+								pixelWriter.Seek( 0, y );
+								for (int x = 0; x < nWidth; ++x)
+								{
+									pixelWriter.WritePixel( red, green, blue, 255 );
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		break;
+	}
+}
 
 //-----------------------------------------------------------------------------
 // Generate a texture that shows the various mip levels
@@ -3053,9 +3588,9 @@ void CTexture::GenerateShowMipLevelsTextures( IVTFTexture *pTexture )
 			{
 				for (int iMip = 0; iMip < pTexture->MipCount(); ++iMip )
 				{
-					int red	  = sg_nMipLevelColors[iMip][0];//( ( iMip + 1 ) & 2 ) ? 255 : 0;
-					int green = sg_nMipLevelColors[iMip][1];//( ( iMip + 1 ) & 1 ) ? 255 : 0;
-					int blue  = sg_nMipLevelColors[iMip][2];//( ( iMip + 1 ) & 4 ) ? 255 : 0;
+					int green  =	( ( iMip + 1 ) & 1 ) ? 255 : 0;
+					int red	   =	( ( iMip + 1 ) & 2 ) ? 255 : 0;
+					int blue   =	( ( iMip + 1 ) & 4 ) ? 255 : 0;
 
 					int nWidth, nHeight, nDepth;
 					pTexture->ComputeMipLevelDimensions( iMip, &nWidth, &nHeight, &nDepth );
@@ -3110,25 +3645,30 @@ void CTexture::CopyLowResImageToTexture( IVTFTexture *pTexture )
 
 	// Don't bother computing the actual size; it's actually equal to the low-res size
 	// With only one mip level
-	m_dimsActual.m_nWidth = m_LowResImageWidth;
-	m_dimsActual.m_nHeight = m_LowResImageHeight;
-	m_dimsActual.m_nDepth = 1;
-	m_dimsActual.m_nMipCount = 1;
+	m_nActualWidth = m_LowResImageWidth;
+	m_nActualHeight = m_LowResImageHeight;
+	m_nActualDepth = 1;
+	m_nActualMipCount = 1;
 
 	// Copy the row-res image into the VTF Texture
 	CPixelWriter pixelWriter;
 	pixelWriter.SetPixelMemory( pTexture->Format(), 
 		pTexture->ImageData( 0, 0, 0 ), pTexture->RowSizeInBytes( 0 ) );
 
+#if !defined( _GAMECONSOLE )
+	unsigned char *pLowResImage = m_pLowResImage;
+#else
+	unsigned char *pLowResImage = m_LowResImageSample;
+#endif
 	for ( int y = 0; y < m_LowResImageHeight; ++y )
 	{
 		pixelWriter.Seek( 0, y );
 		for ( int x = 0; x < m_LowResImageWidth; ++x )
 		{
-			int red = m_pLowResImage[0];
-			int green = m_pLowResImage[1];
-			int blue = m_pLowResImage[2];
-			m_pLowResImage += 3;
+			int red = pLowResImage[0];
+			int green = pLowResImage[1];
+			int blue = pLowResImage[2];
+			pLowResImage += 3;
 
 			pixelWriter.WritePixel( red, green, blue, 255 );
 		}
@@ -3140,15 +3680,22 @@ void CTexture::CopyLowResImageToTexture( IVTFTexture *pTexture )
 //-----------------------------------------------------------------------------
 bool CTexture::SetupDebuggingTextures( IVTFTexture *pVTFTexture )
 {
-	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
+	if ( IsGameConsole() )
+	{
+		// not supporting
+		return false;
+	}
 
 	if ( pVTFTexture->Flags() & TEXTUREFLAGS_NODEBUGOVERRIDE )
 		return false;
 
-	// The all mips flag is typically used on detail textures, which can
-	// really mess up visualization if we apply the debug-colorized
-	// versions of them to debug-colorized base textures, so skip 'em
-	if ( g_config.nShowMipLevels && !(pVTFTexture->Flags() & TEXTUREFLAGS_ALL_MIPS) )
+	if ( g_config.bDrawGray )
+	{
+		GenerateGrayTexture( pVTFTexture );
+		return true;
+	}
+
+	if ( g_config.nShowMipLevels )
 	{
 		// mat_showmiplevels 1 means don't do normal maps
 		if ( ( g_config.nShowMipLevels == 1 ) && ( pVTFTexture->Flags() & ( TEXTUREFLAGS_NORMAL | TEXTUREFLAGS_SSBUMP ) ) )
@@ -3180,25 +3727,29 @@ bool CTexture::SetupDebuggingTextures( IVTFTexture *pVTFTexture )
 //-----------------------------------------------------------------------------
 bool CTexture::ConvertToActualFormat( IVTFTexture *pVTFTexture )
 {
-	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
-
 	if ( !g_pShaderDevice->IsUsingGraphics() )
 		return false;
 
 	bool bConverted = false;
 
 	ImageFormat fmt = m_ImageFormat;
-
 	ImageFormat dstFormat = ComputeActualFormat( pVTFTexture->Format() );
+#ifdef PLATFORM_OSX
+	if ( IsVolumeTexture() && ImageLoader::IsCompressed( dstFormat ) )
+	{
+		// OSX does not support compressed 3d textures
+		dstFormat = IMAGE_FORMAT_RGBA8888;
+	}
+#endif
 	if ( fmt != dstFormat )
 	{
-		tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s - conversion from (%d to %d)", __FUNCTION__, fmt, dstFormat );
-
+		Assert( !IsGameConsole() );
 		pVTFTexture->ConvertImageFormat( dstFormat, false );
-
 		m_ImageFormat = dstFormat;
 		bConverted = true;
 	}
+#ifndef _PS3
+	// No reason to do this conversion on PS3
 	else if ( HardwareConfig()->GetHDRType() == HDR_TYPE_INTEGER &&
 		     fmt == dstFormat && dstFormat == IMAGE_FORMAT_RGBA16161616F )
 	{
@@ -3207,6 +3758,7 @@ bool CTexture::ConvertToActualFormat( IVTFTexture *pVTFTexture )
 		pVTFTexture->ConvertImageFormat( IMAGE_FORMAT_RGBA16161616F, false );
 		bConverted = true;
 	}
+#endif // !_PS3
 
 	return bConverted;
 }
@@ -3241,151 +3793,452 @@ void CTexture::ReloadFilesInList( IFileList *pFilesToReload )
 	}
 }
 
+
+//-----------------------------------------------------------------------------
+// Loads the texture bits from a file or data.
+//-----------------------------------------------------------------------------
+IVTFTexture *CTexture::LoadTexttureBitsFromFileOrData( void *pSourceData, int nSourceDataSize, char **pResolvedFilename )
+{
+	char pCacheFileName[MATERIAL_MAX_PATH] = { 0 };
+	const char *pName;
+	if (m_nInternalFlags & TEXTUREFLAGSINTERNAL_SHOULDEXCLUDE)
+	{
+#if !defined( _CERT )
+		// excluded texture should not be visible, want these to be found during testing
+		// use the green checkerboard
+		pName = "dev/dev_exclude_error";
+#else
+		// for shipping (in case it happens) better to use the version meant for momentary rendering
+		pName = "dev/dev_temp_exclude";
+#endif
+	}
+	else if ((m_nInternalFlags & TEXTUREFLAGSINTERNAL_SHOULDTEMPEXCLUDE) && m_nDesiredTempDimensionLimit <= 0)
+	{
+		pName = "dev/dev_temp_exclude";
+	}
+	else
+	{
+		pName = m_Name.String();
+	}
+
+	bool bIsUNCName = (pName[0] == '/' && pName[1] == '/' && pName[2] != '/');
+	if (!bIsUNCName)
+	{
+		Q_snprintf( pCacheFileName, sizeof( pCacheFileName ), "materials/%s" TEXTURE_FNAME_EXTENSION, pName );
+	}
+	else
+	{
+		Q_snprintf( pCacheFileName, sizeof( pCacheFileName ), "%s" TEXTURE_FNAME_EXTENSION, pName );
+	}
+
+	if (!pSourceData || !nSourceDataSize)
+	{
+		// Get the data from disk...
+		// NOTE: Reloading the texture bits can cause the texture size, frames, format, pretty much *anything* can change.
+		return LoadTextureBitsFromFile( pCacheFileName, pResolvedFilename );
+	}
+	else
+	{
+		// use the data provided
+		return LoadTextureBitsFromData( pCacheFileName, pSourceData, nSourceDataSize );
+	}
+}
+
 //-----------------------------------------------------------------------------
 // Loads the texture bits from a file.
 //-----------------------------------------------------------------------------
 IVTFTexture *CTexture::LoadTextureBitsFromFile( char *pCacheFileName, char **ppResolvedFilename )
 {
-	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s %s", __FUNCTION__, tmDynamicString( TELEMETRY_LEVEL0, pCacheFileName ) );
-	
-	if ( m_bStreamingFileReadFailed )
+	int nHeaderSize;
+	int	nFileSize;
+
+	IVTFTexture *pVTFTexture = ( m_nFlags & TEXTUREFLAGS_ASYNC_DOWNLOAD ) ? GetScratchVTFAsyncTexture() : GetScratchVTFTexture();
+
+	bool bIsCombinedImage = ( pCacheFileName[ 0 ] == '!' ) && g_pMDLCache != NULL;
+
+	CUtlBuffer buf;
+	FileHandle_t fileHandle = FILESYSTEM_INVALID_HANDLE;
+	int nBytesOptimalRead;	// GCC needs this extra newline due to goto
+	int nBytesRead;			// GCC needs this extra newline due to goto
+
+	if ( bIsCombinedImage )
 	{
-		Assert( m_pStreamingVTF == NULL );
-		return HandleFileLoadFailedTexture( GetScratchVTFTexture() );
-	}
+		int		nSize;
+		void	*pBuffer = g_pMDLCache->GetCombinedInternalAsset( COMBINED_ASSET_TEXTURE, pCacheFileName, &nSize );
 
-	// OSX hackery
-	int nPreserveFlags = 0;
-	if ( m_nFlags & TEXTUREFLAGS_SRGB )
-		nPreserveFlags |= TEXTUREFLAGS_SRGB;
-
-	unsigned int stripFlags = 0;
-
-	IVTFTexture *pVTFTexture = m_pStreamingVTF;
-	if ( !pVTFTexture )
-	{
-		pVTFTexture = GetScratchVTFTexture();
-
-		FileHandle_t fileHandle = FILESYSTEM_INVALID_HANDLE;
-
-		if ( !GetFileHandle( &fileHandle, pCacheFileName, ppResolvedFilename ) )
-			return HandleFileLoadFailedTexture( pVTFTexture );
-
-		TextureLODControlSettings_t settings = m_cachedFileLodSettings;
-		if ( !SLoadTextureBitsFromFile( &pVTFTexture, fileHandle, m_nFlags | nPreserveFlags, &settings, m_nDesiredDimensionLimit, &m_nStreamingMips, GetName(), pCacheFileName, &m_dimsMapping, &m_dimsActual, &m_dimsAllocated, &stripFlags ) )
-		{
-			g_pFullFileSystem->Close( fileHandle );
-			return HandleFileLoadFailedTexture( pVTFTexture );
-		}
-
-		g_pFullFileSystem->Close( fileHandle );
-	}
-
-
-	// Don't reinitialize here if we're streaming in the fine levels, we already have been initialized with coarse.
-	if ( ( m_nFlags & TEXTUREFLAGS_STREAMABLE_FINE ) == 0 )
-	{
-		// Initing resets these, but we're happy with the values now--so store and restore them around the Init call.
-		TexDimensions_t actual = m_dimsActual,
-					 allocated = m_dimsAllocated;
-
-		// Initialize the texture class with vtf header data before operations
-		Init( m_dimsMapping.m_nWidth,
-			  m_dimsMapping.m_nHeight,
-			  m_dimsMapping.m_nDepth,
-			  pVTFTexture->Format(),
-			  pVTFTexture->Flags() | nPreserveFlags,
-			  pVTFTexture->FrameCount()
-		);
-
-		m_dimsActual = actual;
-		m_dimsAllocated = allocated;
-
-		m_nFlags &= ~stripFlags;
+		// buf will not own the memory and thus will not try to dealloc it
+		buf.SetExternalBuffer( pBuffer, nSize, nSize );
 	}
 	else
 	{
-		// Not illegal, just needs investigation.
-		Assert( stripFlags == 0 );
+		while ( fileHandle == FILESYSTEM_INVALID_HANDLE )			// run until found a file or out of rules
+		{
+#if defined( _GAMECONSOLE )
+			// generate native texture
+			pVTFTexture->UpdateOrCreate( pCacheFileName );
+#endif
+			fileHandle = g_pFullFileSystem->OpenEx( pCacheFileName, "rb", 0, MaterialSystem()->GetForcedTextureLoadPathID(), ppResolvedFilename );
+			if ( fileHandle == FILESYSTEM_INVALID_HANDLE )
+			{
+				// try any fallbacks.
+				char *pHdrExt = Q_stristr( pCacheFileName, ".hdr" TEXTURE_FNAME_EXTENSION );
+				if ( pHdrExt )
+				{
+					//DevWarning( "A custom HDR cubemap \"%s\": cannot be found on disk.\n"
+					//			"This really should have a HDR version, trying a fall back to a non-HDR version.\n", pCacheFileName );
+					strcpy( pHdrExt, TEXTURE_FNAME_EXTENSION );
+				}
+				else
+				{
+					// no more fallbacks
+					break;
+				}
+			}
+		}
+	
+		if ( fileHandle == FILESYSTEM_INVALID_HANDLE )
+		{
+			if ( !StringHasPrefix( m_Name.String(), "env_cubemap" ) )
+			{
+				if ( IsOSX() )
+				{
+					printf("\n ##### CTexture::LoadTextureBitsFromFile couldn't find %s",pCacheFileName );
+				}
+				DevWarning( "\"%s\": can't be found on disk\n", pCacheFileName );
+			}
+			return HandleFileLoadFailedTexture( pVTFTexture );
+		}
+
+		int nVersion = -1;
+		if ( IsPC() )
+			nVersion = VTF_MAJOR_VERSION;
+		else if ( IsX360() )
+			nVersion = VTF_X360_MAJOR_VERSION;
+		else if ( IsPS3() )
+			nVersion = VTF_PS3_MAJOR_VERSION;
+
+		nHeaderSize = VTFFileHeaderSize( nVersion );
+
+		// restrict read to the header only!
+		// header provides info to avoid reading the entire file
+		nBytesOptimalRead = GetOptimalReadBuffer( fileHandle, nHeaderSize, buf );
+		nBytesRead = g_pFullFileSystem->ReadEx( buf.Base(), nBytesOptimalRead, Min( nHeaderSize, (int)g_pFullFileSystem->Size(fileHandle) ), fileHandle ); // only read as much as the file has
+		nBytesRead = nHeaderSize = ((VTFFileBaseHeader_t *)buf.Base())->headerSize;
+		g_pFullFileSystem->Seek( fileHandle, nHeaderSize, FILESYSTEM_SEEK_HEAD );
+		buf.SeekPut( CUtlBuffer::SEEK_HEAD, nBytesRead );
 	}
 
-	if ( m_pStreamingVTF )
-		ComputeActualSize( false, pVTFTexture, ( m_nFlags & TEXTUREFLAGS_STREAMABLE ) != 0 );
+	// Unserialize the header only
+	// need the header first to determine remainder of data
+#if !defined( _GAMECONSOLE )
+	if ( !pVTFTexture->Unserialize( buf, true ) )
+#else
+	if ( !pVTFTexture->UnserializeFromBuffer( buf, true, true, true, 0 ) )
+#endif
+	{
+		Warning( "Error reading texture header \"%s\"\n", pCacheFileName );
+		g_pFullFileSystem->Close( fileHandle );
+		return HandleFileLoadFailedTexture( pVTFTexture );
+	}
+
+	// FIXME: Hack for L4D
+	int nHackExtraFlags = 0;
+	if ( !Q_strnicmp( pCacheFileName, "materials/graffiti/", 19 ) )
+	{
+		nHackExtraFlags = TEXTUREFLAGS_NOLOD; 
+	}
+	
+	// OSX hackery
+	if ( m_nFlags & TEXTUREFLAGS_SRGB )
+	{
+		nHackExtraFlags |= TEXTUREFLAGS_SRGB; 		
+	}
+
+	// Set from stdshaders cpp code
+	if ( m_nFlags & TEXTUREFLAGS_ANISOTROPIC )
+	{
+		nHackExtraFlags |= TEXTUREFLAGS_ANISOTROPIC;
+	}
+
+	// Seek the reading back to the front of the buffer
+	buf.SeekGet( CUtlBuffer::SEEK_HEAD, 0 );
+
+	// Initialize the texture class with vtf header data before operations
+	Init( 
+#if !defined( _GAMECONSOLE )
+		pVTFTexture->Width(), 
+		pVTFTexture->Height(), 
+		pVTFTexture->Depth(), 
+#else
+		// 360 texture might be pre-picmipped, setup as it's original dimensions
+		// so picmipping logic calculates correctly, and then fixup
+		pVTFTexture->MappingWidth(),
+		pVTFTexture->MappingHeight(),
+		pVTFTexture->MappingDepth(),
+#endif
+		pVTFTexture->Format(), 
+		pVTFTexture->Flags() | nHackExtraFlags, 
+		pVTFTexture->FrameCount() );
 
 	VectorCopy( pVTFTexture->Reflectivity(), m_vecReflectivity );
 
-	// If we've only streamed in coarse but haven't started on fine yet, go ahead and mark us as
-	// partially resident and set up our clamping values. 
-	if ( ( m_nFlags & TEXTUREFLAGS_STREAMABLE ) == TEXTUREFLAGS_STREAMABLE_COARSE )
+#if defined( _GAMECONSOLE )
+	m_nInternalFlags |= TEXTUREFLAGSINTERNAL_QUEUEDLOAD;
+	if ( !g_pQueuedLoader->IsMapLoading() || ( m_nFlags & ( TEXTUREFLAGS_PROCEDURAL|TEXTUREFLAGS_RENDERTARGET|TEXTUREFLAGS_DEPTHRENDERTARGET ) ) )
 	{
-		pVTFTexture->GetMipmapRange( &m_lodClamp, NULL );
-		m_residenceTarget = RESIDENT_PARTIAL;
-		m_residenceCurrent = RESIDENT_PARTIAL;
+		// explicitly disabled or not appropriate for texture type
+		m_nInternalFlags &= ~TEXTUREFLAGSINTERNAL_QUEUEDLOAD;
+	}
+	else
+	{
+		if ( pVTFTexture->FileSize( true, 0 ) >= pVTFTexture->FileSize( false, 0 ) )
+		{
+			// texture is a dwarf, entirely in preload, loads normally
+			m_nInternalFlags &= ~TEXTUREFLAGSINTERNAL_QUEUEDLOAD;
+		}
+	}
+#endif
+
+	// Compute the actual texture dimensions
+	int nMipSkipCount = ComputeActualSize( false, pVTFTexture );
+
+#if defined( _GAMECONSOLE )
+	bool bQueuedLoad = ( m_nInternalFlags & TEXTUREFLAGSINTERNAL_QUEUEDLOAD ) != 0;
+	nMipSkipCount -= pVTFTexture->MipSkipCount();
+	if ( nMipSkipCount < 0 || ( nMipSkipCount >= pVTFTexture->MipCount() ) )
+	{
+		// the 360 texture was already pre-picmipped or can't be picmipped
+		// clamp to the available dimensions
+		m_nActualWidth = pVTFTexture->Width();
+		m_nActualHeight = pVTFTexture->Height();
+		m_nActualDepth = pVTFTexture->Depth();
+		m_nActualMipCount = ComputeActualMipCount();
+		nMipSkipCount = 0;
+	}
+	if ( IsX360() && g_config.skipMipLevels == 0 && m_nActualMipCount > 1 && m_nFrameCount == 1 && !( m_nFlags & ( TEXTUREFLAGS_PROCEDURAL|TEXTUREFLAGS_RENDERTARGET|TEXTUREFLAGS_DEPTHRENDERTARGET ) ) )
+	{
+		// this file based texture is a good candidate for cacheing
+		m_nInternalFlags |= TEXTUREFLAGSINTERNAL_CACHEABLE;
+	}
+	if ( nMipSkipCount )
+	{
+		// track which textures had their dimensions forcefully reduced
+		m_nInternalFlags |= TEXTUREFLAGSINTERNAL_REDUCED;
+	}
+#endif
+	
+	m_nMipSkipCount = nMipSkipCount;
+
+#if !defined( _GAMECONSOLE )
+	// Determine how much of the file to read in
+	nFileSize = pVTFTexture->FileSize( nMipSkipCount );
+#else
+	// A queued loading texture just gets the preload section
+	// and does NOT unserialize the texture bits here
+	nFileSize = pVTFTexture->FileSize( bQueuedLoad, nMipSkipCount );
+#endif
+
+	// Read only the portion of the file that we care about
+	g_pFullFileSystem->Seek( fileHandle, 0, FILESYSTEM_SEEK_HEAD );
+	nBytesOptimalRead = GetOptimalReadBuffer( fileHandle, nFileSize, buf );
+	nBytesRead = g_pFullFileSystem->ReadEx( buf.Base(), nBytesOptimalRead, nFileSize, fileHandle );
+	g_pFullFileSystem->Close( fileHandle );
+	buf.SeekPut( CUtlBuffer::SEEK_HEAD, nBytesRead );
+
+	// NOTE: Skipping mip levels here will cause the size to be changed...
+#if !defined( _GAMECONSOLE )
+	if ( !pVTFTexture->Unserialize( buf, false, nMipSkipCount ) )
+#else
+	if ( !pVTFTexture->UnserializeFromBuffer( buf, true, false, bQueuedLoad, nMipSkipCount ) )
+#endif
+	{
+		Warning( "Error reading material data \"%s\"\n", pCacheFileName );
+		return HandleFileLoadFailedTexture( pVTFTexture );
+	}
+
+	// Build the low-res texture
+	LoadLowResTexture( pVTFTexture );
+
+	// load resources
+	LoadResourceData( pVTFTexture );
+
+	// Try to set up debugging textures, if we're in a debugging mode
+	if ( !IsProcedural() && !IsGameConsole() )
+	{
+		SetupDebuggingTextures( pVTFTexture );
+	}
+
+	if ( ConvertToActualFormat( pVTFTexture ) )
+	{
+		if ( IsGameConsole() )
+		{
+			// 360 vtf are baked in final formats, no format conversion can or should have occurred
+			// otherwise track offender and ensure files are baked correctly
+			Error( "\"%s\" not in native format\n", pCacheFileName );
+		}
+	}
+
+	return pVTFTexture;
+}
+
+//-----------------------------------------------------------------------------
+// Loads the texture bits from provided data.
+//-----------------------------------------------------------------------------
+IVTFTexture *CTexture::LoadTextureBitsFromData( char *pCacheFileName, void *pSourceData, int nSourceDataSize )
+{
+	IVTFTexture *pVTFTexture = ( m_nFlags & TEXTUREFLAGS_ASYNC_DOWNLOAD ) ? GetScratchVTFAsyncTexture() : GetScratchVTFTexture();
+
+	CUtlBuffer buf;
+	buf.SetExternalBuffer( pSourceData, nSourceDataSize, nSourceDataSize, CUtlBuffer::READ_ONLY );
+
+	int nVersion = -1;
+	if ( IsPC() )
+		nVersion = VTF_MAJOR_VERSION;
+	else if ( IsX360() )
+		nVersion = VTF_X360_MAJOR_VERSION;
+	else if ( IsPS3() )
+		nVersion = VTF_PS3_MAJOR_VERSION;
+
+	int nHeaderSize = VTFFileHeaderSize( nVersion );
+	if ( nSourceDataSize < nHeaderSize )
+	{
+		Warning( "Error reading texture header \"%s\"\n", pCacheFileName );
+		return HandleFileLoadFailedTexture( pVTFTexture );
+	}
+
+	// Unserialize the header only
+	// need the header first to determine remainder of data
+#if !defined( _GAMECONSOLE )
+	if ( !pVTFTexture->Unserialize( buf, true ) )
+#else
+	if ( !pVTFTexture->UnserializeFromBuffer( buf, true, true, true, 0 ) )
+#endif
+	{
+		Warning( "Error reading texture header \"%s\"\n", pCacheFileName );
+		return HandleFileLoadFailedTexture( pVTFTexture );
+	}
+
+	// FIXME: Hack for L4D
+	int nHackExtraFlags = 0;
+	if ( !Q_strnicmp( pCacheFileName, "materials/graffiti/", 19 ) )
+	{
+		nHackExtraFlags = TEXTUREFLAGS_NOLOD; 
+	}
+
+	// OSX hackery
+	if ( m_nFlags & TEXTUREFLAGS_SRGB )
+	{
+		nHackExtraFlags |= TEXTUREFLAGS_SRGB; 		
+	}
+
+	// Set from stdshaders cpp code
+	if ( m_nFlags & TEXTUREFLAGS_ANISOTROPIC )
+	{
+		nHackExtraFlags |= TEXTUREFLAGS_ANISOTROPIC;
+	}
+
+	if ( m_nFlags & TEXTUREFLAGS_ASYNC_DOWNLOAD )
+	{
+		nHackExtraFlags |= TEXTUREFLAGS_ASYNC_DOWNLOAD;
+	}
+
+	// Seek the reading back to the front of the buffer
+	buf.SeekGet( CUtlBuffer::SEEK_HEAD, 0 );
+
+	// Initialize the texture class with vtf header data before operations
+	Init( 
+#if !defined( _GAMECONSOLE )
+		pVTFTexture->Width(), 
+		pVTFTexture->Height(), 
+		pVTFTexture->Depth(), 
+#else
+		// 360 texture might be pre-picmipped, setup as it's original dimensions
+		// so picmipping logic calculates correctly, and then fixup
+		pVTFTexture->MappingWidth(),
+		pVTFTexture->MappingHeight(),
+		pVTFTexture->MappingDepth(),
+#endif
+		pVTFTexture->Format(), 
+		pVTFTexture->Flags() | nHackExtraFlags, 
+		pVTFTexture->FrameCount() );
+
+	VectorCopy( pVTFTexture->Reflectivity(), m_vecReflectivity );
+
+	// Compute the actual texture dimensions
+	int nMipSkipCount = ComputeActualSize( false, pVTFTexture );
+
+#if defined( _GAMECONSOLE )
+	bool bQueuedLoad = ( m_nInternalFlags & TEXTUREFLAGSINTERNAL_QUEUEDLOAD ) != 0;
+	nMipSkipCount -= pVTFTexture->MipSkipCount();
+	if ( nMipSkipCount < 0 || ( nMipSkipCount >= pVTFTexture->MipCount() ) )
+	{
+		// the 360 texture was already pre-picmipped or can't be picmipped
+		// clamp to the available dimensions
+		m_nActualWidth = pVTFTexture->Width();
+		m_nActualHeight = pVTFTexture->Height();
+		m_nActualDepth = pVTFTexture->Depth();
+		m_nActualMipCount = ComputeActualMipCount();
+		nMipSkipCount = 0;
+	}
+	if ( IsX360() && g_config.skipMipLevels == 0 && m_nActualMipCount > 1 && m_nFrameCount == 1 && !( m_nFlags & ( TEXTUREFLAGS_PROCEDURAL|TEXTUREFLAGS_RENDERTARGET|TEXTUREFLAGS_DEPTHRENDERTARGET ) ) )
+	{
+		// this file based texture is a good candidate for cacheing
+		m_nInternalFlags |= TEXTUREFLAGSINTERNAL_CACHEABLE;
+	}
+	if ( nMipSkipCount )
+	{
+		// track which textures had their dimensions forcefully reduced
+		m_nInternalFlags |= TEXTUREFLAGSINTERNAL_REDUCED;
+	}
+#endif
+
+	m_nMipSkipCount = nMipSkipCount;
+
+	// NOTE: Skipping mip levels here will cause the size to be changed...
+#if !defined( _GAMECONSOLE )
+	if ( !pVTFTexture->Unserialize( buf, false, nMipSkipCount ) )
+#else
+	if ( !pVTFTexture->UnserializeFromBuffer( buf, true, false, bQueuedLoad, nMipSkipCount ) )
+#endif
+	{
+		Warning( "Error reading texture data \"%s\"\n", pCacheFileName );
+		return HandleFileLoadFailedTexture( pVTFTexture );
 	}
 
 	// Build the low-res texture
 	LoadLowResTexture( pVTFTexture );
 
 	// Load the resources
-	if ( unsigned int uiRsrcCount = pVTFTexture->GetResourceTypes( NULL, 0 ) )
-	{
-		uint32 *arrRsrcTypes = ( uint32 * )_alloca( uiRsrcCount * sizeof( unsigned int ) );
-		pVTFTexture->GetResourceTypes( arrRsrcTypes, uiRsrcCount );
-
-		m_arrDataChunks.EnsureCapacity( uiRsrcCount );
-		for ( uint32 *arrRsrcTypesEnd = arrRsrcTypes + uiRsrcCount;
-			  arrRsrcTypes < arrRsrcTypesEnd; ++arrRsrcTypes )
-		{
-			switch ( *arrRsrcTypes )
-			{
-			case VTF_LEGACY_RSRC_LOW_RES_IMAGE:
-			case VTF_LEGACY_RSRC_IMAGE:
-				// These stock types use specific load routines
-				continue;
-					
-			default:
-				{
-					DataChunk dc;
-					dc.m_eType = *arrRsrcTypes;
-					dc.m_eType &= ~RSRCF_MASK;
-
-					size_t numBytes;
-					if ( void *pvData = pVTFTexture->GetResourceData( dc.m_eType, &numBytes ) )
-					{
-						Assert( numBytes >= sizeof( uint32 ) );
-						if ( numBytes == sizeof( dc.m_numBytes ) )
-						{
-							dc.m_eType |= RSRCF_HAS_NO_DATA_CHUNK;
-							dc.m_pvData = NULL;
-							memcpy( &dc.m_numBytes, pvData, numBytes );
-						}
-						else
-						{
-							dc.Allocate( numBytes );
-							memcpy( dc.m_pvData, pvData, numBytes );
-						}
-
-						m_arrDataChunks.AddToTail( dc );
-					}
-				}
-			}
-		}
-	}
+	LoadResourceData( pVTFTexture );
 
 	// Try to set up debugging textures, if we're in a debugging mode
-	if ( !IsProcedural() )
+	if ( !IsProcedural() && !IsGameConsole() )
+	{
 		SetupDebuggingTextures( pVTFTexture );
+	}
 
 	if ( ConvertToActualFormat( pVTFTexture ) )
-		pVTFTexture; // STAGING_ONLY_EXEC ( Warning( "\"%s\" not in final format, this is causing stutters or load time bloat!\n", pCacheFileName ) );
+	{
+		if ( IsGameConsole() )
+		{
+			// 360 vtf are baked in final formats, no format conversion can or should have occurred
+			// otherwise track offender and ensure files are baked correctly
+			Error( "\"%s\" not in native format\n", pCacheFileName );
+		}
+	}
 
 	return pVTFTexture;
 }
 
-
 IVTFTexture *CTexture::HandleFileLoadFailedTexture( IVTFTexture *pVTFTexture )
 {
 	// create the error texture
+#if defined( _GAMECONSOLE )
+	// reset botched vtf, ensure checkerboard error texture is created now and maintains bgra8888 format
+	pVTFTexture->ReleaseImageMemory();
+	m_nInternalFlags &= ~TEXTUREFLAGSINTERNAL_QUEUEDLOAD;
+	m_nFlags |= TEXTUREFLAGS_EIGHTBITALPHA;
+#endif
 
 	// This will make a checkerboard texture to indicate failure
 	pVTFTexture->Init( 32, 32, 1, IMAGE_FORMAT_BGRA8888, m_nFlags, 1 );
@@ -3395,13 +4248,9 @@ IVTFTexture *CTexture::HandleFileLoadFailedTexture( IVTFTexture *pVTFTexture )
 
 	// NOTE: For mat_picmip to work, we must use the same size (32x32)
 	// Which should work since every card can handle textures of that size
-	m_dimsAllocated.m_nWidth = m_dimsActual.m_nWidth = pVTFTexture->Width();
-	m_dimsAllocated.m_nHeight = m_dimsActual.m_nHeight = pVTFTexture->Height();
-	m_dimsAllocated.m_nDepth = 1;
-	m_dimsAllocated.m_nMipCount = m_dimsActual.m_nMipCount = 1;
-	m_nStreamingMips = 0;
-
-	
+	m_nActualWidth = pVTFTexture->Width();
+	m_nActualHeight = pVTFTexture->Height();
+	m_nActualMipCount = 1;
 
 	// generate the checkerboard
 	TextureManager()->GenerateErrorTexture( this, pVTFTexture );
@@ -3409,7 +4258,7 @@ IVTFTexture *CTexture::HandleFileLoadFailedTexture( IVTFTexture *pVTFTexture )
 
 	// Deactivate procedural texture...
 	m_nFlags &= ~TEXTUREFLAGS_PROCEDURAL;
-	SetErrorTexture( true );
+	m_nInternalFlags |= TEXTUREFLAGSINTERNAL_ERROR;
 
 	return pVTFTexture;
 }
@@ -3442,16 +4291,7 @@ void CTexture::GetDownloadFaceCount( int &nFirstFace, int &nFaceCount )
 	nFirstFace = 0;
 	if ( IsCubeMap() )
 	{
-		if ( HardwareConfig()->SupportsCubeMaps() )
-		{
-			nFaceCount = CUBEMAP_FACE_COUNT-1;
-		}
-		else
-		{
-			// This will cause us to use the spheremap instead of the cube faces
-			// in the case where we don't support cubemaps
-			nFirstFace = CUBEMAP_FACE_SPHEREMAP;
-		}
+		nFaceCount = CUBEMAP_FACE_COUNT;
 	}
 }
 
@@ -3470,8 +4310,29 @@ void CTexture::FixupTexture( const void *pData, int nSize, LoaderError_t loaderE
 
 	// Make sure we've actually allocated the texture handles
 	Assert( HasBeenAllocated() );
-} 
 
+#if defined( _GAMECONSOLE )
+	// hand off the hires data down to the shaderapi to upload directly
+	// Purposely bypassing downloading through material system, which is non-reentrant
+	// for that operation, to avoid mutexing.
+
+	// NOTE: Strange refcount work here to keep it threadsafe
+	int nRefCount = m_nRefCount;
+	int nRefCountOld = nRefCount;
+	g_pShaderAPI->PostQueuedTexture( 
+					pData, 
+					nSize, 
+					m_pTextureHandles, 
+					m_nFrameCount,
+					m_nActualWidth,
+					m_nActualHeight,
+					m_nActualDepth,
+					m_nActualMipCount,
+					&nRefCount );
+	int nDelta = nRefCount - nRefCountOld;
+	m_nRefCount += nDelta;
+#endif
+} 
 static void QueuedLoaderCallback( void *pContext, void *pContext2, const void *pData, int nSize, LoaderError_t loaderError )
 {
 	reinterpret_cast< CTexture * >( pContext )->FixupTexture( pData, nSize, loaderError );
@@ -3483,8 +4344,7 @@ static void QueuedLoaderCallback( void *pContext, void *pContext2, const void *p
 IVTFTexture *CTexture::ReconstructPartialProceduralBits( const Rect_t *pRect, Rect_t *pActualRect )
 {
 	// Figure out the actual size for this texture based on the current mode
-	bool bIgnorePicmip = ( m_nFlags & ( TEXTUREFLAGS_STAGING_MEMORY | TEXTUREFLAGS_IGNORE_PICMIP ) ) != 0;
-	ComputeActualSize( bIgnorePicmip );
+	ComputeActualSize();
 
 	// Figure out how many mip levels we're skipping...
 	int nSizeFactor = 1;
@@ -3504,11 +4364,19 @@ IVTFTexture *CTexture::ReconstructPartialProceduralBits( const Rect_t *pRect, Re
 	// It must bound all partially-covered pixels..
 	ComputeMipLevelSubRect( pRect, nMipSkipCount, pActualRect );
 
+	if ( IsGameConsole() && !IsDebug() && !m_pTextureRegenerator )
+	{
+		// no checkerboards in 360 release
+		return NULL;
+	}
+
+	bool bUsePreallocatedScratchTexture = m_pTextureRegenerator && m_pTextureRegenerator->HasPreallocatedScratchTexture();
+	
 	// Create the texture
-	IVTFTexture *pVTFTexture = GetScratchVTFTexture();
+	IVTFTexture *pVTFTexture = bUsePreallocatedScratchTexture ? m_pTextureRegenerator->GetPreallocatedScratchTexture() : GetScratchVTFTexture();
 
 	// Initialize the texture
-	pVTFTexture->Init( m_dimsActual.m_nWidth, m_dimsActual.m_nHeight, m_dimsActual.m_nDepth,
+	pVTFTexture->Init( m_nActualWidth, m_nActualHeight, m_nActualDepth,
 		ComputeActualFormat( m_ImageFormat ), m_nFlags, m_nFrameCount );
 
 	// Generate the bits from the installed procedural regenerator
@@ -3551,6 +4419,12 @@ void CTexture::ReconstructPartialTexture( const Rect_t *pRect )
 			return;
 	}
 
+	if ( IsGameConsole() && !pVTFTexture )
+	{
+		// 360 inhibited procedural generation
+		return;
+	}
+
 	int nFaceCount, nFirstFace;
 	GetDownloadFaceCount( nFirstFace, nFaceCount );
 	
@@ -3563,7 +4437,7 @@ void CTexture::ReconstructPartialTexture( const Rect_t *pRect )
 
 		for ( int iFace = 0; iFace < nFaceCount; ++iFace )
 		{
-			for ( int iMip = 0; iMip < m_dimsActual.m_nMipCount;  ++iMip )
+			for ( int iMip = 0; iMip < m_nActualMipCount;  ++iMip )
 			{
 				pVTFTexture->ComputeMipLevelSubRect( &vtfRect, iMip, &mipRect );
 				nStride = pVTFTexture->RowSizeInBytes( iMip );
@@ -3578,11 +4452,27 @@ void CTexture::ReconstructPartialTexture( const Rect_t *pRect )
 					mipRect.height, 
 					pVTFTexture->Format(), 
 					nStride, 
+#if defined( _GAMECONSOLE )
+					pVTFTexture->IsPreTiled(),
+#else
 					false,
+#endif
 					pBits );
 			}
 		}
 	}
+
+#if defined( _GAMECONSOLE )
+	if ( IsProcedural() && m_pTextureRegenerator && m_pTextureRegenerator->HasPreallocatedScratchTexture() )
+	{
+		// nothing to free; we used the pre-allocated scratch texture
+	}
+	else
+	{
+		// hint the vtf system to release memory associated with its load
+		pVTFTexture->ReleaseImageMemory();
+	}
+#endif
 }
 
 
@@ -3591,42 +4481,35 @@ void CTexture::ReconstructPartialTexture( const Rect_t *pRect )
 //-----------------------------------------------------------------------------
 IVTFTexture *CTexture::ReconstructProceduralBits()
 {
-	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
-
 	// Figure out the actual size for this texture based on the current mode
-	bool bIgnorePicmip = ( m_nFlags & ( TEXTUREFLAGS_STAGING_MEMORY | TEXTUREFLAGS_IGNORE_PICMIP ) ) != 0;
-	ComputeActualSize( bIgnorePicmip );
+	ComputeActualSize();
+
+	if ( IsGameConsole() && !IsDebug() && !m_pTextureRegenerator )
+	{
+		// no checkerboards in 360 release
+		return NULL;
+	}
+
+	bool bUsePreallocatedScratchTexture = m_pTextureRegenerator && m_pTextureRegenerator->HasPreallocatedScratchTexture();
 
 	// Create the texture
-	IVTFTexture *pVTFTexture = NULL;
-	
-	{
-		tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s - GetScratchVTFTexture", __FUNCTION__ );
-		pVTFTexture = GetScratchVTFTexture();
-	}
+	IVTFTexture *pVTFTexture = bUsePreallocatedScratchTexture ? m_pTextureRegenerator->GetPreallocatedScratchTexture() : GetScratchVTFTexture();
 
-	{
-		tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s - Init", __FUNCTION__ );
-		// Initialize the texture
-		pVTFTexture->Init( m_dimsActual.m_nWidth, m_dimsActual.m_nHeight, m_dimsActual.m_nDepth,
-			ComputeActualFormat( m_ImageFormat ), m_nFlags, m_nFrameCount );
-	}
+	// Initialize the texture
+	pVTFTexture->Init( m_nActualWidth, m_nActualHeight, m_nActualDepth,
+		ComputeActualFormat( m_ImageFormat ), m_nFlags, m_nFrameCount );
 
 	// Generate the bits from the installed procedural regenerator
 	if ( m_pTextureRegenerator )
 	{
-		tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s - RegenerateTextureBits", __FUNCTION__ );
-
 		Rect_t rect;
 		rect.x = 0; rect.y = 0;
-		rect.width = m_dimsActual.m_nWidth; 
-		rect.height = m_dimsActual.m_nHeight; 
+		rect.width = m_nActualWidth; 
+		rect.height = m_nActualHeight; 
 		m_pTextureRegenerator->RegenerateTextureBits( this, pVTFTexture, &rect );
 	}
-	else
+	else if ( !ImageLoader::IsFloatFormat( m_ImageFormat ) && !ImageLoader::IsRuntimeCompressed( m_ImageFormat ) )
 	{
-		tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s - GenerateErrorTexture", __FUNCTION__ );
-
 		// In this case, we don't have one, so just use a checkerboard...
 		TextureManager()->GenerateErrorTexture( this, pVTFTexture );
 	}
@@ -3636,185 +4519,117 @@ IVTFTexture *CTexture::ReconstructProceduralBits()
 
 void CTexture::WriteDataToShaderAPITexture( int nFrameCount, int nFaceCount, int nFirstFace, int nMipCount, IVTFTexture *pVTFTexture, ImageFormat fmt )
 {
-	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
-
-	// If we're a staging texture, there's nothing to do.
-	if ( ( m_nFlags & TEXTUREFLAGS_STAGING_MEMORY ) != 0 )
-		return;
-
 	for ( int iFrame = 0; iFrame < m_nFrameCount; ++iFrame )
 	{
 		Modify( iFrame );
-		g_pShaderAPI->TexImageFromVTF( pVTFTexture, iFrame );
+
+		for ( int iFace = 0; iFace < nFaceCount; ++iFace )
+		{
+			for ( int iMip = 0; iMip < nMipCount; ++iMip )
+			{
+				unsigned char *pBits;
+				int nWidth, nHeight, nDepth;
+				pVTFTexture->ComputeMipLevelDimensions( iMip, &nWidth, &nHeight, &nDepth );
+				for ( int z = 0; z < nDepth; ++z )
+				{
+					pBits = pVTFTexture->ImageData( iFrame, iFace + nFirstFace, iMip, 0, 0, z );
+
+					g_pShaderAPI->TexImage2D( iMip, iFace, fmt, z, nWidth, nHeight, pVTFTexture->Format(), false, pBits );
+				}
+			}
+		}
 	}
 }
 
 bool CTexture::IsDepthTextureFormat( ImageFormat fmt )
 {
-	return ( ( m_ImageFormat == IMAGE_FORMAT_NV_DST16  ) ||
-			 ( m_ImageFormat == IMAGE_FORMAT_NV_DST24  ) ||
-			 ( m_ImageFormat == IMAGE_FORMAT_NV_INTZ   ) ||
-			 ( m_ImageFormat == IMAGE_FORMAT_NV_RAWZ   ) ||
-			 ( m_ImageFormat == IMAGE_FORMAT_ATI_DST16 ) ||
-			 ( m_ImageFormat == IMAGE_FORMAT_ATI_DST24 ) );
+	return ( ( m_ImageFormat == IMAGE_FORMAT_D16_SHADOW  ) || 
+			 ( m_ImageFormat == IMAGE_FORMAT_D24X8_SHADOW ) ||
+			 ( m_ImageFormat == IMAGE_FORMAT_D24S8 ) );
 }
 
-//-----------------------------------------------------------------------------
-void CTexture::NotifyUnloadedFile()
-{
-	// Make sure we have a regular texture that was loaded from a file
-	if ( IsProcedural() || IsRenderTarget() || !m_Name.IsValid() )
-		return;
-	const char *pName = m_Name.String();
-	if ( *pName == '\0' )
-		return;
-	bool bIsUNCName = ( pName[0] == '/' && pName[1] == '/' && pName[2] != '/' );
-	if ( bIsUNCName )
-		return;
-
-	// Generate the filename
-	char pCacheFileName[MATERIAL_MAX_PATH];
-	Q_snprintf( pCacheFileName, sizeof( pCacheFileName ), "materials/%s" TEXTURE_FNAME_EXTENSION, pName );
-
-	// Let filesystem know that the file is uncached, so it knows
-	// what to do with tracking info
-	g_pFullFileSystem->NotifyFileUnloaded( pCacheFileName, "GAME" );
-}
 
 //-----------------------------------------------------------------------------
 // Sets or updates the texture bits
 //-----------------------------------------------------------------------------
-void CTexture::ReconstructTexture( bool bCopyFromCurrent )
+void CTexture::ReconstructTexture( void *pSourceData, int nSourceDataSize )
 {
-	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
-
-	Assert( !bCopyFromCurrent || HardwareConfig()->CanStretchRectFromTextures() );
-
-	int oldWidth = m_dimsAllocated.m_nWidth;
-	int oldHeight = m_dimsAllocated.m_nHeight;
-	int oldDepth = m_dimsAllocated.m_nDepth;
-	int oldMipCount = m_dimsAllocated.m_nMipCount;
+	int oldWidth = m_nActualWidth;
+	int oldHeight = m_nActualHeight;
+	int oldDepth = m_nActualDepth;
+	int oldMipCount = m_nActualMipCount;
 	int oldFrameCount = m_nFrameCount;
 
 	// FIXME: Should RenderTargets be a special case of Procedural?
 	char *pResolvedFilename = NULL;
 	IVTFTexture *pVTFTexture = NULL;
-	
-	{
-		tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s - Begin", __FUNCTION__ );
-		if ( IsProcedural() )
-		{
-			// This will call the installed texture bit regeneration interface
-			pVTFTexture = ReconstructProceduralBits();
-		}
-		else if ( IsRenderTarget() )
-		{
-			// Compute the actual size + format based on the current mode
-			bool bIgnorePicmip = m_RenderTargetSizeMode != RT_SIZE_LITERAL_PICMIP;
-			ComputeActualSize( bIgnorePicmip );
-		}
-		else if ( bCopyFromCurrent )
-		{
-			ComputeActualSize( false, NULL, true );
-		}
-		else
-		{
-			NotifyUnloadedFile();
 
-			char pCacheFileName[ MATERIAL_MAX_PATH ] = { 0 };
-			GetCacheFilename( pCacheFileName, ARRAYSIZE( pCacheFileName ) );
-		
-			// Get the data from disk...
-			// NOTE: Reloading the texture bits can cause the texture size, frames, format, pretty much *anything* can change.
-			pVTFTexture = LoadTextureBitsFromFile( pCacheFileName, &pResolvedFilename );
-		}
+	if ( IsProcedural() )
+	{
+		// This will call the installed texture bit regeneration interface
+		pVTFTexture = ReconstructProceduralBits();
+	}
+	else if ( IsRenderTarget() )
+	{
+		// Compute the actual size + format based on the current mode
+		ComputeActualSize( true );
+	}
+	else
+	{
+		pVTFTexture = LoadTexttureBitsFromFileOrData( pSourceData, nSourceDataSize, &pResolvedFilename );
 	}
 
 	if ( !HasBeenAllocated() ||
-		m_dimsAllocated.m_nWidth != oldWidth ||
-		m_dimsAllocated.m_nHeight != oldHeight ||
-		m_dimsAllocated.m_nDepth != oldDepth ||
-		m_dimsAllocated.m_nMipCount != oldMipCount ||
+		m_nActualWidth != oldWidth ||
+		m_nActualHeight != oldHeight ||
+		m_nActualDepth != oldDepth ||
+		m_nActualMipCount != oldMipCount ||
 		m_nFrameCount != oldFrameCount )
 	{
-		tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s - Allocation", __FUNCTION__ );
-
-		const bool cbCanStretchRectTextures = HardwareConfig()->CanStretchRectFromTextures();
-		const bool cbShouldMigrateTextures = ( ( m_nFlags & TEXTUREFLAGS_STREAMABLE_FINE ) != 0 ) && m_nFrameCount == oldFrameCount;
-
-		// If we're just streaming in more data--or demoting ourselves, do a migration instead. 
-		if ( bCopyFromCurrent || ( cbCanStretchRectTextures && cbShouldMigrateTextures ) )
+		if ( HasBeenAllocated() )
 		{
-			tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s - Migration", __FUNCTION__ );
-
-			MigrateShaderAPITextures();
-
-			// Ahh--I feel terrible about this, but we genuinely don't need anything else if we're streaming.
-			if ( bCopyFromCurrent )
-				return;
+			// This is necessary for the reload case, we may discover there
+			// are more frames of a texture animation, for example, which means
+			// we can't rely on having the same number of texture frames.
+			FreeShaderAPITextures();
 		}
-		else
+
+		// Create the shader api textures, except temp render targets on 360.
+		if ( !( IsX360() && IsTempRenderTarget() ) )
 		{
-			tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s - Deallocate / Allocate", __FUNCTION__ );
-
-			// If we're doing a wholesale copy, we need to restore these values that will be cleared by FreeShaderAPITextures.
-			// Record them here, restore them below.
-			unsigned int restoreStreamingFlag = ( m_nFlags & TEXTUREFLAGS_STREAMABLE );
-			ResidencyType_t restoreResidenceCurrent = m_residenceCurrent;
-			ResidencyType_t restoreResidenceTarget = m_residenceTarget;
-
-			if ( HasBeenAllocated() )
-			{
-				tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s - Deallocate", __FUNCTION__ );
-
-				// This is necessary for the reload case, we may discover there
-				// are more frames of a texture animation, for example, which means
-				// we can't rely on having the same number of texture frames.
-				FreeShaderAPITextures();
-			}
-
-			tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s - Allocate", __FUNCTION__ );
-
-			// Create the shader api textures
 			if ( !AllocateShaderAPITextures() )
 				return;
-
-			// Restored once we successfully allocate the shader api textures, but only if we're 
-			// 
-			if ( !cbCanStretchRectTextures && cbShouldMigrateTextures )
-			{
-				m_nFlags |= restoreStreamingFlag;
-				m_residenceCurrent = restoreResidenceCurrent;
-				m_residenceTarget = restoreResidenceTarget;
-			}
 		}
-	} 
-	else if ( bCopyFromCurrent )
-	{
-		Assert( !"We're about to crash, last chance to examine this texture." );
 	}
-
 
 	// Render Targets just need to be cleared, they have no upload
 	if ( IsRenderTarget() )
 	{
-		tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s - RT Stuff", __FUNCTION__ );
-
 		// Clear the render target to opaque black
+#if !defined( _GAMECONSOLE )
 
 		// Only clear if we're not a depth-stencil texture
 		if ( !IsDepthTextureFormat( m_ImageFormat ) )
 		{
-			tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s - Clearing", __FUNCTION__ );
-
 			CMatRenderContextPtr pRenderContext( MaterialSystem() );
 			ITexture *pThisTexture = GetEmbeddedTexture( 0 );
 			pRenderContext->PushRenderTargetAndViewport( pThisTexture );						// Push this texture on the stack
 			g_pShaderAPI->ClearColor4ub( 0, 0, 0, 0xFF );										// Set the clear color to opaque black
-			g_pShaderAPI->ClearBuffers( true, false, false, m_dimsActual.m_nWidth, m_dimsActual.m_nHeight );	// Clear the target
+			g_pShaderAPI->ClearBuffers( true, false, false, m_nActualWidth, m_nActualHeight );	// Clear the target
 			pRenderContext->PopRenderTargetAndViewport();										// Pop back to previous target
 		}
+#else
+		// 360 may not have RT surface during init time
+		// avoid complex conditionalizing, just cpu clear it, which always works
+		ClearTexture( 0, 0, 0, 0xFF );
+#endif
 		// no upload
+		return;
+	}
+
+	if ( IsGameConsole() && IsProcedural() && !pVTFTexture )
+	{
+		// 360 explicitly inhibited this texture's procedural generation, so no upload needed
 		return;
 	}
 
@@ -3822,97 +4637,89 @@ void CTexture::ReconstructTexture( bool bCopyFromCurrent )
 	int nFirstFace, nFaceCount;
 	GetDownloadFaceCount( nFirstFace, nFaceCount );
 	
-	WriteDataToShaderAPITexture( m_nFrameCount, nFaceCount, nFirstFace, m_dimsActual.m_nMipCount, pVTFTexture, m_ImageFormat );
-
-	ReleaseScratchVTFTexture( pVTFTexture );
-	pVTFTexture = NULL;
-
-	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s - Final Cleanup", __FUNCTION__ );
-
-	// allocated by strdup
-	free( pResolvedFilename );
-
-	// the pc can afford to persist a large buffer
-	FreeOptimalReadBuffer( 6*1024*1024 );
-}
-
-void CTexture::GetCacheFilename( char* pOutBuffer, int nBufferSize ) const
-{
-	Assert( pOutBuffer );
-
-	if ( IsProcedural() || IsRenderTarget() )
+	if ( IsPC() )
 	{
-		pOutBuffer[0] = 0;
-		return;
+		WriteDataToShaderAPITexture( m_nFrameCount, nFaceCount, nFirstFace, m_nActualMipCount, pVTFTexture, m_ImageFormat );
+	}
+
+#if defined( _GAMECONSOLE )
+	bool bDoUpload = true;
+	if ( m_nInternalFlags & TEXTUREFLAGSINTERNAL_QUEUEDLOAD )
+	{
+		// the vtf didn't load any d3d bits, the hires bits will arrive before gameplay
+		bDoUpload = false;
+	}
+
+	if ( bDoUpload )
+	{
+		for ( int iFrame = 0; iFrame < m_nFrameCount; ++iFrame )
+		{
+			Modify( iFrame );
+			for ( int iFace = 0; iFace < nFaceCount; ++iFace )
+			{
+				for ( int iMip = 0; iMip < m_nActualMipCount; ++iMip )
+				{
+					unsigned char *pBits;
+					int nWidth, nHeight, nDepth;
+					pVTFTexture->ComputeMipLevelDimensions( iMip, &nWidth, &nHeight, &nDepth );
+#ifdef _PS3
+					// PS3 textures are pre-swizzled at tool time
+					pBits = pVTFTexture->ImageData( iFrame, iFace + nFirstFace, iMip, 0, 0, 0 );
+					g_pShaderAPI->TexImage2D( iMip, iFace, m_ImageFormat, nDepth > 1 ? nDepth : 0, nWidth, nHeight,
+						pVTFTexture->Format(), false, pBits );
+#else // _PS3
+					pBits = pVTFTexture->ImageData( iFrame, iFace + nFirstFace, iMip, 0, 0, 0 );
+					g_pShaderAPI->TexImage2D( iMip, iFace, m_ImageFormat, 0, nWidth, nHeight, 
+						pVTFTexture->Format(), pVTFTexture->IsPreTiled(), pBits );
+#endif // !_PS3
+				}
+			}
+		}
+	}
+
+#ifdef _X360
+	if ( m_nInternalFlags & TEXTUREFLAGSINTERNAL_CACHEABLE )
+	{
+		// Make sure we've actually allocated the texture handles
+		Assert( HasBeenAllocated() );
+
+		// a cacheing texture needs to know how to get its bits back
+		g_pShaderAPI->SetCacheableTextureParams( m_pTextureHandles, m_nFrameCount, pResolvedFilename, m_nMipSkipCount );
+	}
+#endif // _X360
+
+	if ( m_nInternalFlags & TEXTUREFLAGSINTERNAL_QUEUEDLOAD )
+	{
+		// the empty hires version was setup
+		// the hires d3d bits will be delivered before gameplay (or render)
+		LoaderPriority_t priority = LOADERPRIORITY_BEFOREPLAY;
+		
+		// add the job 
+		LoaderJob_t loaderJob;
+		loaderJob.m_pFilename = pResolvedFilename;
+		loaderJob.m_pCallback = QueuedLoaderCallback;
+		loaderJob.m_pContext = (void *)this;
+		loaderJob.m_Priority =  priority;
+		g_pQueuedLoader->AddJob( &loaderJob );
+	}
+
+	if ( IsProcedural() && m_pTextureRegenerator && m_pTextureRegenerator->HasPreallocatedScratchTexture() )
+	{
+		// nothing to free; we used the pre-allocated scratch texture
 	}
 	else
 	{
-		const char *pName;
-		if ( m_nInternalFlags & TEXTUREFLAGSINTERNAL_SHOULDEXCLUDE )
-		{
-			pName = "dev/dev_exclude_error";
-		}
-		else
-		{
-			pName = m_Name.String();
-		}
-
-		bool bIsUNCName = ( pName[ 0 ] == '/' && pName[ 1 ] == '/' && pName[ 2 ] != '/' );
-		if ( !bIsUNCName )
-		{
-			Q_snprintf( pOutBuffer, nBufferSize, "materials/%s" TEXTURE_FNAME_EXTENSION, pName );
-		}
-		else
-		{
-			Q_snprintf( pOutBuffer, nBufferSize, "%s" TEXTURE_FNAME_EXTENSION, pName );
-		}
+		// hint the vtf system to release memory associated with its load
+		pVTFTexture->ReleaseImageMemory();
 	}
+#endif // _GAMECONSOLE
+
+	delete [] pResolvedFilename;
+
+	// the 360 does not persist a large buffer
+	// the pc can afford to persist a large buffer
+	FreeOptimalReadBuffer( IsGameConsole() ? 32*1024 : 6*1024*1024 );
 }
-
-bool CTexture::GetFileHandle( FileHandle_t *pOutFileHandle, char *pCacheFileName, char **ppResolvedFilename ) const
-{
-	Assert( pOutFileHandle );
-	FileHandle_t& fileHandle = *pOutFileHandle;
-	fileHandle = FILESYSTEM_INVALID_HANDLE;
-
-	while ( fileHandle == FILESYSTEM_INVALID_HANDLE )			// run until found a file or out of rules
-	{
-		fileHandle = g_pFullFileSystem->OpenEx( pCacheFileName, "rb", 0, MaterialSystem()->GetForcedTextureLoadPathID(), ppResolvedFilename );
-		if ( fileHandle == FILESYSTEM_INVALID_HANDLE )
-		{
-			// try any fallbacks.
-			char *pHdrExt = Q_stristr( pCacheFileName, ".hdr" TEXTURE_FNAME_EXTENSION );
-			if ( pHdrExt )
-			{
-				DevWarning( "A custom HDR cubemap \"%s\": cannot be found on disk.\n"
-					"This really should have a HDR version, trying a fall back to a non-HDR version.\n", pCacheFileName );
-				strcpy( pHdrExt, TEXTURE_FNAME_EXTENSION );
-			}
-			else
-			{
-				// no more fallbacks
-				break;
-			}
-		}
-	}
-
-	if ( fileHandle == FILESYSTEM_INVALID_HANDLE )
-	{
-		if ( Q_strnicmp( m_Name.String(), "env_cubemap", 12 ) )
-		{
-			if ( IsPosix() )
-			{
-				Msg( "\n ##### CTexture::LoadTextureBitsFromFile couldn't find %s\n", pCacheFileName );
-			}
-			DevWarning( "\"%s\": can't be found on disk\n", pCacheFileName );
-		}
-
-		return false;
-	}
-
-	return true;
-}
-
 
 // Get the shaderapi texture handle associated w/ a particular frame
 ShaderAPITextureHandle_t CTexture::GetTextureHandle( int nFrame, int nTextureChannel )
@@ -3931,14 +4738,12 @@ ShaderAPITextureHandle_t CTexture::GetTextureHandle( int nFrame, int nTextureCha
 	Assert( nTextureChannel < 2 );
 
 	// Make sure we've actually allocated the texture handles
-	Assert( m_pTextureHandles );
 	Assert( HasBeenAllocated() );
 	if ( m_pTextureHandles == NULL || !HasBeenAllocated() )
 	{
 		return INVALID_SHADERAPI_TEXTURE_HANDLE;
 	}
 
-	// Don't get paired handle here...callers of this function don't know about paired textures
 	return m_pTextureHandles[nFrame];
 }
 
@@ -3950,6 +4755,7 @@ void CTexture::GetLowResColorSample( float s, float t, float *color ) const
 		return;
 	}
 
+#if !defined( _GAMECONSOLE )
 	// force s and t into [0,1)
 	if ( s < 0.0f )
 	{
@@ -3993,6 +4799,11 @@ void CTexture::GetLowResColorSample( float s, float t, float *color ) const
 	color[0] = sColor[0][0] * ( 1.0f - fracT ) + sColor[1][0] * fracT;
 	color[1] = sColor[0][1] * ( 1.0f - fracT ) + sColor[1][1] * fracT;
 	color[2] = sColor[0][2] * ( 1.0f - fracT ) + sColor[1][2] * fracT;
+#else
+	color[0] = (float)m_LowResImageSample[0] * 1.0f/255.0f;
+	color[1] = (float)m_LowResImageSample[1] * 1.0f/255.0f;
+	color[2] = (float)m_LowResImageSample[2] * 1.0f/255.0f;
+#endif
 }
 
 int CTexture::GetApproximateVidMemBytes( void ) const
@@ -4011,6 +4822,16 @@ void CTexture::CopyFrameBufferToMe( int nRenderTargetID, Rect_t *pSrcRect, Rect_
 {
 	Assert( m_pTextureHandles && m_nFrameCount >= 1 );
 
+	if ( IsX360() &&
+		( m_nInternalFlags & TEXTUREFLAGSINTERNAL_TEMPRENDERTARGET ) &&
+		!HasBeenAllocated() )
+	{
+		//need to create the texture bits now
+		//to avoid creating the texture bits previously, we simply skipped this step
+		if ( !AllocateShaderAPITextures() )
+			return;
+	}
+
 	if ( m_pTextureHandles && m_nFrameCount >= 1 )
 	{
 		g_pShaderAPI->CopyRenderTargetToTextureEx( m_pTextureHandles[0], nRenderTargetID, pSrcRect, pDstRect );
@@ -4020,6 +4841,16 @@ void CTexture::CopyFrameBufferToMe( int nRenderTargetID, Rect_t *pSrcRect, Rect_
 void CTexture::CopyMeToFrameBuffer( int nRenderTargetID, Rect_t *pSrcRect, Rect_t *pDstRect )
 {
 	Assert( m_pTextureHandles && m_nFrameCount >= 1 );
+
+	if ( IsX360() &&
+		( m_nInternalFlags & TEXTUREFLAGSINTERNAL_TEMPRENDERTARGET ) &&
+		!HasBeenAllocated() )
+	{
+		//need to create the texture bits now
+		//to avoid creating the texture bits previously, we simply skipped this step
+		if ( !AllocateShaderAPITextures() )
+			return;
+	}
 
 	if ( m_pTextureHandles && m_nFrameCount >= 1 )
 	{
@@ -4032,22 +4863,67 @@ ITexture *CTexture::GetEmbeddedTexture( int nIndex )
 	return ( nIndex == 0 ) ? this : NULL;
 }
 
+//-----------------------------------------------------------------------------
+// Helper method to initialize texture bits in desired state.
+//-----------------------------------------------------------------------------
+#if defined( _GAMECONSOLE )
+bool CTexture::ClearTexture( int r, int g, int b, int a )
+{
+	Assert( IsProcedural() || IsRenderTarget() );
+	if( !HasBeenAllocated() )
+		return false;
+
+	if ( m_ImageFormat == IMAGE_FORMAT_D16 || m_ImageFormat == IMAGE_FORMAT_D24S8 || m_ImageFormat == IMAGE_FORMAT_D24FS8 || m_ImageFormat == IMAGE_FORMAT_R32F )
+	{
+		// not supporting non-rgba textures
+		return true;
+	}
+
+	CPixelWriter writer;
+	g_pShaderAPI->ModifyTexture( m_pTextureHandles[0] );
+	if ( !g_pShaderAPI->TexLock( 0, 0, 0, 0, m_nActualWidth, m_nActualHeight, writer ) )
+		return false;
+
+	writer.Seek( 0, 0 );
+	for ( int j = 0; j < m_nActualHeight; ++j )
+	{
+		for ( int k = 0; k < m_nActualWidth; ++k )
+		{
+			writer.WritePixel( r, g, b, a );
+		}
+	}
+	g_pShaderAPI->TexUnlock();
+
+	return true;
+}
+#endif
+
+#if defined( _X360 )
+bool CTexture::CreateRenderTargetSurface( int width, int height, ImageFormat format, bool bSameAsTexture, RTMultiSampleCount360_t multiSampleCount )
+{
+	Assert( IsRenderTarget() && m_nFrameCount > 1 );
+
+	if ( bSameAsTexture )
+	{
+		// use RT texture configuration
+		width = m_nActualWidth;
+		height = m_nActualHeight;
+		format = m_ImageFormat;
+	}
+
+	// RT surface is expected at end of array
+	m_pTextureHandles[m_nFrameCount-1] = g_pShaderAPI->CreateRenderTargetSurface( width, height, format, multiSampleCount, GetName(), TEXTURE_GROUP_RENDER_TARGET_SURFACE );
+
+	return ( m_pTextureHandles[m_nFrameCount-1] != INVALID_SHADERAPI_TEXTURE_HANDLE );
+}
+#endif
+
 void CTexture::DeleteIfUnreferenced()
 {
 	if ( m_nRefCount > 0 )
 		return;
 
-	if ( ThreadInMainThread() )
-	{
-		// Render thread better not be active or bad things can happen.
-		Assert( MaterialSystem()->GetRenderThreadId() == 0xFFFFFFFF );
-		TextureManager()->RemoveTexture( this );
-		return;
-	}
-
-	// Can't actually clean up from render thread--just safely mark this texture as
-	// one we should check for cleanup next EndFrame when it's safe.
-	TextureManager()->MarkUnreferencedTextureForCleanup( this );	
+	TextureManager()->RemoveTexture( this );
 }
 
 //Swap everything about a texture except the name. Created to support Portal mod's need for swapping out water render targets in recursive stencil views
@@ -4069,13 +4945,10 @@ void CTexture::SwapContents( ITexture *pOther )
 
 	CTexture *pTemp = (CTexture *)stackalloc( sizeof( CTexture ) );
 	
-	//swap everything. Note that this copies the entire object including the
-	// vtable pointer, thus ruining polymorphism. Use with care.
-	// The unnecessary casts to (void*) hint to clang that we know what we
-	// are doing.
-	memcpy( (void*)pTemp, (const void*)this, sizeof( CTexture ) );
-	memcpy( (void*)this, (const void*)pOtherAsCTexture, sizeof( CTexture ) );
-	memcpy( (void*)pOtherAsCTexture, (const void*)pTemp, sizeof( CTexture ) );
+	//swap everything
+	memcpy( (void *)pTemp, (void *)this, sizeof( CTexture ) );
+	memcpy( (void *)this, (void *)pOtherAsCTexture, sizeof( CTexture ) );
+	memcpy( (void *)pOtherAsCTexture, (void *)pTemp, sizeof( CTexture ) );
 
 	//we have the other's name, give it back
 	memcpy( &pOtherAsCTexture->m_Name, &m_Name, sizeof( m_Name ) );
@@ -4101,13 +4974,14 @@ bool CTexture::IsPreloaded() const
 	return ( ( m_nInternalFlags & TEXTUREFLAGSINTERNAL_PRELOADED ) != 0 );
 }
 
-void CTexture::MarkAsExcluded( bool bSet, int nDimensionsLimit )
+void CTexture::MarkAsExcluded( bool bSet, int nDimensionsLimit, bool bMarkAsTrumpedExclude )
 {
 	if ( bSet )
 	{
 		// exclusion trumps picmipping
 		m_nInternalFlags |= TEXTUREFLAGSINTERNAL_SHOULDEXCLUDE;
-		m_nDesiredDimensionLimit = 0;
+		// unique exclusion state to identify maximum exclusion
+		m_nDesiredDimensionLimit = -1;
 	}
 	else
 	{
@@ -4115,519 +4989,414 @@ void CTexture::MarkAsExcluded( bool bSet, int nDimensionsLimit )
 		m_nInternalFlags &= ~TEXTUREFLAGSINTERNAL_SHOULDEXCLUDE;
 		m_nDesiredDimensionLimit = nDimensionsLimit;
 	}
+
+	if ( !bSet && nDimensionsLimit > 0 && bMarkAsTrumpedExclude )
+	{
+		m_nInternalFlags |= TEXTUREFLAGSINTERNAL_FORCED_TO_EXCLUDE;
+	}
 }
 
-bool CTexture::UpdateExcludedState( void )
+bool CTexture::IsTempExcluded() const
 {
-	bool bDesired = ( m_nInternalFlags & TEXTUREFLAGSINTERNAL_SHOULDEXCLUDE ) != 0;
-	bool bActual = ( m_nInternalFlags & TEXTUREFLAGSINTERNAL_EXCLUDED ) != 0;
-	if ( ( bDesired == bActual ) && ( m_nDesiredDimensionLimit == m_nActualDimensionLimit ) )
+	return ( ( m_nInternalFlags & ( TEXTUREFLAGSINTERNAL_SHOULDTEMPEXCLUDE | TEXTUREFLAGSINTERNAL_TEMPEXCLUDED ) ) != 0 );
+}
+
+bool CTexture::CanBeTempExcluded() const
+{
+	return ( m_nRefCount == 1 && 
+		m_nFrameCount == 1 && 
+		!IsError() && 
+		!IsRenderTarget() && 
+		!IsProcedural() && 
+		!IsCubeMap() );
+}
+
+bool CTexture::MarkAsTempExcluded( bool bSet, int nExcludedDimensionLimit )
+{
+	if ( !CanBeTempExcluded() )
 	{
- 		return false;
+		// not possible to temp exclude these
+		return false;
 	}
 
-	if ( m_nInternalFlags & TEXTUREFLAGSINTERNAL_QUEUEDLOAD )
+	if ( bSet )
 	{
-		// already scheduled
-		return true;
+		// temp exclusion can drive the texture to a smaller footprint
+		m_nInternalFlags |= TEXTUREFLAGSINTERNAL_SHOULDTEMPEXCLUDE;
+		// unique exclusion state to identify exclusion
+		m_nDesiredTempDimensionLimit = nExcludedDimensionLimit > 0 ? nExcludedDimensionLimit : -1;
+	}
+	else
+	{
+		// no longer temp excluding, default to expected normal exclusion limit
+		m_nInternalFlags &= ~TEXTUREFLAGSINTERNAL_SHOULDTEMPEXCLUDE;
+		m_nDesiredTempDimensionLimit = m_nDesiredDimensionLimit;
 	}
 
-	// force the texture to re-download, causes the texture bits to match its desired exclusion state
-	Download();
+	// temp excludes need to be tracked from normal excludes
+	m_nInternalFlags |= TEXTUREFLAGSINTERNAL_TEMPEXCLUDE_UPDATE;
 
 	return true;
 }
 
-void CTextureStreamingJob::OnAsyncFindComplete( ITexture* pTex, void* pExtraArgs )
+bool CTexture::UpdateExcludedState()
 {
-	const int cArgsAsInt = ( int ) pExtraArgs;
+	bool bRequiresDownload = false;
 
-	Assert( m_pOwner == NULL || m_pOwner == pTex );
-	if ( m_pOwner )
-		m_pOwner->OnStreamingJobComplete( static_cast<ResidencyType_t>( cArgsAsInt ) );
+	// temp excludes
+	bool bDesiredTempExclude = ( m_nInternalFlags & TEXTUREFLAGSINTERNAL_SHOULDTEMPEXCLUDE ) != 0;
+	bool bActualTempExclude = ( m_nInternalFlags & TEXTUREFLAGSINTERNAL_TEMPEXCLUDED ) != 0;
 
-	// OnStreamingJobComplete should've cleaned us up
-	Assert( m_pOwner == NULL );
-}
-
-// ------------------------------------------------------------------------------------------------
-int GetThreadId()
-{
-	TM_ZONE_DEFAULT( TELEMETRY_LEVEL0 );
-
-	// Turns the current thread into a 0-based index for use in accessing statics in this file.
-	int retVal = INT_MAX;
-	if ( ThreadInMainThread() )
-		retVal = 0;
-	else if ( MaterialSystem()->GetRenderThreadId() == ThreadGetCurrentId() )
-		retVal = 1;
-	else if ( TextureManager()->ThreadInAsyncLoadThread() )
-		retVal = 2;
-	else if ( TextureManager()->ThreadInAsyncReadThread() )
-		retVal = 3;
-	else
+	if ( bDesiredTempExclude || bActualTempExclude )
 	{
-		STAGING_ONLY_EXEC( AssertAlways( !"Unexpected thread in GetThreadId, need to debug this--crash is next. Tell McJohn." ) );
-		DebuggerBreakIfDebugging_StagingOnly();
-	}
-	
-	Assert( retVal < MAX_RENDER_THREADS );
-	return retVal;
-}
-
-// ------------------------------------------------------------------------------------------------
-bool SLoadTextureBitsFromFile( IVTFTexture **ppOutVtfTexture, FileHandle_t hFile, unsigned int nFlags, 
-							   TextureLODControlSettings_t* pInOutCachedFileLodSettings, 
-							   int nDesiredDimensionLimit, unsigned short* pOutStreamedMips, 
-							   const char* pName, const char* pCacheFileName, 
-							   TexDimensions_t* pOptOutDimsMapping,
-							   TexDimensions_t* pOptOutDimsActual, 
-							   TexDimensions_t* pOptOutDimsAllocated,
-							   unsigned int* pOptOutStripFlags )
-{
-	// NOTE! NOTE! NOTE! If you are making changes to this function, be aware that it has threading
-	// NOTE! NOTE! NOTE! implications. It can be called synchronously by the Main thread, 
-	// NOTE! NOTE! NOTE! or by the streaming texture code!
-	Assert( ppOutVtfTexture != NULL && *ppOutVtfTexture != NULL );
-
-	if ( V_strstr( pName, "c_rocketlauncher/c_rocketlauncher" ) )
-	{
-		int i = 0;
-		i = 3;
-	}
-
-	CUtlBuffer buf;
-
-	{
-		tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s - ReadHeaderFromFile", __FUNCTION__ );
-		int nHeaderSize = VTFFileHeaderSize( VTF_MAJOR_VERSION );
-
-		// restrict read to the header only!
-		// header provides info to avoid reading the entire file
-		int nBytesOptimalRead = GetOptimalReadBuffer( &buf, hFile, nHeaderSize );
-		int nBytesRead = g_pFullFileSystem->ReadEx( buf.Base(), nBytesOptimalRead, Min( nHeaderSize, ( int ) g_pFullFileSystem->Size( hFile ) ), hFile ); // only read as much as the file has
-		buf.SeekPut( CUtlBuffer::SEEK_HEAD, nBytesRead );
-		nBytesRead = nHeaderSize = ( ( VTFFileBaseHeader_t * ) buf.Base() )->headerSize;
-		g_pFullFileSystem->Seek( hFile, nHeaderSize, FILESYSTEM_SEEK_HEAD );
-	}
-
-	// Unserialize the header only
-	// need the header first to determine remainder of data
-	if ( !( *ppOutVtfTexture )->Unserialize( buf, true ) )
-	{
-		Warning( "Error reading texture header \"%s\"\n", pCacheFileName );
-		return false;
-	}
-
-	// Need to record this now, before we ask for the trimmed down data to potentially be loaded.
-	TexDimensions_t dimsMappingCurrent( ( *ppOutVtfTexture )->Width(), ( *ppOutVtfTexture )->Height(), ( *ppOutVtfTexture )->MipCount(), ( *ppOutVtfTexture )->Depth() );
-	if ( pOptOutDimsMapping )
-		( *pOptOutDimsMapping ) = dimsMappingCurrent;
-
-
-	int nFullFlags = ( *ppOutVtfTexture )->Flags() 
-		           | nFlags;
-
-	// Seek the reading back to the front of the buffer
-	buf.SeekGet( CUtlBuffer::SEEK_HEAD, 0 );
-
-	// Compute the actual texture dimensions
-	int nMipSkipCount = ComputeMipSkipCount( pName, dimsMappingCurrent, false, *ppOutVtfTexture, nFullFlags, nDesiredDimensionLimit, pOutStreamedMips, pInOutCachedFileLodSettings, pOptOutDimsActual, pOptOutDimsAllocated, pOptOutStripFlags );
-	
-	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s - ReadDataFromFile", __FUNCTION__ );
-
-	// Determine how much of the file to read in
-	int nFileSize = ( *ppOutVtfTexture )->FileSize( nMipSkipCount );
-	int nActualFileSize = (int)g_pFullFileSystem->Size( hFile );
-	if ( nActualFileSize < nFileSize )
-	{
-		if ( mat_spew_on_texture_size.GetInt() )
-			DevMsg( "Bad VTF data for %s, expected file size:%d actual file size:%d \n", pCacheFileName, nFileSize, nActualFileSize );
-		nFileSize = nActualFileSize;
-	}
-
-	// Read only the portion of the file that we care about
-	g_pFullFileSystem->Seek( hFile, 0, FILESYSTEM_SEEK_HEAD );
-	int nBytesOptimalRead = GetOptimalReadBuffer( &buf, hFile, nFileSize );
-	int nBytesRead = g_pFullFileSystem->ReadEx( buf.Base(), nBytesOptimalRead, nFileSize, hFile );
-	buf.SeekPut( CUtlBuffer::SEEK_HEAD, nBytesRead );
-
-	// Some hardware doesn't support copying textures to other textures. For them, we need to reread the 
-	// whole file, so if they are doing the final read (the fine levels) then reread everything by stripping
-	// off the flags we are trying to pass in.
-	unsigned int nForceFlags = nFullFlags & TEXTUREFLAGS_STREAMABLE;
-	if ( !HardwareConfig()->CanStretchRectFromTextures() && ( nForceFlags & TEXTUREFLAGS_STREAMABLE_FINE ) )
-		nForceFlags = 0;
-
-	// NOTE: Skipping mip levels here will cause the size to be changed
-	bool bRetVal = ( *ppOutVtfTexture )->UnserializeEx( buf, false, nForceFlags, nMipSkipCount );
-
-	FreeOptimalReadBuffer( 6*1024*1024 );
-
-	if ( !bRetVal )
-	{
-		Warning( "Error reading texture data \"%s\"\n", pCacheFileName );
-	}
-
-	return bRetVal;
-}
-
-//-----------------------------------------------------------------------------
-// Compute the actual mip count based on the actual size
-//-----------------------------------------------------------------------------
-int ComputeActualMipCount( const TexDimensions_t& actualDims, unsigned int nFlags )
-{
-	if ( nFlags & TEXTUREFLAGS_ENVMAP )
-	{
-		if ( !HardwareConfig()->SupportsMipmappedCubemaps() )
+		if ( m_nActualDimensionLimit != m_nDesiredTempDimensionLimit )
 		{
-			return 1;
-		}
-	}
-
-	if ( nFlags & TEXTUREFLAGS_NOMIP )
-	{
-		return 1;
-	}
-
-	// Unless ALLMIPS is set, we stop mips at 32x32
-	const int nMaxMipSize = 32;
-	// Clamp border textures on Posix to fix L4D2 flashlight cookie issue
-#ifdef DX_TO_GL_ABSTRACTION
-	if ( ( false && !g_bForceTextureAllMips && !( nFlags & TEXTUREFLAGS_ALL_MIPS ) ) || ( true && ( nFlags & TEXTUREFLAGS_BORDER ) ) )
-#else
-	if ( ( true && !g_bForceTextureAllMips && !( nFlags & TEXTUREFLAGS_ALL_MIPS ) ) || ( false && ( nFlags & TEXTUREFLAGS_BORDER ) ) )
-#endif
-	{
-		int nNumMipLevels = 1;
-		int h = actualDims.m_nWidth;
-		int w = actualDims.m_nHeight;
-		while ( MIN( w, h ) > nMaxMipSize )
-		{
-			++nNumMipLevels;
-
-			w >>= 1;
-			h >>= 1;
-		}
-		return nNumMipLevels;
-	}
-
-	return ImageLoader::GetNumMipMapLevels( actualDims.m_nWidth, actualDims.m_nHeight, actualDims.m_nDepth );
-}
-
-// ------------------------------------------------------------------------------------------------
-int ComputeMipSkipCount( const char* pName, const TexDimensions_t& mappingDims, bool bIgnorePicmip, IVTFTexture *pOptVTFTexture, unsigned int nFlags, int nDesiredDimensionLimit, unsigned short* pOutStreamedMips, TextureLODControlSettings_t* pInOutCachedFileLodSettings, TexDimensions_t* pOptOutActualDims, TexDimensions_t* pOptOutAllocatedDims, unsigned int* pOptOutStripFlags )
-{
-	// NOTE! NOTE! NOTE! If you are making changes to this function, be aware that it has threading
-	// NOTE! NOTE! NOTE! implications. It can be called synchronously by the Main thread, 
-	// NOTE! NOTE! NOTE! or by the streaming texture code!
-
-	Assert( pName != NULL );
-	Assert( pOutStreamedMips != NULL );
-	Assert( pInOutCachedFileLodSettings != NULL );
-
-	TexDimensions_t actualDims = mappingDims,
-		            allocatedDims;
-
-	const bool bTextureMigration = ( nFlags & TEXTUREFLAGS_STREAMABLE ) != 0;
-	unsigned int stripFlags = 0;
-
-	int nClampX = actualDims.m_nWidth;	// no clamping (clamp to texture dimensions)
-	int nClampY = actualDims.m_nHeight;
-	int nClampZ = actualDims.m_nDepth;
-
-	// Fetch LOD settings from the VTF if available
-	TextureLODControlSettings_t lcs;
-	memset( &lcs, 0, sizeof( lcs ) );
-	TextureLODControlSettings_t const *pLODInfo = NULL;
-	if ( pOptVTFTexture )
-	{
-		pLODInfo = reinterpret_cast<TextureLODControlSettings_t const *> (
-				pOptVTFTexture->GetResourceData( VTF_RSRC_TEXTURE_LOD_SETTINGS, NULL ) );
-
-		// Texture streaming means there are times we call this where we don't have a VTFTexture, even though 
-		// we're a file. So we need to store off the LOD settings whenever we get in here with a file that has them
-		// so that we can use the correct values for when we don't. Otherwise, the texture will be confused about
-		// what size to use and everything will die a horrible, horrible death.
-		if ( pLODInfo )
-			( *pInOutCachedFileLodSettings ) = ( *pLODInfo );
-	}
-	else if ( bTextureMigration ) 
-	{
-		pLODInfo = pInOutCachedFileLodSettings;
-	}
-
-	if ( pLODInfo )
-		lcs = *pLODInfo;
-
-	// Prepare the default LOD settings (that essentially result in no clamping)
-	TextureLODControlSettings_t default_lod_settings;
-	memset( &default_lod_settings, 0, sizeof( default_lod_settings ) );
-	{
-		for ( int w = actualDims.m_nWidth; w > 1; w >>= 1 )
-				++ default_lod_settings.m_ResolutionClampX;
-		for ( int h = actualDims.m_nHeight; h > 1; h >>= 1 )
-				++ default_lod_settings.m_ResolutionClampY;
-	}
-
-	// Check for LOD control override
-	{
-		TextureLodOverride::OverrideInfo oi = TextureLodOverride::Get( pName );
-			
-		if ( oi.x && oi.y && !pLODInfo )	// If overriding texture that doesn't have lod info yet, then use default
-			lcs = default_lod_settings;
-
-		lcs.m_ResolutionClampX += oi.x;
-		lcs.m_ResolutionClampY += oi.y;
-		if ( int8( lcs.m_ResolutionClampX ) < 0 )
-			lcs.m_ResolutionClampX = 0;
-		if ( int8( lcs.m_ResolutionClampY ) < 0 )
-			lcs.m_ResolutionClampY = 0;
-	}
-
-	// Compute the requested mip0 dimensions
-	if ( lcs.m_ResolutionClampX && lcs.m_ResolutionClampY )
-	{
-		nClampX = (1 << lcs.m_ResolutionClampX );
-		nClampY = (1 << lcs.m_ResolutionClampY );
-	}
-
-	// In case clamp values exceed texture dimensions, then fix up
-	// the clamping values
-	nClampX = min( nClampX, (int)actualDims.m_nWidth );
-	nClampY = min( nClampY, (int)actualDims.m_nHeight );
-
-	//
-	// Honor dimension limit restrictions
-	//
-	if ( nDesiredDimensionLimit > 0 )
-	{
-		while ( nClampX > nDesiredDimensionLimit ||
-				nClampY > nDesiredDimensionLimit )
-		{
-			nClampX >>= 1;
-			nClampY >>= 1;
-		}
-	}
-
-	//
-	// Unless ignoring picmip, reflect the global picmip level in clamp dimensions
-	//
-	if ( !bIgnorePicmip )
-	{
-		// If picmip requests texture degradation, then honor it
-		// for loddable textures only
-		if ( !( nFlags & TEXTUREFLAGS_NOLOD ) &&
-			  ( g_config.skipMipLevels > 0 ) )
-		{
-			for ( int iDegrade = 0; iDegrade < g_config.skipMipLevels; ++ iDegrade )
-			{
-				// don't go lower than 4, or dxt textures won't work properly
-				if ( nClampX > 4 &&
-					 nClampY > 4 )
-				{
-					nClampX >>= 1;
-					nClampY >>= 1;
-				}
-			}
-		}
-
-		// If picmip requests quality upgrade, then always honor it
-		if ( g_config.skipMipLevels < 0 )
-		{
-			for ( int iUpgrade = 0; iUpgrade < - g_config.skipMipLevels; ++ iUpgrade )
-			{
-				if ( nClampX < actualDims.m_nWidth &&
-					 nClampY < actualDims.m_nHeight )
-				{
-					nClampX <<= 1;
-					nClampY <<= 1;
-				}
-				else
-					break;
-			}
-		}
-	}
-
-	//
-	// Now use hardware settings to clamp our "clamping dimensions"
-	//
-	int iHwWidth = HardwareConfig()->MaxTextureWidth();
-	int iHwHeight = HardwareConfig()->MaxTextureHeight();
-	int iHwDepth = HardwareConfig()->MaxTextureDepth();
-
-	nClampX = min( nClampX, max( iHwWidth, 4 ) );
-	nClampY = min( nClampY, max( iHwHeight, 4 ) );
-	nClampZ = min( nClampZ, max( iHwDepth, 1 ) );
-
-	// In case clamp values exceed texture dimensions, then fix up
-	// the clamping values.
-	nClampX = min( nClampX, (int)actualDims.m_nWidth );
-	nClampY = min( nClampY, (int)actualDims.m_nHeight );
-	nClampZ = min( nClampZ, (int)actualDims.m_nDepth );
-	
-	//
-	// Clamp to the determined dimensions
-	//
-	int numMipsSkipped = 0; // will compute now when clamping how many mips we drop
-	while ( ( actualDims.m_nWidth  > nClampX ) ||
-		    ( actualDims.m_nHeight > nClampY ) ||
-			( actualDims.m_nDepth  > nClampZ ) )
-	{
-		actualDims.m_nWidth  >>= 1;
-		actualDims.m_nHeight >>= 1;
-		actualDims.m_nDepth = Max( 1, actualDims.m_nDepth >> 1 );
-
-		++ numMipsSkipped;
-	}
-
-	Assert( actualDims.m_nWidth > 0 && actualDims.m_nHeight > 0 && actualDims.m_nDepth > 0 );
-
-	// Now that we've got the actual size, we can figure out the mip count
-	actualDims.m_nMipCount = ComputeActualMipCount( actualDims, nFlags );
-
-	// If we're streaming, cut down what we're loading.
-	// We can only stream things that have a mipmap pyramid (not just a single mipmap).
-	bool bHasSetAllocation = false;
-	if ( ( nFlags & TEXTUREFLAGS_STREAMABLE ) == TEXTUREFLAGS_STREAMABLE_COARSE )
-	{
-		if ( actualDims.m_nMipCount > 1 )
-		{
-			allocatedDims.m_nWidth    = actualDims.m_nWidth;
-			allocatedDims.m_nHeight   = actualDims.m_nHeight;
-			allocatedDims.m_nDepth    = actualDims.m_nDepth;
-			allocatedDims.m_nMipCount = actualDims.m_nMipCount;
-
-			for ( int i = 0; i < STREAMING_START_MIPMAP; ++i ) 
-			{
-				// Stop when width or height is at 4 pixels (or less). We could do better, 
-				// but some textures really can't function if they're less than 4 pixels (compressed textures, for example).
-				if ( allocatedDims.m_nWidth <= 4 || allocatedDims.m_nHeight <= 4 )
-					break;
-
-				allocatedDims.m_nWidth  >>= 1;
-				allocatedDims.m_nHeight >>= 1;
-				allocatedDims.m_nDepth    = Max( 1, allocatedDims.m_nDepth  >> 1 );
-				allocatedDims.m_nMipCount = Max( 1, allocatedDims.m_nMipCount - 1 );
-
-				++numMipsSkipped;
-				++( *pOutStreamedMips );
-			}
-
-			bHasSetAllocation = true;
+			bRequiresDownload = true;
 		}
 		else
 		{
-			// Clear out that we're streaming, this isn't a texture we can stream.
-			stripFlags |= TEXTUREFLAGS_STREAMABLE_COARSE;
-		}
-	} 
-
-	if ( !bHasSetAllocation )
-	{
-		allocatedDims.m_nWidth    = actualDims.m_nWidth;
-		allocatedDims.m_nHeight   = actualDims.m_nHeight;
-		allocatedDims.m_nDepth    = actualDims.m_nDepth;
-		allocatedDims.m_nMipCount = actualDims.m_nMipCount;
-	}
-
-	if ( pOptOutActualDims )
-		*pOptOutActualDims = actualDims;
-
-	if ( pOptOutAllocatedDims )
-		*pOptOutAllocatedDims = allocatedDims;
-
-	if ( pOptOutStripFlags )
-		( *pOptOutStripFlags ) = stripFlags;
-		
-	// Returns the number we skipped
-	return numMipsSkipped;
-}
-
-//-----------------------------------------------------------------------------
-// Get an optimal read buffer, persists and avoids excessive allocations
-//-----------------------------------------------------------------------------
-int GetOptimalReadBuffer( CUtlBuffer* pOutOptimalBuffer, FileHandle_t hFile, int nSize )
-{
-	// NOTE! NOTE! NOTE! If you are making changes to this function, be aware that it has threading
-	// NOTE! NOTE! NOTE! implications. It can be called synchronously by the Main thread, 
-	// NOTE! NOTE! NOTE! or by the streaming texture code!
-	Assert( GetThreadId() < MAX_RENDER_THREADS );
-
-	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s (%d bytes)", __FUNCTION__, nSize );
-	Assert( pOutOptimalBuffer != NULL );
-
-	// get an optimal read buffer, only resize if necessary
-	const int minSize = 2 * 1024 * 1024;	// Uses 2MB min to avoid fragmentation
-	nSize = max( nSize, minSize );
-	int nBytesOptimalRead = g_pFullFileSystem->GetOptimalReadSize( hFile, nSize );
-
-	const int ti = GetThreadId();
-
-	if ( nBytesOptimalRead > s_nOptimalReadBufferSize[ ti ] )
-	{
-		FreeOptimalReadBuffer( 0 );
-
-		s_nOptimalReadBufferSize[ ti ] = nBytesOptimalRead;
-		s_pOptimalReadBuffer[ ti ] = g_pFullFileSystem->AllocOptimalReadBuffer( hFile, nSize );
-		if ( mat_spewalloc.GetBool() )
-		{
-			Msg( "Allocated optimal read buffer of %d bytes @ 0x%p for thread %d\n", s_nOptimalReadBufferSize[ ti ], s_pOptimalReadBuffer[ ti ], ti );
+			// temp excludes trump any normal exclude, and normal excludes are ignored until the temp state is cleared
+			return false;
 		}
 	}
-
-	// set external buffer and reset to empty
-	( *pOutOptimalBuffer ).SetExternalBuffer( s_pOptimalReadBuffer[ ti ], s_nOptimalReadBufferSize[ ti ], 0 );
-
-	// return the optimal read size
-	return nBytesOptimalRead;
-}
-
-//-----------------------------------------------------------------------------
-// Free the optimal read buffer if it grows too large
-//-----------------------------------------------------------------------------
-void FreeOptimalReadBuffer( int nMaxSize )
-{
-	// NOTE! NOTE! NOTE! If you are making changes to this function, be aware that it has threading
-	// NOTE! NOTE! NOTE! implications. It can be called synchronously by the Main thread, 
-	// NOTE! NOTE! NOTE! or by the streaming texture code!
-	Assert( GetThreadId() < MAX_RENDER_THREADS );
-
-	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
-
-	const int ti = GetThreadId();
-
-	if ( s_pOptimalReadBuffer[ ti ] && s_nOptimalReadBufferSize[ ti ] >= nMaxSize )
-	{
-		if ( mat_spewalloc.GetBool() )
-		{
-			Msg( "Freeing optimal read buffer of %d bytes @ 0x%p for thread %d\n", s_nOptimalReadBufferSize[ ti ], s_pOptimalReadBuffer[ ti ], ti );
-		}
-		g_pFullFileSystem->FreeOptimalReadBuffer( s_pOptimalReadBuffer[ ti ] );
-		s_pOptimalReadBuffer[ ti ] = NULL;
-		s_nOptimalReadBufferSize[ ti ] = 0;
-	}
-}
-
-
-#if defined( STAGING_ONLY )
-	CON_COMMAND( dumptexallocs, "List currently allocated textures and properties about them" )
-	{
-		Msg( "Texture Memory Statistics follow:\n" );
-		uint64 totalTexMemAllocated = 0;
-		FOR_EACH_MAP_FAST( g_currentTextures, i )
-		{
-			const TexInfo_t& tex = g_currentTextures[ i ];
-			uint64 thisTexMem = tex.ComputeTexSize();
-
-			totalTexMemAllocated += thisTexMem;
-			Msg( "%s: %llu bytes\n", ( const char * ) tex.m_Name, thisTexMem );
-		}
-
-		Msg( "Total Memory Allocated: %llu bytes\n", totalTexMemAllocated );
-	}
-#endif
 	
+	// normal excludes
+	if ( m_nActualDimensionLimit != m_nDesiredDimensionLimit )
+	{
+		bRequiresDownload = true;
+	}
+
+	if ( m_nInternalFlags & TEXTUREFLAGSINTERNAL_QUEUEDLOAD )
+	{
+		// already scheduled by the queued loader, the QL wins
+		// a fixup will occur later once the QL finishes
+		return false;
+	}
+
+	if ( bRequiresDownload )
+	{
+		if ( ( m_nInternalFlags & TEXTUREFLAGSINTERNAL_TEMPEXCLUDE_UPDATE ) && g_MaterialSystem.IsLevelLoadingComplete() && mat_exclude_async_update.GetBool() )
+		{
+			// temp excludes are async downloaded ONLY in the middle of gameplay, otherwise they do the normal sync download
+			// the async download path is !!!ONLY!!! wired for highly constrained temp exclusions, not for general purpose texture downloading
+			ScheduleExcludeAsyncDownload();
+		}
+		else
+		{
+			// force the texture to re-download, causes the texture bits to match its desired exclusion state
+			Download();
+		}
+	}
+
+	return bRequiresDownload;
+}
+
+bool CTexture::IsForceExcluded() const
+{
+	return ( ( m_nInternalFlags & TEXTUREFLAGSINTERNAL_FORCED_TO_EXCLUDE ) != 0 );
+}
+
+bool CTexture::ClearForceExclusion()
+{
+	if ( !IsForceExcluded() )
+		return false;
+
+	// clear the forced exclusion state
+	m_nInternalFlags &= ~TEXTUREFLAGSINTERNAL_FORCED_TO_EXCLUDE;
+	m_nDesiredDimensionLimit = 0;
+
+	return UpdateExcludedState();
+}
+
+bool CTexture::IsAsyncDone() const
+{
+	// we only check for async completion on textures that were async downloaded
+	// this function gets called on textures that might be loaded normally sometimes, so it needs to handle that case
+	if ( m_nFlags & TEXTUREFLAGS_ASYNC_DOWNLOAD )
+	{
+		return ( ( m_nInternalFlags & TEXTUREFLAGSINTERNAL_ASYNC_DONE ) != 0 );
+	}
+
+	return true;
+}
+
+static void IOAsyncCallbackTexture( const FileAsyncRequest_t &asyncRequest, int numReadBytes, FSAsyncStatus_t asyncStatus )
+{
+	// interpret the async error
+	AsyncTextureLoadError_t loaderError;
+	switch ( asyncStatus )
+	{
+	case FSASYNC_OK:
+		loaderError = ASYNCTEXTURE_LOADERROR_NONE;
+		break;
+	case FSASYNC_ERR_FILEOPEN:
+		loaderError = ASYNCTEXTURE_LOADERROR_FILEOPEN;
+		break;
+	default:
+		loaderError = ASYNCTEXTRUE_LOADERROR_READING;
+	}
+
+	g_MaterialSystem.OnAsyncTextureDataComplete( (AsyncTextureContext_t *)asyncRequest.pContext, asyncRequest.pData, numReadBytes, loaderError );
+}
+
+bool CTexture::ScheduleAsyncDownload()
+{
+	if ( !( m_nFlags & TEXTUREFLAGS_ASYNC_DOWNLOAD ) )
+	{
+		// only textures flagged of Async Download can be Async downloaded
+		Assert( 0 );
+		return false;
+	}
+
+	if ( m_hAsyncControl )
+	{
+		// already scheduled
+		// this atomically marks when it can be rescheduled
+		return false;
+	}
+
+	const char *pName;
+	pName = m_Name.String();
+
+	char cacheFileName[MATERIAL_MAX_PATH];
+	// resolve the relative texture filename to its absolute path
+	bool bIsUNCName = ( pName[0] == '/' && pName[1] == '/' && pName[2] != '/' );
+	if ( !bIsUNCName )
+	{
+		Q_snprintf( cacheFileName, sizeof( cacheFileName ), "materials/%s" TEXTURE_FNAME_EXTENSION, pName );
+	}
+	else
+	{
+		Q_snprintf( cacheFileName, sizeof( cacheFileName ), "%s" TEXTURE_FNAME_EXTENSION, pName );
+	}
+
+	bool bExists = g_pFullFileSystem->FileExists( cacheFileName, MaterialSystem()->GetForcedTextureLoadPathID() );
+	if ( !bExists )
+	{
+		// unexpected failure, file should have existed and was pre-qualified
+		// this texture cannot be async downloaded
+		return false;
+	}
+
+	pName = cacheFileName;
+	m_ResolvedFileName = cacheFileName;
+
+	// send down a context that identifies the texture state
+	// a texture can only have one outstanding async download operation in flight
+	AsyncTextureContext_t *pContext = new AsyncTextureContext_t;
+	pContext->m_pTexture = this;
+	pContext->m_nInternalFlags = m_nInternalFlags;
+	pContext->m_nDesiredTempDimensionLimit = m_nActualDimensionLimit;
+	pContext->m_nActualDimensionLimit = m_nActualDimensionLimit;
+	pContext->m_pVTFTexture = NULL;
+
+	// schedule the async using what should be the absolute path to the file
+	FileAsyncRequest_t asyncRequest;
+	asyncRequest.pszFilename = pName;
+	asyncRequest.priority = -1;
+	asyncRequest.flags = FSASYNC_FLAGS_ALLOCNOFREE;
+	asyncRequest.pContext = (void *)pContext;
+	asyncRequest.pfnCallback = IOAsyncCallbackTexture;
+	g_pFullFileSystem->AsyncRead( asyncRequest, &m_hAsyncControl );
+
+	return true;
+}
+
+bool CTexture::ScheduleExcludeAsyncDownload()
+{
+	if ( !( m_nInternalFlags & TEXTUREFLAGSINTERNAL_TEMPEXCLUDE_UPDATE ) )
+	{
+		// NOOOOO!!!!! This cannot be used for any textures except highly constrained temp excludes that have been properly qualified.
+		// It cannot be re-purposed into pushing textures in.
+		Assert( 0 );
+		return false;
+	}
+
+	if ( m_hAsyncControl )
+	{
+		// already scheduled
+		// this atomically marks when it can be rescheduled
+		// the data delivery will adhere to the current desired exclude state (that may change before the data arrives multiple times)
+		return false;
+	}
+
+	// want to use the prior resolved absolute filename, this causes an i/o penalty hitch once the first time the filesystem search path resolves
+	// each additional operation avoids the SP penalty
+	const char *pName;
+	bool bResolved = false;
+	bool bExcluding = false;
+	if ( ( m_nInternalFlags & TEXTUREFLAGSINTERNAL_SHOULDEXCLUDE ) ||
+		( ( m_nInternalFlags & TEXTUREFLAGSINTERNAL_SHOULDTEMPEXCLUDE ) && m_nDesiredTempDimensionLimit <= 0 ) )
+	{
+		bExcluding = true;
+		if ( m_ExcludedResolvedFileName.IsValid() )
+		{
+			pName = m_ExcludedResolvedFileName.String();
+			bResolved = true;
+		}
+		else
+		{
+			// The replacement texture for an excluded resource is solid black.
+			// The better thing would be to have unique 8x8 representations.
+			// Can cheap out on this because a temp excluded resource (weapon) is not supposed to be rendering
+			// for any more than a few frames before it's restored data appears.
+			pName = "dev/dev_temp_exclude";
+		}
+	}
+	else
+	{
+		if ( m_ResolvedFileName.IsValid() )
+		{
+			pName = m_ResolvedFileName.String();
+			bResolved = true;
+		}
+		else
+		{
+			pName = m_Name.String();
+		}
+	}
+
+	char fullPath[MAX_PATH];
+	char cacheFileName[MATERIAL_MAX_PATH];
+	if ( !bResolved )
+	{
+		// resolve the relative texture filename to its absolute path
+		bool bIsUNCName = ( pName[0] == '/' && pName[1] == '/' && pName[2] != '/' );
+		if ( !bIsUNCName )
+		{
+			Q_snprintf( cacheFileName, sizeof( cacheFileName ), "materials/%s" TEXTURE_FNAME_EXTENSION, pName );
+		}
+		else
+		{
+			Q_snprintf( cacheFileName, sizeof( cacheFileName ), "%s" TEXTURE_FNAME_EXTENSION, pName );
+		}
+
+		// all 360 files are expected to be in zip, no need to search outside of zip
+		g_pFullFileSystem->RelativePathToFullPath( cacheFileName, MaterialSystem()->GetForcedTextureLoadPathID(), fullPath, sizeof( fullPath ), ( IsX360() ? FILTER_CULLNONPACK : FILTER_NONE ) );
+		bool bExists = V_IsAbsolutePath( fullPath );
+		if ( !bExists )
+		{
+			// unexpected failure, file should have existed and was pre-qualified
+			// this texture cannot be async downloaded
+			return false;
+		}
+
+		pName = fullPath;
+		if ( bExcluding )
+		{
+			m_ExcludedResolvedFileName = fullPath;
+		}
+		else
+		{
+			m_ResolvedFileName = fullPath;
+		}
+	}
+
+	// send down a context that identifies the texture state
+	// the latent async delivery will need to match the state that may have changed
+	// a texture can only have one outstanding async download operation in flight
+	// although the texture state may thrash, the actual i/o will not
+	AsyncTextureContext_t *pContext = new AsyncTextureContext_t;
+	pContext->m_pTexture = this;
+	pContext->m_nInternalFlags = m_nInternalFlags;
+	pContext->m_nDesiredTempDimensionLimit = m_nDesiredTempDimensionLimit;
+	pContext->m_nActualDimensionLimit = m_nActualDimensionLimit;
+	pContext->m_pVTFTexture = NULL;
+
+	// schedule the async using what should be the absolute path to the file
+	FileAsyncRequest_t asyncRequest;
+	asyncRequest.pszFilename = pName;
+	asyncRequest.priority = -1;
+	asyncRequest.flags = FSASYNC_FLAGS_ALLOCNOFREE;
+	asyncRequest.pContext = (void *)pContext;
+	asyncRequest.pfnCallback = IOAsyncCallbackTexture;
+	g_pFullFileSystem->AsyncRead( asyncRequest, &m_hAsyncControl );
+
+	return true;
+}
+
+
+//-----------------------------------------------------------------------------
+// Note for async texture:
+// -----------------------
+//   The download is done is 2 parts:
+//		* Generating the VTF
+//		* Using VTF to create the shader api texture (effectively the corresponding d3d resource)
+//   In order to reduce spikes on the main thread (cf CMaterialSystem::ServiceAsyncTextureLoads), the flMaxTimeMs
+//   limit has been introduced =>  you can safely exit after generating the VTF and resume it at a later date
+//-----------------------------------------------------------------------------
+bool CTexture::FinishAsyncDownload( AsyncTextureContext_t *pContext, void *pData, int nNumReadBytes, bool bAbort, float flMaxTimeMs )
+{
+	// The temp exclusions/restores are expected/desgined to be serviced at the only safe interval at the end of the frame
+	// and end of any current QMS jobs before QMS queues and start on it's next frame. Texture downloading is not thead safe
+	// and does not need to be made so. Instead, while the texture access pattens are quiescent and stable, the download
+	// (expected to be few in number) is deferred to this safe interval.
+	Assert( ThreadInMainThread() );
+
+	// For non-exclude async downloads, never abort
+	if ( m_nFlags & TEXTUREFLAGS_ASYNC_DOWNLOAD )
+	{
+		bAbort = false;
+	}
+
+	// aborting just discards the data
+	// whatever state the texture bits were in, they stay that way
+	bool bDownloadCompleted = true;
+	if ( !bAbort && g_pShaderAPI->CanDownloadTextures() )
+	{
+		// the delayed async nature of this download may have invalidated the original/expected state at the moment of queuing
+		// prevent an update of the texture to the wrong state
+		// the temp exclusion monitor is responsible for rescheduling
+		if ( ( m_nFlags & TEXTUREFLAGS_ASYNC_DOWNLOAD ) || // general async download (non-exclude)
+			( ( ( pContext->m_nInternalFlags & TEXTUREFLAGSINTERNAL_SHOULDTEMPEXCLUDE ) == ( m_nInternalFlags & TEXTUREFLAGSINTERNAL_SHOULDTEMPEXCLUDE ) ) &&
+			  ( pContext->m_nDesiredTempDimensionLimit == m_nDesiredTempDimensionLimit ) ) )
+		{
+			// the download will put the texture in the expected state
+			MaterialLock_t hLock = MaterialSystem()->Lock();
+			if ( m_nFlags & TEXTUREFLAGS_ASYNC_DOWNLOAD )
+			{
+				bDownloadCompleted = DownloadAsyncTexture( pContext, pData, nNumReadBytes, flMaxTimeMs );
+			}
+			else
+			{
+				DownloadTexture( NULL, pData, nNumReadBytes );
+			}
+			MaterialSystem()->Unlock( hLock );
+		}
+		else
+		{
+			// the texture wants to be in a different state than this download can achieve
+			bool bDesiredTempExclude = ( m_nInternalFlags & TEXTUREFLAGSINTERNAL_SHOULDTEMPEXCLUDE ) != 0;
+			bool bActualTempExclude = ( m_nInternalFlags & TEXTUREFLAGSINTERNAL_TEMPEXCLUDED ) != 0;
+			if ( bDesiredTempExclude == bActualTempExclude && m_nDesiredTempDimensionLimit == m_nActualDimensionLimit )
+			{
+				// the current desired temp exclude state now matches the actual
+				// the discarded download does not need to happen
+				m_nInternalFlags &= ~TEXTUREFLAGSINTERNAL_TEMPEXCLUDE_UPDATE;
+			}
+		}
+	}
+
+	if ( bDownloadCompleted )
+	{
+		// ownership of the data is expected to have been handed off
+		g_pFullFileSystem->FreeOptimalReadBuffer( pData );
+		g_pFullFileSystem->AsyncRelease( m_hAsyncControl );
+		// texture can be rescheduled
+		m_hAsyncControl = NULL;
+
+		delete pContext;
+
+		if (m_nFlags & TEXTUREFLAGS_ASYNC_DOWNLOAD)
+		{
+			m_nInternalFlags |= TEXTUREFLAGSINTERNAL_ASYNC_DONE; // signal we're done
+			m_nFlags &= ~TEXTUREFLAGS_ASYNC_DOWNLOAD; // no longer want this flag
+		}
+	}
+
+	return bDownloadCompleted;
+}
+
 
 //////////////////////////////////////////////////////////////////////////
 //
@@ -4714,7 +5483,6 @@ CP4Requirement::CP4Requirement() :
 	m_bLoadedModule( false ),
 	m_pP4Module( NULL )
 {
-#ifdef STAGING_ONLY
 	if ( p4 )
 		return;
 
@@ -4737,7 +5505,6 @@ CP4Requirement::CP4Requirement() :
 			}
 		}
 	}
-#endif // STAGING_ONLY
 
 	if ( !p4 )
 	{
@@ -4863,7 +5630,7 @@ CON_COMMAND_F( mat_texture_list_txlod_sync, "'reset' - resets all run-time chang
 				
 				CUtlBuffer bufTxtFileBuffer( 0, 0, CUtlBuffer::TEXT_BUFFER );
 				g_pFullFileSystem->ReadFile( szTextureContentPath, 0, bufTxtFileBuffer );
-				for ( int kCh = 0; kCh < 1024; ++kCh ) bufTxtFileBuffer.PutChar( 0 );
+				for ( int k = 0; k < 1024; ++ k ) bufTxtFileBuffer.PutChar( 0 );
 
 				// Now fix maxwidth/maxheight settings
 				SetBufferValue( ( char * ) bufTxtFileBuffer.Base(), "maxwidth", chMaxWidth );
@@ -4902,7 +5669,7 @@ CON_COMMAND_F( mat_texture_list_txlod_sync, "'reset' - resets all run-time chang
 
 				CUtlBuffer bufTxtFileBuffer( 0, 0, CUtlBuffer::TEXT_BUFFER );
 				g_pFullFileSystem->ReadFile( szTxtFileName, 0, bufTxtFileBuffer );
-				for ( int kCh = 0; kCh < 1024; ++ kCh ) bufTxtFileBuffer.PutChar( 0 );
+				for ( int k = 0; k < 1024; ++ k ) bufTxtFileBuffer.PutChar( 0 );
 
 				// Now fix maxwidth/maxheight settings
 				SetBufferValue( ( char * ) bufTxtFileBuffer.Base(), "maxwidth", chMaxWidth );
@@ -4956,4 +5723,183 @@ usage:
 		"  mat_texture_list_txlod_sync save  - saves all changes to material content files.\n"
 		);
 }
+
+ConVar mat_texture_list_exclude_editing( "mat_texture_list_exclude_editing", "0" );
+
+CON_COMMAND_F( mat_texture_list_exclude, "'load' - loads the exclude list file, 'reset' - resets all loaded exclude information, 'save' - saves exclude list file", FCVAR_DONTRECORD )
+{
+	using namespace TextureLodOverride;
+	using namespace TextureLodExclude;
+
+	if ( args.ArgC() < 2 )
+		goto usage;
+
+	char const *szCmd = args.Arg( 1 );
+
+	if ( !stricmp( szCmd, "load" ) )
+	{
+		if ( args.ArgC() < 3 )
+			goto usage;
+
+		char const *szFile = args.Arg( 2 );
+		Msg( "mat_texture_list_exclude loading '%s'...\n", szFile );
+
+		// Read the file buffer
+		CUtlInplaceBuffer bufFile( 0, 0, CUtlBuffer::TEXT_BUFFER );
+		if ( !g_pFullFileSystem->ReadFile( szFile, NULL, bufFile ) )
+		{
+			Warning( "Error: failed to load exclude file '%s'!\n", szFile );
+			return;
+		}
+
+		// Process the file
+		while ( char *pszLine = bufFile.InplaceGetLinePtr() )
+		{
+			// Skip empty lines
+			if ( !*pszLine || V_isspace( *pszLine ) ||
+				!V_isalnum( *pszLine ) )
+				continue;
+
+			// If the line starts with a digit, then it's LOD override
+			int nLodOverride = atoi( pszLine );
+			while ( V_isdigit( *pszLine ) )
+				++ pszLine;
+			while ( V_isspace( *pszLine ) )
+				++ pszLine;
+			
+			// Skip malformed lines
+			if ( !V_isalpha( *pszLine ) )
+				continue;
+
+			// Record the exclude element
+			TextureLodExclude::Add( pszLine, nLodOverride );
+		}
+
+		for ( int k = 0; k < s_ExcludeMap.GetNumStrings(); ++ k )
+		{
+			char const *szTx = s_ExcludeMap.String( k );
+
+			// Force the texture LOD override to get re-processed
+			if ( ITexture *pTx = materials->FindTexture( szTx, "" ) )
+				pTx->Download( NULL );
+		}
+
+		Msg( "mat_texture_list_exclude loaded '%s'.\n", szFile );
+		
+		// Set the var to designate exclude mode
+		int iMode = mat_texture_list_exclude_editing.GetInt();
+		mat_texture_list_exclude_editing.SetValue( MAX( 0, iMode ) + 1 );
+		
+		return;
+	}
+	else if ( !stricmp( szCmd, "reset" ) )
+	{
+		Msg( "mat_texture_list_exclude reset...\n" );
+
+		CUtlStringMap< int > lstReload;
+
+		for ( int k = 0; k < s_OverrideMap.GetNumStrings(); ++ k )
+		{
+			char const *szTx = s_OverrideMap.String( k );
+			lstReload[ szTx ] = 1;
+		}
+		s_OverrideMap.Purge();
+
+		for ( int k = 0; k < s_ExcludeMap.GetNumStrings(); ++ k )
+		{
+			char const *szTx = s_ExcludeMap.String( k );
+			lstReload[ szTx ] = 1;
+		}
+		s_ExcludeMap.Purge();
+
+		for ( int k = 0; k < lstReload.GetNumStrings(); ++ k )
+		{
+			char const *szTx = lstReload.String( k );
+
+			// Force the texture LOD override to get re-processed
+			if ( ITexture *pTx = materials->FindTexture( szTx, "" ) )
+				pTx->Download( NULL );
+		}
+
+		Msg( "mat_texture_list_exclude reset : completed.\n" );
+
+		mat_texture_list_exclude_editing.SetValue( 0 );
+
+		return;
+	}
+	else if ( !stricmp( szCmd, "save" ) )
+	{
+		if ( args.ArgC() < 3 )
+			goto usage;
+
+		char const *szFile = args.Arg( 2 );
+		Msg( "mat_texture_list_exclude saving '%s'...\n", szFile );
+
+		// Read the file buffer
+		CUtlInplaceBuffer bufFile( 0, 0, CUtlBuffer::TEXT_BUFFER );
+
+		// Write the buffer file (full excludes)
+		for ( int k = 0; k < s_ExcludeMap.GetNumStrings(); ++ k )
+		{
+			char const *szTx = s_ExcludeMap.String( k );
+			int x = s_ExcludeMap[ k ];
+
+			if ( !( x == 0 ) ) continue; // first pass, skip mips
+
+			bufFile.Printf( "%s\n", szTx );
+		}
+
+		// empty line
+		bufFile.Printf( "\n" );
+
+		// Write the buffer file (mips)
+		for ( int k = 0; k < s_ExcludeMap.GetNumStrings(); ++ k )
+		{
+			char const *szTx = s_ExcludeMap.String( k );
+			int x = s_ExcludeMap[ k ];
+
+			if ( !( x > 0 ) ) continue;
+
+			bufFile.Printf( "%d %s\n", x, szTx );
+		}
+
+		// Save out the buffer to file
+		if ( !g_pFullFileSystem->WriteFile( szFile, NULL, bufFile ) )
+		{
+			Warning( "Error: failed to save exclude file '%s'!\n", szFile );
+			return;
+		}
+
+		Msg( "mat_texture_list_exclude saved '%s'.\n", szFile );
+		return;
+	}
+
+	return;
+
+usage:
+	Warning(
+		"Usage:\n"
+		"  mat_texture_list_exclude load excludelistfile.lst - loads exclude list file;\n"
+		"  mat_texture_list_exclude reset - resets loaded exclude list information;\n"
+		"  mat_texture_list_exclude save excludelistfile.lst - saves exclude list file.\n"
+		);
+}
+
 #endif
+
+
+
+bool CTextureImpl_GetTextureInformation( char const *szTextureName, MaterialTextureInfo_t &info )
+{
+#ifdef IS_WINDOWS_PC
+
+	info.iExcludeInformation = TextureLodExclude::Get( szTextureName );
+	return true;
+
+#else
+
+	return false;
+
+#endif
+}
+

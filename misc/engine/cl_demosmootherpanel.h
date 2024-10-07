@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -76,8 +76,8 @@ protected:
 	void		DrawKeySpline( void );
 	int			GetTickForFrame( int frame );
 	int			GetFrameForTick( int tick );
-	bool		GetInterpolatedViewPoint( Vector& origin, QAngle& angles );
-	bool		GetInterpolatedOriginAndAngles( bool readonly, Vector& origin, QAngle& angles );
+	bool		GetInterpolatedViewPoint( int nSlot, Vector& origin, QAngle& angles );
+	bool		GetInterpolatedOriginAndAngles( int nSlot, bool readonly, Vector& origin, QAngle& angles );
 
 	void		DrawLegend( int startframe, int endframe );
 
@@ -133,9 +133,9 @@ protected:
 	void				Redo( void );
 
 	// Do push before changes
-	void				PushUndo( const char *description );
+	void				PushUndo( char *description );
 	// Do this push after changes, must match pushundo 1for1
-	void				PushRedo( const char *description );
+	void				PushRedo( char *description );
 
 	void				WipeUndo( void );
 	void				WipeRedo( void );

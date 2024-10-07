@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose:
 //
@@ -26,8 +26,11 @@ enum
 	CHAN_BODY		= 4,
 	CHAN_STREAM		= 5,		// allocate stream channel from the static or dynamic area
 	CHAN_STATIC		= 6,		// allocate channel from the static area 
-	CHAN_VOICE2		= 7,
-	CHAN_VOICE_BASE	= 8,		// allocate channel for network voice data
+	CHAN_VOICE_BASE	= 7,		// allocate channel for network voice data
+};
+
+enum
+{
 	CHAN_USER_BASE	= (CHAN_VOICE_BASE+128)		// Anything >= this number is allocated to game code.
 };
 
@@ -103,7 +106,7 @@ enum soundlevel_t
 
 
 #define ATTN_TO_SNDLVL( a ) (soundlevel_t)(int)((a) ? (50 + 20 / ((float)a)) : 0 )
-#define SNDLVL_TO_ATTN( a ) ((a > 50) ? (20.0f / (float)(a - 50)) : 4.0 )
+#define SNDLVL_TO_ATTN( a ) ( (a > 50) ? (20.0f / (float)(a - 50)) : ( (a == 0) ? (0.0f) : (4.0f) ) )
 
 // This is a limit due to network encoding.
 // It encodes attenuation * 64 in 8 bits, so the maximum is (255 / 64)
@@ -114,27 +117,34 @@ enum soundlevel_t
 //-----------------------------------------------------------------------------
 enum SoundFlags_t
 {
-	SND_NOFLAGS			= 0,			// to keep the compiler happy
-	SND_CHANGE_VOL		= (1<<0),		// change sound vol
-	SND_CHANGE_PITCH	= (1<<1),		// change sound pitch
-	SND_STOP			= (1<<2),		// stop the sound
-	SND_SPAWNING		= (1<<3),		// we're spawning, used in some cases for ambients
-										// not sent over net, only a param between dll and server.
-	SND_DELAY			= (1<<4),		// sound has an initial delay
-	SND_STOP_LOOPING	= (1<<5),		// stop all looping sounds on the entity.
-	SND_SPEAKER			= (1<<6),		// being played again by a microphone through a speaker
+	SND_NOFLAGS					= 0,			// to keep the compiler happy
+	SND_CHANGE_VOL				= (1<<0),		// change sound vol
+	SND_CHANGE_PITCH			= (1<<1),		// change sound pitch
+	SND_STOP					= (1<<2),		// stop the sound
+	SND_SPAWNING				= (1<<3),		// we're spawning, used in some cases for ambients
+												// not sent over net, only a param between dll and server.
+	SND_DELAY					= (1<<4),		// sound has an initial delay
+	SND_STOP_LOOPING			= (1<<5),		// stop all looping sounds on the entity.
+	SND_SPEAKER					= (1<<6),		// being played again by a microphone through a speaker
  
-	SND_SHOULDPAUSE		= (1<<7),		// this sound should be paused if the game is paused
-	SND_IGNORE_PHONEMES	= (1<<8),
-	SND_IGNORE_NAME		= (1<<9),		// used to change all sounds emitted by an entity, regardless of scriptname
+	SND_SHOULDPAUSE				= (1<<7),		// this sound should be paused if the game is paused
+	SND_IGNORE_PHONEMES			= (1<<8),
+	SND_IGNORE_NAME				= (1<<9),		// used to change all sounds emitted by an entity, regardless of scriptname
+	SND_IS_SCRIPTHANDLE			= (1<<10),		// server has passed the actual SoundEntry instead of wave filename
 
-	SND_DO_NOT_OVERWRITE_EXISTING_ON_CHANNEL = (1<<10),
+	SND_UPDATE_DELAY_FOR_CHOREO	= (1<<11),		// True if we have to update snd_delay_for_choreo with the IO latency.
+	SND_GENERATE_GUID			= (1<<12),		// True if we generate the GUID when we send the sound.
+
+	SND_OVERRIDE_PITCH			= (1<<13),		// The pitch given in code overrides what is present in the sound entry.
 };
 
-#define SND_FLAG_BITS_ENCODE 11
+#define SND_FLAG_BITS_ENCODE 13
 
-#define MAX_SOUND_INDEX_BITS	14
+#define MAX_SOUND_INDEX_BITS	13
 #define	MAX_SOUNDS				(1<<MAX_SOUND_INDEX_BITS)
+
+// Todo: Morasky, we need to test against this #!
+// MAX_MEASURED_SOUNDENTRIES
 
 #if !defined( IN_XBOX_CODELINE )
 // +/-4096 msec
@@ -146,6 +156,12 @@ enum SoundFlags_t
 
 // Subtract one to leave room for the sign bit
 #define MAX_SOUND_DELAY_MSEC				(1<<(MAX_SOUND_DELAY_MSEC_ENCODE_BITS-1))    // 4096 msec or about 4 seconds
+
+#define MAX_SOUND_SEED_BITS		6	// Used to encode 0-63 for seeding client side sound operators
+									// NOTE: The LSB also carries the server side wave file selection
+#define MIN_SOUND_SEED_VALUE	0
+#define MAX_SOUND_SEED_VALUE	((1<<MAX_SOUND_SEED_BITS)-1)
+#define MAX_SOUND_RNDWAVE_NUM	MAX_SOUND_SEED_VALUE
 
 //-----------------------------------------------------------------------------
 // common pitch values

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -154,11 +154,12 @@ public:
 
 struct FileElementSet_t
 {
-	FileElementSet_t( UtlSymId_t filename = UTL_INVAL_SYMBOL, UtlSymId_t format = UTL_INVAL_SYMBOL ) :
+	FileElementSet_t( CUtlSymbolLarge filename = UTL_INVAL_SYMBOL_LARGE, CUtlSymbolLarge format = UTL_INVAL_SYMBOL_LARGE ) :
 		m_filename( filename ), m_format( format ),
 		m_hRoot( DMELEMENT_HANDLE_INVALID ),
 		m_bLoaded( true ),
-		m_nElements( 0 )
+		m_nElements( 0 ),
+		m_fileModificationTime( 0 )
 	{
 	}
 	FileElementSet_t( const FileElementSet_t& that ) : m_filename( that.m_filename ), m_format( that.m_format ), m_hRoot( DMELEMENT_HANDLE_INVALID ), m_bLoaded( that.m_bLoaded ), m_nElements( that.m_nElements )
@@ -168,11 +169,12 @@ struct FileElementSet_t
 		Assert( that.m_nElements == 0 );
 	}
 
-	UtlSymId_t m_filename;
-	UtlSymId_t m_format;
+	CUtlSymbolLarge m_filename;
+	CUtlSymbolLarge m_format;
 	CDmeCountedHandle m_hRoot;
 	bool m_bLoaded;
 	int m_nElements;
+	long m_fileModificationTime;
 };
 
 
@@ -196,18 +198,19 @@ public:
 	virtual void Shutdown();
 
 	// Methods of IDataModel
-	virtual void				AddElementFactory( const char *pClassName, IDmElementFactory *pFactory );
+	virtual void				AddElementFactory( CDmElementFactoryHelper *pFactoryHelper );
+	virtual CDmElementFactoryHelper	*GetElementFactoryHelper( const char *pClassName );
 	virtual bool				HasElementFactory( const char *pElementType ) const;
 	virtual void				SetDefaultElementFactory( IDmElementFactory *pFactory );
 	virtual int					GetFirstFactory() const;
 	virtual int					GetNextFactory( int index ) const;
 	virtual bool				IsValidFactory( int index ) const;
 	virtual char const			*GetFactoryName( int index ) const;
-	virtual DmElementHandle_t	CreateElement( UtlSymId_t typeSymbol, const char *pElementName, DmFileId_t fileid, const DmObjectId_t *pObjectID = NULL );
+	virtual DmElementHandle_t	CreateElement( CUtlSymbolLarge typeSymbol, const char *pElementName, DmFileId_t fileid, const DmObjectId_t *pObjectID = NULL );
 	virtual DmElementHandle_t	CreateElement( const char *pTypeName, const char *pElementName, DmFileId_t fileid, const DmObjectId_t *pObjectID = NULL );
 	virtual void				DestroyElement( DmElementHandle_t hElement );
-	virtual	CDmElement*		GetElement( DmElementHandle_t hElement ) const;
-	virtual UtlSymId_t			GetElementType( DmElementHandle_t hElement ) const;
+	virtual	CDmElement*			GetElement( DmElementHandle_t hElement ) const;
+	virtual CUtlSymbolLarge			GetElementType( DmElementHandle_t hElement ) const;
 	virtual const char*			GetElementName( DmElementHandle_t hElement ) const;
 	virtual const DmObjectId_t&	GetElementId( DmElementHandle_t hElement ) const;
 	virtual const char			*GetAttributeNameForType( DmAttributeType_t attType ) const;
@@ -239,11 +242,11 @@ public:
 	virtual IDmFormatUpdater*	FindFormatUpdater( const char *pFormatName ) const;
 	virtual bool				SaveToFile( char const *pFileName, char const *pPathID, const char *pEncodingName, const char *pFormatName, CDmElement *pRoot );
 	virtual DmFileId_t			RestoreFromFile( char const *pFileName, char const *pPathID, const char *pFormatHint, CDmElement **ppRoot, DmConflictResolution_t idConflictResolution = CR_DELETE_NEW, DmxHeader_t *pHeaderOut = NULL );
+	virtual bool				IsDMXFormat( CUtlBuffer &buf ) const;
 
 	virtual void				SetKeyValuesElementCallback( IElementForKeyValueCallback *pCallbackInterface );
 	virtual const char *		GetKeyValuesElementName( const char *pszKeyName, int iNestingLevel );
-	virtual UtlSymId_t			GetSymbol( const char *pString );
-	virtual const char *		GetString( UtlSymId_t sym ) const;
+	virtual CUtlSymbolLarge			GetSymbol( const char *pString );
 	virtual int					GetElementsAllocatedSoFar();
 	virtual int					GetMaxNumberOfElements();
 	virtual int					GetAllocatedAttributeCount();
@@ -268,10 +271,10 @@ public:
 	virtual void				TraceUndo( bool state ); // if true, undo records spew as they are added
 	virtual void				ClearUndo();
 	virtual void				GetUndoInfo( CUtlVector< UndoInfo_t >& list );
-	virtual const char *		GetUndoString( UtlSymId_t sym );
+	virtual const char *		GetUndoString( CUtlSymbolLarge sym );
 	virtual void				AddUndoElement( IUndoElement *pElement );
-	virtual UtlSymId_t			GetUndoDescInternal( const char *context );
-	virtual UtlSymId_t			GetRedoDescInternal( const char *context );
+	virtual CUtlSymbolLarge			GetUndoDescInternal( const char *context );
+	virtual CUtlSymbolLarge			GetRedoDescInternal( const char *context );
 	virtual void				EmptyClipboard();
 	virtual void				SetClipboardData( CUtlVector< KeyValues * >& data, IClipboardCleanup *pfnOptionalCleanuFunction = 0 );
 	virtual void				AddToClipboardData( KeyValues *add );
@@ -292,6 +295,9 @@ public:
 	virtual void				SetFileFormat( DmFileId_t fileid, const char *pFormat );
 	virtual DmElementHandle_t	GetFileRoot( DmFileId_t fileid );
 	virtual void				SetFileRoot( DmFileId_t fileid, DmElementHandle_t hRoot );
+	virtual long				GetFileModificationUTCTime( DmFileId_t fileid );
+	virtual long				GetCurrentUTCTime();
+	virtual void				UTCTimeToString( char *pString, int maxChars, long fileTime );
 	virtual bool				IsFileLoaded( DmFileId_t fileid );
 	virtual void				MarkFileLoaded( DmFileId_t fileid );
 	virtual void				UnloadFile( DmFileId_t fileid );
@@ -300,6 +306,7 @@ public:
 	virtual void				MarkHandleInvalid( DmElementHandle_t hElement );
 	virtual void				MarkHandleValid( DmElementHandle_t hElement );
 	virtual DmElementHandle_t	FindElement( const DmObjectId_t &id );
+	virtual void				GetExistingElements( CElementIdHash &hash ) const;
 	virtual	DmAttributeReferenceIterator_t	FirstAttributeReferencingElement( DmElementHandle_t hElement );
 	virtual DmAttributeReferenceIterator_t	NextAttributeReferencingElement( DmAttributeReferenceIterator_t hAttrIter );
 	virtual CDmAttribute *					GetAttribute( DmAttributeReferenceIterator_t hAttrIter );
@@ -310,9 +317,17 @@ public:
 	virtual void				PushNotificationScope( const char *pReason, int nNotifySource, int nNotifyFlags );
 	virtual void				PopNotificationScope( bool bAbort );
 	virtual void				SetUndoDepth( int nSize );
-	virtual void				DisplayMemoryStats();
-
+	virtual void				DisplayMemoryStats(DmElementHandle_t hElement = DMELEMENT_HANDLE_INVALID);
+	// Dump the symbol table to the console
+	virtual void				DumpSymbolTable();
+	virtual void				AddOnElementCreatedCallback( const char* pElementType, IDmeElementCreated *callback );
+	virtual void				RemoveOnElementCreatedCallback( const char* pElementType, IDmeElementCreated *callback );
+	
 public:
+
+	// Commits symbols in symbol table
+	void						CommitSymbols();
+
 	// Internal public methods
 	int GetCurrentFormatVersion( const char *pFormatName );
 
@@ -330,17 +345,6 @@ public:
 
 	// remove orphaned element subtrees
 	void FindAndDeleteOrphanedElements();
-
-	// Event "mailing list"
-	DmMailingList_t CreateMailingList();
-	void DestroyMailingList( DmMailingList_t list );
-	void AddElementToMailingList( DmMailingList_t list, DmElementHandle_t h );
-
-	// Returns false if the mailing list is empty now
-	bool RemoveElementFromMailingList( DmMailingList_t list, DmElementHandle_t h );
-
-	// Returns false if the mailing list is empty now (can happen owing to stale attributes)
-	bool PostAttributeChanged( DmMailingList_t list, CDmAttribute *pAttribute );
 
 	void GetInvalidHandles( CUtlVector< DmElementHandle_t > &handles );
 	void MarkHandlesValid( CUtlVector< DmElementHandle_t > &handles );
@@ -365,7 +369,8 @@ public:
 
 	bool IsCreatingUntypedElements() const { return m_bOnlyCreateUntypedElements; }
 
-	unsigned short GetSymbolCount() const;
+	void UpdateReferenceToElements( CDmAttribute *pAttr, CDmElement *pChild, bool bDetach );
+	void UpdateReferencesToElements( CDmElement *pElement, bool bDetach );
 
 private:
 	struct MailingList_t
@@ -423,6 +428,7 @@ private:
 	const CClipboardManager *GetClipboardMgr() const;
 
 	void UnloadFile( DmFileId_t fileid, bool bDeleteElements );
+	void SetFileModificationUTCTime( DmFileId_t fileid, long fileModificationTime );
 
 	friend class CDmeElementRefHelper;
 	friend class CDmAttribute;
@@ -430,21 +436,22 @@ private:
 
 	void OnElementReferenceAdded  ( DmElementHandle_t hElement, CDmAttribute *pAttribute );
 	void OnElementReferenceRemoved( DmElementHandle_t hElement, CDmAttribute *pAttribute );
-	void OnElementReferenceAdded  ( DmElementHandle_t hElement, bool bRefCount );
-	void OnElementReferenceRemoved( DmElementHandle_t hElement, bool bRefCount );
-						
+	void OnElementReferenceAdded  ( DmElementHandle_t hElement, HandleType_t handleType );
+	void OnElementReferenceRemoved( DmElementHandle_t hElement, HandleType_t handleType );
+
+	void BuildHistogramForHandles( CUtlMap< CUtlSymbolLarge, struct DmMemoryInfo_t > &typeHistogram, CUtlVector< DmElementHandle_t > &handles );
+
 private:
 	CUtlVector< IDmSerializer* >		m_Serializers;
 	CUtlVector< IDmLegacyUpdater* >		m_LegacyUpdaters;
 	CUtlVector< IDmFormatUpdater* >		m_FormatUpdaters;
 
 	IDmElementFactory *m_pDefaultFactory;
-	CUtlDict< IDmElementFactory*, int >	m_Factories;
-	CUtlSymbolTable m_SymbolTable;
-	CUtlHandleTable< CDmElement, 20 > m_Handles;
-	CUtlHandleTable< CDmAttribute, 20 > m_AttributeHandles;
+	CUtlDict< CDmElementFactoryHelper*, int >	m_Factories;
+	CUtlSymbolTableLargeMT m_SymbolTable;
+	CUtlHandleTable< CDmElement, 21 > m_Handles;
+	CUtlHandleTable< CDmAttribute, 21 > m_AttributeHandles;
 	CUndoManager m_UndoMgr;
-	CUtlLinkedList< MailingList_t, DmMailingList_t > m_MailingLists;
 
 	bool m_bIsUnserializing : 1;
 	bool m_bUnableToSetDefaultFactory : 1;
@@ -456,8 +463,6 @@ private:
 
 	CElementIdHash m_elementIds;
 	CUtlHash< ElementIdHandlePair_t > m_unloadedIdElementMap;
-	CUtlVector< DmObjectId_t > m_unreferencedElementIds;
-	CUtlVector< DmElementHandle_t > m_unreferencedElementHandles;
 
 	CClipboardManager m_ClipboardMgr;
 	IElementForKeyValueCallback *m_pKeyvaluesCallbackInterface;
@@ -511,17 +516,21 @@ public:
 	static void SetId( CDmElement *pElement, const DmObjectId_t &id )							{ pElement->SetId( id ); }
 	static bool IsDirty( const CDmElement *pElement )											{ return pElement->IsDirty(); }
 	static void MarkDirty( CDmElement *pElement, bool dirty = true )							{ pElement->MarkDirty( dirty ); }
-	static void MarkAttributesClean( CDmElement *pElement )									{ pElement->MarkAttributesClean(); }
-	static void MarkBeingUnserialized( CDmElement *pElement, bool beingUnserialized = true )	{ pElement->MarkBeingUnserialized( beingUnserialized ); }
-	static bool IsBeingUnserialized( const CDmElement *pElement ) 								{ return pElement->IsBeingUnserialized(); }
+	static void MarkAttributesClean( CDmElement *pElement )										{ pElement->MarkAttributesClean(); }
+	static void DisableOnChangedCallbacks( CDmElement *pElement )								{ pElement->DisableOnChangedCallbacks(); }
+	static void EnableOnChangedCallbacks( CDmElement *pElement )								{ pElement->EnableOnChangedCallbacks(); }
+	static bool AreOnChangedCallbacksEnabled( CDmElement *pElement )							{ return pElement->AreOnChangedCallbacksEnabled(); }
+	static void FinishUnserialization( CDmElement *pElement )									{ pElement->FinishUnserialization(); }
 	static void AddAttributeByPtr( CDmElement *pElement, CDmAttribute *ptr )					{ pElement->AddAttributeByPtr( ptr ); }
-	static void RemoveAttributeByPtrNoDelete( CDmElement *pElement, CDmAttribute *ptr )		{ pElement->RemoveAttributeByPtrNoDelete( ptr); }
+	static void RemoveAttributeByPtrNoDelete( CDmElement *pElement, CDmAttribute *ptr )			{ pElement->RemoveAttributeByPtrNoDelete( ptr); }
 	static void ChangeHandle( CDmElement *pElement, DmElementHandle_t handle )					{ pElement->ChangeHandle( handle ); }
 	static DmElementReference_t	*GetReference( CDmElement *pElement )							{ return pElement->GetReference(); }
 	static void SetReference( CDmElement *pElement, const DmElementReference_t &ref )			{ pElement->SetReference( ref ); }
 	static int EstimateMemoryUsage( CDmElement *pElement, CUtlHash< DmElementHandle_t > &visited, TraversalDepth_t depth, int *pCategories ) { return pElement->EstimateMemoryUsage( visited, depth, pCategories ); }
-	static void PerformConstruction( CDmElement *pElement )									{ pElement->PerformConstruction(); }
+	static void PerformConstruction( CDmElement *pElement )										{ pElement->PerformConstruction(); }
 	static void PerformDestruction( CDmElement *pElement )										{ pElement->PerformDestruction(); }
+	static void OnAdoptedFromUndo( CDmElement *pElement )										{ pElement->OnAdoptedFromUndo(); }
+	static void OnOrphanedToUndo( CDmElement *pElement )										{ pElement->OnOrphanedToUndo(); }
 };
 
 #endif // DATAMODEL_H

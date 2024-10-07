@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -16,6 +16,9 @@
 
 #include "materialsystem/imesh.h"
 #include "materialsystem/imaterial.h"
+
+
+struct VertexStreamSpec_t;
 
 
 //-----------------------------------------------------------------------------
@@ -56,6 +59,7 @@ abstract_class CIndexBufferBase : public IIndexBuffer
 public:
 	virtual void Spew( int nIndexCount, const IndexDesc_t &desc );
 	virtual void ValidateData( int nIndexCount, const IndexDesc_t& desc );
+	virtual IMesh* GetMesh() { return NULL; }
 
 	// Other public methods
 public:
@@ -82,18 +86,36 @@ public:
 	virtual void BeginPass( ) = 0;
 
 	// Draws a single pass of the mesh
-	virtual void RenderPass() = 0;
+	virtual void RenderPass( const unsigned char *pInstanceCommandBuffer ) = 0;
+
+	// DrawPrims
+	virtual void DrawPrims( const unsigned char *pInstanceCommandBuffer ) = 0;
 
 	// Does it have a color mesh?
 	virtual bool HasColorMesh() const = 0;
 
-	// Am I using morph data?
-	virtual bool IsUsingMorphData() const = 0;
-
+	// Does it have a flex mesh?
 	virtual bool HasFlexMesh() const = 0;
+
+	// Is it using a vertex ID?
+	virtual bool IsUsingVertexID() const = 0;
+
+	// Is it using tessellation for higher-order surfaces?
+#if ENABLE_TESSELLATION
+	virtual TessellationMode_t GetTessellationType() const = 0;
+#else
+	TessellationMode_t GetTessellationType() const { return TESSELLATION_MODE_DISABLED; }
+#endif
+
+	// Are vertex data streams specified in a custom manner?
+	virtual VertexStreamSpec_t *GetVertexStreamSpec() const = 0;
 
 	virtual IMesh *GetMesh() { return this; }
 
+	virtual void * AccessRawHardwareDataStream( uint8 nRawStreamIndex, uint32 numBytes, uint32 uiFlags, void *pvContext ) { return NULL; }
+
+	virtual ICachedPerFrameMeshData *GetCachedPerFrameMeshData() { return NULL; }
+	virtual void ReconstructFromCachedPerFrameMeshData( ICachedPerFrameMeshData *pData ) {}
 public:
 	// constructor, destructor
 	CMeshBase();
@@ -103,8 +125,13 @@ public:
 
 //-----------------------------------------------------------------------------
 // Utility method for VertexDesc_t (don't want to expose it in public, in imesh.h)
+// We've split this into two versions, one for computing size-only, and the standard
+// version which computes field offsets and sizes.
+// The code would be cleaner if we split it into two functions, but for now we'll keep
+// all of the if( !bSizeOnly ) for easier maintenance if we need to change any of the fields.
 //-----------------------------------------------------------------------------
-inline void ComputeVertexDesc( unsigned char * pBuffer, VertexFormat_t vertexFormat, VertexDesc_t & desc )
+template< bool bSizeOnly >
+inline int ComputeVertexDesc( unsigned char * pBuffer, VertexFormat_t vertexFormat, VertexDesc_t & desc )
 {
 	int i;
 	int *pVertexSizesToSet[64];
@@ -114,7 +141,13 @@ inline void ComputeVertexDesc( unsigned char * pBuffer, VertexFormat_t vertexFor
 
 	// Determine which vertex compression type this format specifies (affects element sizes/decls):
 	VertexCompressionType_t compression = CompressionType( vertexFormat );
-	desc.m_CompressionType = compression;
+	int nNumBoneWeights = NumBoneWeights( vertexFormat );
+
+	if ( !bSizeOnly )
+	{
+		desc.m_CompressionType = compression;
+		desc.m_NumBoneWeights = nNumBoneWeights;
+	}
 
 	// We use fvf instead of flags here because we may pad out the fvf
 	// vertex structure to optimize performance
@@ -123,24 +156,33 @@ inline void ComputeVertexDesc( unsigned char * pBuffer, VertexFormat_t vertexFor
 	Assert( ( ( vertexFormat & VERTEX_WRINKLE ) == 0 ) || ( ( vertexFormat & VERTEX_POSITION ) != 0 ) );
 	if ( vertexFormat & VERTEX_POSITION )
 	{
-		// UNDONE: compress position+wrinkle to SHORT4N, and roll the scale into the transform matrices
-		desc.m_pPosition = reinterpret_cast<float*>(pBuffer);
-		offset += GetVertexElementSize( VERTEX_ELEMENT_POSITION, compression );
-		pVertexSizesToSet[nVertexSizesToSet++] = &desc.m_VertexSize_Position;
+		if ( !bSizeOnly )
+		{
+			// UNDONE: compress position+wrinkle to SHORT4N, and roll the scale into the transform matrices
+			desc.m_pPosition = reinterpret_cast<float*>(pBuffer);
+			pVertexSizesToSet[nVertexSizesToSet++] = &desc.m_VertexSize_Position;
+		}
+
+		VertexElement_t posElement = (vertexFormat & VERTEX_FORMAT_PAD_POS_NORM ) != 0 ? VERTEX_ELEMENT_POSITION4D : VERTEX_ELEMENT_POSITION;
+		offset += GetVertexElementSize( posElement, compression );
 
 		if ( vertexFormat & VERTEX_WRINKLE )
 		{
-			desc.m_pWrinkle = reinterpret_cast<float*>( pBuffer + offset );
+			if ( !bSizeOnly )
+			{
+				desc.m_pWrinkle = reinterpret_cast<float*>( pBuffer + offset );
+				pVertexSizesToSet[nVertexSizesToSet++] = &desc.m_VertexSize_Wrinkle;
+			}
+
 			offset += GetVertexElementSize( VERTEX_ELEMENT_WRINKLE, compression );
-			pVertexSizesToSet[nVertexSizesToSet++] = &desc.m_VertexSize_Wrinkle;
 		}
-		else
+		else if ( !bSizeOnly )
 		{
 			desc.m_pWrinkle = dummyData;
 			desc.m_VertexSize_Wrinkle = 0;
 		}
 	}
-	else
+	else if ( !bSizeOnly )
 	{
 		desc.m_pPosition = dummyData;
 		desc.m_VertexSize_Position = 0;
@@ -149,36 +191,41 @@ inline void ComputeVertexDesc( unsigned char * pBuffer, VertexFormat_t vertexFor
 	}
 
 	// Bone weights/matrix indices
-	desc.m_NumBoneWeights = NumBoneWeights( vertexFormat );
-
-	Assert( ( desc.m_NumBoneWeights == 2 ) || ( desc.m_NumBoneWeights == 0 ) );
+	Assert( ( nNumBoneWeights == 2 ) || ( nNumBoneWeights == 0 ) );
 
 	// We assume that if you have any indices/weights, you have exactly two of them
-	Assert( ( ( desc.m_NumBoneWeights == 2 ) && ( ( vertexFormat & VERTEX_BONE_INDEX ) != 0 ) ) ||
-			( ( desc.m_NumBoneWeights == 0 ) && ( ( vertexFormat & VERTEX_BONE_INDEX ) == 0 ) ) );
+	Assert( ( ( nNumBoneWeights == 2 ) && ( ( vertexFormat & VERTEX_BONE_INDEX ) != 0 ) ) ||
+		( ( nNumBoneWeights == 0 ) && ( ( vertexFormat & VERTEX_BONE_INDEX ) == 0 ) ) );
 
 	if ( ( vertexFormat & VERTEX_BONE_INDEX ) != 0 )
 	{
-		if ( desc.m_NumBoneWeights > 0 )
+		if ( nNumBoneWeights > 0 )
 		{
-			Assert( desc.m_NumBoneWeights == 2 );
-
 			// Always exactly two weights
-			desc.m_pBoneWeight = reinterpret_cast<float*>(pBuffer + offset);
+			Assert( nNumBoneWeights == 2 );
+			if ( !bSizeOnly )
+			{
+				desc.m_pBoneWeight = reinterpret_cast<float*>(pBuffer + offset);
+				pVertexSizesToSet[nVertexSizesToSet++] = &desc.m_VertexSize_BoneWeight;
+			}
+
 			offset += GetVertexElementSize( VERTEX_ELEMENT_BONEWEIGHTS2, compression );
-			pVertexSizesToSet[nVertexSizesToSet++] = &desc.m_VertexSize_BoneWeight;
 		}
-		else
+		else if ( !bSizeOnly )
 		{
 			desc.m_pBoneWeight = dummyData;
 			desc.m_VertexSize_BoneWeight = 0;
 		}
 
-		desc.m_pBoneMatrixIndex = pBuffer + offset;
+		if ( !bSizeOnly )
+		{
+			desc.m_pBoneMatrixIndex = pBuffer + offset;
+			pVertexSizesToSet[nVertexSizesToSet++] = &desc.m_VertexSize_BoneMatrixIndex;
+		}
+
 		offset += GetVertexElementSize( VERTEX_ELEMENT_BONEINDEX, compression );
-		pVertexSizesToSet[nVertexSizesToSet++] = &desc.m_VertexSize_BoneMatrixIndex;
 	}
-	else
+	else if ( !bSizeOnly )
 	{
 		desc.m_pBoneWeight = dummyData;
 		desc.m_VertexSize_BoneWeight = 0;
@@ -189,12 +236,18 @@ inline void ComputeVertexDesc( unsigned char * pBuffer, VertexFormat_t vertexFor
 
 	if ( vertexFormat & VERTEX_NORMAL )
 	{
-		desc.m_pNormal = reinterpret_cast<float*>(pBuffer + offset);
+		if ( !bSizeOnly )
+		{
+			desc.m_pNormal = reinterpret_cast<float*>(pBuffer + offset);
+			pVertexSizesToSet[nVertexSizesToSet++] = &desc.m_VertexSize_Normal;
+		}
+
 		// See PackNormal_[SHORT2|UBYTE4|HEND3N] in mathlib.h for the compression algorithm
-		offset += GetVertexElementSize( VERTEX_ELEMENT_NORMAL, compression );
-		pVertexSizesToSet[nVertexSizesToSet++] = &desc.m_VertexSize_Normal;
+
+		VertexElement_t normalElement = (vertexFormat & VERTEX_FORMAT_PAD_POS_NORM ) != 0 ? VERTEX_ELEMENT_NORMAL4D : VERTEX_ELEMENT_NORMAL;
+		offset += GetVertexElementSize( normalElement, compression );
 	}
-	else
+	else if ( !bSizeOnly )
 	{
 		desc.m_pNormal = dummyData;
 		desc.m_VertexSize_Normal = 0;
@@ -202,11 +255,15 @@ inline void ComputeVertexDesc( unsigned char * pBuffer, VertexFormat_t vertexFor
 
 	if ( vertexFormat & VERTEX_COLOR )
 	{
-		desc.m_pColor = pBuffer + offset;
+		if ( !bSizeOnly )
+		{
+			desc.m_pColor = pBuffer + offset;
+			pVertexSizesToSet[nVertexSizesToSet++] = &desc.m_VertexSize_Color;
+		}
+
 		offset += GetVertexElementSize( VERTEX_ELEMENT_COLOR, compression );
-		pVertexSizesToSet[nVertexSizesToSet++] = &desc.m_VertexSize_Color;
 	}
-	else
+	else if ( !bSizeOnly )
 	{
 		desc.m_pColor = (unsigned char*)dummyData;
 		desc.m_VertexSize_Color = 0;
@@ -214,30 +271,38 @@ inline void ComputeVertexDesc( unsigned char * pBuffer, VertexFormat_t vertexFor
 
 	if ( vertexFormat & VERTEX_SPECULAR )
 	{
-		desc.m_pSpecular = pBuffer + offset;
+		if ( !bSizeOnly )
+		{
+			desc.m_pSpecular = pBuffer + offset;
+			pVertexSizesToSet[nVertexSizesToSet++] = &desc.m_VertexSize_Specular;
+		}
+
 		offset += GetVertexElementSize( VERTEX_ELEMENT_SPECULAR, compression );
-		pVertexSizesToSet[nVertexSizesToSet++] = &desc.m_VertexSize_Specular;
 	}
-	else
+	else if ( !bSizeOnly )
 	{
 		desc.m_pSpecular = (unsigned char*)dummyData;
 		desc.m_VertexSize_Specular = 0;
 	}
 
 	// Set up texture coordinates
+	static const VertexElement_t texCoordElements[4] = { VERTEX_ELEMENT_TEXCOORD1D_0, VERTEX_ELEMENT_TEXCOORD2D_0, VERTEX_ELEMENT_TEXCOORD3D_0, VERTEX_ELEMENT_TEXCOORD4D_0 };
 	for ( i = 0; i < VERTEX_MAX_TEXTURE_COORDINATES; ++i )
 	{
 		// FIXME: compress texcoords to SHORT2N/SHORT4N, with a scale rolled into the texture transform
-		VertexElement_t texCoordElements[4] = { VERTEX_ELEMENT_TEXCOORD1D_0, VERTEX_ELEMENT_TEXCOORD2D_0, VERTEX_ELEMENT_TEXCOORD3D_0, VERTEX_ELEMENT_TEXCOORD4D_0 };
 		int nSize = TexCoordSize( i, vertexFormat );
 		if ( nSize != 0 )
 		{
-			desc.m_pTexCoord[i] = reinterpret_cast<float*>(pBuffer + offset);
+			if ( !bSizeOnly )
+			{
+				desc.m_pTexCoord[i] = reinterpret_cast<float*>(pBuffer + offset);
+				pVertexSizesToSet[nVertexSizesToSet++] = &desc.m_VertexSize_TexCoord[i];
+			}
+
 			VertexElement_t texCoordElement = (VertexElement_t)( texCoordElements[ nSize - 1 ] + i );
 			offset += GetVertexElementSize( texCoordElement, compression );
-			pVertexSizesToSet[nVertexSizesToSet++] = &desc.m_VertexSize_TexCoord[i];
 		}
-		else
+		else if ( !bSizeOnly )
 		{
 			desc.m_pTexCoord[i] = dummyData;
 			desc.m_VertexSize_TexCoord[i] = 0;
@@ -249,11 +314,15 @@ inline void ComputeVertexDesc( unsigned char * pBuffer, VertexFormat_t vertexFor
 	if ( vertexFormat & VERTEX_TANGENT_S )
 	{
 		// UNDONE: use normal compression here (use mem_dumpvballocs to see if this uses much memory)
-		desc.m_pTangentS = reinterpret_cast<float*>(pBuffer + offset);
+		if ( !bSizeOnly )
+		{
+			desc.m_pTangentS = reinterpret_cast<float*>(pBuffer + offset);
+			pVertexSizesToSet[nVertexSizesToSet++] = &desc.m_VertexSize_TangentS;
+		}
 		offset += GetVertexElementSize( VERTEX_ELEMENT_TANGENT_S, compression );
-		pVertexSizesToSet[nVertexSizesToSet++] = &desc.m_VertexSize_TangentS;
+
 	}
-	else
+	else if ( !bSizeOnly )
 	{
 		desc.m_pTangentS = dummyData;
 		desc.m_VertexSize_TangentS = 0;
@@ -262,11 +331,14 @@ inline void ComputeVertexDesc( unsigned char * pBuffer, VertexFormat_t vertexFor
 	if ( vertexFormat & VERTEX_TANGENT_T )
 	{
 		// UNDONE: use normal compression here (use mem_dumpvballocs to see if this uses much memory)
-		desc.m_pTangentT = reinterpret_cast<float*>(pBuffer + offset);
+		if ( !bSizeOnly )
+		{
+			desc.m_pTangentT = reinterpret_cast<float*>(pBuffer + offset);
+			pVertexSizesToSet[nVertexSizesToSet++] = &desc.m_VertexSize_TangentT;
+		}
 		offset += GetVertexElementSize( VERTEX_ELEMENT_TANGENT_T, compression );
-		pVertexSizesToSet[nVertexSizesToSet++] = &desc.m_VertexSize_TangentT;
 	}
-	else
+	else if ( !bSizeOnly )
 	{
 		desc.m_pTangentT = dummyData;
 		desc.m_VertexSize_TangentT = 0;
@@ -276,14 +348,17 @@ inline void ComputeVertexDesc( unsigned char * pBuffer, VertexFormat_t vertexFor
 	int userDataSize = UserDataSize( vertexFormat );
 	if ( userDataSize > 0 )
 	{
-		desc.m_pUserData = reinterpret_cast<float*>(pBuffer + offset);
+		if ( !bSizeOnly )
+		{
+			desc.m_pUserData = reinterpret_cast<float*>(pBuffer + offset);
+			pVertexSizesToSet[nVertexSizesToSet++] = &desc.m_VertexSize_UserData;
+		}
+
 		VertexElement_t userDataElement = (VertexElement_t)( VERTEX_ELEMENT_USERDATA1 + ( userDataSize - 1 ) );
 		// See PackNormal_[SHORT2|UBYTE4|HEND3N] in mathlib.h for the compression algorithm
 		offset += GetVertexElementSize( userDataElement, compression );
-
-		pVertexSizesToSet[nVertexSizesToSet++] = &desc.m_VertexSize_UserData;
 	}
-	else
+	else if ( !bSizeOnly )
 	{
 		desc.m_pUserData = dummyData;
 		desc.m_VertexSize_UserData = 0;
@@ -298,12 +373,17 @@ inline void ComputeVertexDesc( unsigned char * pBuffer, VertexFormat_t vertexFor
 	}
 	desc.m_ActualVertexSize = offset;
 
-	// Now set the m_VertexSize for all the members that were actually valid.
-	Assert( nVertexSizesToSet < sizeof(pVertexSizesToSet)/sizeof(pVertexSizesToSet[0]) );
-	for ( int iElement=0; iElement < nVertexSizesToSet; iElement++ )
+	if ( !bSizeOnly )
 	{
-		*pVertexSizesToSet[iElement] = offset;
+		// Now set the m_VertexSize for all the members that were actually valid.
+		Assert( nVertexSizesToSet < sizeof(pVertexSizesToSet)/sizeof(pVertexSizesToSet[0]) );
+		for ( int iElement=0; iElement < nVertexSizesToSet; iElement++ )
+		{
+			*pVertexSizesToSet[iElement] = offset;
+		}
 	}
+
+	return offset;
 }
 
 #endif // MESHBASE_H

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright (c) 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -14,7 +14,8 @@
 void Memory_Init (void);
 void Memory_Shutdown( void );
 
-void *Hunk_Alloc(int size, bool bClear = true );
+void Hunk_OnMapStart( int nEstimatedBytes );
+
 void *Hunk_AllocName (int size, const char *name, bool bClear = true );
 
 int	Hunk_LowMark (void);
@@ -26,6 +27,39 @@ int Hunk_MallocSize();
 int Hunk_Size();
 
 void Hunk_Print();
+
+// Deal with memory attribution for CHunkMemory
+#define HUNK_ALLOC_CREDIT_( _name_ )	MEM_ALLOC_CREDIT_( _name_ ); CHunkAllocCredit hunkAllocAttributeAlloction( _name_ );
+class CHunkAllocCredit
+{
+public:
+	 CHunkAllocCredit( const char *name )	{ PushAllocDbgInfo( name ); };
+	 ~CHunkAllocCredit( void )				{ PopAllocDbgInfo(); };
+
+	static void PushAllocDbgInfo( const char *name )
+	{
+		Assert( name && name[0] );
+		++s_DbgInfoStackDepth;
+		Assert( s_DbgInfoStackDepth < DBG_INFO_STACK_DEPTH );
+		if ( s_DbgInfoStackDepth < DBG_INFO_STACK_DEPTH )
+			s_DbgInfoStack[s_DbgInfoStackDepth] = ( name && name[0] ) ? name : "CHunkMemory";
+	}
+	static void PopAllocDbgInfo( void )
+	{
+		Assert( s_DbgInfoStackDepth >= 0 );
+		if ( s_DbgInfoStackDepth >= 0 )
+			s_DbgInfoStack[ s_DbgInfoStackDepth-- ] = NULL;
+	}
+	static const char *GetAllocDbgInfo( void )
+	{
+		int index = MIN( s_DbgInfoStackDepth, (DBG_INFO_STACK_DEPTH-1) );
+		return ( index >= 0 ) ? s_DbgInfoStack[index] : "CHunkMemory";
+	}
+
+	static const int DBG_INFO_STACK_DEPTH = 8;
+	static const char *s_DbgInfoStack[ DBG_INFO_STACK_DEPTH ];
+	static int s_DbgInfoStackDepth;
+};
 
 template< typename T >
 class CHunkMemory
@@ -56,7 +90,7 @@ public:
 	int Count() const										{ return m_nAllocated; }
 
 	// Grows the memory, so that at least allocated + num elements are allocated
-	void Grow( int num = 1 )								{ Assert( !m_nAllocated ); m_pMemory = (T *)Hunk_Alloc( num * sizeof(T), false ); m_nAllocated = num; }
+	void Grow( int num = 1 )								{ Assert( !m_nAllocated ); m_pMemory = (T *)Hunk_AllocName( num * sizeof(T), CHunkAllocCredit::GetAllocDbgInfo(), false ); m_nAllocated = num; }
 
 	// Makes sure we've got at least this much memory
 	void EnsureCapacity( int num )							{ Assert( num <= m_nAllocated ); }
@@ -78,7 +112,4 @@ private:
 	int m_nAllocated;
 };
 
-
 #endif // ZONE_H
-
-

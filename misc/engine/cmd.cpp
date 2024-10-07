@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright (c) 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -7,21 +7,16 @@
 // $NoKeywords: $
 //===========================================================================//
 
-// support QueryPerformanceCounter
-#if defined(_WIN32) && !defined(_X360)
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#endif
 
 #include "quakedef.h"						 
 #include "zone.h"
-#include "tier0/vcrmode.h"
 #include "demo.h"
 #include "filesystem.h"
 #include "filesystem_engine.h"
 #include "eiface.h"
 #include "server.h"
 #include "sys.h"
+#include "cl_splitscreen.h"
 #include "baseautocompletefilelist.h"
 #include "tier0/icommandline.h"
 #include "tier1/utlbuffer.h"
@@ -30,13 +25,12 @@
 #include "netmessages.h"
 #include "client.h"
 #include "sv_plugin.h"
-#include "tier1/CommandBuffer.h"
+#include "tier1/commandbuffer.h"
 #include "cvar.h"
 #include "vstdlib/random.h"
 #include "tier1/utldict.h"
 #include "tier0/etwprof.h"
 #include "tier0/vprof.h"
-#include "gl_matsysiface.h"		// update materialsystem config
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -66,8 +60,9 @@ struct cmdalias_t
 
 static cmdalias_t	*cmd_alias = NULL;
 
-static CCommandBuffer s_CommandBuffer;
+static CCommandBuffer s_CommandBuffer[ CBUF_COUNT ];
 static CThreadFastMutex s_CommandBufferMutex;
+CUtlStringList m_WhitelistedConvars;
 #define LOCK_COMMAND_BUFFER() AUTO_LOCK(s_CommandBufferMutex)
 
 static FileAssociationInfo g_FileAssociations[] =
@@ -78,19 +73,16 @@ static FileAssociationInfo g_FileAssociations[] =
 };
 
 
-int g_iFilterCommandsByServerCanExecute = 0;		// If this is nonzero, then they want us to only run commands marked with FCVAR_SERVER_CAN_EXECUTE.
-int g_iFilterCommandsByClientCmdCanExecute = 0;		// If this is nonzero, then they want us to only run commands marked with FCVAR_CLIENTCMD_CAN_EXECUTE.
-
-// This is a list of cvars that are in the client DLL that we want FCVAR_CLIENTCMD_CAN_EXECUTE set on.
-// In order to avoid patching the client DLL, we setup this list. Whenever the client DLL has gone out with the
-// FCVAR_CLIENTCMD_CAN_EXECUTE flag set, we can get rid of this list.
-CUtlDict<int,int> g_ExtraClientCmdCanExecuteCvars;
-
-void Cmd_AddClientCmdCanExecuteVar( const char *pName )
-{
-	if ( g_ExtraClientCmdCanExecuteCvars.Find( pName ) == g_ExtraClientCmdCanExecuteCvars.InvalidIndex() )
-		g_ExtraClientCmdCanExecuteCvars.Insert( pName );
-}
+// Client -> Server command throttling
+// FIXME: Perhaps kForwardedCommandQuota_nCommandsPerSecond should instead be some fraction /
+//        amount below sv_quota_stringcmdspersecond.  Right now that variable isn't networked,
+//        so we just cap at the previous server 'throttle' value (after which commands were
+//        discarded).  The new behavior kicks you from the server if you overflow, so it's
+//        important to be significantly below that -- we don't throttle commands issued
+//        by client code, only via the user via console/keybind input.
+static const int kForwardedCommandQuota_nCommandsPerSecond = 16;
+static double gForwardedCommandQuota_flTimeStart = -1.0;
+static int gForwardedCommandQuota_nCount = 0;
 
 
 //=============================================================================
@@ -99,62 +91,13 @@ void Cmd_AddClientCmdCanExecuteVar( const char *pName )
 //=============================================================================
 
 static CUtlVector<int> g_ExecutionMarkers;
-static CUniformRandomStream g_ExecutionMarkerStream;
-static bool g_bExecutionMarkerStreamInitialized = false;
 
 static int CreateExecutionMarker()
 {
-	if ( !g_bExecutionMarkerStreamInitialized )
-	{
-		int iSeed;
-		if ( IsPosix() )
-		{
-			float flFloatTime = (float)Plat_FloatTime();
-			iSeed = *(int*)(&flFloatTime);
-		}
-		else
-		{
-#if defined(_WIN32) && !defined(_X360)
-			LARGE_INTEGER CurrentTime;
+	if ( g_ExecutionMarkers.Count() > 2048 )
+		g_ExecutionMarkers.Remove( 0 );
 
-			QueryPerformanceCounter( &CurrentTime );
-			iSeed = CurrentTime.LowPart ^ CurrentTime.HighPart;
-#else
-			float flFloatTime = (float)Plat_FloatTime();
-			iSeed = *(int*)(&flFloatTime);
-#endif
-		}
-
-		g_ExecutionMarkerStream.SetSeed( iSeed );
-		g_bExecutionMarkerStreamInitialized = true;
-	}
-
-	if ( g_ExecutionMarkers.Count() >= MAX_EXECUTION_MARKERS )
-	{
-		// Callers to this function should call Cbuf_HasRoomForExecutionMarkers first.
-		Host_Error( "CreateExecutionMarker called, but the max has already been reached." );
-	}
-
-	int nRandomNumber;
-	int nIndex = g_ExecutionMarkers.InvalidIndex();
-
-	// Pick a random number that doesn't already exist in the list
-	do
-	{
-		// We don't have CCrypto :(
-		// if ( CCrypto::GenerateRandomBlock( (uint8 *)&nRandomNumber, sizeof(nRandomNumber) ) )
-		// {
-		// 	nRandomNumber = nRandomNumber & 0x7FFFFFFF;
-		// }
-		// else
-		// {
-		nRandomNumber = g_ExecutionMarkerStream.RandomInt( 0, 1<<30 );
-		// }
-
-		nIndex = g_ExecutionMarkers.Find( nRandomNumber );
-	} while ( nIndex != g_ExecutionMarkers.InvalidIndex() );
-
-	int i = g_ExecutionMarkers.AddToTail( nRandomNumber );
+	int i = g_ExecutionMarkers.AddToTail( RandomInt( 0, 1<<30 ) );
 	return g_ExecutionMarkers[i];
 }
 
@@ -202,12 +145,7 @@ CON_COMMAND( BindToggle, "Performs a bind <key> \"increment var <cvar> 0 1 1\"" 
 	char newCmd[MAX_COMMAND_LENGTH];
 	Q_snprintf( newCmd, sizeof(newCmd), "bind %s \"incrementvar %s 0 1 1\"\n", args[1], args[2] );
 
-	Cbuf_InsertText( newCmd );
-}
-
-CON_COMMAND_F( PerfMark, "inserts a telemetry marker into the stream. If args are provided, they will be included.", FCVAR_NONE )
-{
-	// Nothing to do, we had our message written out by Cbuf_ExecuteCommand. 
+	Cbuf_InsertText( Cbuf_GetCurrentPlayer(), newCmd, args.Source() );
 }
 
 
@@ -217,30 +155,37 @@ CON_COMMAND_F( PerfMark, "inserts a telemetry marker into the stream. If args ar
 void Cbuf_Init()
 {
 	// Wait for 1 execute time
-	s_CommandBuffer.SetWaitDelayTime( 1 );
+	for ( int i = 0; i < CBUF_COUNT; ++i )
+	{
+		s_CommandBuffer[ i ].SetWaitDelayTime( 1 );
+	}
 }
 
 void Cbuf_Shutdown()
 {
 }
 
+ECommandTarget_t Cbuf_GetCurrentPlayer()
+{
+	return ( ECommandTarget_t )( GET_ACTIVE_SPLITSCREEN_SLOT() );
+}
 
 //-----------------------------------------------------------------------------
 // Clears the command buffer
 //-----------------------------------------------------------------------------
-void Cbuf_Clear()
+void Cbuf_Clear( ECommandTarget_t eTarget )
 {
-	Cbuf_Init();
+	s_CommandBuffer[ eTarget ].SetWaitDelayTime( 1 );
 }
 
 
 //-----------------------------------------------------------------------------
 // Adds command text at the end of the buffer
 //-----------------------------------------------------------------------------
-void Cbuf_AddText( const char *pText )
+void Cbuf_AddText( ECommandTarget_t eTarget, const char *pText, cmd_source_t cmdSource, int nTickDelay )
 {
 	LOCK_COMMAND_BUFFER();
-	if ( !s_CommandBuffer.AddText( pText ) )
+	if ( !s_CommandBuffer[ eTarget ].AddText( pText, cmdSource, nTickDelay ) )
 	{
 		ConMsg( "Cbuf_AddText: buffer overflow\n" );
 	}
@@ -248,133 +193,51 @@ void Cbuf_AddText( const char *pText )
 
 
 //-----------------------------------------------------------------------------
-// Escape an argument for a command. This *can* fail as many characters cannot
-// actually be passed through the old command syntax...
-//-----------------------------------------------------------------------------
-bool Cbuf_EscapeCommandArg( const char *pText, char *pOut, unsigned int nOut )
-{
-	// Okay, so, to be honest, all we can do with the super limited syntax is ensure we don't have quotes or control
-	// characters, and then wrap the string in quotes. Hence escape *argument*. Anything more advanced than that is just
-	// not allowable.
-	if ( !pText || !*pText )
-		return false;
-
-	for (const char *pChar = pText; pChar && *pChar; pChar++ )
-	{
-		// ASCII control characters (codepoints <= 31) are just not sane to pass to this system. This includes \n and
-		// \r.
-		if ( *pChar <= (char)31 )
-			return false;
-
-		// Can't quote these with current syntax.
-		if ( *pChar == '"' )
-			return false;
-	}
-
-	// Room for quotes+null in out?
-	if ( !pOut || nOut < (unsigned int)V_strlen( pText ) + 3 )
-		return false;
-
-	V_snprintf( pOut, nOut, "\"%s\"", pText );
-	return true;
-}
-
-//-----------------------------------------------------------------------------
 // Adds command text at the beginning of the buffer
 //-----------------------------------------------------------------------------
-void Cbuf_InsertText( const char *pText )
+void Cbuf_InsertText( ECommandTarget_t eTarget, const char *pText, cmd_source_t cmdSource, int nTickDelay )
 {
 	LOCK_COMMAND_BUFFER();
 	// NOTE: This operation is only allowed when the command buffer
 	// is in the middle of processing. If this assertion never triggers,
 	// it's safe to eliminate Cbuf_InsertText altogether.
 	// Otherwise, I have to add a feature to CCommandBuffer
-	Assert( s_CommandBuffer.IsProcessingCommands() );
-	Cbuf_AddText( pText );
+	Assert( s_CommandBuffer[ eTarget ].IsProcessingCommands() );
+	Cbuf_AddText( eTarget, pText, cmdSource, nTickDelay );
 }
 
-
-
-bool Cbuf_AddExecutionMarker( ECmdExecutionMarker marker, const char *pszMarkerCode )
+bool Cbuf_IsProcessingCommands( ECommandTarget_t eTarget )
 {
-	if ( marker == eCmdExecutionMarker_Enable_FCVAR_SERVER_CAN_EXECUTE )
-	{
-		s_CommandBuffer.SetWaitEnabled( false );
-	}
-	else if ( marker == eCmdExecutionMarker_Disable_FCVAR_SERVER_CAN_EXECUTE )
-	{
-		s_CommandBuffer.SetWaitEnabled( true );
-	}
-
-	return s_CommandBuffer.AddText( pszMarkerCode );
+	LOCK_COMMAND_BUFFER();
+	return s_CommandBuffer[ eTarget ].IsProcessingCommands();
 }
 
-
-bool Cbuf_AddTextWithMarkers( ECmdExecutionMarker markerLeft, const char *text, ECmdExecutionMarker markerRight )
+void Cbuf_AddExecutionMarker( ECommandTarget_t eTarget, ECmdExecutionMarker marker )
 {
-	if ( !Cbuf_HasRoomForExecutionMarkers( 2 ) )
-	{
-		ConMsg( "Cbuf_AddTextWithMarkers: execution marker overflow\n" );
-		return false;
-	}
-
-	int iMarkerCodeLeft = CreateExecutionMarker();
-	int iMarkerCodeRight = CreateExecutionMarker();
-
+	int iMarkerCode = CreateExecutionMarker();
+	
 	// CMDCHAR_ADD_EXECUTION_MARKER tells us there's a special execution thing here.
 	// (char)marker tells it what to turn on
 	// iRandomCode is for security, so only our code can stuff this command into the buffer.
-	char szMarkerLeft[512], szMarkerRight[512];
-	V_sprintf_safe( szMarkerLeft, ";%s %c %d;", CMDSTR_ADD_EXECUTION_MARKER, (char)markerLeft, iMarkerCodeLeft );
-	V_sprintf_safe( szMarkerRight, ";%s %c %d;", CMDSTR_ADD_EXECUTION_MARKER, (char)markerRight, iMarkerCodeRight );
-
-	// Due to the behavior of the command buffer, we may be over-estimating the amount of space required.
-	int cTextToBeAdded = strlen( szMarkerLeft ) + strlen( szMarkerRight ) + strlen( text ) + 3;
-
-	LOCK_COMMAND_BUFFER();
-	if ( s_CommandBuffer.GetArgumentBufferSize() + cTextToBeAdded + 1 > s_CommandBuffer.GetMaxArgumentBufferSize() )
-	{
-		// cleanup
-		FindAndRemoveExecutionMarker( iMarkerCodeLeft );
-		FindAndRemoveExecutionMarker( iMarkerCodeRight );
-
-		ConMsg( "Cbuf_AddTextWithMarkers: buffer overflow\n" );
-		return false;
-	}
-
-	bool bSuccess = Cbuf_AddExecutionMarker( markerLeft, szMarkerLeft ) && 
-		s_CommandBuffer.AddText( text ) &&
-		Cbuf_AddExecutionMarker( markerRight, szMarkerRight );
-	if ( !bSuccess )
-	{
-		// If we screwed up the validation, don't allow us to get stuck in a bad state.
-		Host_Error( "Cbuf_AddTextWithMarkers: buffer overflow\n" );
-	}
-
-	return true;
-}
-
-
-bool Cbuf_HasRoomForExecutionMarkers( int cExecutionMarkers )
-{
-	return ( g_ExecutionMarkers.Count() + cExecutionMarkers ) < MAX_EXECUTION_MARKERS;
+	char str[512];
+	Q_snprintf( str, sizeof( str ), ";%s %c %d;", CMDSTR_ADD_EXECUTION_MARKER, (char)marker, iMarkerCode );
+	
+	Cbuf_AddText( eTarget, str, kCommandSrcCode );
 }
 
 
 //-----------------------------------------------------------------------------
 // Executes commands in the buffer
 //-----------------------------------------------------------------------------
-static void Cbuf_ExecuteCommand( const CCommand &args, cmd_source_t source )
+static void Cbuf_ExecuteCommand( ECommandTarget_t eTarget, const CCommand &args )
 {
-	// Note: If you remove this, PerfMark needs to do the same logic--so don't do that.
-	tmMessage( TELEMETRY_LEVEL0, TMMF_SEVERITY_LOG | TMMF_ICON_NOTE, "(source/command) %s", tmDynamicString( TELEMETRY_LEVEL0, args.GetCommandString() ) );
 	// Add the command text to the ETW stream to give better context to traces.
 	ETWMark( args.GetCommandString() );
 
 	// execute the command line
-	const ConCommandBase *pCmd = Cmd_ExecuteCommand( args, source );
+	const ConCommandBase *pCmd = Cmd_ExecuteCommand( eTarget, args );
 
-#if !defined(SWDS) && !defined(_XBOX)
+#if !defined(DEDICATED)
 	if ( pCmd && !pCmd->IsFlagSet( FCVAR_DONTRECORD ) )
 	{
 		demorecorder->RecordCommand( args.GetCommandString() );
@@ -389,7 +252,6 @@ static void Cbuf_ExecuteCommand( const CCommand &args, cmd_source_t source )
 void Cbuf_Execute()
 {
 	VPROF("Cbuf_Execute");
-	tmZoneFiltered( TELEMETRY_LEVEL0, 50, TMZF_NONE, "%s", __FUNCTION__ );
 
 	if ( !ThreadInMainThread() )
 	{
@@ -399,26 +261,46 @@ void Cbuf_Execute()
 
 	LOCK_COMMAND_BUFFER();
 
-	// If text was added with Cbuf_AddText and then Cbuf_Execute gets called from within handler, we're going
-	//  to execute the new commands anyway, so we can ignore this extra execute call here.
-	if ( s_CommandBuffer.IsProcessingCommands() )
-		return;
+#if !defined( SPLIT_SCREEN_STUBS )
+	int nSaveIndex = GET_ACTIVE_SPLITSCREEN_SLOT();
+	bool bSaveResolvable = SET_LOCAL_PLAYER_RESOLVABLE( __FILE__, __LINE__, false );
+#endif
 
-	// Allow/Don't allow wait commands.
-	if ( sv_allow_wait_command.GetBool() != s_CommandBuffer.IsWaitEnabled() )
+	for ( int i = 0; i < CBUF_COUNT; ++i )
 	{
-		s_CommandBuffer.SetWaitEnabled( sv_allow_wait_command.GetBool() );
+		// If text was added with Cbuf_AddText and then Cbuf_Execute gets called from within handler, we're going
+		//  to execute the new commands anyway, so we can ignore this extra execute call here.
+		if ( s_CommandBuffer[ i ].IsProcessingCommands() )
+			continue;
+
+		// For player slots, force the correct context
+		if ( i >= CBUF_FIRST_PLAYER && 
+			 i < ( CBUF_FIRST_PLAYER + host_state.max_splitscreen_players ) )
+		{
+			SET_ACTIVE_SPLIT_SCREEN_PLAYER_SLOT( i );
+			SET_LOCAL_PLAYER_RESOLVABLE( __FILE__, __LINE__, true );
+		}
+		else
+		{
+			SET_ACTIVE_SPLIT_SCREEN_PLAYER_SLOT( 0 );
+			SET_LOCAL_PLAYER_RESOLVABLE( __FILE__, __LINE__, bSaveResolvable );
+		}
+
+		// NOTE: The command buffer knows about execution time related to commands,
+		// but since HL2 doesn't, we're going to spoof the command time to simply
+		// be the the number of times Cbuf_Execute is called.
+		s_CommandBuffer[ i ].BeginProcessingCommands( 1 );
+		CCommand nextCommand;
+
+		while ( s_CommandBuffer[ i ].DequeueNextCommand( &nextCommand ) )
+		{
+			Cbuf_ExecuteCommand( ( ECommandTarget_t )i, nextCommand );
+		}
+		s_CommandBuffer[ i ].EndProcessingCommands( );
 	}
 
-	// NOTE: The command buffer knows about execution time related to commands,
-	// but since HL2 doesn't, we're going to spoof the command time to simply
-	// be the the number of times Cbuf_Execute is called.
-	s_CommandBuffer.BeginProcessingCommands( 1 );
-	while ( s_CommandBuffer.DequeueNextCommand( ) )
-	{
-		Cbuf_ExecuteCommand( s_CommandBuffer.GetCommand(), src_command );
-	}
-	s_CommandBuffer.EndProcessingCommands( );
+	SET_ACTIVE_SPLIT_SCREEN_PLAYER_SLOT( nSaveIndex );
+	SET_LOCAL_PLAYER_RESOLVABLE( __FILE__, __LINE__, bSaveResolvable );
 }
 
 
@@ -433,7 +315,7 @@ static char const *Cmd_TranslateFileAssociation(char const *param )
 	char *retval = NULL;
 
 	char temp[ 512 ];
-	Q_strncpy( temp, param, sizeof( temp ) );
+	V_strcpy_safe( temp, param );
 	Q_FixSlashes( temp );
 	Q_strlower( temp );
 
@@ -451,7 +333,7 @@ static char const *Cmd_TranslateFileAssociation(char const *param )
 			 ! CommandLine()->FindParm(va( "+%s", info.command_to_issue ) ) )
 		{
 			// Translate if haven't already got one of these commands			
-			Q_strncpy( sz, temp, sizeof( sz ) );
+			V_strcpy_safe( sz, temp );
 			Q_FileBase( sz, temp, sizeof( sz ) );
 
 			Q_snprintf( sz, sizeof( sz ), "%s %s", info.command_to_issue, temp );
@@ -493,19 +375,38 @@ CON_COMMAND( stuffcmds, "Parses and stuffs command line + commands to command bu
 		if (szParm[0] == '-') 
 		{
 			// skip -XXX options and eat their args
-			const char *szValue = CommandLine()->ParmValueByIndex( i );
-			if ( szValue )
-				i++;
+			const char *szValue = CommandLine()->ParmValue(szParm);
+			if ( szValue ) i++;
 			continue;
 		}
 		if (szParm[0] == '+')
 		{
 			// convert +XXX options and stuff them into the build buffer
-			const char *szValue = CommandLine()->ParmValueByIndex( i );
+			const char *szValue = CommandLine()->ParmValue(szParm);
 			if (szValue)
 			{
-				build.PutString(va("%s %s\n", szParm+1, szValue));
-				i++;
+				// Special case for +map parameter on the command line to support a second argument
+				char const *szSecondParameterUsed = NULL;
+				if ( !Q_stricmp( "+map", szParm ) &&
+					( CommandLine()->ParmCount() > ( i + 2 ) ) &&
+					CommandLine()->GetParm( i + 2 ) )
+				{
+					char const *szAppendParameter = CommandLine()->GetParm( i + 2 );
+					if ( ( szAppendParameter[0] != '+' ) &&
+						 ( szAppendParameter[0] != '-' ) )
+					{
+						szSecondParameterUsed = szAppendParameter;
+						build.PutString( va("%s %s %s\n", szParm+1, szValue, szSecondParameterUsed ) );
+						++ i; // eat one parameter we used for map name
+						++ i; // eat another parameter that was second appended parameter
+					}
+				}
+
+				if ( !szSecondParameterUsed )
+				{	// If we didn't use the second parameter, then just append command value to execution buffer
+					build.PutString( va("%s %s\n", szParm+1, szValue ) );
+					i++;
+				}
 			}
 			else
 			{
@@ -529,7 +430,7 @@ CON_COMMAND( stuffcmds, "Parses and stuffs command line + commands to command bu
 		
 	if ( build.TellPut() > 1 )
 	{
-		Cbuf_InsertText( (char *)build.Base() );
+		Cbuf_InsertText( Cbuf_GetCurrentPlayer(), (char *)build.Base(), args.Source() );
 	}
 }
 
@@ -558,114 +459,177 @@ bool IsValidFileExtension( const char *pszFilename )
 	return true;
 }
 
+bool IsWhiteListedCmd( const char *pszCmd )
+{
+	if ( m_WhitelistedConvars.Count() == 0 )
+	{
+		const char *svfileName = "bspconvar_whitelist.txt";
+		KeyValues *pKV_wl = new KeyValues( "convars" );
+		if ( pKV_wl->LoadFromFile( g_pFullFileSystem, svfileName, "GAME" ) )
+		{
+			KeyValuesDumpAsDevMsg( pKV_wl );
+			for ( KeyValues *sub = pKV_wl->GetFirstSubKey(); sub; sub = sub->GetNextKey() )
+			{
+				m_WhitelistedConvars.CopyAndAddToTail( sub->GetName() );
+			}
+		}
+		else
+		{
+			DevMsg( "Failed to cache %s\n", svfileName );
+			return false;
+		}
+	}
+
+	for ( int i = 0; i < m_WhitelistedConvars.Count(); ++i )
+	{
+		if ( !Q_stricmp(m_WhitelistedConvars[i], pszCmd) )
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
 /*
 ===============
 Cmd_Exec_f
 ===============
 */
 
-void Cmd_Exec_f( const CCommand &args )
+void _Cmd_Exec_f( const CCommand &args, bool bOnlyIfExists, bool bUseWhitelist = false )
 {
 	LOCK_COMMAND_BUFFER();
+	char	*f;
+	const char	*s;
 	char	fileName[MAX_OSPATH];
 
 	int argc = args.ArgC();
-
-	if ( argc != 2 )
+	if ( argc < 2 )
 	{
-		ConMsg( "exec <filename>: execute a script file\n" );
+		ConMsg( "%s <filename> [path id]: execute a script file\n", args[ 0 ] );
 		return;
 	}
 
-	const char *szFile = args[1];
+	s = args[ 1 ];
+	DevMsg( "Execing config: %s\n", s );
 
-	const char *pPathID = "MOD";
-
-	Q_snprintf( fileName, sizeof( fileName ), "//%s/cfg/%s", pPathID, szFile );
-	Q_DefaultExtension( fileName, ".cfg", sizeof( fileName ) );
-
-	// check path validity
-	if ( !COM_IsValidPath( fileName ) )
+	// Optional path ID. * means no path ID.
+	const char *pPathID = NULL;
+	if ( argc >= 3 )
 	{
-		ConMsg( "exec %s: invalid path.\n", fileName );
-		return;
+		pPathID = args[ 2 ];
+	}
+	else
+	{
+		pPathID = "*";
+	}
+
+	if ( !Q_stricmp( pPathID, "T" ) )
+	{
+		// Has an extension already?
+		Q_snprintf( fileName, sizeof( fileName ), "T:/cfg/%s", s );
+	}
+	else
+	{
+		// Ensure it has an extension
+		Q_snprintf( fileName, sizeof( fileName ), "//%s/cfg/%s", pPathID, s );
+		Q_DefaultExtension( fileName, ".cfg", sizeof( fileName ) );
+		
+		// check path validity
+		if ( !COM_IsValidPath( fileName ) )
+		{
+			ConMsg( "%s %s: invalid path.\n", args[ 0 ], fileName );
+			return;
+		}
 	}
 
 	// check for invalid file extensions
 	if ( !IsValidFileExtension( fileName ) )
 	{
-		ConMsg( "exec %s: invalid file type.\n", fileName );
+		ConMsg( "%s %s: invalid file type.\n", args[ 0 ], fileName );
 		return;
 	}
 
 	// 360 doesn't need to do costly existence checks
-	if ( IsPC() )
+	if ( IsPC() && g_pFileSystem->FileExists( fileName ) )
 	{
-		if ( g_pFileSystem->FileExists( fileName ) )
+		// don't want to exec files larger than 1 MB
+		// probably not a valid file to exec
+		unsigned int size = g_pFileSystem->Size( fileName );
+		if ( size > 1*1024*1024 )
 		{
-			// don't want to exec files larger than 1 MB
-			// probably not a valid file to exec
-			unsigned int size = g_pFileSystem->Size( fileName );
-			if ( size > 1*1024*1024 )
-			{
-				ConMsg( "exec %s: file size larger than 1 MB!\n", szFile );
-				return;
-			}
-		}
-		else
-		{
-			// Many exec files are optional.  make the error message slightly
-			// more informative and less like there is a problem.
-			if ( !V_stristr( szFile, "autoexec.cfg" ) && !V_stristr( szFile, "joystick.cfg" ) && !V_stristr( szFile, "game.cfg" ) )
-			{
-				ConMsg( "'%s' not present; not executing.\n", szFile );
-			}
+			ConMsg( "%s %s: file size larger than 1 MB!\n", args[ 0 ], s );
 			return;
 		}
 	}
 
-	char buf[16384] = { 0 };
-	int len = 0;
-	char *f = (char *)COM_LoadStackFile( fileName, buf, sizeof( buf ), len );
+	char buf[16384];
+	int len;
+	f = (char *)COM_LoadStackFile( fileName, buf, sizeof( buf ), len );
 	if ( !f )
 	{
-		ConMsg( "exec: couldn't exec %s\n", szFile );
+		if ( !V_stristr( s, "autoexec.cfg" ) && !V_stristr( s, "joystick.cfg" ) && !V_stristr( s, "game.cfg" ))
+		{
+			// File doesn't exist, fail silently?
+			if ( !bOnlyIfExists )
+			{
+				ConMsg( "%s: couldn't exec %s\n", args[ 0 ], s );
+			}
+		}
 		return;
 	}
-
+	
 	char *original_f = f;
-	VCRHook_Cmd_Exec(&f);
+	ConDMsg( "execing %s\n", s );
+	
+	ECommandTarget_t eTarget = CBUF_FIRST_PLAYER;
 
-	// In case f was allocated and VCR mode spoofed f, free the old one we allocated earlier.
-	if ( original_f != buf && original_f != f )
+	// A bit of hack, but find the context (probably CBUF_SERVER) who is executing commands!
+	for ( int i = 0; i < CBUF_COUNT; ++i )
 	{
-		free( original_f );
+		if ( s_CommandBuffer[ i ].IsProcessingCommands() )
+		{
+			eTarget = (ECommandTarget_t)i;
+			break;
+		}
 	}
 
-	ConDMsg( "execing %s\n", szFile );
+	CCommandBuffer &rCommandBuffer = s_CommandBuffer[ eTarget ];
 
 	// check to make sure we're not going to overflow the cmd_text buffer
-	int hCommand = s_CommandBuffer.GetNextCommandHandle();
+	int hCommand = rCommandBuffer.GetNextCommandHandle();
+
+	KeyValues *pKV_wl = new KeyValues( "convars" );
 
 	// Execute each command immediately
 	const char *pszDataPtr = f;
-	while( true )
+	while( pszDataPtr )
 	{
 		// parse a line out of the source
 		pszDataPtr = COM_ParseLine( pszDataPtr );
 
 		// no more tokens
 		if ( Q_strlen( com_token ) <= 0 )
-			break;
+			continue;
 
-		Cbuf_InsertText( com_token );
+		Cbuf_InsertText( eTarget, com_token, args.Source() );
 
 		// Execute all commands provoked by the current line read from the file
-		while ( s_CommandBuffer.GetNextCommandHandle() != hCommand )
+		while ( rCommandBuffer.GetNextCommandHandle() != hCommand )
 		{
-			if( s_CommandBuffer.DequeueNextCommand( ) )
+			CCommand execCommand;
+
+			if( rCommandBuffer.DequeueNextCommand( &execCommand ) )
 			{
-				Cbuf_ExecuteCommand( s_CommandBuffer.GetCommand(), src_command );
+				bool bFoundConvar = true;
+				if ( bUseWhitelist )
+				{
+					bFoundConvar = IsWhiteListedCmd( *execCommand.ArgV() );
+				}
+
+				if ( bFoundConvar )
+					Cbuf_ExecuteCommand( eTarget, execCommand );
 			}
 			else
 			{
@@ -673,6 +637,12 @@ void Cmd_Exec_f( const CCommand &args )
 				break;
 			}
 		}
+	}
+
+	if ( pKV_wl )
+	{
+		pKV_wl->deleteThis();
+		pKV_wl = NULL;
 	}
 
 	if ( f != buf )
@@ -684,10 +654,22 @@ void Cmd_Exec_f( const CCommand &args )
 			free( f );
 		}
 	}
-	// force any queued convar changes to flush before reading/writing them
-	UpdateMaterialSystemConfig();
 }
 
+void Cmd_Exec_f( const CCommand &args )
+{
+	_Cmd_Exec_f( args, false );
+}
+
+void Cmd_ExecIfExists_f( const CCommand &args )
+{
+	_Cmd_Exec_f( args, true );
+}
+
+void Cmd_ExecWithWhiteList_f( const CCommand &args )
+{
+	_Cmd_Exec_f( args, false, true );
+}
 
 /*
 ===============
@@ -706,13 +688,6 @@ CON_COMMAND_F( echo, "Echo text to console.", FCVAR_SERVER_CAN_EXECUTE )
 	ConMsg ("\n");
 }
 
-// Users can alias these commands to remove their functionality because the game systems use convars to implement these features
-// The blacklist prevents that exploit
-static const char *g_pBlacklistedCommands[] = 
-{
-	"dsp_player",
-	"room_type",
-};
 /*
 ===============
 Cmd_Alias_f
@@ -724,7 +699,7 @@ CON_COMMAND( alias, "Alias a command." )
 {
 	cmdalias_t	*a;
 	char		cmd[MAX_COMMAND_LENGTH];
-	int			c;
+	int			i, c;
 	const char	*s;
 
 	int argc = args.ArgC();
@@ -745,26 +720,18 @@ CON_COMMAND( alias, "Alias a command." )
 		return;
 	}
 
-	for ( int i = 0; i < ARRAYSIZE(g_pBlacklistedCommands); i++ )
-	{
-		if ( !V_stricmp( g_pBlacklistedCommands[i], s) )
-		{
-			ConMsg("Can't alias %s\n", g_pBlacklistedCommands[i] );
-			return;
-		}
-	}
 // copy the rest of the command line
 	cmd[0] = 0;		// start out with a null string
 	c = argc;
-	for ( int i=2 ; i< c ; i++)
+	for (i=2 ; i< c ; i++)
 	{
-		Q_strncat(cmd, args[i], sizeof( cmd ), COPY_ALL_CHARACTERS);
+		V_strcat_safe( cmd, args[i] );
 		if (i != c)
 		{
-			Q_strncat (cmd, " ", sizeof( cmd ), COPY_ALL_CHARACTERS );
+			V_strcat_safe( cmd, " " );
 		}
 	}
-	Q_strncat (cmd, "\n", sizeof( cmd ), COPY_ALL_CHARACTERS);
+	V_strcat_safe( cmd, "\n" );
 
 	// if the alias already exists, reuse it
 	for (a = cmd_alias ; a ; a=a->next)
@@ -781,13 +748,30 @@ CON_COMMAND( alias, "Alias a command." )
 
 	if (!a)
 	{
+		ConCommandBase *pCommandExisting = g_pCVar->FindCommandBase( s );
+		if ( pCommandExisting )
+		{
+			ConMsg( "Cannot alias an existing %s\n", pCommandExisting->IsCommand() ? "concommand" : "convar" );
+			return;
+		}
+
 		a = (cmdalias_t *)new cmdalias_t;
 		a->next = cmd_alias;
 		cmd_alias = a;
 	}
-	Q_strncpy (a->name, s, sizeof( a->name ) );	
+	V_strcpy_safe ( a->name, s );	
 
 	a->value = COM_StringCopy(cmd);
+}
+
+/*
+===============
+Runs a command only if that command exits in the bspwhitelist
+===============
+*/
+CON_COMMAND( whitelistcmd, "Runs a whitelisted command." )
+{
+	Cmd_ForwardToServerWithWhitelist( args );
 }
 
 /*
@@ -798,7 +782,6 @@ CON_COMMAND( alias, "Alias a command." )
 =============================================================================
 */
 
-cmd_source_t	cmd_source;
 int				cmd_clientslot = -1;
 
 
@@ -812,6 +795,8 @@ CON_COMMAND( cmd, "Forward command to server." )
 }
 
 CON_COMMAND_AUTOCOMPLETEFILE( exec, Cmd_Exec_f, "Execute script file.", "cfg", cfg );
+CON_COMMAND_AUTOCOMPLETEFILE( execifexists, Cmd_ExecIfExists_f, "Execute script file if file exists.", "cfg", cfg );
+CON_COMMAND_AUTOCOMPLETEFILE( execwithwhitelist, Cmd_ExecWithWhiteList_f, "Execute script file, only execing convars on a whitelist.", "cfg", cfg );
 
 
 
@@ -849,22 +834,29 @@ void Cmd_Dispatch( const ConCommandBase *pCommand, const CCommand &command )
 
 static void HandleExecutionMarker( const char *pCommand, const char *pMarkerCode )
 {
-	char cCommand = pCommand[0];
 	int iMarkerCode = atoi( pMarkerCode );
 	
 	// Validate..
 	if ( FindAndRemoveExecutionMarker( iMarkerCode ) )
 	{
 		// Ok, now it's validated, so do the command.
-		if ( cCommand == eCmdExecutionMarker_Enable_FCVAR_SERVER_CAN_EXECUTE )
-			++g_iFilterCommandsByServerCanExecute;
-		else if ( cCommand == eCmdExecutionMarker_Disable_FCVAR_SERVER_CAN_EXECUTE )
-			--g_iFilterCommandsByServerCanExecute;
+		// REI CSGO: We no longer use execution markers, but I'm leaving this mechanism in here
+		ECmdExecutionMarker command = (ECmdExecutionMarker)(pCommand[0]);
 
-		else if ( cCommand == eCmdExecutionMarker_Enable_FCVAR_CLIENTCMD_CAN_EXECUTE )
-			++g_iFilterCommandsByClientCmdCanExecute;
-		else if ( cCommand == eCmdExecutionMarker_Disable_FCVAR_CLIENTCMD_CAN_EXECUTE )
-			--g_iFilterCommandsByClientCmdCanExecute;
+#ifdef _WIN32
+#pragma warning(push)
+#pragma warning(disable: 4065) // switch statement contains 'default' but no 'case' labels
+#endif // _WIN32
+
+		switch(command)
+		{
+		default:
+			Warning( "Unrecognized execution marker '%c'\n", pCommand[0] );
+		}
+
+#ifdef _WIN32
+#pragma warning(pop)
+#endif
 	}
 	else
 	{
@@ -874,49 +866,59 @@ static void HandleExecutionMarker( const char *pCommand, const char *pMarkerCode
 	}
 }
 
-static bool ShouldPreventServerCommand( const ConCommandBase *pCommand )
+static bool ShouldPreventServerCommand( const CCommand& args, const ConCommandBase *pCommand )
 {
-	if ( !Host_IsSinglePlayerGame() )
-	{
-		if ( g_iFilterCommandsByServerCanExecute > 0 )
-		{
-			// If we don't understand the command, and it came from a server command, then forward it back to the server.
-			// Lots of server plugins use this.  They use engine->ClientCommand() to have a client execute a command that 
-			// they have hooked on the server. We disabled it once and they freaked. It IS redundant since they could just
-			// code the call to their command on the server, but they complained loudly enough that we're adding it back in
-			// since there's no exploit that we know of by allowing it.
-			if ( !pCommand )
-				return false;
+	// If the command didn't come from the server, then we aren't filtering it here.
+	if ( args.Source() != kCommandSrcNetServer )
+		return false;
 
-			if ( !pCommand->IsFlagSet( FCVAR_SERVER_CAN_EXECUTE ) )
-			{
-				Warning( "FCVAR_SERVER_CAN_EXECUTE prevented server running command: %s\n", pCommand->GetName() );
-				return true;
-			}
-		}
-	}
-	
-	return false;
+	// Server can execute any command on client if this is a single player game.
+	if ( Host_IsSinglePlayerGame() )
+		return false;
+
+	// If we don't understand the command, and it came from a server command, then forward it back to the server.
+	// Lots of server plugins use this.  They use engine->ClientCommand() to have a client execute a command that 
+	// they have hooked on the server. We disabled it once and they freaked. It IS redundant since they could just
+	// code the call to their command on the server, but they complained loudly enough that we're adding it back in
+	// since there's no exploit that we know of by allowing it.
+	if ( !pCommand )
+		return false;
+
+	// If the command is marked to be executable by the server, allow it.
+	if ( pCommand->IsFlagSet( FCVAR_SERVER_CAN_EXECUTE ) )
+		return false;
+
+	// Otherwise we are filtering the command.  Print a warning to the client console (the server shouldn't be
+	// sending commands that it isn't allowed to execute on the client)
+	Warning( "FCVAR_SERVER_CAN_EXECUTE prevented server running command: %s\n", args.GetCommandString() );
+	return true;
 }
 
 		
-static bool ShouldPreventClientCommand( const ConCommandBase *pCommand )
+static bool ShouldPreventClientCommand( const CCommand& args, const ConCommandBase *pCommand )
 {
-	if ( g_iFilterCommandsByClientCmdCanExecute > 0 && 
-		!pCommand->IsFlagSet( FCVAR_CLIENTCMD_CAN_EXECUTE ) && 
-		g_ExtraClientCmdCanExecuteCvars.Find( pCommand->GetName() ) == g_ExtraClientCmdCanExecuteCvars.InvalidIndex() )
+	// If the command didn't come from ClientCmd(), we don't filter it here.
+	if ( args.Source() != kCommandSrcClientCmd )
+		return false;
+
+	// Commands we don't recognize aren't prevented here (they will get forwarded to the server)
+	if ( !pCommand )
+		return false;
+
+	// Commands that are explicitly marked as executable by ClientCmd() aren't filtered
+	if ( pCommand->IsFlagSet( FCVAR_CLIENTCMD_CAN_EXECUTE ) )
+		return false;
+
+	// Otherwise we are going to filter the command.  Check if we should warn the user about this:
+
+	// If this command is in the game DLL, don't mention it because we're going to forward this
+	// request to the server and let the server handle it.
+	if ( !pCommand->IsFlagSet( FCVAR_GAMEDLL ) )
 	{
-		// If this command is in the game DLL, don't mention it because we're going to forward this
-		// request to the server and let the server handle it.
-		if ( !pCommand->IsFlagSet( FCVAR_GAMEDLL ) )
-		{
-			Warning( "FCVAR_CLIENTCMD_CAN_EXECUTE prevented running command: %s\n", pCommand->GetName() );
-		}
-		
-		return true;
+		Warning( "FCVAR_CLIENTCMD_CAN_EXECUTE prevented running command: %s\n", args.GetCommandString() );
 	}
-	
-	return false;
+
+	return true;
 }
 
 
@@ -924,12 +926,12 @@ static bool ShouldPreventClientCommand( const ConCommandBase *pCommand )
 // A complete command line has been parsed, so try to execute it
 // FIXME: lookupnoadd the token to speed search?
 //-----------------------------------------------------------------------------
-const ConCommandBase *Cmd_ExecuteCommand( const CCommand &command, cmd_source_t src, int nClientSlot )
+const ConCommandBase *Cmd_ExecuteCommand( ECommandTarget_t eTarget, const CCommand &command, int nClientSlot )
 {	
 	// execute the command line
 	if ( !command.ArgC() )
 		return NULL;		// no tokens
-			
+	
 	// First, check for execution markers.
 	if ( Q_strcmp( command[0], CMDSTR_ADD_EXECUTION_MARKER ) == 0 )
 	{
@@ -951,30 +953,32 @@ const ConCommandBase *Cmd_ExecuteCommand( const CCommand &command, cmd_source_t 
 	{
 		if ( !Q_strcasecmp( command[0], a->name ) )
 		{
-			Cbuf_InsertText( a->value );
+			Cbuf_InsertText( Cbuf_GetCurrentPlayer(), a->value, command.Source() );
 			return NULL;
 		}
 	}
 	
-	cmd_source = src;
 	cmd_clientslot = nClientSlot;
 
 	// check ConCommands
-	const ConCommandBase *pCommand = g_pCVar->FindCommandBase( command[ 0 ] );
+	const ConCommandBase *pCommand = g_pCVar->FindCommandBase( command[0] );
 
 	// If we prevent a server command due to FCVAR_SERVER_CAN_EXECUTE not being set, then we get out immediately.
-	if ( ShouldPreventServerCommand( pCommand ) )
+	if ( ShouldPreventServerCommand( command, pCommand ) )
 		return NULL;
 
+	// FIXME: Why do we treat convars differently than commands here?
 	if ( pCommand && pCommand->IsCommand() )
 	{
-		if ( !ShouldPreventClientCommand( pCommand ) && pCommand->IsCommand() )
+		if ( !ShouldPreventClientCommand( command, pCommand ) && pCommand->IsCommand() )
 		{
-			bool isServerCommand = ( pCommand->IsFlagSet( FCVAR_GAMEDLL ) && 
-									// Typed at console
-									cmd_source == src_command &&
-									// Not HLDS
-									!sv.IsDedicated() );
+			bool isServerCommand = 
+				// Command is marked for execution on the server.
+				pCommand->IsFlagSet( FCVAR_GAMEDLL )
+				// Not received over the network
+				&& ( command.Source() != kCommandSrcNetClient && command.Source() != kCommandSrcNetServer )
+				// Not HLDS
+				&& !sv.IsDedicated();
 
 			// Hook to allow game .dll to figure out who type the message on a listen server
 			if ( serverGameClients )
@@ -982,15 +986,22 @@ const ConCommandBase *Cmd_ExecuteCommand( const CCommand &command, cmd_source_t 
 				// We're actually the server, so set it up locally
 				if ( sv.IsActive() )
 				{
-					g_pServerPluginHandler->SetCommandClient( cmd_source == src_client ? nClientSlot : -1 );
+					g_pServerPluginHandler->SetCommandClient( -1 );
 
-#ifndef SWDS
+	#ifndef DEDICATED
 					// Special processing for listen server player
 					if ( isServerCommand )
 					{
-						g_pServerPluginHandler->SetCommandClient( cl.m_nPlayerSlot );
+						if ( splitscreen->IsLocalPlayerResolvable() )
+						{
+							g_pServerPluginHandler->SetCommandClient( GetLocalClient().m_nPlayerSlot );
+						}
+						else
+						{
+							g_pServerPluginHandler->SetCommandClient( GetBaseLocalClient().m_nPlayerSlot );
+						}
 					}
-#endif
+	#endif
 				}
 				// We're not the server, but we've been a listen server (game .dll loaded)
 				//  forward this command tot he server instead of running it locally if we're still
@@ -998,27 +1009,35 @@ const ConCommandBase *Cmd_ExecuteCommand( const CCommand &command, cmd_source_t 
 				// Otherwise, things like "say" won't work unless you quit and restart
 				else if ( isServerCommand )
 				{
-					if ( cl.IsConnected() )
+	#ifndef DEDICATED
+					if ( GetBaseLocalClient().IsConnected() )
 					{
 						Cmd_ForwardToServer( command );
 						return NULL;
 					}
-
+	#endif
 					// It's a server command, but we're not connected to a server.  Don't try to execute it.
 					return NULL;
 				}
 			}
 
-			// Allow cheat commands in singleplayer, debug, or multiplayer with sv_cheats on
+			// Allow cheat commands in debug, or multiplayer with sv_cheats on
 			if ( pCommand->IsFlagSet( FCVAR_CHEAT ) )
 			{
-				if ( !Host_IsSinglePlayerGame() && !CanCheat() )
+				if ( !CanCheat() )
 				{
 					// But.. if the server is allowed to run this command and the server DID run this command, then let it through.
 					// (used by soundscape_flush)
-					if ( g_iFilterCommandsByServerCanExecute == 0 || !pCommand->IsFlagSet( FCVAR_SERVER_CAN_EXECUTE ) )
+					if ( command.Source() != kCommandSrcNetServer || !pCommand->IsFlagSet( FCVAR_SERVER_CAN_EXECUTE ) )
 					{
-						Msg( "Can't use cheat command %s in multiplayer, unless the server has sv_cheats set to 1.\n", pCommand->GetName() );
+						if ( Host_IsSinglePlayerGame() )
+						{
+							Msg( "This game doesn't allow cheat command %s in single player, unless you have sv_cheats set to 1.\n", pCommand->GetName() );
+						}
+						else
+						{
+							Msg( "Can't use cheat command %s in multiplayer, unless the server has sv_cheats set to 1.\n", pCommand->GetName() );
+						}
 						return NULL;
 					}
 				}
@@ -1032,7 +1051,7 @@ const ConCommandBase *Cmd_ExecuteCommand( const CCommand &command, cmd_source_t 
 					return NULL;
 				}
 			}
-			
+
 			if ( pCommand->IsFlagSet( FCVAR_DEVELOPMENTONLY ) )
 			{
 				Msg( "Unknown command \"%s\"\n", pCommand->GetName() );
@@ -1044,28 +1063,38 @@ const ConCommandBase *Cmd_ExecuteCommand( const CCommand &command, cmd_source_t 
 		}
 	}
 
-	// Bail out before we update convars if we're runnign in default mode.
-	if ( pCommand && src == src_command && CommandLine()->CheckParm( "-default" ) && !pCommand->IsFlagSet( FCVAR_EXEC_DESPITE_DEFAULT ) )
-	{
-		Msg( "Ignoring cvar \"%s\" due to -default on command line\n", pCommand->GetName() );
-		return NULL;
-	}
-
 	// check cvars
-	if ( cv->IsCommand( command ) )
+	if ( ConVarUtilities->IsCommand( command, ( int )eTarget ) )
 		return pCommand;
 
+	#ifndef DEDICATED
 	// forward the command line to the server, so the entity DLL can parse it
-	if ( cmd_source == src_command )
+	if ( command.Source() != kCommandSrcNetClient )
 	{
-		if ( cl.IsConnected() )
+		if ( GetBaseLocalClient().IsConnected() )
 		{
 			Cmd_ForwardToServer( command );
 			return NULL;
 		}
 	}
-	
+	#endif
+
 	Msg( "Unknown command \"%s\"\n", command[0] );
+	return NULL;
+}
+
+const char* Cmd_AliasToCommandString( const char* szAliasName )
+{
+	if ( !szAliasName )
+		return NULL;
+
+	for ( cmdalias_t* a = cmd_alias; a; a = a->next )
+	{
+		if ( !Q_strcasecmp( szAliasName, a->name ) )
+		{
+			return a->value;
+		}
+	}
 	return NULL;
 }
 
@@ -1076,26 +1105,67 @@ const ConCommandBase *Cmd_ExecuteCommand( const CCommand &command, cmd_source_t 
 void Cmd_ForwardToServer( const CCommand &args, bool bReliable )
 {
 	// YWB 6/3/98 Don't forward if this is a dedicated server
-#ifndef SWDS
+#ifndef DEDICATED
 	char str[1024];
 
-#ifndef _XBOX
-	if ( demoplayer->IsPlayingBack() )
-		return;		// not really connected
-#endif
+	// no command to forward
+	if ( args.ArgC() == 0 )
+		return;
 
-	str[0] = 0;
-	if ( Q_strcasecmp( args[0], "cmd") != 0 )
-	{
-		Q_strncat( str, args[0], sizeof( str ), COPY_ALL_CHARACTERS );
-		Q_strncat( str, " ", sizeof( str ), COPY_ALL_CHARACTERS );
-	}
+	// Special case: "cmd whatever args..." is forwarded as "whatever args...";
+	// in this case we strip "cmd" from the input.
+	if ( Q_strcasecmp( args[0], "cmd" ) == 0 )
+		V_strcpy_safe( str, args.ArgS() );
+	else
+		V_strcpy_safe( str, args.GetCommandString() );
 	
-	if ( args.ArgC() > 1)
+	extern IBaseClientDLL *g_ClientDLL;
+	if ( demoplayer->IsPlayingBack() && g_ClientDLL )
 	{
-		Q_strncat( str, args.ArgS(), sizeof( str ), COPY_ALL_CHARACTERS );
+		// Not really connected, but can let client dll trap it
+		g_ClientDLL->OnCommandDuringPlayback( str );
 	}
-	
-	cl.SendStringCmd( str );
+	else
+	{
+		// Throttle user-input commands but not commands issued by code
+		if ( args.Source() == kCommandSrcUserInput )
+		{
+			if(realtime - gForwardedCommandQuota_flTimeStart >= 1.0)
+			{
+				// reset quota
+				gForwardedCommandQuota_flTimeStart = realtime;
+				gForwardedCommandQuota_nCount = 0;
+			}
+
+			// Add 1 to quota used
+			gForwardedCommandQuota_nCount++;
+
+			// If we are over quota commands per second, dump this on the floor.
+			// If we spam the server with too many commands, it will kick us.
+			if ( gForwardedCommandQuota_nCount > kForwardedCommandQuota_nCommandsPerSecond )
+			{
+				ConMsg( "Ignoring command '%s': too many server commands issued per second\n", str );
+				return;
+			}
+		}
+
+		GetLocalClient().SendStringCmd( str );
+	}
 #endif
+}
+
+//-----------------------------------------------------------------------------
+// Sends the entire command line over to the server only if it is whitelisted
+//-----------------------------------------------------------------------------
+void Cmd_ForwardToServerWithWhitelist( const CCommand &args, bool bReliable )
+{
+ 	int argc = args.ArgC();
+	char str[1024];
+	str[0] = 0;
+
+	if ( argc > 1 && args[1] && IsWhiteListedCmd( args[1] ) )
+	{
+		V_strcat_safe( str, args.ArgS() );
+		Cbuf_AddText( CBUF_SERVER, str );
+	}
 }

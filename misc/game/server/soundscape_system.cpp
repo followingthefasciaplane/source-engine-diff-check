@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -8,7 +8,7 @@
 #include "cbase.h"
 #include "soundscape_system.h"
 #include "soundscape.h"
-#include "KeyValues.h"
+#include "keyvalues.h"
 #include "filesystem.h"
 #include "game.h"
 
@@ -79,7 +79,7 @@ void CSoundscapeSystem::AddSoundscapeFile( const char *filename )
 				}
 				m_soundscapes.AddString( pKeys->GetName(), m_soundscapeCount );
 
-				if ( IsX360() )
+				if ( IsGameConsole() )
 				{
 					AddSoundscapeSounds( pKeys, m_soundscapeCount );
 				}
@@ -91,7 +91,7 @@ void CSoundscapeSystem::AddSoundscapeFile( const char *filename )
 	pKeyValuesData->deleteThis();
 }
 
-CON_COMMAND_F( sv_soundscape_printdebuginfo, "print soundscapes", FCVAR_DEVELOPMENTONLY )
+CON_COMMAND_F(sv_soundscape_printdebuginfo, "print soundscapes", FCVAR_CHEAT)
 {
 	if ( !UTIL_IsCommandIssuedByServerAdmin() )
 		return;
@@ -111,7 +111,7 @@ void CSoundscapeSystem::PrintDebugInfo()
 		Msg( "- %d: %s\n", id, pName );
 	}
 	Msg( "-------- SOUNDSCAPE ENTITIES -----\n" );
-	for( int entityIndex = 0; entityIndex < m_soundscapeEntities.Size(); ++entityIndex )
+	for( int entityIndex = 0; entityIndex < m_soundscapeEntities.Count(); ++entityIndex )
 	{
 		CEnvSoundscape *currentSoundscape = m_soundscapeEntities[entityIndex];
 		Msg("- %d: %s x:%.4f y:%.4f z:%.4f\n", 
@@ -133,7 +133,7 @@ bool CSoundscapeSystem::Init()
 	const char *mapSoundscapeFilename = NULL;
 	if ( mapname && *mapname )
 	{
-		mapSoundscapeFilename = UTIL_VarArgs( "scripts/soundscapes_%s.txt", mapname );
+		mapSoundscapeFilename = UTIL_VarArgs( "scripts/soundscapes_%s.txt", V_GetFileName( mapname ) );
 	}
 
 	KeyValues *manifest = new KeyValues( SOUNDSCAPE_MANIFEST_FILE );
@@ -183,7 +183,7 @@ void CSoundscapeSystem::Shutdown()
 	m_soundscapeEntities.RemoveAll();
 	m_activeIndex = 0;
 
-	if ( IsX360() )
+	if ( IsGameConsole() )
 	{
 		m_soundscapeSounds.Purge();
 	}
@@ -197,7 +197,7 @@ void CSoundscapeSystem::LevelInitPreEntity()
 
 void CSoundscapeSystem::LevelInitPostEntity()
 {
-	if ( IsX360() )
+	if ( IsGameConsole() )
 	{
 		m_soundscapeSounds.Purge();
 	}
@@ -228,7 +228,7 @@ void CSoundscapeSystem::LevelInitPostEntity()
 			if ( myPVS[ j >> 3 ] & (1<<(j&7)) )
 			{
 				float distSq = CalcSqrDistanceToAABB( clusterbounds[j].mins, clusterbounds[j].maxs, position );
-				if ( distSq < radiusSq || radius < 0 )
+				if ( distSq < radiusSq )
 				{
 					m_soundscapesInCluster[j].soundscapeCount++;
 					clusterIndexList.AddToTail(j);
@@ -297,14 +297,10 @@ void CSoundscapeSystem::FrameUpdatePostEntityThink()
 	{
 		int traceCount = 0;
 		int playerCount = 0;
-		// budget tuned for TF.  Do a max of 20 traces.  That's going to happen anyway because a bunch of the maps
-		// use radius -1 for all soundscapes.  So to trace one player you'll often need that many and this code must
-		// always trace one player's soundscapes.
-		// If the map has been optimized, then allow more players to update per frame.
-		int maxPlayers = gpGlobals->maxClients / 2;
-		// maxPlayers has to be at least 1
-		maxPlayers = MAX( 1, maxPlayers );
-		int maxTraces = 20;
+		// budget to do 2 players with 2 traces each tick.  Anything more expensive than that should
+		// get spread across multiple ticks
+		int maxPlayers = 2;
+		int maxTraces = maxPlayers * 2;
 		if ( soundscape_debug.GetBool() )
 		{
 			maxTraces = 9999;
@@ -326,12 +322,11 @@ void CSoundscapeSystem::FrameUpdatePostEntityThink()
 
 				// if we got this far, we're looking at an entity that is contending
 				// for current player sound. the closest entity to player wins.
-				CEnvSoundscape *pCurrent = (CEnvSoundscape *)( audio.ent.Get() );
-				if ( pCurrent )
+				CEnvSoundscape *pCurrent = NULL;
+				if ( audio.entIndex > 0 && audio.entIndex <= m_soundscapeEntities.Count() )
 				{
-					int nEntIndex = pCurrent->m_soundscapeEntityId - 1;
-					NOTE_UNUSED( nEntIndex );
-					Assert( m_soundscapeEntities[nEntIndex] == pCurrent );
+					int ssIndex = audio.entIndex - 1;
+					pCurrent = m_soundscapeEntities[ssIndex];
 				}
 				ss_update_t update;
 				update.pPlayer = pPlayer;
@@ -367,7 +362,7 @@ void CSoundscapeSystem::FrameUpdatePostEntityThink()
 
 void CSoundscapeSystem::AddSoundscapeSounds( KeyValues *pSoundscape, int soundscapeIndex )
 {
-	if ( !IsX360() )
+	if ( !IsGameConsole() )
 	{
 		return;
 	}
@@ -431,7 +426,7 @@ void CSoundscapeSystem::AddSoundscapeSounds( KeyValues *pSoundscape, int soundsc
 
 void CSoundscapeSystem::PrecacheSounds( int soundscapeIndex )
 {
-	if ( !IsX360() )
+	if ( !IsGameConsole() )
 	{
 		return;
 	}

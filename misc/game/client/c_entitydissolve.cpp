@@ -1,9 +1,9 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
 // $NoKeywords: $
-//=============================================================================//
+//===========================================================================//
 
 #include "cbase.h"
 
@@ -19,16 +19,19 @@
 #include "IEffects.h"
 #include "c_entitydissolve.h"
 #include "movevars_shared.h"
-#include "clienteffectprecachesystem.h"
+#include "precache_register.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
-CLIENTEFFECT_REGISTER_BEGIN( PrecacheEffectBuild )
-CLIENTEFFECT_MATERIAL( "effects/tesla_glow_noz" )
-CLIENTEFFECT_MATERIAL( "effects/spark" )
-CLIENTEFFECT_MATERIAL( "effects/combinemuzzle2" )
-CLIENTEFFECT_REGISTER_END()
+ConVar cl_portal_use_new_dissolve( "cl_portal_use_new_dissolve", "1", FCVAR_CHEAT, "Use new dissolve effect" );
+
+PRECACHE_REGISTER_BEGIN( GLOBAL, PrecacheEffectBuild )
+PRECACHE( MATERIAL,"effects/tesla_glow_noz" )
+PRECACHE( MATERIAL,"effects/spark" )
+PRECACHE( MATERIAL,"effects/combinemuzzle2" )
+PRECACHE( PARTICLE_SYSTEM, "dissolve" )
+PRECACHE_REGISTER_END()
 
 //-----------------------------------------------------------------------------
 // Networking
@@ -49,15 +52,16 @@ END_RECV_TABLE()
 extern PMaterialHandle g_Material_Spark;
 PMaterialHandle g_Material_AR2Glow = NULL;
 
+
 //-----------------------------------------------------------------------------
 // Purpose: 
 //-----------------------------------------------------------------------------
-C_EntityDissolve::C_EntityDissolve( void )
+CEG_NOINLINE C_EntityDissolve::C_EntityDissolve( void )
 {
 	m_bLinkedToServerEnt = true;
+	CEG_PROTECT_MEMBER_FUNCTION( C_EntityDissolve_C_EntityDissolve );
 	m_pController = NULL;
 	m_bCoreExplode = false;
-	m_vEffectColor = Vector( 255, 255, 255 );
 }
 
 //-----------------------------------------------------------------------------
@@ -86,6 +90,8 @@ void C_EntityDissolve::OnDataChanged( DataUpdateType_t updateType )
 	{
 		m_flNextSparkTime = m_flStartTime;
 		SetNextClientThink( CLIENT_THINK_ALWAYS );
+		if ( cl_portal_use_new_dissolve.GetBool() )
+			DispatchParticleEffect( "dissolve", PATTACH_ABSORIGIN_FOLLOW, GetMoveParent() );
 	}
 }
 
@@ -112,7 +118,7 @@ IMotionEvent::simresult_e C_EntityDissolve::Simulate( IPhysicsMotionController *
 	angular.Init();
 
 	// Make it zero g
-	linear.z -= -1.02 * GetCurrentGravity();
+	linear.z -= -1.02 * sv_gravity.GetFloat();
 
 	Vector vel;
 	AngularImpulse angVel;
@@ -226,9 +232,12 @@ void C_EntityDissolve::BuildTeslaEffect( mstudiobbox_t *pHitBox, const matrix3x4
 	{
 		if ( !EffectOccluded( tr.endpos ) )
 		{
+			int nSlot = GET_ACTIVE_SPLITSCREEN_SLOT();
+
 			// Move it towards the camera
 			Vector vecFlash = tr.endpos;
-			AngleVectors( MainViewAngles(), &vecForward );
+			Vector vecForward;
+			AngleVectors( MainViewAngles(nSlot), &vecForward );
 			vecFlash -= (vecForward * 8);
 
 			g_pEffects->EnergySplash( vecFlash, -vecForward, false );
@@ -464,6 +473,8 @@ float C_EntityDissolve::GetFadeOutPercentage( void )
 	{
 		dt -= m_flFadeOutStart;
 		
+		RANDOM_CEG_TEST_SECRET();
+
 		if ( dt > m_flFadeOutLength )
 			return 0.0f;
 		
@@ -502,26 +513,16 @@ float C_EntityDissolve::GetModelFadeOutPercentage( void )
 //-----------------------------------------------------------------------------
 void C_EntityDissolve::ClientThink( void )
 {
-	C_BaseEntity *pEnt = GetMoveParent();
-	if ( !pEnt )
-		return;
-
-	bool bIsRagdoll;
-#ifdef TF_CLIENT_DLL
-	bIsRagdoll = true;
-#else
 	C_BaseAnimating *pAnimating = GetMoveParent() ? GetMoveParent()->GetBaseAnimating() : NULL;
 	if (!pAnimating)
 		return;
-	bIsRagdoll = pAnimating->IsRagdoll();
-#endif
 
 	// NOTE: IsRagdoll means *client-side* ragdoll. We shouldn't be trying to fight
 	// the server ragdoll (or any server physics) on the client
-	if (( !m_pController ) && ( m_nDissolveType == ENTITY_DISSOLVE_NORMAL ) && bIsRagdoll )
+	if (( !m_pController ) && ( m_nDissolveType == ENTITY_DISSOLVE_NORMAL ) && pAnimating->IsRagdoll())
 	{
 		IPhysicsObject *ppList[VPHYSICS_MAX_OBJECT_LIST_COUNT];
-		int nCount = pEnt->VPhysicsGetObjectList( ppList, ARRAYSIZE(ppList) );
+		int nCount = pAnimating->VPhysicsGetObjectList( ppList, ARRAYSIZE(ppList) );
 		if ( nCount > 0 )
 		{
 			m_pController = physenv->CreateMotionController( this );
@@ -534,14 +535,13 @@ void C_EntityDissolve::ClientThink( void )
 
 	color32 color;
 
-	color.r = ( 1.0f - GetFadeInPercentage() ) * m_vEffectColor.x;
-	color.g = ( 1.0f - GetFadeInPercentage() ) * m_vEffectColor.y;
-	color.b = ( 1.0f - GetFadeInPercentage() ) * m_vEffectColor.z;
+	color.r = color.g = color.b = ( 1.0f - GetFadeInPercentage() ) * 255.0f;
 	color.a = GetModelFadeOutPercentage() * 255.0f;
 
 	// Setup the entity fade
-	pEnt->SetRenderMode( kRenderTransColor );
-	pEnt->SetRenderColor( color.r, color.g, color.b, color.a );
+	pAnimating->SetRenderMode( kRenderTransColor );
+	pAnimating->SetRenderColor( color.r, color.g, color.b );
+	pAnimating->SetRenderAlpha( color.a );
 
 	if ( GetModelFadeOutPercentage() <= 0.2f )
 	{
@@ -565,21 +565,12 @@ void C_EntityDissolve::ClientThink( void )
 		{
 			Release();
 
-			C_ClientRagdoll *pRagdoll = dynamic_cast <C_ClientRagdoll *> ( pEnt );
+			C_ClientRagdoll *pRagdoll = dynamic_cast <C_ClientRagdoll *> ( pAnimating );
 
 			if ( pRagdoll )
 			{
 				pRagdoll->ReleaseRagdoll();
 			}
-#ifdef TF_CLIENT_DLL
-			else
-			{
-				// Hide the ragdoll -- don't actually delete it or else things get unhappy when
-				// we get a message from the server telling us to delete it
-				pEnt->AddEffects( EF_NODRAW );
-				pEnt->ParticleProp()->StopEmission();
-			}
-#endif
 		}
 	}
 }
@@ -589,202 +580,205 @@ void C_EntityDissolve::ClientThink( void )
 // Input  : flags - 
 // Output : int
 //-----------------------------------------------------------------------------
-int C_EntityDissolve::DrawModel( int flags )
+int C_EntityDissolve::DrawModel( int flags, const RenderableInstance_t &instance )
 {
-	// See if we should draw
-	if ( gpGlobals->frametime == 0 || m_bReadyToDraw == false )
-		return 0;
-
-	C_BaseAnimating *pAnimating = GetMoveParent() ? GetMoveParent()->GetBaseAnimating() : NULL;
-	if ( pAnimating == NULL )
-		return 0;
-
-	matrix3x4_t	*hitboxbones[MAXSTUDIOBONES];
-	if ( pAnimating->HitboxToWorldTransforms( hitboxbones ) == false )
-		return 0;
-
-	studiohdr_t *pStudioHdr = modelinfo->GetStudiomodel( pAnimating->GetModel() );
-	if ( pStudioHdr == NULL )
-		return false;
-
-	mstudiohitboxset_t *set = pStudioHdr->pHitboxSet( pAnimating->GetHitboxSet() );
-	if ( set == NULL )
-		return false;
-
-	// Make sure the emitter is setup properly
-	SetupEmitter();
-	
-	// Get fade percentages for the effect
-	float fadeInPerc = GetFadeInPercentage();
-	float fadeOutPerc = GetFadeOutPercentage();
-
-	float fadePerc = ( fadeInPerc >= 1.0f ) ? fadeOutPerc : fadeInPerc;
-
-	Vector vecSkew = vec3_origin;
-
-	// Do extra effects under certain circumstances
-	if ( ( fadePerc < 0.99f ) && ( (m_nDissolveType == ENTITY_DISSOLVE_ELECTRICAL) || (m_nDissolveType == ENTITY_DISSOLVE_ELECTRICAL_LIGHT) ) )
+	if ( !cl_portal_use_new_dissolve.GetBool() )
 	{
-		DoSparks( set, hitboxbones );
-	}
+		// See if we should draw
+		if ( gpGlobals->frametime == 0 || m_bReadyToDraw == false )
+			return 0;
 
-	// Skew the particles in front or in back of their targets
-	vecSkew = CurrentViewForward() * ( 8.0f - ( ( 1.0f - fadePerc ) * 32.0f ) );
+		C_BaseAnimating *pAnimating = GetMoveParent() ? GetMoveParent()->GetBaseAnimating() : NULL;
+		if ( pAnimating == NULL )
+			return 0;
 
-	float spriteScale = ( ( gpGlobals->curtime - m_flStartTime ) / m_flFadeOutLength );
-	spriteScale = clamp( spriteScale, 0.75f, 1.0f );
+		matrix3x4_t	*hitboxbones[MAXSTUDIOBONES];
+		if ( pAnimating->HitboxToWorldTransforms( hitboxbones ) == false )
+			return 0;
 
-	// Cache off this material reference
-	if ( g_Material_Spark == NULL )
-	{
-		g_Material_Spark = ParticleMgr()->GetPMaterial( "effects/spark" );
-	}
+		studiohdr_t *pStudioHdr = modelinfo->GetStudiomodel( pAnimating->GetModel() );
+		if ( pStudioHdr == NULL )
+			return false;
 
-	if ( g_Material_AR2Glow == NULL )
-	{
-		g_Material_AR2Glow = ParticleMgr()->GetPMaterial( "effects/combinemuzzle2" );
-	}
+		mstudiohitboxset_t *set = pStudioHdr->pHitboxSet( pAnimating->GetHitboxSet() );
+		if ( set == NULL )
+			return false;
 
-	SimpleParticle *sParticle;
+		// Make sure the emitter is setup properly
+		SetupEmitter();
 
-	for ( int i = 0; i < set->numhitboxes; ++i )
-	{
-		Vector vecAbsOrigin, xvec, yvec;
-		mstudiobbox_t *pBox = set->pHitbox(i);
-		ComputeRenderInfo( pBox, *hitboxbones[pBox->bone], &vecAbsOrigin, &xvec, &yvec );
+		// Get fade percentages for the effect
+		float fadeInPerc = GetFadeInPercentage();
+		float fadeOutPerc = GetFadeOutPercentage();
 
-		Vector offset;
-		Vector	xDir, yDir;
+		float fadePerc = ( fadeInPerc >= 1.0f ) ? fadeOutPerc : fadeInPerc;
 
-		xDir = xvec;
-		float xScale = VectorNormalize( xDir ) * 0.75f;
+		Vector vecSkew = vec3_origin;
 
-		yDir = yvec;
-		float yScale = VectorNormalize( yDir ) * 0.75f;
-
-		int numParticles = clamp( 3.0f * fadePerc, 0.f, 3.f );
-
-		int iTempParts = 2;
-
-		if ( m_nDissolveType == ENTITY_DISSOLVE_CORE )
+		// Do extra effects under certain circumstances
+		if ( ( fadePerc < 0.99f ) && ( (m_nDissolveType == ENTITY_DISSOLVE_ELECTRICAL) || (m_nDissolveType == ENTITY_DISSOLVE_ELECTRICAL_LIGHT) ) )
 		{
-			if ( m_bCoreExplode == true )
-			{
-				numParticles = 15;
-				iTempParts = 20;
-			}
+			DoSparks( set, hitboxbones );
 		}
 
-		for ( int j = 0; j < iTempParts; j++ )
+		// Skew the particles in front or in back of their targets
+		vecSkew = CurrentViewForward() * ( 8.0f - ( ( 1.0f - fadePerc ) * 32.0f ) );
+
+		float spriteScale = ( ( gpGlobals->curtime - m_flStartTime ) / m_flFadeOutLength );
+		spriteScale = clamp( spriteScale, 0.75f, 1.0f );
+
+		// Cache off this material reference
+		if ( g_Material_Spark == NULL )
 		{
-			// Skew the origin
-			offset = xDir * Helper_RandomFloat( -xScale*0.5f, xScale*0.5f ) + yDir * Helper_RandomFloat( -yScale*0.5f, yScale*0.5f );
-			offset += vecSkew;
+			g_Material_Spark = ParticleMgr()->GetPMaterial( "effects/spark" );
+		}
 
-			if ( random->RandomInt( 0, 2 ) != 0 )
-				continue;
+		if ( g_Material_AR2Glow == NULL )
+		{
+			g_Material_AR2Glow = ParticleMgr()->GetPMaterial( "effects/combinemuzzle2" );
+		}
 
-			sParticle = (SimpleParticle *) m_pEmitter->AddParticle( sizeof(SimpleParticle), g_Material_Spark, vecAbsOrigin + offset );
-			
-			if ( sParticle == NULL )
-				return 1;
+		SimpleParticle *sParticle;
 
-			sParticle->m_vecVelocity	= Vector( Helper_RandomFloat( -4.0f, 4.0f ), Helper_RandomFloat( -4.0f, 4.0f ), Helper_RandomFloat( 16.0f, 64.0f ) );
-			
+		for ( int i = 0; i < set->numhitboxes; ++i )
+		{
+			Vector vecAbsOrigin, xvec, yvec;
+			mstudiobbox_t *pBox = set->pHitbox(i);
+			ComputeRenderInfo( pBox, *hitboxbones[pBox->bone], &vecAbsOrigin, &xvec, &yvec );
+
+			Vector offset;
+			Vector	xDir, yDir;
+
+			xDir = xvec;
+			float xScale = VectorNormalize( xDir ) * 0.75f;
+
+			yDir = yvec;
+			float yScale = VectorNormalize( yDir ) * 0.75f;
+
+			int numParticles = clamp( 3.0f * fadePerc, 0, 3 );
+
+			int iTempParts = 2;
+
 			if ( m_nDissolveType == ENTITY_DISSOLVE_CORE )
 			{
 				if ( m_bCoreExplode == true )
 				{
-					Vector vDirection = (vecAbsOrigin + offset) - m_vDissolverOrigin;
-					VectorNormalize( vDirection );
-					sParticle->m_vecVelocity = vDirection * m_nMagnitude;
+					numParticles = 15;
+					iTempParts = 20;
 				}
 			}
 
-			if ( sParticle->m_vecVelocity.z > 0 )
+			for ( int j = 0; j < iTempParts; j++ )
 			{
-				sParticle->m_uchStartSize	= random->RandomFloat( 4, 6 ) * spriteScale;
-			}
-			else
-			{
-				sParticle->m_uchStartSize	= 2 * spriteScale;
-			}
+				// Skew the origin
+				offset = xDir * Helper_RandomFloat( -xScale*0.5f, xScale*0.5f ) + yDir * Helper_RandomFloat( -yScale*0.5f, yScale*0.5f );
+				offset += vecSkew;
 
-			sParticle->m_flDieTime = random->RandomFloat( 0.4f, 0.5f );
-			
-			// If we're the last particles, last longer
-			if ( numParticles == 0 )
-			{
-				sParticle->m_flDieTime *= 2.0f;
-				sParticle->m_uchStartSize = 2 * spriteScale;
-				sParticle->m_flRollDelta	= Helper_RandomFloat( -4.0f, 4.0f );
+				if ( random->RandomInt( 0, 2 ) != 0 )
+					continue;
+
+				sParticle = (SimpleParticle *) m_pEmitter->AddParticle( sizeof(SimpleParticle), g_Material_Spark, vecAbsOrigin + offset );
+
+				if ( sParticle == NULL )
+					return 1;
+
+				sParticle->m_vecVelocity	= Vector( Helper_RandomFloat( -4.0f, 4.0f ), Helper_RandomFloat( -4.0f, 4.0f ), Helper_RandomFloat( 16.0f, 64.0f ) );
 
 				if ( m_nDissolveType == ENTITY_DISSOLVE_CORE )
 				{
 					if ( m_bCoreExplode == true )
 					{
-						sParticle->m_flDieTime *= 2.0f;
-						sParticle->m_flRollDelta	= Helper_RandomFloat( -1.0f, 1.0f );
+						Vector vDirection = (vecAbsOrigin + offset) - m_vDissolverOrigin;
+						VectorNormalize( vDirection );
+						sParticle->m_vecVelocity = vDirection * m_nMagnitude;
 					}
 				}
-			}
-			else
-			{
-				sParticle->m_flRollDelta	= Helper_RandomFloat( -8.0f, 8.0f );
-			}
-			
-			sParticle->m_flLifetime		= 0.0f;
 
-			sParticle->m_flRoll			= Helper_RandomInt( 0, 360 );
-
-			float alpha = 255;
-
-			sParticle->m_uchColor[0]	= m_vEffectColor.x;
-			sParticle->m_uchColor[1]	= m_vEffectColor.y;
-			sParticle->m_uchColor[2]	= m_vEffectColor.z;
-			sParticle->m_uchStartAlpha	= alpha;
-			sParticle->m_uchEndAlpha	= 0;
-			sParticle->m_uchEndSize		= 0;
-		}
-			
-		for ( int j = 0; j < numParticles; j++ )
-		{
-			offset = xDir * Helper_RandomFloat( -xScale*0.5f, xScale*0.5f ) + yDir * Helper_RandomFloat( -yScale*0.5f, yScale*0.5f );
-			offset += vecSkew;
-
-			sParticle = (SimpleParticle *) m_pEmitter->AddParticle( sizeof(SimpleParticle), g_Material_AR2Glow, vecAbsOrigin + offset );
-
-			if ( sParticle == NULL )
-				return 1;
-			
-			sParticle->m_vecVelocity	= Vector( Helper_RandomFloat( -4.0f, 4.0f ), Helper_RandomFloat( -4.0f, 4.0f ), Helper_RandomFloat( -64.0f, 128.0f ) );
-			sParticle->m_uchStartSize	= random->RandomFloat( 8, 12 ) * spriteScale;
-			sParticle->m_flDieTime		= 0.1f;
-			sParticle->m_flLifetime		= 0.0f;
-
-			sParticle->m_flRoll			= Helper_RandomInt( 0, 360 );
-			sParticle->m_flRollDelta	= Helper_RandomFloat( -2.0f, 2.0f );
-
-			float alpha = 255;
-
-			sParticle->m_uchColor[0]	= m_vEffectColor.x;
-			sParticle->m_uchColor[1]	= m_vEffectColor.y;
-			sParticle->m_uchColor[2]	= m_vEffectColor.z;
-			sParticle->m_uchStartAlpha	= alpha;
-			sParticle->m_uchEndAlpha	= 0;
-			sParticle->m_uchEndSize		= 0;
-
-			if ( m_nDissolveType == ENTITY_DISSOLVE_CORE )
-			{
-				if ( m_bCoreExplode == true )
+				if ( sParticle->m_vecVelocity.z > 0 )
 				{
-					Vector vDirection = (vecAbsOrigin + offset) - m_vDissolverOrigin;
+					sParticle->m_uchStartSize	= random->RandomFloat( 4, 6 ) * spriteScale;
+				}
+				else
+				{
+					sParticle->m_uchStartSize	= 2 * spriteScale;
+				}
 
-					VectorNormalize( vDirection );
+				sParticle->m_flDieTime = random->RandomFloat( 0.4f, 0.5f );
 
-					sParticle->m_vecVelocity = vDirection * m_nMagnitude;
+				// If we're the last particles, last longer
+				if ( numParticles == 0 )
+				{
+					sParticle->m_flDieTime *= 2.0f;
+					sParticle->m_uchStartSize = 2 * spriteScale;
+					sParticle->m_flRollDelta	= Helper_RandomFloat( -4.0f, 4.0f );
 
-					sParticle->m_flDieTime		= 0.5f;
+					if ( m_nDissolveType == ENTITY_DISSOLVE_CORE )
+					{
+						if ( m_bCoreExplode == true )
+						{
+							sParticle->m_flDieTime *= 2.0f;
+							sParticle->m_flRollDelta	= Helper_RandomFloat( -1.0f, 1.0f );
+						}
+					}
+				}
+				else
+				{
+					sParticle->m_flRollDelta	= Helper_RandomFloat( -8.0f, 8.0f );
+				}
+
+				sParticle->m_flLifetime		= 0.0f;
+
+				sParticle->m_flRoll			= Helper_RandomInt( 0, 360 );
+
+				float alpha = 255;
+
+				sParticle->m_uchColor[0]	= alpha;
+				sParticle->m_uchColor[1]	= alpha;
+				sParticle->m_uchColor[2]	= alpha;
+				sParticle->m_uchStartAlpha	= alpha;
+				sParticle->m_uchEndAlpha	= 0;
+				sParticle->m_uchEndSize		= 0;
+			}
+
+			for ( int j = 0; j < numParticles; j++ )
+			{
+				offset = xDir * Helper_RandomFloat( -xScale*0.5f, xScale*0.5f ) + yDir * Helper_RandomFloat( -yScale*0.5f, yScale*0.5f );
+				offset += vecSkew;
+
+				sParticle = (SimpleParticle *) m_pEmitter->AddParticle( sizeof(SimpleParticle), g_Material_AR2Glow, vecAbsOrigin + offset );
+
+				if ( sParticle == NULL )
+					return 1;
+
+				sParticle->m_vecVelocity	= Vector( Helper_RandomFloat( -4.0f, 4.0f ), Helper_RandomFloat( -4.0f, 4.0f ), Helper_RandomFloat( -64.0f, 128.0f ) );
+				sParticle->m_uchStartSize	= random->RandomFloat( 8, 12 ) * spriteScale;
+				sParticle->m_flDieTime		= 0.1f;
+				sParticle->m_flLifetime		= 0.0f;
+
+				sParticle->m_flRoll			= Helper_RandomInt( 0, 360 );
+				sParticle->m_flRollDelta	= Helper_RandomFloat( -2.0f, 2.0f );
+
+				float alpha = 255;
+
+				sParticle->m_uchColor[0]	= alpha;
+				sParticle->m_uchColor[1]	= alpha;
+				sParticle->m_uchColor[2]	= alpha;
+				sParticle->m_uchStartAlpha	= alpha;
+				sParticle->m_uchEndAlpha	= 0;
+				sParticle->m_uchEndSize		= 0;
+
+				if ( m_nDissolveType == ENTITY_DISSOLVE_CORE )
+				{
+					if ( m_bCoreExplode == true )
+					{
+						Vector vDirection = (vecAbsOrigin + offset) - m_vDissolverOrigin;
+
+						VectorNormalize( vDirection );
+
+						sParticle->m_vecVelocity = vDirection * m_nMagnitude;
+
+						sParticle->m_flDieTime		= 0.5f;
+					}
 				}
 			}
 		}

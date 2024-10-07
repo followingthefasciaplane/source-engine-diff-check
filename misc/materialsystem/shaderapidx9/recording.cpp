@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -8,10 +8,10 @@
 
 #include "togl/rendermechanism.h"
 #include "recording.h"
-#include "shaderapi/ishaderutil.h"
-#include "materialsystem/imaterialsystem.h"
-#include "shaderapidx8_global.h"
-#include "utlvector.h"
+#include "shaderapi/IShaderUtil.h"
+#include "materialsystem/IMaterialSystem.h"
+#include "ShaderAPIDX8_Global.h"
+#include "UtlVector.h"
 #include <stdio.h>
 
 // memdbgon must be the last include file in a .cpp file!!!

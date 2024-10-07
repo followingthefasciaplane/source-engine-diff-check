@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -190,8 +190,14 @@ public:
 // physics mesh and the engine uses it to render.
 //
 // To use this function, derive a class from CBaseTesselateHelper that supports the TesselateHelper functions.
+
+#ifdef _PS3
+template< class TesselateHelper >
+NOINLINE void TesselateDisplacement( TesselateHelper *pHelper )
+#else
 template< class TesselateHelper >
 inline void TesselateDisplacement( TesselateHelper *pHelper )
+#endif
 {
 	pHelper->m_nIndices = 0;
 	

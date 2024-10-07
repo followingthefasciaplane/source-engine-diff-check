@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -8,7 +8,7 @@
 
 #include "IOcclusionSystem.h"
 #include "mathlib/vector.h"
-#include "UtlSortVector.h"
+#include "utlsortvector.h"
 #include "utllinkedlist.h"
 #include "utlvector.h"
 #include "collisionutils.h"
@@ -31,16 +31,24 @@
 //-----------------------------------------------------------------------------
 // Used to visualizes what the occlusion system is doing.
 //-----------------------------------------------------------------------------
-#ifdef _X360
+#ifdef _GAMECONSOLE
 #define DEFAULT_MIN_OCCLUDER_AREA  70.0f
 #else
 #define DEFAULT_MIN_OCCLUDER_AREA  5.0f
 #endif
 #define DEFAULT_MAX_OCCLUDEE_AREA  5.0f
 
+#ifdef _GAMECONSOLE
+#define DEFAULT_OCCLUSION_STATE "0"
+#else
+#define DEFAULT_OCCLUSION_STATE "1"
+#endif
+
+// Used by ViewData ring buffer
+#define OCCLUSION_SYSTEM_VIEWDATA_MAX	32
 
 ConVar r_visocclusion( "r_visocclusion", "0", FCVAR_CHEAT, "Activate/deactivate wireframe rendering of what the occlusion system is doing." );
-ConVar r_occlusion( "r_occlusion", "1", 0, "Activate/deactivate the occlusion system." );
+ConVar r_occlusion( "r_occlusion", DEFAULT_OCCLUSION_STATE, 0, "Activate/deactivate the occlusion system." );
 static ConVar r_occludermincount( "r_occludermincount", "0", 0, "At least this many occluders will be used, no matter how big they are." );
 static ConVar r_occlusionspew( "r_occlusionspew", "0", FCVAR_CHEAT, "Activate/deactivates spew about what the occlusion system is doing." );
 ConVar r_occluderminarea( "r_occluderminarea", "0", 0, "Prevents this occluder from being used if it takes up less than X% of the screen. 0 means use whatever the level said to use." );
@@ -437,7 +445,7 @@ void CWingedEdgeList::ResetActiveEdgeList()
 
 	// Don't bother with edges below the screen edge
 	m_flNextDiscontinuity = WingedEdge( 0 ).m_vecPosition.y;
-	m_flNextDiscontinuity = max( m_flNextDiscontinuity, -1.0f );
+	m_flNextDiscontinuity = MAX( m_flNextDiscontinuity, -1.0f );
 
 	m_StartTerminal.m_pNextActiveEdge = &m_EndTerminal;
 	m_EndTerminal.m_pPrevActiveEdge = &m_StartTerminal;
@@ -688,7 +696,7 @@ bool CWingedEdgeList::IsOccludingEdgeList( CWingedEdgeList &testList )
 
 		float flTestY = testList.NextDiscontinuity();
 		float flOccluderY = NextDiscontinuity();
-		flCurrentY = min( flTestY, flOccluderY );
+		flCurrentY = MIN( flTestY, flOccluderY );
 
 		// NOTE: This check here is to help occlusion @ the top of the screen
 		// We cut the occluders off at y = 1.0 + epsilon, which means there's
@@ -715,7 +723,7 @@ bool CWingedEdgeList::IsOccludingEdgeList( CWingedEdgeList &testList )
 //-----------------------------------------------------------------------------
 void CWingedEdgeList::QueueVisualization( unsigned char *pColor )
 {
-#ifndef SWDS
+#ifndef DEDICATED
 	if ( !r_visocclusion.GetInt() )
 		return;
 
@@ -737,7 +745,7 @@ void CWingedEdgeList::QueueVisualization( unsigned char *pColor )
 //-----------------------------------------------------------------------------
 void CWingedEdgeList::Visualize( unsigned char *pColor )
 {
-#ifndef SWDS
+#ifndef DEDICATED
 	if ( !r_visocclusion.GetInt() )
 		return;
 
@@ -1967,7 +1975,7 @@ void CEdgeList::ReduceActiveList( CWingedEdgeList &newEdgeList )
 //-----------------------------------------------------------------------------
 void CEdgeList::QueueVisualization( unsigned char *pColor )
 {
-#ifndef SWDS
+#ifndef DEDICATED
 	if ( !r_visocclusion.GetInt() )
 		return;
 
@@ -1985,7 +1993,7 @@ void CEdgeList::QueueVisualization( unsigned char *pColor )
 
 void CEdgeList::Visualize( unsigned char *pColor )
 {
-#ifndef SWDS
+#ifndef DEDICATED
 	if ( !r_visocclusion.GetInt() )
 		return;
 
@@ -2052,7 +2060,8 @@ public:
 	// Inherited from IOcclusionSystem
 	virtual void ActivateOccluder( int nOccluderIndex, bool bActive );
 	virtual void SetView( const Vector &vecCameraPos, float flFOV, const VMatrix &worldToCamera, const VMatrix &cameraToProjection, const VPlane &nearClipPlane );
-	virtual bool IsOccluded( const Vector &vecAbsMins, const Vector &vecAbsMaxs );
+	virtual int GetViewId() const;
+	virtual bool IsOccluded( int occlusionViewId, const Vector &vecAbsMins, const Vector &vecAbsMaxs );
 	virtual void SetOcclusionParameters( float flMaxOccludeeArea, float flMinOccluderArea );
 	virtual float MinOccluderArea() const;
 	virtual void DrawDebugOverlays();
@@ -2065,21 +2074,36 @@ private:
 		float m_flDist;
 	};
 
+	struct ViewData_t
+	{
+		bool m_bEdgeListDirty;
+		VMatrix m_WorldToProjection;
+		VMatrix m_WorldToCamera;
+		float m_flXProjScale;
+		float m_flYProjScale;
+		float m_flProjDistScale;
+		float m_flProjDistOffset;
+		Vector m_vecCameraPosition;		// in world space
+		cplane_t m_NearClipPlane;
+		float m_flNearPlaneDist;
+		float m_flFOVFactor;
+	};
+
 	// Recomputes the edge list for occluders
-	void RecomputeOccluderEdgeList();
+	void RecomputeOccluderEdgeList( ViewData_t& viewData );
 
 	// Is the point inside the near plane?
-	bool IsPointInsideNearPlane( const Vector &vecPos ) const;
-	void IntersectWithNearPlane( const Vector &vecStart, const Vector &vecEnd, Vector &outPos ) const;
+	bool IsPointInsideNearPlane( const ViewData_t& viewData, const Vector &vecPos ) const;
+	void IntersectWithNearPlane( const ViewData_t& viewData, const Vector &vecStart, const Vector &vecEnd, Vector &outPos ) const;
 
 	// Clips a polygon to the near clip plane
-	int ClipPolygonToNearPlane( Vector **ppVertices, int nVertexCount, Vector **ppOutVerts, bool *pClipped ) const;
+	int ClipPolygonToNearPlane( const ViewData_t& viewData, Vector **ppVertices, int nVertexCount, Vector **ppOutVerts, bool *pClipped ) const;
 
 	// Project world-space verts + add into the edge list
-	void AddPolygonToEdgeList( CEdgeList &edgeList, Vector **ppPolygon, int nCount, int nSurfID, bool bClipped );
+	void AddPolygonToEdgeList( const ViewData_t& viewData, CEdgeList &edgeList, Vector **ppPolygon, int nCount, int nSurfID, bool bClipped );
 
 	// Computes the plane equation of a polygon in screen space from a camera-space plane
-	void ComputeScreenSpacePlane( const cplane_t &cameraSpacePlane, cplane_t *pScreenSpacePlane );
+	void ComputeScreenSpacePlane( const ViewData_t& viewData, const cplane_t &cameraSpacePlane, cplane_t *pScreenSpacePlane );
 
 	// Used to clip the screen space polygons to the screen
 	void ResetClipTempVerts();
@@ -2094,18 +2118,12 @@ private:
 	void StitchClippedVertices( Vector *pVertices, int nCount );
 
 private:
+
 	// Per-frame information
-	bool m_bEdgeListDirty;
-	VMatrix m_WorldToProjection;
-	VMatrix m_WorldToCamera;
-	float m_flXProjScale;
-	float m_flYProjScale;
-	float m_flProjDistScale;
-	float m_flProjDistOffset;
-	Vector m_vecCameraPosition;		// in world space
-	cplane_t m_NearClipPlane;
-	float m_flNearPlaneDist;
-	float m_flFOVFactor;
+	int			m_nCurrentViewId;
+	// ring buffer
+	ViewData_t	m_viewData[OCCLUSION_SYSTEM_VIEWDATA_MAX];
+	
 	CEdgeList m_EdgeList;
 	CWingedEdgeList m_WingedEdgeList;
 	CUtlVector< Vector > m_ClippedVerts;
@@ -2136,7 +2154,11 @@ IOcclusionSystem *OcclusionSystem()
 //-----------------------------------------------------------------------------
 COcclusionSystem::COcclusionSystem() : m_ClippedVerts( 0, 64 )
 {
-	m_bEdgeListDirty = false;
+	m_nCurrentViewId = 0;
+	for (int i = 0; i < OCCLUSION_SYSTEM_VIEWDATA_MAX; ++i)
+	{
+		m_viewData[i].m_bEdgeListDirty = false;
+	}
 	m_nTests = 0;
 	m_nOccluded = 0;
 	m_flMinOccluderArea = DEFAULT_MIN_OCCLUDER_AREA;
@@ -2166,16 +2188,16 @@ float COcclusionSystem::MinOccluderArea() const
 //-----------------------------------------------------------------------------
 // Is the point within the near plane?
 //-----------------------------------------------------------------------------
-inline bool COcclusionSystem::IsPointInsideNearPlane( const Vector &vecPos ) const
+inline bool COcclusionSystem::IsPointInsideNearPlane( const ViewData_t& viewData, const Vector &vecPos ) const
 {
-	return DotProduct( vecPos, m_NearClipPlane.normal ) >= m_NearClipPlane.dist;
+	return DotProduct( vecPos, viewData.m_NearClipPlane.normal ) >= viewData.m_NearClipPlane.dist;
 }
 
-inline void COcclusionSystem::IntersectWithNearPlane( const Vector &vecStart, const Vector &vecEnd, Vector &outPos ) const
+inline void COcclusionSystem::IntersectWithNearPlane( const ViewData_t& viewData, const Vector &vecStart, const Vector &vecEnd, Vector &outPos ) const
 {
 	Vector vecDir;
 	VectorSubtract( vecEnd, vecStart, vecDir );
-	float t = IntersectRayWithPlane( vecStart, vecDir, m_NearClipPlane.normal, m_NearClipPlane.dist );
+	float t = IntersectRayWithPlane( vecStart, vecDir, viewData.m_NearClipPlane.normal, viewData.m_NearClipPlane.dist );
 	VectorLerp( vecStart, vecEnd, t, outPos );
 }
 
@@ -2187,7 +2209,7 @@ inline void COcclusionSystem::IntersectWithNearPlane( const Vector &vecStart, co
 //-----------------------------------------------------------------------------
 static Vector s_TempVertMemory[256];
 
-int COcclusionSystem::ClipPolygonToNearPlane( Vector **ppVertices, int nVertexCount, Vector **ppOutVerts, bool *pClipped ) const
+int COcclusionSystem::ClipPolygonToNearPlane( const ViewData_t& viewData, Vector **ppVertices, int nVertexCount, Vector **ppOutVerts, bool *pClipped ) const
 {
 	*pClipped = false;
 
@@ -2199,18 +2221,18 @@ int COcclusionSystem::ClipPolygonToNearPlane( Vector **ppVertices, int nVertexCo
 	int nNewVertCount = 0;
 
 	Vector* pStart = ppVertices[ nVertexCount - 1 ];
-	bool bStartInside = IsPointInsideNearPlane( *pStart );
+	bool bStartInside = IsPointInsideNearPlane( viewData, *pStart );
 	for ( int i = 0; i < nVertexCount; ++i )
 	{
 		Vector* pEnd = ppVertices[ i ];
-		bool bEndInside = IsPointInsideNearPlane( *pEnd );
+		bool bEndInside = IsPointInsideNearPlane( viewData, *pEnd );
 		if (bEndInside)
 		{
 			if (!bStartInside)
 			{
 				// Started outside, ended inside, need to clip the edge
 				ppOutVerts[nOutVertCount] = &s_TempVertMemory[ nNewVertCount++ ];
-				IntersectWithNearPlane( *pStart, *pEnd, *ppOutVerts[nOutVertCount] ); 
+				IntersectWithNearPlane( viewData, *pStart, *pEnd, *ppOutVerts[nOutVertCount] ); 
 				++nOutVertCount;
 				*pClipped = true;
 			}
@@ -2222,7 +2244,7 @@ int COcclusionSystem::ClipPolygonToNearPlane( Vector **ppVertices, int nVertexCo
 			{
 				// Started inside, ended outside, need to clip the edge
 				ppOutVerts[nOutVertCount] = &s_TempVertMemory[ nNewVertCount++ ];
-				IntersectWithNearPlane( *pStart, *pEnd, *ppOutVerts[nOutVertCount] ); 
+				IntersectWithNearPlane( viewData, *pStart, *pEnd, *ppOutVerts[nOutVertCount] ); 
 				++nOutVertCount;
 				*pClipped = true;
 			}
@@ -2304,7 +2326,7 @@ int COcclusionSystem::ClipPolygonToAxisAlignedPlane( Vector **ppVertices, int nV
 //-----------------------------------------------------------------------------
 // Computes the plane equation of a polygon in screen space from a world-space plane
 //-----------------------------------------------------------------------------
-void COcclusionSystem::ComputeScreenSpacePlane( const cplane_t &cameraSpacePlane, cplane_t *pScreenSpacePlane )
+void COcclusionSystem::ComputeScreenSpacePlane( const ViewData_t& viewData, const cplane_t &cameraSpacePlane, cplane_t *pScreenSpacePlane )
 {
 	// Here's how this is computed:
 	// If the *camera* space plane is Ax+By+Cz = D, 
@@ -2320,10 +2342,10 @@ void COcclusionSystem::ComputeScreenSpacePlane( const cplane_t &cameraSpacePlane
 	// A' xs + B' ys + zs = D'	is the screen space plane equation
 	
 	float ooD = (cameraSpacePlane.dist != 0) ? (1.0f / cameraSpacePlane.dist) : 0.0f;
-	pScreenSpacePlane->normal.x = cameraSpacePlane.normal.x * ooD * m_flXProjScale;
-	pScreenSpacePlane->normal.y = cameraSpacePlane.normal.y * ooD * m_flYProjScale;
+	pScreenSpacePlane->normal.x = cameraSpacePlane.normal.x * ooD * viewData.m_flXProjScale;
+	pScreenSpacePlane->normal.y = cameraSpacePlane.normal.y * ooD * viewData.m_flYProjScale;
 	pScreenSpacePlane->normal.z = 1;
-	pScreenSpacePlane->dist = cameraSpacePlane.normal.z * ooD * m_flProjDistScale + m_flProjDistOffset;
+	pScreenSpacePlane->dist = cameraSpacePlane.normal.z * ooD * viewData.m_flProjDistScale + viewData.m_flProjDistOffset;
 }
 
 
@@ -2362,7 +2384,7 @@ void COcclusionSystem::StitchClippedVertices( Vector *pVertices, int nCount )
 //-----------------------------------------------------------------------------
 // Project world-space verts + add into the edge list
 //-----------------------------------------------------------------------------
-void COcclusionSystem::AddPolygonToEdgeList( CEdgeList &edgeList, Vector **ppPolygon, int nCount, int nSurfID, bool bClipped )
+void COcclusionSystem::AddPolygonToEdgeList( const ViewData_t& viewData, CEdgeList &edgeList, Vector **ppPolygon, int nCount, int nSurfID, bool bClipped )
 {
 	// Transform the verts into projection space
 	// Transform into projection space (extra logic here is to simply guarantee that we project each vert exactly once)
@@ -2375,7 +2397,7 @@ void COcclusionSystem::AddPolygonToEdgeList( CEdgeList &edgeList, Vector **ppPol
 	int k;
 	for ( k = 0; k < nCount; ++k )
 	{
-		Vector3DMultiplyPositionProjective( m_WorldToProjection, *(ppPolygon[k]), pVecProjectedVertex[k] );
+		Vector3DMultiplyPositionProjective( viewData.m_WorldToProjection, *(ppPolygon[k]), pVecProjectedVertex[k] );
 
 		// Clamp needed to avoid precision problems.
 //		if ( pVecProjectedVertex[k].z < 0.0f )
@@ -2454,16 +2476,17 @@ void COcclusionSystem::AddPolygonToEdgeList( CEdgeList &edgeList, Vector **ppPol
 //-----------------------------------------------------------------------------
 // Recomputes the occluder edge list
 //-----------------------------------------------------------------------------
-void COcclusionSystem::RecomputeOccluderEdgeList()
+void COcclusionSystem::RecomputeOccluderEdgeList( ViewData_t& viewData )
 {
-	if ( !m_bEdgeListDirty )
+#ifndef DEDICATED
+	if ( !viewData.m_bEdgeListDirty )
 		return;
 
-	// Tracker 17772:  If building cubemaps can end up calling into here w/o cl.pAreaBits setup yet, oh well.
-	if ( !cl.m_bAreaBitsValid && CommandLine()->FindParm( "-buildcubemaps" ) )
+	// Tracker 17772:  If building cubemaps can end up calling into here w/o GetBaseLocalClient().pAreaBits setup yet, oh well.
+	if ( !GetBaseLocalClient().m_bAreaBitsValid && ( CommandLine()->FindParm( "-buildcubemaps" ) || CommandLine()->FindParm( "-buildmodelforworld" ) ) )
 		return;
 	 
-	m_bEdgeListDirty = false;
+	viewData.m_bEdgeListDirty = false;
 	m_EdgeList.RemoveAll();
 	m_WingedEdgeList.Clear();
 	m_ClippedVerts.RemoveAll();
@@ -2479,8 +2502,8 @@ void COcclusionSystem::RecomputeOccluderEdgeList()
 			continue;
 
 		// Skip the occluder if it's in a disconnected area
-		if ( cl.m_chAreaBits &&
-			(cl.m_chAreaBits[pOccluders[i].area >> 3] & (1 << ( pOccluders[i].area & 0x7 )) ) == 0 )
+		if ( GetBaseLocalClient().m_chAreaBits &&
+			(GetBaseLocalClient().m_chAreaBits[pOccluders[i].area >> 3] & (1 << ( pOccluders[i].area & 0x7 )) ) == 0 )
 			continue;
 
 		int nSurfID = pOccluders[i].firstpoly;
@@ -2494,7 +2517,7 @@ void COcclusionSystem::RecomputeOccluderEdgeList()
 
 			// If the surface is backfacing, blow it off...
 			const cplane_t &surfPlane = host_state.worldbrush->planes[ pSurf->planenum ];
-			if ( DotProduct( surfPlane.normal, m_vecCameraPosition ) <= surfPlane.dist )
+			if ( DotProduct( surfPlane.normal, viewData.m_vecCameraPosition ) <= surfPlane.dist )
 				continue;
 
 			// Clip to the near plane (has to be done in world space)
@@ -2507,19 +2530,19 @@ void COcclusionSystem::RecomputeOccluderEdgeList()
 			}
 
 			bool bClipped;
-			int nClipCount = ClipPolygonToNearPlane( ppSurfVerts, nVertexCount, ppClipVerts, &bClipped );
+			int nClipCount = ClipPolygonToNearPlane( viewData, ppSurfVerts, nVertexCount, ppClipVerts, &bClipped );
 			Assert( nClipCount <= ( nVertexCount * 2 ) );
 			if ( nClipCount < 3 )
 				continue;
 
 			cplane_t projectionSpacePlane;
 			cplane_t cameraSpacePlane;
-			MatrixTransformPlane( m_WorldToCamera, surfPlane, cameraSpacePlane );
-			ComputeScreenSpacePlane( cameraSpacePlane, &projectionSpacePlane ); 
+			MatrixTransformPlane( viewData.m_WorldToCamera, surfPlane, cameraSpacePlane );
+			ComputeScreenSpacePlane( viewData, cameraSpacePlane, &projectionSpacePlane ); 
 			int nEdgeSurfID = m_EdgeList.AddSurface( projectionSpacePlane );
 
 			// Transform into projection space (extra logic here is to simply guarantee that we project each vert exactly once)
-			AddPolygonToEdgeList( m_EdgeList, ppClipVerts, nClipCount, nEdgeSurfID, bClipped );
+			AddPolygonToEdgeList( viewData, m_EdgeList, ppClipVerts, nClipCount, nEdgeSurfID, bClipped );
 		}
 	}
 
@@ -2530,6 +2553,7 @@ void COcclusionSystem::RecomputeOccluderEdgeList()
 	// Draw the occluders
 	unsigned char color[4] = { 255, 255, 255, 255 };
 	m_WingedEdgeList.QueueVisualization( color );
+#endif
 }
 
 
@@ -2550,31 +2574,39 @@ void COcclusionSystem::ActivateOccluder( int nOccluderIndex, bool bActive )
 		host_state.worldbrush->occluders[nOccluderIndex].flags |= OCCLUDER_FLAGS_INACTIVE;
 	}
 
-	m_bEdgeListDirty = true;
+	for ( int i = 0; i < OCCLUSION_SYSTEM_VIEWDATA_MAX; ++i )
+	{
+		m_viewData[i].m_bEdgeListDirty = true;
+	}
 }
 
 
 void COcclusionSystem::SetView( const Vector &vecCameraPos, float flFOV, const VMatrix &worldToCamera, 
 			const VMatrix &cameraToProjection, const VPlane &nearClipPlane )
 {
-	m_vecCameraPosition = vecCameraPos;
-	m_WorldToCamera = worldToCamera;
+	m_nCurrentViewId = ( m_nCurrentViewId + 1 ) % OCCLUSION_SYSTEM_VIEWDATA_MAX;
+	ViewData_t* pActiveView = &m_viewData[m_nCurrentViewId];
+
+	pActiveView->m_vecCameraPosition = vecCameraPos;
+	pActiveView->m_WorldToCamera = worldToCamera;
 
 	// See ComputeScreenSpacePlane() for the use of these constants
-	m_flXProjScale = -cameraToProjection[2][3] / cameraToProjection[0][0];
-	m_flYProjScale = -cameraToProjection[2][3] / cameraToProjection[1][1];
-	m_flProjDistScale = -cameraToProjection[2][3];
-	m_flProjDistOffset = -cameraToProjection[2][2];
-	MatrixMultiply( cameraToProjection, worldToCamera, m_WorldToProjection );
-	m_NearClipPlane.normal = nearClipPlane.m_Normal;
-	m_NearClipPlane.dist = nearClipPlane.m_Dist;
-	m_NearClipPlane.type = 3;
-	m_bEdgeListDirty = true;
-	m_flNearPlaneDist = -( DotProduct( vecCameraPos, m_NearClipPlane.normal ) - m_NearClipPlane.dist );
-	Assert( m_flNearPlaneDist > 0.0f );
-	m_flFOVFactor = m_flNearPlaneDist * tan( flFOV * 0.5f * M_PI / 180.0f );
-	m_flFOVFactor = m_flNearPlaneDist / m_flFOVFactor;
-	m_flFOVFactor *= m_flFOVFactor;
+	pActiveView->m_flXProjScale = -cameraToProjection[2][3] / cameraToProjection[0][0];
+	pActiveView->m_flYProjScale = -cameraToProjection[2][3] / cameraToProjection[1][1];
+	pActiveView->m_flProjDistScale = -cameraToProjection[2][3];
+	pActiveView->m_flProjDistOffset = -cameraToProjection[2][2];
+	MatrixMultiply( cameraToProjection, worldToCamera, pActiveView->m_WorldToProjection );
+	pActiveView->m_NearClipPlane.normal = nearClipPlane.m_Normal;
+	pActiveView->m_NearClipPlane.dist = nearClipPlane.m_Dist;
+	pActiveView->m_NearClipPlane.type = 3;
+	pActiveView->m_bEdgeListDirty = true;
+	pActiveView->m_flNearPlaneDist = -( DotProduct( vecCameraPos, pActiveView->m_NearClipPlane.normal ) - pActiveView->m_NearClipPlane.dist );
+	// Due to FP precision issues this value can sometimes drop slightly below 0.0f (during CSM shadow rendering).
+	Assert( pActiveView->m_flNearPlaneDist > -0.125f );
+	pActiveView->m_flNearPlaneDist = MAX( pActiveView->m_flNearPlaneDist, 0.0f );
+	pActiveView->m_flFOVFactor = pActiveView->m_flNearPlaneDist * tan( flFOV * 0.5f * M_PI / 180.0f );
+	pActiveView->m_flFOVFactor = pActiveView->m_flNearPlaneDist / pActiveView->m_flFOVFactor;
+	pActiveView->m_flFOVFactor *= pActiveView->m_flFOVFactor;
 
 	if ( r_occlusionspew.GetInt() )
 	{
@@ -2586,6 +2618,11 @@ void COcclusionSystem::SetView( const Vector &vecCameraPos, float flFOV, const V
 			m_nOccluded = 0;
 		}
 	}
+}
+
+int COcclusionSystem::GetViewId() const
+{
+	return m_nCurrentViewId;
 }
 
 
@@ -2631,18 +2668,18 @@ struct EdgeInfo_t
 // for the first face listed and vert1 -> vert0 is clockwise for the 2nd face listed
 static EdgeInfo_t s_pEdges[12] = 
 {
-	{ { 0, 1 }, { 2, 4 }, 0, 0 },		// 0: Edge between -y + -z
-	{ { 2, 0 }, { 0, 4 }, 0, 0 },		// 1: Edge between -x + -z
-	{ { 1, 3 }, { 1, 4 }, 0, 0 },		// 2: Edge between +x + -z
-	{ { 3, 2 }, { 3, 4 }, 0, 0 },		// 3: Edge between +y + -z
-	{ { 0, 4 }, { 0, 2 }, 0, 0 },		// 4: Edge between -x + -y
-	{ { 5, 1 }, { 1, 2 }, 0, 0 },		// 5: Edge between +x + -y
-	{ { 6, 2 }, { 0, 3 }, 0, 0 },		// 6: Edge between -x + +y
-	{ { 3, 7 }, { 1, 3 }, 0, 0 },		// 7: Edge between +x + +y
-	{ { 5, 4 }, { 2, 5 }, 0, 0 },		// 8: Edge between -y + +z
-	{ { 4, 6 }, { 0, 5 }, 0, 0 },		// 9: Edge between -x + +z
-	{ { 7, 5 }, { 1, 5 }, 0, 0 },		// 10:Edge between +x + +z
-	{ { 6, 7 }, { 3, 5 }, 0, 0 },		// 11:Edge between +y + +z
+	{ 0, 1, 2, 4, 0, 0 },		// 0: Edge between -y + -z
+	{ 2, 0, 0, 4, 0, 0 },		// 1: Edge between -x + -z
+	{ 1, 3, 1, 4, 0, 0 },		// 2: Edge between +x + -z
+	{ 3, 2, 3, 4, 0, 0 },		// 3: Edge between +y + -z
+	{ 0, 4, 0, 2, 0, 0 },		// 4: Edge between -x + -y
+	{ 5, 1, 1, 2, 0, 0 },		// 5: Edge between +x + -y
+	{ 6, 2, 0, 3, 0, 0 },		// 6: Edge between -x + +y
+	{ 3, 7, 1, 3, 0, 0 },		// 7: Edge between +x + +y
+	{ 5, 4, 2, 5, 0, 0 },		// 8: Edge between -y + +z
+	{ 4, 6, 0, 5, 0, 0 },		// 9: Edge between -x + +z
+	{ 7, 5, 1, 5, 0, 0 },		// 10:Edge between +x + +z
+	{ 6, 7, 3, 5, 0, 0 },		// 11:Edge between +y + +z
 };
 
 static int s_pFaceEdges[6][4] = 
@@ -2695,10 +2732,15 @@ public:
 	}
 };
 
-bool COcclusionSystem::IsOccluded( const Vector &vecAbsMins, const Vector &vecAbsMaxs )
+bool COcclusionSystem::IsOccluded( int occlusionViewId, const Vector &vecAbsMins, const Vector &vecAbsMaxs )
 {
 	if ( r_occlusion.GetInt() == 0 )
 		return false;
+
+	if ( occlusionViewId < 0 || occlusionViewId >= OCCLUSION_SYSTEM_VIEWDATA_MAX )
+		return false;
+
+	ViewData_t* pActiveView = &m_viewData[occlusionViewId];
 
 	VPROF_BUDGET( "COcclusionSystem::IsOccluded", VPROF_BUDGETGROUP_OCCLUSION );
 
@@ -2706,7 +2748,7 @@ bool COcclusionSystem::IsOccluded( const Vector &vecAbsMins, const Vector &vecAb
 	static CThreadFastMutex mutex;
 	AUTO_LOCK( mutex );
 
-	RecomputeOccluderEdgeList();
+	RecomputeOccluderEdgeList( *pActiveView );
 
 	// No occluders? Then the edge list isn't occluded
 	if ( m_WingedEdgeList.EdgeCount() == 0 )
@@ -2718,18 +2760,18 @@ bool COcclusionSystem::IsOccluded( const Vector &vecAbsMins, const Vector &vecAb
 	VectorAdd( vecAbsMaxs, vecAbsMins, vecCenter );
 	vecCenter *= 0.5f;
 
-	vecCenter -= m_vecCameraPosition;
-	float flDist = DotProduct( m_NearClipPlane.normal, vecCenter );
+	vecCenter -= pActiveView->m_vecCameraPosition;
+	float flDist = DotProduct( pActiveView->m_NearClipPlane.normal, vecCenter );
 	if (flDist <= 0.0f)
 		return false;
 
-	flDist += m_flNearPlaneDist;
+	flDist += pActiveView->m_flNearPlaneDist;
 
 	Vector vecSize;
 	VectorSubtract( vecAbsMaxs, vecAbsMins, vecSize );
 	float flRadiusSq = DotProduct( vecSize, vecSize ) * 0.25f;
 
-	float flScreenArea = m_flFOVFactor * flRadiusSq / (flDist * flDist);
+	float flScreenArea = pActiveView->m_flFOVFactor * flRadiusSq / (flDist * flDist);
 	float flMaxSize = r_occludeemaxarea.GetFloat() * 0.01f;
 	if ( flMaxSize == 0.0f )
 	{
@@ -2771,14 +2813,14 @@ bool COcclusionSystem::IsOccluded( const Vector &vecAbsMins, const Vector &vecAb
 	Vector4D vecProjVert[8];
 	Vector4D vecDeltaProj[3];
 	Vector4D vecAbsMins4D( vecAbsMins.x, vecAbsMins.y, vecAbsMins.z, 1.0f );
-	Vector4DMultiply( m_WorldToProjection, vecAbsMins4D, vecProjVert[0] );
+	Vector4DMultiply( pActiveView->m_WorldToProjection, vecAbsMins4D, vecProjVert[0] );
 	if ( vecProjVert[0].w <= 0.0f )
 		return false;
 	float flOOW = 1.0f / vecProjVert[0].w;
 
-	vecDeltaProj[0].Init( vecSize.x * m_WorldToProjection[0][0], vecSize.x * m_WorldToProjection[1][0],	vecSize.x * m_WorldToProjection[2][0], vecSize.x * m_WorldToProjection[3][0] );
-	vecDeltaProj[1].Init( vecSize.y * m_WorldToProjection[0][1], vecSize.y * m_WorldToProjection[1][1],	vecSize.y * m_WorldToProjection[2][1], vecSize.y * m_WorldToProjection[3][1] );
-	vecDeltaProj[2].Init( vecSize.z * m_WorldToProjection[0][2], vecSize.z * m_WorldToProjection[1][2],	vecSize.z * m_WorldToProjection[2][2], vecSize.z * m_WorldToProjection[3][2] );
+	vecDeltaProj[0].Init( vecSize.x * pActiveView->m_WorldToProjection[0][0], vecSize.x * pActiveView->m_WorldToProjection[1][0],	vecSize.x * pActiveView->m_WorldToProjection[2][0], vecSize.x * pActiveView->m_WorldToProjection[3][0] );
+	vecDeltaProj[1].Init( vecSize.y * pActiveView->m_WorldToProjection[0][1], vecSize.y * pActiveView->m_WorldToProjection[1][1],	vecSize.y * pActiveView->m_WorldToProjection[2][1], vecSize.y * pActiveView->m_WorldToProjection[3][1] );
+	vecDeltaProj[2].Init( vecSize.z * pActiveView->m_WorldToProjection[0][2], vecSize.z * pActiveView->m_WorldToProjection[1][2],	vecSize.z * pActiveView->m_WorldToProjection[2][2], vecSize.z * pActiveView->m_WorldToProjection[3][2] );
 
 	pVecProjectedVertex[0].Init( vecProjVert[0].x * flOOW, vecProjVert[0].y * flOOW, vecProjVert[0].z * flOOW ); 
 	if ( pVecProjectedVertex[0].z <= 0.0f )
@@ -2800,8 +2842,8 @@ bool COcclusionSystem::IsOccluded( const Vector &vecAbsMins, const Vector &vecAb
 	// Precompute stuff needed by the loop over faces below
 	float pSign[2] = { -1, 1 };
 	Vector vecDelta[2];
-	VectorSubtract( *pCornerVert[0], m_vecCameraPosition, vecDelta[0] );
-	VectorSubtract( m_vecCameraPosition, *pCornerVert[1], vecDelta[1] );
+	VectorSubtract( *pCornerVert[0], pActiveView->m_vecCameraPosition, vecDelta[0] );
+	VectorSubtract( pActiveView->m_vecCameraPosition, *pCornerVert[1], vecDelta[1] );
 
 	// Determine which faces + edges are visible...
 	++m_nTests;
@@ -2821,8 +2863,8 @@ bool COcclusionSystem::IsOccluded( const Vector &vecAbsMins, const Vector &vecAb
 		cplane_t cameraSpacePlane, projectionSpacePlane;
 		float flSign = pSign[nInd];
 		float flPlaneDist = (*pCornerVert[nInd])[ nDim ] * flSign;
-		MatrixTransformAxisAlignedPlane( m_WorldToCamera, nDim, flSign, flPlaneDist, cameraSpacePlane );
-		ComputeScreenSpacePlane( cameraSpacePlane, &projectionSpacePlane ); 
+		MatrixTransformAxisAlignedPlane( pActiveView->m_WorldToCamera, nDim, flSign, flPlaneDist, cameraSpacePlane );
+		ComputeScreenSpacePlane( *pActiveView, cameraSpacePlane, &projectionSpacePlane ); 
 		int nSurfID = s_WingedTestEdgeList.AddSurface( projectionSpacePlane );
 		pSurfInd[i] = nSurfID;
 
@@ -2888,7 +2930,7 @@ bool COcclusionSystem::IsOccluded( const Vector &vecAbsMins, const Vector &vecAb
 //-----------------------------------------------------------------------------
 void VisualizeQueuedEdges( )
 {
-#ifndef SWDS
+#ifndef DEDICATED
 	if ( !g_EdgeVisualization.Count() )
 		return;
 

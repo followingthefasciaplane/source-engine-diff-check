@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -6,6 +6,7 @@
 
 #include "dmattributeinternal.h"
 #include "datamodel/dmelement.h"
+#include "datamodel/dmattribute.h"
 #include "dmelementdictionary.h"
 #include "datamodel/idatamodel.h"
 #include "datamodel.h"
@@ -14,6 +15,7 @@
 #include "mathlib/vector.h"
 #include "tier1/utlstring.h"
 #include "tier1/utlbuffer.h"
+#include "tier1/utlbufferutil.h"
 #include "tier1/KeyValues.h"
 #include "tier1/mempool.h"
 #include "mathlib/vmatrix.h"
@@ -22,7 +24,6 @@
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
-
 
 //-----------------------------------------------------------------------------
 // Tests equality
@@ -52,7 +53,7 @@ bool IsAttributeEqual( const CUtlVector<T> &src1, const CUtlVector<T> &src2 )
 //-----------------------------------------------------------------------------
 // Typesafety check for element handles
 //-----------------------------------------------------------------------------
-static inline bool IsA( DmElementHandle_t hElement, UtlSymId_t type )
+static inline bool IsA( DmElementHandle_t hElement, CUtlSymbolLarge type )
 {
 	// treat NULL, deleted, and unloaded elements as being of any type - 
 	// when set, undeleted or loaded, this should be checked again
@@ -115,6 +116,7 @@ public:
 	virtual bool UnserializeElement( CDmAttribute *pAttribute, CUtlBuffer &buf ) = 0;
 	virtual bool UnserializeElement( CDmAttribute *pAttribute, int nElement, CUtlBuffer &buf ) = 0;
 	virtual void OnUnserializationFinished( CDmAttribute *pAttribute ) = 0;
+	virtual bool IsIdenticalToSerializedValue( const CDmAttribute *pAttribute, CUtlBuffer &buf ) const = 0;
 };
 
 
@@ -152,15 +154,19 @@ public:
 	virtual bool UnserializeElement( CDmAttribute *pAttribute, CUtlBuffer &buf );
 	virtual bool UnserializeElement( CDmAttribute *pAttribute, int nElement, CUtlBuffer &buf );
 	virtual void OnUnserializationFinished( CDmAttribute *pAttribute );
+	virtual bool IsIdenticalToSerializedValue( const CDmAttribute *pAttribute, CUtlBuffer &buf ) const;
 };
 
 
 //-----------------------------------------------------------------------------
-// Memory pool useds for CDmAttribute data
+// Memory pools used for CDmAttribute data
 // Over 8 bytes, use the small-block allocator (it aligns to 16 bytes)
 //-----------------------------------------------------------------------------
-CUtlMemoryPool g_DataAlloc4( sizeof( CDmAttribute ), 4, CUtlMemoryPool::GROW_SLOW, "4-byte data pool" );
-CUtlMemoryPool g_DataAlloc8( sizeof( CDmAttribute ), 8, CUtlMemoryPool::GROW_SLOW, "8-byte data pool" );
+CUtlMemoryPool g_DataAlloc4( 4, 1024, CUtlMemoryPool::GROW_SLOW, "4-byte data pool" );
+CUtlMemoryPool g_DataAlloc8( 8, 1024, CUtlMemoryPool::GROW_SLOW, "8-byte data pool" );
+#if defined( PLATFORM_64BITS )
+CUtlMemoryPool g_DataAlloc16( 16, 1024, CUtlMemoryPool::GROW_SLOW, "16-byte data pool" );
+#endif
 
 template< class T > void* NewData()
 {
@@ -195,7 +201,11 @@ struct CSizeTest
 		COMPILE_TIME_ASSERT( sizeof( float )		== 4 );
 		COMPILE_TIME_ASSERT( sizeof( bool )			<= 4 );
 		COMPILE_TIME_ASSERT( sizeof( Color )		== 4 );
+#if defined( PLATFORM_64BITS )
+		COMPILE_TIME_ASSERT( sizeof( DmElementAttribute_t ) <= 16 );
+#else
 		COMPILE_TIME_ASSERT( sizeof( DmElementAttribute_t ) <= 8 );
+#endif
 		COMPILE_TIME_ASSERT( sizeof( Vector2D )		== 8 );
 	}
 };
@@ -207,8 +217,13 @@ static CSizeTest g_sizeTest;
 USE_SPECIAL_ALLOCATOR( bool, g_DataAlloc4 )
 USE_SPECIAL_ALLOCATOR( int, g_DataAlloc4 )
 USE_SPECIAL_ALLOCATOR( float, g_DataAlloc4 )
-USE_SPECIAL_ALLOCATOR( DmElementHandle_t, g_DataAlloc4 )
+#if defined( PLATFORM_64BITS )
+USE_SPECIAL_ALLOCATOR( DmElementHandle_t, g_DataAlloc16 )
+#else
+USE_SPECIAL_ALLOCATOR( DmElementHandle_t, g_DataAlloc8 )
+#endif
 USE_SPECIAL_ALLOCATOR( Color, g_DataAlloc4 )
+USE_SPECIAL_ALLOCATOR( DmeTime_t, g_DataAlloc4 )
 USE_SPECIAL_ALLOCATOR( Vector2D, g_DataAlloc8 )
 
 #include "tier0/memdbgon.h"
@@ -317,6 +332,7 @@ void CDmAttributeOp<int>::SetValue( CDmAttribute *pAttribute, DmAttributeType_t 
 	SET_VALUE_TYPE( int );
 	SET_VALUE_TYPE( float );
 	SET_VALUE_TYPE( bool );
+	SET_VALUE_TYPE( DmeTime_t );
 
 	default:
 		Assert(0);
@@ -332,6 +348,7 @@ void CDmAttributeOp<float>::SetValue( CDmAttribute *pAttribute, DmAttributeType_
 	SET_VALUE_TYPE( int );
 	SET_VALUE_TYPE( float );
 	SET_VALUE_TYPE( bool );
+	SET_VALUE_TYPE( DmeTime_t );
 
 	default:
 		Assert(0);
@@ -347,6 +364,23 @@ void CDmAttributeOp<bool>::SetValue( CDmAttribute *pAttribute, DmAttributeType_t
 	SET_VALUE_TYPE( int );
 	SET_VALUE_TYPE( float );
 	SET_VALUE_TYPE( bool );
+	SET_VALUE_TYPE( DmeTime_t );
+
+	default:
+		Assert(0);
+		break;			 			  
+	}
+}
+
+template<>
+void CDmAttributeOp<DmeTime_t>::SetValue( CDmAttribute *pAttribute, DmAttributeType_t valueType, const void *pValue )
+{
+	switch( valueType )
+	{
+		SET_VALUE_TYPE( int );
+		SET_VALUE_TYPE( float );
+		SET_VALUE_TYPE( bool );
+		SET_VALUE_TYPE( DmeTime_t );
 
 	default:
 		Assert(0);
@@ -383,6 +417,51 @@ void CDmAttributeOp<Quaternion>::SetValue( CDmAttribute *pAttribute, DmAttribute
 	}
 }
 
+//-----------------------------------------------------------------------------
+// CUtlSymbolLarge specialization of utlvector unserialize function defined by
+// utlBufferUtil, allows the unserialize to correctly add the string to the 
+// global symbol table.
+//-----------------------------------------------------------------------------
+template<>
+bool Unserialize( CUtlBuffer &buf, CUtlVector< CUtlSymbolLarge > &dest )
+{
+	dest.RemoveAll();
+
+	MEM_ALLOC_CREDIT_FUNCTION();
+
+	CUtlString tempString;
+
+	if ( !buf.IsText() )
+	{
+		int nCount = buf.GetInt();
+		if ( nCount )
+		{
+			dest.EnsureCapacity( nCount );
+			for ( int i = 0; i < nCount; ++i )
+			{
+				if ( !::Unserialize( buf, tempString ) )
+					return false;
+
+				dest.AddToTail( g_pDataModel->GetSymbol( tempString.Get() ) );
+			}
+		}
+		return buf.IsValid();
+	}
+
+	while ( true )
+	{
+		buf.EatWhiteSpace();
+		if ( !buf.IsValid() )
+			break;
+
+		if ( ! ::Unserialize( buf, tempString ) )
+			return false;
+
+		dest.AddToTail( g_pDataModel->GetSymbol( tempString.Get() ) );
+	}
+	return true;
+}
+
 
 //-----------------------------------------------------------------------------
 // Methods related to serialization
@@ -397,8 +476,14 @@ template< class T >
 bool CDmAttributeOp<T>::SkipUnserialize( CUtlBuffer& buf )
 {
 	T dummy;
-	::Unserialize( buf, dummy );
-	return buf.IsValid();
+	return ::Unserialize( buf, dummy );
+}
+
+template<>
+bool CDmAttributeOp< CUtlSymbolLarge >::SkipUnserialize( CUtlBuffer& buf )
+{
+	CUtlString dummy;
+	return ::Unserialize( buf, dummy );
 }
 
 template< class T >
@@ -416,12 +501,74 @@ bool CDmAttributeOp<T>::Unserialize( CDmAttribute *pAttribute, CUtlBuffer &buf )
 	// bool Unserialize( CUtlBuffer &buf, T &src )
 
 	T tempVal;
-	bool bRet = ::Unserialize( buf, tempVal );
+	if ( !::Unserialize( buf, tempVal ) )
+		return false;
 
 	// Don't need undo hook since this goes through SetValue route
 	pAttribute->SetValue( tempVal );
 
-	return bRet;
+	return true;
+}
+
+template<>
+bool CDmAttributeOp< CUtlSymbolLarge >::Unserialize( CDmAttribute *pAttribute, CUtlBuffer &buf )
+{
+	CUtlString tempString;
+	if ( !::Unserialize( buf, tempString ) )
+		return false;
+
+	pAttribute->SetValue( tempString.Get() );
+	
+	return true;
+}
+
+
+// Helper function to compare two DM attribute values for equality
+// Needs to be done in a separate function because we can't do templated template specialization
+// Otherwise we'd do: template< class T > bool CDmAttributeOp< CUtlVector<T> >
+// So instead we use function overload resolution to do the dirty work for us...
+template< class T > bool CompareAttrValuesHelper( const T& A, const T& B )
+{
+	return ( A == B );
+}
+
+template< class T > bool CompareAttrValuesHelper( const CUtlVector<T>& A, const CUtlVector<T>& B )
+{
+	if ( A.Count() != B.Count() )
+		return false;
+
+	for ( int i = 0; i < A.Count(); ++i )
+	{
+		if ( !CompareAttrValuesHelper( A[i], B[i] ) )
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
+
+template< class T >
+bool CDmAttributeOp<T>::IsIdenticalToSerializedValue( const CDmAttribute *pAttribute, CUtlBuffer &buf ) const
+{
+	T tempVal;
+	if ( !::Unserialize( buf, tempVal ) )
+		return false;
+
+	return CompareAttrValuesHelper( tempVal, pAttribute->GetValue<T>() );
+}
+
+template <>
+bool CDmAttributeOp< CUtlSymbolLarge >::IsIdenticalToSerializedValue( const CDmAttribute *pAttribute, CUtlBuffer &buf ) const
+{
+	CUtlString tempVal;
+	if ( !::Unserialize( buf, tempVal ) )
+		return false;
+
+	if ( V_stricmp( pAttribute->GetValue< CUtlSymbolLarge >().String(), tempVal.Get() ) != 0 )
+		return false;
+
+	return true;
 }
 
 template< class T >
@@ -536,8 +683,8 @@ public:
 	{
 		Assert( pAttribute->GetOwner() && pAttribute->GetOwner()->GetFileId() != DMFILEID_INVALID );
 		m_hOwner = pAttribute->GetOwner()->GetHandle();
-		m_symAttributeOld = pAttribute->GetName();
-		m_symAttributeNew = newName;
+		m_symAttributeOld = pAttribute->GetNameSymbol();
+		m_symAttributeNew = g_pDataModel->GetSymbol( newName );
 	}
 
 	virtual void Undo()
@@ -573,8 +720,8 @@ private:
 		return g_pDataModel->GetElement( m_hOwner );
 	}
 
-	CUtlSymbol				m_symAttributeOld;
-	CUtlSymbol				m_symAttributeNew;
+	CUtlSymbolLarge				m_symAttributeOld;
+	CUtlSymbolLarge				m_symAttributeNew;
 	DmElementHandle_t		m_hOwner;
 };
 
@@ -594,6 +741,20 @@ public:
 		m_OldValue = pAttribute->GetValue<T>();
 		m_Value = newValue;
 		m_symAttribute = pAttribute->GetNameSymbol( );
+	}
+
+	CUndoAttributeSetValueElement( CDmAttribute *pAttribute )
+		: BaseClass( "CUndoAttributeSetValueElement" )
+	{
+		Assert( pAttribute->GetOwner() && pAttribute->GetOwner()->GetFileId() != DMFILEID_INVALID );
+		m_hOwner = pAttribute->GetOwner()->GetHandle();
+		m_OldValue = pAttribute->GetValue<T>();
+		m_symAttribute = pAttribute->GetNameSymbol( );
+	}
+
+	void SetEndValue( CDmAttribute *pAttribute )
+	{
+		m_Value = pAttribute->GetValue<T>();
 	}
 
 	CDmElement *GetOwner()
@@ -629,7 +790,7 @@ public:
 		{
 			::Serialize( serialized, m_Value );
 		}
-		Q_snprintf( buf, sizeof( buf ), "%s(%s) = %s", base, g_pDataModel->GetString( m_symAttribute ), serialized.Base() ? (const char*)serialized.Base() : "\"\"" );
+		V_sprintf_safe( buf, "%s(%s) = %s", base, m_symAttribute.String(), serialized.Base() ? (const char*)serialized.Base() : "\"\"" );
 		return buf;
 	}
 
@@ -639,15 +800,15 @@ private:
 		CDmElement *pOwner = GetOwner();
 		if ( pOwner )
 		{
-			const char *pAttributeName = g_pDataModel->GetString( m_symAttribute );
+			const char *pAttributeName = m_symAttribute.String();
 			return pOwner->GetAttribute( pAttributeName );
 		}
 		return NULL;
 	}
 
-	typedef T StorageType_t;
+	typedef typename CDmAttributeUndoStorageType< T >::UndoStorageType StorageType_t;
 
-	CUtlSymbol			m_symAttribute;
+	CUtlSymbolLarge			m_symAttribute;
 	DmElementHandle_t	m_hOwner;
 	StorageType_t		m_OldValue;
 	StorageType_t		m_Value;
@@ -680,7 +841,7 @@ protected:
 
 	const char *GetAttributeName()
 	{
-		return g_pDataModel->GetString( m_symAttribute );
+		return m_symAttribute.String();
 	}
 
 	CDmAttribute *GetAttribute()
@@ -694,7 +855,7 @@ protected:
 	}
 
 private:
-	CUtlSymbol				m_symAttribute;
+	CUtlSymbolLarge				m_symAttribute;
 	DmElementHandle_t		m_hOwner;
 };
 
@@ -1149,7 +1310,7 @@ template< class T >
 void CDmArrayAttributeOp<T>::OnAttributeArrayElementAdded( int nFirstElem, int nLastElem, bool bUpdateElementReferences )
 {
 	CDmElement *pOwner = m_pAttribute->GetOwner();
-	if ( m_pAttribute->IsFlagSet( FATTRIB_HAS_ARRAY_CALLBACK ) && !CDmeElementAccessor::IsBeingUnserialized( pOwner ) )
+	if ( m_pAttribute->IsFlagSet( FATTRIB_HAS_CALLBACK ) && CDmeElementAccessor::AreOnChangedCallbacksEnabled( pOwner ) )
 	{
 		pOwner->OnAttributeArrayElementAdded( m_pAttribute, nFirstElem, nLastElem );
 	}
@@ -1158,7 +1319,7 @@ void CDmArrayAttributeOp<T>::OnAttributeArrayElementAdded( int nFirstElem, int n
 template< > inline void CDmArrayAttributeOp< DmElementHandle_t >::OnAttributeArrayElementAdded( int nFirstElem, int nLastElem, bool bUpdateElementReferences )
 {
 	CDmElement *pOwner = m_pAttribute->GetOwner();
-	if ( m_pAttribute->IsFlagSet( FATTRIB_HAS_ARRAY_CALLBACK ) && !CDmeElementAccessor::IsBeingUnserialized( pOwner ) )
+	if ( m_pAttribute->IsFlagSet( FATTRIB_HAS_CALLBACK ) && CDmeElementAccessor::AreOnChangedCallbacksEnabled( pOwner ) )
 	{
 		pOwner->OnAttributeArrayElementAdded( m_pAttribute, nFirstElem, nLastElem );
 	}
@@ -1176,7 +1337,7 @@ template< class T >
 void CDmArrayAttributeOp<T>::OnAttributeArrayElementRemoved( int nFirstElem, int nLastElem )
 {
 	CDmElement *pOwner = m_pAttribute->GetOwner();
-	if ( m_pAttribute->IsFlagSet( FATTRIB_HAS_ARRAY_CALLBACK ) && !CDmeElementAccessor::IsBeingUnserialized( pOwner ) )
+	if ( m_pAttribute->IsFlagSet( FATTRIB_HAS_CALLBACK ) && CDmeElementAccessor::AreOnChangedCallbacksEnabled( pOwner ) )
 	{
 		pOwner->OnAttributeArrayElementRemoved( m_pAttribute, nFirstElem, nLastElem );
 	}
@@ -1185,7 +1346,7 @@ void CDmArrayAttributeOp<T>::OnAttributeArrayElementRemoved( int nFirstElem, int
 template< > void CDmArrayAttributeOp< DmElementHandle_t >::OnAttributeArrayElementRemoved( int nFirstElem, int nLastElem )
 {
 	CDmElement *pOwner = m_pAttribute->GetOwner();
-	if ( m_pAttribute->IsFlagSet( FATTRIB_HAS_ARRAY_CALLBACK ) && !CDmeElementAccessor::IsBeingUnserialized( pOwner ) )
+	if ( m_pAttribute->IsFlagSet( FATTRIB_HAS_CALLBACK ) && CDmeElementAccessor::AreOnChangedCallbacksEnabled( pOwner ) )
 	{
 		pOwner->OnAttributeArrayElementRemoved( m_pAttribute, nFirstElem, nLastElem );
 	}
@@ -1222,14 +1383,6 @@ template<> inline bool CDmArrayAttributeOp<DmElementHandle_t>::ShouldInsertEleme
 	if ( !IsA( src, Data().m_ElementType ) )
 		return false;
 
-	if ( m_pAttribute->IsFlagSet( FATTRIB_NODUPLICATES ) )
-	{
-		// See if value exists
-		int idx = Data().Find( src );
-		if ( idx != Data().InvalidIndex() )
-			return false;
-	}
-
 	return true;
 }
 
@@ -1258,7 +1411,6 @@ int CDmArrayAttributeOp<T>::InsertBefore( int elem, const T& src )
 		g_pDataModel->AddUndoElement( pUndo );
 	}
 
-	m_pAttribute->PreChanged();
 	int nIndex = Data().InsertBefore( elem, src );
 	OnAttributeArrayElementAdded( nIndex, nIndex );
 	m_pAttribute->OnChanged( true );
@@ -1288,7 +1440,6 @@ int CDmArrayAttributeOp<T>::InsertMultipleBefore( int elem, int num )
 		g_pDataModel->AddUndoElement( pUndo );
 	}
 
-	m_pAttribute->PreChanged();
 	int index = Data().InsertMultipleBefore( elem, num );
 	for ( int i = 0; i < num; ++i )
 	{
@@ -1316,7 +1467,6 @@ void CDmArrayAttributeOp<T>::FastRemove( int elem )
 		g_pDataModel->AddUndoElement( pUndo );
 	}
 
-	m_pAttribute->PreChanged();
 	OnAttributeArrayElementRemoved( elem, elem );
 	Data().FastRemove( elem );
 	m_pAttribute->OnChanged( true );
@@ -1338,7 +1488,6 @@ void CDmArrayAttributeOp<T>::Remove( int elem )
 		g_pDataModel->AddUndoElement( pUndo );
 	}
 
-	m_pAttribute->PreChanged();
 	OnAttributeArrayElementRemoved( elem, elem );
 	Data().Remove( elem );
 	m_pAttribute->OnChanged( true );
@@ -1357,7 +1506,6 @@ void CDmArrayAttributeOp<T>::RemoveAll()
 		g_pDataModel->AddUndoElement( pUndo );
 	}
 
-	m_pAttribute->PreChanged();
 	OnAttributeArrayElementRemoved( 0, Data().Count() - 1 );
 	Data().RemoveAll();
 	m_pAttribute->OnChanged( true );
@@ -1376,7 +1524,6 @@ void CDmArrayAttributeOp<T>::RemoveMultiple( int elem, int num )
 		g_pDataModel->AddUndoElement( pUndo );
 	}
 
-	m_pAttribute->PreChanged();
 	OnAttributeArrayElementRemoved( elem, elem + num - 1 );
 	Data().RemoveMultiple( elem, num );
 	m_pAttribute->OnChanged( true );
@@ -1396,7 +1543,6 @@ void CDmArrayAttributeOp<T>::Purge()
 		g_pDataModel->AddUndoElement( pUndo );
 	}
 
-	m_pAttribute->PreChanged();
 	OnAttributeArrayElementRemoved( 0, Data().Count() - 1 );
 	Data().Purge();
 	m_pAttribute->OnChanged( true );
@@ -1451,7 +1597,6 @@ void CDmArrayAttributeOp<T>::CopyArray( const T *pArray, int nCount )
 		g_pDataModel->AddUndoElement( pUndo );
 	}
 
-	m_pAttribute->PreChanged();
 	OnAttributeArrayElementRemoved( 0, Data().Count() - 1 );
 	PerformCopyArray( pArray, nCount );
 	OnAttributeArrayElementAdded( 0, Data().Count() - 1 );
@@ -1478,7 +1623,6 @@ void CDmArrayAttributeOp<T>::SwapArray( CUtlVector< T >& src )
 		g_pDataModel->AddUndoElement( pUndo );
 	}
 
-	m_pAttribute->PreChanged();
 	OnAttributeArrayElementRemoved( 0, Data().Count() - 1 );
 	Data().Swap( src );
 	OnAttributeArrayElementAdded( 0, Data().Count() - 1 );
@@ -1519,7 +1663,6 @@ void CDmArrayAttributeOp<T>::Set( int i, const T& value )
 		g_pDataModel->AddUndoElement( pUndo );
 	}
 
-	m_pAttribute->PreChanged();
 	OnAttributeArrayElementRemoved( i, i ); 
 	Data()[i] = value;
 	OnAttributeArrayElementAdded( i, i ); 
@@ -1572,7 +1715,6 @@ void CDmArrayAttributeOp<T>::SetMultiple( int i, int nCount, const T* pValue )
 		g_pDataModel->AddUndoElement( pUndo );
 	}
 
-	m_pAttribute->PreChanged();
 	OnAttributeArrayElementRemoved( i, i+nCount-1 ); 
 	for ( int j = 0; j < nCount; ++j )
 	{
@@ -1639,8 +1781,6 @@ void CDmArrayAttributeOp<T>::Swap( int i, int j )
 		g_pDataModel->AddUndoElement( pUndo );
 	}
 
-	m_pAttribute->PreChanged();
-
 	OnAttributeArrayElementRemoved( i, i ); 
 	Data()[i] = Data()[j];
 	OnAttributeArrayElementAdded( i, i ); 
@@ -1665,32 +1805,34 @@ bool CDmArrayAttributeOp<T>::Unserialize( CDmAttribute *pAttribute, CUtlBuffer &
 	MEM_ALLOC_CREDIT_CLASS();
 
 	CUtlVector< T > tempVal;
-	bool bRet = ::Unserialize( buf, tempVal );
+	if ( !::Unserialize( buf, tempVal ) )
+		return false;
 
 	// Don't need undo hook since this goes through Swap route
 	CDmArrayAttributeOp<T> accessor( pAttribute );
 	accessor.SwapArray( tempVal );
 
-	return bRet;
+	return true;
 }
 
 template<> bool CDmArrayAttributeOp<DmElementHandle_t>::Unserialize( CDmAttribute *pAttribute, CUtlBuffer &buf )
 {
 	// Need to specialize this because element handles can't use SwapArray
-	// because it's incapable of doing type safety checks or looking for FATTRIB_NODUPLICATES
+	// because it's incapable of doing type safety checks
 	if ( !CDmAttributeAccessor::MarkDirty( pAttribute ) )
 		return false;
 
 	MEM_ALLOC_CREDIT_CLASS();
 
 	CUtlVector< DmElementHandle_t > tempVal;
-	bool bRet = ::Unserialize( buf, tempVal );
+	if ( !::Unserialize( buf, tempVal ) )
+		return false;
 
 	// Don't need undo hook since this goes through copy route
 	CDmArrayAttributeOp<DmElementHandle_t> accessor( pAttribute );
 	accessor.CopyArray( tempVal.Base(), tempVal.Count() );
 
-	return bRet;
+	return true;
 }
 
 // Serialization of a single element
@@ -1710,17 +1852,35 @@ bool CDmArrayAttributeOp<T>::UnserializeElement( CDmAttribute *pAttribute, CUtlB
 	MEM_ALLOC_CREDIT_CLASS();
 
 	T temp;
-	bool bReadElement = ::Unserialize( buf, temp );
-	if ( bReadElement )
-	{
-		pAttribute->PreChanged();
+	if ( !::Unserialize( buf, temp ) )
+		return false;
 
-		CDmArrayAttributeOp<T> accessor( pAttribute );
-		accessor.AddToTail( temp );
+	CDmArrayAttributeOp<T> accessor( pAttribute );
+	accessor.AddToTail( temp );
 
-		pAttribute->OnChanged( true );
-	}
-	return bReadElement;
+	pAttribute->OnChanged( true );
+
+	return true;
+}
+
+template<>
+bool CDmArrayAttributeOp< CUtlSymbolLarge >::UnserializeElement( CDmAttribute *pAttribute, CUtlBuffer &buf )
+{
+	if ( !CDmAttributeAccessor::MarkDirty( pAttribute ) )
+		return false;
+
+	MEM_ALLOC_CREDIT_CLASS();
+
+	CUtlString tempString;
+	if ( !::Unserialize( buf, tempString ) )
+		return false;
+
+	CDmrStringArray stringArray( pAttribute );
+	stringArray.AddToTail( tempString.Get() );
+
+	pAttribute->OnChanged( true );
+
+	return true;
 }
 
 template< class T >
@@ -1735,14 +1895,37 @@ bool CDmArrayAttributeOp<T>::UnserializeElement( CDmAttribute *pAttribute, int n
 
 	MEM_ALLOC_CREDIT_CLASS();
 
-	pAttribute->PreChanged();
-	bool bReadElement = ::Unserialize( buf, *const_cast<T*>( &array[nElement] ) );
-	if ( bReadElement )
-	{
-		pAttribute->OnChanged();
-	}
-	return bReadElement;
+	if ( !::Unserialize( buf, *const_cast<T*>( &array[nElement] ) ) )
+		return false;
+
+	pAttribute->OnChanged();
+
+	return true;
 }
+
+template<>
+bool CDmArrayAttributeOp< CUtlSymbolLarge >::UnserializeElement( CDmAttribute *pAttribute, int nElement, CUtlBuffer &buf )
+{
+	if ( !CDmAttributeAccessor::MarkDirty( pAttribute ) )
+		return false;
+
+	CDmrStringArray array( pAttribute );
+	if ( array.Count() <= nElement )
+		return false;
+
+	MEM_ALLOC_CREDIT_CLASS();
+
+	CUtlString tempString;
+	if ( !::Unserialize( buf, tempString ) )
+		return false;
+
+	array.Set( nElement, tempString.Get() );
+
+	pAttribute->OnChanged();
+
+	return true;
+}
+
 
 template< class T >
 void CDmArrayAttributeOp<T>::OnUnserializationFinished( CDmAttribute *pAttribute )
@@ -1767,7 +1950,7 @@ void CDmArrayAttributeOp<T>::OnUnserializationFinished( CDmAttribute *pAttribute
 //-----------------------------------------------------------------------------
 // Memory pool used for CDmAttribute
 //-----------------------------------------------------------------------------
-CUtlMemoryPool g_AttrAlloc( sizeof( CDmAttribute ), 32, CUtlMemoryPool::GROW_SLOW, "CDmAttribute pool" );
+CUtlMemoryPool g_AttrAlloc( sizeof( CDmAttribute ), 4096, CUtlMemoryPool::GROW_SLOW, "CDmAttribute pool" );
 
 
 //-----------------------------------------------------------------------------
@@ -1787,8 +1970,15 @@ CDmAttribute *CDmAttribute::CreateAttribute( CDmElement *pOwner, DmAttributeType
 
 	default:
 		{
-			void *pMem = g_AttrAlloc.Alloc( sizeof( CDmAttribute ) );
-			return ::new( pMem ) CDmAttribute( pOwner, type, pAttributeName );
+			void *pMem = 0;
+			{
+				DMX_PROFILE_SCOPE( CreateAttribute_Alloc );
+				pMem = g_AttrAlloc.Alloc( sizeof( CDmAttribute ) );
+			}
+			{
+				DMX_PROFILE_SCOPE( CreateAttribute_new_CDmAttribute );
+				return ::new( pMem ) CDmAttribute( pOwner, type, pAttributeName );
+			}
 		}
 	}
 }
@@ -1803,8 +1993,15 @@ CDmAttribute *CDmAttribute::CreateExternalAttribute( CDmElement *pOwner, DmAttri
 
 	default:
 		{
-			void *pMem = g_AttrAlloc.Alloc( sizeof( CDmAttribute ) );
-			return ::new( pMem ) CDmAttribute( pOwner, type, pAttributeName, pExternalMemory );
+			void *pMem = 0;
+			{
+				DMX_PROFILE_SCOPE( CreateExternalAttribute_Alloc );
+				pMem = g_AttrAlloc.Alloc( sizeof( CDmAttribute ) );
+			}
+			{
+				DMX_PROFILE_SCOPE( CreateExternalAttribute_new_CDmAttribute );
+				return ::new( pMem ) CDmAttribute( pOwner, type, pAttributeName, pExternalMemory );
+			}
 		}
 	}
 }
@@ -1841,38 +2038,47 @@ void CDmAttribute::DestroyAttribute( CDmAttribute *pAttribute )
 CDmAttribute::CDmAttribute( CDmElement *pOwner, DmAttributeType_t type, const char *pAttributeName ) :
 	m_pData( NULL )
 {
-	Init( pOwner, type, pAttributeName );
-	CreateAttributeData();
+	{
+		DMX_PROFILE_SCOPE( CDmAttribute_Init );
+		Init( pOwner, type, pAttributeName );
+	}
+	{
+		DMX_PROFILE_SCOPE( CDmAttribute_CreateAttributeData );
+		CreateAttributeData();
+	}
 }
 
 CDmAttribute::CDmAttribute( CDmElement *pOwner, DmAttributeType_t type, const char *pAttributeName, void *pMemory ) :
 	m_pData( pMemory )
 {
-	Init( pOwner, type, pAttributeName );
-	s_pAttrInfo[ GetType() ]->SetDefaultValue( m_pData );
+	{
+		DMX_PROFILE_SCOPE( CDmAttributeExternal_Init );
+		Init( pOwner, type, pAttributeName );
+	}
+	{
+		DMX_PROFILE_SCOPE( CDmAttributeExternal_SetDefaultValue );
+		s_pAttrInfo[ GetType() ]->SetDefaultValue( m_pData );
+	}
+
 	AddFlag( FATTRIB_EXTERNAL );
 }
 
 
 void CDmAttribute::Init( CDmElement *pOwner, DmAttributeType_t type, const char *pAttributeName )
 {
-	// FIXME - this is just here temporarily to catch old code trying to create type and id attributes
-	// this shouldn't actually be illegal, since users should be able to create attributes of whatever name they want
-	Assert( V_strcmp( pAttributeName, "type" ) && V_strcmp( pAttributeName, "id" ) );
-
 	m_pOwner = pOwner;
-	m_Name = g_pDataModel->GetSymbol( pAttributeName );
+	{
+		DMX_PROFILE_SCOPE( CDmAttribute_m_Name_GetSymbol );
+		m_Name = g_pDataModel->GetSymbol( pAttributeName );
+	}
 	m_nFlags = type;
 	m_Handle = DMATTRIBUTE_HANDLE_INVALID;
 	m_pNext = NULL;
-	m_hMailingList = DMMAILINGLIST_INVALID;
 
 	switch ( type )
 	{
 	case AT_ELEMENT:
 	case AT_ELEMENT_ARRAY:
-	case AT_OBJECTID:
-	case AT_OBJECTID_ARRAY:
 		m_nFlags |= FATTRIB_TOPOLOGICAL;
 		break;
 	}
@@ -1898,7 +2104,6 @@ CDmAttribute::~CDmAttribute()
 		break;
 	}
 	
-	CleanupMailingList();
 	InvalidateHandle();
 	DeleteAttributeData();
 }
@@ -1931,11 +2136,59 @@ void CDmAttribute::DeleteAttributeData()
 	}
 }
 
+// ChangeType fails (and returns false) for external attributes (ones who's data is owned by their element)
+bool CDmAttribute::ChangeType_UNSAFE( DmAttributeType_t type )
+{
+	DmAttributeType_t oldType = GetType();
+	if ( type == oldType )
+		return true;
+
+	if ( IsFlagSet( FATTRIB_EXTERNAL ) )
+		return false;
+
+	if ( IsArrayType( oldType ) || IsArrayType( type ) )
+	{
+		if ( !IsArrayType( oldType ) || !IsArrayType( type ) )
+			return false;
+
+		// shortcut the conversion and callbacks for array type changes - this only works for bitwise exact type changes (currently only int <-> time)
+		m_nFlags = ( m_nFlags & ( 0xffff & ~FATTRIB_TYPEMASK ) ) | type;
+		return true;
+	}
+
+	int nNewSize = s_pAttrInfo[ type ]->DataSize();
+	int nOldSize = s_pAttrInfo[ oldType ]->DataSize();
+	void *pOldData = stackalloc( nOldSize );
+	V_memcpy( pOldData, m_pData, nOldSize );
+
+	// force any necessary callbacks to be called (ie OnElementReferenceRemoved)
+	s_pAttrInfo[ oldType ]->SetToDefaultValue( this ); // may trigger callbacks
+
+	uint16 nFlags = ( m_nFlags & ( 0xffff & ~FATTRIB_TYPEMASK ) ) | type;
+	if ( nOldSize != nNewSize )
+	{
+		DeleteAttributeData();
+		m_nFlags = nFlags;
+		CreateAttributeData();
+	}
+	else
+	{
+		m_nFlags = nFlags;
+	}
+
+	// put data in state s.t. when callbacks are called, no harm is done (OnElementReferenceAdded)
+	void *pDefaultData = stackalloc( nNewSize );
+	s_pAttrInfo[ type ]->SetDefaultValue( pDefaultData ); // does NOT trigger callbacks
+
+	SetValue( oldType, pOldData ); // may trigger callbacks, but only if the types are convertable
+	return true;
+}
+
 
 //-----------------------------------------------------------------------------
 // Used only in attribute element arrays
 //-----------------------------------------------------------------------------
-void CDmAttribute::SetElementTypeSymbol( UtlSymId_t typeSymbol )
+void CDmAttribute::SetElementTypeSymbol( CUtlSymbolLarge typeSymbol )
 {
 	switch ( GetType() )
 	{
@@ -1951,7 +2204,7 @@ void CDmAttribute::SetElementTypeSymbol( UtlSymId_t typeSymbol )
 		{
 #ifdef _DEBUG
 			CDmrElementArray<> array( this );
-			if ( array.GetElementType() != UTL_INVAL_SYMBOL )
+			if ( array.GetElementType() != UTL_INVAL_SYMBOL_LARGE )
 			{
 				int i;
 				int c = array.Count();
@@ -1973,7 +2226,7 @@ void CDmAttribute::SetElementTypeSymbol( UtlSymId_t typeSymbol )
 	}
 }
 
-UtlSymId_t CDmAttribute::GetElementTypeSymbol() const
+CUtlSymbolLarge CDmAttribute::GetElementTypeSymbol() const
 {
 	switch ( GetType() )
 	{
@@ -1988,7 +2241,7 @@ UtlSymId_t CDmAttribute::GetElementTypeSymbol() const
 		break;
 	}
 
-	return UTL_INVAL_SYMBOL;
+	return UTL_INVAL_SYMBOL_LARGE;
 }
 
 
@@ -2001,7 +2254,7 @@ bool CDmAttribute::ModificationAllowed() const
 		return false;
 
 	DmPhase_t phase = g_pDmElementFramework->GetPhase();
-	if ( phase == PH_EDIT )
+	if ( phase == PH_EDIT || phase == PH_EDIT_APPLY || phase == PH_EDIT_RESOLVE )
 		return true;
 	if ( ( phase == PH_OPERATE ) && !IsFlagSet( FATTRIB_TOPOLOGICAL ) )
 		return true;
@@ -2025,31 +2278,13 @@ bool CDmAttribute::MarkDirty()
 
 
 //-----------------------------------------------------------------------------
-// Called before and after the attribute has changed
+// Called after the attribute has changed
 //-----------------------------------------------------------------------------
-void CDmAttribute::PreChanged()
-{
-	if ( IsFlagSet( FATTRIB_HAS_PRE_CALLBACK ) && !CDmeElementAccessor::IsBeingUnserialized( m_pOwner ) )
-	{
-		m_pOwner->PreAttributeChanged( this );
-	}
-
-	// FIXME: What about mailing lists?
-}
-
 void CDmAttribute::OnChanged( bool bArrayCountChanged, bool bIsTopological )
 {
-	if ( IsFlagSet( FATTRIB_HAS_CALLBACK ) && !CDmeElementAccessor::IsBeingUnserialized( m_pOwner ) )
+	if ( IsFlagSet( FATTRIB_HAS_CALLBACK ) && CDmeElementAccessor::AreOnChangedCallbacksEnabled( m_pOwner ) )
 	{
 		m_pOwner->OnAttributeChanged( this );
-	}
-
-	if ( ( m_hMailingList != DMMAILINGLIST_INVALID ) && !CDmeElementAccessor::IsBeingUnserialized( m_pOwner ) )
-	{
-		if ( !g_pDataModelImp->PostAttributeChanged( m_hMailingList, this ) )
-		{
-			CleanupMailingList();
-		}
 	}
 
 	if ( bIsTopological || IsTopological( GetType() ) )
@@ -2068,37 +2303,43 @@ void CDmAttribute::OnChanged( bool bArrayCountChanged, bool bIsTopological )
 //-----------------------------------------------------------------------------
 template< class T > bool CDmAttribute::IsTypeConvertable() const
 {
-	return ( CDmAttributeInfo< T >::ATTRIBUTE_TYPE == GetType() );
+	return CDmAttributeInfo< T >::ATTRIBUTE_TYPE == GetType();
 }
 
 template<> bool CDmAttribute::IsTypeConvertable<bool>() const
 {
 	DmAttributeType_t type = GetType();
-	return ( type == AT_BOOL || type == AT_INT || type == AT_FLOAT );
+	return type == AT_TIME || type == AT_FLOAT || type == AT_INT || type == AT_BOOL;
 }
 
 template<> bool CDmAttribute::IsTypeConvertable<int>() const
 {
 	DmAttributeType_t type = GetType();
-	return ( type == AT_INT || type == AT_BOOL || type == AT_FLOAT );
+	return type == AT_TIME || type == AT_FLOAT || type == AT_INT || type == AT_BOOL;
 }
 
 template<> bool CDmAttribute::IsTypeConvertable<float>() const
 {
 	DmAttributeType_t type = GetType();
-	return ( type == AT_FLOAT || type == AT_INT || type == AT_BOOL );
+	return type == AT_TIME || type == AT_FLOAT || type == AT_INT || type == AT_BOOL;
+}
+
+template<> bool CDmAttribute::IsTypeConvertable<DmeTime_t>() const
+{
+	DmAttributeType_t type = GetType();
+	return type == AT_TIME || type == AT_FLOAT || type == AT_INT || type == AT_BOOL;
 }
 
 template<> bool CDmAttribute::IsTypeConvertable<QAngle>() const
 {
 	DmAttributeType_t type = GetType();
-	return ( type == AT_QANGLE || type == AT_QUATERNION );
+	return type == AT_QANGLE || type == AT_QUATERNION;
 }
 
 template<> bool CDmAttribute::IsTypeConvertable<Quaternion>() const
 {
 	DmAttributeType_t type = GetType();
-	return ( type == AT_QUATERNION || type == AT_QANGLE);
+	return type == AT_QUATERNION || type == AT_QANGLE;
 }
 
 template< class T > void CDmAttribute::CopyData( const T& value )
@@ -2126,6 +2367,10 @@ template<> void CDmAttribute::CopyData( const bool& value )
 	case AT_FLOAT:
 		*reinterpret_cast< float* >( m_pData ) = value ? 1.0f : 0.0f;
 		break;
+
+	case AT_TIME:
+		*reinterpret_cast< DmeTime_t* >( m_pData ) = value ? DmeTime_t( 1.0f ) : DMETIME_ZERO;
+		break;
 	}
 }
 
@@ -2143,6 +2388,10 @@ template<> void CDmAttribute::CopyDataOut( bool& value ) const
 
 	case AT_FLOAT:
 		value = *reinterpret_cast< float* >( m_pData ) != 0.0f;
+		break;
+
+	case AT_TIME:
+		value = *reinterpret_cast< DmeTime_t* >( m_pData ) != DMETIME_ZERO;
 		break;
 	}
 }
@@ -2162,6 +2411,10 @@ template<> void CDmAttribute::CopyData( const int& value )
 	case AT_FLOAT:
 		*reinterpret_cast< float* >( m_pData ) = value;
 		break;
+
+	case AT_TIME:
+		reinterpret_cast< DmeTime_t* >( m_pData )->SetTenthsOfMS( value );
+		break;
 	}
 }
 
@@ -2179,6 +2432,10 @@ template<> void CDmAttribute::CopyDataOut( int& value ) const
 
 	case AT_FLOAT:
 		value = *reinterpret_cast< float* >( m_pData );
+		break;
+
+	case AT_TIME:
+		value = reinterpret_cast< DmeTime_t* >( m_pData )->GetTenthsOfMS();
 		break;
 	}
 }
@@ -2198,6 +2455,10 @@ template<> void CDmAttribute::CopyData( const float& value )
 	case AT_FLOAT:
 		*reinterpret_cast< float* >( m_pData ) = value;
 		break;
+
+	case AT_TIME:
+		reinterpret_cast< DmeTime_t* >( m_pData )->SetSeconds( value );
+		break;
 	}
 }
 
@@ -2215,6 +2476,54 @@ template<> void CDmAttribute::CopyDataOut( float& value ) const
 
 	case AT_FLOAT:
 		value = *reinterpret_cast< float* >( m_pData );
+		break;
+
+	case AT_TIME:
+		value = reinterpret_cast< DmeTime_t* >( m_pData )->GetSeconds();
+		break;
+	}
+}
+
+template<> void CDmAttribute::CopyData( const DmeTime_t& value )
+{
+	switch( GetType() )
+	{
+	case AT_BOOL:
+		*reinterpret_cast< bool* >( m_pData ) = value != DMETIME_ZERO;
+		break;
+
+	case AT_INT:
+		*reinterpret_cast< int* >( m_pData ) = value.GetTenthsOfMS();
+		break;
+
+	case AT_FLOAT:
+		*reinterpret_cast< float* >( m_pData ) = value.GetSeconds();
+		break;
+
+	case AT_TIME:
+		*reinterpret_cast< DmeTime_t* >( m_pData ) = value;
+		break;
+	}
+}
+
+template<> void CDmAttribute::CopyDataOut( DmeTime_t& value ) const
+{
+	switch( GetType() )
+	{
+	case AT_BOOL:
+		value = *reinterpret_cast< bool* >( m_pData ) ? DmeTime_t( 1.0f ) : DMETIME_ZERO;
+		break;
+
+	case AT_INT:
+		value.SetTenthsOfMS( *reinterpret_cast< int* >( m_pData ) );
+		break;
+
+	case AT_FLOAT:
+		value.SetSeconds( *reinterpret_cast< float* >( m_pData ) );
+		break;
+
+	case AT_TIME:
+		value = *reinterpret_cast< DmeTime_t* >( m_pData );
 		break;
 	}
 }
@@ -2315,7 +2624,7 @@ template<> bool CDmAttribute::ShouldModify( const DmElementHandle_t& value )
 		return false;
 
 	DmElementAttribute_t *pData = GetData<DmElementHandle_t>();
-	if ( pData->m_ElementType != UTL_INVAL_SYMBOL && !::IsA( value, pData->m_ElementType ) )
+	if ( pData->m_ElementType != UTL_INVAL_SYMBOL_LARGE && !::IsA( value, pData->m_ElementType ) )
 		return false;
 
 	return MarkDirty();
@@ -2338,28 +2647,58 @@ void CDmAttribute::SetValue( const T &value )
 		g_pDataModel->AddUndoElement( pUndo );
 	}
 
-	bool bIsBeingUnserialized = CDmeElementAccessor::IsBeingUnserialized( m_pOwner );
-	if ( IsFlagSet( FATTRIB_HAS_PRE_CALLBACK ) && !bIsBeingUnserialized )
-	{
-		m_pOwner->PreAttributeChanged( this );
-	}
-
 	CopyData< T >( value );
 
-	if ( !bIsBeingUnserialized )
+	if ( IsFlagSet( FATTRIB_HAS_CALLBACK ) && CDmeElementAccessor::AreOnChangedCallbacksEnabled( m_pOwner ) )
 	{
-		if ( IsFlagSet( FATTRIB_HAS_CALLBACK ) )
-		{
-			m_pOwner->OnAttributeChanged( this );
-		}
+		m_pOwner->OnAttributeChanged( this );
+	}
 
-		if ( m_hMailingList != DMMAILINGLIST_INVALID )
-		{
-			if ( !g_pDataModelImp->PostAttributeChanged( m_hMailingList, this ) )
-			{
-				CleanupMailingList();
-			}
-		}
+	g_pDataModelImp->NotifyState( IsTopological( GetType() ) ? NOTIFY_CHANGE_TOPOLOGICAL : NOTIFY_CHANGE_ATTRIBUTE_VALUE );
+}
+
+
+//-----------------------------------------------------------------------------
+// Main entry point for single-valued SetValue
+//-----------------------------------------------------------------------------
+template< class T > T& 
+CDmAttribute::BeginModifyValueInPlace( DmAttributeModifyHandle_t *pHandle )
+{
+	*pHandle = NULL;
+
+	// Type conversion is not allowed
+	if ( (int)GetType() != (int)CDmAttributeInfo< T >::ATTRIBUTE_TYPE )
+	{
+		Assert( 0 );
+		return *( T* )NULL;
+	}
+
+	// UNDO Hook
+	if ( g_pDataModel->UndoEnabledForElement( m_pOwner ) )
+	{
+		CUndoAttributeSetValueElement<T> *pUndo = new CUndoAttributeSetValueElement<T>( this );
+		*pHandle = (DmAttributeModifyHandle_t)pUndo;
+	}
+
+	return *reinterpret_cast< T* >( m_pData );
+}
+
+template< class T >
+void CDmAttribute::EndModifyValueInPlace( DmAttributeModifyHandle_t handle )
+{
+	if ( (int)GetType() != (int)CDmAttributeInfo< T >::ATTRIBUTE_TYPE )
+		return;
+
+	CUndoAttributeSetValueElement<T> *pUndo = ( CUndoAttributeSetValueElement<T>* )( handle );
+	if ( pUndo )
+	{
+		pUndo->SetEndValue( this );
+		g_pDataModel->AddUndoElement( pUndo );
+	}
+
+	if ( IsFlagSet( FATTRIB_HAS_CALLBACK ) && CDmeElementAccessor::AreOnChangedCallbacksEnabled( m_pOwner ) )
+	{
+		m_pOwner->OnAttributeChanged( this );
 	}
 
 	g_pDataModelImp->NotifyState( IsTopological( GetType() ) ? NOTIFY_CHANGE_TOPOLOGICAL : NOTIFY_CHANGE_ATTRIBUTE_VALUE );
@@ -2421,7 +2760,7 @@ void CDmAttribute::SetValueFromString( const char *pValue )
 				break;
 			}
 
-			CUtlBuffer buf( pValue, nLen, CUtlBuffer::TEXT_BUFFER | CUtlBuffer::READ_ONLY );
+			CUtlBuffer buf( pValue, nLen + 1, CUtlBuffer::TEXT_BUFFER | CUtlBuffer::READ_ONLY );
 			if ( !Unserialize( buf ) )
 			{
 				SetToDefaultValue();
@@ -2455,6 +2794,11 @@ const char *GetTypeString( DmAttributeType_t type )
 	return "unknown";
 }
 
+bool CDmAttribute::IsStandard() const
+{
+	static CUtlSymbolLarge nameSym = g_pDataModel->GetSymbol( "name" );
+	return m_Name == nameSym;
+}
 
 void CDmAttribute::SetName( const char *pNewName )
 {
@@ -2498,6 +2842,11 @@ bool CDmAttribute::Unserialize( CUtlBuffer &buf )
 	return s_pAttrInfo[ GetType() ]->Unserialize( this, buf );
 }
 
+bool CDmAttribute::IsIdenticalToSerializedValue( CUtlBuffer &buf ) const
+{
+	return s_pAttrInfo[ GetType() ]->IsIdenticalToSerializedValue( this, buf );
+}
+
 bool CDmAttribute::SerializeElement( int nElement, CUtlBuffer &buf ) const
 {
 	return s_pAttrInfo[ GetType() ]->SerializeElement( this, nElement, buf );
@@ -2517,41 +2866,6 @@ bool CDmAttribute::UnserializeElement( int nElement, CUtlBuffer &buf )
 void CDmAttribute::OnUnserializationFinished()
 {
 	return s_pAttrInfo[ GetType() ]->OnUnserializationFinished( this );
-}
-
-
-
-//-----------------------------------------------------------------------------
-// Methods related to attribute change notification
-//-----------------------------------------------------------------------------
-void CDmAttribute::CleanupMailingList()
-{
-	if ( m_hMailingList != DMMAILINGLIST_INVALID )
-	{
-		g_pDataModelImp->DestroyMailingList( m_hMailingList );
-		m_hMailingList = DMMAILINGLIST_INVALID;
-	}
-}
-
-void CDmAttribute::NotifyWhenChanged( DmElementHandle_t h, bool bNotify )
-{
-	if ( bNotify )
-	{
-		if ( m_hMailingList == DMMAILINGLIST_INVALID )
-		{
-			m_hMailingList = g_pDataModelImp->CreateMailingList();
-		}
-		g_pDataModelImp->AddElementToMailingList( m_hMailingList, h );
-		return;
-	}
-
-	if ( m_hMailingList != DMMAILINGLIST_INVALID )
-	{
-		if ( !g_pDataModelImp->RemoveElementFromMailingList( m_hMailingList, h ) )
-		{
-			CleanupMailingList();
-		}
-	}
 }
 
 
@@ -2606,8 +2920,9 @@ int CDmAttribute::EstimateMemoryUsageInternal( CUtlHash< DmElementHandle_t > &vi
 	{
 		CDmrGenericArrayConst array( this );
 		int nCount = array.Count();
-		nAttributeExtraDataSize = nCount * s_pAttrInfo[ GetType() ]->ValueSize();	// Data in the UtlVector
-		int nMallocOverhead = ( array.Count() == 0 ) ? 0 : 8;	// malloc overhead inside the vector
+		DmAttributeType_t valueType = ArrayTypeToValueType( GetType() );
+		nAttributeExtraDataSize = nCount * s_pAttrInfo[ valueType ]->ValueSize();	// Data in the UtlVector
+		int nMallocOverhead = ( nCount == 0 ) ? 0 : 8;	// malloc overhead inside the vector
 		nOverhead += nMallocOverhead;
 		nTotalMemory += nAttributeExtraDataSize + nMallocOverhead;
 	}
@@ -2627,33 +2942,6 @@ int CDmAttribute::EstimateMemoryUsageInternal( CUtlHash< DmElementHandle_t > &vi
 
 	switch ( GetType() )
 	{
-	case AT_STRING:
-		{
-			const CUtlString &value = GetValue<CUtlString>();
-			if ( pCategories )
-			{
-				pCategories[MEMORY_CATEGORY_ATTRIBUTE_DATA] += value.Length() + 1;
-				pCategories[MEMORY_CATEGORY_ATTRIBUTE_OVERHEAD] += 8;
-			}
-			return nTotalMemory + value.Length() + 1 + 8; // string's length skips trailing null
-		}
-
-	case AT_STRING_ARRAY:
-		{
-			const CUtlVector< CUtlString > &array = GetValue< CUtlVector< CUtlString > >( );
-			for ( int i = 0; i < array.Count(); ++i )
-			{
-				int nStrLen = array[ i ].Length() + 1;
-				if ( pCategories )
-				{
-					pCategories[MEMORY_CATEGORY_ATTRIBUTE_DATA] += nStrLen;
-					pCategories[MEMORY_CATEGORY_ATTRIBUTE_OVERHEAD] += 8;
-				}
-				nTotalMemory += nStrLen + 8; // string's length skips trailing null
-			}
-			return nTotalMemory;
-		}
-
 	case AT_VOID:
 		{
 			const CUtlBinaryBlock &value = GetValue< CUtlBinaryBlock >();
@@ -3014,9 +3302,9 @@ bool CDmrDecorator<T,BaseClass>::IsValid() const
 		ARRAY_METHOD_VOID( QAngle, _func )					\
 		ARRAY_METHOD_VOID( Quaternion, _func )				\
 		ARRAY_METHOD_VOID( VMatrix, _func )					\
-		ARRAY_METHOD_VOID( CUtlString, _func )				\
+		ARRAY_METHOD_VOID( CUtlSymbolLarge, _func )			\
 		ARRAY_METHOD_VOID( CUtlBinaryBlock, _func )			\
-		ARRAY_METHOD_VOID( DmObjectId_t, _func )			\
+		ARRAY_METHOD_VOID( DmeTime_t, _func )				\
 		ARRAY_METHOD_VOID( DmElementHandle_t, _func )		\
 	default:												\
 		break;												\
@@ -3044,9 +3332,9 @@ bool CDmrDecorator<T,BaseClass>::IsValid() const
 		ARRAY_METHOD_RET( QAngle, _func );				\
 		ARRAY_METHOD_RET( Quaternion, _func );			\
 		ARRAY_METHOD_RET( VMatrix, _func );				\
-		ARRAY_METHOD_RET( CUtlString, _func );			\
+		ARRAY_METHOD_RET( CUtlSymbolLarge, _func );		\
 		ARRAY_METHOD_RET( CUtlBinaryBlock, _func );		\
-		ARRAY_METHOD_RET( DmObjectId_t, _func );		\
+		ARRAY_METHOD_RET( DmeTime_t, _func );			\
 		ARRAY_METHOD_RET( DmElementHandle_t, _func );	\
 		default:										\
 			break;										\
@@ -3156,9 +3444,18 @@ void CDmrGenericArray::SetFromString( int i, const char *pValue )
 {
 	if ( ( Count() > i ) && ( i >= 0 ) )
 	{
-		int nLen = pValue ? Q_strlen( pValue ) : 0;
-		CUtlBuffer buf( pValue, nLen, CUtlBuffer::TEXT_BUFFER | CUtlBuffer::READ_ONLY );
-		m_pAttribute->UnserializeElement( i, buf );
+		if ( m_pAttribute->GetType() == AT_STRING_ARRAY )
+		{
+			CDmArrayAttributeOp< CUtlSymbolLarge > array( m_pAttribute );
+			CUtlSymbolLarge symbol = g_pDataModel->GetSymbol( pValue );
+			array.Set( i, symbol );
+		}
+		else
+		{
+			int nLen = pValue ? Q_strlen( pValue ) : 0;
+			CUtlBuffer buf( pValue, nLen, CUtlBuffer::TEXT_BUFFER | CUtlBuffer::READ_ONLY );
+			m_pAttribute->UnserializeElement( i, buf );
+		}
 	}
 }
 
@@ -3236,11 +3533,13 @@ static CInstantiateOp<DmUnknownAttribute_t> __s_AttrDmUnknownAttribute_t;
 	INSTANTIATE_GENERIC_OPS( _type )	\
 	ATTRIBUTE_SET_VALUE_ARRAY( _type )	\
 	template void CDmAttribute::SetValue< _type >( const _type& value );										\
+	template _type &CDmAttribute::BeginModifyValueInPlace< _type >( DmAttributeModifyHandle_t *pHandle );		\
+	template void CDmAttribute::EndModifyValueInPlace< _type >( DmAttributeModifyHandle_t handle );				\
 	template class CDmArrayAttributeOp< _type >;																\
 	template class CDmaArrayBase< _type, CDmaDataInternal< CUtlVector< _type > > >;								\
 	template class CDmaArrayBase< _type, CDmaDataExternal< CUtlVector< _type > > >;								\
-	template class CDmaArrayConstBase< _type, CDmaDataInternal< CUtlVector< _type > > >;								\
-	template class CDmaArrayConstBase< _type, CDmaDataExternal< CUtlVector< _type > > >;								\
+	template class CDmaArrayConstBase< _type, CDmaDataInternal< CUtlVector< _type > > >;						\
+	template class CDmaArrayConstBase< _type, CDmaDataExternal< CUtlVector< _type > > >;						\
 	template class CDmaDecorator< _type, CDmaArrayBase< _type, CDmaDataInternal< CUtlVector< _type > > > >;		\
 	template class CDmrDecorator< _type, CDmaArrayBase< _type, CDmaDataExternal< CUtlVector< _type > > > >;		\
 	template class CDmrDecoratorConst< _type, CDmaArrayConstBase< _type, CDmaDataExternal< CUtlVector< _type > > > >;
@@ -3256,10 +3555,11 @@ DEFINE_ATTRIBUTE_TYPE( Vector4D )
 DEFINE_ATTRIBUTE_TYPE( QAngle )
 DEFINE_ATTRIBUTE_TYPE( Quaternion )
 DEFINE_ATTRIBUTE_TYPE( VMatrix )
-DEFINE_ATTRIBUTE_TYPE( CUtlString )
+DEFINE_ATTRIBUTE_TYPE( CUtlSymbolLarge )
 DEFINE_ATTRIBUTE_TYPE( CUtlBinaryBlock )
-DEFINE_ATTRIBUTE_TYPE( DmObjectId_t )
+DEFINE_ATTRIBUTE_TYPE( DmeTime_t )
 DEFINE_ATTRIBUTE_TYPE( DmElementHandle_t )
 
-template class CDmaDecorator< CUtlString, CDmaStringArrayBase< CDmaDataInternal< CUtlVector< CUtlString > > > >;
-template class CDmrDecorator< CUtlString, CDmaStringArrayBase< CDmaDataExternal< CUtlVector< CUtlString > > > >;
+template class CDmaDecorator< CUtlSymbolLarge, CDmaStringArrayBase< CDmaDataInternal< CUtlVector< CUtlSymbolLarge > > > >;
+template class CDmrDecorator< CUtlSymbolLarge, CDmaStringArrayBase< CDmaDataExternal< CUtlVector< CUtlSymbolLarge > > > >;
+template class CDmrDecoratorConst< CUtlSymbolLarge, CDmaStringArrayConstBase< CDmaArrayConstBase< CUtlSymbolLarge, CDmaDataExternal< CUtlVector< CUtlSymbolLarge > > > > >;

@@ -1,4 +1,3 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
 /*
 ** $Id: lua.h,v 1.218 2006/06/02 15:34:00 roberto Exp $
 ** Lua - An Extensible Extension Language

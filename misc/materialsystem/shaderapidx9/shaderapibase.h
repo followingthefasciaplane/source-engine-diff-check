@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright � 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -12,7 +12,6 @@
 #ifdef _WIN32
 #pragma once
 #endif
-
 
 #include "togl/rendermechanism.h"
 #include "shaderapi/ishaderapi.h"
@@ -43,7 +42,7 @@ public:
 	virtual void AdvancePIXFrame() = 0;
 
 	// Release, reacquire objects
-	virtual void ReleaseShaderObjects() = 0;
+	virtual void ReleaseShaderObjects( bool bReleaseManagedResources = true ) = 0;
 	virtual void RestoreShaderObjects() = 0;
 
 	// Resets the render state to its well defined initial value

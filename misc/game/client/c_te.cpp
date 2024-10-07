@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//=== Copyright © 1996-2005, Valve Corporation, All rights reserved. ========//
 //
 // Purpose: 
 //
@@ -7,11 +7,12 @@
 #include "cbase.h"
 #include "itempents.h"
 #include "effect_dispatch_data.h"
-#include "tier1/KeyValues.h"
+#include "tier1/keyvalues.h"
 #include "iefx.h"
 #include "IEffects.h"
 #include "toolframework_client.h"
 #include "cdll_client_int.h"
+#include "c_te_effect_dispatch.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -72,8 +73,8 @@ void TE_DynamicLight( IRecipientFilter& filter, float delay,
 	const Vector* org, int r, int g, int b, int exponent, float radius, float time, float decay, int nLightIndex = LIGHT_INDEX_TE_DYNAMIC );
 void TE_DynamicLight( IRecipientFilter& filter, float delay, KeyValues *pKeyValues );
 void TE_Explosion( IRecipientFilter& filter, float delay,
-	const Vector* pos, int modelindex, float scale, int framerate, int flags, int radius, int magnitude, 
-	const Vector* normal = NULL, unsigned char materialType = 'C', bool bShouldAffectRagdolls = true );
+	const Vector& pos, int modelindex, float scale, int framerate, int flags, int radius, int magnitude, 
+	const Vector& normal, unsigned char materialType = 'C', bool bShouldAffectRagdolls = true );
 void TE_Explosion( IRecipientFilter& filter, float delay, KeyValues *pKeyValues );
 void TE_ShatterSurface( IRecipientFilter& filter, float delay,
 	const Vector* pos, const QAngle* angle, const Vector* vForce, const Vector* vForcePos, 
@@ -96,7 +97,7 @@ void TE_MetalSparks( IRecipientFilter& filter, float delay,
 void TE_EnergySplash( IRecipientFilter& filter, float delay,
 	const Vector* pos, const Vector* dir, bool bExplosive );
 void TE_PlayerDecal( IRecipientFilter& filter, float delay,
-	const Vector* pos, int player, int entity );
+	const Vector* pos, const Vector* start, const Vector* right, int player, int entity, int hitbox, int nAdditionalDecalFlags );
 void TE_ShowLine( IRecipientFilter& filter, float delay,
 	const Vector* start, const Vector* end );
 void TE_Smoke( IRecipientFilter& filter, float delay,
@@ -118,11 +119,8 @@ void TE_Dust( IRecipientFilter& filter, float delay,
 			 const Vector &pos, const Vector &dir, float size, float speed );
 void TE_GaussExplosion( IRecipientFilter& filter, float delayt,
 			 const Vector &pos, const Vector &dir, int type );
-void TE_DispatchEffect( IRecipientFilter& filter, float delay, 
-			 const Vector &pos, const char *pName, const CEffectData &data );
-void TE_DispatchEffect( IRecipientFilter& filter, float delay, KeyValues *pKeyValues );
 void TE_PhysicsProp( IRecipientFilter& filter, float delay,
-	int modelindex, int skin, const Vector& pos, const QAngle &angles, const Vector& vel, bool breakmodel, int effects );
+	int modelindex, int skin, const Vector& pos, const QAngle &angles, const Vector& vel, int flags, int effects, color24 renderColor );
 void TE_PhysicsProp( IRecipientFilter& filter, float delay, KeyValues *pKeyValues );
 void TE_ConcussiveExplosion( IRecipientFilter& filter, float delay, KeyValues *pKeyValues );
 void TE_ClientProjectile( IRecipientFilter& filter, float delay,
@@ -191,6 +189,7 @@ public:
 				r, g, b, a, speed );
 		}
 	}
+
 	virtual void BeamFollow( IRecipientFilter& filter, float delay,
 		int iEntIndex, int modelIndex, int haloIndex, float life, float width, float endWidth, 
 		float fadeLength, float r, float g, float b, float a )
@@ -202,6 +201,7 @@ public:
 				r, g, b, a );
 		}
 	}
+
 	virtual void BeamPoints( IRecipientFilter& filter, float delay,
 		const Vector* start, const Vector* end, int modelindex, int haloindex, int startframe, int framerate,
 		float life, float width, float endWidth, int fadeLength, float amplitude, 
@@ -215,6 +215,7 @@ public:
 				r, g, b, a, speed );
 		}
 	}
+
 	virtual void BeamLaser( IRecipientFilter& filter, float delay,
 		int	start, int end, int modelindex, int haloindex, int startframe, int framerate,
 		float life, float width, float endWidth, int fadeLength, float amplitude, int r, int g, int b, int a, int speed )
@@ -226,6 +227,7 @@ public:
 				life, width, endWidth, fadeLength, amplitude, r, g, b, a, speed );
 		}
 	}
+
 	virtual void BeamRing( IRecipientFilter& filter, float delay,
 		int	start, int end, int modelindex, int haloindex, int startframe, int framerate,
 		float life, float width, int spread, float amplitude, int r, int g, int b, int a, int speed, int flags = 0 )
@@ -237,6 +239,7 @@ public:
 				life, width, spread, amplitude, r, g, b, a, speed, flags );
 		}
 	}
+
 	virtual void BeamRingPoint( IRecipientFilter& filter, float delay,
 		const Vector& center, float start_radius, float end_radius, int modelindex, int haloindex, int startframe, int framerate,
 		float life, float width, int spread, float amplitude, int r, int g, int b, int a, int speed, int flags = 0 )
@@ -248,6 +251,7 @@ public:
 				life, width, spread, amplitude, r, g, b, a, speed, flags );
 		}
 	}
+
 	virtual void BeamSpline( IRecipientFilter& filter, float delay,
 		int points, Vector* rgPoints )
 	{
@@ -256,6 +260,7 @@ public:
 			TE_BeamSpline( filter, delay, points, rgPoints );
 		}
 	}
+
 	virtual void BloodStream( IRecipientFilter& filter, float delay,
 		const Vector* org, const Vector* dir, int r, int g, int b, int a, int amount )
 	{
@@ -264,6 +269,7 @@ public:
 			TE_BloodStream( filter, delay, org, dir, r, g, b, a, amount );
 		}
 	}
+
 	virtual void BloodSprite( IRecipientFilter& filter, float delay,
 		const Vector* org, const Vector *dir, int r, int g, int b, int a, int size )
 	{
@@ -272,6 +278,7 @@ public:
 			TE_BloodSprite( filter, delay, org, dir, r, g, b, a, size );
 		}
 	}
+
 	virtual void BreakModel( IRecipientFilter& filter, float delay,
 		const Vector& pos, const QAngle &angles, const Vector& size, const Vector& vel, 
 		int modelindex, int randomization, int count, float time, int flags )
@@ -282,6 +289,7 @@ public:
 				count, time, flags );
 		}
 	}
+
 	virtual void BSPDecal( IRecipientFilter& filter, float delay,
 		const Vector* pos, int entity, int index )
 	{
@@ -308,6 +316,7 @@ public:
 			TE_Bubbles( filter, delay, mins, maxs, height, modelindex, count, speed );
 		}
 	}
+
 	virtual void BubbleTrail( IRecipientFilter& filter, float delay,
 		const Vector* mins, const Vector* maxs, float flWaterZ, int modelindex, int count, float speed )
 	{
@@ -316,6 +325,7 @@ public:
 			TE_BubbleTrail( filter, delay, mins, maxs, flWaterZ, modelindex, count, speed );
 		}
 	}
+
 	virtual void Decal( IRecipientFilter& filter, float delay,
 		const Vector* pos, const Vector* start, int entity, int hitbox, int index )
 	{
@@ -324,6 +334,7 @@ public:
 			TE_Decal( filter, delay, pos, start, entity, hitbox, index );
 		}
 	}
+
 	virtual void DynamicLight( IRecipientFilter& filter, float delay,
 		const Vector* org, int r, int g, int b, int exponent, float radius, float time, float decay )
 	{
@@ -332,15 +343,18 @@ public:
 			TE_DynamicLight( filter, delay, org, r, g, b, exponent, radius, time, decay );
 		}
 	}
+
 	virtual void Explosion( IRecipientFilter& filter, float delay,
-		const Vector* pos, int modelindex, float scale, int framerate, int flags, int radius, int magnitude, const Vector* normal = NULL, unsigned char materialType = 'C' )
+		const Vector& pos, int modelindex, float scale, int framerate, int flags, int radius, int magnitude, const Vector* pNormal = NULL, unsigned char materialType = 'C' )
 	{
 		if ( !SuppressTE( filter ) )
 		{
+			Vector normal = pNormal ? *pNormal : Vector( 0, 0, 1 );
 			TE_Explosion( filter, delay, pos, modelindex, scale, framerate, flags, radius, magnitude, 
 				normal, materialType );
 		}
 	}
+
 	virtual void ShatterSurface( IRecipientFilter& filter, float delay,
 		const Vector* pos, const QAngle* angle, const Vector* vForce, const Vector* vForcePos, 
 		float width, float height, float shardsize, ShatterSurface_t surfacetype,
@@ -412,12 +426,12 @@ public:
 		}
 	}
 	virtual void PlayerDecal( IRecipientFilter& filter, float delay,
-		const Vector* pos, int player, int entity )
+		const Vector* pos, const Vector* start, const Vector* right, int player, int entity, int hitbox )
 	{
 		if ( !SuppressTE( filter ) )
 		{
 			TE_PlayerDecal( filter, delay,
-				pos, player, entity );
+				pos, start, right, player, entity, hitbox, 0 );
 		}
 	}
 	virtual void ShowLine( IRecipientFilter& filter, float delay,
@@ -500,20 +514,12 @@ public:
 			TE_GaussExplosion( filter, delay, pos, dir, type );
 		}
 	}
-	virtual void DispatchEffect( IRecipientFilter& filter, float delay,
-				const Vector &pos, const char *pName, const CEffectData &data )
-	{
-		if ( !SuppressTE( filter ) )
-		{
-			TE_DispatchEffect( filter, delay, pos, pName, data );
-		}
-	}
 	virtual void PhysicsProp( IRecipientFilter& filter, float delay, int modelindex, int skin,
-		const Vector& pos, const QAngle &angles, const Vector& vel, int flags, int fEffects )
+		const Vector& pos, const QAngle &angles, const Vector& vel, int flags, int effects, color24 renderColor )
 	{
 		if ( !SuppressTE( filter ) )
 		{
-			TE_PhysicsProp( filter, delay, modelindex, skin, pos, angles, vel, flags, fEffects );
+			TE_PhysicsProp( filter, delay, modelindex, skin, pos, angles, vel, flags, effects, renderColor );
 		}
 	}
 	virtual void ClientProjectile( IRecipientFilter& filter, float delay,
@@ -549,7 +555,7 @@ public:
 			break;
 
 		case TE_DISPATCH_EFFECT:
-			TE_DispatchEffect( filter, 0.0f, pKeyValues );
+			DispatchEffect( filter, 0.0f, pKeyValues );
 			break;
 
 		case TE_MUZZLE_FLASH:

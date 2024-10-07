@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -113,8 +113,7 @@ inline const CHandle<CBaseEntity> &variant_t::Entity(void) const
 	if ( fieldType == FIELD_EHANDLE )
 		return eVal;
 
-	static CHandle<CBaseEntity> hNull;
-	hNull.Set(NULL);
+	static const CHandle<CBaseEntity> hNull(INVALID_EHANDLE);
 	return(hNull);
 }
 

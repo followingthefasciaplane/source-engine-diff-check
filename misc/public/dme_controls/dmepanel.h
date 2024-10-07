@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -14,7 +14,7 @@
 
 #include "tier0/basetypes.h"
 #include "tier1/utlstringmap.h"
-#include "vgui_controls/EditablePanel.h"
+#include "vgui_controls/editablepanel.h"
 #include "datamodel/dmelement.h"
 #include "datamodel/dmehandle.h"
 

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//=========== Copyright Valve Corporation, All rights reserved. ===============//
 //
 // Purpose: 
 //=============================================================================//
@@ -20,14 +20,8 @@ enum EMouseCursor
 	dc_waitarrow,
 	dc_crosshair,
 	dc_up,
-	dc_sizenw,
-	dc_sizese,
-	dc_sizene,
-	dc_sizesw,
-    dc_sizew,
-    dc_sizee,
-    dc_sizen,
-    dc_sizes,
+	dc_sizenwse,
+	dc_sizenesw,
 	dc_sizewe,
 	dc_sizens,
 	dc_sizeall,

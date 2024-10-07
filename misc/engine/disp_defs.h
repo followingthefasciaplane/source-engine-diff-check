@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -34,6 +34,7 @@ class CDispGroup;
 
 // The texture stage that displacement lightmap coordinates go in.
 #define DISP_LMCOORDS_STAGE 1
+#define DISP_MULTIBLEND_STAGE 3
 
 
 #define MAX_STATIC_BUFFER_VERTS		(8*1024)
@@ -145,15 +146,14 @@ public:
 	DispDecalFragmentHandle_t	m_FirstFragment;
 };
 
-#pragma pack(1)
 class CDispDecalFragment
 {
 public:
 	enum { MAX_VERTS = 6 };					// 3 decal verts clipped by 4 planes results in a maximum of 6 (not 8) verts
 
 	decal_t			*m_pDecal;				// Owning Decal	
-	unsigned char	m_nVerts;				// 
 	CDecalVert*		m_pVerts;				// m_pVerts[MAX_VERTS];
+	unsigned char	m_nVerts;				// 
 
 	~CDispDecalFragment()
 	{
@@ -161,10 +161,6 @@ public:
 		m_pVerts = NULL;
 	}
 };
-
-
-#pragma pack()
-
 
 typedef unsigned short DispShadowFragmentHandle_t;
 

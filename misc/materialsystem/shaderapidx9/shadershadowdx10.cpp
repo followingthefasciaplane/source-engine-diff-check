@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -15,6 +15,9 @@
 #include "materialsystem/imesh.h"
 #include "tier0/dbg.h"
 #include "materialsystem/idebugtextureinfo.h"
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
 
 
 //-----------------------------------------------------------------------------
@@ -84,6 +87,11 @@ void CShaderShadowDx10::EnableBlending( bool bEnable )
 	m_IsTranslucent = bEnable;
 }
 
+void CShaderShadowDx10::EnableBlendingForceOpaque( bool bEnable )
+{
+	m_IsTranslucent = bEnable;
+}
+
 void CShaderShadowDx10::BlendFunc( ShaderBlendFactor_t srcFactor, ShaderBlendFactor_t dstFactor )
 {
 }
@@ -93,23 +101,6 @@ void CShaderShadowDx10::BlendOp( ShaderBlendOp_t blendOp )
 }
 
 void CShaderShadowDx10::BlendOpSeparateAlpha( ShaderBlendOp_t blendOp )
-{
-}
-
-// A simpler method of dealing with alpha modulation
-void CShaderShadowDx10::EnableAlphaPipe( bool bEnable )
-{
-}
-
-void CShaderShadowDx10::EnableConstantAlpha( bool bEnable )
-{
-}
-
-void CShaderShadowDx10::EnableVertexAlpha( bool bEnable )
-{
-}
-
-void CShaderShadowDx10::EnableTextureAlpha( TextureStage_t stage, bool bEnable )
 {
 }
 
@@ -143,11 +134,6 @@ void CShaderShadowDx10::EnableAlphaToCoverage( bool bEnable )
 {
 }
 
-// constant color + transparency
-void CShaderShadowDx10::EnableConstantColor( bool bEnable )
-{
-}
-
 
 // Indicates the vertex format for use with a vertex shader
 // The flags to pass in here come from the VertexFormatFlags_t enum
@@ -159,47 +145,11 @@ void CShaderShadowDx10::VertexShaderVertexFormat( unsigned int flags,
 {
 }
 
-// Indicates we're going to light the model
-void CShaderShadowDx10::EnableLighting( bool bEnable )
-{
-}
-
-void CShaderShadowDx10::EnableSpecular( bool bEnable )
-{
-}
-
-// Activate/deactivate skinning
-void CShaderShadowDx10::EnableVertexBlend( bool bEnable )
-{
-}
-
-// per texture unit stuff
-void CShaderShadowDx10::OverbrightValue( TextureStage_t stage, float value )
-{
-}
-
 void CShaderShadowDx10::EnableTexture( Sampler_t stage, bool bEnable )
 {
 }
 
-void CShaderShadowDx10::EnableCustomPixelPipe( bool bEnable )
-{
-}
-
-void CShaderShadowDx10::CustomTextureStages( int stageCount )
-{
-}
-
-void CShaderShadowDx10::CustomTextureOperation( TextureStage_t stage, ShaderTexChannel_t channel, 
-												ShaderTexOp_t op, ShaderTexArg_t arg1, ShaderTexArg_t arg2 )
-{
-}
-
-void CShaderShadowDx10::EnableTexGen( TextureStage_t stage, bool bEnable )
-{
-}
-
-void CShaderShadowDx10::TexGen( TextureStage_t stage, ShaderTexGenParam_t param )
+void CShaderShadowDx10::EnableVertexTexture( VertexTextureSampler_t stage, bool bEnable )
 {
 }
 
@@ -218,10 +168,6 @@ void CShaderShadowDx10::SetPixelShader( const char *pShaderName, int pshIndex )
 }
 
 void CShaderShadowDx10::BlendFuncSeparateAlpha( ShaderBlendFactor_t srcFactor, ShaderBlendFactor_t dstFactor )
-{
-}
-// indicates what per-vertex data we're providing
-void CShaderShadowDx10::DrawFlags( unsigned int drawFlags )
 {
 }
 

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2006, Valve Corporation, All rights reserved. =======
 //
 // A class representing draw settings for Dme things
 //
@@ -129,8 +129,8 @@ protected:
 	static bool s_bUnlitGrayMaterial;
 	static CMaterialReference s_UnlitGrayMaterial;
 
-	static CUtlRBTree< CUtlSymbol > s_KnownDrawableTypes;
-	CUtlRBTree< CUtlSymbol > m_NotDrawable;
+	static CUtlRBTree< CUtlSymbolLarge > s_KnownDrawableTypes;
+	CUtlRBTree< CUtlSymbolLarge > m_NotDrawable;
 
 	CUtlStack< DrawType_t > m_drawTypeStack;
 	bool m_IsAMaterialBound;

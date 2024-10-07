@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -25,7 +25,7 @@ class CPlayerAndObjectEnumerator : public IPartitionEnumerator
 	DECLARE_CLASS_NOBASE( CPlayerAndObjectEnumerator );
 public:
 	//Forced constructor
-	CPlayerAndObjectEnumerator( float radius );
+	explicit CPlayerAndObjectEnumerator( float radius );
 
 	//Actual work code
 	virtual IterationRetval_t EnumElement( IHandleEntity *pHandleEntity );

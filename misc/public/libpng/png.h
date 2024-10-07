@@ -1,4 +1,3 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
 
 /* png.h - header file for PNG reference library
  *
@@ -986,7 +985,7 @@ PNG_EXPORT(7, void, png_set_compression_buffer_size, (png_structp png_ptr,
 PNG_EXPORT(8, jmp_buf*, png_set_longjmp_fn, (png_structp png_ptr,
     png_longjmp_ptr longjmp_fn, size_t jmp_buf_size));
 #  define png_jmpbuf(png_ptr) \
-      (*png_set_longjmp_fn((png_ptr), (png_longjmp_ptr)longjmp, sizeof (jmp_buf)))
+      (*png_set_longjmp_fn((png_ptr), longjmp, sizeof (jmp_buf)))
 #else
 #  define png_jmpbuf(png_ptr) \
       (LIBPNG_WAS_COMPILED_WITH__PNG_NO_SETJMP)

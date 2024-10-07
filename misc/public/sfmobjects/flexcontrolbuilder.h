@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =======
 //
 // A class used to build flex animation controls for an animation set
 //
@@ -11,7 +11,6 @@
 #endif
 
 
-#include "movieobjects/timeutils.h"
 #include "tier1/utlvector.h"
 #include "movieobjects/dmelog.h"
 
@@ -25,7 +24,6 @@ class CDmeFilmClip;
 class CDmeChannelsClip;
 class CDmElement;
 class CDmeChannel;
-class CDmeBalanceToStereoCalculatorOperator;
 class CDmeGlobalFlexControllerOperator;
 
 
@@ -44,21 +42,11 @@ public:
 private:
 	enum ControlField_t
 	{
-		CONTROL_VALUE = 0,
-		CONTROL_BALANCE,
-		CONTROL_MULTILEVEL,
+		CONTROL_MONO = 0,
+		CONTROL_RIGHT,
+		CONTROL_LEFT,
 
 		CONTROL_FIELD_COUNT,
-	};
-
-	enum OutputField_t
-	{
-		OUTPUT_MONO = 0,
-		OUTPUT_RIGHT = 0,
-		OUTPUT_LEFT,
-		OUTPUT_MULTILEVEL,
-
-		OUTPUT_FIELD_COUNT,
 	};
 
 	struct FlexControllerInfo_t
@@ -79,21 +67,17 @@ private:
 	{
 		char m_pControlName[256];
 		bool m_bIsStereo : 1;
-		bool m_bIsMulti : 1;
 		CDmElement *m_pControl;
+		float m_flDefaultValue;
 
-		int m_pControllerIndex[OUTPUT_FIELD_COUNT];
+		int m_pControllerIndex[CONTROL_FIELD_COUNT];
 
 		CDmeChannel *m_ppControlChannel[CONTROL_FIELD_COUNT];
-		float m_pDefaultValue[CONTROL_FIELD_COUNT];
 		ExistingLogInfo_t m_pExistingLog[CONTROL_FIELD_COUNT];
 	};
 
 	// Removes a channel from the channels clip referring to it.
 	void RemoveChannelFromClips( CDmeChannel *pChannel );
-
-	// Removes a stereo operator from the animation set referring to it
-	void RemoveStereoOpFromSet( CDmeBalanceToStereoCalculatorOperator *pChannel );
 
 	// Builds the list of flex controls (outputs) in the current game model
 	void BuildDesiredFlexControlList( CDmeGameModel *pGameModel );
@@ -112,8 +96,7 @@ private:
 	// - reattach flex controls that were removed from the gamemodel's list
 	void FixupExistingFlexControlLogList( CDmeFilmClip *pCurrentClip, CDmeGameModel *pGameModel );
 
-	// Converts existing logs to balance/value if necessary while building the list
-	// Also deletes existing infrastructure (balance ops, channels, flex controller ops).
+	// Build list of existing flex controller logs
 	void BuildExistingFlexControlLogList( CDmeFilmClip *pCurrentClip, CDmeGameModel *pGameModel );
 
 	// Finds a desired flex controller index in the m_FlexControllerInfo array
@@ -127,16 +110,6 @@ private:
 
 	// Returns an existing mono log
 	void GetExistingMonoLog( ExistingLogInfo_t *pLog, CDmeFilmClip *pClip, CDmeGlobalFlexControllerOperator *pMonoOp );
-
-	// Returns an existing stereo log, performing conversion if necessary
-	void GetExistingStereoLog( ExistingLogInfo_t *pLogs, CDmeFilmClip *pClip,
-		CDmeGlobalFlexControllerOperator *pRightOp, CDmeGlobalFlexControllerOperator *pLeftOp );
-
-	// Returns an existing value/balance log
-	void GetExistingVBLog( ExistingLogInfo_t *pLogs, CDmeFilmClip *pClip, CDmeBalanceToStereoCalculatorOperator *pStereoOp );
-
-	// Converts an existing left/right log into a value/balance log
-	void ConvertExistingLRLogs( ExistingLogInfo_t *pLogs, CDmeFilmClip *pClip, CDmeChannel *pLeftChannel, CDmeChannel *pRightChannel );
 
 	// Computes a global offset and scale to convert from log time to global time
 	void ComputeChannelTimeTransform( DmeTime_t *pOffset, double *pScale, CDmeChannelsClip *pChannelsClip );
@@ -153,9 +126,6 @@ private:
 
 	// Connects a mono control to a single flex controller op
 	void BuildFlexControllerOps( CDmeGameModel *pGameModel, CDmeChannelsClip *pChannelsClip, ControlInfo_t &info, ControlField_t field );
-
-	// Connects a stereo control to a two flex controller ops
-	void BuildStereoFlexControllerOps( CDmeAnimationSet *pAnimationSet,	CDmeGameModel *pGameModel, CDmeChannelsClip *pChannelsClip, ControlInfo_t &info );
 
 	// Attaches existing logs and sets default values for logs
 	void SetupLogs( CDmeChannelsClip *pChannelsClip, bool bUseExistingLogs );

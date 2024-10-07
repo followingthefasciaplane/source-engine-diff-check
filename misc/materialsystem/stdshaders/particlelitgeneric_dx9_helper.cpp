@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright � 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -26,15 +26,7 @@ void InitParamsParticleLitGeneric_DX9( CBaseVSShader *pShader, IMaterialVar** pa
 	// FLASHLIGHTFIXME: Do ShaderAPI::BindFlashlightTexture
 	Assert( info.m_nFlashlightTexture >= 0 );
 
-	if ( g_pHardwareConfig->SupportsBorderColor() )
-	{
-		params[FLASHLIGHTTEXTURE]->SetStringValue( "effects/flashlight_border" );
-	}
-	else
-	{
-		params[FLASHLIGHTTEXTURE]->SetStringValue( "effects/flashlight001" );
-	}
-
+	params[FLASHLIGHTTEXTURE]->SetStringValue( GetFlashlightTextureFilename() );
 
 	SET_FLAGS2( MATERIAL_VAR2_LIGHTING_VERTEX_LIT );
 	CLEAR_FLAGS( MATERIAL_VAR_SELFILLUM );
@@ -212,26 +204,26 @@ void DrawParticleLitGeneric_DX9( CBaseVSShader *pShader, IMaterialVar** params,
 
 		if( hasBaseTexture )
 		{
-			pShader->BindTexture( SHADER_SAMPLER0, info.m_nBaseTexture, info.m_nBaseTextureFrame );
+			pShader->BindTexture( SHADER_SAMPLER0, true, info.m_nBaseTexture, info.m_nBaseTextureFrame );
 		}
 		if( !g_pConfig->m_bFastNoBump )
 		{
 			if( hasBump )
 			{
-				pShader->BindTexture( SHADER_SAMPLER3, info.m_nBumpmap, info.m_nBumpFrame );
+				pShader->BindTexture( SHADER_SAMPLER3, false, info.m_nBumpmap, info.m_nBumpFrame );
 			}
 		}
 		else
 		{
 			if( hasBump )
 			{
-				pShaderAPI->BindStandardTexture( SHADER_SAMPLER3, TEXTURE_NORMALMAP_FLAT );
+				pShaderAPI->BindStandardTexture( SHADER_SAMPLER3, false, TEXTURE_NORMALMAP_FLAT );
 			}
 		}
 		if( hasFlashlight )
 		{
 			Assert( info.m_nFlashlightTexture >= 0 && info.m_nFlashlightTextureFrame >= 0 );
-			pShader->BindTexture( SHADER_SAMPLER7, info.m_nFlashlightTexture, info.m_nFlashlightTextureFrame );
+			pShader->BindTexture( SHADER_SAMPLER7, true, info.m_nFlashlightTexture, info.m_nFlashlightTextureFrame );
 		}
 
 		LightState_t lightState = { 0, false, false };
@@ -250,7 +242,6 @@ void DrawParticleLitGeneric_DX9( CBaseVSShader *pShader, IMaterialVar** params,
 		SET_DYNAMIC_PIXEL_SHADER_COMBO( STATIC_LIGHT,  lightState.m_bStaticLight  ? 1 : 0 );
 		SET_DYNAMIC_PIXEL_SHADER_COMBO( WRITEWATERFOGTODESTALPHA,  fogType == MATERIAL_FOG_LINEAR_BELOW_FOG_Z &&
 			blendType != BT_BLENDADD && blendType != BT_BLEND && !bIsAlphaTested );
-		SET_DYNAMIC_PIXEL_SHADER_COMBO( PIXELFOGTYPE, pShaderAPI->GetPixelFogCombo() );
 		SET_DYNAMIC_PIXEL_SHADER_COMBO( HDRENABLED,  pShader->IsHDREnabled() );
 		SET_DYNAMIC_PIXEL_SHADER( particlelit_generic_ps30 );
 
@@ -261,7 +252,7 @@ void DrawParticleLitGeneric_DX9( CBaseVSShader *pShader, IMaterialVar** params,
 		}
 		if( hasBump )
 		{
-			pShaderAPI->BindStandardTexture( SHADER_SAMPLER5, TEXTURE_NORMALIZATION_CUBEMAP_SIGNED );
+			pShaderAPI->BindStandardTexture( SHADER_SAMPLER5, false, TEXTURE_NORMALIZATION_CUBEMAP_SIGNED );
 			pShaderAPI->SetPixelShaderStateAmbientLightCube( 5 );
 			pShaderAPI->CommitPixelShaderLighting( 13 );
 		}
@@ -282,7 +273,7 @@ void DrawParticleLitGeneric_DX9( CBaseVSShader *pShader, IMaterialVar** params,
 			atten[0] = flashlightState.m_fConstantAtten;
 			atten[1] = flashlightState.m_fLinearAtten;
 			atten[2] = flashlightState.m_fQuadraticAtten;
-			atten[3] = flashlightState.m_FarZ;
+			atten[3] = flashlightState.m_FarZAtten;
 			pShaderAPI->SetPixelShaderConstant( 22, atten, 1 );
 
 			// Set the flashlight origin
@@ -290,7 +281,7 @@ void DrawParticleLitGeneric_DX9( CBaseVSShader *pShader, IMaterialVar** params,
 			pos[0] = flashlightState.m_vecLightOrigin[0];
 			pos[1] = flashlightState.m_vecLightOrigin[1];
 			pos[2] = flashlightState.m_vecLightOrigin[2];
-			pos[3] = 1.0f;
+			pos[3] = flashlightState.m_FarZ; // didn't have this in main. . probably need this?
 			pShaderAPI->SetPixelShaderConstant( 23, pos, 1 );
 
 			pShaderAPI->SetPixelShaderConstant( 24, worldToTexture.Base(), 4 );

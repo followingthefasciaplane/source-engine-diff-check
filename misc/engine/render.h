@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -21,76 +21,121 @@ extern float r_blend; // Global blending factor for the current entity
 extern float r_colormod[3]; // Global color modulation for the current entity
 extern bool g_bIsBlendingOrModulating;
 
+#ifndef DEDICATED
+#include "cl_splitscreen.h" // ISplitScreen
+#endif
 
 //-----------------------------------------------------------------------------
 // Current view
 //-----------------------------------------------------------------------------
 inline const Vector &CurrentViewOrigin()
 {
-#ifdef DBGFLAG_ASSERT
-	extern bool g_bCanAccessCurrentView;
-#endif
 	extern Vector g_CurrentViewOrigin;
+#ifndef DEDICATED
+	extern bool g_bCanAccessCurrentView;
 	Assert( g_bCanAccessCurrentView );
+	ASSERT_LOCAL_PLAYER_RESOLVABLE();
+#endif
 	return g_CurrentViewOrigin;
 }
 
 inline const Vector &CurrentViewForward()
 {
-#ifdef DBGFLAG_ASSERT
-	extern bool g_bCanAccessCurrentView;
-#endif
 	extern Vector g_CurrentViewForward;
+	extern Vector g_CurrentViewOrigin;
+#ifndef DEDICATED
+	extern bool g_bCanAccessCurrentView;
 	Assert( g_bCanAccessCurrentView );
+	ASSERT_LOCAL_PLAYER_RESOLVABLE();
+#endif
 	return g_CurrentViewForward;
 }
 
 inline const Vector &CurrentViewRight()
 {
-#ifdef DBGFLAG_ASSERT
-	extern bool g_bCanAccessCurrentView;
-#endif
 	extern Vector g_CurrentViewRight;
+#ifndef DEDICATED
+	extern bool g_bCanAccessCurrentView;
 	Assert( g_bCanAccessCurrentView );
+	ASSERT_LOCAL_PLAYER_RESOLVABLE();
+#endif
 	return g_CurrentViewRight;
 }
 
 inline const Vector &CurrentViewUp()
 {
-#ifdef DBGFLAG_ASSERT
-	extern bool g_bCanAccessCurrentView;
-#endif
 	extern Vector g_CurrentViewUp;
+#ifndef DEDICATED
+	extern bool g_bCanAccessCurrentView;
 	Assert( g_bCanAccessCurrentView );
+	ASSERT_LOCAL_PLAYER_RESOLVABLE();
+#endif
 	return g_CurrentViewUp;
 }
 
 
+extern Vector g_MainViewOrigin[ MAX_SPLITSCREEN_CLIENTS ];
+extern Vector g_MainViewForward[ MAX_SPLITSCREEN_CLIENTS ];
+extern Vector g_MainViewRight[ MAX_SPLITSCREEN_CLIENTS ];
+extern Vector g_MainViewUp[ MAX_SPLITSCREEN_CLIENTS ];
+
 //-----------------------------------------------------------------------------
 // Main view
 //-----------------------------------------------------------------------------
-inline const Vector &MainViewOrigin()
+inline const Vector &MainViewOrigin( int nSlot = -1 )
 {
-	extern Vector g_MainViewOrigin;
-	return g_MainViewOrigin;
+#ifdef DEDICATED
+	nSlot = 0;
+#else
+	if ( nSlot == -1 )
+	{
+		ASSERT_LOCAL_PLAYER_RESOLVABLE();
+		nSlot = GET_ACTIVE_SPLITSCREEN_SLOT();
+	}
+#endif
+	return g_MainViewOrigin[ nSlot ];
 }
 
-inline const Vector &MainViewForward()
+inline const Vector &MainViewForward( int nSlot = -1 )
 {
-	extern Vector g_MainViewForward;
-	return g_MainViewForward;
+#ifdef DEDICATED
+	nSlot = 0;
+#else
+	if ( nSlot == -1 )
+	{
+		ASSERT_LOCAL_PLAYER_RESOLVABLE();
+		nSlot = GET_ACTIVE_SPLITSCREEN_SLOT();
+	}
+#endif
+	return g_MainViewForward[ nSlot ];
 }
 
-inline const Vector &MainViewRight()
+inline const Vector &MainViewRight( int nSlot = -1 )
 {
-	extern Vector g_MainViewRight;
-	return g_MainViewRight;
+#ifdef DEDICATED
+	nSlot = 0;
+#else
+	if ( nSlot == -1 )
+	{
+		ASSERT_LOCAL_PLAYER_RESOLVABLE();
+		nSlot = GET_ACTIVE_SPLITSCREEN_SLOT();
+	}
+#endif
+	return g_MainViewRight[ nSlot ];
 }
 
-inline const Vector &MainViewUp()
+inline const Vector &MainViewUp( int nSlot = -1 )
 {
-	extern Vector g_MainViewUp;
-	return g_MainViewUp;
+#ifdef DEDICATED
+	nSlot = 0;
+#else
+	if ( nSlot == -1 )
+	{
+		ASSERT_LOCAL_PLAYER_RESOLVABLE();
+		nSlot = GET_ACTIVE_SPLITSCREEN_SLOT();
+	}
+#endif
+	return g_MainViewUp[ nSlot ];
 }
 
 
@@ -114,14 +159,20 @@ public:
 	
 	virtual void	ViewSetupVis( bool novis, int numorigins, const Vector origin[] ) = 0;
 
-	virtual void	ViewDrawFade( byte *color, IMaterial* pFadeMaterial ) = 0;
+	virtual void	ViewDrawFade( byte *color, IMaterial* pFadeMaterial, bool mapFullTextureToScreen = true ) = 0;
 
 	virtual void	DrawSceneBegin( void ) = 0;
 	virtual void	DrawSceneEnd( void ) = 0;
 
 	virtual IWorldRenderList * CreateWorldList() = 0;
+#if defined(_PS3)
+	virtual IWorldRenderList * CreateWorldList_PS3( int viewID ) = 0;
+	virtual void	BuildWorldLists_PS3_Epilogue( IWorldRenderList *pList, WorldListInfo_t* pInfo, bool bShadowDepth ) = 0;
+#else
+	virtual void	BuildWorldLists_Epilogue( IWorldRenderList *pList, WorldListInfo_t* pInfo, bool bShadowDepth ) = 0;
+#endif
 	virtual void	BuildWorldLists( IWorldRenderList *pList, WorldListInfo_t* pInfo, int iForceViewLeaf, const VisOverrideData_t* pVisData, bool bShadowDepth, float *pReflectionWaterHeight ) = 0;
-	virtual void	DrawWorldLists( IWorldRenderList *pList, unsigned long flags, float waterZAdjust ) = 0;
+	virtual void	DrawWorldLists( IMatRenderContext *pRenderContext, IWorldRenderList *pList, unsigned long flags, float waterZAdjust ) = 0;
 
 	// UNDONE: these are temporary functions that will end up on the other
 	// side of this interface
@@ -141,12 +192,9 @@ public:
 	virtual float	GetFovY( void ) = 0;
 	virtual float	GetFovViewmodel( void ) = 0;
 
-
 	// Compute the clip-space coordinates of a point in 3D
 	// Clip-space is normalized screen coordinates (-1 to 1 in x and y)
 	// Returns true if the point is behind the camera
-	virtual bool	ClipTransformWithProjection ( const VMatrix& worldToScreen, const Vector& point, Vector* pClip ) = 0;
-	// Same, using the current engine's matrices.
 	virtual bool	ClipTransform( Vector const& point, Vector* pClip ) = 0;
 
 	// Compute the screen-space coordinates of a point in 3D
@@ -154,16 +202,16 @@ public:
 	// Returns true if the point is behind the camera
 	virtual bool ScreenTransform( Vector const& point, Vector* pScreen ) = 0;
 
-	virtual void Push3DView( const CViewSetup &view, int nFlags, ITexture* pRenderTarget, Frustum frustumPlanes ) = 0;
-	virtual void Push3DView( const CViewSetup &view, int nFlags, ITexture* pRenderTarget, Frustum frustumPlanes, ITexture* pDepthTexture ) = 0;
-	virtual void Push2DView( const CViewSetup &view, int nFlags, ITexture* pRenderTarget, Frustum frustumPlanes ) = 0;
-	virtual void PopView( Frustum frustumPlanes ) = 0;
+	virtual void Push3DView( IMatRenderContext *pRenderContext, const CViewSetup &view, int nFlags, ITexture* pRenderTarget, Frustum frustumPlanes ) = 0;
+	virtual void Push3DView( IMatRenderContext *pRenderContext, const CViewSetup &view, int nFlags, ITexture* pRenderTarget, Frustum frustumPlanes, ITexture* pDepthTexture ) = 0;
+	virtual void Push2DView( IMatRenderContext *pRenderContext, const CViewSetup &view, int nFlags, ITexture* pRenderTarget, Frustum frustumPlanes ) = 0;
+	virtual void PopView( IMatRenderContext *pRenderContext, Frustum frustumPlanes ) = 0;
 	virtual void SetMainView( const Vector &vecOrigin, const QAngle &angles ) = 0;
 	virtual void ViewSetupVisEx( bool novis, int numorigins, const Vector origin[], unsigned int &returnFlags ) = 0;
 	virtual void OverrideViewFrustum( Frustum custom ) = 0;
 	virtual void UpdateBrushModelLightmap( model_t *model, IClientRenderable *Renderable ) = 0;
 	virtual void BeginUpdateLightmaps( void ) = 0;
-	virtual void EndUpdateLightmaps( void ) = 0;
+	virtual void EndUpdateLightmaps() = 0;
 	virtual bool InLightmapUpdate( void ) const = 0;
 };
 

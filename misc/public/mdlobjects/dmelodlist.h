@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =====//
 //
 // Dme version of a list of lods
 //
@@ -18,6 +18,7 @@
 // Forward Declarations
 //-----------------------------------------------------------------------------
 class CDmeLOD;
+class CDmeEyeball;
 
 				 
 //-----------------------------------------------------------------------------
@@ -41,6 +42,8 @@ public:
 	// and assume the LOD always uses the root skeleton.
 	CDmaElementArray< CDmeLOD > m_LODs;
 
+	// Eyeballs
+	CDmaElementArray< CDmeEyeball > m_EyeballList;
 };
 
 

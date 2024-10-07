@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========== Copyright (c) Valve Corporation, All rights reserved. ==========//
 //
 // Purpose: This is where all common code for vertex shaders go.
 //
@@ -20,6 +20,11 @@
 //	SKIP: defined $LIGHTING_PREVIEW && defined $FASTPATH && $LIGHTING_PREVIEW && $FASTPATH
 // --------------------------------------------------------------------------------
 
+#ifdef _PS3
+// Remap semantics for PS3 Cg
+#define POSITION1 TEXCOORD4
+#define NORMAL1 TEXCOORD5
+#endif // _PS3
 
 #ifndef COMPRESSED_VERTS
 // Default to no vertex compression
@@ -66,33 +71,32 @@ const float4 cConstants1				: register(c1);
 const bool g_bLightEnabled[4]			: register(b0);
 										// through b3
 
+#ifndef _PS3
 const int g_nLightCountRegister			: register(i0);
-
-
 #define g_nLightCount					g_nLightCountRegister.x
+#endif // !_PS3
 
-const float4 cEyePosWaterZ				: register(c2);
-#define cEyePos			cEyePosWaterZ.xyz
 
-// Only cFlexScale.x is used
-// It is a binary value used to switch on/off the addition of the flex delta stream
-const float4 cFlexScale					: register( c3 );
+
+
+const float4 cEyePos_WaterHeightW			: register(c2);
+#define cEyePos			cEyePos_WaterHeightW.xyz
+#define cWaterHeight	cEyePos_WaterHeightW.w
+
+// This is still used by asm stuff.
+const float4 cObsoleteLightIndex		: register(c3);
 
 const float4x4 cModelViewProj			: register(c4);
 const float4x4 cViewProj				: register(c8);
 
-// Used to compute projPosZ in shaders without skinning
-// Using cModelViewProj with FastClip generates incorrect results
-// This is just row two of the non-FastClip cModelViewProj matrix
-const float4 cModelViewProjZ			: register(c12);
-
-// More constants working back from the top...
-const float4 cViewProjZ					: register(c13);
+// Only cFlexScale.x is used
+// It is a binary value used to switch on/off the addition of the flex delta stream
+const float4 cFlexScale					: register(c13);
 
 const float4 cFogParams					: register(c16);
 #define cFogEndOverFogRange cFogParams.x
-#define cFogOne cFogParams.y
-#define cFogMaxDensity cFogParams.z
+// cFogParams.y unused
+#define cRadialFogMaxDensity cFogParams.z  //radial fog max density in fractional portion. height fog max density stored in integer portion and is multiplied by 1e10
 #define cOOFogRange cFogParams.w
 
 const float4x4 cViewModel				: register(c17);
@@ -120,7 +124,11 @@ struct LightInfo
 // 00 - point
 
 // Four lights x 5 constants each = 20 constants
+#if (CASCADED_SHADOW_MAPPING == 1)
+LightInfo cLightInfo[2]					: register(c27);
+#else
 LightInfo cLightInfo[4]					: register(c27);
+#endif
 #define LIGHT_0_POSITION_REG					   c29
 
 #ifdef SHADER_MODEL_VS_1_1
@@ -160,11 +168,14 @@ const float4 cModulationColor			: register( c47 );
 #define SHADER_SPECIFIC_CONST_9 c57
 #define SHADER_SPECIFIC_CONST_10 c14
 #define SHADER_SPECIFIC_CONST_11 c15
+#define SHADER_SPECIFIC_CONST_12 c12
 
 static const int cModel0Index = 58;
-const float4x3 cModel[53]				: register( c58 );
-// last cmodel is c105 for dx80, c216 for dx90
+const hlsl_float4x3 cModel[53]					: register( c58 );
+// last cmodel is c105 for dx80, c214 for dx90
 
+#define SHADER_SPECIFIC_CONST_CSM_0 c37  // c37 through c44, 2 float4x4 matrices, cascade 0, or cascade 1 and 2
+#define SHADER_SPECIFIC_CONST_CSM_1 c45  // row z(2) of cascade 0
 
 #define SHADER_SPECIFIC_BOOL_CONST_0 b4
 #define SHADER_SPECIFIC_BOOL_CONST_1 b5
@@ -274,6 +285,10 @@ void DecompressVertex_Normal( float4 inputNormal, out float3 outputNormal )
 {
 	if ( COMPRESSED_VERTS == 1 )
 	{
+#ifdef _PS3
+		// ps3 byte order is swapped
+		inputNormal = inputNormal.wzyx;
+#endif // _PS3
 		if ( COMPRESSED_NORMALS_TYPE == COMPRESSED_NORMALS_SEPARATETANGENTS_SHORT2 )
 		{
 			_DecompressShort2Normal( inputNormal.xy, outputNormal );
@@ -293,6 +308,10 @@ void DecompressVertex_NormalTangent( float4 inputNormal,  float4 inputTangent, o
 {
 	if ( COMPRESSED_VERTS == 1 )
 	{
+#ifdef _PS3
+		// ps3 byte order is swapped
+		inputNormal = inputNormal.wzyx;
+#endif // _PS3
 		if ( COMPRESSED_NORMALS_TYPE == COMPRESSED_NORMALS_SEPARATETANGENTS_SHORT2 )
 		{
 			_DecompressShort2NormalTangent( inputNormal.xy, inputTangent.xy, outputNormal, outputTangent );
@@ -348,9 +367,6 @@ void SampleMorphDelta2( sampler2D vt, const float3 vMorphTargetTextureDim, const
 
 #endif // SHADER_MODEL_VS_3_0
 
-
-#if ( defined( SHADER_MODEL_VS_2_0 ) || defined( SHADER_MODEL_VS_3_0 ) )
-
 //-----------------------------------------------------------------------------
 // Method to apply morphs
 //-----------------------------------------------------------------------------
@@ -396,9 +412,6 @@ bool ApplyMorph( float4 vPosFlex, float3 vNormalFlex,
 	vTangent.xyz  += vNormalDelta;
 	return true;
 }
-
-#endif // defined( SHADER_MODEL_VS_2_0 ) || defined( SHADER_MODEL_VS_3_0 )
-
 
 #ifdef SHADER_MODEL_VS_3_0
 
@@ -519,81 +532,38 @@ bool ApplyMorph( sampler2D morphSampler, const float3 vMorphTargetTextureDim, co
 
 #endif   // SHADER_MODEL_VS_3_0
 
-
-float RangeFog( const float3 projPos )
+float CalcFixedFunctionFog( const float3 worldPos, const bool bWaterFog )
 {
-	return max( cFogMaxDensity, ( -projPos.z * cOOFogRange + cFogEndOverFogRange ) );
-}
-
-float WaterFog( const float3 worldPos, const float3 projPos )
-{
-	float4 tmp;
-	
-	tmp.xy = cEyePosWaterZ.wz - worldPos.z;
-
-	// tmp.x is the distance from the water surface to the vert
-	// tmp.y is the distance from the eye position to the vert
-
-	// if $tmp.x < 0, then set it to 0
-	// This is the equivalent of moving the vert to the water surface if it's above the water surface
-	
-	tmp.x = max( 0.0f, tmp.x );
-
-	// $tmp.w = $tmp.x / $tmp.y
-	tmp.w = tmp.x / tmp.y;
-
-	tmp.w *= projPos.z;
-
-	// $tmp.w is now the distance that we see through water.
-
-	return max( cFogMaxDensity, ( -tmp.w * cOOFogRange + cFogOne ) );
-}
-
-float CalcFog( const float3 worldPos, const float3 projPos, const int fogType )
-{
-#if defined( _X360 )
-	// 360 only does pixel fog
-	return 1.0f;
-#endif
-
-	if( fogType == FOGTYPE_RANGE )
-	{
-		return RangeFog( projPos );
-	}
-	else
-	{
-#if SHADERMODEL_VS_2_0 == 1
-		// We do this work in the pixel shader in dx9, so don't do any fog here.
-		return 1.0f;
-#else
-		return WaterFog( worldPos, projPos );
-#endif
-	}
-}
-
-float CalcFog( const float3 worldPos, const float3 projPos, const bool bWaterFog )
-{
-#if defined( _X360 )
-	// 360 only does pixel fog
-	return 1.0f;
-#endif
-
-	float flFog;
 	if( !bWaterFog )
 	{
-		flFog = RangeFog( projPos );
+		return CalcRangeFogFactorFixedFunction( worldPos, cEyePos, cRadialFogMaxDensity, cFogEndOverFogRange, cOOFogRange );
 	}
 	else
 	{
-#if SHADERMODEL_VS_2_0 == 1
-		// We do this work in the pixel shader in dx9, so don't do any fog here.
-		flFog = 1.0f;
-#else
-		flFog = WaterFog( worldPos, projPos );
-#endif
+		return 0.0f; //all done in the pixel shader as of ps20 (current min-spec)
 	}
+}
 
-	return flFog;
+float CalcFixedFunctionFog( const float3 worldPos, const int fogType )
+{
+	return CalcFixedFunctionFog( worldPos, fogType != FOGTYPE_RANGE );
+}
+
+float CalcNonFixedFunctionFog( const float3 worldPos, const bool bWaterFog )
+{
+	if( !bWaterFog )
+	{
+		return CalcRangeFogFactorNonFixedFunction( worldPos, cEyePos, cRadialFogMaxDensity, cFogEndOverFogRange, cOOFogRange );
+	}
+	else
+	{
+		return 0.0f; //all done in the pixel shader as of ps20 (current min-spec)
+	}
+}
+
+float CalcNonFixedFunctionFog( const float3 worldPos, const int fogType )
+{
+	return CalcNonFixedFunctionFog( worldPos, fogType != FOGTYPE_RANGE );
 }
 
 float4 DecompressBoneWeights( const float4 weights )
@@ -609,6 +579,12 @@ float4 DecompressBoneWeights( const float4 weights )
 		//       from [-32768,+32767] to [-1,+1] is imprecise in the same way.
 		result += 1;
 		result /= 32768;
+
+#ifdef _PS3
+		// @todo [kutta] - figure out why the values are swapped
+		// Only the first 2 values are even used, and their position seems to be swapped on PS3, so swap X & Y and who cares about z / w anyways
+		return result.yxzw;
+#endif // _PS3
 	}
 
 	return result;
@@ -618,10 +594,12 @@ void SkinPosition( bool bSkinning, const float4 modelPos,
                    const float4 boneWeights, float4 fBoneIndices,
 				   out float3 worldPos )
 {
-#if !defined( _X360 )
-	int3 boneIndices = D3DCOLORtoUBYTE4( fBoneIndices );
+#if defined( _PS3 )
+	int3 boneIndices = D3DCOLORtoUBYTE4( fBoneIndices ).zyx;
+#elif !defined( _X360 )
+	int3 boneIndices = D3DCOLORtoUBYTE4( fBoneIndices ).xyz;
 #else
-	int3 boneIndices = fBoneIndices;
+	int3 boneIndices = fBoneIndices.xyz;
 #endif
 
 	// Needed for invariance issues caused by multipass rendering
@@ -635,14 +613,14 @@ void SkinPosition( bool bSkinning, const float4 modelPos,
 		}
 		else // skinning - always three bones
 		{
-			float4x3 mat1 = cModel[boneIndices[0]];
-			float4x3 mat2 = cModel[boneIndices[1]];
-			float4x3 mat3 = cModel[boneIndices[2]];
+			hlsl_float4x3 mat1 = cModel[boneIndices[0]];
+			hlsl_float4x3 mat2 = cModel[boneIndices[1]];
+			hlsl_float4x3 mat3 = cModel[boneIndices[2]];
 
 			float3 weights = DecompressBoneWeights( boneWeights ).xyz;
 			weights[2] = 1 - (weights[0] + weights[1]);
 
-			float4x3 blendMatrix = mat1 * weights[0] + mat2 * weights[1] + mat3 * weights[2];
+			hlsl_float4x3 blendMatrix = mat1 * weights[0] + mat2 * weights[1] + mat3 * weights[2];
 			worldPos = mul4x3( modelPos, blendMatrix );
 		}
 	}
@@ -657,9 +635,10 @@ void SkinPositionAndNormal( bool bSkinning, const float4 modelPos, const float3 
 	[isolate] 
 #endif
 	{ 
-
-#if !defined( _X360 )
-		int3 boneIndices = D3DCOLORtoUBYTE4( fBoneIndices );
+#if defined( _PS3 )
+		int3 boneIndices = D3DCOLORtoUBYTE4( fBoneIndices ).zyx;
+#elif !defined( _X360 )
+		int3 boneIndices = D3DCOLORtoUBYTE4( fBoneIndices ).xyz;
 #else
 		int3 boneIndices = fBoneIndices;
 #endif
@@ -671,14 +650,14 @@ void SkinPositionAndNormal( bool bSkinning, const float4 modelPos, const float3 
 		}
 		else // skinning - always three bones
 		{
-			float4x3 mat1 = cModel[boneIndices[0]];
-			float4x3 mat2 = cModel[boneIndices[1]];
-			float4x3 mat3 = cModel[boneIndices[2]];
+			hlsl_float4x3 mat1 = cModel[boneIndices[0]];
+			hlsl_float4x3 mat2 = cModel[boneIndices[1]];
+			hlsl_float4x3 mat3 = cModel[boneIndices[2]];
 
 			float3 weights = DecompressBoneWeights( boneWeights ).xyz;
 			weights[2] = 1 - (weights[0] + weights[1]);
 
-			float4x3 blendMatrix = mat1 * weights[0] + mat2 * weights[1] + mat3 * weights[2];
+			hlsl_float4x3 blendMatrix = mat1 * weights[0] + mat2 * weights[1] + mat3 * weights[2];
 			worldPos = mul4x3( modelPos, blendMatrix );
 			worldNormal = mul3x3( modelNormal, ( float3x3 )blendMatrix );
 		}
@@ -696,10 +675,12 @@ void SkinPositionNormalAndTangentSpace(
 						    out float3 worldPos, out float3 worldNormal, 
 							out float3 worldTangentS, out float3 worldTangentT )
 {
-#if !defined( _X360 )
-	int3 boneIndices = D3DCOLORtoUBYTE4( fBoneIndices );
+#if defined( _PS3 )
+	int3 boneIndices = D3DCOLORtoUBYTE4( fBoneIndices ).zyx;
+#elif !defined( _X360 )
+	int3 boneIndices = D3DCOLORtoUBYTE4( fBoneIndices ).xyz;
 #else
-	int3 boneIndices = fBoneIndices;
+	int3 boneIndices = fBoneIndices.xyz;
 #endif
 
 	// Needed for invariance issues caused by multipass rendering
@@ -715,14 +696,14 @@ void SkinPositionNormalAndTangentSpace(
 		}
 		else // skinning - always three bones
 		{
-			float4x3 mat1 = cModel[boneIndices[0]];
-			float4x3 mat2 = cModel[boneIndices[1]];
-			float4x3 mat3 = cModel[boneIndices[2]];
+			hlsl_float4x3 mat1 = cModel[boneIndices[0]];
+			hlsl_float4x3 mat2 = cModel[boneIndices[1]];
+			hlsl_float4x3 mat3 = cModel[boneIndices[2]];
 
 			float3 weights = DecompressBoneWeights( boneWeights ).xyz;
 			weights[2] = 1 - (weights[0] + weights[1]);
 
-			float4x3 blendMatrix = mat1 * weights[0] + mat2 * weights[1] + mat3 * weights[2];
+			hlsl_float4x3 blendMatrix = mat1 * weights[0] + mat2 * weights[1] + mat3 * weights[2];
 			worldPos = mul4x3( modelPos, blendMatrix );
 			worldNormal = mul3x3( modelNormal, ( const float3x3 )blendMatrix );
 			worldTangentS = mul3x3( ( float3 )modelTangentS, ( const float3x3 )blendMatrix );
@@ -754,7 +735,7 @@ float VertexAttenInternal( const float3 worldPos, int lightNum )
 	float result = 0.0f;
 
 	// Get light direction
-	float3 lightDir = cLightInfo[lightNum].pos - worldPos;
+	float3 lightDir = cLightInfo[lightNum].pos.xyz - worldPos;
 
 	// Get light distance squared.
 	float lightDistSquared = dot( lightDir, lightDir );
@@ -766,7 +747,7 @@ float VertexAttenInternal( const float3 worldPos, int lightNum )
 	lightDir *= ooLightDist;
 
 	float3 vDist;
-#	if defined( _X360 )
+	#if ( defined( _X360 ) || defined( _PS3 ) )
 	{
 		//X360 dynamic compile hits an internal compiler error using dst(), this is the breakdown of how dst() works from the 360 docs.
 		vDist.x = 1;
@@ -774,11 +755,11 @@ float VertexAttenInternal( const float3 worldPos, int lightNum )
 		vDist.z = lightDistSquared;
 		//flDist.w = ooLightDist;
 	}
-#	else
+	#else
 	{
-		vDist = dst( lightDistSquared, ooLightDist );
+		vDist = dst( lightDistSquared, ooLightDist ).xyz;
 	}
-#	endif
+	#endif
 
 	float flDistanceAtten = 1.0f / dot( cLightInfo[lightNum].atten.xyz, vDist );
 
@@ -801,10 +782,10 @@ float VertexAttenInternal( const float3 worldPos, int lightNum )
 float CosineTermInternal( const float3 worldPos, const float3 worldNormal, int lightNum, bool bHalfLambert )
 {
 	// Calculate light direction assuming this is a point or spot
-	float3 lightDir = normalize( cLightInfo[lightNum].pos - worldPos );
+	float3 lightDir = normalize( cLightInfo[lightNum].pos.xyz - worldPos );
 
 	// Select the above direction or the one in the structure, based upon light type
-	lightDir = lerp( lightDir, -cLightInfo[lightNum].dir, cLightInfo[lightNum].color.w );
+	lightDir = lerp( lightDir, -cLightInfo[lightNum].dir.xyz, cLightInfo[lightNum].color.w );
 
 	// compute N dot L
 	float NDotL = dot( worldNormal, lightDir );
@@ -812,6 +793,7 @@ float CosineTermInternal( const float3 worldPos, const float3 worldNormal, int l
 	if ( !bHalfLambert )
 	{
 		NDotL = max( 0.0f, NDotL );
+		NDotL = SoftenCosineTerm( NDotL ); // For CS:GO
 	}
 	else	// Half-Lambert
 	{
@@ -822,7 +804,7 @@ float CosineTermInternal( const float3 worldPos, const float3 worldNormal, int l
 }
 
 // This routine uses booleans to do early-outs and is meant to be called by routines OUTSIDE of this file
-float GetVertexAttenForLight( const float3 worldPos, int lightNum, bool bUseStaticControlFlow )
+float GetVertexAttenForLight( const float3 worldPos, int lightNum, bool bUseStaticControlFlow = true )
 {
 	float result = 0.0f;
 
@@ -842,9 +824,21 @@ float GetVertexAttenForLight( const float3 worldPos, int lightNum, bool bUseStat
 	return result;
 }
 
+// This routine uses booleans to do early-outs and is meant to be called by routines OUTSIDE of this file
+float CosineTerm( const float3 worldPos, const float3 worldNormal, int lightNum, bool bHalfLambert )
+{
+	float flResult = 0.0f;
+	if ( g_bLightEnabled[lightNum] )
+	{
+		flResult = CosineTermInternal( worldPos, worldNormal, lightNum, bHalfLambert );
+	}
+
+	return flResult;
+}
+
 float3 DoLightInternal( const float3 worldPos, const float3 worldNormal, int lightNum, bool bHalfLambert )
 {
-	return cLightInfo[lightNum].color *
+	return cLightInfo[lightNum].color.xyz *
 		CosineTermInternal( worldPos, worldNormal, lightNum, bHalfLambert ) *
 		VertexAttenInternal( worldPos, lightNum );
 }
@@ -857,20 +851,28 @@ float3 DoLighting( const float3 worldPos, const float3 worldNormal,
 
 	if( bStaticLight )			// Static light
 	{
-		float3 col = staticLightingColor * cOverbright;
-#if defined ( _X360 )
-		linearColor += col * col;
-#else
-		linearColor += GammaToLinear( col );
-#endif
+		linearColor += GammaToLinear( staticLightingColor.rgb * cOverbright );
 	}
 
 	if( bDynamicLight )			// Dynamic light
 	{
+#ifdef _PS3
+		// no integer constant support :(
+		if ( g_bLightEnabled[0] )
+		{
+			linearColor += DoLightInternal( worldPos, worldNormal, 0, bHalfLambert );
+
+			if ( g_bLightEnabled[1] )
+			{
+				linearColor += DoLightInternal( worldPos, worldNormal, 1, bHalfLambert );
+			}
+		}
+#else // _PS3
 		for (int i = 0; i < g_nLightCount; i++)
 		{
 			linearColor += DoLightInternal( worldPos, worldNormal, i, bHalfLambert );
-		}		
+		}	
+#endif // !_PS3
 	}
 
 	if( bDynamicLight )
@@ -880,6 +882,59 @@ float3 DoLighting( const float3 worldPos, const float3 worldNormal,
 
 	return linearColor;
 }
+
+
+float3 DoLightingSeparateDirectional( const float3 worldPos, const float3 worldNormal,
+				   const float3 staticLightingColor, const bool bStaticLight,
+				   const bool bDynamicLight, bool bHalfLambert,
+				   out float3 directionalLightColor )
+{
+	directionalLightColor = float3( 0.0f, 0.0f, 0.0f );
+	
+	float3 linearColor = float3( 0.0f, 0.0f, 0.0f );
+
+	if( bStaticLight )			// Static light
+	{
+		linearColor += GammaToLinear( staticLightingColor.rgb * cOverbright );
+	}
+
+	if( bDynamicLight )			// Dynamic light
+	{
+#if defined(_PS3)
+		// no integer constant support :(
+		if ( g_bLightEnabled[0] )
+		{
+			directionalLightColor += DoLightInternal( worldPos, worldNormal, 0, bHalfLambert );
+
+			if ( g_bLightEnabled[1] )
+			{
+				linearColor += DoLightInternal( worldPos, worldNormal, 1, bHalfLambert );
+			}
+		}
+#else
+		for (int i = 0; i < g_nLightCount; i++)
+		{
+			float3 contribColor = DoLightInternal( worldPos, worldNormal, i, bHalfLambert );
+		    if ( !i )
+			{
+				directionalLightColor += contribColor;
+			}
+			else
+			{
+				linearColor += contribColor;
+			}
+		}	
+#endif
+	}
+
+	if( bDynamicLight )
+	{
+		linearColor += AmbientLight( worldNormal ); //ambient light is already remapped
+	}
+
+	return linearColor;
+}
+
 
 float3 DoLightingUnrolled( const float3 worldPos, const float3 worldNormal,
 				  const float3 staticLightingColor, const bool bStaticLight,

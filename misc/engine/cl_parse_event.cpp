@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -7,6 +7,7 @@
 #include "client_pch.h"
 #include "dt_recv_eng.h"
 #include "client_class.h"
+#include "serializedentity.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -36,11 +37,13 @@ void CL_DescribeEvent( int slot, CEventInfo *event, const char *eventname )
 	n.color[1] = 0.8;
 	n.color[2] = 1.0;
 
-	Con_NXPrintf( &n, "%02i %6.3ff %20s %03i bytes", slot, cl.GetTime(), eventname, Bits2Bytes( event->bits ) );
+	CSerializedEntity *pEntity = (CSerializedEntity *)event->m_Packed;
+
+	Con_NXPrintf( &n, "%02i %6.3ff %20s %03i bytes", slot, GetBaseLocalClient().GetTime(), eventname, pEntity ? Bits2Bytes( pEntity->GetFieldDataBitCount() ) : 0 );
 
 	if ( cl_showevents.GetInt() == 2 )
 	{
-		DevMsg( "%02i %6.3ff %20s %03i bytes\n", slot, cl.GetTime(), eventname, Bits2Bytes( event->bits ) );
+		DevMsg( "%02i %6.3ff %20s %03i bytes\n", slot, GetBaseLocalClient().GetTime(), eventname, pEntity ?  Bits2Bytes( pEntity->GetFieldDataBitCount() ) : 0 );
 	}
 }
 
@@ -50,22 +53,15 @@ void CL_DescribeEvent( int slot, CEventInfo *event, const char *eventname )
 //			*pToData - 
 //			*pRecvTable - 
 //-----------------------------------------------------------------------------
-void CL_ParseEventDelta( void *RawData, void *pToData, RecvTable *pRecvTable, unsigned int uReadBufferSize )
+void CL_DecodeEventDelta( SerializedEntityHandle_t handle, void *pToData, RecvTable *pRecvTable )
 {
 	// Make sure we have a decoder
-	assert(pRecvTable->m_pDecoder);
-
-	// Only so much data allowed
-	bf_read fromBuf( "CL_ParseEventDelta->fromBuf", RawData, uReadBufferSize );
+	Assert(pRecvTable->m_pDecoder);
 
 	// First, decode all properties as zeros since temp ents are delta'd from zeros.
 	RecvTable_DecodeZeros( pRecvTable, pToData, -1 );
 
-	// Now decode the data from the network on top of that.
-	RecvTable_Decode( pRecvTable, pToData, &fromBuf, -1 );
-
-	// Make sure the server, etc. didn't try to send too much
-	assert(!fromBuf.IsOverflowed());
+	RecvTable_Decode( pRecvTable, pToData, handle, -1 );
 }
 
 //-----------------------------------------------------------------------------
@@ -75,13 +71,16 @@ void CL_ParseEventDelta( void *RawData, void *pToData, RecvTable *pRecvTable, un
 void CL_FireEvents( void )
 {
 	VPROF("CL_FireEvents");
+	CClientState &cl = GetBaseLocalClient();
+
 	if ( !cl.IsActive() )
 	{
 		cl.events.RemoveAll();
 		return;
 	}
+	MDLCACHE_CRITICAL_SECTION_(g_pMDLCache);
 
-	int i, next;
+	intp i, next;
 	for ( i = cl.events.Head(); i != cl.events.InvalidIndex(); i = next )
 	{
 		next = cl.events.Next( i );
@@ -112,8 +111,7 @@ void CL_FireEvents( void )
 				pCE->PreDataUpdate( DATA_UPDATE_CREATED );
 
 				// Decode data into client event object
-				unsigned int buffer_size = PAD_NUMBER( Bits2Bytes( ei->bits ), 4 );
-				CL_ParseEventDelta( ei->pData, pCE->GetDataTableBasePtr(), ei->pClientClass->m_pRecvTable, buffer_size );
+				CL_DecodeEventDelta( ei->m_Packed, pCE->GetDataTableBasePtr(), ei->pClientClass->m_pRecvTable );
 
 				// Fire the event!!!
 				pCE->PostDataUpdate( DATA_UPDATE_CREATED );

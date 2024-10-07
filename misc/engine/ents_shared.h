@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -11,11 +11,56 @@
 #include <iserver.h>
 #include "clientframe.h"
 #include "packed_entity.h"
+#include "iclientnetworkable.h"
 
 #ifdef _WIN32
 #pragma once
 #endif
 
+typedef intp SerializedEntityHandle_t;
+
+enum
+{
+	SERIALIZED_ENTITY_HANDLE_INVALID = (SerializedEntityHandle_t)0,
+};
+
+abstract_class ISerializedEntities
+{
+public:
+	virtual SerializedEntityHandle_t AllocateSerializedEntity( char const *pFile, int nLine ) = 0;
+	virtual void ReleaseSerializedEntity( SerializedEntityHandle_t handle ) = 0;
+	virtual SerializedEntityHandle_t CopySerializedEntity( SerializedEntityHandle_t handle, char const *pFile, int nLine ) = 0;
+};
+
+extern ISerializedEntities *g_pSerializedEntities;
+
+enum
+{
+	ENTITY_SENTINEL = 9999	// larger number than any real entity number
+};
+
+// Used to classify entity update types in DeltaPacketEntities.
+enum UpdateType
+{
+	EnterPVS = 0,	// Entity came back into pvs, create new entity if one doesn't exist
+
+	LeavePVS,		// Entity left pvs
+
+	DeltaEnt,		// There is a delta for this entity.
+	PreserveEnt,	// Entity stays alive but no delta ( could be LOD, or just unchanged )
+
+	Finished,		// finished parsing entities successfully
+	Failed,			// parsing error occured while reading entities
+};
+
+// Flags for delta encoding header
+enum
+{
+	FHDR_ZERO			= 0x0000,
+	FHDR_LEAVEPVS		= 0x0001,
+	FHDR_DELETE			= 0x0002,
+	FHDR_ENTERPVS		= 0x0004,
+};
 
 
 class CEntityInfo
@@ -29,11 +74,9 @@ public:
 	}
 	virtual	~CEntityInfo() {};
 	
-	bool			m_bAsDelta;
 	CClientFrame	*m_pFrom;
 	CClientFrame	*m_pTo;
 
-	UpdateType		m_UpdateType;
 
 	int				m_nOldEntity;	// current entity index in m_pFrom
 	int				m_nNewEntity;	// current entity index in m_pTo
@@ -41,6 +84,8 @@ public:
 	int				m_nHeaderBase;
 	int				m_nHeaderCount;
 
+	UpdateType		m_UpdateType;
+	bool			m_bAsDelta;
 	inline void	NextOldEntity( void ) 
 	{
 		if ( m_pFrom )
@@ -56,6 +101,25 @@ public:
 		else
 		{
 			m_nOldEntity = ENTITY_SENTINEL;
+		}
+	}
+
+	inline int GetNextOldEntity( int startEntity ) 
+	{
+		if ( m_pFrom )
+		{
+			int nextEntity = m_pFrom->transmit_entity.FindNextSetBit( startEntity+1 );
+
+			if ( nextEntity < 0 )
+			{
+				// Sentinel/end of list....
+				nextEntity = ENTITY_SENTINEL;
+			}
+			return nextEntity;
+		}
+		else
+		{
+			return ENTITY_SENTINEL;
 		}
 	}
 
@@ -91,8 +155,16 @@ public:
 		m_nLocalPlayerBits = 0;
 		m_nOtherPlayerBits = 0;
 		m_UpdateType = PreserveEnt;
+		m_DecodeEntity = g_pSerializedEntities->AllocateSerializedEntity( __FILE__, __LINE__ );
 	}
 
+	~CEntityReadInfo()
+	{
+		g_pSerializedEntities->ReleaseSerializedEntity( m_DecodeEntity );
+	}
+
+	SerializedEntityHandle_t m_DecodeEntity;
+	
 	bf_read			*m_pBuf;
 	int				m_UpdateFlags;	// from the subheader
 	bool			m_bIsEntity;

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//======= Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -8,8 +8,12 @@
 #include "bitmap/imageformat.h"
 #include "basetypes.h"
 #include "tier0/dbg.h"
+#ifndef _PS3
 #include <malloc.h>
 #include <memory.h>
+#else
+#include <stdlib.h>
+#endif
 #include "mathlib/mathlib.h"
 #include "mathlib/vector.h"
 #include "tier1/utlmemory.h"
@@ -106,39 +110,50 @@ void GammaCorrectRGBA8888( unsigned char *src, unsigned char* dst, int width, in
 //-----------------------------------------------------------------------------
 static void GenerateNiceFilter( float wratio, float hratio, float dratio, int kernelDiameter, float* pKernel, float *pInvKernel )
 {
-	// Compute a kernel...
-	int h, i, j;
-	int kernelWidth = kernelDiameter * wratio;
-	int kernelHeight = kernelDiameter * hratio;
-	int kernelDepth = ( dratio != 0 ) ? kernelDiameter * dratio : 1;
-
-	// This is a NICE filter
+	// Compute a kernel. This is a NICE filter
 	// sinc pi*x * a box from -3 to 3 * sinc ( pi * x/3)
 	// where x is the pixel # in the destination (shrunken) image.
 	// only problem here is that the NICE filter has a very large kernel
 	// (7x7 x wratio x hratio x dratio)
-	float dx = 1.0f / (float)wratio;
-	float dy = 1.0f / (float)hratio;
-	float z, dz;
+	int kernelWidth, kernelHeight, kernelDepth;
+	float sx, dx, sy, dy, sz, dz;
+	float flInvFactor = 1.0f;
 
-	if (dratio != 0.0f)
+	kernelWidth = kernelHeight = kernelDepth = 1;
+	sx = dx = sy = dy = sz = dz = 0.0f;
+	if ( wratio > 1.0f )
 	{
+		kernelWidth = ( int )( kernelDiameter * wratio );
+		dx = 1.0f / (float)wratio;
+		sx = -((float)kernelDiameter - dx) * 0.5f; 
+		flInvFactor *= wratio;
+	}
+
+	if ( hratio > 1.0f )
+	{
+		kernelHeight = ( int )( kernelDiameter * hratio );
+		dy = 1.0f / (float)hratio;
+		sy = -((float)kernelDiameter - dy) * 0.5f; 
+		flInvFactor *= hratio;
+	}
+
+	if ( dratio > 1.0f )
+	{
+		kernelDepth = ( int )( kernelDiameter * dratio );
 		dz = 1.0f / (float)dratio;
-		z = -((float)kernelDiameter - dz) * 0.5f; 
-	}
-	else
-	{
-		dz = 0.0f;
-		z = 0.0f;
+		sz = -((float)kernelDiameter - dz) * 0.5f; 
+		flInvFactor *= dratio;
 	}
 
+	float z = sz;
+	int h, i, j;
 	float total = 0.0f;
 	for ( h = 0; h < kernelDepth; ++h )
 	{
-		float y = -((float)kernelDiameter - dy) * 0.5f; 
+		float y = sy; 
 		for ( i = 0; i < kernelHeight; ++i )
 		{
-			float x = -((float)kernelDiameter - dx) * 0.5f; 
+			float x = sx; 
 			for ( j = 0; j < kernelWidth; ++j )
 			{
 				int nKernelIndex = kernelWidth * ( i + h * kernelHeight ) + j;
@@ -171,9 +186,7 @@ static void GenerateNiceFilter( float wratio, float hratio, float dratio, int ke
 	}
 
 	// normalize
-	float flInvFactor = ( dratio == 0 ) ? wratio * hratio : dratio * wratio * hratio;
 	float flInvTotal = (total != 0.0f) ? 1.0f / total : 1.0f;
-
 	for ( h = 0; h < kernelDepth; ++h )
 	{
 		for ( i = 0; i < kernelHeight; ++i )
@@ -187,6 +200,7 @@ static void GenerateNiceFilter( float wratio, float hratio, float dratio, int ke
 		}
 	}
 }
+
 
 //-----------------------------------------------------------------------------
 // Resample an image
@@ -204,16 +218,6 @@ inline bool IsPowerOfTwo( int x )
 	return (x & ( x - 1 )) == 0;
 }
 
-
-struct KernelInfo_t
-{
-	float *m_pKernel;
-	float *m_pInvKernel;
-	int m_nWidth;
-	int m_nHeight;
-	int m_nDepth;
-	int m_nDiameter;
-};
 
 enum KernelType_t
 {
@@ -381,9 +385,10 @@ public:
 		int wratio, int hratio, int dratio, float *pAlphaResult )
 	{
 		// Find the delta between the alpha + source image
-		for ( int k = 0; k < info.m_nSrcDepth; ++k )
+		int i, k;
+		for ( k = 0; k < info.m_nSrcDepth; ++k )
 		{
-			for ( int i = 0; i < info.m_nSrcHeight; ++i )
+			for ( i = 0; i < info.m_nSrcHeight; ++i )
 			{
 				int dstPixel = i * info.m_nSrcWidth + k * info.m_nSrcWidth * info.m_nSrcHeight;
 				for ( int j = 0; j < info.m_nSrcWidth; ++j, ++dstPixel )
@@ -405,7 +410,7 @@ public:
 		for ( int h = 0; h < info.m_nDestDepth; ++h )
 		{
 			int startZ = dratio * h + nInitialZ;
-			for ( int i = 0; i < info.m_nDestHeight; ++i )
+			for ( i = 0; i < info.m_nDestHeight; ++i )
 			{
 				int startY = hratio * i + nInitialY;
 				int dstPixel = ( info.m_nDestWidth * (i + h * info.m_nDestHeight) ) << 2;
@@ -442,7 +447,7 @@ public:
 					flAlphaDelta *= flInvFactor;
 					if ( flAlphaDelta > flAlphaThreshhold )
 					{
-						info.m_pDest[ dstPixel + 3 ] = 255.0f;
+						info.m_pDest[ dstPixel + 3 ] = 255;
 					}
 				}
 			}
@@ -530,6 +535,72 @@ static ApplyKernelFunc_t g_KernelFuncNice[] =
 	ApplyKernelAlphatestNice_t::ApplyKernel,
 };
 
+void ComputeNiceFilterKernel( float wratio, float hratio, float dratio, KernelInfo_t *pKernel )
+{
+	// Kernel size is measured in dst pixels
+	pKernel->m_nDiameter = 6;
+
+	// Compute a nice kernel...
+	pKernel->m_nWidth = ( wratio > 1 ) ? ( int )( pKernel->m_nDiameter * wratio ) : 1;
+	pKernel->m_nHeight = ( hratio > 1 ) ? ( int )( pKernel->m_nDiameter * hratio ) : 1;
+	pKernel->m_nDepth = ( dratio > 1 ) ? ( int )( pKernel->m_nDiameter * dratio ) : 1;
+
+	// Cache the filter (2d kernels only)....
+	int power = -1;
+
+	if ( (wratio == hratio) && (dratio <= 1) && ( IsPowerOfTwo( pKernel->m_nWidth ) ) && ( IsPowerOfTwo( pKernel->m_nHeight ) ) )
+	{
+		power = 0;
+		int tempWidth = ( int )wratio;
+		while (tempWidth > 1)
+		{
+			++power;
+			tempWidth >>= 1;
+		}
+
+		// Don't cache anything bigger than 512x512
+		if (power >= 10)
+		{
+			power = -1;
+		}
+	}
+
+	static float* s_pKernelCache[10] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+	static float* s_pInvKernelCache[10] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+	if (power >= 0)
+	{
+		if (!s_pKernelCache[power])
+		{
+			s_pKernelCache[power] = new float[pKernel->m_nWidth * pKernel->m_nHeight];
+			s_pInvKernelCache[power] = new float[pKernel->m_nWidth * pKernel->m_nHeight];
+			GenerateNiceFilter( wratio, hratio, dratio, pKernel->m_nDiameter, s_pKernelCache[power], s_pInvKernelCache[power] ); 
+		}
+
+		pKernel->m_pKernel = s_pKernelCache[power];
+		pKernel->m_pInvKernel = s_pInvKernelCache[power];
+	}
+	else
+	{
+		// Don't cache non-square kernels, or 3d kernels
+		float *pTempMemory = new float[pKernel->m_nWidth * pKernel->m_nHeight * pKernel->m_nDepth];
+		float *pTempInvMemory = new float[pKernel->m_nWidth * pKernel->m_nHeight * pKernel->m_nDepth];
+		GenerateNiceFilter( wratio, hratio, dratio, pKernel->m_nDiameter, pTempMemory, pTempInvMemory ); 
+		pKernel->m_pKernel = pTempMemory;
+		pKernel->m_pInvKernel = pTempInvMemory;
+	}
+}
+
+void CleanupNiceFilterKernel( KernelInfo_t *pKernel )
+{
+	if ( ( pKernel->m_nWidth != pKernel->m_nHeight ) || ( pKernel->m_nDepth > 1 ) || ( pKernel->m_nWidth > 512 ) ||
+		 ( !IsPowerOfTwo( pKernel->m_nWidth ) ) || ( !IsPowerOfTwo( pKernel->m_nHeight ) ) )
+	{
+		delete[] pKernel->m_pKernel;
+		delete[] pKernel->m_pInvKernel;
+	}
+}
+
+
 bool ResampleRGBA8888( const ResampleInfo_t& info )
 {
 	// No resampling needed, just gamma correction
@@ -568,68 +639,13 @@ bool ResampleRGBA8888( const ResampleInfo_t& info )
 	int dratio = (info.m_nSrcDepth != info.m_nDestDepth) ? info.m_nSrcDepth / info.m_nDestDepth : 0;
 	
 	KernelInfo_t kernel;
+	memset( &kernel, 0, sizeof( KernelInfo_t ) );
 
-	float* pTempMemory = 0;
-	float* pTempInvMemory = 0;
-	static float* kernelCache[10] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-	static float* pInvKernelCache[10] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 	float pKernelMem[1];
 	float pInvKernelMem[1];
 	if ( info.m_nFlags & RESAMPLE_NICE_FILTER )
 	{
-		// Kernel size is measured in dst pixels
-		kernel.m_nDiameter = 6;
-
-		// Compute a kernel...
-		kernel.m_nWidth = kernel.m_nDiameter * wratio;
-		kernel.m_nHeight = kernel.m_nDiameter * hratio;
-		kernel.m_nDepth = kernel.m_nDiameter * dratio;
-		if ( kernel.m_nDepth == 0 )
-		{
-			kernel.m_nDepth = 1;
-		}
-
-		// Cache the filter (2d kernels only)....
-		int power = -1;
-
-		if ( (wratio == hratio) && (dratio == 0) )
-		{
-			power = 0;
-			int tempWidth = wratio;
-			while (tempWidth > 1)
-			{
-				++power;
-				tempWidth >>= 1;
-			}
-
-			// Don't cache anything bigger than 512x512
-			if (power >= 10)
-			{
-				power = -1;
-			}
-		}
-
-		if (power >= 0)
-		{
-			if (!kernelCache[power])
-			{
-				kernelCache[power] = new float[kernel.m_nWidth * kernel.m_nHeight];
-				pInvKernelCache[power] = new float[kernel.m_nWidth * kernel.m_nHeight];
-				GenerateNiceFilter( wratio, hratio, dratio, kernel.m_nDiameter, kernelCache[power], pInvKernelCache[power] ); 
-			}
-
-			kernel.m_pKernel = kernelCache[power];
-			kernel.m_pInvKernel = pInvKernelCache[power];
-		}
-		else
-		{
-			// Don't cache non-square kernels, or 3d kernels
-			pTempMemory = new float[kernel.m_nWidth * kernel.m_nHeight * kernel.m_nDepth];
-			pTempInvMemory = new float[kernel.m_nWidth * kernel.m_nHeight * kernel.m_nDepth];
-			GenerateNiceFilter( wratio, hratio, dratio, kernel.m_nDiameter, pTempMemory, pTempInvMemory ); 
-			kernel.m_pKernel = pTempMemory;
-			kernel.m_pInvKernel = pTempInvMemory;
-		}
+		ComputeNiceFilterKernel( wratio, hratio, dratio, &kernel );
 	}
 	else
 	{
@@ -668,10 +684,7 @@ bool ResampleRGBA8888( const ResampleInfo_t& info )
 	if ( info.m_nFlags & RESAMPLE_NICE_FILTER )
 	{	
 		g_KernelFuncNice[type]( kernel, info, wratio, hratio, dratio, gammaToLinear, pAlphaResult );
-		if (pTempMemory)
-		{
-			delete[] pTempMemory;
-		}
+		CleanupNiceFilterKernel( &kernel );
 	}
 	else
 	{
@@ -728,8 +741,8 @@ bool ResampleRGBA16161616( const ResampleInfo_t& info )
 			for( i = 0; i < 4; i++ )
 			{
 				accum[i] /= ( nSampleWidth * nSampleHeight );
-				accum[i] = max( accum[i], 0 );
-				accum[i] = min( accum[i], 65535 );
+				accum[i] = MAX( accum[i], 0 );
+				accum[i] = MIN( accum[i], 65535 );
 				pDst[(x+y*info.m_nDestWidth)*4+i] = ( unsigned short )accum[i];
 			}
 		}
@@ -756,29 +769,70 @@ bool ResampleRGB323232F( const ResampleInfo_t& info )
 
 	float *pSrc = ( float * )info.m_pSrc;
 	float *pDst = ( float * )info.m_pDest;
-	int x, y;
-	for( y = 0; y < info.m_nDestHeight; y++ )
+	for( int y = 0; y < info.m_nDestHeight; y++ )
 	{
-		for( x = 0; x < info.m_nDestWidth; x++ )
+		for( int x = 0; x < info.m_nDestWidth; x++ )
 		{
 			float accum[4];
 			accum[0] = accum[1] = accum[2] = accum[3] = 0;
-			int nSampleY;
-			for( nSampleY = 0; nSampleY < nSampleHeight; nSampleY++ )
+			for( int nSampleY = 0; nSampleY < nSampleHeight; nSampleY++ )
 			{
-				int nSampleX;
-				for( nSampleX = 0; nSampleX < nSampleWidth; nSampleX++ )
+				for( int nSampleX = 0; nSampleX < nSampleWidth; nSampleX++ )
 				{
 					accum[0] += pSrc[((x*nSampleWidth+nSampleX)+(y*nSampleHeight+nSampleY)*info.m_nSrcWidth)*3+0];
 					accum[1] += pSrc[((x*nSampleWidth+nSampleX)+(y*nSampleHeight+nSampleY)*info.m_nSrcWidth)*3+1];
 					accum[2] += pSrc[((x*nSampleWidth+nSampleX)+(y*nSampleHeight+nSampleY)*info.m_nSrcWidth)*3+2];
 				}
 			}
-			int i;
-			for( i = 0; i < 3; i++ )
+			for( int i = 0; i < 3; i++ )
 			{
 				accum[i] /= ( nSampleWidth * nSampleHeight );
 				pDst[(x+y*info.m_nDestWidth)*3+i] = accum[i];
+			}
+		}
+	}
+	return true;
+}
+
+
+bool ResampleRGBA32323232F( const ResampleInfo_t& info )
+{
+	// HDRFIXME: This is some lame shit right here. (We need to get NICE working, etc, etc.)
+
+	// Make sure everything is power of two.
+	Assert( ( info.m_nSrcWidth & ( info.m_nSrcWidth - 1 ) ) == 0 );
+	Assert( ( info.m_nSrcHeight & ( info.m_nSrcHeight - 1 ) ) == 0 );
+	Assert( ( info.m_nDestWidth & ( info.m_nDestWidth - 1 ) ) == 0 );
+	Assert( ( info.m_nDestHeight & ( info.m_nDestHeight - 1 ) ) == 0 );
+
+	// Make sure that we aren't upscaling the image. . .we don't support that very well.
+	Assert( info.m_nSrcWidth >= info.m_nDestWidth );
+	Assert( info.m_nSrcHeight >= info.m_nDestHeight );
+
+	int nSampleWidth = info.m_nSrcWidth / info.m_nDestWidth;
+	int nSampleHeight = info.m_nSrcHeight / info.m_nDestHeight;
+
+	float *pSrc = ( float * )info.m_pSrc;
+	float *pDst = ( float * )info.m_pDest;
+	for( int y = 0; y < info.m_nDestHeight; y++ )
+	{
+		for( int x = 0; x < info.m_nDestWidth; x++ )
+		{
+			float accum[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+			for( int nSampleY = 0; nSampleY < nSampleHeight; nSampleY++ )
+			{
+				for( int nSampleX = 0; nSampleX < nSampleWidth; nSampleX++ )
+				{
+					accum[0] += pSrc[((x*nSampleWidth+nSampleX)+(y*nSampleHeight+nSampleY)*info.m_nSrcWidth)*4+0];
+					accum[1] += pSrc[((x*nSampleWidth+nSampleX)+(y*nSampleHeight+nSampleY)*info.m_nSrcWidth)*4+1];
+					accum[2] += pSrc[((x*nSampleWidth+nSampleX)+(y*nSampleHeight+nSampleY)*info.m_nSrcWidth)*4+2];
+					accum[3] += pSrc[((x*nSampleWidth+nSampleX)+(y*nSampleHeight+nSampleY)*info.m_nSrcWidth)*4+3];
+				}
+			}
+			for( int i = 0; i < 4; i++ )
+			{
+				accum[i] /= ( nSampleWidth * nSampleHeight );
+				pDst[(x+y*info.m_nDestWidth)*4+i] = accum[i];
 			}
 		}
 	}
@@ -843,77 +897,6 @@ void GenerateMipmapLevels( unsigned char* pSrc, unsigned char* pDst, int width,
 		dstDepth = dstDepth > 1 ? dstDepth >> 1 : 1;
 	}
 }
-
-void GenerateMipmapLevelsLQ( unsigned char* pSrc, unsigned char* pDst, int width, int height,
-		                     ImageFormat imageFormat, int numLevels )
-{
-	CUtlMemory<unsigned char> tmpImage;
-
-	const unsigned char* pSrcLevel = pSrc;
-
-	int mipmap0Size = GetMemRequired( width, height, 1, IMAGE_FORMAT_RGBA8888, false );
-
-	// TODO: Could work with any 8888 format without conversion.
-	if ( imageFormat != IMAGE_FORMAT_RGBA8888 )
-	{
-		// Damn and blast, had to allocate memory.
-		tmpImage.EnsureCapacity( mipmap0Size );
-		ConvertImageFormat( tmpImage.Base(), IMAGE_FORMAT_RGBA8888, pSrc, imageFormat, width, height, 0, 0 );
-		pSrcLevel = tmpImage.Base();
-	}
-
-	// Copy the 0th level over.
-	memcpy( pDst, pSrcLevel, mipmap0Size );
-	
-	int dstWidth = width;
-	int dstHeight = height;
-	unsigned char* pDstLevel = pDst + mipmap0Size;
-
-	int srcWidth = width;
-	int srcHeight = height;
-
-	// Distance from one pixel to the next
-	const int cStride = 4;
-	
-	do 
-	{
-		dstWidth =  Max( 1, dstWidth  >> 1 );
-		dstHeight = Max( 1, dstHeight >> 1 );
-
-		// Distance from one row to the next. 
-		const int cSrcPitch = cStride * srcWidth * ( srcHeight > 1 ? 1 : 0);
-		const int cSrcStride = srcWidth > 1 ? cStride : 0;
-
-		const unsigned char* pSrcPixel = pSrcLevel;
-		unsigned char* pDstPixel = pDstLevel;
-
-		for ( int j = 0; j < dstHeight; ++j )
-		{
-			for ( int i = 0; i < dstWidth; ++i ) 
-			{
-				// This doesn't round. It's crappy. It's a simple bilerp. 
-				pDstPixel[ 0 ] = ( ( unsigned int ) pSrcPixel[ 0 ] + ( unsigned int ) pSrcPixel[ 0 + cSrcStride ] + ( unsigned int ) pSrcPixel[ 0 + cSrcPitch ] + ( unsigned int ) pSrcPixel[ 0 + cSrcPitch + cSrcStride ] ) >> 2;
-				pDstPixel[ 1 ] = ( ( unsigned int ) pSrcPixel[ 1 ] + ( unsigned int ) pSrcPixel[ 1 + cSrcStride ] + ( unsigned int ) pSrcPixel[ 1 + cSrcPitch ] + ( unsigned int ) pSrcPixel[ 1 + cSrcPitch + cSrcStride ] ) >> 2;
-				pDstPixel[ 2 ] = ( ( unsigned int ) pSrcPixel[ 2 ] + ( unsigned int ) pSrcPixel[ 2 + cSrcStride ] + ( unsigned int ) pSrcPixel[ 2 + cSrcPitch ] + ( unsigned int ) pSrcPixel[ 2 + cSrcPitch + cSrcStride ] ) >> 2;
-				pDstPixel[ 3 ] = ( ( unsigned int ) pSrcPixel[ 3 ] + ( unsigned int ) pSrcPixel[ 3 + cSrcStride ] + ( unsigned int ) pSrcPixel[ 3 + cSrcPitch ] + ( unsigned int ) pSrcPixel[ 3 + cSrcPitch + cSrcStride ] ) >> 2;
-				
-				pDstPixel += cStride;
-				pSrcPixel += cStride * 2; // We advance 2 source pixels for each pixel.
-			}
-
-			// Need to bump down a row. 
-			pSrcPixel += cSrcPitch;
-		}
-
-		// Update for the next go round!
-		pSrcLevel = pDstLevel;
-		pDstLevel += GetMemRequired( dstWidth, dstHeight, 1, IMAGE_FORMAT_RGBA8888, false );
-
-		srcWidth =  Max( 1, srcWidth  >> 1 );
-		srcHeight = Max( 1, srcHeight >> 1 );
-	} while ( srcWidth > 1 || srcHeight > 1 );
-}
-
 
 } // ImageLoader namespace ends
 

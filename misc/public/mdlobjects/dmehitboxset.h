@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =====//
 //
 // Dme version of a hitbox set
 //
@@ -7,26 +7,34 @@
 #ifndef DMEHITBOXSET_H
 #define DMEHITBOXSET_H
 
+
 #ifdef _WIN32
 #pragma once
 #endif
 
-#include "datamodel/dmelement.h"
+
 #include "datamodel/dmattributevar.h"
-#include "mdlobjects/dmehitbox.h"
+#include "mdlobjects/dmemdllist.h"
+
+
+//-----------------------------------------------------------------------------
+// Forward declarations
+//-----------------------------------------------------------------------------
+class CDmeHitbox;
 
 
 //-----------------------------------------------------------------------------
 // A class representing an attachment point
 //-----------------------------------------------------------------------------
-class CDmeHitboxSet : public CDmElement
+class CDmeHitboxSet : public CDmeMdlList
 {
-	DEFINE_ELEMENT( CDmeHitboxSet, CDmElement );
+	DEFINE_ELEMENT( CDmeHitboxSet, CDmeMdlList );
 
 public:
-	CDmaElementArray< CDmeHitbox > m_Hitboxes;	
+	virtual CDmAttribute *GetListAttr() { return m_HitboxList.GetAttribute(); }
 
-private:
+	CDmaElementArray< CDmeHitbox > m_HitboxList;	
+
 };
 
 

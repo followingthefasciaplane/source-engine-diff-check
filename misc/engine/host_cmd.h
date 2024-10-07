@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -27,9 +27,15 @@ void Host_Init( bool bIsDedicated );
 void Host_Shutdown(void);
 int  Host_Frame (float time, int iState );
 void Host_ShutdownServer(void);
-bool Host_NewGame( char *mapName, bool loadGame, bool bBackgroundLevel, const char *pszOldMap = NULL, const char *pszLandmark = NULL, bool bOldSave = false );
-bool Host_Changelevel( bool loadfromsavedgame, const char *mapname, const char *start );
-void Disconnect();
+bool Host_NewGame( char *mapName, char *mapGroupName, bool loadGame, bool bBackgroundLevel, bool bSplitScreenConnect, const char *pszOldMap = NULL, const char *pszLandmark = NULL );
+void Host_Changelevel( bool loadfromsavedgame, const char *mapname, char *mapGroupName, const char *start );
+void Host_PrintStatus( cmd_source_t commandSource, void ( *print )(const char *fmt, ...), bool bShort );
+
+const char *GetHostProductString();
+const char *GetHostVersionString();
+int32 GetHostVersion();
+int32 GetClientVersion();
+int32 GetServerVersion();
 
 extern ConVar host_name;
 

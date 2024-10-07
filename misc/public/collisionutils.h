@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Common collision utility methods
 //
@@ -190,6 +190,27 @@ bool IsBoxIntersectingSphere( const Vector& boxMin, const Vector& boxMax,
 bool IsBoxIntersectingSphereExtents( const Vector& boxCenter, const Vector& boxHalfDiag, 
 									const Vector& center, float radius );
 
+
+//-----------------------------------------------------------------------------
+// Returns true if a box intersects with a sphere
+// NOTE: f4RadiusSq must have the radius sq in all components
+//-----------------------------------------------------------------------------
+FORCEINLINE bool IsBoxIntersectingSphere( const Vector& boxMin, const Vector& boxMax, 
+											 const fltx4& f4Center, const fltx4& f4RadiusSq )
+{
+	// See Graphics Gems, box-sphere intersection
+	fltx4 f4Mins = LoadUnalignedSIMD( &boxMin.x );
+	fltx4 f4Maxs = LoadUnalignedSIMD( &boxMax.x );
+	fltx4 f4MinDelta = SubSIMD( f4Mins, f4Center );
+	fltx4 f4MaxDelta = SubSIMD( f4Center, f4Maxs );
+	f4MinDelta = MaxSIMD( f4MinDelta, Four_Zeros );
+	f4MaxDelta = MaxSIMD( f4MaxDelta, Four_Zeros );
+	fltx4 f4Delta = AddSIMD( f4MinDelta, f4MaxDelta );
+	fltx4 f4DistSq = Dot3SIMD( f4Delta, f4Delta );
+	return IsAllGreaterThan( f4RadiusSq, f4DistSq );
+}
+
+
 //-----------------------------------------------------------------------------
 // returns true if there's an intersection between ray and sphere
 //-----------------------------------------------------------------------------
@@ -252,7 +273,7 @@ bool FASTCALL IsBoxIntersectingRay( const Vector& boxMin, const Vector& boxMax,
 									const Vector& origin, const Vector& delta, float flTolerance = 0.0f );
 
 bool FASTCALL IsBoxIntersectingRay( const Vector& boxMin, const Vector& boxMax, 
-									const Ray_t& ray, float flTolerance = 0.0f );
+									const Ray_t& ray, float flTolerance );
 
 bool FASTCALL IsBoxIntersectingRay( const Vector& boxMin, const Vector& boxMax, 
 									const Vector& origin, const Vector& delta,
@@ -261,7 +282,7 @@ bool FASTCALL IsBoxIntersectingRay( const Vector& boxMin, const Vector& boxMax,
 
 // On the PC, we can't pass fltx4's in registers like this. On the x360, it is 
 // much better if we do.
-#ifdef _X360
+#if defined( _X360 ) || defined( _PS3 )
 bool FASTCALL IsBoxIntersectingRay( fltx4 boxMin, fltx4 boxMax, 
 								   fltx4 origin, fltx4 delta, fltx4 invDelta, // ray parameters
 								   fltx4 vTolerance = LoadZeroSIMD() ///< eg from ReplicateX4(flTolerance)
@@ -280,9 +301,18 @@ bool inline FASTCALL IsBoxIntersectingRay( const fltx4& boxMin, const fltx4& box
 }
 
 
+#if defined( _X360 ) || defined( _PS3 )
+bool FASTCALL IsBoxIntersectingRay( fltx4 boxMin, fltx4 boxMax, 
+								   const Ray_t& ray, fltx4 fl4Tolerance = LoadZeroSIMD() );
+#else
 bool FASTCALL IsBoxIntersectingRay( const fltx4& boxMin, const fltx4& boxMax, 
-								   const Ray_t& ray, float flTolerance = 0.0f );
+								   const Ray_t& ray, const fltx4 &fl4Tolerance = LoadZeroSIMD() );
+#endif
 
+FORCEINLINE bool IsBoxIntersectingRay( const Vector& boxMin, const Vector& boxMax, const Ray_t& ray )
+{
+	return IsBoxIntersectingRay( LoadUnaligned3SIMD(boxMin.Base()), LoadUnaligned3SIMD(boxMax.Base()), ray, LoadZeroSIMD() );
+}
 
 
 //-----------------------------------------------------------------------------
@@ -298,8 +328,8 @@ bool IsPointInBox( const Vector& pt, const Vector& boxMin, const Vector& boxMax 
 // SIMD version
 FORCEINLINE bool IsPointInBox( const fltx4& pt, const fltx4& boxMin, const fltx4& boxMax )
 {
-	fltx4 greater = CmpGtSIMD( pt,boxMax );
-	fltx4 less = CmpLtSIMD( pt, boxMin );
+	bi32x4 greater = CmpGtSIMD( pt,boxMax );
+	bi32x4 less = CmpLtSIMD( pt, boxMin );
 	return (IsAllZeros(SetWToZeroSIMD(OrSIMD(greater,less))));
 }
 
@@ -422,6 +452,26 @@ bool RayHasFullyContainedIntersectionWithQuad( const Ray_t &ray,
 											  const Vector &vQuadExtent2_Normalized, float fQuadExtent2Length );
 
 
+
+//-----------------------------------------------------------------------------
+// Compute the intersection of a line and a circle
+//-----------------------------------------------------------------------------
+bool LineCircleIntersection(const Vector2D &center,
+							const float radius,
+							const Vector2D &vLinePt,
+							const Vector2D &vLineDir,
+							float *fIntersection1,
+							float *fIntersection2);
+
+
+//-----------------------------------------------------------------------------
+// Find the intersection of a ray with an axis-aligned cylinder
+//-----------------------------------------------------------------------------
+bool IntersectRayWithAACylinder( const Ray_t &ray, 
+								 const Vector &center, 
+								 float radius, 
+								 float height, 
+								 CBaseTrace *pTrace );
 
 //-----------------------------------------------------------------------------
 // INLINES

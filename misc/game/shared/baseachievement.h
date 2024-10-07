@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -11,10 +11,13 @@
 #endif
 
 #include "GameEventListener.h"
-#include "hl2orange.spa.h"
+#include "../common/xlast_csgo/csgo.spa.h"
 #include "iachievementmgr.h"
 
+#define AWARD_ID_NONE ""
+
 class CAchievementMgr;
+class IPlayerLocal;
 
 //
 // Base class for achievements
@@ -25,7 +28,6 @@ class CBaseAchievement : public CGameEventListener, public IAchievement
 	DECLARE_CLASS_NOBASE( CBaseAchievement );
 public:
 	CBaseAchievement();	
-	virtual ~CBaseAchievement();
 	virtual void Init() {}
 	virtual void ListenForEvents() {};
 	virtual void Event_EntityKilled( CBaseEntity *pVictim, CBaseEntity *pAttacker, CBaseEntity *pInflictor, IGameEvent *event );
@@ -34,7 +36,6 @@ public:
 	void SetAchievementID( int iAchievementID ) { m_iAchievementID = iAchievementID; }
 	void SetName( const char *pszName ) { m_pszName = pszName; }
 	const char *GetName() { return m_pszName; }
-	const char *GetStat() { return m_pszStat?m_pszStat:GetName(); }
 	void SetFlags( int iFlags );
 	int GetFlags() { return m_iFlags; }
 	void SetGoal( int iGoal ) { m_iGoal = iGoal; }
@@ -44,11 +45,13 @@ public:
 	void SetPointValue( int iPointValue ) { m_iPointValue = iPointValue; }
 	int	GetPointValue() { return m_iPointValue; }
 	bool ShouldHideUntilAchieved() { return m_bHideUntilAchieved; }
+
+
 	void SetHideUntilAchieved( bool bHide ) { m_bHideUntilAchieved = bHide; }
 	void SetStoreProgressInSteam( bool bStoreProgressInSteam ) { m_bStoreProgressInSteam = bStoreProgressInSteam; }
 	bool StoreProgressInSteam() { return m_bStoreProgressInSteam; }
 	virtual bool ShouldShowProgressNotification() { return true; }
-	virtual void OnPlayerStatsUpdate() {}
+	virtual void OnPlayerStatsUpdate( int nUserSlot ) {}
 
 	virtual bool ShouldSaveWithGame();
 	bool ShouldSaveGlobal();
@@ -60,27 +63,21 @@ public:
 	int GetProgressShown() { return m_iProgressShown; }
 	virtual bool IsAchieved() { return m_bAchieved; }
 	virtual bool IsActive();
+	virtual bool IsAvailable(); // Is this achievement available?  Might need DLC, etc
 	virtual bool LocalPlayerCanEarn( void ) { return true; }
 	void SetAchieved( bool bAchieved ) { m_bAchieved = bAchieved; }
+	virtual void CheckAssetAwards( int nSlotId ) {}
 	virtual bool IsMetaAchievement() { return false; }
-	virtual bool AlwaysListen() { return false; }
-	virtual bool AlwaysEnabled() { return false; }
 
-	//=============================================================================
-	// HPE_BEGIN:
-	// [pfreese] Notification method for derived classes
-	//=============================================================================
-	
-	virtual void OnAchieved() {}
-	uint32 GetUnlockTime() const { return m_uUnlockTime; }
+	virtual void OnAchieved( void ) {}
+	uint32 GetUnlockTime( void ) const { return m_uUnlockTime; }
 	void SetUnlockTime( uint32 unlockTime ) { m_uUnlockTime = unlockTime; }
-	
-	//=============================================================================
-	// HPE_END
-	//=============================================================================
 
 	uint64 GetComponentBits() { return m_iComponentBits; }
+	virtual int GetNumComponents() { return m_iNumComponents; }
+	virtual const char *GetComponentDisplayString( int iComponent );
 	void SetComponentBits( uint64 iComponentBits );
+	int GetNumComponentBitsSet( void );
 	void OnComponentEvent( const char *pchComponentName );
 	void EnsureComponentBitSetAndEvaluate( int iBitNumber );
 	void EvaluateIsAlreadyAchieved();
@@ -90,23 +87,27 @@ public:
 	virtual void UpdateAchievement( int nData ) {}
 	virtual bool ShouldShowOnHUD() { return m_bShowOnHUD; }
 	virtual void SetShowOnHUD( bool bShow );
+	virtual void SetUserSlot( int nUserSlot ) { m_nUserSlot = nUserSlot; }
+	virtual void ClearAchievementData();
+	virtual const char *GetIconPath() { return NULL; }
+	void SetDisplayOrder( int iDisplayOrder ) { m_iDisplayOrder = iDisplayOrder; }
+	int GetDisplayOrder( ) { return m_iDisplayOrder; }
 
-	//=============================================================================
-	// HPE_BEGIN:
-	// [pfreese] Serialization methods
-	//=============================================================================
-	
+	virtual void ReadProgress( IPlayerLocal *pPlayer ) {}
+	virtual bool WriteProgress( IPlayerLocal *pPlayer ) { return false; }
+
 	virtual void GetSettings( KeyValues* pNodeOut );				// serialize
 	virtual void ApplySettings( /* const */ KeyValues* pNodeIn );	// unserialize
-	
-	//=============================================================================
-	// HPE_END
-	//=============================================================================
 
 	virtual void Think( void ) { return; }
+	
+	// XBox Asset Awards
+	void SetAssetAward( const char* assetAwardName );
+	void SetAssetAwardID( int iAssetAwardID ) { m_iAssetAwardID = iAssetAwardID; }
+	int GetAssetAwardID( void ) { return m_iAssetAwardID; }
+	bool IsAssetAward( void ) { return m_iAssetAwardID > 0; }
 
-	const char *GetMapNameFilter( void ){ return m_pMapNameFilter; }
-	CAchievementMgr *GetAchievementMgr( void ){ return m_pAchievementMgr; }
+	virtual bool CheckAchievementsEnabled( void );
 
 protected:
 	virtual void FireGameEvent( IGameEvent *event );
@@ -125,10 +126,8 @@ protected:
 	virtual void CalcProgressMsgIncrement();
 	void SetNextThink( float flThinkTime );
 	void ClearThink( void );
-	void SetStat( const char* pStatName ) { m_pszStat = pStatName; }
 
 	const char *m_pszName;								// name of this achievement
-	const char *m_pszStat;								// stat this achievement uses
 	int m_iAchievementID;								// ID of this achievement
 	int	m_iFlags;										// ACH_* flags for this achievement
 	int	m_iGoal;										// goal # of steps to award this achievement
@@ -145,6 +144,7 @@ protected:
 	const char *m_pGameDirFilter;						// if non-NULL, game dir name to filter with
 
 	const char **m_pszComponentNames;			
+	const char **m_pszComponentDisplayNames;			// localizable strings for each component
 	int			m_iNumComponents;
 	const char *m_pszComponentPrefix;
 	int			m_iComponentPrefixLen;
@@ -154,7 +154,11 @@ protected:
 	int			m_iProgressShown;						// # of progress msgs we've shown
 	uint64		m_iComponentBits;						// bitfield of components achieved
 	CAchievementMgr *m_pAchievementMgr;					// our achievement manager
+	int			m_nUserSlot;
+	int			m_iDisplayOrder;						// Order in which the achievement is displayed in the UI
 	bool		m_bShowOnHUD;							// if set, the player wants this achievement pinned to the HUD
+
+	int			m_iAssetAwardID;						// ID of the avatar award asset associated with this achievement. Alliteration!
 
 	friend class CAchievementMgr;
 public:

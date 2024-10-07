@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright  1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -16,12 +16,12 @@
 
 namespace vgui
 {
-class Button;
-class CheckButton;
-class Label;
-class ProgressBar;
-class FileOpenDialog;
-class Slider;
+	class Button;
+	class CheckButton;
+	class Label;
+	class ProgressBar;
+	class FileOpenDialog;
+	class Slider;
 };
 
 class CDemoEditorPanel;
@@ -47,18 +47,18 @@ public:
 	virtual void	OnVDMChanged( void );
 
 	virtual bool	OverrideView( democmdinfo_t& info, int frame );
-    virtual void	DrawDebuggingInfo();
+	virtual void	DrawDebuggingInfo();
 
 	static	void	InstallDemoUI( vgui::Panel *parent );
 
-			bool	IsInDriveMode();
-			void	SetDriveViewPoint( Vector &origin, QAngle &angle );
-			void	GetDriveViewPoint( Vector &origin, QAngle &angle );
+	bool	IsInDriveMode();
+	void	SetDriveViewPoint( Vector &origin, QAngle &angle );
+	void	GetDriveViewPoint( Vector &origin, QAngle &angle );
 
 protected:
-	
+	virtual void ApplySchemeSettings( vgui::IScheme *pScheme );
+
 	void			HandleInput( bool active );
-	bool			IsHoldingFastForward();
 	void			SetPlaybackScale( float scale );
 	float			GetPlaybackScale();
 	void			GetCurrentView();
@@ -68,8 +68,7 @@ protected:
 	void		OnEdit();
 	void		OnSmooth();
 	void		OnLoad();
-	
-	vgui::Label		*m_pCurrentDemo;
+
 	vgui::Button	*m_pStop;
 	vgui::Button	*m_pLoad;
 
@@ -82,12 +81,10 @@ protected:
 	vgui::Button	*m_pPlayPauseResume;
 	vgui::Button	*m_pGoStart;
 	vgui::Button	*m_pGoEnd;
-	vgui::Button	*m_pFastForward;
-	vgui::Button	*m_pFastBackward;
 	vgui::Button	*m_pPrevFrame;
 	vgui::Button	*m_pNextFrame;
 
-	vgui::ProgressBar *m_pProgress;
+	vgui::Slider *m_pProgress;
 	vgui::Label	*m_pProgressLabelFrame;
 	vgui::Label	*m_pProgressLabelTime;
 
@@ -98,16 +95,15 @@ protected:
 	vgui::DHANDLE< CDemoSmootherPanel > m_hDemoSmoother;
 	vgui::DHANDLE< vgui::FileOpenDialog > m_hFileOpenDialog;
 
-	vgui::Button	*m_pGo;
-	vgui::TextEntry *m_pGotoTick;
-
 	bool		m_bInputActive;
 	int			m_nOldCursor[2];
 	Vector		m_ViewOrigin;
 	QAngle		m_ViewAngles;
 };
 
+//#if !defined( LINUX )
 extern CDemoUIPanel *g_pDemoUI;
+//#endif
 
 //-----------------------------------------------------------------------------
 // Purpose: a special demo UI panel that is always visible allowing you
@@ -142,9 +138,9 @@ public:
 	void	MakePanelForeground( bool bPutToForeground );
 
 protected:
+	virtual void ApplySchemeSettings( vgui::IScheme *pScheme );
 
 	void			HandleInput( bool active );
-	bool			IsHoldingFastForward();
 	void			SetPlaybackScale( float scale );
 	float			GetPlaybackScale();
 
@@ -159,8 +155,6 @@ protected:
 	vgui::Button	*m_pPlayPauseResume;
 	vgui::Button	*m_pGoStart;
 	vgui::Button	*m_pGoEnd;
-	vgui::Button	*m_pFastForward;
-	vgui::Button	*m_pFastBackward;
 	vgui::Button	*m_pPrevFrame;
 	vgui::Button	*m_pNextFrame;
 
@@ -181,7 +175,8 @@ protected:
 	bool		m_bIsInForeground;
 };
 
+#if 0 //!defined( LINUX )
 extern CDemoUIPanel2 *g_pDemoUI2;
-
+#endif
 
 #endif // CL_DEMOUIPANEL_H

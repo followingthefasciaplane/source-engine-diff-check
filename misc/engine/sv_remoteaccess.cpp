@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: Handles all the functions for implementing remote access to the engine
 //
@@ -14,13 +14,18 @@
 #include "sv_rcon.h"
 #include "sv_filter.h"
 #include "sys.h"
+#include "sys_dll.h"
 #include "vprof_engine.h"
 #include "PlayerState.h"
 #include "sv_log.h"
-#ifndef SWDS
+#ifndef DEDICATED
 #include "zip/XZip.h"
 #endif
 #include "cl_main.h"
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
 
 extern IServerGameDLL	*serverGameDLL;
 
@@ -36,7 +41,8 @@ void Host_Stats_f (void)
 {
 	char stats[512];
 	g_ServerRemoteAccess.GetStatsString(stats, sizeof(stats));
-	ConMsg("CPU    In_(KB/s)  Out_(KB/s)  Uptime  Map_changes  FPS      Players  Connects\n%s\n", stats);
+	ConMsg("  CPU   NetIn   NetOut    Uptime  Maps   FPS   Players  Svms    +-ms   ~tick\n%s\n", stats);
+	//     "--cpu- ++++in++ +++out++ ---up-- ++cl+ ---fps- ++user+ ~~hms~~ ~~dev~~ ~tdev~~"
 }
 static ConCommand stats("stats", Host_Stats_f, "Prints server performance variables" );
 
@@ -51,6 +57,7 @@ CServerRemoteAccess::CServerRemoteAccess()
 	m_NextListenerID = 0;
 	m_AdminUIID = INVALID_LISTENER_ID;
 	m_nScreenshotListener = -1;
+	m_nBugListener = -1;
 }
 
 //-----------------------------------------------------------------------------
@@ -73,7 +80,7 @@ ra_listener_id CServerRemoteAccess::GetNextListenerID( bool authConnection, cons
 bool GetStringHelper( CUtlBuffer & cmd, char *outBuf, int bufSize )
 {
 	outBuf[0] = 0;
-	cmd.GetStringManualCharCount( outBuf, bufSize );
+	cmd.GetString(outBuf, bufSize);
 	if ( !cmd.IsValid() )
 	{
 		cmd.Purge();
@@ -221,13 +228,13 @@ void CServerRemoteAccess::WriteDataRequest( CRConServer *pNetworkListener, ra_li
 			case SERVERDATA_AUTH:
 				{
 					char password[512];
-					if ( !GetStringHelper( cmd, password, sizeof(password) ) )
+					if ( !GetStringHelper( cmd, password, sizeof( password ) ) )
 					{
 						invalidRequest = true;
 						break;
 					}
 					CheckPassword( pNetworkListener, listener, requestID, password );
-					if ( !GetStringHelper( cmd, password, sizeof(password) ) )
+					if ( !GetStringHelper( cmd, password, sizeof( password ) ) )
 					{
 						invalidRequest = true;
 						break;
@@ -237,26 +244,18 @@ void CServerRemoteAccess::WriteDataRequest( CRConServer *pNetworkListener, ra_li
 					{
 						// if the second string has a non-zero value, it is a userid.
 						int userID = atoi( password );
-						const ConCommandBase *var = g_pCVar->GetCommands();
-						while ( var )
+						ConCommandBase *cmd = g_pCVar->FindCommand( "mp_disable_autokick" );
+						if ( cmd )
 						{
-							if ( var->IsCommand() )
-							{
-								if ( Q_stricmp( var->GetName(), "mp_disable_autokick" ) == 0 )
-								{
-									Cbuf_AddText( va( "mp_disable_autokick %d\n", userID ) );
-									Cbuf_Execute();
-									break;
-								}
-							}
-							var = var->GetNext();
+							Cbuf_AddText( CBUF_SERVER, va( "mp_disable_autokick %d\n", userID ) );
+							Cbuf_Execute();
 						}
 					}
 				}
 				break;
 
 			case SERVERDATA_TAKE_SCREENSHOT:
-#ifndef SWDS
+#ifndef DEDICATED
 				m_nScreenshotListener = listener;
 				CL_TakeJpeg( );
 #endif
@@ -264,12 +263,12 @@ void CServerRemoteAccess::WriteDataRequest( CRConServer *pNetworkListener, ra_li
 
 			case SERVERDATA_SEND_CONSOLE_LOG:
 				{
-#ifndef SWDS
+#ifndef DEDICATED
 					CUtlBuffer buf( 0, 0, CUtlBuffer::TEXT_BUFFER );
 					if ( GetConsoleLogFileData( buf ) )
 					{
 						HZIP hZip = CreateZipZ( 0, 1024 * 1024, ZIP_MEMORY );
-						void *pMem;
+						void *pMem = NULL;
 						unsigned long nLen;
 						ZipAdd( hZip, "console.log", buf.Base(), buf.TellMaxPut(), ZIP_MEMORY );
 						ZipGetMemory( hZip, &pMem, &nLen );
@@ -330,6 +329,24 @@ void CServerRemoteAccess::WriteDataRequest( CRConServer *pNetworkListener, ra_li
 				}
 				break;
 #endif
+			case SERVERDATA_SEND_REMOTEBUG:
+				{
+					if ( CommandLine()->CheckParm( "-remotebug" ) == NULL )
+					{
+						Warning( "Received a remote bug request from rcon client, but not running with '-remotebug'. Ignoring.\n" );
+						RespondString( listener, 0, "Remote machine using wrong bugreporter dll. Try running with '-remotebug'\n" );
+						invalidRequest = true;
+						break;
+					}
+
+					if ( IsAuthenticated(listener) )
+					{
+						ExecCommand("bug -auto");
+						LogCommand( listener, "Remote bug submission\n" );
+						m_nBugListener = listener;
+					}
+				}
+				break;
 
 			default:
 				Assert(!("Unknown requestType in CServerRemoteAccess::WriteDataRequest()"));
@@ -346,13 +363,29 @@ void CServerRemoteAccess::WriteDataRequest( ra_listener_id listener, const void 
 	WriteDataRequest( &RCONServer(), listener, buffer, bufferSize );
 }
 
+void CServerRemoteAccess::RemoteBug( const char *pBugPath )
+{
+	if ( m_nBugListener < 0 )
+		return;
+
+	int i = m_ResponsePackets.AddToTail();
+	m_ResponsePackets[i].responderID = m_nBugListener;
+
+	CUtlBuffer &response = m_ResponsePackets[i].packet;
+
+	response.PutInt(0);
+	response.PutInt(SERVERDATA_RESPONSE_REMOTEBUG);
+	response.PutString(pBugPath);
+
+	m_nBugListener = -1;
+}
 
 //-----------------------------------------------------------------------------
 // Uploads a screenshot to a particular listener
 //-----------------------------------------------------------------------------
 void CServerRemoteAccess::UploadScreenshot( const char *pFileName )
 {
-#ifndef SWDS
+#ifndef DEDICATED
 	if ( m_nScreenshotListener < 0 )
 		return;
 
@@ -360,7 +393,7 @@ void CServerRemoteAccess::UploadScreenshot( const char *pFileName )
 	if ( g_pFullFileSystem->ReadFile( pFileName, "MOD", buf ) )
 	{
 		HZIP hZip = CreateZipZ( 0, 1024 * 1024, ZIP_MEMORY );
-		void *pMem;
+		void *pMem = NULL;
 		unsigned long nLen;
 		ZipAdd( hZip, "screenshot.jpg", buf.Base(), buf.TellMaxPut(), ZIP_MEMORY );
 		ZipGetMemory( hZip, &pMem, &nLen );
@@ -388,11 +421,11 @@ void CServerRemoteAccess::LogCommand( ra_listener_id listener, const char *msg )
 		
 	if ( listener < (ra_listener_id)m_ListenerIDs.Count() && m_ListenerIDs[listener].m_bHasAddress )
 	{
-		Log( "rcon from \"%s\": %s\n", m_ListenerIDs[listener].adr.ToString(), msg );
+		Log_Msg( LOG_SERVER_LOG, "rcon from \"%s\": %s\n", m_ListenerIDs[listener].adr.ToString(), msg );
 	}
 	else
 	{
-		Log( "rcon from \"unknown\": %s\n", msg );
+		Log_Msg( LOG_SERVER_LOG, "rcon from \"unknown\": %s\n", msg );
 	}
 }
 
@@ -428,10 +461,11 @@ void CServerRemoteAccess::CheckPassword( CRConServer *pNetworkListener, ra_liste
 //-----------------------------------------------------------------------------
 bool CServerRemoteAccess::IsAuthenticated( ra_listener_id listener )
 {
-	// Checking for >= 0 is tautological because ra_listener_id is unsigned
-	Assert( /*listener >= 0 &&*/ listener < (ra_listener_id)m_ListenerIDs.Count() );
+	Assert( listener >= 0 && listener < (ra_listener_id)m_ListenerIDs.Count() );
 	return m_ListenerIDs[listener].authenticated;
 }
+
+extern ConVar sv_rcon_maxfailures;
 
 //-----------------------------------------------------------------------------
 // Purpose: send a bad password packet
@@ -575,7 +609,7 @@ void CServerRemoteAccess::SetValue(const char *variable, const char *value)
 	if (!stricmp(variable, "map"))
 	{
 		// push a map change command
-		Cbuf_AddText( va( "changelevel %s\n", value ) );
+		Cbuf_AddText( CBUF_SERVER, va( "changelevel %s\n", value ) );
 		Cbuf_Execute();
 	}
 	else if (!stricmp(variable, "mapcycle"))
@@ -603,8 +637,8 @@ void CServerRemoteAccess::SetValue(const char *variable, const char *value)
 	else
 	{
 		// Stick the cvar set in the command string, so client notification, replication, etc happens
-		Cbuf_AddText( va("%s %s", variable, value) );
-		Cbuf_AddText("\n");
+		Cbuf_AddText( CBUF_SERVER, va("%s %s", variable, value) );
+		Cbuf_AddText(CBUF_SERVER, "\n");
 		Cbuf_Execute();
 	}
 }
@@ -614,8 +648,8 @@ void CServerRemoteAccess::SetValue(const char *variable, const char *value)
 //-----------------------------------------------------------------------------
 void CServerRemoteAccess::ExecCommand(const char *cmdString)
 {
-	Cbuf_AddText((char *)cmdString);
-	Cbuf_AddText("\n");
+	Cbuf_AddText(CBUF_SERVER, (char *)cmdString);
+	Cbuf_AddText(CBUF_SERVER, "\n");
 	Cbuf_Execute();
 }
 
@@ -635,9 +669,9 @@ bool CServerRemoteAccess::LookupValue(const char *variable, CUtlBuffer &value)
 	}
 	else if (!stricmp(variable, "stats"))
 	{
-		char szStats[512];
-		GetStatsString( szStats, sizeof( szStats ) );
-		value.PutString( szStats );
+		char stats[512];
+		GetStatsString(stats, sizeof(stats));
+		value.PutString(stats);
 		value.PutChar(0);
 	}
 	else if (!stricmp(variable, "banlist"))
@@ -678,7 +712,7 @@ bool CServerRemoteAccess::LookupValue(const char *variable, CUtlBuffer &value)
 				return true;
 			
 			int len = g_pFileSystem->Size(f);
-			char *mapcycleData = (char *)_alloca( len+1 );
+			char *mapcycleData = (char *)stackalloc( len+1 );
 			if ( len && g_pFileSystem->Read( mapcycleData, len, f ) )
 			{
 				mapcycleData[len] = 0; // Make sure it's null terminated.
@@ -772,15 +806,15 @@ void CServerRemoteAccess::GetStatsString(char *buf, int bufSize)
 	sv.GetNetStats( avgIn, avgOut );
 
 	// format: CPU percent, Bandwidth in, Bandwidth out, uptime, changelevels, framerate, total players
-	_snprintf(buf, bufSize - 1, "%-6.2f %-10.2f %-11.2f %-7i %-12i %-8.2f %-8i %-8i",
+	_snprintf(buf, bufSize - 1, "%6.1f %8.1f %8.1f %7i %5i %7.2f %7i %7.2f %7.2f %7.2f",
 				sv.GetCPUUsage() * 100, 
-				avgIn / 1024.0f,
-				avgOut / 1024.0f,
+				avgIn, 
+				avgOut,
 				(int)(Sys_FloatTime()) / 60,
 				sv.GetSpawnCount() - 1,
 				1.0/host_frametime, // frame rate
 				sv.GetNumClients() - sv.GetNumProxies(),
-				sv.GetNumConnections());
+				1000.0f*host_frameendtime_computationduration, 1000.0f*host_frametime_stddeviation, 1000.0f*host_framestarttime_stddeviation );
 	buf[bufSize - 1] = 0;
 };
 
@@ -812,7 +846,7 @@ void CServerRemoteAccess::GetPlayerList(CUtlBuffer &value)
 			value.Printf("\"%s\" %s 0 0 0 %d 0\n",
 				client->GetClientName(),
 				client->GetNetworkIDString(),
-				pl->frags);
+				pl->score);
 		}
 		else
 		{
@@ -822,7 +856,7 @@ void CServerRemoteAccess::GetPlayerList(CUtlBuffer &value)
 				client->GetNetChannel()->GetAddress(),
 				(int)(client->GetNetChannel()->GetAvgLatency(FLOW_OUTGOING) * 1000.0f),
 				(int)(client->GetNetChannel()->GetAvgLoss(FLOW_INCOMING)),
-				pl->frags,
+				pl->score,
 				(int)(client->GetNetChannel()->GetTimeConnected()));
 		}
 	}

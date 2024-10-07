@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -28,13 +28,16 @@ class CStringTableSaveRestoreOps;
 #define MAX_CHOREO_SCENES_STRINGS		( 1 << MAX_CHOREO_SCENES_STRING_BITS )
 #define CHOREO_SCENES_INVALID_STRING	( MAX_CHOREO_SCENES_STRINGS - 1 )
 
-#define MAX_PARTICLESYSTEMS_STRING_BITS		12
+#define MAX_PARTICLESYSTEMS_STRING_BITS		10
 #define MAX_PARTICLESYSTEMS_STRINGS			( 1 << MAX_PARTICLESYSTEMS_STRING_BITS )
-#define PARTICLESYSTEMS_INVALID_STRING	( MAX_PARTICLESYSTEMS_STRINGS - 1 )
+#define PARTICLESYSTEMS_INVALID_STRING		( MAX_PARTICLESYSTEMS_STRINGS - 1 )
+
+#define MAX_MOVIE_STRING_BITS			4
+#define MAX_MOVIE_STRINGS				( 1 << MAX_MOVIE_STRING_BITS )
+#define OVERLAY_MOVIE_INVALID_STRING	( MAX_MOVIE_STRINGS - 1 )
 
 extern INetworkStringTableContainer *networkstringtable;
 extern INetworkStringTable *g_pStringTableVguiScreen;
-extern INetworkStringTable *g_pStringTableEffectDispatch;
 extern INetworkStringTable *g_pStringTableClientSideChoreoScenes;
 
 #define MAX_INFOPANEL_STRINGS			128

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -203,8 +203,8 @@ int ColorSpace::LinearToScreenGamma( float f )
 uint16 ColorSpace::LinearFloatToCorrectedShort( float in )
 {
 	uint16 out;
-	in = min( in * 4096.0, 65535.0 );
-	out = max( in, 0.0f );
+	in = MIN( in * 4096.0, 65535.0 );
+	out = (uint16) MAX( in, 0.0f );
 
 	return out;
 }

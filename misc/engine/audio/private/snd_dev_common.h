@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Device Common Routines
 //
@@ -8,6 +8,9 @@
 #define SND_DEV_COMMON_H
 #pragma once
 
+void DEBUG_DrawPanCurves(void);
+#if USE_AUDIO_DEVICE_V1
+
 class CAudioDeviceBase : public IAudioDevice
 {
 public:	
@@ -16,44 +19,27 @@ public:
 	virtual void		Shutdown( void ) {}
 	virtual void		Pause( void ) {}
 	virtual void		UnPause( void ) {}
-	virtual float		MixDryVolume( void ) { return 0; }
-	virtual bool		Should3DMix( void ) { return m_bSurround; }
-	virtual void		StopAllSounds( void ) {}
 
-	virtual int			PaintBegin( float, int soundtime, int paintedtime ) { return 0; }
+	virtual int64		PaintBegin( float, int64 soundtime, int64 paintedtime ) { return 0; }
 	virtual void		PaintEnd( void ) {}
 
-	virtual void		SpatializeChannel( int volume[CCHANVOLUMES/2], int master_vol, const Vector& sourceDir, float gain, float mono );
-	virtual void		ApplyDSPEffects( int idsp, portable_samplepair_t *pbuffront, portable_samplepair_t *pbufrear, portable_samplepair_t *pbufcenter, int samplecount );
 	virtual int			GetOutputPosition( void ) { return 0; }
 	virtual void		ClearBuffer( void ) {}
-	virtual void		UpdateListener( const Vector& position, const Vector& forward, const Vector& right, const Vector& up ) {}
 
-	virtual void		MixBegin( int sampleCount );
-	virtual void		MixUpsample( int sampleCount, int filtertype );
 
-	virtual void		Mix8Mono( channel_t *pChannel, char *pData, int outputOffset, int inputOffset, fixedint rateScaleFix, int outCount, int timecompress );
-	virtual void		Mix8Stereo( channel_t *pChannel, char *pData, int outputOffset, int inputOffset, fixedint rateScaleFix, int outCount, int timecompress );
-	virtual void		Mix16Mono( channel_t *pChannel, short *pData, int outputOffset, int inputOffset, fixedint rateScaleFix, int outCount, int timecompress );
-	virtual void		Mix16Stereo( channel_t *pChannel, short *pData, int outputOffset, int inputOffset, fixedint rateScaleFix, int outCount, int timecompress );
-
-	virtual void		ChannelReset( int entnum, int channelIndex, float distanceMod ) {}
-	virtual void		TransferSamples( int end ) {}
+	// virtual void		TransferSamples( int64 end ) {}
 	
-	virtual const char *DeviceName( void )			{ return NULL; }
-	virtual int			DeviceChannels( void )		{ return 0; }
-	virtual int			DeviceSampleBits( void )	{ return 0; }
-	virtual int			DeviceSampleBytes( void )	{ return 0; }
-	virtual int			DeviceDmaSpeed( void )		{ return 1; }
 	virtual int			DeviceSampleCount( void )	{ return 0; }
-
-	virtual bool		IsSurround( void )			{ return m_bSurround; }
-	virtual bool		IsSurroundCenter( void )	{ return m_bSurroundCenter; }
-	virtual bool		IsHeadphone( void )			{ return m_bHeadphone; }
-
-	bool				m_bSurround;
-	bool				m_bSurroundCenter;
-	bool				m_bHeadphone;
 };
+#endif
+
+extern void		Device_MixUpsample( int sampleCount, int filtertype );
+extern void		Device_ApplyDSPEffects( int idsp, portable_samplepair_t *pbuffront, portable_samplepair_t *pbufrear, portable_samplepair_t *pbufcenter, int samplecount );
+extern void		Device_SpatializeChannel( int nSlot, float volume[CCHANVOLUMES/2], int master_vol, const Vector& sourceDir, float gain, float mono, int nWavType );
+extern void		Device_SpatializeChannel( int nSlot, float volume[CCHANVOLUMES/2], const Vector& sourceDir, float mono, float flRearToStereoScale = 0.75 );
+extern void		Device_Mix8Mono( channel_t *pChannel, char *pData, int outputOffset, int inputOffset, fixedint rateScaleFix, int outCount, int timecompress );
+extern void		Device_Mix8Stereo( channel_t *pChannel, char *pData, int outputOffset, int inputOffset, fixedint rateScaleFix, int outCount, int timecompress );
+extern void		Device_Mix16Mono( channel_t *pChannel, short *pData, int outputOffset, int inputOffset, fixedint rateScaleFix, int outCount, int timecompress );
+extern void		Device_Mix16Stereo( channel_t *pChannel, short *pData, int outputOffset, int inputOffset, fixedint rateScaleFix, int outCount, int timecompress );
 
 #endif // SND_DEV_COMMON_H

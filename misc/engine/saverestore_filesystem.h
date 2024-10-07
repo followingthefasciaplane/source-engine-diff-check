@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Interface for filesystem calls used by the saverestore system
 //			to manupulate the save directory.
@@ -47,5 +47,27 @@ public:
 };
 
 extern ISaveRestoreFileSystem *g_pSaveRestoreFileSystem;
+
+#ifdef _X360
+#define PREPARE_XSAVE_FILENAME_EX( iCtrlr, chBuffer, iBufferLen ) \
+	XBX_MakeStorageContainerRoot( iCtrlr, XBX_USER_SAVES_CONTAINER_DRIVE, chBuffer, iBufferLen ); \
+	Q_snprintf( chBuffer + Q_strlen( chBuffer ), iBufferLen - Q_strlen( chBuffer ), ":\\"
+#elif defined (_PS3)
+#define PREPARE_XSAVE_FILENAME_EX( iCtrlr, chBuffer, iBufferLen ) \
+	chBuffer[0] = 0; \
+	Q_snprintf( chBuffer + Q_strlen( chBuffer ), iBufferLen - Q_strlen( chBuffer ), "//PS3SAVE/"
+#else
+#define PREPARE_XSAVE_FILENAME_EX( iCtrlr, chBuffer, iBufferLen ) \
+	chBuffer[0] = 0; \
+	Q_snprintf( chBuffer + Q_strlen( chBuffer ), iBufferLen - Q_strlen( chBuffer ), "//mod/"
+#endif
+#define PREPARE_XSAVE_FILENAME( iCtrlr, chBuffer ) PREPARE_XSAVE_FILENAME_EX( iCtrlr, chBuffer, sizeof( chBuffer ) )
+
+
+
+
+extern ConVar save_spew;
+
+#define SaveMsg if ( !save_spew.GetBool() ) ; else Msg
 
 #endif // SAVERESTOREFILESYSTEM_H

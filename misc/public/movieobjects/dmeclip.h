@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -14,10 +14,10 @@
 #include "datamodel/dmattribute.h"
 #include "datamodel/dmattributevar.h"
 #include "datamodel/dmehandle.h"
-#include "video/ivideoservices.h"
-#include "materialsystem/MaterialSystemUtil.h"
+#include "avi/iavi.h"
+#include "materialsystem/materialsystemutil.h"
 #include "tier1/utlmap.h"
-#include "movieobjects/timeutils.h"
+#include "videocache/iremotevideomaterial.h"
 
 
 //-----------------------------------------------------------------------------
@@ -26,10 +26,10 @@
 class CDmeClip;
 class CDmeTimeFrame;
 class CDmeBookmark;
+class CDmeBookmarkSet;
 class CDmeSound;
 class CDmeChannel;
 class CDmeCamera;
-class CDmeLight;
 class CDmeDag;
 class CDmeInput;
 class CDmeOperator;
@@ -41,8 +41,9 @@ class CDmeChannelsClip;
 class CDmeAnimationSet;
 class CDmeMaterialOverlayFXClip;
 class DmeLog_TimeSelection_t;
+struct TimeSelection_t;
 struct Rect_t;
-
+enum ChannelMode_t;
 
 enum DmeClipSkipFlag_t
 {
@@ -74,7 +75,48 @@ enum DmeClipType_t
 DEFINE_ENUM_INCREMENT_OPERATORS( DmeClipType_t )
 
 
-typedef CUtlVector< CDmeHandle< CDmeClip > > DmeClipStack_t;
+struct DmeClipStack_t
+{
+public:
+	DmeClipStack_t() : m_bOptimized( false ) {}
+	DmeClipStack_t( const CDmeClip *pRoot, CDmeClip *pShot, CDmeClip *pClip ) { BuildClipStack( pRoot, pShot, pClip ); }
+
+	int GetClipCount() const { return m_clips.Count(); }
+	const CDmeClip *GetClip( int i ) const { return m_clips[ i ]; }
+	      CDmeClip *GetClip( int i )       { return m_clips[ i ]; }
+	int FindClip( const CDmeClip *pClip ) const;
+	int InvalidClipIndex() const { return m_clips.InvalidIndex(); }
+
+	bool BuildClipStack( const CDmeClip *pRoot, const CDmeClip *pShot, const CDmeClip *pClip );
+
+	int AddClipToHead( const CDmeClip *pClip );
+	int AddClipToTail( const CDmeClip *pClip );
+	void RemoveClip( int i ) { m_clips.Remove( i ); m_bOptimized = false; }
+	void RemoveAll() { m_clips.RemoveAll(); m_bOptimized = false; }
+
+	DmeTime_t ToChildMediaTime  ( DmeTime_t t, bool bClamp = true ) const;
+	DmeTime_t FromChildMediaTime( DmeTime_t t, bool bClamp = true ) const;
+	DmeTime_t ToChildMediaDuration ( DmeTime_t t ) const;
+	DmeTime_t FromChildMediaDuration( DmeTime_t t ) const;
+
+	void ToChildMediaTime( TimeSelection_t &params ) const;
+
+protected:
+	// Given a root clip and a child (or grandchild) clip, builds the stack 
+	// from root on down to the destination clip. If shot is specified, then it
+	// must build a clip stack that passes through the shot
+	bool BuildClipStack_R( const CDmeClip *pMovie, const CDmeClip *pShot, const CDmeClip *pCurrent );
+
+
+	CUtlVector< CDmeHandle< CDmeClip > > m_clips;
+	mutable DmeTime_t m_tStart;
+	mutable DmeTime_t m_tDuration;
+	mutable DmeTime_t m_tOffset;
+	mutable double m_flScale;
+	mutable bool m_bOptimized;
+
+	void Optimize() const;
+};
 
 
 //-----------------------------------------------------------------------------
@@ -109,7 +151,8 @@ struct ClipAssociation_t
 	AssociationType_t m_nType;
 	CDmeHandle< CDmeClip > m_hClip;
 	CDmeHandle< CDmeClip > m_hAssociation;
-	DmeTime_t m_offset;
+	DmeTime_t m_startTimeInAssociatedClip; // used for HAS_CLIP
+	DmeTime_t m_offset; // used for BEFORE_START and AFTER_END
 };
 
 
@@ -121,10 +164,6 @@ class CDmeClip : public CDmElement
 	DEFINE_ELEMENT( CDmeClip, CDmElement );
 
 public:
-	// Inherited from IDmElement
-	virtual void OnAttributeArrayElementAdded( CDmAttribute *pAttribute, int nFirstElem, int nLastElem );
-	virtual void OnAttributeArrayElementRemoved( CDmAttribute *pAttribute, int nFirstElem, int nLastElem );
-
 	// Returns the time frame
 	CDmeTimeFrame *GetTimeFrame() const;
 	DmeTime_t ToChildMediaTime  ( DmeTime_t t, bool bClamp = true ) const;
@@ -143,17 +182,12 @@ public:
 	void SetTimeOffset( DmeTime_t t );
 	void SetTimeScale ( float s );
 
+	virtual void BakeTimeScale( float scale = 1.0f );
+
 	// Given a root clip and a child (or grandchild) clip, builds the stack 
 	// from root on down to the destination clip. If shot is specified, then it
 	// must build a clip stack that passes through the shot
-	bool BuildClipStack( DmeClipStack_t* pStack, CDmeClip *pRoot, CDmeClip *pShot = NULL );
-
-	// Clip stack versions of time conversion
-	static DmeTime_t	ToChildMediaTime   ( const DmeClipStack_t& stack, DmeTime_t globalTime, bool bClamp = true );
-	static DmeTime_t	FromChildMediaTime ( const DmeClipStack_t& stack, DmeTime_t localTime,  bool bClamp = true );
-	static DmeTime_t	ToChildMediaDuration  ( const DmeClipStack_t& stack, DmeTime_t globalDuration );
-	static DmeTime_t	FromChildMediaDuration( const DmeClipStack_t& stack, DmeTime_t localDuration );
-	static void			ToChildMediaTime( DmeLog_TimeSelection_t &params, const DmeClipStack_t& stack );
+	bool BuildClipStack( DmeClipStack_t* pStack, const CDmeClip *pRoot, CDmeClip *pShot = NULL );
 
 	void SetClipColor( const Color& clr );
 	Color GetClipColor() const;
@@ -191,7 +225,8 @@ public:
 
 	// Finding clips in tracks by time
 	virtual void FindClipsAtTime( DmeClipType_t clipType, DmeTime_t time, DmeClipSkipFlag_t flags, CUtlVector< CDmeClip * >& clips ) const;
-	virtual void FindClipsWithinTime( DmeClipType_t clipType, DmeTime_t startTime, DmeTime_t endTime, DmeClipSkipFlag_t flags, CUtlVector< CDmeClip * >& clips ) const;
+	virtual void FindClipsIntersectingTime( DmeClipType_t clipType, DmeTime_t startTime, DmeTime_t endTime, DmeClipSkipFlag_t flags, CUtlVector< CDmeClip * >& clips ) const;
+	virtual void FindClipsWithinTime      ( DmeClipType_t clipType, DmeTime_t startTime, DmeTime_t endTime, DmeClipSkipFlag_t flags, CUtlVector< CDmeClip * >& clips ) const;
 
 	// Is a particular clip typed able to be added?
 	bool IsSubClipTypeAllowed( DmeClipType_t type ) const;
@@ -204,6 +239,10 @@ public:
 	void SetMute( bool state );
 	bool IsMute( ) const;
 
+	// Clip vertical display size
+	void SetDisplayScale( float flDisplayScale );
+	float GetDisplayScale() const;
+
 protected:
 	virtual int AllowedClipTypes() const { return 1 << DMECLIP_CHANNEL; }
 
@@ -215,6 +254,8 @@ protected:
 	CDmaElement< CDmeTimeFrame > m_TimeFrame;
 	CDmaVar< Color > m_ClipColor;
 	CDmaVar< bool > m_bMute;
+	CDmaVar< float > m_flDisplayScale;
+
 	CDmaString m_ClipText;
 };
 
@@ -233,6 +274,18 @@ inline bool CDmeClip::IsMute( ) const
 	return m_bMute;
 }
 
+//-----------------------------------------------------------------------------
+// Clip vertical display size
+//-----------------------------------------------------------------------------
+inline void CDmeClip::SetDisplayScale( float flDisplayScale )
+{
+	m_flDisplayScale = flDisplayScale;
+}
+
+inline float CDmeClip::GetDisplayScale() const
+{
+	return m_flDisplayScale;
+}
 
 //-----------------------------------------------------------------------------
 // Sound clip
@@ -247,9 +300,20 @@ public:
 	void SetShowWave( bool state );
 	bool ShouldShowWave( ) const;
 
-	CDmaElement< CDmeSound > m_Sound;
-	CDmaVar< bool > m_bShowWave;
+	void SetFadeTimes( DmeTime_t fadeIn, DmeTime_t fadeOut ) { m_fadeInDuration = fadeIn; m_fadeOutDuration = fadeOut; }
+	void SetFadeInTime( DmeTime_t t ) { m_fadeInDuration = t; }
+	void SetFadeOutTime( DmeTime_t t ) { m_fadeOutDuration = t; }
+	DmeTime_t GetFadeInTime() const { return m_fadeInDuration; }
+	DmeTime_t GetFadeOutTime() const { return m_fadeOutDuration; }
 
+	float GetVolumeFade( DmeTime_t tParent );
+
+	virtual void BakeTimeScale( float scale = 1.0f );
+
+	CDmaElement< CDmeSound >	m_Sound;
+	CDmaVar< bool >				m_bShowWave;
+	CDmaTime					m_fadeInDuration;
+	CDmaTime					m_fadeOutDuration;
 };
 
 
@@ -263,6 +327,8 @@ class CDmeChannelsClip : public CDmeClip
 public:
 	virtual DmeClipType_t GetClipType() { return DMECLIP_CHANNEL; }
 
+	virtual void BakeTimeScale( float scale = 1.0f );
+
 	CDmeChannel *CreatePassThruConnection
 	( 
 		char const *passThruName,
@@ -274,6 +340,15 @@ public:
 	);
 
 	void RemoveChannel( CDmeChannel *pChannel );
+	
+	// Set the mode of all of the channels in the clip
+	void SetChannelMode( const ChannelMode_t &mode );
+
+	// Operate all of the channels in the clip
+	void OperateChannels();
+
+	// Play all of the channels in the clip
+	void PlayChannels(); 
 
 	CDmaElementArray< CDmeChannel > m_Channels;
 };
@@ -291,7 +366,7 @@ public:
 
 	enum
 	{
-		MAX_FX_INPUT_TEXTURES = 2
+		MAX_FX_INPUT_TEXTURES = 3
 	};
 
 	// All effects must be able to apply their effect
@@ -349,6 +424,7 @@ public:
 
 #endif
 
+
 //-----------------------------------------------------------------------------
 // Film clip
 //-----------------------------------------------------------------------------
@@ -359,9 +435,10 @@ class CDmeFilmClip : public CDmeClip
 public:
 	virtual DmeClipType_t GetClipType() { return DMECLIP_FILM; }
 
+	virtual void BakeTimeScale( float scale = 1.0f );
+
 	// Attribute changed
 	virtual void OnElementUnserialized( );
-	virtual void PreAttributeChanged( CDmAttribute *pAttribute );
 	virtual void OnAttributeChanged( CDmAttribute *pAttribute );
 
 	// Resolve
@@ -379,7 +456,8 @@ public:
 
 	// Finding clips in tracks by time
 	virtual void FindClipsAtTime( DmeClipType_t clipType, DmeTime_t time, DmeClipSkipFlag_t flags, CUtlVector< CDmeClip * >& clips ) const;
-	virtual void FindClipsWithinTime( DmeClipType_t clipType, DmeTime_t startTime, DmeTime_t endTime, DmeClipSkipFlag_t flags, CUtlVector< CDmeClip * >& clips ) const;
+	virtual void FindClipsIntersectingTime( DmeClipType_t clipType, DmeTime_t startTime, DmeTime_t endTime, DmeClipSkipFlag_t flags, CUtlVector< CDmeClip * >& clips ) const;
+	virtual void FindClipsWithinTime      ( DmeClipType_t clipType, DmeTime_t startTime, DmeTime_t endTime, DmeClipSkipFlag_t flags, CUtlVector< CDmeClip * >& clips ) const;
 
 	// mapname helper methods
 	const char *GetMapName();
@@ -393,6 +471,12 @@ public:
 	void			SetVolume( float state );
 	float			GetVolume() const;
 
+	int	GetConCommandCount() const;
+	const char *GetConCommand( int i ) const;
+
+	int	GetConVarCount() const;
+	const char *GetConVar( int i ) const;
+
 	// Returns the monitor camera associated with the clip (for now, only 1 supported)
 	CDmeCamera *GetMonitorCamera();
 	void AddMonitorCamera( CDmeCamera *pCamera );
@@ -400,14 +484,9 @@ public:
 	void SelectMonitorCamera( CDmeCamera *pCamera );
 	int FindMonitorCamera( CDmeCamera *pCamera );
 
-	// Light helper methods
-	int GetLightCount();
-	CDmeLight *GetLight( int nIndex );
-	void AddLight( CDmeLight *pLight );
-
 	// Scene / Dag helper methods
 	void SetScene( CDmeDag *pDag );
-	CDmeDag *GetScene();
+	CDmeDag *GetScene( bool bCreateIfNull = false );
 
 	// helper for inputs and operators
 	int GetInputCount();
@@ -415,7 +494,9 @@ public:
 	void AddInput( CDmeInput *pInput );
 	void RemoveAllInputs();
 	void AddOperator( CDmeOperator *pOperator );
+	void RemoveOperator( CDmeOperator *pOperator );
 	void CollectOperators( CUtlVector< DmElementHandle_t > &operators );
+	CDmaElementArray< CDmeOperator > &GetOperators();
 
 	// Helper for overlays
 	// FIXME: Change this to use CDmeMaterials
@@ -429,24 +510,32 @@ public:
 	// AVI tape out
 	void UseCachedVersion( bool bUseCachedVersion );
 	bool IsUsingCachedVersion() const;
-	IVideoMaterial *GetCachedVideoMaterial();
+	AVIMaterial_t GetCachedAVI();
 	void SetCachedAVI( const char *pAVIFile );
 
-	int	GetAnimationSetCount();
-	CDmeAnimationSet *GetAnimationSet( int idx );
-	void	AddAnimationSet( CDmeAnimationSet *element );
-	void	RemoveAllAnimationSets();
-	CDmaElementArray< CDmElement > &GetAnimationSets(); // raw access to the array
-	const CDmaElementArray< CDmElement > &GetAnimationSets() const;
+	void AssignRemoteVideoMaterial( IRemoteVideoMaterial *theMaterial );
+	void UpdateRemoteVideoMaterialStatus();
+	bool HasRemoteVideo();
+	bool GetCachedQTVideoFrameAt( float timeInSec );
+	IMaterial *GetRemoteVideoMaterial();
+	void GetRemoteVideoMaterialTexCoordRange( float *u, float *v );
 
-	const CDmaElementArray< CDmeBookmark > &GetBookmarks() const;
-	CDmaElementArray< CDmeBookmark > &GetBookmarks();
+	CDmaElementArray< CDmeAnimationSet > &GetAnimationSets(); // raw access to the array
+	const CDmaElementArray< CDmeAnimationSet > &GetAnimationSets() const;
+	CDmeAnimationSet *FindAnimationSet( const char *pAnimSetName ) const;
 
-	void SetFadeTimes( DmeTime_t fadeIn, DmeTime_t fadeOut ) { m_fadeInDuration = fadeIn.GetTenthsOfMS(); m_fadeOutDuration = fadeOut.GetTenthsOfMS(); }
-	void SetFadeInTime( DmeTime_t t ) { m_fadeInDuration = t.GetTenthsOfMS(); }
-	void SetFadeOutTime( DmeTime_t t ) { m_fadeOutDuration = t.GetTenthsOfMS(); }
-	DmeTime_t GetFadeInTime() const { return DmeTime_t( m_fadeInDuration.Get() ); }
-	DmeTime_t GetFadeOutTime() const { return DmeTime_t( m_fadeOutDuration.Get() ); }
+	const CDmaElementArray< CDmeBookmarkSet > &GetBookmarkSets() const;
+	CDmaElementArray< CDmeBookmarkSet > &GetBookmarkSets();
+	int GetActiveBookmarkSetIndex() const;
+	void SetActiveBookmarkSetIndex( int nActiveBookmarkSet );
+	CDmeBookmarkSet *GetActiveBookmarkSet();
+	CDmeBookmarkSet *CreateBookmarkSet( const char *pName = "default set" );
+
+	void SetFadeTimes( DmeTime_t fadeIn, DmeTime_t fadeOut ) { m_fadeInDuration = fadeIn; m_fadeOutDuration = fadeOut; }
+	void SetFadeInTime( DmeTime_t t ) { m_fadeInDuration = t; }
+	void SetFadeOutTime( DmeTime_t t ) { m_fadeOutDuration = t; }
+	DmeTime_t GetFadeInTime() const { return m_fadeInDuration; }
+	DmeTime_t GetFadeOutTime() const { return m_fadeOutDuration; }
 
 	// Used to move clips in non-film track groups with film clips
 	// Call BuildClipAssociations before modifying the film track,
@@ -454,11 +543,13 @@ public:
 	void BuildClipAssociations( CUtlVector< ClipAssociation_t > &association, bool bHandleGaps = true );
 	void UpdateAssociatedClips( CUtlVector< ClipAssociation_t > &association );
 
-	// Rolls associated clips so they remain in the same relative time
-	void RollAssociatedClips( CDmeClip *pClip, CUtlVector< ClipAssociation_t > &association, DmeTime_t dt );
+	void LatchWorkCamera( CDmeCamera *pCamera );
+	void UpdateWorkCamera( CDmeCamera *pCamera );
 
-	// Shifts associated clips so they remain in the same relative time when pClip is scaled
-	void ScaleAssociatedClips( CDmeClip *pClip, CUtlVector< ClipAssociation_t > &association, float ratio, DmeTime_t oldOffset );
+	void PreviousWorkCamera();
+	void NextWorkCamera();
+	CDmeCamera *GetCurrentCameraStackEntry();
+	void	PurgeCameraStack();
 
 private:
 	virtual int AllowedClipTypes() const { return (1 << DMECLIP_CHANNEL) | (1 << DMECLIP_SOUND) | (1 << DMECLIP_FX) | (1 << DMECLIP_FILM); }
@@ -470,27 +561,37 @@ private:
 	CDmaElementArray< CDmeCamera >			m_MonitorCameras;
 	CDmaVar< int >							m_nActiveMonitor;
 	CDmaElement     < CDmeDag >				m_Scene;
-	CDmaElementArray< CDmeLight >			m_Lights;
 
 	CDmaElementArray< CDmeInput >			m_Inputs;
 	CDmaElementArray< CDmeOperator >		m_Operators;
 
 	CDmaString								m_AVIFile;
 
-	CDmaVar< int >							m_fadeInDuration;
-	CDmaVar< int >							m_fadeOutDuration;
+	CDmaTime								m_fadeInDuration;
+	CDmaTime								m_fadeOutDuration;
 
 	CDmaElement< CDmeMaterialOverlayFXClip >m_MaterialOverlayEffect;
 	CDmaVar< bool >							m_bIsUsingCachedVersion;
 
-	CDmaElementArray< CDmElement >			m_AnimationSets; // "animationSets"
-	CDmaElementArray< CDmeBookmark >		m_Bookmarks;
+	CDmaElementArray< CDmeAnimationSet >	m_AnimationSets;	// "animationSets"
+	CDmaElementArray< CDmeBookmarkSet >		m_BookmarkSets;				// "bookmarkSets"
+	CDmaVar< int >							m_nActiveBookmarkSet;		// "activeBookmarkSet"
 
 	CDmaVar< float >						m_Volume;
 
-	IVideoMaterial						   *m_pCachedVersion;	
-	bool m_bReloadCachedVersion;
-	CMaterialReference m_FadeMaterial;
+	CDmaStringArray							m_ConCommands;
+	CDmaStringArray							m_ConVars;
+
+	AVIMaterial_t							m_hCachedVersion;
+	bool									m_bReloadCachedVersion;
+	
+	CMaterialReference						m_FadeMaterial;
+
+	CDmaElementArray< CDmeCamera >			m_CameraStack;
+	int										m_nCurrentStackCamera;
+	
+	IRemoteVideoMaterial				   *m_pRemoteVideoMaterial;
+	
 };
 
 
@@ -538,7 +639,14 @@ DECLARE_DMECLIP_TYPE( CDmeFilmClip,		DMECLIP_FILM )
 // helper methods
 //-----------------------------------------------------------------------------
 CDmeTrack *GetParentTrack( CDmeClip *pClip );
+CDmeChannel *FindChannelTargetingElement( CDmElement *pElement, const char *pAttributeName = NULL );
 CDmeChannel *FindChannelTargetingElement( CDmeChannelsClip *pChannelsClip, CDmElement *pElement, const char *pAttributeName = NULL );
 CDmeChannel *FindChannelTargetingElement( CDmeFilmClip *pClip, CDmElement *pElement, const char *pAttributeName, CDmeChannelsClip **ppChannelsClip, CDmeTrack **ppTrack = NULL, CDmeTrackGroup **ppTrackGroup = NULL );
+CDmeFilmClip *FindFilmClipContainingDag( CDmeDag *pDag );
+void BuildClipStackList( const CUtlVector< CDmeChannel* > &channelList, CUtlVector< DmeClipStack_t > &clipStackList, CUtlVector< DmeTime_t > &orginalTimeList, const CDmeClip *pMovie, CDmeClip *pShot );
+void PlayChannelsAtTime( DmeTime_t time, const CUtlVector< CDmeChannel* > &channelList, const CUtlVector< CDmeOperator* > &operatorList, const CUtlVector< DmeClipStack_t > &clipStackList, bool forcePlay = true );
+void PlayChannelsAtLocalTimes( const CUtlVector< DmeTime_t > &timeList, const CUtlVector< CDmeChannel* > &channelList, const CUtlVector< CDmeOperator* > &operatorList, bool forcePlay = true );
+
+
 
 #endif // DMECLIP_H

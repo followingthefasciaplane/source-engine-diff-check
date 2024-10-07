@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -38,7 +38,6 @@
 // Globals.
 //-----------------------------------------------------------------------------
 Vector modelorg;
-ConVar r_DispDrawAxes( "r_DispDrawAxes", "0" );
 
 
 //-----------------------------------------------------------------------------
@@ -111,6 +110,71 @@ void CDispInfo::UpdateBoundingBox()
 		VectorMin( pos, m_BBoxMin, m_BBoxMin );
 		VectorMax( pos, m_BBoxMax, m_BBoxMax );
 	}
+
+	UpdateNodeBoundingBoxes();
+}
+
+
+void CDispInfo::UpdateNodeBoundingBoxes()
+{
+	// init all nodes to an invalid AABB
+	for ( int i = 0; i < m_pPowerInfo->m_NodeCount; i++ )
+	{
+		m_pNodeInfo[i].m_mins.Init( FLT_MAX, FLT_MAX, FLT_MAX );
+		m_pNodeInfo[i].m_maxs.Init( -FLT_MAX, -FLT_MAX, -FLT_MAX );
+	}
+
+	UpdateNodeBoundingBoxes_R( m_pPowerInfo->m_RootNode, 0, 0 );
+}
+
+
+void CDispInfo::UpdateNodeBoundingBoxes_R( CVertIndex const &nodeIndex, int iNodeBitIndex, int iLevel )
+{
+	int iNodeIndex = VertIndex( nodeIndex );
+	DispNodeInfo_t& nodeInfo = m_pNodeInfo[iNodeBitIndex];
+	nodeInfo.m_maxs.Init( -FLT_MAX, -FLT_MAX, -FLT_MAX );
+	nodeInfo.m_mins.Init( FLT_MAX, FLT_MAX, FLT_MAX );
+
+	if ( ( iLevel+1 < m_Power ) && ( nodeInfo.m_Flags & DispNodeInfo_t::CHILDREN_HAVE_TRIANGLES ) )
+	{
+		// Recurse into child nodes.
+		int iChildNodeBit = iNodeBitIndex + 1;
+		for( int iChild=0; iChild < 4; iChild++ )
+		{
+			CVertIndex const &childNode = m_pPowerInfo->m_pChildVerts[iNodeIndex].m_Verts[iChild];
+			UpdateNodeBoundingBoxes_R( childNode, iChildNodeBit, iLevel + 1 );
+
+			// expand box by child bounds
+			DispNodeInfo_t& childNodeInfo = m_pNodeInfo[iChildNodeBit];
+			if ( childNodeInfo.m_mins.x != FLT_MAX )
+			{
+				VectorMax( childNodeInfo.m_maxs, nodeInfo.m_maxs, nodeInfo.m_maxs );
+				VectorMin( childNodeInfo.m_mins, nodeInfo.m_mins, nodeInfo.m_mins );
+			}
+
+			iChildNodeBit += m_pPowerInfo->m_NodeIndexIncrements[iLevel];
+		}
+	}
+
+	// BBox around triangles in this node
+	for ( int i = 0; i < nodeInfo.m_Count; i += 3 )
+	{
+		int iIndexStart = nodeInfo.m_FirstTesselationIndex + i;
+
+		unsigned short tempIndices[3] = 
+		{
+			m_MeshReader.Index( iIndexStart+0 ) - m_iVertOffset,
+			m_MeshReader.Index( iIndexStart+1 ) - m_iVertOffset,
+			m_MeshReader.Index( iIndexStart+2 ) - m_iVertOffset
+		};
+
+		for ( int j = 0; j < 3; j++ )
+		{
+			const Vector &v0 = m_MeshReader.Position( tempIndices[j] );
+			VectorMax( v0, nodeInfo.m_maxs, nodeInfo.m_maxs );
+			VectorMin( v0, nodeInfo.m_mins, nodeInfo.m_mins );
+		}
+	}
 }
 
 
@@ -140,9 +204,9 @@ void CDispInfo::TestAddDecalTri( int iIndexStart, unsigned short decalHandle, CD
 	// If the decal is too far away from the plane of this triangle, reject it.
 	unsigned short tempIndices[3] = 
 	{
-		(unsigned short)(m_MeshReader.Index( iIndexStart+0 ) - m_iVertOffset),
-		(unsigned short)(m_MeshReader.Index( iIndexStart+1 ) - m_iVertOffset),
-		(unsigned short)(m_MeshReader.Index( iIndexStart+2 ) - m_iVertOffset)
+		m_MeshReader.Index( iIndexStart+0 ) - m_iVertOffset,
+		m_MeshReader.Index( iIndexStart+1 ) - m_iVertOffset,
+		m_MeshReader.Index( iIndexStart+2 ) - m_iVertOffset
 	};
 	
 	const Vector &v0 = m_MeshReader.Position( tempIndices[0] );
@@ -187,7 +251,7 @@ void CDispInfo::TestAddDecalTri( int iIndexStart, unsigned short decalHandle, CD
 
 	if ( outCount > 2 ) 
 	{
-		outCount = min( outCount, (int)CDispDecalFragment::MAX_VERTS );
+		outCount = MIN( outCount, CDispDecalFragment::MAX_VERTS );
 
 		// Allocate a new fragment...
 		CDispDecalFragment* pFragment = AllocateDispDecalFragment( decalHandle, outCount );
@@ -234,11 +298,11 @@ void CDispInfo::TestAddDecalTri( int iIndexStart, unsigned short decalHandle, CD
 {
 	unsigned short tempIndices[3] = 
 	{
-		(unsigned short)(m_MeshReader.Index( iIndexStart+0 ) - m_iVertOffset),
-		(unsigned short)(m_MeshReader.Index( iIndexStart+1 ) - m_iVertOffset),
-		(unsigned short)(m_MeshReader.Index( iIndexStart+2 ) - m_iVertOffset)
+		m_MeshReader.Index( iIndexStart+0 ) - m_iVertOffset,
+		m_MeshReader.Index( iIndexStart+1 ) - m_iVertOffset,
+		m_MeshReader.Index( iIndexStart+2 ) - m_iVertOffset
 	};
-#ifndef SWDS
+#ifndef DEDICATED
 	// Setup verts.
 	Vector vPositions[3] ={
 		GetOverlayPos( &m_MeshReader, tempIndices[0] ),
@@ -248,7 +312,8 @@ void CDispInfo::TestAddDecalTri( int iIndexStart, unsigned short decalHandle, CD
 	Vector* ppPosition[3] = { &vPositions[0], &vPositions[1], &vPositions[2] };
 
 	ShadowVertex_t** ppClipVertex;
-	int count = g_pShadowMgr->ProjectAndClipVertices( pDecal->m_Shadow, 3, ppPosition, &ppClipVertex );
+	ShadowClipState_t clip;
+	int count = g_pShadowMgr->ProjectAndClipVerticesEx( pDecal->m_Shadow, 3, ppPosition, &ppClipVertex, clip );	// using the thread-safe version
 	if (count < 3)
 		return;
 
@@ -374,7 +439,7 @@ void CDispInfo::SpecifyWalkableDynamicMesh( void )
 	// Specify the vertices and indices.
 	CMatRenderContextPtr pRenderContext( materials );
 
-#ifdef SWDS
+#ifdef DEDICATED
 	IMesh *pMesh = pRenderContext->GetDynamicMesh( false, NULL, NULL, NULL );
 #else
 	IMesh *pMesh = pRenderContext->GetDynamicMesh( false, NULL, NULL, g_materialTranslucentSingleColor );
@@ -407,7 +472,7 @@ void CDispInfo::SpecifyBuildableDynamicMesh( void )
 	// Specify the vertices and indices.
 	CMatRenderContextPtr pRenderContext( materials );
 
-#ifdef SWDS
+#ifdef DEDICATED
 	IMesh *pMesh = pRenderContext->GetDynamicMesh( false, NULL, NULL, NULL );
 #else
 	g_materialTranslucentSingleColor->ColorModulate( 0.0f, 1.0f, 1.0f );
@@ -478,9 +543,9 @@ bool DispInfoRenderDebugModes()
 {
 	if( ShouldDrawInWireFrameMode() || mat_luxels.GetInt() || r_DispWalkable.GetInt() || 
 		r_DispBuildable.GetInt() 
-#if !defined( SWDS )
+#if !defined( DEDICATED )
 		|| mat_surfaceid.GetInt() || mat_surfacemat.GetInt()
-#endif // SWDS
+#endif // DEDICATED
 		)
 		return true;
 
@@ -489,18 +554,13 @@ bool DispInfoRenderDebugModes()
 
 bool CDispInfo::Render( CGroupMesh *pGroup, bool bAllowDebugModes )
 {
-#ifndef SWDS
+#ifndef DEDICATED
 	if( !m_pMesh )
 	{
 		Assert( !"CDispInfo::Render: m_pMesh == NULL" );
 		return false;
 	}
 
-	// Trivial reject?
-	if( R_CullBox(m_BBoxMin, m_BBoxMax, g_Frustum) )
-		return false; 
-
-	bool bNormalRender = true;
 	if ( bAllowDebugModes )
 	{
 		CMatRenderContextPtr pRenderContext( materials );
@@ -508,9 +568,18 @@ bool CDispInfo::Render( CGroupMesh *pGroup, bool bAllowDebugModes )
 		// Wireframe? 
 		if( ShouldDrawInWireFrameMode() )
 		{
-			pRenderContext->Bind( g_materialWireframe );
+			// BUGBUG: The draw order for this is wrong - we need to write Z here or this won't show up
+			// BUGBUG: Move this wireframe draw to the end of the scene instead of during normal disp draw (which is first)
+			int nWireFrameMode = WireFrameMode();
+			if ( nWireFrameMode == 2 )
+			{
+				pRenderContext->Bind( g_materialWorldWireframeZBuffer );
+			}
+			else
+			{
+				pRenderContext->Bind( g_materialWorldWireframeGreen );
+			}
 			SpecifyDynamicMesh();
-			bNormalRender = false;
 		}
 		
 		if( mat_luxels.GetInt() )
@@ -522,7 +591,6 @@ bool CDispInfo::Render( CGroupMesh *pGroup, bool bAllowDebugModes )
 
 			pRenderContext->Bind( g_materialDebugLuxels );
 			SpecifyDynamicMesh();
-			bNormalRender = false;
 		}
 
 		if ( r_DispWalkable.GetInt() || r_DispBuildable.GetInt() )
@@ -535,11 +603,9 @@ bool CDispInfo::Render( CGroupMesh *pGroup, bool bAllowDebugModes )
 
 			if ( r_DispBuildable.GetInt() )
 				SpecifyBuildableDynamicMesh();
-
-			bNormalRender = false;
 		}
 
-#if !defined( SWDS )
+#if !defined( DEDICATED )
 		if ( mat_surfaceid.GetInt() )
 		{
 			Vector bbMin, bbMax, vecCenter;
@@ -547,7 +613,7 @@ bool CDispInfo::Render( CGroupMesh *pGroup, bool bAllowDebugModes )
 			VectorAdd( bbMin, bbMax, vecCenter );
 			vecCenter *= 0.5f;
 
-			int nInt = ( mat_surfaceid.GetInt() != 2 ) ? (int)m_ParentSurfID : (msurface2_t*)m_ParentSurfID - host_state.worldbrush->surfaces2;
+			int nInt = ( mat_surfaceid.GetInt() != 2 ) ? size_cast< int >( (intp)m_ParentSurfID ) : (msurface2_t*)m_ParentSurfID - host_state.worldbrush->surfaces2;
 			char buf[32];
 			Q_snprintf( buf, sizeof( buf ), "%d", nInt );
 			CDebugOverlay::AddTextOverlay( vecCenter, 0, buf );
@@ -574,13 +640,11 @@ bool CDispInfo::Render( CGroupMesh *pGroup, bool bAllowDebugModes )
 
 			CDebugOverlay::AddTextOverlay( vecCenter, 0, pMaterialName );
 		}
-#endif // SWDS
+#endif // DEDICATED
 	}
-
-	// Mark it visible.
-	if( bNormalRender )
+	else
 	{
-		if( pGroup->m_nVisible < pGroup->m_Visible.Size() )
+		if( pGroup->m_nVisible < pGroup->m_Visible.Count() )
 		{
 			// Don't bother if all faces are backfacing, or somesuch...
 			if (m_nIndices)
@@ -617,9 +681,9 @@ struct ProcessLightmapSampleData_t
 	ProcessLightmapSampleFunc_t *pProcessLightmapSampleDataFunc;
 };
 
-#ifndef DEDICATED
 static void	ProcessLightmapSample( const ProcessLightmapSampleData_t &data, const Vector &vPos, const Vector &vNormal, const Vector &vTangentS, const Vector &vTangentT, int t, int s, int tmax, int smax )
 {
+#if !defined( DEDICATED )
 	float distSqr = data.m_vLightOrigin.DistToSqr( vPos );
 	if( distSqr < data.m_LightDistSqr )
 	{
@@ -636,10 +700,12 @@ static void	ProcessLightmapSample( const ProcessLightmapSampleData_t &data, cons
 			scale, data.m_Intensity,
 			blocklights[0][index].AsVector3D() );
 	}
+#endif
 }
 
 static void	ProcessLightmapSampleBumped( const ProcessLightmapSampleData_t &data, const Vector &vPos, const Vector &vNormal, const Vector &vTangentS, const Vector &vTangentT, int t, int s, int tmax, int smax )
 {
+#if !defined( DEDICATED )
 	float distSqr = data.m_vLightOrigin.DistToSqr( vPos );
 	if( distSqr < data.m_LightDistSqr )
 	{
@@ -681,6 +747,7 @@ static void	ProcessLightmapSampleBumped( const ProcessLightmapSampleData_t &data
 			data.m_Intensity, 
 			blocklights[3][index].AsVector3D() );
 	}
+#endif
 }
 
 //-----------------------------------------------------------------------------
@@ -688,6 +755,7 @@ static void	ProcessLightmapSampleBumped( const ProcessLightmapSampleData_t &data
 //-----------------------------------------------------------------------------
 static void	ProcessLightmapSampleAlpha( const ProcessLightmapSampleData_t &data, const Vector &vPos, const Vector &vNormal, const Vector &vTangentS, const Vector &vTangentT, int t, int s, int tmax, int smax )
 {
+#if !defined( DEDICATED )
 	float distSqr = data.m_vLightOrigin.DistToSqr( vPos );
 	if( distSqr < data.m_LightDistSqr )
 	{
@@ -702,14 +770,20 @@ static void	ProcessLightmapSampleAlpha( const ProcessLightmapSampleData_t &data,
 		int index = t*smax + s;
 		blocklights[0][index][3] += scale * data.m_Intensity[0];
 	}
-}
 #endif
+}
 
 // This iterates over all the lightmap samples and for each one, calls:
 // T::ProcessLightmapSample( Vector const &vPos, int t, int s, int tmax, int smax );
 void IterateLightmapSamples( CDispInfo *pDisp, const ProcessLightmapSampleData_t &data )
 {
 	ASSERT_SURF_VALID( pDisp->m_ParentSurfID );
+
+	if ( !g_DispLightmapSamplePositions.Count() )
+	{
+		ExecuteNTimes( 20, Warning( "Cannot update displacement for dlight - set 'r_dlightsenable 1' and reload the map! (data may also have been culled by MakeGameData)\n" ) );
+		return;
+	}
 
 	int smax = MSurf_LightmapExtents( pDisp->m_ParentSurfID )[0] + 1;
 	int tmax = MSurf_LightmapExtents( pDisp->m_ParentSurfID )[1] + 1;
@@ -769,7 +843,7 @@ void IterateLightmapSamples( CDispInfo *pDisp, const ProcessLightmapSampleData_t
 
 void CDispInfo::AddSingleDynamicLight( dlight_t& dl )
 {
-#ifndef SWDS
+#ifndef DEDICATED
 	ProcessLightmapSampleData_t data;
 	data.m_LightDistSqr = dl.GetRadiusSquared();
 
@@ -793,7 +867,7 @@ void CDispInfo::AddSingleDynamicLight( dlight_t& dl )
 
 void CDispInfo::AddSingleDynamicLightBumped( dlight_t& dl )
 {
-#ifndef SWDS
+#ifndef DEDICATED
 	ProcessLightmapSampleData_t data;
 
 	data.m_LightDistSqr = dl.GetRadiusSquared();
@@ -818,7 +892,7 @@ void CDispInfo::AddSingleDynamicLightBumped( dlight_t& dl )
 
 void CDispInfo::AddSingleDynamicAlphaLight( dlight_t& dl )
 {
-#ifndef SWDS
+#ifndef DEDICATED
 	ProcessLightmapSampleData_t data;
 
 	data.m_LightDistSqr = dl.GetRadiusSquared();
@@ -828,7 +902,7 @@ void CDispInfo::AddSingleDynamicAlphaLight( dlight_t& dl )
 	if ( dl.flags & DLIGHT_SUBTRACT_DISPLACEMENT_ALPHA )
 		data.m_Intensity *= -1.0f;
 
-	float minlight = max( g_flMinLightingValue, dl.minlight );
+	float minlight = MAX( g_flMinLightingValue, dl.minlight );
 	float ooQuadraticAttn = data.m_LightDistSqr * minlight; // / maxIntensity;
 
 	data.m_ooQuadraticAttn = ooQuadraticAttn;
@@ -1007,7 +1081,7 @@ Vector CDispInfo::GetFlatVert( int iVertex )
 void CDispInfo::ComputeLightmapAndTextureCoordinate( RayDispOutput_t const& output, 
 													Vector2D* luv, Vector2D* tuv )
 {	
-#ifndef SWDS
+#ifndef DEDICATED
 	// lightmap coordinate
 	if( luv )
 	{

@@ -1,10 +1,10 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//======Copyright (c) Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
 //
 // The dx8 implementation of the shader API
-//===========================================================================//
+//==================================================================//
 
 /*
 DX9 todo:
@@ -23,7 +23,7 @@ fix this:
 unrelated to dx9:
 mat_fullbright 1 doesn't work properly on alpha materials in testroom_standards
 */
-#define DISABLE_PROTECTED_THINGS
+
 #include "shaderapidx8.h"
 #include "shaderapidx8_global.h"
 #include "shadershadowdx8.h"
@@ -33,6 +33,7 @@ mat_fullbright 1 doesn't work properly on alpha materials in testroom_standards
 #include "utlstack.h"
 #include "shaderapi/ishaderutil.h"
 #include "shaderapi/commandbuffer.h"
+#include "shaderapi/gpumemorystats.h"
 #include "shaderapidx8_global.h"
 #include "materialsystem/imaterialsystem.h"
 #include "materialsystem/itexture.h"
@@ -42,7 +43,9 @@ mat_fullbright 1 doesn't work properly on alpha materials in testroom_standards
 #include "colorformatdx8.h"
 #include "texturedx8.h"
 #include "textureheap.h"
+#if !defined ( _PS3 )
 #include <malloc.h>
+#endif // !_PS3
 #include "interface.h"
 #include "utlrbtree.h"
 #include "utlsymbol.h"
@@ -57,21 +60,22 @@ mat_fullbright 1 doesn't work properly on alpha materials in testroom_standards
 #include "materialsystem/materialsystem_config.h"
 #include "worldsize.h"
 #include "TransitionTable.h"
-#include "tier0/vcrmode.h"
+#include "tier0/perfstats.h"
 #include "tier0/vprof.h"
 #include "tier1/tier1.h"
 #include "tier1/utlbuffer.h"
 #include "vertexdecl.h"
 #include "tier0/icommandline.h"
-#include "IShaderSystem.h"
+#include "materialsystem/ishadersystem.h"
 #include "tier1/convar.h"
-#include "tier1/KeyValues.h"
-#include "Color.h"
+#include "tier1/keyvalues.h"
+#include "vstdlib/vstrtools.h"
+#include "color.h"
 #ifdef RECORDING
 #include "materialsystem/IShader.h"
 #endif
 #include "../stdshaders/common_hlsl_cpp_consts.h" // hack hack hack!
-#include "KeyValues.h"
+#include "keyvalues.h"
 #include "bitmap/imageformat.h"
 #include "materialsystem/idebugtextureinfo.h"
 #include "tier1/utllinkedlist.h"
@@ -81,11 +85,15 @@ mat_fullbright 1 doesn't work properly on alpha materials in testroom_standards
 #include "tier2/tier2.h"
 #include "materialsystem/deformations.h"
 #include "bitmap/tgawriter.h"
-#include "tier0/icommandline.h"
-#include "togl/rendermechanism.h"  // provides GLMPRINTF/GLMPRINTSTR / GLMPRINTEXT macros which only activate if GLMDEBUG is nonzero and POSIX is defined.
+
+#include "itextureinternal.h"
+#include "texturemanager.h"
+#include "bitmap/imageformat.h"
+#include "togl/rendermechanism.h"
 
 #if defined( _X360 )
 #include "xbox/xbox_console.h"
+#include "xbox/xbox_vxconsole.h"
 #include "xbox/xbox_win32stubs.h"
 #include "xbox/xbox_launch.h"
 #endif
@@ -95,7 +103,12 @@ mat_fullbright 1 doesn't work properly on alpha materials in testroom_standards
 #endif
 #include "filesystem/IQueuedLoader.h"
 #include "shaderdevicedx8.h"
-#include "togl/rendermechanism.h"
+#include "utldict.h"
+
+#ifdef _PS3
+#include "ps3gcm\gcmdrawstate.h"
+#include "ps3gcm\gcmtexture.h"
+#endif
 
 // Define this if you want to use a stubbed d3d.
 //#define STUBD3D
@@ -106,29 +119,136 @@ mat_fullbright 1 doesn't work properly on alpha materials in testroom_standards
 
 #include "winutils.h"
 
+#ifdef _WIN32
+#include "nvapi.h"
+#include "NvApiDriverSettings.h"
+#endif
+
+#include "winutils.h"
+
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
-#if defined( OSX )
-	typedef unsigned int DWORD;
-	typedef DWORD* LPDWORD;
-#endif
-
 #ifdef _WIN32
 #pragma warning (disable:4189)
+#endif
+
+#if ( ( defined( _WIN32 ) || defined( LINUX ) ) && ( !defined( DYNAMIC_SHADER_COMPILE ) ) )
+
+ConVar mat_vtxlit_new_path( "mat_vtxlit_new_path", "1", FCVAR_DEVELOPMENTONLY );
+ConVar mat_unlit_new_path( "mat_unlit_new_path", "1", FCVAR_DEVELOPMENTONLY );
+ConVar mat_lmap_new_path( "mat_lmap_new_path", "1", FCVAR_DEVELOPMENTONLY );
+ConVar mat_depthwrite_new_path( "mat_depthwrite_new_path", "1", FCVAR_DEVELOPMENTONLY );
+
+
+CON_COMMAND( toggleVtxLitPath, "toggleVtxLitPath" )
+{
+	mat_vtxlit_new_path.SetValue( !mat_vtxlit_new_path.GetBool() );
+	Msg( "mat_vtxlit_new_path = %s\n", mat_vtxlit_new_path.GetBool()? "TRUE":"FALSE" );
+}
+
+CON_COMMAND( toggleUnlitPath, "toggleUnlitPath" )
+{
+	mat_unlit_new_path.SetValue( !mat_unlit_new_path.GetBool() );
+	Msg( "mat_unlit_new_path = %s\n", mat_unlit_new_path.GetBool()? "TRUE":"FALSE" );
+}
+
+CON_COMMAND( toggleLmapPath, "toggleLmapPath" )
+{
+	mat_lmap_new_path.SetValue( !mat_lmap_new_path.GetBool() );
+	Msg( "toggleLmapPath = %s\n", mat_lmap_new_path.GetBool()? "TRUE":"FALSE" );
+}
+
+CON_COMMAND( toggleShadowPath, "Toggles CSM generation method" )
+{
+	mat_depthwrite_new_path.SetValue( !mat_depthwrite_new_path.GetBool() );
+	Msg( "mat_depthwrite_new_path = %s\n", mat_depthwrite_new_path.GetBool()? "TRUE":"FALSE" );
+}
+
+#else
+
+ConVar mat_vtxlit_new_path( "mat_vtxlit_new_path", "0", FCVAR_DEVELOPMENTONLY );
+ConVar mat_unlit_new_path( "mat_unlit_new_path", "0", FCVAR_DEVELOPMENTONLY );
+ConVar mat_lmap_new_path( "mat_lmap_new_path", "0", FCVAR_DEVELOPMENTONLY );
+ConVar mat_depthwrite_new_path( "mat_depthwrite_new_path", "0", FCVAR_DEVELOPMENTONLY );
+
+#endif
+
+// On OSX, this does 
+#ifdef _OSX
+ConVar r_frameratesmoothing( "r_frameratesmoothing", "1", FCVAR_ARCHIVE, "Enable frame rate smoothing, which significantly reduces stutters but at the expense of overall frame rate." );
+#else
+// This convar only does something on OSX, but is referenced from Windows and Linux. Just leave a dummy here for them to find.
+ConVar r_frameratesmoothing( "r_frameratesmoothing", "0", FCVAR_NONE, "", true, 0, true, 0 );
+#endif
+
+
+// If you need to debug refcounting issues, enable this. As of this writing, only Z side is 
+// instrumented.
+// #define SPEW_REFCOUNTS 1
+
+#ifdef SPEW_REFCOUNTS
+	#define SPEW_REFCOUNT_( f, l, funcname, pObj, op, expected ) \
+		do { \
+			if ( pObj == NULL ) { \
+				Msg( "%s(%d): %s: %s == NULL\n", f, l, funcname, #pObj ); \
+				break; \
+			} \
+			pObj->AddRef(); \
+			ULONG rc = pObj->Release(); \
+			Assert( rc op expected ); \
+			Msg( "%s(%d): %s: ref( %s [0x%08p] ) -> %d\n", f, l, funcname, #pObj, pObj, rc ); \
+		} while ( 0 )
+
+	#define SPEW_REFCOUNT( pObj ) SPEW_REFCOUNT_( __FILE__, __LINE__, __FUNCTION__, pObj, >=, 0 ) // Unsigned, so everything is >= 0.
+	#define SPEW_REFCOUNT_EXPECTED( pObj, op, expected ) SPEW_REFCOUNT_( __FILE__, __LINE__, __FUNCTION__, pObj, op, expected )
+#else
+	#define SPEW_REFCOUNT_( f, l, funcname, pObj, op, expected ) \
+		do { \
+			if ( pObj == NULL ) { \
+				break; \
+			} \
+			pObj->AddRef(); \
+			ULONG rc = pObj->Release(); \
+			Assert( rc op expected ); \
+		} while ( 0 )
+
+	#define SPEW_REFCOUNT( pObj ) /* nothing if we're not spewing */
+	#define SPEW_REFCOUNT_EXPECTED( pObj, op, expected ) /* nothing if we're not spewing */
 #endif
 
 ConVar mat_texture_limit( "mat_texture_limit", "-1", FCVAR_NEVER_AS_STRING, 
 	"If this value is not -1, the material system will limit the amount of texture memory it uses in a frame."
 	" Useful for identifying performance cliffs. The value is in kilobytes." );
 
+// This feature is useful because world static mesh size (in vertex count) is computed while the dynamic VBs are shrunk to save memory on map load/unload.  Setting this 
+// var to 1 will not shrink the VBs, which will increase the number of vertices allowed in a single batch.
+ConVar mat_do_not_shrink_dynamic_vb( "mat_do_not_shrink_dynamic_vb", "0", 0, "Do not shrink the size of dynamic vertex buffers during map load/unload to save memory." );
+
 ConVar mat_frame_sync_enable( "mat_frame_sync_enable", "1", FCVAR_CHEAT );
 ConVar mat_frame_sync_force_texture( "mat_frame_sync_force_texture", "0", FCVAR_CHEAT, "Force frame syncing to lock a managed texture." );
 
+#if defined( _X360 )
+ConVar mat_x360_vblank_miss_threshold( "mat_x360_vblank_miss_threshold", "8" );
+#endif
+
+static ConVar r_pixelfog( "r_pixelfog", "1" );
+
+ConVar r_force_first_dynamic_light_to_directional_for_csm( "r_force_first_dynamic_light_to_directional_for_csm", "1", FCVAR_CHEAT|FCVAR_DEVELOPMENTONLY, "" );
 
 #if defined( _X360 )
+
 ConVar mat_texturecachesize( "mat_texturecachesize", "176" );
 ConVar mat_force_flush_texturecache( "mat_force_flush_texturecache", "0" );
+ConVar mat_hi_z_enable( "mat_hi_z_enable", "1", FCVAR_CHEAT, "Toggle Hi-Z on the Xbox 360" );
+ConVar mat_hi_stencil_enable( "mat_hi_stencil_enable", "1", FCVAR_CHEAT, "Toggle Hi-Stencil on the Xbox 360" );
+
+#if defined( CSTRIKE15 )
+static ConVar r_shader_srgbread( "r_shader_srgbread", "1", 0, "1 = use shader srgb texture reads, 0 = use HW" );
+#else
+static ConVar r_shader_srgbread( "r_shader_srgbread", "0", 0, "1 = use shader srgb texture reads, 0 = use HW" );
+#endif
+
 #endif
 
 extern ConVar mat_debugalttab;
@@ -139,12 +259,22 @@ extern ConVar mat_debugalttab;
 static ConVar mat_use_smp( "mat_use_smp", "0" );
 #endif
 
+// [mhansen] Enable PIX in debug and profile builds (Xbox 360 only)
+// PC:    By default, PIX profiling is explicitly disallowed using the D3DPERF_SetOptions(1) API on PC
+// X360:  PIX_INSTRUMENTATION will only generate PIX events in RELEASE builds on 360
+// Uncomment to use PIX instrumentation:
+#if defined( _X360) && (defined( PROFILE_BUILD ) || defined( _DEBUG ))
+#define	PIX_INSTRUMENTATION
+#endif
+
+
 // Convars for driving PIX (not all hooked up yet...JasonM)
 static ConVar r_pix_start( "r_pix_start", "0" );
 static ConVar r_pix_recordframes( "r_pix_recordframes", "0" );
 
-
-#define D3DDeviceWrapper IDirect3DDevice9
+#if defined( _X360 )
+#define JUNE_2009_XDK_ISSUES
+#endif
 
 //-----------------------------------------------------------------------------
 // Some important enumerations
@@ -158,15 +288,6 @@ enum
 //-----------------------------------------------------------------------------
 // These board states change with high frequency; are not shadowed
 //-----------------------------------------------------------------------------
-struct TextureStageState_t
-{
-	D3DTEXTURETRANSFORMFLAGS m_TextureTransformFlags;
-	float					m_BumpEnvMat00;
-	float					m_BumpEnvMat01;
-	float					m_BumpEnvMat10;
-	float					m_BumpEnvMat11;
-};
-
 struct SamplerState_t
 {
 	ShaderAPITextureHandle_t	m_BoundTexture;
@@ -176,11 +297,10 @@ struct SamplerState_t
 	D3DTEXTUREFILTERTYPE		m_MagFilter;
 	D3DTEXTUREFILTERTYPE		m_MinFilter;
 	D3DTEXTUREFILTERTYPE		m_MipFilter;
-	int							m_FinestMipmapLevel;
-	float						m_LodBias;
+	TextureBindFlags_t			m_nTextureBindFlags;
 	int							m_nAnisotropicLevel;
+	uint					    m_bShadowFilterEnable;
 	bool						m_TextureEnable;
-	bool						m_SRGBReadEnable;
 };
 
 
@@ -189,7 +309,7 @@ struct SamplerState_t
 //-----------------------------------------------------------------------------
 struct VertexTextureState_t
 {
-	ShaderAPITextureHandle_t	m_BoundTexture;
+	ShaderAPITextureHandle_t	m_BoundVertexTexture;
 	D3DTEXTUREADDRESS			m_UTexWrap;
 	D3DTEXTUREADDRESS			m_VTexWrap;
 	D3DTEXTUREFILTERTYPE		m_MagFilter;
@@ -208,9 +328,25 @@ enum TransformType_t
 enum TransformDirtyBits_t
 {
 	STATE_CHANGED_VERTEX_SHADER = 0x1,
-	STATE_CHANGED_FIXED_FUNCTION = 0x2,
-	STATE_CHANGED = 0x3
+	STATE_CHANGED = 0x1
 };
+
+struct UberlightRenderState_t
+{
+	Vector4D m_vSmoothEdge0;
+	Vector4D m_vSmoothEdge1;
+	Vector4D m_vSmoothOneOverW;
+	Vector4D m_vShearRound;
+	Vector4D m_vaAbB;
+	VMatrix m_WorldToLight;
+};
+
+struct DepthBiasState_t
+{
+	float m_flOOSlopeScaleDepthBias;
+	float m_flOODepthBias;
+};
+
 
 enum
 {
@@ -224,12 +360,6 @@ enum
 
 struct DynamicState_t
 {
-	// Constant color
-	unsigned int	m_ConstantColor;
-
-	// Normalize normals?
-	bool			m_NormalizeNormals;
-
 	// Viewport state
 	D3DVIEWPORT9	m_Viewport;
 
@@ -238,18 +368,22 @@ struct DynamicState_t
 	unsigned char	m_TransformType[NUM_MATRIX_MODES];
 	unsigned char	m_TransformChanged[NUM_MATRIX_MODES];
 
-	// Ambient light color
-	D3DCOLOR		m_Ambient;
-	D3DLIGHT		m_Lights[MAX_NUM_LIGHTS];
-	LightDesc_t		m_LightDescs[MAX_NUM_LIGHTS];
-	bool			m_LightEnable[MAX_NUM_LIGHTS];
-	Vector4D		m_AmbientLightCube[6];
-	unsigned char	m_LightChanged[MAX_NUM_LIGHTS];
-	unsigned char	m_LightEnableChanged[MAX_NUM_LIGHTS];
-	VertexShaderLightTypes_t	m_LightType[MAX_NUM_LIGHTS];
-	Vector			m_vLightingOrigin;
-	int				m_NumLights;
+	InstanceInfo_t				m_InstanceInfo;
+	CompiledLightingState_t		m_CompiledLightingState;
+	MaterialLightingState_t		m_LightingState;
 
+	// Used for GetDx9LightState
+	mutable LightState_t		m_ShaderLightState;
+	mutable bool				m_bLightStateComputed;
+
+	// Used to deal with env cubemaps
+	int							m_nLocalEnvCubemapSamplers;
+
+	// Used to deal with lightmaps
+	int							m_nLightmapSamplers;
+	
+	int							m_nPaintmapSamplers;
+	
 	// Shade mode
 	D3DSHADEMODE	m_ShadeMode;
 
@@ -258,10 +392,10 @@ struct DynamicState_t
 
 	// Fog
 	D3DCOLOR		m_FogColor;
-	float			m_PixelFogColor[4];
+	Vector4D	m_vecPixelFogColor;
+	Vector4D	m_vecPixelFogColorLinear;
 	bool			m_bFogGammaCorrectionDisabled;
 	bool			m_FogEnable;
-	MaterialFogMode_t	m_SceneFog;
 	D3DFOGMODE		m_FogMode;
 	float			m_FogStart;
 	float			m_FogEnd;
@@ -292,8 +426,7 @@ struct DynamicState_t
 	bool			m_bCullEnabled;
 	
 	// Skinning
-	D3DVERTEXBLENDFLAGS	m_VertexBlend;
-	int					m_NumBones;
+	int				m_NumBones;
 
 	// Pixel and vertex shader constants...
 	Vector4D*		m_pVectorVertexShaderConstant;
@@ -304,7 +437,6 @@ struct DynamicState_t
 	IntVector4D*	m_pIntegerPixelShaderConstant;
 
 	// Texture stage state
-	TextureStageState_t m_TextureStage[MAX_TEXTURE_STAGES];
 	SamplerState_t m_SamplerState[MAX_SAMPLERS];
 
 	// Vertex texture stage state
@@ -315,31 +447,38 @@ struct DynamicState_t
 	RECT  m_ScissorRect;
 
 	IDirect3DVertexDeclaration9 *m_pVertexDecl;
+	VertexFormat_t m_DeclVertexFormat;
+	bool m_bDeclHasColorMesh;
+	bool m_bDeclUsingFlex;
+	bool m_bDeclUsingMorph;
+	bool m_bDeclUsingPreTessPatch;
 
 	bool	m_bSRGBWritesEnabled;
 	bool	m_bHWMorphingEnabled;
-
-	float	m_DestAlphaDepthRange; //Dest alpha writes compress the depth to get better results. This holds the default setting that can be overriden with r_destalpharange
 
 #if defined( _X360 )
 	int		m_iVertexShaderGPRAllocation; //only need to track vertex shader
 	bool	m_bBuffer2Frames;
 #endif
-	
+
+	TessellationMode_t	m_TessellationMode;
+
 	DynamicState_t() {}
 
 private:
 	DynamicState_t( DynamicState_t const& );
+
+	DISALLOW_OPERATOR_EQUAL( DynamicState_t );
 };
 
 //-----------------------------------------------------------------------------
 // Method to queue up dirty dynamic state change calls
 //-----------------------------------------------------------------------------
-typedef void (*StateCommitFunc_t)( IDirect3DDevice9 *pDevice, const DynamicState_t &desiredState, DynamicState_t &currentState, bool bForce );
-static void CommitSetViewports( IDirect3DDevice9 *pDevice, const DynamicState_t &desiredState, DynamicState_t &currentState, bool bForce );
+typedef void (*StateCommitFunc_t)( D3DDeviceWrapper *pDevice, const DynamicState_t &desiredState, DynamicState_t &currentState, bool bForce );
+static void CommitSetViewports( D3DDeviceWrapper *pDevice, const DynamicState_t &desiredState, DynamicState_t &currentState, bool bForce );
 
 // NOTE: It's slightly memory inefficient, and definitely not typesafe,
-// to put all commit funcs into the same table (vs, ff, per-draw, per-pass),
+// to put all commit funcs into the same table (vs, per-draw, per-pass),
 // but it makes the code a heck of a lot simpler and smaller.
 enum CommitFunc_t
 {
@@ -364,38 +503,32 @@ enum CommitFuncType_t
 	COMMIT_FUNC_TYPE_COUNT,
 };
 
-enum CommitShaderType_t
-{
-	COMMIT_FIXED_FUNCTION = 0,
-	COMMIT_VERTEX_SHADER,
-	COMMIT_ALWAYS,
 
-	COMMIT_SHADER_TYPE_COUNT,
-};
-
-
-#define ADD_COMMIT_FUNC( _func, _shader, _func_name )	\
-	if ( !IsCommitFuncInUse( _func, _shader, COMMIT_FUNC_ ## _func_name ) )	\
+#define ADD_COMMIT_FUNC( _func, _func_name )	\
+	if ( !IsCommitFuncInUse( _func, COMMIT_FUNC_ ## _func_name ) )	\
 	{																		\
-		AddCommitFunc( _func, _shader, _func_name );						\
-		MarkCommitFuncInUse( _func, _shader, COMMIT_FUNC_ ## _func_name );	\
+		AddCommitFunc( _func, _func_name );						\
+		MarkCommitFuncInUse( _func, COMMIT_FUNC_ ## _func_name );	\
 	}
 
-#define ADD_RENDERSTATE_FUNC( _func, _shader, _func_name, _state, _val )	\
+#define ADD_RENDERSTATE_FUNC( _func, _func_name, _state, _val )	\
 	if ( m_bResettingRenderState || (m_DesiredState._state != _val) )	\
 	{																		\
 		m_DesiredState._state = _val;									\
-		ADD_COMMIT_FUNC( _func, _shader, _func_name )						\
+		ADD_COMMIT_FUNC( _func, _func_name )						\
 	}
 
-#define ADD_VERTEX_TEXTURE_FUNC( _func, _shader, _func_name, _stage, _state, _val )	\
-	Assert( ( int )_stage < MAX_VERTEX_TEXTURE_COUNT );							\
+#define ADD_VERTEX_TEXTURE_FUNC( _func, _func_name, _stage, _state, _val )	\
+	Assert( _stage < MAX_VERTEX_TEXTURE_COUNT );							\
 	if ( m_bResettingRenderState || (m_DesiredState.m_VertexTextureState[_stage]._state != _val) )	\
 	{																		\
 		m_DesiredState.m_VertexTextureState[_stage]._state = _val;		\
-		ADD_COMMIT_FUNC( _func, _shader, _func_name )						\
+		ADD_COMMIT_FUNC( _func, _func_name )						\
 	}
 
+#if defined( _X360 )
+static void CommitShaderGPRs( D3DDeviceWrapper *pDevice, const DynamicState_t &desiredState, DynamicState_t &currentState, bool bForce );
+#endif
 
 //-----------------------------------------------------------------------------
 // Check render state support at compile time instead of runtime
@@ -404,7 +537,7 @@ enum CommitShaderType_t
 	{																				\
 		if( _state != D3DRS_NOTSUPPORTED )											\
 		{																			\
-			SetRenderState( _state, _val, false );									\
+			SetRenderState( _state, _val );											\
 		}																			\
 	}
 
@@ -433,25 +566,33 @@ struct Texture_t
 		m_ImageFormat = IMAGE_FORMAT_RGBA8888;
 		m_pTextureGroupCounterGlobal = NULL;
 		m_pTextureGroupCounterFrame = NULL;
-		m_FinestMipmapLevel = 0;
-		m_LodBias = 0.0f;
 	}
 
-	// FIXME: Compress this info
-	D3DTEXTUREADDRESS		m_UTexWrap;
-	D3DTEXTUREADDRESS		m_VTexWrap;
-	D3DTEXTUREADDRESS		m_WTexWrap;
-	D3DTEXTUREFILTERTYPE	m_MagFilter;
-	D3DTEXTUREFILTERTYPE	m_MinFilter;
-	D3DTEXTUREFILTERTYPE	m_MipFilter;
-	int						m_FinestMipmapLevel;
-	float					m_LodBias;
+	uint8					m_UTexWrap;
+	uint8					m_VTexWrap;
+	uint8					m_WTexWrap;
 
-	unsigned char			m_NumLevels;
-	unsigned char			m_SwitchNeeded;	// Do we need to advance the current copy?
-	unsigned char			m_NumCopies;	// copies are used to optimize procedural textures
-	unsigned char			m_CurrentCopy;	// the current copy we're using...
+	uint8					m_MagFilter;
+	uint8					m_MinFilter;
+	uint8					m_MipFilter;
 
+	uint8					m_NumLevels;
+	uint8					m_SwitchNeeded;	// Do we need to advance the current copy?
+	uint8					m_NumCopies;	// copies are used to optimize procedural textures
+	uint8					m_CurrentCopy;	// the current copy we're using...
+
+private:
+	union
+	{
+		IDirect3DBaseTexture	*m_pTexture;				// used when there's one copy
+		IDirect3DBaseTexture	**m_ppTexture;				// used when there are more than one copies
+		IDirect3DSurface		*m_pDepthStencilSurface;	// used when there's one depth stencil surface
+		IDirect3DSurface		*m_pRenderTargetSurface[2];	// 360: regular+sRGB views onto an EDRAM surface
+	};
+
+	ImageFormat m_ImageFormat;
+
+public:
 	int						m_CreationFlags;
 
 	CUtlSymbol				m_DebugName;
@@ -472,14 +613,15 @@ struct Texture_t
 		IS_DEPTH_STENCIL         = 0x0002,
 		IS_DEPTH_STENCIL_TEXTURE = 0x0004,	// depth stencil texture, not surface
 		IS_RENDERABLE            = ( IS_DEPTH_STENCIL | IS_ALLOCATED ),
-		IS_LOCKABLE				 = 0x0008,
-		IS_FINALIZED             = 0x0010,	// 360: completed async hi-res load
-		IS_FAILED                = 0x0020,	// 360: failed during load
-		CAN_CONVERT_FORMAT       = 0x0040,	// 360: allow format conversion
-		IS_LINEAR                = 0x0080,	// 360: unswizzled linear format
-		IS_RENDER_TARGET         = 0x0100,	// 360: marks a render target texture source
-		IS_RENDER_TARGET_SURFACE = 0x0200,	// 360: marks a render target surface target
+		IS_FINALIZED             = 0x0010,	// CONSOLE: completed async hi-res load
+		IS_ERROR_TEXTURE         = 0x0020,	// CONSOLE:	failed during load
+		CAN_CONVERT_FORMAT       = 0x0040,	// 360:		allow format conversion
+		IS_LINEAR                = 0x0080,	// 360:		unswizzled linear format
+		IS_RENDER_TARGET         = 0x0100,	// CONSOLE:	marks a render target texture source
+		IS_RENDER_TARGET_SURFACE = 0x0200,	// 360:		marks a render target surface target
 		IS_VERTEX_TEXTURE		 = 0x0800,
+		IS_PWL_CORRECTED         = 0x1000,	// 360:		data is pwl corrected
+		IS_CACHEABLE             = 0x2000,	// 360:		texture is subject to cache discard
 	};
 
 	short					m_Width;
@@ -519,9 +661,10 @@ struct Texture_t
 
 	IDirect3DSurfacePtr &GetRenderTargetSurface( bool bSRGB )
 	{
+		Assert( IsX360() );
 		Assert( m_NumCopies == 1 );
 		Assert( m_Flags & IS_RENDER_TARGET_SURFACE );
-		return m_pRenderTargetSurface[bSRGB];
+		return m_pRenderTargetSurface[bSRGB?1:0];
 	}
 
 	void SetTexture( IDirect3DBaseTexturePtr pPtr )
@@ -553,11 +696,6 @@ struct Texture_t
 		return ( int )m_Depth;
 	}
 
-	int GetLodClamp() const
-	{
-		return m_FinestMipmapLevel;
-	}
-
 	void SetImageFormat( ImageFormat format )
 	{
 		m_ImageFormat = format;
@@ -566,17 +704,6 @@ struct Texture_t
 	{
 		return m_ImageFormat;
 	}
-
-private:
-	union
-	{
-		IDirect3DBaseTexture	*m_pTexture;				// used when there's one copy
-		IDirect3DBaseTexture	**m_ppTexture;				// used when there are more than one copies
-		IDirect3DSurface		*m_pDepthStencilSurface;	// used when there's one depth stencil surface
-		IDirect3DSurface		*m_pRenderTargetSurface[2];
-	};
-
-	ImageFormat m_ImageFormat;
 
 public:
 	short m_Count;
@@ -598,6 +725,14 @@ struct Deformation_t
 	float m_flDeformationParameters[MAX_DEFORMATION_PARAMETERS];
 };
 
+// These represent the three different methods that we apply fog in the shader.
+enum FogMethod_t
+{
+	FOGMETHOD_FIXEDFUNCTIONVERTEXFOG = 0,
+	FOGMETHOD_VERTEXFOGBLENDEDINPIXELSHADER,
+	FOGMETHOD_PIXELSHADERFOG,
+	FOGMETHOD_NUMVALUES
+};
 
 //-----------------------------------------------------------------------------
 // The DX8 implementation of the shader API
@@ -613,7 +748,7 @@ public:
 
 	// Methods of IShaderAPI
 public:
-	virtual void SetViewports( int nCount, const ShaderViewport_t* pViewports );
+	virtual void SetViewports( int nCount, const ShaderViewport_t* pViewports, bool setImmediately = false );
 	virtual int  GetViewports( ShaderViewport_t* pViewports, int nMax ) const;
 	virtual void ClearBuffers( bool bClearColor, bool bClearDepth, bool bClearStencil, int renderTargetWidth, int renderTargetHeight );
 	virtual void ClearColor3ub( unsigned char r, unsigned char g, unsigned char b );
@@ -623,6 +758,14 @@ public:
 	virtual void BindPixelShader( PixelShaderHandle_t hPixelShader );
 	virtual void SetRasterState( const ShaderRasterState_t& state );
 	virtual void SetFlexWeights( int nFirstWeight, int nCount, const MorphWeight_t* pWeights );
+	virtual void OnPresent( void );
+#ifdef _GAMECONSOLE
+	// Backdoor used by the queued context to directly use write-combined memory
+	virtual IMesh *GetExternalMesh( const ExternalMeshInfo_t& info );
+	virtual void SetExternalMeshData( IMesh *pMesh, const ExternalMeshData_t &data );
+	virtual IIndexBuffer *GetExternalIndexBuffer( int nIndexCount, uint16 *pIndexData );
+	virtual void FlushGPUCache( void *pBaseAddr, size_t nSizeInBytes );
+#endif
 
 	// Methods of IShaderDynamicAPI
 public:
@@ -631,17 +774,58 @@ public:
 		// Chain to the device
 		BaseClass::GetBackBufferDimensions( nWidth, nHeight );
 	}
+
+	virtual const AspectRatioInfo_t &GetAspectRatioInfo( void ) const
+	{
+		// Chain to the device
+		return BaseClass::GetAspectRatioInfo();
+	}
+
+	// Get the dimensions of the current render target
+	virtual void GetCurrentRenderTargetDimensions( int& nWidth, int& nHeight ) const
+	{
+		ITexture *pTexture = ShaderAPI()->GetRenderTargetEx( 0 );
+		if ( pTexture == NULL )
+		{
+			ShaderAPI()->GetBackBufferDimensions( nWidth, nHeight );
+		}
+		else
+		{
+			nWidth  = pTexture->GetActualWidth();
+			nHeight = pTexture->GetActualHeight();
+		}
+	}
+
+	// Get the current viewport
+	virtual void GetCurrentViewport( int& nX, int& nY, int& nWidth, int& nHeight ) const
+	{
+		ShaderViewport_t viewport;
+		ShaderAPI()->GetViewports( &viewport, 1 );
+		nX = viewport.m_nTopLeftX;
+		nY = viewport.m_nTopLeftY;
+		nWidth = viewport.m_nWidth;
+		nHeight = viewport.m_nHeight;
+	}
+
 	virtual void MarkUnusedVertexFields( unsigned int nFlags, int nTexCoordCount, bool *pUnusedTexCoords );
+	virtual void SetScreenSizeForVPOS( int pshReg = 32 );
+	virtual void SetVSNearAndFarZ( int vshReg );
+	virtual float GetFarZ();
+
+	virtual void EnableSinglePassFlashlightMode( bool bEnable );
+	virtual bool SinglePassFlashlightModeEnabled( void );
 
 public:
 	// Methods of CShaderAPIBase
 	virtual bool OnDeviceInit();
 	virtual void OnDeviceShutdown();
-	virtual void ReleaseShaderObjects();
+	virtual void ReleaseShaderObjects( bool bReleaseManagedResources = true );
 	virtual void RestoreShaderObjects();
 	virtual void BeginPIXEvent( unsigned long color, const char *szName );
 	virtual void EndPIXEvent();
 	virtual void AdvancePIXFrame();
+	virtual void NotifyShaderConstantsChangedInRenderPass();
+	virtual void GenerateNonInstanceRenderState( MeshInstanceData_t *pInstance, CompiledLightingState_t** pCompiledState, InstanceInfo_t **pInstanceInfo );
 
 public:
 	// Methods of IShaderAPIDX8
@@ -670,22 +854,8 @@ public:
 	VertexFormat_t ComputeVertexFormat( int num, StateSnapshot_t* pIds ) const;
 	VertexFormat_t ComputeVertexUsage( int num, StateSnapshot_t* pIds ) const;
 
-	// What fields in the morph do we actually use?
-	virtual MorphFormat_t ComputeMorphFormat( int numSnapshots, StateSnapshot_t* pIds ) const;
-
 	// Uses a state snapshot
 	void UseSnapshot( StateSnapshot_t snapshot );
-
-	// Color state
-	void Color3f( float r, float g, float b );
-	void Color4f( float r, float g, float b, float a );
-	void Color3fv( float const* c );
-	void Color4fv( float const* c );
-
-	void Color3ub( unsigned char r, unsigned char g, unsigned char b );
-	void Color3ubv( unsigned char const* pColor );
-	void Color4ub( unsigned char r, unsigned char g, unsigned char b, unsigned char a );
-	void Color4ubv( unsigned char const* pColor );
 
 	// Set the number of bone weights
 	virtual void SetNumBoneWeights( int numBones );
@@ -724,15 +894,15 @@ public:
 
 	virtual void	SyncToken( const char *pToken );
 
-	// Cull mode
 	void CullMode( MaterialCullMode_t cullMode );
+	void FlipCullMode( void );
 
 	// Force writes only when z matches. . . useful for stenciling things out
 	// by rendering the desired Z values ahead of time.
 	void ForceDepthFuncEquals( bool bEnable );
 
 	// Turns off Z buffering
-	void OverrideDepthEnable( bool bEnable, bool bDepthEnable );
+	void OverrideDepthEnable( bool bEnable, bool bDepthWriteEnable, bool bDepthTestEnable = true );
 
 	void OverrideAlphaWriteEnable( bool bOverrideEnable, bool bAlphaWriteEnable );
 	void OverrideColorWriteEnable( bool bOverrideEnable, bool bColorWriteEnable );
@@ -749,9 +919,6 @@ public:
 	// The shade mode
 	void ShadeMode( ShaderShadeMode_t mode );
 
-	// Vertex blend state
-	void SetVertexBlendState( int numBones );
-
 	// Gets the dynamic mesh
 	IMesh* GetDynamicMesh( IMaterial* pMaterial, int nHWSkinBoneCount, bool buffered,
 		IMesh* pVertexOverride, IMesh* pIndexOverride );
@@ -765,20 +932,22 @@ public:
 	virtual int GetMaxIndicesToRender( );
 
 	// Draws the mesh
-	void DrawMesh( CMeshBase* mesh );
-
-	// modifies the vertex data when necessary
-	void ModifyVertexData( );
+	void DrawMesh( CMeshBase* mesh, int nCount, const MeshInstanceData_t *pInstances, VertexCompressionType_t nCompressionType, CompiledLightingState_t* pCompiledState, InstanceInfo_t *pInfo );
+	void DrawMesh2( CMeshBase* mesh, int nCount, const MeshInstanceData_t *pInstances, VertexCompressionType_t nCompressionType, CompiledLightingState_t* pCompiledState, InstanceInfo_t *pInfo );
+	void DrawShadowMesh( CMeshBase* mesh, int nCount, const MeshInstanceData_t *pInstances, VertexCompressionType_t nCompressionType, CompiledLightingState_t* pCompiledState, InstanceInfo_t *pInfo );
+	void DrawMeshInternal( CMeshBase* mesh, int nCount, const MeshInstanceData_t *pInstances, VertexCompressionType_t nCompressionType, CompiledLightingState_t* pCompiledState, InstanceInfo_t *pInfo );
 
 	// Draws
 	void BeginPass( StateSnapshot_t snapshot  );
-	void RenderPass( int nPass, int nPassCount );
+	void RenderPass( const unsigned char *pInstanceCommandBuffer, int nPass, int nPassCount );
 
 	// We use smaller dynamic VBs during level transitions, to free up memory
 	virtual int  GetCurrentDynamicVBSize( void );
 	virtual void DestroyVertexBuffers( bool bExitingLevel = false );
 
-	void SetVertexDecl( VertexFormat_t vertexFormat, bool bHasColorMesh, bool bUsingFlex, bool bUsingMorph );
+	void SetVertexDecl( VertexFormat_t vertexFormat, bool bHasColorMesh, bool bUsingFlex, bool bUsingMorph, bool bUsingPreTessPatch, VertexStreamSpec_t *pStreamSpec );
+
+	void SetTessellationMode( TessellationMode_t mode );
 
 	// Sets the constant register for vertex and pixel shaders
 	FORCEINLINE void SetVertexShaderConstantInternal( int var, float const* pVec, int numVecs = 1, bool bForce = false );
@@ -788,7 +957,14 @@ public:
 	void SetIntegerVertexShaderConstant( int var, int const* pVec, int numIntVecs = 1, bool bForce = false );
 	
 	void SetPixelShaderConstant( int var, float const* pVec, int numVecs = 1, bool bForce = false );
-	FORCEINLINE void SetPixelShaderConstantInternal( int var, float const* pValues, int nNumConsts, bool bForce );
+#ifdef _PS3
+	FORCEINLINE void SetPixelShaderConstantInternal( int var, float const* pValues, int nNumConsts = 1, bool bForce = false )
+	{
+		Dx9Device()->SetPixelShaderConstantF( var, pValues, nNumConsts );
+	}
+#else
+	FORCEINLINE void SetPixelShaderConstantInternal( int var, float const* pValues, int nNumConsts = 1, bool bForce = false );
+#endif
 
 	void SetBooleanPixelShaderConstant( int var, BOOL const* pVec, int numBools = 1, bool bForce = false );
 	void SetIntegerPixelShaderConstant( int var, int const* pVec, int numIntVecs = 1, bool bForce = false );
@@ -802,8 +978,8 @@ public:
 
 	// stuff that shouldn't be used from within a shader 
     void ModifyTexture( ShaderAPITextureHandle_t textureHandle );
-	void BindTexture( Sampler_t sampler, ShaderAPITextureHandle_t textureHandle );
-	virtual void BindVertexTexture( VertexTextureSampler_t nStage, ShaderAPITextureHandle_t textureHandle );
+	void BindTexture( Sampler_t sampler, TextureBindFlags_t nBindFlags, ShaderAPITextureHandle_t textureHandle );
+	void BindVertexTexture( VertexTextureSampler_t nStage, ShaderAPITextureHandle_t textureHandle );
 	void DeleteTexture( ShaderAPITextureHandle_t textureHandle );
 
 	void WriteTextureToFile( ShaderAPITextureHandle_t hTexture, const char *szFileName );
@@ -840,11 +1016,9 @@ public:
 	void TexMagFilter( ShaderTexFilterMode_t texFilterMode );
 	void TexWrap( ShaderTexCoordComponent_t coord, ShaderTexWrapMode_t wrapMode );
 	void TexSetPriority( int priority );
-	void TexLodClamp( int finest );
-	void TexLodBias( float bias );
 
 	ShaderAPITextureHandle_t CreateTextureHandle( void );
-	void CreateTextureHandles( ShaderAPITextureHandle_t *handles, int count );
+	void CreateTextureHandles( ShaderAPITextureHandle_t *handles, int count, bool bReuseHandles );
 
 	ShaderAPITextureHandle_t CreateTexture( 
 		int width, 
@@ -876,7 +1050,8 @@ public:
 		int width, 
 		int height, 
 		const char *pDebugName,
-		bool bTexture );
+		bool bTexture,
+		bool bAliasDepthSurfaceOverColorX360 = false );
 
 	void TexImage2D( 
 		int level, 
@@ -902,25 +1077,29 @@ public:
 		bool bSrcIsTiled,
 		void *imageData );
 
-	void TexImageFromVTF( IVTFTexture *pVTF, int iVTFFrame );
-
 	bool TexLock( int level, int cubeFaceID, int xOffset, int yOffset, int width, int height, CPixelWriter& writer );
 	void TexUnlock( );
+
+	// Copy sysmem surface to default pool surface asynchronously
+	void UpdateTexture( int xOffset, int yOffset, int w, int h, ShaderAPITextureHandle_t hDstTexture, ShaderAPITextureHandle_t hSrcTexture );
+
+	void *LockTex( ShaderAPITextureHandle_t hTexture );
+	void UnlockTex( ShaderAPITextureHandle_t hTexture );
+
+	void UpdateDepthBiasState();
 
 	// stuff that isn't to be used from within a shader
 	// what's the best way to hide this? subclassing?
 	virtual void ClearBuffersObeyStencil( bool bClearColor, bool bClearDepth );
 	virtual void ClearBuffersObeyStencilEx( bool bClearColor, bool bClearAlpha, bool bClearDepth );
 	virtual void PerformFullScreenStencilOperation( void );
-	void ReadPixels( int x, int y, int width, int height, unsigned char *data, ImageFormat dstFormat );
+	void ReadPixels( int x, int y, int width, int height, unsigned char *data, ImageFormat dstFormat, ITexture *pRenderTargetTexture = NULL );
+	void ReadPixelsAsync( int x, int y, int width, int height, unsigned char *data, ImageFormat dstFormat, ITexture *pRenderTargetTexture = NULL, CThreadEvent *pPixelsReadEvent = NULL );
+	void ReadPixelsAsyncGetResult( int x, int y, int width, int height, unsigned char *data, ImageFormat dstFormat, CThreadEvent *pGetResultEvent = NULL );
 	virtual void ReadPixels( Rect_t *pSrcRect, Rect_t *pDstRect, unsigned char *data, ImageFormat dstFormat, int nDstStride );
 
 	// Gets the current buffered state... (debug only)
 	void GetBufferedState( BufferedState_t& state );
-
-	// Buffered primitives
-	void FlushBufferedPrimitives();
-	void FlushBufferedPrimitivesInternal( );
 
 	// Make sure we finish drawing everything that has been requested 
 	void FlushHardware();
@@ -932,8 +1111,15 @@ public:
 	// Used to clear the transition table when we know it's become invalid.
 	void ClearSnapshots();
 
+	// returns the D3D interfaces....
+#if !defined( _GAMECONSOLE )
+	FORCEINLINE D3DDeviceWrapper *Dx9Device() const
+	{ 
+		return (D3DDeviceWrapper*)&(m_DeviceWrapper);
+	}
+#endif
+
 	// Backward compat
-	virtual int GetActualTextureStageCount() const;
 	virtual int GetActualSamplerCount() const;
 	virtual int StencilBufferBits() const;
 	virtual bool IsAAEnabled() const;	// Is antialiasing being used?
@@ -948,9 +1134,10 @@ public:
 
 	// Get the current camera position in world space.
 	void GetWorldSpaceCameraPosition( float* pPos ) const;
+	void GetWorldSpaceCameraDirection( float* pDir ) const;
 
 	// Fog methods
-	void FogMode( MaterialFogMode_t fogMode );
+	void EnableFixedFunctionFog( bool bFogEnable );
 	void FogStart( float fStart );
 	void FogEnd( float fEnd );
 	void FogMaxDensity( float flMaxDensity );
@@ -959,12 +1146,18 @@ public:
 
 	void SceneFogMode( MaterialFogMode_t fogMode );
 	MaterialFogMode_t GetSceneFogMode( );
-	MaterialFogMode_t GetPixelFogMode( );
 	int GetPixelFogCombo( );//0 is either range fog, or no fog simulated with rigged range fog values. 1 is height fog
-	bool ShouldUsePixelFogForMode( MaterialFogMode_t fogMode );
 	void SceneFogColor3ub( unsigned char r, unsigned char g, unsigned char b );
 	void GetSceneFogColor( unsigned char *rgb );
 	void GetSceneFogColor( unsigned char *r, unsigned char *g, unsigned char *b );
+
+
+	/// update the array of precalculated color values when state changes.
+	void RegenerateFogConstants( void );
+
+	Vector CalculateFogColorConstant( D3DCOLOR *pPackedColorOut, FogMethod_t fogMethod, ShaderFogMode_t fogMode, 
+									  bool bDisableFogGammaCorrection, bool bSRGBWritesEnabled );
+
 	
 	// Selection mode methods
 	int  SelectionMode( bool selectionMode );
@@ -978,10 +1171,15 @@ public:
 	void WriteHitRecord();
 
 	// Binds a standard texture
-	virtual void BindStandardTexture( Sampler_t sampler, StandardTextureId_t id );
+	virtual void BindStandardTexture( Sampler_t sampler, TextureBindFlags_t nBindFlags, StandardTextureId_t id );
 	virtual void BindStandardVertexTexture( VertexTextureSampler_t sampler, StandardTextureId_t id );
 	virtual void GetStandardTextureDimensions( int *pWidth, int *pHeight, StandardTextureId_t id );
 
+	virtual float GetSubDHeight();
+
+	virtual bool IsStereoActiveThisFrame() const;
+	bool m_bIsStereoActiveThisFrame;
+	
 	// Gets the lightmap dimensions
 	virtual void GetLightmapDimensions( int *w, int *h );
 
@@ -989,62 +1187,55 @@ public:
 	CMeshBuilder* GetVertexModifyBuilder();
 
 	virtual bool InFlashlightMode() const;
+	virtual bool IsRenderingPaint() const;
 	virtual bool InEditorMode() const;
 
-	// Gets the bound morph's vertex format; returns 0 if no morph is bound
-	virtual MorphFormat_t GetBoundMorphFormat();
-
 	// Helper to get at the texture state stage
-	TextureStageState_t& TextureStage( int stage ) { return m_DynamicState.m_TextureStage[stage]; }
-	const TextureStageState_t& TextureStage( int stage ) const { return m_DynamicState.m_TextureStage[stage]; }
 	SamplerState_t& SamplerState( int nSampler ) { return m_DynamicState.m_SamplerState[nSampler]; }
 	const SamplerState_t& SamplerState( int nSampler ) const { return m_DynamicState.m_SamplerState[nSampler]; }
+	TextureBindFlags_t LastSetTextureBindFlags( int nSampler ) const { return SamplerState( nSampler ).m_nTextureBindFlags; }
+	void SetLastSetTextureBindFlags( int nSampler, TextureBindFlags_t nBindFlags ) { SamplerState( nSampler ).m_nTextureBindFlags = nBindFlags; }
 
-	void SetAmbientLight( float r, float g, float b );
-	void SetLight( int lightNum, const LightDesc_t& desc );
+	virtual void SetLightingState( const MaterialLightingState_t& state );
+	void SetLights( int nCount, const LightDesc_t *pDesc );
 	void SetLightingOrigin( Vector vLightingOrigin );
 	void DisableAllLocalLights();
 	void SetAmbientLightCube( Vector4D colors[6] );
-	float GetAmbientLightCubeLuminance( void );
+	float GetAmbientLightCubeLuminance( MaterialLightingState_t *pLightingState );
 
-	int GetMaxLights( void ) const;
-	const LightDesc_t& GetLight( int lightNum ) const;
+	void SetVertexShaderStateAmbientLightCube( int nVSReg, CompiledLightingState_t *pLightingState );
+	void SetPixelShaderStateAmbientLightCube( int pshReg, CompiledLightingState_t *pLightingState );
 
-	void SetVertexShaderStateAmbientLightCube();
-	void SetPixelShaderStateAmbientLightCube( int pshReg, bool bForceToBlack = false );
+	// Methods related to compiling lighting state for use in shaderes
+	void CompileAmbientCube( CompiledLightingState_t *pCompiledState, int nLightCount, const MaterialLightingState_t *pLightingState );
+	void CompileVertexShaderLocalLights( CompiledLightingState_t *pCompiledState, int nLightCount, const MaterialLightingState_t *pLightingState, bool bStaticLight );
+	void CompilePixelShaderLocalLights( CompiledLightingState_t *pCompiledState, int nLightCount, const MaterialLightingState_t *pLightingState, bool bStaticLight );
 
 	void CopyRenderTargetToTexture( ShaderAPITextureHandle_t textureHandle );
 	void CopyRenderTargetToTextureEx( ShaderAPITextureHandle_t textureHandle, int nRenderTargetID, Rect_t *pSrcRect = NULL, Rect_t *pDstRect = NULL );
 	void CopyTextureToRenderTargetEx( int nRenderTargetID, ShaderAPITextureHandle_t textureHandle, Rect_t *pSrcRect = NULL, Rect_t *pDstRect = NULL );
-	void CopyRenderTargetToScratchTexture( ShaderAPITextureHandle_t srcHandle, ShaderAPITextureHandle_t dstHandle, Rect_t *pSrcRect = NULL, Rect_t *pDstRect = NULL );
-
-	virtual void LockRect( void** pOutBits, int* pOutPitch, ShaderAPITextureHandle_t texHandle, int mipmap, int x, int y, int w, int h, bool bWrite, bool bRead );
-	virtual void UnlockRect( ShaderAPITextureHandle_t texHandle, int mipmap );
-
-	virtual void CopyTextureToTexture( ShaderAPITextureHandle_t srcTex, ShaderAPITextureHandle_t dstTex );
 
 	// Returns the cull mode (for fill rate computation)
 	D3DCULL GetCullMode() const;
 	void SetCullModeState( bool bEnable, D3DCULL nDesiredCullMode );
 	void ApplyCullEnable( bool bEnable );
+	void FlipCulling( bool bFlipCulling );
 
 	// Alpha to coverage
 	void ApplyAlphaToCoverage( bool bEnable );
 
-#if defined( _X360 )
-	void ApplySRGBReadState( int iTextureStage, bool bSRGBReadEnabled );
-#endif
-
 	// Applies Z Bias
-	void ApplyZBias( const ShadowState_t& shaderState );
+	void ApplyZBias( const DepthTestState_t &shaderState );
 
 	// Applies texture enable
 	void ApplyTextureEnable( const ShadowState_t& state, int stage );
 
-	void ApplyFogMode( ShaderFogMode_t fogMode, bool bSRGBWritesEnabled, bool bDisableFogGammaCorrection );
-	void UpdatePixelFogColorConstant( void );
+	void ApplyFogMode( ShaderFogMode_t fogMode, bool bVertexFog, bool bSRGBWritesEnabled, bool bDisableFogGammaCorrection );
+
+	void UpdatePixelFogColorConstant( bool bMultiplyByToneMapScale = true );
 
 	void EnabledSRGBWrite( bool bEnabled );
+	void SetSRGBWrite( bool bState );
 
 	// Gamma<->Linear conversions according to the video hardware we're running on
 	float GammaToLinear_HardwareSpecific( float fGamma ) const;
@@ -1053,16 +1244,10 @@ public:
 	// Applies alpha blending
 	void ApplyAlphaBlend( bool bEnable, D3DBLEND srcBlend, D3DBLEND destBlend );
 
-	// Applies alpha texture op
-	void ApplyColorTextureStage( int stage, D3DTEXTUREOP op, int arg1, int arg2 );
-	void ApplyAlphaTextureStage( int stage, D3DTEXTUREOP op, int arg1, int arg2 );
-
 	// Sets texture stage stage + render stage state
 	void SetSamplerState( int stage, D3DSAMPLERSTATETYPE state, DWORD val );
-	void SetTextureStageState( int stage, D3DTEXTURESTAGESTATETYPE state, DWORD val);
 	void SetRenderStateForce( D3DRENDERSTATETYPE state, DWORD val );
-	void SetRenderState( D3DRENDERSTATETYPE state, DWORD val, 
-						 bool bFlushBufferedPrimitivesIfChanged = false);
+	void SetRenderState( D3DRENDERSTATETYPE state, DWORD val );
 
 	// Scissor Rect
 	void SetScissorRect( const int nLeft, const int nTop, const int nRight, const int nBottom, const bool bEnableScissor );
@@ -1075,6 +1260,9 @@ public:
 
 	void EvictManagedResources();
 
+	// Get stats on GPU memory usage
+	virtual void GetGPUMemoryStats( GPUMemoryStats &stats );
+
 	virtual void EvictManagedResourcesInternal();
 
 	// Gets at a particular transform
@@ -1085,18 +1273,14 @@ public:
 
 	int GetCurrentNumBones( void ) const;
 	bool IsHWMorphingEnabled( ) const;
-	int GetCurrentLightCombo( void ) const;				// Used for DX8 only
+	TessellationMode_t GetTessellationMode( ) const;
 	void GetDX9LightState( LightState_t *state ) const;	// Used for DX9 only
 
-	MaterialFogMode_t GetCurrentFogType( void ) const;
+	MaterialFogMode_t GetCurrentFogType( void ) const; // deprecated. don't use.
 
 	void RecordString( const char *pStr );
 
-	virtual bool IsRenderingMesh() const { return m_pRenderMesh != 0; }
-
-	void SetTextureTransformDimension( TextureStage_t textureStage, int dimension, bool projected );
-	void DisableTextureTransform( TextureStage_t textureMatrix );
-	void SetBumpEnvMatrix( TextureStage_t textureStage, float m00, float m01, float m10, float m11 );
+	virtual bool IsRenderingMesh() const { return m_nRenderInstanceCount != 0; }
 
 	int GetCurrentFrameCounter( void ) const
 	{
@@ -1122,7 +1306,13 @@ public:
 	void SetFlashlightStateEx( const FlashlightState_t &state, const VMatrix &worldToTexture, ITexture *pFlashlightDepthTexture );
 	const FlashlightState_t &GetFlashlightState( VMatrix &worldToTexture ) const;
 	const FlashlightState_t &GetFlashlightStateEx( VMatrix &worldToTexture, ITexture **pFlashlightDepthTexture ) const;
-
+	virtual void GetFlashlightShaderInfo( bool *pShadowsEnabled, bool *pUberLight ) const;
+	virtual float GetFlashlightAmbientOcclusion( ) const;
+			
+	virtual bool IsCascadedShadowMapping() const;
+	virtual void SetCascadedShadowMappingState( const CascadedShadowMappingState_t &state, ITexture *pDepthTextureAtlas );
+	virtual const CascadedShadowMappingState_t &GetCascadedShadowMappingState( ITexture **pDepthTextureAtlas, bool bLightMapScale = false ) const;
+				
 	// Gets at the shadow state for a particular state snapshot
 	virtual bool IsDepthWriteEnabled( StateSnapshot_t id ) const;
 
@@ -1132,14 +1322,15 @@ public:
 	virtual void EnableDebugTextureList( bool bEnable );
 	virtual bool SetDebugTextureRendering( bool bEnable );
 	virtual void EnableGetAllTextures( bool bEnable );
-	virtual KeyValues* GetDebugTextureList();
+	virtual KeyValues* LockDebugTextureList( void );
+	virtual void UnlockDebugTextureList( void );
 	virtual int GetTextureMemoryUsed( TextureMemoryType eTextureMemory );
 
 	virtual void ClearVertexAndPixelShaderRefCounts();
 	virtual void PurgeUnusedVertexAndPixelShaders();
 
 	// Called when the dx support level has changed
-	virtual void DXSupportLevelChanged();
+	virtual void DXSupportLevelChanged( int nDXLevel );
 
 	// User clip plane override
 	virtual void EnableUserClipTransformOverride( bool bEnable );
@@ -1154,61 +1345,69 @@ public:
 	void D3DXMatrixToVMatrix( const D3DXMATRIX &in, VMatrix &out );
 	void VMatrixToD3DXMatrix( const VMatrix &in, D3DXMATRIX &out );
 
-	ITexture *GetRenderTargetEx( int nRenderTargetID );
+	ITexture *GetRenderTargetEx( int nRenderTargetID ) const;
 
 	virtual void SetToneMappingScaleLinear( const Vector &scale );
 	virtual const Vector &GetToneMappingScaleLinear( void ) const;
-	float GetLightMapScaleFactor( void ) const;
 
-	void SetFloatRenderingParameter(int parm_number, float value);
+	void SetFloatRenderingParameter(int parm_number, float value);					// Rendering Parameter Setters
+	void SetIntRenderingParameter(int parm_number, int value);						//
+	void SetTextureRenderingParameter(int parm_number, ITexture *pTexture);			//
+	void SetVectorRenderingParameter(int parm_number, Vector const &value);			//
 
-	void SetIntRenderingParameter(int parm_number, int value);
-	void SetVectorRenderingParameter(int parm_number, Vector const &value);
-
-	float GetFloatRenderingParameter(int parm_number) const;
-
-	int GetIntRenderingParameter(int parm_number) const;
-
-	Vector GetVectorRenderingParameter(int parm_number) const;
+	float GetFloatRenderingParameter(int parm_number) const;						// Rendering Parameter Getters
+	int GetIntRenderingParameter(int parm_number) const;							//
+	ITexture *GetTextureRenderingParameter(int parm_number) const;					//
+	Vector GetVectorRenderingParameter(int parm_number) const;						//
 
 	// For dealing with device lost in cases where Present isn't called all the time (Hammer)
 	virtual void HandleDeviceLost();
 
 	virtual void EnableLinearColorSpaceFrameBuffer( bool bEnable );
 
-	virtual void SetPSNearAndFarZ( int pshReg );
-
-	// stencil methods
-	void SetStencilEnable(bool onoff);
-	void SetStencilFailOperation(StencilOperation_t op);
-	void SetStencilZFailOperation(StencilOperation_t op);
-	void SetStencilPassOperation(StencilOperation_t op);
-	void SetStencilCompareFunction(StencilComparisonFunction_t cmpfn);
-	void SetStencilReferenceValue(int ref);
-	void SetStencilTestMask(uint32 msk);
-	void SetStencilWriteMask(uint32 msk);
+	void SetStencilState( const ShaderStencilState_t &state );												// Stencil methods
+	void SetStencilStateInternal( const ShaderStencilState_t &state );
+	void GetCurrentStencilState( ShaderStencilState_t *pState );
 	void ClearStencilBufferRectangle(int xmin, int ymin, int xmax, int ymax,int value);
 
-	virtual void GetDXLevelDefaults(uint &max_dxlevel,uint &recommended_dxlevel);
+#if defined ( _GAMECONSOLE )
+	bool PostQueuedTexture( const void *pData, int nSize, ShaderAPITextureHandle_t *pHandles, int nHandles, int nWidth, int nHeight, int nDepth, int nMips, int *pRefCount );
+#endif
 
 #if defined( _X360 )
 	HXUIFONT OpenTrueTypeFont( const char *pFontname, int tall, int style );
 	void CloseTrueTypeFont( HXUIFONT hFont );
-	bool GetTrueTypeFontMetrics( HXUIFONT hFont, XUIFontMetrics *pFontMetrics, XUICharMetrics charMetrics[256] );
+	bool GetTrueTypeFontMetrics( HXUIFONT hFont, wchar_t wchFirst, wchar_t wchLast, XUIFontMetrics *pFontMetrics, XUICharMetrics *pCharMetrics );
 	// Render a sequence of characters and extract the data into a buffer
 	// For each character, provide the width+height of the font texture subrect,
 	// an offset to apply when rendering the glyph, and an offset into a buffer to receive the RGBA data
 	bool GetTrueTypeGlyphs( HXUIFONT hFont, int numChars, wchar_t *pWch, int *pOffsetX, int *pOffsetY, int *pWidth, int *pHeight, unsigned char *pRGBA, int *pRGBAOffset );
-	ShaderAPITextureHandle_t CreateRenderTargetSurface( int width, int height, ImageFormat format, const char *pDebugName, const char *pTextureGroupName );
+	ShaderAPITextureHandle_t CreateRenderTargetSurface( int width, int height, ImageFormat format, RTMultiSampleCount360_t multiSampleCount, const char *pDebugName, const char *pTextureGroupName );
 	void PersistDisplay();
-	bool PostQueuedTexture( const void *pData, int nSize, ShaderAPITextureHandle_t *pHandles, int nHandles, int nWidth, int nHeight, int nDepth, int nMips, int *pRefCount );
 	void *GetD3DDevice();
 
 	void PushVertexShaderGPRAllocation( int iVertexShaderCount = 64 );
 	void PopVertexShaderGPRAllocation( void );
 
 	void EnableVSync_360( bool bEnable );
+
+	virtual void SetCacheableTextureParams( ShaderAPITextureHandle_t *pHandles, int count, const char *pFilename, int mipSkipCount );
+	virtual void FlushHiStencil();
 #endif
+
+#if defined( _GAMECONSOLE )
+	virtual void BeginConsoleZPass2( int nNumDynamicIndicesNeeded );
+	virtual void EndConsoleZPass();
+	virtual unsigned int GetConsoleZPassCounter() const { return m_nZPassCounter; }
+
+	virtual void EnablePredication( bool bZPass, bool bRenderPass );
+	virtual void DisablePredication();
+#endif
+
+#if defined( _PS3 )
+	virtual void FlushTextureCache();
+#endif
+	virtual void AntiAliasingHint( int nHint );
 
 	virtual bool OwnGPUResources( bool bEnable );
 
@@ -1241,13 +1440,26 @@ public:
 
 	// Gets the texture 
 	IDirect3DBaseTexture* GetD3DTexture( ShaderAPITextureHandle_t hTexture );
+	virtual void* GetD3DTexturePtr( ShaderAPITextureHandle_t hTexture );
+	virtual bool IsStandardTextureHandleValid( StandardTextureId_t textureId );
 
+#ifdef _PS3
+	virtual void GetPs3Texture(void* tex, ShaderAPITextureHandle_t hTexture );
+	virtual void GetPs3Texture(void* tex, StandardTextureId_t nTextureId );
+#endif
 
 	virtual bool ShouldWriteDepthToDestAlpha( void ) const;
 
 	virtual void AcquireThreadOwnership();
 	virtual void ReleaseThreadOwnership();
+
+	virtual void UpdateGameTime( float flTime ) { m_flCurrGameTime = flTime; }
+
+	virtual bool IsStereoSupported() const;
+	virtual void UpdateStereoTexture( ShaderAPITextureHandle_t texHandle, bool *pStereoActiveThisFrame );
+#ifndef _PS3
 private:
+#endif
 	enum
 	{
 		SMALL_BACK_BUFFER_SURFACE_WIDTH = 256,
@@ -1258,6 +1470,8 @@ private:
 	bool m_bDebugGetAllTextures;
 	bool m_bDebugTexturesRendering;
 	KeyValues *m_pDebugTextureList;
+	CThreadFastMutex m_DebugTextureListLock;
+
 	int m_nTextureMemoryUsedLastFrame, m_nTextureMemoryUsedTotal;
 	int m_nTextureMemoryUsedPicMip1, m_nTextureMemoryUsedPicMip2;
 	int m_nDebugDataExportFrame;
@@ -1265,6 +1479,17 @@ private:
 	FlashlightState_t m_FlashlightState;
 	VMatrix m_FlashlightWorldToTexture;
 	ITexture *m_pFlashlightDepthTexture;
+	UberlightRenderState_t m_UberlightRenderState;
+	float m_pFlashlightAtten[4];
+	float m_pFlashlightPos[4];
+	float m_pFlashlightColor[4];
+	float m_pFlashlightTweaks[4];
+	DepthBiasState_t m_ZBias;
+	DepthBiasState_t m_ZBiasDecal;
+
+	CascadedShadowMappingState_t m_CascadedShadowMappingState;
+	CascadedShadowMappingState_t m_CascadedShadowMappingState_LightMapScaled;
+	ITexture *m_pCascadedShadowMappingDepthTexture;
 
 	CShaderAPIDx8( CShaderAPIDx8 const& );
 
@@ -1288,6 +1513,7 @@ private:
 
 	void ExportTextureList();
 	void AddBufferToTextureList( const char *pName, D3DSURFACE_DESC &desc );
+	int D3DFormatToBitsPerPixel( D3DFORMAT fmt ) const;
 
 	void SetupTextureGroup( ShaderAPITextureHandle_t hTexture, const char *pTextureGroupName );
 
@@ -1343,10 +1569,40 @@ private:
 	void SetPixelShaderFogParams( int reg );
 	void SetPixelShaderFogParams( int reg, ShaderFogMode_t fogMode );
 
-	FORCEINLINE void UpdateVertexShaderFogParams( void )
+	void SetVertexShaderCameraPos()
 	{
-		if ( g_pHardwareConfig->Caps().m_SupportsPixelShaders )
+		float vertexShaderCameraPos[4];
+		vertexShaderCameraPos[0] = m_WorldSpaceCameraPosition[0];
+		vertexShaderCameraPos[1] = m_WorldSpaceCameraPosition[1];
+		vertexShaderCameraPos[2] = m_WorldSpaceCameraPosition[2];
+		vertexShaderCameraPos[3] = m_DynamicState.m_FogZ;  //waterheight in water fog mode
+
+		// eyepos.x eyepos.y eyepos.z cWaterZ
+		SetVertexShaderConstantInternal( VERTEX_SHADER_CAMERA_POS, vertexShaderCameraPos );
+	}
+	
+	// This is where vertex shader constants are set for both hardware vertex fog and pixel shader-blended vertex fog.
+	FORCEINLINE void UpdateVertexShaderFogParams( ShaderFogMode_t fogMode = SHADER_FOGMODE_NUMFOGMODES, bool bVertexFog = false )
+	{
+		float fogParams[4];
+
+		if( fogMode == SHADER_FOGMODE_NUMFOGMODES ) //not passing in an explicit fog mode
 		{
+			if ( m_TransitionTable.CurrentShadowState() == NULL )
+			{
+				fogMode = SHADER_FOGMODE_DISABLED;
+				bVertexFog = false;
+			}
+			else
+			{
+				fogMode = ( ShaderFogMode_t ) m_TransitionTable.CurrentShadowState()->m_FogAndMiscState.m_FogMode;
+				bVertexFog = m_TransitionTable.CurrentShadowState()->m_FogAndMiscState.m_bVertexFogEnable;
+			}
+		}
+
+		if( (m_SceneFogMode != MATERIAL_FOG_NONE) && (fogMode != SHADER_FOGMODE_DISABLED) )
+		{
+			//prepare the values for Fixed Function fog, and we'll modify them to handle pixel fog if necessary
 			float ooFogRange = 1.0f;
 
 			float fStart = m_VertexShaderFogParams[0];
@@ -1358,29 +1614,52 @@ private:
 				ooFogRange = 1.0f / ( fEnd - fStart );
 			}
 
-			float fogParams[4];
-			fogParams[0] = ooFogRange * fEnd;
-			fogParams[1] = 1.0f;
-			fogParams[2] = 1.0f - clamp( m_flFogMaxDensity, 0.0f, 1.0f ); // Max fog density
-
-			fogParams[3] = ooFogRange;
-
-			float vertexShaderCameraPos[4];
-			vertexShaderCameraPos[0] = m_WorldSpaceCameraPositon[0];
-			vertexShaderCameraPos[1] = m_WorldSpaceCameraPositon[1];
-			vertexShaderCameraPos[2] = m_WorldSpaceCameraPositon[2];
-			vertexShaderCameraPos[3] = m_DynamicState.m_FogZ;  // waterheight
-
-			// cFogEndOverFogRange, cFogOne, unused, cOOFogRange
-			SetVertexShaderConstant( VERTEX_SHADER_FOG_PARAMS, fogParams, 1 );
-
-			// eyepos.x eyepos.y eyepos.z cWaterZ
-			SetVertexShaderConstant( VERTEX_SHADER_CAMERA_POS, vertexShaderCameraPos );
+			// Fixed-function-blended per-vertex fog requires some inverted params since a fog factor of 0 means fully fogged and 1 means no fog.
+			// We could implement shader fog the same way, but would require an extra subtract in the vertex and/or pixel shader, which we want to avoid.
+			if ( HardwareConfig()->GetDXSupportLevel() <= 90 )
+			{
+				fogParams[0] = ooFogRange * fEnd;
+				fogParams[1] = 0.0f;
+				fogParams[2] = 1.0f - clamp( m_flFogMaxDensity, 0.0f, 1.0f ); // Max fog density
+				fogParams[3] = ooFogRange;
+			}
+			else
+			{
+				fogParams[0] = 1.0f - ( ooFogRange * fEnd );
+				fogParams[1] = 0.0f;
+				fogParams[2] = clamp( m_flFogMaxDensity, 0.0f, 1.0f ); // Max fog density
+				fogParams[3] = ooFogRange;
+			}
 		}
+		else
+		{
+			// Fixed-function-blended per-vertex fog requires some inverted params since a fog factor of 0 means fully fogged and 1 means no fog.
+			// We could implement shader fog the same way, but would require an extra subtract in the vertex and/or pixel shader, which we want to avoid.
+			if ( HardwareConfig()->GetDXSupportLevel() <= 90 )
+			{
+				//emulate no-fog by rigging the result to always be 0. 
+				fogParams[0] = 1.0f;
+				fogParams[1] = -FLT_MAX;
+				fogParams[2] = 1.0f; //Max fog density
+				fogParams[3] = 0.0f; //0 out distance factor
+			}
+			else
+			{
+				//emulate no-fog by rigging the result to always be 0. 
+				fogParams[0] = 0.0f;
+				fogParams[1] = -FLT_MAX;
+				fogParams[2] = 0.0f; //Max fog density
+				fogParams[3] = 0.0f; //0 out distance factor
+			}
+		}
+
+		// cFogEndOverFogRange, cFogOne, unused, cOOFogRange
+		SetVertexShaderConstantInternal( VERTEX_SHADER_FOG_PARAMS, fogParams, 1 );
+		SetVertexShaderCameraPos();
 	}
 
 	// Compute stats info for a texture
-	void ComputeStatsInfo( ShaderAPITextureHandle_t hTexture, bool isCubeMap, bool isVolumeTexture );
+	void ComputeStatsInfo( ShaderAPITextureHandle_t hTexture, bool bIsCubeMap, bool isVolumeTexture );
 
 	// For procedural textures
 	void AdvanceCurrentCopy( ShaderAPITextureHandle_t hTexture );
@@ -1408,7 +1687,12 @@ private:
 	bool WouldBeOverTextureLimit( ShaderAPITextureHandle_t hTexture );
 
 	// Sets the texture state
-	void SetTextureState( Sampler_t sampler, ShaderAPITextureHandle_t hTexture, bool force = false );
+	void SetTextureState( Sampler_t sampler, TextureBindFlags_t nBindFlags, ShaderAPITextureHandle_t hTexture, bool force = false );
+
+	FORCEINLINE void TouchTexture( Sampler_t sampler, IDirect3DBaseTexture *pD3DTexture );
+
+	// Lookup standard texture handle
+	ShaderAPITextureHandle_t GetStandardTextureHandle(StandardTextureId_t id);
 
 	// Grab/release the internal render targets such as the back buffer and the save game thumbnail
 	void AcquireInternalRenderTargets();
@@ -1425,27 +1709,18 @@ private:
 	// returns true if we're using texture coordinates at a given stage
 	bool IsUsingTextureCoordinates( int stage, int flags ) const;
 
-	// Returns true if the board thinks we're generating spheremap coordinates
-	bool IsSpheremapRenderStateActive( int stage ) const;
-
-	// Returns true if we're modulating constant color into the vertex color
-	bool IsModulatingVertexColor() const;
-
-	// Recomputes ambient light cube
-	void RecomputeAmbientLightCube( );
-
 	// Debugging spew
 	void SpewBoardState();
 
-	// Compute and save the world space camera position.
-	void CacheWorldSpaceCameraPosition();
+	// Compute and save the world space camera position and direction
+	void CacheWorldSpaceCamera();
 
 	// Compute and save the projection atrix with polyoffset built in if we need it.
 	void CachePolyOffsetProjectionMatrix();
 
 	// Vertex shader helper functions
-	int  FindVertexShader( VertexFormat_t fmt, char const* pFileName ) const;
-	int  FindPixelShader( char const* pFileName ) const;
+	int  FindVertexShader( VertexFormat_t fmt, const char* pFileName ) const;
+	int  FindPixelShader( const char* pFileName ) const;
 
 	// Returns copies of the front and back buffers
 	IDirect3DSurface* GetFrontBufferImage( ImageFormat& format );
@@ -1456,38 +1731,24 @@ private:
 	void CopyBitsFromHostSurface( IDirect3DSurface* pSurfaceBits, 
 		const Rect_t &dstRect, unsigned char *pData, ImageFormat srcFormat, ImageFormat dstFormat, int nDstStride );
 
-	FORCEINLINE void SetTransform( D3DTRANSFORMSTATETYPE State, CONST D3DXMATRIX *pMatrix )
-	{
-#if !defined( _X360 )
-		Dx9Device()->SetTransform( State, pMatrix );
-#endif
-	}
-
-	FORCEINLINE void SetLight( DWORD Index, CONST D3DLIGHT9 *pLight )
-	{
-#if !defined( _X360 )
-		Dx9Device()->SetLight( Index, pLight );
-#endif
-	}
-
-	FORCEINLINE void LightEnable( DWORD LightIndex, bool bEnable )
-	{
-#if !defined( _X360 )
-		Dx9Device()->LightEnable( LightIndex, bEnable );
-#endif
-	}
-
-
+	void SetTextureFilterMode( Sampler_t sampler, TextureFilterMode_t nMode );
+	
 	void ExecuteCommandBuffer( uint8 *pCmdBuffer );
+#ifdef _PS3
+	void ExecuteCommandBufferPPU(uint8 *pCmdBuffer );
+#endif
+
+	void ExecuteInstanceCommandBuffer( const unsigned char *pCmdBuf, int nInstanceIndex, bool bForceStateSet );
 	void SetStandardTextureHandle( StandardTextureId_t nId, ShaderAPITextureHandle_t );
+	void RecomputeAggregateLightingState( void );
+	virtual void DrawInstances( int nInstanceCount, const MeshInstanceData_t *pInstance );
 
 	// Methods related to queuing functions to be called per-(pMesh->Draw call) or per-pass
-	void ClearAllCommitFuncs( CommitFuncType_t func, CommitShaderType_t shader );
-	void CallCommitFuncs( CommitFuncType_t func, CommitShaderType_t shader, bool bForce );
-	bool IsCommitFuncInUse( CommitFuncType_t func, CommitShaderType_t shader, int nFunc ) const;
-	void MarkCommitFuncInUse( CommitFuncType_t func, CommitShaderType_t shader, int nFunc );
-	void AddCommitFunc( CommitFuncType_t func, CommitShaderType_t shader, StateCommitFunc_t f );
-	void CallCommitFuncs( CommitFuncType_t func, bool bUsingFixedFunction, bool bForce = false );
+	void ClearAllCommitFuncs( CommitFuncType_t func );
+	bool IsCommitFuncInUse( CommitFuncType_t func, int nFunc ) const;
+	void MarkCommitFuncInUse( CommitFuncType_t func, int nFunc );
+	void AddCommitFunc( CommitFuncType_t func, StateCommitFunc_t f );
+	void CallCommitFuncs( CommitFuncType_t func, bool bForce = false );
 
 	// Commits transforms and lighting
 	void CommitStateChanges();
@@ -1501,24 +1762,17 @@ private:
 	void CommitPerPassXboxFixups();
 
 	// Commits user clip planes
-	void CommitUserClipPlanes( bool bUsingFixedFunction );
+	void CommitUserClipPlanes( );
 
 	// Gets the user clip transform (world->view)
 	D3DXMATRIX & GetUserClipTransform( );
 
 	// transform commit
 	bool VertexShaderTransformChanged( int i );
-	bool FixedFunctionTransformChanged( int i );
 
 	void UpdateVertexShaderMatrix( int iMatrix );
-	void SetVertexShaderStateSkinningMatrices();
 	void CommitVertexShaderTransforms();
 	void CommitPerPassVertexShaderTransforms();
-
-	void UpdateFixedFunctionMatrix( int iMatrix );
-	void SetFixedFunctionStateSkinningMatrices();
-	void CommitFixedFunctionTransforms();
-	void CommitPerPassFixedFunctionTransforms();
 
 	// Recomputes the fast-clip plane matrices based on the current fast-clip plane
 	void CommitFastClipPlane( );
@@ -1526,18 +1780,12 @@ private:
 	// Computes a matrix which includes the poly offset given an initial projection matrix
 	void ComputePolyOffsetMatrix( const D3DXMATRIX& matProjection, D3DXMATRIX &matProjectionOffset );
 
-	void SetSkinningMatrices();
+	bool SetSkinningMatrices( const MeshInstanceData_t &instance );
+	bool IsRenderingInstances() const;
 	
 	// lighting commit
-	bool VertexShaderLightingChanged( int i );
-	bool VertexShaderLightingEnableChanged( int i );
-	bool FixedFunctionLightingChanged( int i );
-	bool FixedFunctionLightingEnableChanged( int i );
-	VertexShaderLightTypes_t ComputeLightType( int i ) const;
-	void SortLights( int* index );
-	void CommitVertexShaderLighting();
-	void CommitPixelShaderLighting( int pshReg );
-	void CommitFixedFunctionLighting();
+	void CommitVertexShaderLighting( CompiledLightingState_t *pLightingState );
+	void CommitPixelShaderLighting( int pshReg, CompiledLightingState_t *pLightingState );
 
 	// Gets the surface associated with a texture (refcount of surface is increased)
 	IDirect3DSurface* GetTextureSurface( ShaderAPITextureHandle_t textureHandle );
@@ -1571,20 +1819,29 @@ private:
 	// Gamma correction of fog color, or not...
 	D3DCOLOR ComputeGammaCorrectedFogColor( unsigned char r, unsigned char g, unsigned char b, bool bSRGBWritesEnabled );
 
-	void SetDefaultMaterial();
-
 	bool RestorePersistedDisplay( bool bUseFrontBuffer );
 
 	void ClearStdTextureHandles( void );
 
 	// debug logging
 	void PrintfVA( char *fmt, va_list vargs );
-	void Printf( const char *fmt, ... );	
+	void Printf( char *fmt, ... );	
 	float Knob( char *knobname, float *setvalue = NULL );
+
+	void AddShaderComboInformation( const ShaderComboSemantics_t *pSemantics );
+
+	virtual float GetLightMapScaleFactor() const;
+
+	virtual ShaderAPITextureHandle_t FindTexture( const char *pDebugName );
+	virtual void GetTextureDimensions( ShaderAPITextureHandle_t hTexture, int &nWidth, int &nHeight, int &nDepth );
+
+#ifndef _GAMECONSOLE
+	D3DDeviceWrapper	m_DeviceWrapper;
+#endif
 
 	// "normal" back buffer and depth buffer.  Need to keep this around so that we
 	// know what to set the render target to when we are done rendering to a texture.
-	IDirect3DSurface	*m_pBackBufferSurface;
+	CUtlVector<IDirect3DSurface*> m_pBackBufferSurfaces;
 	IDirect3DSurface	*m_pBackBufferSurfaceSRGB;
 	IDirect3DSurface	*m_pZBufferSurface;
 
@@ -1610,7 +1867,8 @@ private:
 	int m_CurrStack;
 
 	// The current camera position in world space.
-	Vector4D m_WorldSpaceCameraPositon;
+	Vector m_WorldSpaceCameraPosition;
+	Vector m_WorldSpaceCameraDirection;
 
 	// The current projection matrix with polyoffset baked into it.
 	D3DXMATRIX		m_CachedPolyOffsetProjectionMatrix;
@@ -1626,11 +1884,18 @@ private:
 	DynamicState_t	m_DesiredState;
 
 	// A list of state commit functions to run as per-draw call commit time
-	unsigned char m_pCommitFlags[COMMIT_FUNC_TYPE_COUNT][COMMIT_SHADER_TYPE_COUNT][ COMMIT_FUNC_BYTE_COUNT ];
-	CUtlVector< StateCommitFunc_t >	m_CommitFuncs[COMMIT_FUNC_TYPE_COUNT][COMMIT_SHADER_TYPE_COUNT];
+	unsigned char m_pCommitFlags[COMMIT_FUNC_TYPE_COUNT][ COMMIT_FUNC_BYTE_COUNT ];
+	CUtlVector< StateCommitFunc_t >	m_CommitFuncs[COMMIT_FUNC_TYPE_COUNT];
 
 	// Render data
 	CMeshBase *m_pRenderMesh;
+	int m_nRenderInstanceCount;
+	const MeshInstanceData_t *m_pRenderInstances;
+	CompiledLightingState_t *m_pRenderCompiledState;
+	InstanceInfo_t *m_pRenderInstanceInfo;
+	ShaderStencilState_t m_RenderInitialStencilState;
+	bool m_bRenderHasSetStencil;
+
 	int m_nDynamicVBSize;
 	IMaterialInternal *m_pMaterial;
 
@@ -1638,10 +1903,10 @@ private:
 	float m_fShadowSlopeScaleDepthBias;
 	float m_fShadowDepthBias;
 
-	bool		m_bReadPixelsEnabled;
-
-	// Render-to-texture stuff...
-	bool		m_UsingTextureRenderTarget;
+	bool		m_bReadPixelsEnabled : 1;
+	bool		m_bFlipCulling : 1;
+	bool		m_bSinglePassFlashlightMode : 1;
+	bool		m_UsingTextureRenderTarget : 1;
 
 	int			m_ViewportMaxWidth;
 	int			m_ViewportMaxHeight;
@@ -1649,22 +1914,27 @@ private:
 	ShaderAPITextureHandle_t m_hCachedRenderTarget;
 	bool		m_bUsingSRGBRenderTarget;
 
-	// Ambient cube map ok?
-	int m_CachedAmbientLightCube;
-
 	// The current frame
 	int m_CurrentFrame;
 
 	// The texture we're currently modifying
-	ShaderAPITextureHandle_t m_ModifyTextureHandle;
-	char m_ModifyTextureLockedLevel;
-	unsigned char m_ModifyTextureLockedFace;
+	// Using thread local variables so that ModifyTexture(), TexLock()/TexUnlock(), ... can concurently be used
+	// from different thread (eg scaleform and lightmap)
+	static CTHREADLOCALINTEGER( ShaderAPITextureHandle_t ) m_ModifyTextureHandle;
+	static CTHREADLOCALINT m_ModifyTextureLockedLevel;
+	static CTHREADLOCALINT m_ModifyTextureLockedFace;
 
 	// Stores all textures
 	CUtlFixedLinkedList< Texture_t >	m_Textures;
-
-	// Mesh builder used to modify vertex data
-	CMeshBuilder m_ModifyBuilder;
+#ifdef _PS3
+	CUtlVector< ShaderAPITextureHandle_t > m_ArtificialTextureHandles;
+	struct DepthBufferCacheEntry_t
+	{
+		CPs3gcmTexture *m_pReal;
+		CPs3gcmTexture *m_pCache;
+	};
+	CUtlVector< DepthBufferCacheEntry_t > m_arrPs3DepthBufferCache;
+#endif
 
 	float			m_VertexShaderFogParams[2];
 	float			m_flFogMaxDensity;
@@ -1708,12 +1978,13 @@ private:
 
 	// rendering parameter storage
 	int IntRenderingParameters[MAX_INT_RENDER_PARMS];
+	ITexture *TextureRenderingParameters[MAX_TEXTURE_RENDER_PARMS];
 	float FloatRenderingParameters[MAX_FLOAT_RENDER_PARMS];
 	Vector VectorRenderingParameters[MAX_VECTOR_RENDER_PARMS];
 
 	ShaderAPITextureHandle_t m_StdTextureHandles[TEXTURE_MAX_STD_TEXTURES];
 	
-	// PIX instrumentation utlities...enable these with PIX_INSTRUMENTATION
+	// PIX instrumentation utilities...enable these with PIX_INSTRUMENTATION
 	void StartPIXInstrumentation();
 	void EndPIXInstrumentation();
 	void SetPIXMarker( unsigned long color, const char *szName );
@@ -1728,21 +1999,31 @@ private:
 		return MeshMgr()->ComputeVertexDescription( pBuffer, vertexFormat, desc );
 	}
 
-	// Reports support for shadow depth texturing
-	bool SupportsShadowDepthTextures( void );
-	bool SupportsFetch4( void );
+	int VertexFormatSize( VertexFormat_t vertexFormat ) const
+	{
+		return MeshMgr()->VertexFormatSize( vertexFormat );
+	}
+
+	// Bracket custom shadow rendering code that doesn't use transition tables or regular cshaders
+	bool m_bToolsMode;
+	bool m_bVtxLitMesh;
+	bool m_bUnlitMesh;
+	bool m_bLmapMesh;
+	bool m_bGeneratingCSMs;
+	BOOL m_bCSMsValidThisFrame;
+	void BeginGeneratingCSMs();
+	void EndGeneratingCSMs();
+
+	// Per-cascade settings
+	void PerpareForCascadeDraw( int cascade, float fShadowSlopeScaleDepthBias, float fShadowDepthBias );
 
 	void SetShadowDepthBiasFactors( float fShadowSlopeScaleDepthBias, float fShadowDepthBias );
 
-	// Vendor-dependent depth stencil texture format
-	ImageFormat GetShadowDepthTextureFormat( void );
-
-	bool SupportsBorderColor( void ) const;
-	bool SupportsFetch4( void ) const;
-	
 	void EnableBuffer2FramesAhead( bool bEnable );
+	
+	void GetActualProjectionMatrix( float *pMatrix );
 
-	void SetDepthFeatheringPixelShaderConstant( int iConstant, float fDepthBlendScale );
+	void SetDepthFeatheringShaderConstants( int iConstant, float fDepthBlendScale );
 
 	void SetDisallowAccess( bool b )
 	{
@@ -1765,9 +2046,6 @@ private:
 		g_ShaderMutex.Unlock();
 	}
 
-	// Vendor-dependent slim texture format
-	ImageFormat GetNullTextureFormat( void );
-
 	//The idea behind a delayed constant is this.
 	// Some shaders set constants based on rendering states, and some rendering states aren't updated until after a shader's already called Draw().
 	//  So, for some functions that are state based, we save the constant we set and if the state changes between when it's set in the shader setup code 
@@ -1786,6 +2064,8 @@ private:
 
 	bool SetRenderTargetInternalXbox( ShaderAPITextureHandle_t hTexture, bool bForce = false );
 
+	FogMethod_t ComputeFogMethod( ShaderFogMode_t shaderFogMode, MaterialFogMode_t sceneFogMode, bool bVertexFog );
+
 #if defined( _X360 )
 	CUtlStack<int> m_VertexShaderGPRAllocationStack;
 #endif
@@ -1799,9 +2079,35 @@ private:
 
 	bool m_bGPUOwned;
 	bool m_bResetRenderStateNeeded;
+#if defined( _GAMECONSOLE )
+	bool m_bInZPass;
+	unsigned int m_nZPassCounter;
+	StateSnapshot_t m_zPassSnapshot;
+#endif
 
-#ifdef ENABLE_NULLREF_DEVICE_SUPPORT
-	bool m_NullDevice;
+	float32 m_flCurrGameTime;
+
+#if defined( _X360 )
+	struct XboxFontMap_t
+	{
+		XboxFontMap_t()
+		{
+			m_pPhysicalMemory = NULL;
+			m_nMemorySize = 0;
+			m_nFontFileSize = 0;
+		}
+
+		void	*m_pPhysicalMemory;
+		int		m_nMemorySize;
+		int		m_nFontFileSize;
+	};
+
+	CUtlDict< XboxFontMap_t > m_XboxFontMemoryDict;
+#endif
+
+#if defined( _WIN32 )
+	IDirect3DSurface *m_pNVAPI_registeredDepthStencilSurface;
+	IDirect3DTexture *m_pNVAPI_registeredDepthTexture;
 #endif
 };
 
@@ -1824,56 +2130,351 @@ EXPOSE_SINGLE_INTERFACE_GLOBALVAR( CShaderAPIDx8, IDebugTextureInfo,
 				DEBUG_TEXTURE_INFO_VERSION, g_ShaderAPIDX8 )
 
 //-----------------------------------------------------------------------------
+// CShaderAPIDx8 static members
+//-----------------------------------------------------------------------------
+CTHREADLOCALINTEGER( ShaderAPITextureHandle_t ) CShaderAPIDx8::m_ModifyTextureHandle(INVALID_SHADERAPI_TEXTURE_HANDLE);
+CTHREADLOCALINT CShaderAPIDx8::m_ModifyTextureLockedLevel(-1);
+CTHREADLOCALINT CShaderAPIDx8::m_ModifyTextureLockedFace;
+
+//-----------------------------------------------------------------------------
 // Accessors for major interfaces
 //-----------------------------------------------------------------------------
+#if !defined( _GAMECONSOLE )
+D3DDeviceWrapper *Dx9Device()
+{
+	return g_ShaderAPIDX8.Dx9Device();
+}
+#endif
 
 // Pix wants a max of 32 characters
 // We'll give it the right-most substrings separated by slashes
 static char s_pPIXMaterialName[32];
-void PIXifyName( char *pDst, int destSize, const char *pSrc )
+void PIXifyName( char *pDest, const char *pSrc )
 {
 	char *pSrcWalk = (char *)pSrc;
 
-	while ( V_strlen( pSrcWalk ) > 31 )						// While we still have too many characters
+	// Walk forward looking for the end, find the last \ or /
+	char *pLastSlash = pSrcWalk;
+	while ( *pSrcWalk )
 	{
-		char *pTok = strpbrk( pSrcWalk, "/\\" );			// Find next token
-
-		if ( pTok )
-			pSrcWalk = pTok + 1;
-		else
-			break;
+		char c = *pSrcWalk;
+		if ( c == '\\' || c == '/' )
+		{
+			pLastSlash = pSrcWalk + 1;
+		}
+		++pSrcWalk;
 	}
 
-	V_strncpy( pDst, pSrcWalk, min( 32, destSize ) );
+	size_t nBytes = (intp)pSrcWalk - (intp)pLastSlash + 1;
+	if ( nBytes > 32 )
+	{
+		pLastSlash = pSrcWalk + 1 - 32;
+		nBytes = 32;
+	}
+	else if ( pLastSlash != pSrc )
+	{
+		pSrcWalk = pLastSlash - 2;
+		size_t nTestBytes = nBytes + 2;
+		while( nTestBytes <= 32 )
+		{
+			char c = *pSrcWalk;
+			if ( c == '\\' || c == '/' )
+			{
+				pLastSlash = pSrcWalk + 1;
+				nBytes = nTestBytes - 1;
+			}
+
+			if ( pSrcWalk == pSrc )
+			{
+				pLastSlash = (char*)pSrc;
+				nBytes = nTestBytes;
+				break;
+			}
+
+			--pSrcWalk;
+			++nTestBytes;
+		}
+	}
+
+	memcpy( pDest, pLastSlash, nBytes );
 }
 
-static int AdjustUpdateRange( float const* pVec, void const *pOut, int numVecs, int* pSkip )
+#ifdef _WIN32
+void PrintError( NvAPI_Status status, uint32 unStage, uint32 unProp, bool bPlus = false )
 {
-	int skip = 0;
-	uint32* pSrc = (uint32*)pVec;
-	uint32* pDst = (uint32*)pOut;
-	while( numVecs && !( ( pSrc[0] ^ pDst[0] ) | ( pSrc[1] ^ pDst[1] ) | ( pSrc[2] ^ pDst[2] ) | ( pSrc[3] ^ pDst[3] ) ) )
-	{
-		pSrc += 4;
-		pDst += 4;
-		numVecs--;
-		skip++;
-	}
-	*pSkip = skip;
-	if ( !numVecs )
-		return 0;
-
-	uint32* pSrcLast = pSrc + numVecs * 4 - 4;
-	uint32* pDstLast = pDst + numVecs * 4 - 4;
-	while( numVecs > 1 && !( ( pSrcLast[0] ^ pDstLast[0] ) | ( pSrcLast[1] ^ pDstLast[1] ) | ( pSrcLast[2] ^ pDstLast[2] ) | ( pSrcLast[3] ^ pDstLast[3] ) ) )
-	{
-		pSrcLast -= 4;
-		pDstLast -= 4;
-		numVecs--;
-	}
-
-	return numVecs;
+	NvAPI_ShortString szDesc = { 0 };
+	NvAPI_GetErrorMessage( status, szDesc );
+#ifdef DEBUG
+	Msg( " NVAPI error: %s\n", szDesc );
+#endif
+	Error( "Failed to initialize NVidia driver!\nDriver error at 0x%08X%s%08X: %s\n\nPlease visit NVidia website to get the most recent version of the graphics drivers and restore your Counter-Strike: Global Offensive driver profile and global driver profile to NVidia defaults.",
+		unStage, ( bPlus ? "+" : "-" ), unProp,
+		szDesc );
 }
+
+#ifdef DEBUG
+void DumpProfileSettings( NvDRSSessionHandle hSession, NvDRSProfileHandle hProfile, int numOfSettings )
+{
+	char szTemp[ 2048 ];
+	size_t nChars = 0;
+
+	if ( numOfSettings > 0 )
+	{
+		NVDRS_SETTING *setArray = new NVDRS_SETTING[ numOfSettings ];
+		V_memset( setArray, 0, sizeof( NVDRS_SETTING ) * numOfSettings );
+		NvU32 numSetRead = numOfSettings;
+		setArray[ 0 ].version = NVDRS_SETTING_VER;
+		NvAPI_Status status = NvAPI_DRS_EnumSettings( hSession, hProfile, 0, &numSetRead, setArray );
+		if (status != NVAPI_OK)
+		{
+			PrintError( status, 0x454e4d53, numOfSettings );
+			return;
+		}
+		for( unsigned int i = 0; i < numSetRead; i++ )
+		{
+			if ( setArray[ i ].settingLocation != NVDRS_CURRENT_PROFILE_LOCATION )
+			{
+				continue;
+			}
+			wcstombs_s( &nChars, szTemp, 2048, (wchar_t*)(setArray[ i ].settingName), 2048 );
+			Msg( "Setting Name: %s\n", szTemp );
+			Msg( "Setting ID: %X\n", setArray[ i ].settingId );
+			Msg( "Setting Type: %X\n", setArray[ i ].settingType );
+			Msg( "Predefined? : %d\n", setArray[ i ].isCurrentPredefined );
+			switch ( setArray[ i ].settingType )
+			{
+				case NVDRS_DWORD_TYPE:
+					Msg( "Setting Value: %X\n\n", setArray[ i ].u32CurrentValue );
+					break;
+				case NVDRS_BINARY_TYPE:
+					{
+						Msg( "Setting Binary (length=%d) :", setArray[ i ].binaryCurrentValue.valueLength );
+						for( unsigned int len = 0; len < setArray[ i ].binaryCurrentValue.valueLength; len++ )
+						{
+							Msg(" %02x", setArray[ i ].binaryCurrentValue.valueData[ len ] );
+						}
+						Msg( "\n\n" );
+					}
+					break;
+				case NVDRS_WSTRING_TYPE:
+					{
+						wcstombs_s( &nChars, szTemp, 2048, ( wchar_t* )( setArray[ i ].wszCurrentValue ), 2048 );
+						Msg( "Setting Value: %s\n\n", szTemp );
+					}
+					break;
+			}
+		}
+	}
+	Msg("\n");
+}
+#endif
+
+void ForceProfileSettings( NvDRSSessionHandle hSession, NvDRSProfileHandle hProfile, int numOfSettings )
+{
+	bool bNeedsSaving = false;
+	uint32 unFirstFixedProp = 0;
+	uint32 unFirstFixedValue = 0;
+	if ( numOfSettings > 0 )
+	{
+		NVDRS_SETTING *setArray = new NVDRS_SETTING[ numOfSettings ];
+		V_memset( setArray, 0, sizeof( NVDRS_SETTING ) * numOfSettings );
+		NvU32 numSetRead = numOfSettings;
+		setArray[ 0 ].version = NVDRS_SETTING_VER;
+		NvAPI_Status status = NvAPI_DRS_EnumSettings( hSession, hProfile, 0, &numSetRead, setArray );
+		if ( status != NVAPI_OK )
+		{
+			// PrintError( status, 0x454e4d53, numOfSettings );
+			return;
+		}
+		for ( unsigned int i = 0; i < numSetRead; i++ )
+		{
+			if ( setArray[ i ].settingLocation != NVDRS_CURRENT_PROFILE_LOCATION )
+			{
+				continue;
+			}
+			bool bNeedsReset = false;
+			switch ( setArray[ i ].settingId )
+			{
+			case 0x002C7F45: // Ambient Occlusion Compatibility
+				switch ( setArray[ i ].u32CurrentValue )
+				{
+				case 0: // disabled
+				case 0x2C: // CS:GO
+					break;
+				default:
+					bNeedsReset = true;
+					break;
+				}
+				break;
+			case 0x00664339: // NVIDIA Predefined Ambient Occlusion Usage
+				switch ( setArray[ i ].u32CurrentValue )
+				{
+				case 1: // Enabled
+					break;
+				default:
+					bNeedsReset = true;
+					break;
+				}
+				break;
+			case 0x00667329: // Ambient Occlusion Setting
+				switch ( setArray[ i ].u32CurrentValue )
+				{
+				case 0: // Off
+					break;
+				default:
+					bNeedsReset = true;
+					break;
+				}
+				break;
+			case 0x00738E8F: // texture filtering LOD bias (DX)
+			case 0x20403F79: // texture filtering LOD bias (GL)
+				switch ( setArray[ i ].u32CurrentValue )
+				{
+				case 0: // Off
+					break;
+				default:
+					bNeedsReset = true;
+					break;
+				}
+				break;
+			}
+			if ( bNeedsReset )
+			{
+#ifdef _DEBUG
+				Msg( "NVIDIA Setting Override Required -- ID: %X Old Value: %X\n", setArray[ i ].settingId, setArray[ i ].u32CurrentValue );
+#endif
+				if ( !bNeedsSaving )
+				{
+					unFirstFixedProp = setArray[ i ].settingId;
+					unFirstFixedValue = setArray[ i ].u32CurrentValue;
+				}
+				status = NvAPI_DRS_RestoreProfileDefaultSetting( hSession, hProfile, setArray[ i ].settingId );
+				if ( status != NVAPI_OK )
+				{
+					PrintError( status, setArray[ i ].settingId, setArray[ i ].u32CurrentValue );
+				}
+				bNeedsSaving = true;
+			}
+		}
+	}
+	
+	if ( bNeedsSaving )
+	{
+		NvAPI_Status status;
+		status = NvAPI_DRS_SaveSettings( hSession );
+		if ( ( status != NVAPI_OK )
+			&& ( status != NVAPI_FILE_NOT_FOUND )
+			&& ( status != NVAPI_ERROR ) )
+		{
+			PrintError( status, unFirstFixedProp, unFirstFixedValue, true );
+		}
+	}
+}
+
+bool CheckAndFixProfileSettings( NvDRSSessionHandle hSession, NvDRSProfileHandle hProfile, bool &bCSGOProfileFound )
+{
+	NvAPI_Status status;
+	NVDRS_PROFILE profileInformation = { 0 };
+	profileInformation.version = NVDRS_PROFILE_VER;
+	status = NvAPI_DRS_GetProfileInfo( hSession, hProfile, &profileInformation );
+	if ( status != NVAPI_OK )
+	{
+		// PrintError( status, 0x50524f46, status );
+		return false;
+	}
+
+	char szTemp[ 2048 ];
+	size_t nChars = 0;
+
+	if ( profileInformation.numOfApps > 0 )
+	{
+#if 1	// use the basic V1 info to work with oldest possible drivers
+		NVDRS_APPLICATION_V1 *appArray = new NVDRS_APPLICATION_V1[ profileInformation.numOfApps ];
+		appArray[ 0 ].version = NVDRS_APPLICATION_VER_V1;
+#else	// most recent version of app info
+		NVDRS_APPLICATION *appArray = new NVDRS_APPLICATION[ profileInformation.numOfApps ];
+		appArray[ 0 ].version = NVDRS_APPLICATION_VER;
+#endif
+		NvU32 numAppsRead = profileInformation.numOfApps;
+		status = NvAPI_DRS_EnumApplications( hSession, hProfile, 0, &numAppsRead, reinterpret_cast< NVDRS_APPLICATION * >( appArray ) );
+		if ( status != NVAPI_OK )
+		{
+			// PrintError( status, 0x454e4d41, numAppsRead );
+			delete[] appArray;
+			return false;
+		}
+		for( unsigned int i = 0; i < numAppsRead; i++ )
+		{
+			wcstombs_s( &nChars, szTemp, 2048, ( wchar_t* )( appArray[ i ].appName ), 2048 );
+			if ( V_stristr( szTemp, "csgo.exe" ) != NULL )
+			{
+				bCSGOProfileFound = true;
+#ifdef DEBUG
+				wcstombs_s( &nChars, szTemp, 2048, ( wchar_t* )( profileInformation.profileName ), 2048 );
+				Msg( "Profile Name: %s\n", szTemp );
+				Msg( "Number of Applications associated with the Profile: %d\n", profileInformation.numOfApps );
+				Msg( "Number of Settings associated with the Profile: %d\n", profileInformation.numOfSettings );
+				Msg( "Is Predefined: %d\n\n", profileInformation.isPredefined );
+				Msg( "Executable: %s\n", szTemp);
+				wcstombs_s( &nChars, szTemp, 2048, ( wchar_t* )( appArray[ i ].userFriendlyName ), 2048 );
+				Msg( "User Friendly Name: %s\n", szTemp );
+				Msg( "Is Predefined: %d\n\n", appArray[ i ].isPredefined );
+				DumpProfileSettings( hSession, hProfile, profileInformation.numOfSettings );
+#endif
+				ForceProfileSettings( hSession, hProfile, profileInformation.numOfSettings );
+			}
+		}
+		delete[] appArray;
+	}
+
+	return true;
+}
+
+void ScanAndFixNvDriverProfiles()
+{
+	NvAPI_Status status;
+	status = NvAPI_Initialize();
+	if ( status != NVAPI_OK )
+	{
+		// will get here for any non-Nv drivers or really really old Nv drivers that don't support NvAPI
+		return;
+	}
+
+	NvDRSSessionHandle hSession = 0;
+	status = NvAPI_DRS_CreateSession( &hSession );
+	if ( status == NVAPI_OK )
+	{
+		status = NvAPI_DRS_LoadSettings( hSession );
+		if ( status == NVAPI_OK )
+		{
+			NvDRSProfileHandle hProfile = 0;
+			bool bCSGOProfileFound = false;
+			unsigned int index = 0;
+			while ( ( status = NvAPI_DRS_EnumProfiles( hSession, index, &hProfile ) ) == NVAPI_OK )
+			{
+				CheckAndFixProfileSettings( hSession, hProfile, bCSGOProfileFound );
+				index++;
+			}
+
+			// force global settings
+			status = NvAPI_DRS_GetBaseProfile( hSession, &hProfile );
+			if ( status == NVAPI_OK )
+			{
+				NVDRS_PROFILE profileInformation = { 0 };
+				profileInformation.version = NVDRS_PROFILE_VER;
+				status = NvAPI_DRS_GetProfileInfo( hSession, hProfile, &profileInformation );
+				if ( status == NVAPI_OK )
+				{
+					ForceProfileSettings( hSession, hProfile, profileInformation.numOfSettings );
+				}
+			}
+		}
+	}
+
+	NvAPI_DRS_DestroySession( hSession );
+	hSession = 0; 
+}
+#endif
 
 //-----------------------------------------------------------------------------
 // Constructor, destructor
@@ -1881,27 +2482,25 @@ static int AdjustUpdateRange( float const* pVec, void const *pOut, int numVecs, 
 CShaderAPIDx8::CShaderAPIDx8() :
 	m_Textures( 32 ),
 	m_CurrStack( -1 ),
-	m_ModifyTextureHandle( INVALID_SHADERAPI_TEXTURE_HANDLE ),
 	m_pRenderMesh( 0 ),
 	m_nDynamicVBSize( DYNAMIC_VERTEX_BUFFER_MEMORY ),
 	m_pMaterial( NULL ),
 	m_CurrentFrame( 0 ),
-	m_CachedAmbientLightCube( STATE_CHANGED ),
 	m_InSelectionMode( false ),
 	m_SelectionMinZ( FLT_MAX ),
 	m_SelectionMaxZ( FLT_MIN ),
 	m_pSelectionBuffer( 0 ),
 	m_pSelectionBufferEnd( 0 ),
 	m_bResetRenderStateNeeded( false ),
-	m_ModifyTextureLockedLevel( -1 ),
 	m_nPixFrame(0),
 	m_bPixCapturing(false),
 	m_nPIXErrorCount(0),
-	m_pBackBufferSurface( 0 ),
+	m_pBackBufferSurfaces(),
 	m_pBackBufferSurfaceSRGB( 0 ),
 	m_pZBufferSurface( 0 ),
 	m_bResettingRenderState( false ),
 	m_bReadPixelsEnabled( false ),
+	m_bSinglePassFlashlightMode( false ),
 	m_ToneMappingScale( 1.0f, 1.0f, 1.0f, 1.0f ),
 	m_hFullScreenTexture( INVALID_SHADERAPI_TEXTURE_HANDLE ),
 	m_hLinearToGammaTableTexture( INVALID_SHADERAPI_TEXTURE_HANDLE ),
@@ -1909,7 +2508,13 @@ CShaderAPIDx8::CShaderAPIDx8() :
 	m_fShadowSlopeScaleDepthBias( 16.0f ),
 	m_fShadowDepthBias( 0.00008f ),
 	m_hCachedRenderTarget( INVALID_SHADERAPI_TEXTURE_HANDLE ),
-	m_bUsingSRGBRenderTarget( false )
+	m_bUsingSRGBRenderTarget( false ),
+	m_bFlipCulling( false ),
+	m_flCurrGameTime( 0.0f ),
+#if defined( _X360 )
+	m_XboxFontMemoryDict( k_eDictCompareTypeCaseInsensitive ),
+#endif
+	m_bIsStereoActiveThisFrame( false )
 {
 	// FIXME: Remove! Backward compat
 	m_bAdapterSet = false;
@@ -1951,13 +2556,128 @@ CShaderAPIDx8::CShaderAPIDx8() :
 	m_MaxBooleanPixelShaderConstant = 0;
 	m_MaxIntegerPixelShaderConstant = 0;
 
+	// init to cover "real" backbuffer and HDR backbuffer
+	m_pBackBufferSurfaces.SetCount( 2 );
+	m_pBackBufferSurfaces[0] = NULL;
+	m_pBackBufferSurfaces[1] = NULL;
+
 	ClearStdTextureHandles();
-	
-	//Debugger();
-#ifdef ENABLE_NULLREF_DEVICE_SUPPORT
-	m_NullDevice = !!CommandLine()->FindParm( "-nulldevice" );
+
+	V_memset( &m_CascadedShadowMappingState, 0, sizeof( m_CascadedShadowMappingState ) );
+	V_memset( &m_CascadedShadowMappingState_LightMapScaled, 0, sizeof( m_CascadedShadowMappingState_LightMapScaled ) );
+	m_pCascadedShadowMappingDepthTexture = NULL;
+
+#ifdef _GAMECONSOLE
+	m_bInZPass = false;
+	m_nZPassCounter = 0;
+	m_zPassSnapshot = -1;
+#endif
+
+#if defined( _PS3 ) || defined( _OSX )
+	g_pShaderAPI = this;
+	g_pShaderDevice = this;
+#endif
+
+#ifdef _PS3
+	//
+	// Set artificial texture handle (BACKBUFFER)
+	//
+	{
+		ShaderAPITextureHandle_t hTexture = m_Textures.AddToTail();
+		m_ArtificialTextureHandles.AddToTail( hTexture );
+		Texture_t *pTexture = &m_Textures[hTexture];
+		void Ps3gcmInitializeArtificialTexture( Texture_t *pTexture );
+		Ps3gcmInitializeArtificialTexture( pTexture );
+
+		pTexture->m_DebugName = "^PS3^BACKBUFFER";
+		pTexture->SetImageFormat( IMAGE_FORMAT_ARGB8888 );
+	}
+	//
+	// Set artificial texture handle (DEPTHBUFFER)
+	//
+	{
+		ShaderAPITextureHandle_t hTexture = m_Textures.AddToTail();
+		m_ArtificialTextureHandles.AddToTail( hTexture );
+		Texture_t *pTexture = &m_Textures[hTexture];
+		void Ps3gcmInitializeArtificialTexture( Texture_t *pTexture );
+		Ps3gcmInitializeArtificialTexture( pTexture );
+
+		pTexture->m_DebugName = "^PS3^DEPTHBUFFER";
+		pTexture->SetImageFormat( IMAGE_FORMAT_D24S8 );
+	}
+	//
+	// End of artificial texture handles
+	//
+#endif
+
+	m_bGeneratingCSMs = false;
+    m_bVtxLitMesh = false;
+	m_bLmapMesh = false;
+	m_bUnlitMesh = false;
+
+#ifdef WIN32
+	ScanAndFixNvDriverProfiles();
+	m_pNVAPI_registeredDepthStencilSurface = NULL;
+	m_pNVAPI_registeredDepthTexture = NULL;
 #endif
 }
+
+#ifdef _PS3
+void Ps3gcmInitializeArtificialTexture( Texture_t *pTexture )
+{
+	pTexture->m_DebugName = "^PS3^";
+
+	pTexture->m_Flags = Texture_t::IS_ALLOCATED;
+	pTexture->m_Depth = 1;
+	pTexture->m_Count = 1;
+	pTexture->m_CountIndex = 0;
+
+	pTexture->m_CreationFlags = 0;
+	pTexture->m_Flags |= 0;
+
+	// Set the initial texture state
+	pTexture->m_NumCopies = 1;
+	pTexture->m_CurrentCopy = 0;
+
+	// -- patched after surfaces are created --
+	pTexture->m_Width = 1;
+	pTexture->m_Height = 1;
+	pTexture->SetTexture( NULL );
+	// --
+
+	pTexture->SetImageFormat( IMAGE_FORMAT_ARGB8888 );
+	pTexture->m_UTexWrap = D3DTADDRESS_CLAMP;
+	pTexture->m_VTexWrap = D3DTADDRESS_CLAMP;
+	pTexture->m_WTexWrap = D3DTADDRESS_CLAMP;
+
+	pTexture->m_MinFilter = pTexture->m_MagFilter = D3DTEXF_LINEAR;
+
+	pTexture->m_NumLevels = 1;
+	pTexture->m_MipFilter = D3DTEXF_NONE;
+
+	pTexture->m_SwitchNeeded = false;
+
+	pTexture->m_SizeBytes = 0;
+	pTexture->m_SizeTexels = 0;
+	pTexture->m_LastBoundFrame = -1;
+}
+
+ShaderAPITextureHandle_t Ps3gcmGetArtificialTextureHandle( int iHandle )
+{
+	return ( ( CShaderAPIDx8 * ) g_pShaderAPIDX8 )->m_ArtificialTextureHandles[ iHandle ];
+}
+
+void Ps3gcmInitializeArtificialTexture( int iHandle, IDirect3DBaseTexture *pPtr )
+{
+	Texture_t *pTexture = &( ( CShaderAPIDx8 * ) g_pShaderAPIDX8 )->GetTexture( Ps3gcmGetArtificialTextureHandle( iHandle ) );
+	pTexture->SetTexture( pPtr );
+
+	D3DSURFACE_DESC ddd;
+	pPtr->GetLevelDesc( 0, &ddd );
+	pTexture->m_Width = ddd.Width;
+	pTexture->m_Height = ddd.Height;
+}
+#endif
 
 CShaderAPIDx8::~CShaderAPIDx8()
 {
@@ -1999,8 +2719,10 @@ CShaderAPIDx8::~CShaderAPIDx8()
 
 	if ( m_pDebugTextureList )
 	{
+		m_DebugTextureListLock.Lock();
 		m_pDebugTextureList->deleteThis();
 		m_pDebugTextureList = NULL;
+		m_DebugTextureListLock.Unlock();
 	}
 }
 
@@ -2020,28 +2742,13 @@ bool CShaderAPIDx8::OnAdapterSet()
 	if ( !DetermineHardwareCaps( ) )
 		return false;
 
-	// Modify the caps based on requested DXlevels
-	int nForcedDXLevel = CommandLine()->ParmValue( "-dxlevel", 0 );
-	
-	if ( nForcedDXLevel > 0 )
-	{
-		nForcedDXLevel = MAX( nForcedDXLevel, ABSOLUTE_MINIMUM_DXLEVEL );
-	}
-	
-
 	// FIXME: Check g_pHardwareConfig->ActualCaps() for a preferred DX level
-	OverrideCaps( nForcedDXLevel );
+	OverrideCaps( 0 );
 
 	m_bAdapterSet = true;
 	return true;
 }
 
-
-void CShaderAPIDx8::GetDXLevelDefaults(uint &max_dxlevel,uint &recommended_dxlevel)
-{
-	max_dxlevel=g_pHardwareConfig->ActualCaps().m_nMaxDXSupportLevel;
-	recommended_dxlevel=g_pHardwareConfig->ActualCaps().m_nDXSupportLevel;
-}
 
 //-----------------------------------------------------------------------------
 // Can we download textures?
@@ -2060,21 +2767,46 @@ bool CShaderAPIDx8::CanDownloadTextures() const
 //-----------------------------------------------------------------------------
 void CShaderAPIDx8::AcquireInternalRenderTargets()
 {
-	GLMPRINTF(( ">-A- CShaderAPIDx8::AcquireInternalRenderTargets... "));
 	if ( mat_debugalttab.GetBool() )
 	{
 		Warning( "mat_debugalttab: CShaderAPIDx8::AcquireInternalRenderTargets\n" );
 	}
 
-	if ( !m_pBackBufferSurface )
+	Assert( m_pBackBufferSurfaces.Count() > BACK_BUFFER_INDEX_DEFAULT );
+	if ( m_pBackBufferSurfaces[BACK_BUFFER_INDEX_DEFAULT] == NULL )
 	{
-		Dx9Device()->GetRenderTarget( 0, &m_pBackBufferSurface );
-#ifdef ENABLE_NULLREF_DEVICE_SUPPORT
-		if( !m_NullDevice )
-#endif
-		{
-			Assert( m_pBackBufferSurface );
-		}
+		Dx9Device()->GetRenderTarget( 0, &m_pBackBufferSurfaces[BACK_BUFFER_INDEX_DEFAULT] );
+		Assert( m_pBackBufferSurfaces[BACK_BUFFER_INDEX_DEFAULT] );
+	}
+
+	Assert( m_pBackBufferSurfaces.Count() > BACK_BUFFER_INDEX_HDR );
+	if( ( g_pHardwareConfig->GetHDRType() == HDR_TYPE_FLOAT ) &&
+		( m_pBackBufferSurfaces[BACK_BUFFER_INDEX_HDR] == NULL ) )
+	{
+		// create a float16 HDR rendertarget
+		int nWidth, nHeight;
+		GetBackBufferDimensions( nWidth, nHeight );
+
+		HRESULT hRes = Dx9Device()->CreateRenderTarget(
+			nWidth, 
+			nHeight,
+			D3DFMT_A16B16G16R16F, 
+			m_PresentParameters.MultiSampleType,		// TODO: Check if the HW supports this
+			m_PresentParameters.MultiSampleQuality, 
+			false,	// Lockable
+			&m_pBackBufferSurfaces[BACK_BUFFER_INDEX_HDR], 
+			NULL );
+		if ( ( hRes != D3D_OK ) || m_pBackBufferSurfaces[BACK_BUFFER_INDEX_HDR]  == NULL )
+			hRes = Dx9Device()->CreateRenderTarget(
+				nWidth, 
+				nHeight,
+				D3DFMT_A16B16G16R16F, 
+				D3DMULTISAMPLE_NONE,
+				0,
+				false,	// Lockable
+				&m_pBackBufferSurfaces[BACK_BUFFER_INDEX_HDR], 
+				NULL );
+		Assert( ( hRes == D3D_OK ) && m_pBackBufferSurfaces[BACK_BUFFER_INDEX_HDR] );
 	}
 
 #if defined( _X360 )
@@ -2084,20 +2816,21 @@ void CShaderAPIDx8::AcquireInternalRenderTargets()
 		int backWidth, backHeight;
 		ShaderAPI()->GetBackBufferDimensions( backWidth, backHeight );
 		D3DFORMAT backBufferFormat = ImageLoader::ImageFormatToD3DFormat( g_pShaderDevice->GetBackBufferFormat() );
-		m_pBackBufferSurfaceSRGB = g_TextureHeap.AllocRenderTargetSurface( backWidth, backHeight, (D3DFORMAT)MAKESRGBFMT( backBufferFormat ), true, 0 );
+#if defined( CSTRIKE15 )
+		// [mariod] - implicit srgb render targets (regular 8888, writes happen in shaders) as opposed to PWL
+		m_pBackBufferSurfaceSRGB = g_TextureHeap.AllocRenderTargetSurface( backWidth, backHeight, backBufferFormat, RT_MULTISAMPLE_MATCH_BACKBUFFER, 0 );
+#else
+		m_pBackBufferSurfaceSRGB = g_TextureHeap.AllocRenderTargetSurface( backWidth, backHeight, (D3DFORMAT)MAKESRGBFMT( backBufferFormat ), RT_MULTISAMPLE_MATCH_BACKBUFFER, 0 );
+#endif
 	}
 #endif
 
-#ifdef ENABLE_NULLREF_DEVICE_SUPPORT
-	if ( !m_pZBufferSurface && !m_NullDevice )
-#else
 	if ( !m_pZBufferSurface )
-#endif
 	{
 		Dx9Device()->GetDepthStencilSurface( &m_pZBufferSurface );
 		Assert( m_pZBufferSurface );
+		SPEW_REFCOUNT_EXPECTED( m_pZBufferSurface, ==, 2 );
 	}
-	GLMPRINTF(( "<-A- CShaderAPIDx8::AcquireInternalRenderTargets...complete "));
 }
 
 
@@ -2106,7 +2839,6 @@ void CShaderAPIDx8::AcquireInternalRenderTargets()
 //-----------------------------------------------------------------------------
 void CShaderAPIDx8::ReleaseInternalRenderTargets( )
 {
-	GLMPRINTF(( ">-A- CShaderAPIDx8::ReleaseInternalRenderTargets... "));
 	if( mat_debugalttab.GetBool() )
 	{
 		Warning( "mat_debugalttab: CShaderAPIDx8::ReleaseInternalRenderTargets\n" );
@@ -2114,31 +2846,44 @@ void CShaderAPIDx8::ReleaseInternalRenderTargets( )
 
 	// Note: This function does not release renderable textures created elsewhere
 	//       Those should be released separately via the texure manager
-	if ( m_pBackBufferSurface )
+	FOR_EACH_VEC( m_pBackBufferSurfaces, i )
 	{
-#if POSIX
-		// dxabstract's AddRef/Release have optional args to help track usage
-		int nRetVal = m_pBackBufferSurface->Release( 0, "-B  CShaderAPIDx8::ReleaseInternalRenderTargets public release color buffer");
-#else
-		int nRetVal = m_pBackBufferSurface->Release();
-#endif
-		//Assert( nRetVal == 0 );
-		m_pBackBufferSurface = NULL;
+		if ( m_pBackBufferSurfaces[i] != NULL )
+		{
+			IDirect3DSurface9* backBufferSurface = m_pBackBufferSurfaces[i];
+			m_pBackBufferSurfaces[i] = NULL;
+
+			// Default back buffer may have a reference held by DirectX.
+			int nRemainingReferences = backBufferSurface->Release();
+			Assert(nRemainingReferences == 0 || i == BACK_BUFFER_INDEX_DEFAULT && nRemainingReferences <= 1);
+		}
 	}
 
 	if ( m_pZBufferSurface )
 	{
-#if POSIX
-		// dxabstract's AddRef/Release have optional args to help track usage
-		int nRetVal = m_pZBufferSurface->Release( 0, "-B  CShaderAPIDx8::ReleaseInternalRenderTargets public release zbuffer");
-#else
-		int nRetVal = m_pZBufferSurface->Release();
-#endif
+#if defined(_WIN32) && !defined( DX_TO_GL_ABSTRACTION )
+		if ( m_pNVAPI_registeredDepthStencilSurface != NULL )
+		{
+			// Unregister old one if there is any
+			SPEW_REFCOUNT( m_pNVAPI_registeredDepthStencilSurface );
+			NvAPI_D3D9_UnregisterResource( m_pNVAPI_registeredDepthStencilSurface );
+			SPEW_REFCOUNT( m_pNVAPI_registeredDepthStencilSurface );
+			m_pNVAPI_registeredDepthStencilSurface = NULL;
+		}
 
-		//Assert( nRetVal == 0 );		//FIXME not sure why we're seeing a refcount of 3 here
+		if ( m_pNVAPI_registeredDepthTexture != NULL )
+		{
+			// Unregister old one if there is any
+			SPEW_REFCOUNT( m_pNVAPI_registeredDepthTexture );
+			NvAPI_D3D9_UnregisterResource( m_pNVAPI_registeredDepthTexture );
+			SPEW_REFCOUNT( m_pNVAPI_registeredDepthTexture );
+			m_pNVAPI_registeredDepthTexture = NULL;
+		}
+#endif
+		SPEW_REFCOUNT_EXPECTED( m_pZBufferSurface, <=, 2 );
+		m_pZBufferSurface->Release();
 		m_pZBufferSurface = NULL;
 	}
-	GLMPRINTF(( "<-A- CShaderAPIDx8::ReleaseInternalRenderTargets... complete"));
 }
 
 //-----------------------------------------------------------------------------
@@ -2157,6 +2902,7 @@ bool CShaderAPIDx8::RestorePersistedDisplay( bool bUseFrontBuffer )
 
 	OwnGPUResources( false );
 
+	// HLSL source for the persist shader:
 	const char *strVertexShaderProgram = 
 		" float4x4 matWVP : register(c0);"  
 		" struct VS_IN"  
@@ -2182,11 +2928,47 @@ bool CShaderAPIDx8::RestorePersistedDisplay( bool bUseFrontBuffer )
 		" {"
 		" float2 TexCoord : TEXCOORD;"
 		" };"
-		" sampler detail;"
+		" sampler detail : register( s0 );"
 		" float4 main( PS_IN In ) : COLOR"  
 		" {"  
 		" return tex2D( detail, In.TexCoord );"
 		" }"; 
+ 
+	// Hard-coded compiled shader data, so we don't have to bloat our DLLs
+	// with all the shader compilation stuff from the D3D libs (over 2 MB!)
+#if defined( _X360 ) && ( _XDK_VER != 20764 )
+	// Make sure this hard-coded shader data gets updated with each XDK rev
+#if !defined( JUNE_2009_XDK_ISSUES )
+#error "Define X360_LINK_WITH_SHADER_COMPILE temporarily (to verify shader data and spew out new data if necessary)"
+#endif
+#endif
+
+	// As of L4D ship, 80 DWORDS
+	DWORD vertexShaderData[] = {
+		0x102a1101, 0x000000bc, 0x00000084, 0x00000000, 0x00000024, 0x00000000, 0x00000084, 0x00000000, 
+		0x00000000, 0x0000005c, 0x0000001c, 0x0000004f, 0xfffe0300, 0x00000001, 0x0000001c, 0x00000000, 
+		0x00000048, 0x00000030, 0x00020000, 0x00040000, 0x00000038, 0x00000000, 0x6d617457, 0x565000ab, 
+		0x00030003, 0x00040004, 0x00010000, 0x00000000, 0x76735f33, 0x5f300032, 0x2e302e32, 0x30373634, 
+		0x2e3000ab, 0x00000000, 0x00000084, 0x00010002, 0x00000000, 0x00000000, 0x00000821, 0x00000001, 
+		0x00000002, 0x00000001, 0x00000290, 0x00100003, 0x00305004, 0x00003050, 0x00001009, 0x30052003, 
+		0x00001200, 0xc2000000, 0x00004005, 0x00001200, 0xc4000000, 0x00001009, 0x00002200, 0x00000000, 
+		0x05f82000, 0x00000688, 0x00000000, 0x05f80000, 0x00000fc8, 0x00000000, 0xc80f0001, 0x001b8800, 
+		0xa1020300, 0xc80f0001, 0x00c68800, 0xab020201, 0xc80f0001, 0x00b13494, 0xab020101, 0xc80f803e, 
+		0x006c0034, 0xab020001, 0xc8038000, 0x00b0b000, 0xe2000000, 0x00000000, 0x00000000, 0x00000000, 
+	};
+
+
+	// As of L4D ship, 57 DWORDS
+	DWORD pixelShaderData1[] = {     
+		0x102a1100, 0x000000a8, 0x0000003c, 0x00000000, 0x00000024, 0x00000000, 0x00000084, 0x00000000, 
+		0x00000000, 0x0000005c, 0x0000001c, 0x0000004f, 0xffff0300, 0x00000001, 0x0000001c, 0x00000000, 
+		0x00000048, 0x00000030, 0x00030000, 0x00010000, 0x00000038, 0x00000000, 0x64657461, 0x696c00ab, 
+		0x0004000c, 0x00010001, 0x00010000, 0x00000000, 0x70735f33, 0x5f300032, 0x2e302e32, 0x30373634, 
+		0x2e3000ab, 0x00000000, 0x0000003c, 0x10000000, 0x00000004, 0x00000000, 0x00000821, 0x00010001, 
+		0x00000001, 0x00003050, 0x00011002, 0x00001200, 0xc4000000, 0x00001003, 0x00002200, 0x00000000, 
+		0x10080001, 0x1f1ff688, 0x00004000, 0xc80f8000, 0x00000000, 0xe2000000, 0x00000000, 0x00000000, 
+		0x00000000, 
+	};
 
 	D3DVERTEXELEMENT9 VertexElements[3] =
 	{
@@ -2207,28 +2989,16 @@ bool CShaderAPIDx8::RestorePersistedDisplay( bool bUseFrontBuffer )
 		Dx9Device()->GetPersistedTexture( &pTexture );
 	}
 
-	ID3DXBuffer *pErrorMsg = NULL;
-	ID3DXBuffer *pShaderCode = NULL;
-
-	HRESULT hr = D3DXCompileShader( strVertexShaderProgram, (UINT)strlen( strVertexShaderProgram ), NULL, NULL, "main", "vs_2_0", 0, &pShaderCode, &pErrorMsg, NULL );
-	if ( FAILED( hr ) )
-	{
-		return false;
-	}
+	// Build the shaders to do this rendering (fixed-function pipeline FTW :o/ )
 	IDirect3DVertexShader9 *pVertexShader;
-	Dx9Device()->CreateVertexShader( (DWORD*)pShaderCode->GetBufferPointer(), &pVertexShader );
-	pShaderCode->Release();
-
-	pErrorMsg = NULL;
-	pShaderCode = NULL;
-	hr = D3DXCompileShader( strPixelShaderProgram, (UINT)strlen( strPixelShaderProgram ), NULL, NULL, "main", "ps_2_0", 0, &pShaderCode, &pErrorMsg, NULL );
-	if ( FAILED(hr) )
-	{
+	if ( !BuildStaticShader( true, (void **)&pVertexShader, "vertex shader",
+							 strVertexShaderProgram, vertexShaderData, sizeof( vertexShaderData ) ) )
 		return false;
-	}
+
 	IDirect3DPixelShader9 *pPixelShader;
-	Dx9Device()->CreatePixelShader( (DWORD*)pShaderCode->GetBufferPointer(), &pPixelShader );
-	pShaderCode->Release();
+	if ( !BuildStaticShader( false, (void **)&pPixelShader, "pixel shader",
+							 strPixelShaderProgram, pixelShaderData1, sizeof( pixelShaderData1 ) ) )
+		return false;
 
 	int w, h;
 	GetBackBufferDimensions( w, h );
@@ -2331,10 +3101,10 @@ bool CShaderAPIDx8::OnDeviceInit()
 	// Initialize the mesh manager
 	MeshMgr()->Init();
 
-	bool bToolsMode = IsWindows() && ( CommandLine()->CheckParm( "-tools" ) != NULL );
+	m_bToolsMode = IsPlatformWindows() && ( CommandLine()->CheckParm( "-tools" ) != NULL );
 
 	// Use fat vertices when running in tools
-	MeshMgr()->UseFatVertices( bToolsMode );
+	MeshMgr()->UseFatVertices( m_bToolsMode );
 
 	// Initialize the transition table.
 	m_TransitionTable.Init();
@@ -2370,6 +3140,14 @@ bool CShaderAPIDx8::OnDeviceInit()
 		// place the front buffer image in the back buffer, later systems will detect and grab
 		// other systems will detect and grab
 		RestorePersistedDisplay( true );
+
+#ifdef PLATFORM_X360
+		if ( m_PresentParameters.PresentationInterval != D3DPRESENT_INTERVAL_IMMEDIATE )
+		{
+			// Ensure our custom present immediate threshold is set.
+			EnableVSync_360( true );
+		}
+#endif
 	}
 
 	Dx9Device()->BeginScene();
@@ -2379,7 +3157,7 @@ bool CShaderAPIDx8::OnDeviceInit()
 
 void CShaderAPIDx8::OnDeviceShutdown() 
 {
-	if ( !IsPC() || !IsActive() )
+	if ( IsX360() || !IsActive() )
 		return;
 
 	// Deallocate all textures
@@ -2439,13 +3217,6 @@ bool CShaderAPIDx8::SetMode( void* VD3DHWND, int nAdapter, const ShaderDeviceInf
 
 	ShaderDeviceInfo_t actualInfo = info;
 	int nDXLevel = actualInfo.m_nDXLevel ? actualInfo.m_nDXLevel : actualCaps.m_nDXSupportLevel;
-
-	static bool bSetModeOnce = false;
-	if ( !bSetModeOnce )
-	{
-		nDXLevel = MAX( ABSOLUTE_MINIMUM_DXLEVEL, CommandLine()->ParmValue( "-dxlevel", nDXLevel ) );
-		bSetModeOnce = true;
-	}
 	if ( nDXLevel > actualCaps.m_nMaxDXSupportLevel )
 	{
 		nDXLevel = actualCaps.m_nMaxDXSupportLevel;
@@ -2489,12 +3260,20 @@ void CShaderAPIDx8::CreateMatrixStacks()
 }
 
 
+// Use this when recording *.rec files that need to be run on more than one kind of 
+// hardware, etc.
+//#define DX8_COMPATABILITY_MODE
+
+
 //-----------------------------------------------------------------------------
 // Vendor-dependent code to turn on alpha to coverage
 //-----------------------------------------------------------------------------
 void CShaderAPIDx8::EnableAlphaToCoverage( void )
 {
 	if( !g_pHardwareConfig->ActualCaps().m_bSupportsAlphaToCoverage || !IsAAEnabled() )
+		return;
+
+	if ( IsPC() && ( m_PresentParameters.MultiSampleType < D3DMULTISAMPLE_4_SAMPLES ) )
 		return;
 
 	D3DRENDERSTATETYPE renderState = (D3DRENDERSTATETYPE)g_pHardwareConfig->Caps().m_AlphaToCoverageState;
@@ -2507,6 +3286,9 @@ void CShaderAPIDx8::EnableAlphaToCoverage( void )
 void CShaderAPIDx8::DisableAlphaToCoverage()
 {
 	if( !g_pHardwareConfig->ActualCaps().m_bSupportsAlphaToCoverage || !IsAAEnabled() )
+		return;
+
+	if ( IsPC() && ( m_PresentParameters.MultiSampleType < D3DMULTISAMPLE_4_SAMPLES ) )
 		return;
 
 	D3DRENDERSTATETYPE renderState = (D3DRENDERSTATETYPE)g_pHardwareConfig->Caps().m_AlphaToCoverageState;
@@ -2558,12 +3340,12 @@ void CShaderAPIDx8::OverrideCaps( int nForcedDXLevel )
 //-----------------------------------------------------------------------------
 // Called when the dx support level has changed
 //-----------------------------------------------------------------------------
-void CShaderAPIDx8::DXSupportLevelChanged()
+void CShaderAPIDx8::DXSupportLevelChanged( int nDXLevel )
 {
 	LOCK_SHADERAPI();
 	if ( IsPC() )
 	{
-		OverrideCaps( ShaderUtil()->GetConfig().dxSupportLevel );
+		OverrideCaps( nDXLevel );
 	}
 	else
 	{
@@ -2575,11 +3357,6 @@ void CShaderAPIDx8::DXSupportLevelChanged()
 //-----------------------------------------------------------------------------
 // FIXME: Remove! Backward compat only
 //-----------------------------------------------------------------------------
-int CShaderAPIDx8::GetActualTextureStageCount() const
-{
-	return g_pHardwareConfig->GetActualTextureStageCount();
-}
-
 int CShaderAPIDx8::GetActualSamplerCount() const
 {
 	return g_pHardwareConfig->GetActualSamplerCount();
@@ -2600,46 +3377,43 @@ bool CShaderAPIDx8::IsAAEnabled() const
 //-----------------------------------------------------------------------------
 // Methods related to queuing functions to be called per-(pMesh->Draw call) or per-pass
 //-----------------------------------------------------------------------------
-bool CShaderAPIDx8::IsCommitFuncInUse( CommitFuncType_t func, CommitShaderType_t shader, int nFunc ) const
+bool CShaderAPIDx8::IsCommitFuncInUse( CommitFuncType_t func, int nFunc ) const
 {
 	Assert( nFunc < COMMIT_FUNC_COUNT );
-	return ( m_pCommitFlags[func][shader][ nFunc >> 3 ] & ( 1 << ( nFunc & 0x7 ) ) ) != 0;
+	return ( m_pCommitFlags[func][ nFunc >> 3 ] & ( 1 << ( nFunc & 0x7 ) ) ) != 0;
 }
 
-void CShaderAPIDx8::MarkCommitFuncInUse( CommitFuncType_t func, CommitShaderType_t shader, int nFunc )
+void CShaderAPIDx8::MarkCommitFuncInUse( CommitFuncType_t func, int nFunc )
 {
-	m_pCommitFlags[func][shader][ nFunc >> 3 ] |= 1 << ( nFunc & 0x7 );
+	m_pCommitFlags[func][ nFunc >> 3 ] |= 1 << ( nFunc & 0x7 );
 }
 
-void CShaderAPIDx8::AddCommitFunc( CommitFuncType_t func, CommitShaderType_t shader, StateCommitFunc_t f )
+void CShaderAPIDx8::AddCommitFunc( CommitFuncType_t func, StateCommitFunc_t f )
 {
-	m_CommitFuncs[func][shader].AddToTail( f );
+	m_CommitFuncs[func].AddToTail( f );
 }
 
 
 //-----------------------------------------------------------------------------
 // Clears all commit functions
 //-----------------------------------------------------------------------------
-void CShaderAPIDx8::ClearAllCommitFuncs( CommitFuncType_t func, CommitShaderType_t shader )
+void CShaderAPIDx8::ClearAllCommitFuncs( CommitFuncType_t func )
 {
-	memset( m_pCommitFlags[func][shader], 0, COMMIT_FUNC_BYTE_COUNT );
-	m_CommitFuncs[func][shader].RemoveAll();
+	memset( m_pCommitFlags[func], 0, COMMIT_FUNC_BYTE_COUNT );
+	m_CommitFuncs[func].RemoveAll();
 }
 
 
 //-----------------------------------------------------------------------------
 // Calls all commit functions in a particular list
 //-----------------------------------------------------------------------------
-void CShaderAPIDx8::CallCommitFuncs( CommitFuncType_t func, CommitShaderType_t shader, bool bForce )
+void CShaderAPIDx8::CallCommitFuncs( CommitFuncType_t func, bool bForce )
 {
-	// 360 does not have have a FF pipe
-	Assert ( IsPC() || ( IsX360() && shader != COMMIT_FIXED_FUNCTION ) );
-
 	// Don't bother committing anything if we're deactivated
 	if ( IsDeactivated() )
 		return;
 
-	CUtlVector< StateCommitFunc_t > &funcList =	m_CommitFuncs[func][shader];
+	CUtlVector< StateCommitFunc_t > &funcList =	m_CommitFuncs[func];
 	int nCount = funcList.Count();
 	if ( nCount == 0 )
 		return;
@@ -2648,35 +3422,14 @@ void CShaderAPIDx8::CallCommitFuncs( CommitFuncType_t func, CommitShaderType_t s
 	{
 		funcList[i]( Dx9Device(), m_DesiredState, m_DynamicState, bForce );
 	}
-	ClearAllCommitFuncs( func, shader );
+	ClearAllCommitFuncs( func );
 }
 
-
-//-----------------------------------------------------------------------------
-// Calls all per-mesh draw commit functions
-//-----------------------------------------------------------------------------
-void CShaderAPIDx8::CallCommitFuncs( CommitFuncType_t func, bool bUsingFixedFunction, bool bForce )
-{
-	// Fixed-Function only funcs
-	if ( IsPC() && ( bUsingFixedFunction || bForce ) )
-	{
-		CallCommitFuncs( func, COMMIT_FIXED_FUNCTION, bForce );
-	}
-
-	// Vertex-shader only funcs
-	if ( !bUsingFixedFunction || bForce )
-	{
-		CallCommitFuncs( func, COMMIT_VERTEX_SHADER, bForce );
-	}
-
-	// State set in both FF + VS
-	CallCommitFuncs( func, COMMIT_ALWAYS, bForce );
-}
 
 //-----------------------------------------------------------------------------
 // Sets the sampler state
 //-----------------------------------------------------------------------------
-static FORCEINLINE void SetSamplerState( IDirect3DDevice9 *pDevice, int stage, D3DSAMPLERSTATETYPE state, DWORD val )
+static inline void SetSamplerState( D3DDeviceWrapper *pDevice, int stage, D3DSAMPLERSTATETYPE state, DWORD val )
 {
 	RECORD_SAMPLER_STATE( stage, state, val ); 
 
@@ -2701,38 +3454,24 @@ inline void CShaderAPIDx8::SetSamplerState( int stage, D3DSAMPLERSTATETYPE state
 //-----------------------------------------------------------------------------
 // Sets the texture stage state
 //-----------------------------------------------------------------------------
-inline void CShaderAPIDx8::SetTextureStageState( int stage, D3DTEXTURESTAGESTATETYPE state, DWORD val )
-{
-#if !defined( _X360 )
-	if ( IsDeactivated() )
-		return;
-
-	Dx9Device()->SetTextureStageState( stage, state, val );
-#endif
-}
-
-inline void CShaderAPIDx8::SetRenderState( D3DRENDERSTATETYPE state, DWORD val, bool bFlushIfChanged )
+inline void CShaderAPIDx8::SetRenderState( D3DRENDERSTATETYPE state, DWORD val )
 {
 #if ( !defined( _X360 ) && !defined( DX_TO_GL_ABSTRACTION ) )
 	{
 		if ( IsDeactivated() )
 			return;
 	}
-#else
+#	else
 	{
 		Assert( state != D3DRS_NOTSUPPORTED ); //Use SetSupportedRenderState() macro to avoid this at compile time
 		//if ( state == D3DRS_NOTSUPPORTED )
 		//	return;
 	}
-#endif
+#	endif
 
 	Assert( state >= 0 && ( int )state < MAX_NUM_RENDERSTATES );
 	if ( m_DynamicState.m_RenderState[state] != val )
 	{
-		if ( bFlushIfChanged )
-		{
-			FlushBufferedPrimitives();
-		}
 #ifdef DX_TO_GL_ABSTRACTION
 		Dx9Device()->SetRenderStateInline( state, val );
 #else
@@ -2743,25 +3482,77 @@ inline void CShaderAPIDx8::SetRenderState( D3DRENDERSTATETYPE state, DWORD val, 
 }
 
 #ifdef DX_TO_GL_ABSTRACTION
-	// Purposely always writing the new state (even if it's not changed), in case SetRenderStateConstInline() compiles away to nothing (it sometimes does)
-	#define SetRenderStateConstMacro(t, state, val )						\
-		do																	\
-		{																	\
-			Assert( state >= 0 && ( int )state < MAX_NUM_RENDERSTATES );	\
-			if ( t->m_DynamicState.m_RenderState[state] != (DWORD)val )		\
-			{																\
-				Dx9Device()->SetRenderStateConstInline( state, val );		\
-			}																\
-			t->m_DynamicState.m_RenderState[state] = val;					\
-		} while(0)
+// Purposely always writing the new state (even if it's not changed), in case SetRenderStateConstInline() compiles away to nothing (it sometimes does)
+#define SetRenderStateConstMacro(t, state, val ) do { Assert( state >= 0 && ( int )state < MAX_NUM_RENDERSTATES ); if ( t->m_DynamicState.m_RenderState[state] != (DWORD)val ) { Dx9Device()->SetRenderStateConstInline( state, val ); } t->m_DynamicState.m_RenderState[state] = val; } while(0)
 #else
-	#define SetRenderStateConstMacro(t, state, val ) t->SetRenderState( state, val );
+#define SetRenderStateConstMacro(t, state, val ) t->SetRenderState( state, val );
 #endif
+
+inline void CShaderAPIDx8::SetScreenSizeForVPOS( int pshReg /* = 32 */)
+{
+	int nWidth, nHeight;
+	ITexture *pTexture = ShaderAPI()->GetRenderTargetEx( 0 );
+	if ( pTexture == NULL )
+	{
+		ShaderAPI()->GetBackBufferDimensions( nWidth, nHeight );
+	}
+	else
+	{
+		nWidth  = pTexture->GetActualWidth();
+		nHeight = pTexture->GetActualHeight();
+	}
+
+	// Set constant to enable translation of VPOS to render target coordinates in ps_3_0
+	float vScreenSize[4] = { 1.0f/(float)nWidth, 1.0f/(float)nHeight, 0.5f/(float)nWidth, 0.5f/(float)nHeight };
+
+	SetPixelShaderConstantInternal( pshReg, vScreenSize, 1, true );
+}
+
+
+inline void CShaderAPIDx8::SetVSNearAndFarZ( int vshReg )
+{
+	VMatrix m;
+	GetMatrix( MATERIAL_PROJECTION, m.m[0] );
+
+	// m[2][2] =  F/(N-F)   (flip sign if RH)
+	// m[3][2] = NF/(N-F)
+
+	float vNearFar[4];
+
+	float N =     m[3][2] / m[2][2];
+	float F = (m[3][2]*N) / (N + m[3][2]);
+
+	vNearFar[0] = N;
+	vNearFar[1] = F;
+
+
+	SetVertexShaderConstant( vshReg, vNearFar, 1 );
+}
+
+inline float CShaderAPIDx8::GetFarZ()
+{
+	VMatrix m;
+	GetMatrix( MATERIAL_PROJECTION, m.m[0] );	// See above for the algebra here
+	float N =     m[3][2] / m[2][2];
+	return (m[3][2]*N) / (N + m[3][2]);
+}
+
+
+void CShaderAPIDx8::EnableSinglePassFlashlightMode( bool bEnable )
+{
+	m_bSinglePassFlashlightMode = bEnable;
+}
+
+bool CShaderAPIDx8::SinglePassFlashlightModeEnabled( void )
+{
+	return IsX360() || IsPS3() || m_bSinglePassFlashlightMode; //360/PS3 only supports single pass flashlights
+}
+
 
 //-----------------------------------------------------------------------------
 // Commits viewports
 //-----------------------------------------------------------------------------
-static void CommitSetScissorRect( IDirect3DDevice9 *pDevice, const DynamicState_t &desiredState, DynamicState_t &currentState, bool bForce )
+static void CommitSetScissorRect( D3DDeviceWrapper *pDevice, const DynamicState_t &desiredState, DynamicState_t &currentState, bool bForce )
 {
 	// Set the enable/disable renderstate
 
@@ -2790,11 +3581,6 @@ static void CommitSetScissorRect( IDirect3DDevice9 *pDevice, const DynamicState_
 		Assert( (desiredState.m_ScissorRect.left <= nWidth) && (desiredState.m_ScissorRect.bottom <= nHeight) &&
 			    ( desiredState.m_ScissorRect.top >= 0 ) && (desiredState.m_ScissorRect.left >= 0) );
 
-		clamp( desiredState.m_ScissorRect.right,  0, nWidth );
-		clamp( desiredState.m_ScissorRect.left,   0, nWidth );
-		clamp( desiredState.m_ScissorRect.top,    0, nHeight );
-		clamp( desiredState.m_ScissorRect.bottom, 0, nHeight );
-
 		Dx9Device()->SetScissorRect( &desiredState.m_ScissorRect );
 		currentState.m_ScissorRect = desiredState.m_ScissorRect;
 	}
@@ -2808,6 +3594,13 @@ inline void CShaderAPIDx8::SetScissorRect( const int nLeft, const int nTop, cons
 	Assert( (nLeft <= nRight) && (nTop <= nBottom) ); //360 craps itself if this isn't true
 	if ( !g_pHardwareConfig->Caps().m_bScissorSupported )
 		return;
+
+	DWORD dwEnableScissor = bEnableScissor ? TRUE : FALSE;
+	RECT newScissorRect;
+	newScissorRect.left = nLeft;
+	newScissorRect.top = nTop;
+	newScissorRect.right = nRight;
+	newScissorRect.bottom = nBottom;
 
 	// If we're turning it on, check the validity of the rect
 	if ( bEnableScissor )
@@ -2826,18 +3619,11 @@ inline void CShaderAPIDx8::SetScissorRect( const int nLeft, const int nTop, cons
 
 		Assert( (nRight <= nWidth) && (nBottom <= nHeight) && ( nTop >= 0 ) && (nLeft >= 0) );
 
-		clamp( nRight,  0, nWidth );
-		clamp( nLeft,   0, nWidth );
-		clamp( nTop,    0, nHeight );
-		clamp( nBottom, 0, nHeight );
+		newScissorRect.left   = clamp( newScissorRect.left,   0, nWidth );
+		newScissorRect.top    = clamp( newScissorRect.top,    0, nHeight );
+		newScissorRect.right  = clamp( newScissorRect.right,  0, nWidth );
+		newScissorRect.bottom = clamp( newScissorRect.bottom, 0, nHeight );
 	}
-
-	DWORD dwEnableScissor = bEnableScissor ? TRUE : FALSE;
-	RECT newScissorRect;
-	newScissorRect.left = nLeft;
-	newScissorRect.top = nTop;
-	newScissorRect.right = nRight;
-	newScissorRect.bottom = nBottom;
 
 	if ( !m_bResettingRenderState )
 	{
@@ -2848,32 +3634,27 @@ inline void CShaderAPIDx8::SetScissorRect( const int nLeft, const int nTop, cons
 			return;
 	}
 
-	if ( !IsDeactivated() )
-	{
-		// Do we need to do this always?
-		FlushBufferedPrimitives();
-	}
-
 	m_DesiredState.m_RenderState[D3DRS_SCISSORTESTENABLE] = dwEnableScissor;
 	memcpy( &m_DesiredState.m_ScissorRect, &newScissorRect, sizeof(RECT) );
 
-	ADD_COMMIT_FUNC( COMMIT_PER_DRAW, COMMIT_ALWAYS, CommitSetScissorRect );
+	ADD_COMMIT_FUNC( COMMIT_PER_DRAW, CommitSetScissorRect );
 }
 
 inline void CShaderAPIDx8::SetRenderStateForce( D3DRENDERSTATETYPE state, DWORD val )
 {
-#if ( !defined( _X360 ) && !defined( DX_TO_GL_ABSTRACTION ) )
+#if ( !defined( _GAMECONSOLE ) && !defined( DX_TO_GL_ABSTRACTION ) )
+
 	{
-		if ( IsDeactivated() )
+		if ( IsDeactivated() )   // e.g. if the window minimized, don't set any render states
 			return;
 	}
-#else
+#	else
 	{
 		Assert( state != D3DRS_NOTSUPPORTED ); //Use SetSupportedRenderStateForce() macro to avoid this at compile time
 		//if ( state == D3DRS_NOTSUPPORTED )
 		//	return;
 	}
-#endif
+#	endif
 
 	Dx9Device()->SetRenderState( state, val );
 	m_DynamicState.m_RenderState[state] = val;
@@ -2886,20 +3667,32 @@ inline void CShaderAPIDx8::SetRenderStateForce( D3DRENDERSTATETYPE state, DWORD 
 void CShaderAPIDx8::SetStandardVertexShaderConstants( float fOverbright )
 {
 	LOCK_SHADERAPI();
-	if ( g_pHardwareConfig->GetDXSupportLevel() < 80 )
-		return;
 
 	// Set a couple standard constants....
 	Vector4D standardVertexShaderConstant( 0.0f, 1.0f, 2.0f, 0.5f );
-	SetVertexShaderConstant( VERTEX_SHADER_MATH_CONSTANTS0, standardVertexShaderConstant.Base(), 1 );
+	SetVertexShaderConstantInternal( VERTEX_SHADER_MATH_CONSTANTS0, standardVertexShaderConstant.Base(), 1 );
 
 	// [ gamma, overbright, 1/3, 1/overbright ]
 	standardVertexShaderConstant.Init( 1.0f/2.2f, fOverbright, 1.0f / 3.0f, 1.0f / fOverbright );
-	SetVertexShaderConstant( VERTEX_SHADER_MATH_CONSTANTS1, standardVertexShaderConstant.Base(), 1 );
+	SetVertexShaderConstantInternal( VERTEX_SHADER_MATH_CONSTANTS1, standardVertexShaderConstant.Base(), 1 );
 
-	int nModelIndex = g_pHardwareConfig->Caps().m_nDXSupportLevel < 90 ? VERTEX_SHADER_MODEL - 10 : VERTEX_SHADER_MODEL;
+#if 0
+	int nModelIndex = VERTEX_SHADER_MODEL;
 
-/*
+	// These point to the lighting and the transforms
+	standardVertexShaderConstant.Init( 
+		VERTEX_SHADER_LIGHTS,
+		VERTEX_SHADER_LIGHTS + 5, 
+        // Use COLOR instead of UBYTE4 since Geforce3 does not support it
+        // vConst.w should be 3, but due to about hack, mul by 255 and add epsilon
+		// 360 supports UBYTE4, so no fixup required
+		(IsPC() || !IsX360()) ? 765.01f : 3.0f,
+		 nModelIndex );	// DX8 has different constant packing
+#endif
+
+	SetVertexShaderConstantInternal( VERTEX_SHADER_LIGHT_INDEX, standardVertexShaderConstant.Base(), 1 );
+
+	/*
 	if ( g_pHardwareConfig->Caps().m_SupportsVertexShaders_3_0 )
 	{
 		Vector4D factors[4];
@@ -2907,29 +3700,12 @@ void CShaderAPIDx8::SetStandardVertexShaderConstants( float fOverbright )
 		factors[1].Init( 0, 1, 0, 0 );
 		factors[2].Init( 0, 0, 1, 0 );
 		factors[3].Init( 0, 0, 0, 1 );
-		SetVertexShaderConstant( VERTEX_SHADER_DOT_PRODUCT_FACTORS, factors[0].Base(), 4 );
+		SetVertexShaderConstantInternal( VERTEX_SHADER_DOT_PRODUCT_FACTORS, factors[0].Base(), 4 );
 	}
 */
 
-	if ( g_pHardwareConfig->Caps().m_SupportsVertexShaders_2_0 )
-	{
-		float c[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-		SetVertexShaderConstant( VERTEX_SHADER_FLEXSCALE, c, 1 );
-	}
-	else
-	{
-		// These point to the lighting and the transforms
-		standardVertexShaderConstant.Init( 
-			VERTEX_SHADER_LIGHTS,
-			VERTEX_SHADER_LIGHTS + 5, 
-			// Use COLOR instead of UBYTE4 since Geforce3 does not support it
-			// vConst.w should be 3, but due to about hack, mul by 255 and add epsilon
-			// 360 supports UBYTE4, so no fixup required
-			(IsPC() || !IsX360()) ? 765.01f : 3.0f,
-			nModelIndex );	// DX8 has different constant packing
-
-		SetVertexShaderConstant( VERTEX_SHADER_LIGHT_INDEX, standardVertexShaderConstant.Base(), 1 );
-	}
+	float c[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+	SetVertexShaderConstantInternal( VERTEX_SHADER_FLEXSCALE, c, 1 );
 }
 
 //-----------------------------------------------------------------------------
@@ -2937,131 +3713,164 @@ void CShaderAPIDx8::SetStandardVertexShaderConstants( float fOverbright )
 //-----------------------------------------------------------------------------
 void CShaderAPIDx8::InitVertexAndPixelShaders()
 {
-	// Allocate space for the pixel and vertex shader constants...
-	if ( g_pHardwareConfig->Caps().m_SupportsPixelShaders )
+	bool bPreviousState;
+	if ( IsX360() )
 	{
-		// pixel shaders
+		// to init/update all constants now, must release ownership
+		bPreviousState = OwnGPUResources( false );
+	}
+
+	// Allocate space for the pixel and vertex shader constants...
+	// pixel shaders
+	{
+#ifdef _PS3
+		m_DynamicState.m_pVectorPixelShaderConstant = NULL;
+		m_DesiredState.m_pVectorPixelShaderConstant = NULL;
+#else
+		if (m_DynamicState.m_pVectorPixelShaderConstant)
 		{
-			if (m_DynamicState.m_pVectorPixelShaderConstant)
-			{
-				delete[] m_DynamicState.m_pVectorPixelShaderConstant;
-			}
-			m_DynamicState.m_pVectorPixelShaderConstant = new Vector4D[g_pHardwareConfig->Caps().m_NumPixelShaderConstants];
-
-			if (m_DesiredState.m_pVectorPixelShaderConstant)
-			{
-				delete[] m_DesiredState.m_pVectorPixelShaderConstant;
-			}
-			m_DesiredState.m_pVectorPixelShaderConstant = new Vector4D[g_pHardwareConfig->Caps().m_NumPixelShaderConstants];
-
-			if (m_DynamicState.m_pBooleanPixelShaderConstant)
-			{
-				delete[] m_DynamicState.m_pBooleanPixelShaderConstant;
-			}
-			m_DynamicState.m_pBooleanPixelShaderConstant = new BOOL[g_pHardwareConfig->Caps().m_NumBooleanPixelShaderConstants];
-
-			if (m_DesiredState.m_pBooleanPixelShaderConstant)
-			{
-				delete[] m_DesiredState.m_pBooleanPixelShaderConstant;
-			}
-			m_DesiredState.m_pBooleanPixelShaderConstant = new BOOL[g_pHardwareConfig->Caps().m_NumBooleanPixelShaderConstants];
-		
-			if (m_DynamicState.m_pIntegerPixelShaderConstant)
-			{
-				delete[] m_DynamicState.m_pIntegerPixelShaderConstant;
-			}
-			m_DynamicState.m_pIntegerPixelShaderConstant = new IntVector4D[g_pHardwareConfig->Caps().m_NumIntegerPixelShaderConstants];
-
-			if (m_DesiredState.m_pIntegerPixelShaderConstant)
-			{
-				delete[] m_DesiredState.m_pIntegerPixelShaderConstant;
-			}
-			m_DesiredState.m_pIntegerPixelShaderConstant = new IntVector4D[g_pHardwareConfig->Caps().m_NumIntegerPixelShaderConstants];
-
-			// force reset vector pixel constants
-			int i;
-			for ( i = 0; i < g_pHardwareConfig->Caps().m_NumPixelShaderConstants; ++i )
-			{
-				m_DesiredState.m_pVectorPixelShaderConstant[i].Init();
-			}
-			SetPixelShaderConstant( 0, m_DesiredState.m_pVectorPixelShaderConstant[0].Base(), g_pHardwareConfig->Caps().m_NumPixelShaderConstants, true );
-
-			// force reset boolean pixel constants
-			int nNumBooleanPixelShaderConstants = g_pHardwareConfig->Caps().m_NumBooleanPixelShaderConstants;
-			if ( nNumBooleanPixelShaderConstants )
-			{
-				for ( i = 0; i < nNumBooleanPixelShaderConstants; ++i )
-				{
-					m_DesiredState.m_pBooleanPixelShaderConstant[i] = 0;
-				}
-				SetBooleanPixelShaderConstant( 0, m_DesiredState.m_pBooleanPixelShaderConstant, nNumBooleanPixelShaderConstants, true );
-			}
-
-			// force reset integer pixel constants
-			int nNumIntegerPixelShaderConstants = g_pHardwareConfig->Caps().m_NumIntegerPixelShaderConstants;
-			if ( nNumIntegerPixelShaderConstants )
-			{
-				for ( i = 0; i < nNumIntegerPixelShaderConstants; ++i )
-				{
-					m_DesiredState.m_pIntegerPixelShaderConstant[i].Init();
-				}
-				SetIntegerPixelShaderConstant( 0, m_DesiredState.m_pIntegerPixelShaderConstant[0].Base(), nNumIntegerPixelShaderConstants, true );
-			}
+			delete[] m_DynamicState.m_pVectorPixelShaderConstant;
 		}
-		
-		// vertex shaders
+		m_DynamicState.m_pVectorPixelShaderConstant = new Vector4D[g_pHardwareConfig->Caps().m_NumPixelShaderConstants];
+
+		if (m_DesiredState.m_pVectorPixelShaderConstant)
 		{
-			if (m_DynamicState.m_pVectorVertexShaderConstant)
-			{
-				delete[] m_DynamicState.m_pVectorVertexShaderConstant;
-			}
-			m_DynamicState.m_pVectorVertexShaderConstant = new Vector4D[g_pHardwareConfig->Caps().m_NumVertexShaderConstants];
+			delete[] m_DesiredState.m_pVectorPixelShaderConstant;
+		}
+		m_DesiredState.m_pVectorPixelShaderConstant = new Vector4D[g_pHardwareConfig->Caps().m_NumPixelShaderConstants];
+#endif
 
-			if (m_DesiredState.m_pVectorVertexShaderConstant)
-			{
-				delete[] m_DesiredState.m_pVectorVertexShaderConstant;
-			}
-			m_DesiredState.m_pVectorVertexShaderConstant = new Vector4D[g_pHardwareConfig->Caps().m_NumVertexShaderConstants];
+		if (m_DynamicState.m_pBooleanPixelShaderConstant)
+		{
+			delete[] m_DynamicState.m_pBooleanPixelShaderConstant;
+		}
+		m_DynamicState.m_pBooleanPixelShaderConstant = new BOOL[g_pHardwareConfig->Caps().m_NumBooleanPixelShaderConstants];
 
-			if (m_DynamicState.m_pBooleanVertexShaderConstant)
-			{
-				delete[] m_DynamicState.m_pBooleanVertexShaderConstant;
-			}
-			m_DynamicState.m_pBooleanVertexShaderConstant = new BOOL[g_pHardwareConfig->Caps().m_NumBooleanVertexShaderConstants];
+		if (m_DesiredState.m_pBooleanPixelShaderConstant)
+		{
+			delete[] m_DesiredState.m_pBooleanPixelShaderConstant;
+		}
+		m_DesiredState.m_pBooleanPixelShaderConstant = new BOOL[g_pHardwareConfig->Caps().m_NumBooleanPixelShaderConstants];
+	
+		if (m_DynamicState.m_pIntegerPixelShaderConstant)
+		{
+			delete[] m_DynamicState.m_pIntegerPixelShaderConstant;
+		}
+		m_DynamicState.m_pIntegerPixelShaderConstant = new IntVector4D[g_pHardwareConfig->Caps().m_NumIntegerPixelShaderConstants];
 
-			if (m_DesiredState.m_pBooleanVertexShaderConstant)
-			{
-				delete[] m_DesiredState.m_pBooleanVertexShaderConstant;
-			}
-			m_DesiredState.m_pBooleanVertexShaderConstant = new BOOL[g_pHardwareConfig->Caps().m_NumBooleanVertexShaderConstants];
+		if (m_DesiredState.m_pIntegerPixelShaderConstant)
+		{
+			delete[] m_DesiredState.m_pIntegerPixelShaderConstant;
+		}
+		m_DesiredState.m_pIntegerPixelShaderConstant = new IntVector4D[g_pHardwareConfig->Caps().m_NumIntegerPixelShaderConstants];
 
-			if (m_DynamicState.m_pIntegerVertexShaderConstant)
-			{
-				delete[] m_DynamicState.m_pIntegerVertexShaderConstant;
-			}
-			m_DynamicState.m_pIntegerVertexShaderConstant = new IntVector4D[g_pHardwareConfig->Caps().m_NumIntegerVertexShaderConstants];
+		// force reset vector pixel constants
+		int i;
+#ifdef _PS3
+// 		if ( int numResetBytes = g_pHardwareConfig->Caps().m_NumPixelShaderConstants * sizeof( float ) * 4 )
+// 		{
+// 			float *pResetPixelShaderConstants = ( float * ) stackalloc( numResetBytes );
+// 			memset( pResetPixelShaderConstants, 0, numResetBytes );
+// 			SetPixelShaderConstantInternal( 0, pResetPixelShaderConstants, g_pHardwareConfig->Caps().m_NumPixelShaderConstants, true );
+// 		}
 
-			if (m_DesiredState.m_pIntegerVertexShaderConstant)
-			{
-				delete[] m_DesiredState.m_pIntegerVertexShaderConstant;
-			}
-			m_DesiredState.m_pIntegerVertexShaderConstant = new IntVector4D[g_pHardwareConfig->Caps().m_NumIntegerVertexShaderConstants];
+		gpGcmDrawState->m_dirtyStatesMask |= CGcmDrawState::kDirtyZeroAllPSConsts;
 
-			// force reset vector vertex constants
-			int i;
-			for ( i = 0; i < g_pHardwareConfig->Caps().m_NumVertexShaderConstants; ++i )
-			{
-				m_DesiredState.m_pVectorVertexShaderConstant[i].Init();
-			}
-			SetVertexShaderConstant( 0, m_DesiredState.m_pVectorVertexShaderConstant[0].Base(), g_pHardwareConfig->Caps().m_NumVertexShaderConstants, true );
+#else
+		for ( i = 0; i < g_pHardwareConfig->Caps().m_NumPixelShaderConstants; ++i )
+		{
+			m_DesiredState.m_pVectorPixelShaderConstant[i].Init();
+		}
+		SetPixelShaderConstantInternal( 0, m_DesiredState.m_pVectorPixelShaderConstant[0].Base(), g_pHardwareConfig->Caps().m_NumPixelShaderConstants, true );
+#endif
 
-			// force reset boolean vertex constants
-			for ( i = 0; i < g_pHardwareConfig->Caps().m_NumBooleanVertexShaderConstants; ++i )
+		// force reset boolean pixel constants
+		int nNumBooleanPixelShaderConstants = g_pHardwareConfig->Caps().m_NumBooleanPixelShaderConstants;
+		if ( nNumBooleanPixelShaderConstants )
+		{
+			for ( i = 0; i < nNumBooleanPixelShaderConstants; ++i )
 			{
-				m_DesiredState.m_pBooleanVertexShaderConstant[i] = 0;
+				m_DesiredState.m_pBooleanPixelShaderConstant[i] = 0;
 			}
-			SetBooleanVertexShaderConstant( 0, m_DesiredState.m_pBooleanVertexShaderConstant, g_pHardwareConfig->Caps().m_NumBooleanVertexShaderConstants, true );
+			SetBooleanPixelShaderConstant( 0, m_DesiredState.m_pBooleanPixelShaderConstant, nNumBooleanPixelShaderConstants, true );
+		}
 
+		// force reset integer pixel constants
+		int nNumIntegerPixelShaderConstants = g_pHardwareConfig->Caps().m_NumIntegerPixelShaderConstants;
+		if ( nNumIntegerPixelShaderConstants )
+		{
+			for ( i = 0; i < nNumIntegerPixelShaderConstants; ++i )
+			{
+				m_DesiredState.m_pIntegerPixelShaderConstant[i].Init();
+			}
+			SetIntegerPixelShaderConstant( 0, m_DesiredState.m_pIntegerPixelShaderConstant[0].Base(), nNumIntegerPixelShaderConstants, true );
+		}
+	}
+	
+	// vertex shaders
+	{
+		if (m_DynamicState.m_pVectorVertexShaderConstant)
+		{
+			delete[] m_DynamicState.m_pVectorVertexShaderConstant;
+		}
+		m_DynamicState.m_pVectorVertexShaderConstant = new Vector4D[g_pHardwareConfig->Caps().m_NumVertexShaderConstants];
+
+		if (m_DesiredState.m_pVectorVertexShaderConstant)
+		{
+			delete[] m_DesiredState.m_pVectorVertexShaderConstant;
+		}
+		m_DesiredState.m_pVectorVertexShaderConstant = new Vector4D[g_pHardwareConfig->Caps().m_NumVertexShaderConstants];
+
+		if (m_DynamicState.m_pBooleanVertexShaderConstant)
+		{
+			delete[] m_DynamicState.m_pBooleanVertexShaderConstant;
+		}
+		m_DynamicState.m_pBooleanVertexShaderConstant = new BOOL[g_pHardwareConfig->Caps().m_NumBooleanVertexShaderConstants];
+
+		if (m_DesiredState.m_pBooleanVertexShaderConstant)
+		{
+			delete[] m_DesiredState.m_pBooleanVertexShaderConstant;
+		}
+		m_DesiredState.m_pBooleanVertexShaderConstant = new BOOL[g_pHardwareConfig->Caps().m_NumBooleanVertexShaderConstants];
+
+		if (m_DynamicState.m_pIntegerVertexShaderConstant)
+		{
+			delete[] m_DynamicState.m_pIntegerVertexShaderConstant;
+		}
+		m_DynamicState.m_pIntegerVertexShaderConstant = new IntVector4D[g_pHardwareConfig->Caps().m_NumIntegerVertexShaderConstants];
+
+		if (m_DesiredState.m_pIntegerVertexShaderConstant)
+		{
+			delete[] m_DesiredState.m_pIntegerVertexShaderConstant;
+		}
+		m_DesiredState.m_pIntegerVertexShaderConstant = new IntVector4D[g_pHardwareConfig->Caps().m_NumIntegerVertexShaderConstants];
+
+		// force reset vector vertex constants
+
+#ifdef _PS3
+		int i;
+		memset(m_DesiredState.m_pVectorVertexShaderConstant[0].Base(), 0,
+			  g_pHardwareConfig->Caps().m_NumVertexShaderConstants * sizeof(vec_float4));
+		
+		gpGcmDrawState->m_dirtyStatesMask |= CGcmDrawState::kDirtyZeroAllVSConsts;
+#else
+
+		int i;
+		for ( i = 0; i < g_pHardwareConfig->Caps().m_NumVertexShaderConstants; ++i )
+		{
+			m_DesiredState.m_pVectorVertexShaderConstant[i].Init();
+		}
+		SetVertexShaderConstantInternal( 0, m_DesiredState.m_pVectorVertexShaderConstant[0].Base(), g_pHardwareConfig->Caps().m_NumVertexShaderConstants, true );
+#endif
+		// force reset boolean vertex constants
+		for ( i = 0; i < g_pHardwareConfig->Caps().m_NumBooleanVertexShaderConstants; ++i )
+		{
+			m_DesiredState.m_pBooleanVertexShaderConstant[i] = 0;
+		}
+		SetBooleanVertexShaderConstant( 0, m_DesiredState.m_pBooleanVertexShaderConstant, g_pHardwareConfig->Caps().m_NumBooleanVertexShaderConstants, true );
+
+		if ( !IsPS3() )
+		{
 			// force reset integer vertex constants
 			for ( i = 0; i < g_pHardwareConfig->Caps().m_NumIntegerVertexShaderConstants; ++i )
 			{
@@ -3069,16 +3878,17 @@ void CShaderAPIDx8::InitVertexAndPixelShaders()
 			}
 			SetIntegerVertexShaderConstant( 0, m_DesiredState.m_pIntegerVertexShaderConstant[0].Base(), g_pHardwareConfig->Caps().m_NumIntegerVertexShaderConstants, true );
 		}
-
-		if ( IsX360() )
-		{
-			// to init/update all constants, must disable ownership
-			bool bPreviousState = OwnGPUResources( false );
-			WriteShaderConstantsToGPU();
-			OwnGPUResources( bPreviousState );
-		}
-		SetStandardVertexShaderConstants( OVERBRIGHT );
 	}
+
+	if ( IsX360() )
+	{
+		// to init/update all constants, must disable ownership
+		bool bPreviousState = OwnGPUResources( false );
+		WriteShaderConstantsToGPU();
+		OwnGPUResources( bPreviousState );
+	}
+
+	SetStandardVertexShaderConstants( OVERBRIGHT );
 
 	// Set up the vertex and pixel shader stuff
 	ShaderManager()->ResetShaderState();
@@ -3097,6 +3907,10 @@ void CShaderAPIDx8::InitRenderState()
 	// state to something well defined.
 	m_TransitionTable.TakeDefaultStateSnapshot();
 
+#ifdef _GAMECONSOLE
+	m_zPassSnapshot = m_TransitionTable.TakeSnapshot();
+#endif
+
 	if ( !IsDeactivated() )
 	{
 		ResetRenderState();
@@ -3107,23 +3921,23 @@ void CShaderAPIDx8::InitRenderState()
 //-----------------------------------------------------------------------------
 // Commits vertex textures
 //-----------------------------------------------------------------------------
-static void CommitVertexTextures( IDirect3DDevice9 *pDevice, const DynamicState_t &desiredState, DynamicState_t &currentState, bool bForce )
+static void CommitVertexTextures( D3DDeviceWrapper *pDevice, const DynamicState_t &desiredState, DynamicState_t &currentState, bool bForce )
 {
-	int nCount = g_pMaterialSystemHardwareConfig->GetVertexTextureCount();
+	int nCount = g_pMaterialSystemHardwareConfig->GetVertexSamplerCount();
 	for ( int i = 0; i < nCount; ++i )
 	{
 		VertexTextureState_t &currentVTState = currentState.m_VertexTextureState[i];
-		ShaderAPITextureHandle_t textureHandle = desiredState.m_VertexTextureState[i].m_BoundTexture;
+		ShaderAPITextureHandle_t textureHandle = desiredState.m_VertexTextureState[i].m_BoundVertexTexture;
 
 		Texture_t *pTexture = ( textureHandle != INVALID_SHADERAPI_TEXTURE_HANDLE ) ? &g_ShaderAPIDX8.GetTexture( textureHandle ) : NULL;
-		if ( pTexture && ( pTexture->m_Flags & Texture_t::IS_VERTEX_TEXTURE ) == 0 )
-		{
-			Warning( "Attempting to bind a vertex texture (%s) which was not created as a vertex texture!\n", pTexture->m_DebugName.String() );
-		}
+//		if ( pTexture && ( pTexture->m_Flags & Texture_t::IS_VERTEX_TEXTURE ) == 0 )
+//		{
+//			Warning( "Attempting to bind a vertex texture (%s) which was not created as a vertex texture!\n", pTexture->m_DebugName.String() );
+//		}
 
-		if ( bForce || ( currentVTState.m_BoundTexture != textureHandle ) )
+		if ( bForce || ( currentVTState.m_BoundVertexTexture != textureHandle ) )
 		{
-			currentVTState.m_BoundTexture = textureHandle;
+			currentVTState.m_BoundVertexTexture = textureHandle;
 
 // 			RECORD_COMMAND( DX8_SET_VERTEXTEXTURE, 3 );
 // 			RECORD_INT( D3DVERTEXTEXTURESAMPLER0 + nStage );
@@ -3138,14 +3952,14 @@ static void CommitVertexTextures( IDirect3DDevice9 *pDevice, const DynamicState_
 		if ( !pTexture )
 			continue;
 
-		D3DTEXTUREADDRESS nNewUTexWrap = pTexture->m_UTexWrap;
+		D3DTEXTUREADDRESS nNewUTexWrap = (D3DTEXTUREADDRESS)pTexture->m_UTexWrap;
 		if ( bForce || ( currentVTState.m_UTexWrap != nNewUTexWrap ) )
 		{
 			currentVTState.m_UTexWrap = nNewUTexWrap;
 			SetSamplerState( pDevice, D3DVERTEXTEXTURESAMPLER0 + i, D3DSAMP_ADDRESSU, currentVTState.m_UTexWrap );
 		}
 
-		D3DTEXTUREADDRESS nNewVTexWrap = pTexture->m_VTexWrap;
+		D3DTEXTUREADDRESS nNewVTexWrap = (D3DTEXTUREADDRESS)pTexture->m_VTexWrap;
 		if ( bForce || ( currentVTState.m_VTexWrap != nNewVTexWrap ) )
 		{
 			currentVTState.m_VTexWrap = nNewVTexWrap;
@@ -3161,21 +3975,21 @@ static void CommitVertexTextures( IDirect3DDevice9 *pDevice, const DynamicState_
 		}
 		*/
 
-		D3DTEXTUREFILTERTYPE nNewMinFilter = pTexture->m_MinFilter;
+		D3DTEXTUREFILTERTYPE nNewMinFilter = (D3DTEXTUREFILTERTYPE)pTexture->m_MinFilter;
 		if ( bForce || ( currentVTState.m_MinFilter != nNewMinFilter ) )
 		{
 			currentVTState.m_MinFilter = nNewMinFilter;
 			SetSamplerState( pDevice, D3DVERTEXTEXTURESAMPLER0 + i, D3DSAMP_MINFILTER, currentVTState.m_MinFilter );
 		}
 
-		D3DTEXTUREFILTERTYPE nNewMagFilter = pTexture->m_MagFilter;
+		D3DTEXTUREFILTERTYPE nNewMagFilter = (D3DTEXTUREFILTERTYPE)pTexture->m_MagFilter;
 		if ( bForce || ( currentVTState.m_MagFilter != nNewMagFilter ) )
 		{
 			currentVTState.m_MagFilter = nNewMagFilter;
 			SetSamplerState( pDevice, D3DVERTEXTEXTURESAMPLER0 + i, D3DSAMP_MAGFILTER, currentVTState.m_MagFilter );
 		}
 
-		D3DTEXTUREFILTERTYPE nNewMipFilter = pTexture->m_MipFilter;
+		D3DTEXTUREFILTERTYPE nNewMipFilter = (D3DTEXTUREFILTERTYPE)pTexture->m_MipFilter;
 		if ( bForce || ( currentVTState.m_MipFilter != nNewMipFilter ) )
 		{
 			currentVTState.m_MipFilter = nNewMipFilter;
@@ -3191,7 +4005,8 @@ static void CommitVertexTextures( IDirect3DDevice9 *pDevice, const DynamicState_
 bool CShaderAPIDx8::IsTranslucent( StateSnapshot_t id ) const
 {
 	LOCK_SHADERAPI();
-	return m_TransitionTable.GetSnapshot(id).m_AlphaBlendEnable;
+	const ShadowState_t& snapshot = m_TransitionTable.GetSnapshot(id);
+	return snapshot.m_AlphaBlendState.m_AlphaBlendEnable && !snapshot.m_AlphaBlendState.m_AlphaBlendEnabledForceOpaque;
 }
 
 
@@ -3201,7 +4016,7 @@ bool CShaderAPIDx8::IsTranslucent( StateSnapshot_t id ) const
 bool CShaderAPIDx8::IsAlphaTested( StateSnapshot_t id ) const
 {
 	LOCK_SHADERAPI();
-	return m_TransitionTable.GetSnapshot(id).m_AlphaTestEnable;
+	return m_TransitionTable.GetSnapshot(id).m_AlphaTestAndMiscState.m_AlphaTestEnable;
 }
 
 
@@ -3211,7 +4026,7 @@ bool CShaderAPIDx8::IsAlphaTested( StateSnapshot_t id ) const
 bool CShaderAPIDx8::IsDepthWriteEnabled( StateSnapshot_t id ) const
 {
 	LOCK_SHADERAPI();
-	return m_TransitionTable.GetSnapshot(id).m_ZWriteEnable;
+	return m_TransitionTable.GetSnapshot(id).m_DepthTestState.m_ZWriteEnable;
 }
 
 
@@ -3288,20 +4103,29 @@ void CShaderAPIDx8::ResetDXRenderState( void )
     SetSupportedRenderStateForce( D3DRS_EMISSIVEMATERIALSOURCE, D3DMCS_MATERIAL );
     SetSupportedRenderStateForce( D3DRS_VERTEXBLEND, D3DVBF_DISABLE );
     SetSupportedRenderStateForce( D3DRS_CLIPPLANEENABLE, 0 );
-
+	
 	// -disable_d3d9_hacks is for debugging. For example, the "CENT" driver hack thing causes the flashlight pass to appear much brighter on NVidia drivers.
 	if ( IsPC() && !IsOpenGL() && !CommandLine()->CheckParm( "-disable_d3d9_hacks" ) )
 	{	
-		if ( g_pHardwareConfig->Caps().m_bNeedsATICentroidHack && ( g_pHardwareConfig->Caps().m_VendorID == VENDORID_ATI ) )
+		if ( g_pHardwareConfig->Caps().m_bNeedsATICentroidHack )
 		{
 			SetSupportedRenderStateForce( D3DRS_POINTSIZE, MAKEFOURCC( 'C', 'E', 'N', 'T' ) );
 		}
-
+		else if ( g_pHardwareConfig->Caps().m_VendorID == VENDORID_NVIDIA )
+		{
+			// NVIDIA has a bug in their driver, so we can't call this on DX10 hardware right now
+			if ( !g_pHardwareConfig->UsesSRGBCorrectBlending() )
+			{
+				// This helps the driver to know to turn on fast z reject for NVidia dx80 hardware
+				SetSupportedRenderStateForce( D3DRS_POINTSIZE, MAKEFOURCC( 'H', 'L', '2', 'A' ) );
+			}
+		}
 		if( g_pHardwareConfig->Caps().m_bDisableShaderOptimizations )
 		{
 			SetSupportedRenderStateForce( D3DRS_ADAPTIVETESS_Y, MAKEFOURCC( 'C', 'O', 'P', 'M' ) );
 		}
 	}
+
 	SetSupportedRenderStateForce( D3DRS_POINTSIZE, dOne );
     SetSupportedRenderStateForce( D3DRS_POINTSIZE_MIN, dOne );
     SetSupportedRenderStateForce( D3DRS_POINTSPRITEENABLE, FALSE );
@@ -3352,7 +4176,7 @@ void CShaderAPIDx8::ResetDXRenderState( void )
     SetSupportedRenderStateForce( D3DRS_BLENDOPALPHA, D3DBLENDOP_ADD );
 
 #if defined( _X360 )
-	SetSupportedRenderStateForce( D3DRS_HIZENABLE, D3DHIZ_AUTOMATIC );
+	SetSupportedRenderStateForce( D3DRS_HIZENABLE, mat_hi_z_enable.GetBool() ? D3DHIZ_AUTOMATIC : D3DHIZ_DISABLE );
 	SetSupportedRenderStateForce( D3DRS_HIZWRITEENABLE, D3DHIZ_AUTOMATIC );
 
 	SetSupportedRenderStateForce( D3DRS_HISTENCILENABLE, FALSE );
@@ -3363,11 +4187,24 @@ void CShaderAPIDx8::ResetDXRenderState( void )
 }
 
 //-----------------------------------------------------------------------------
-// Own GPU Resources.  Return previous state.
+// Own GPU Resources.  Return previous state. GPU Ownership allows the code
+// to defer all constant setting and then just blast the peak watermark directly into
+// the system's internal command buffer. The actual savings may be very negligible
+// if not worse due to our constant layout, which causes a wider range to be
+// copied.
 //-----------------------------------------------------------------------------
 bool CShaderAPIDx8::OwnGPUResources( bool bEnable )
 {
 #if defined( _X360 )
+	// no longer supporting, causes an unmeasurable benefit
+	// code complexity and instability dictate it is better left off
+	// modelfastpath and better batching has probably lessened the dense amount of constant setting
+	// leaving code in case perf testing again shows constant setting to be an issue
+	if ( !IsGPUOwnSupported() )
+	{
+		return false;
+	}
+
 	if ( m_bGPUOwned == bEnable )
 	{
 		return m_bGPUOwned;
@@ -3380,6 +4217,7 @@ bool CShaderAPIDx8::OwnGPUResources( bool bEnable )
 	else
 	{
 		// owned GPU constants can be set very fast, and must be in blocks of 4
+		// owned constants are set via a peak watermark, otherwise the legacy method is used
 		// there are 256, but the game only uses 217 (snapped to 220), leaving just enough room for shader literals
 		COMPILE_TIME_ASSERT( VERTEX_SHADER_MODEL + 3*NUM_MODEL_TRANSFORMS == 217 );
 		Dx9Device()->GpuOwnVertexShaderConstantF( 0, AlignValue( VERTEX_SHADER_MODEL + 3*NUM_MODEL_TRANSFORMS, 4 ) );
@@ -3400,19 +4238,20 @@ bool CShaderAPIDx8::OwnGPUResources( bool bEnable )
 // Reset render state (to its initial value)
 //-----------------------------------------------------------------------------
 void CShaderAPIDx8::ResetRenderState( bool bFullReset )
-{
+{ 
+	if ( IsDeactivated() )
+		return;
+
 	LOCK_SHADERAPI();
 	RECORD_DEBUG_STRING( "BEGIN ResetRenderState" );
 
-	if ( !CanDownloadTextures() )
-	{
-		QueueResetRenderState();
-		return;
-	}
+	// force xbox to do any reset work immediately
+	OwnGPUResources( false );
+	
+	ClearAllCommitFuncs( COMMIT_PER_DRAW );
+	ClearAllCommitFuncs( COMMIT_PER_PASS );
 
 	m_bResettingRenderState = true;
-
-	OwnGPUResources( true );
 
 	ResetDXRenderState();
 
@@ -3434,6 +4273,8 @@ void CShaderAPIDx8::ResetRenderState( bool bFullReset )
 	// to construct the shadow state.
 	m_DynamicState.m_ClearColor = D3DCOLOR_XRGB(0,0,0);
 
+	UpdateDepthBiasState();
+
 	if ( bFullReset )
 	{
 		InitVertexAndPixelShaders();
@@ -3441,39 +4282,39 @@ void CShaderAPIDx8::ResetRenderState( bool bFullReset )
 	else
 	{
 		// just need to dirty the dynamic state, desired state gets copied into below
+#ifndef _PS3
 		Q_memset( m_DynamicState.m_pVectorPixelShaderConstant, 0, g_pHardwareConfig->Caps().m_NumPixelShaderConstants * sizeof( Vector4D ) );
+#endif
 		Q_memset( m_DynamicState.m_pBooleanPixelShaderConstant, 0, g_pHardwareConfig->Caps().m_NumBooleanPixelShaderConstants * sizeof( BOOL ) );
 		Q_memset( m_DynamicState.m_pIntegerPixelShaderConstant, 0, g_pHardwareConfig->Caps().m_NumIntegerPixelShaderConstants * sizeof( IntVector4D ) );
 
 		Q_memset( m_DynamicState.m_pVectorVertexShaderConstant, 0, g_pHardwareConfig->Caps().m_NumVertexShaderConstants * sizeof( Vector4D ) );
+#ifdef _PS3
+		Q_memset( m_DesiredState.m_pVectorVertexShaderConstant, 0, g_pHardwareConfig->Caps().m_NumVertexShaderConstants * sizeof( Vector4D ) );
+		gpGcmDrawState->m_dirtyStatesMask |= CGcmDrawState::kDirtyZeroAllVSConsts;
+#endif
 		Q_memset( m_DynamicState.m_pBooleanVertexShaderConstant, 0, g_pHardwareConfig->Caps().m_NumBooleanVertexShaderConstants * sizeof( BOOL ) );
 		Q_memset( m_DynamicState.m_pIntegerVertexShaderConstant, 0, g_pHardwareConfig->Caps().m_NumIntegerVertexShaderConstants * sizeof( IntVector4D ) );
 
 		SetStandardVertexShaderConstants( OVERBRIGHT );
 	}
 
-	//Set the default compressed depth range written to dest alpha. Only need to compress it for 8bit alpha to get a useful gradient.
-	m_DynamicState.m_DestAlphaDepthRange = (g_pHardwareConfig->GetHDRType() == HDR_TYPE_FLOAT) ? 8192.0f : 192.0f;
-
-	m_CachedAmbientLightCube = STATE_CHANGED;
-
-	// Set the constant color
-	m_DynamicState.m_ConstantColor = 0xFFFFFFFF;
-	Color4ub( 255, 255, 255, 255 );
-
-	// Ambient light color
-	m_DynamicState.m_Ambient = 0;
-	SetSupportedRenderState( D3DRS_AMBIENT, m_DynamicState.m_Ambient );
+	m_DynamicState.m_nLocalEnvCubemapSamplers = 0;
+	m_DynamicState.m_nLightmapSamplers = 0;
+	m_DynamicState.m_nPaintmapSamplers = 0;
+	
+	// Set the default compressed depth range written to dest alpha. Only need to compress it for 8bit alpha to get a useful gradient.
+	SetFloatRenderingParameter( FLOAT_RENDERPARM_DEST_ALPHA_DEPTH_SCALE, ( g_pHardwareConfig->GetHDRType() == HDR_TYPE_FLOAT )  ? 8192.0f : 192.0f );
 
 	// Fog
 	m_VertexShaderFogParams[0] = m_VertexShaderFogParams[1] = 0.0f;
-	m_WorldSpaceCameraPositon.Init( 0, 0, 0.01f, 0 ); // Don't let z be zero, as some pixel shaders will divide by this
+	m_WorldSpaceCameraPosition.Init( 0, 0, 0 );
+	m_WorldSpaceCameraDirection.Init( 0, 0, -1 );
 	m_DynamicState.m_FogColor = 0xFFFFFFFF;
-	m_DynamicState.m_PixelFogColor[0] = m_DynamicState.m_PixelFogColor[1] = 
-		m_DynamicState.m_PixelFogColor[2] = m_DynamicState.m_PixelFogColor[3] = 0.0f;
+	m_DynamicState.m_vecPixelFogColor.Init();
+	m_DynamicState.m_vecPixelFogColorLinear.Init();
 	m_DynamicState.m_bFogGammaCorrectionDisabled = false;
 	m_DynamicState.m_FogEnable = false;
-	m_DynamicState.m_SceneFog = MATERIAL_FOG_NONE;
 	m_DynamicState.m_FogMode = D3DFOG_NONE;
 	m_DynamicState.m_FogStart = -1;
 	m_DynamicState.m_FogEnd = -1;
@@ -3506,44 +4347,22 @@ void CShaderAPIDx8::ResetRenderState( bool bFullReset )
 
 	// Skinning...
 	m_DynamicState.m_NumBones = 0;
-	m_DynamicState.m_VertexBlend = (D3DVERTEXBLENDFLAGS)-1;
-	SetSupportedRenderState( D3DRS_VERTEXBLEND, D3DVBF_DISABLE );
-	SetSupportedRenderState( D3DRS_INDEXEDVERTEXBLENDENABLE, FALSE );
 
-	// No normal normalization
-	m_DynamicState.m_NormalizeNormals = false;
-	SetSupportedRenderState( D3DRS_NORMALIZENORMALS, m_DynamicState.m_NormalizeNormals );
-
-	bool bAntialiasing = ( m_PresentParameters.MultiSampleType != D3DMULTISAMPLE_NONE );
-	if ( g_pHardwareConfig->GetHDRType() == HDR_TYPE_FLOAT )
-	{
-		bAntialiasing = false;
-	}
-	SetRenderState( D3DRS_MULTISAMPLEANTIALIAS, bAntialiasing );
+	// It's safe and not a perf problem to always enable this renderstate, even for single-sample rendertargets
+	SetRenderState( D3DRS_MULTISAMPLEANTIALIAS, true );
 	
+	if ( g_pHardwareConfig->ActualCaps().m_bSupportsAlphaToCoverage )
+	{
+		D3DRENDERSTATETYPE renderState = (D3DRENDERSTATETYPE)g_pHardwareConfig->ActualCaps().m_AlphaToCoverageState;
+		SetRenderState( renderState, g_pHardwareConfig->ActualCaps().m_AlphaToCoverageDisableValue );	// Vendor dependent state
+	}
 	// Anisotropic filtering is disabled by default
 	if ( bFullReset )
 	{
 		SetAnisotropicLevel( 1 );
 	}
-	
-	int i;
-	for ( i = 0; i < g_pHardwareConfig->ActualCaps().m_NumTextureStages; ++i )
-	{
-		TextureStage(i).m_TextureTransformFlags = D3DTTFF_DISABLE;
-		TextureStage(i).m_BumpEnvMat00 = 1.0f;
-		TextureStage(i).m_BumpEnvMat01 = 0.0f;
-		TextureStage(i).m_BumpEnvMat10 = 0.0f;
-		TextureStage(i).m_BumpEnvMat11 = 1.0f;
 
-		SetTextureStageState( i, D3DTSS_TEXTURETRANSFORMFLAGS, TextureStage(i).m_TextureTransformFlags );
-		SetTextureStageState( i, D3DTSS_BUMPENVMAT00, *( ( LPDWORD ) (&TextureStage(i).m_BumpEnvMat00) ) );
-		SetTextureStageState( i, D3DTSS_BUMPENVMAT01, *( ( LPDWORD ) (&TextureStage(i).m_BumpEnvMat01) ) );
-		SetTextureStageState( i, D3DTSS_BUMPENVMAT10, *( ( LPDWORD ) (&TextureStage(i).m_BumpEnvMat10) ) );
-		SetTextureStageState( i, D3DTSS_BUMPENVMAT11, *( ( LPDWORD ) (&TextureStage(i).m_BumpEnvMat11) ) );
-	}
-
-	for ( i = 0; i < g_pHardwareConfig->ActualCaps().m_NumSamplers; ++i )
+	for ( int i = 0; i < g_pHardwareConfig->ActualCaps().m_NumSamplers; ++i )
 	{
 		SamplerState(i).m_BoundTexture = INVALID_SHADERAPI_TEXTURE_HANDLE;						  
 		SamplerState(i).m_UTexWrap = D3DTADDRESS_WRAP;
@@ -3552,10 +4371,9 @@ void CShaderAPIDx8::ResetRenderState( bool bFullReset )
 		SamplerState(i).m_MagFilter = D3DTEXF_POINT;
 		SamplerState(i).m_MinFilter = D3DTEXF_POINT;
 		SamplerState(i).m_MipFilter = D3DTEXF_NONE;
-		SamplerState(i).m_FinestMipmapLevel = 0;
-		SamplerState(i).m_LodBias = 0.0f;
 		SamplerState(i).m_TextureEnable = false;
-		SamplerState(i).m_SRGBReadEnable = false;
+		SamplerState(i).m_nTextureBindFlags = TEXTURE_BINDFLAGS_NONE;
+		SamplerState(i).m_bShadowFilterEnable = 0;
 
 		// Just some initial state...
 		Dx9Device()->SetTexture( i, 0 );
@@ -3566,16 +4384,17 @@ void CShaderAPIDx8::ResetRenderState( bool bFullReset )
 		SetSamplerState( i, D3DSAMP_MINFILTER, SamplerState(i).m_MinFilter );
 		SetSamplerState( i, D3DSAMP_MAGFILTER, SamplerState(i).m_MagFilter );
 		SetSamplerState( i, D3DSAMP_MIPFILTER, SamplerState(i).m_MipFilter );
-		SetSamplerState( i, D3DSAMP_MAXMIPLEVEL, SamplerState(i).m_FinestMipmapLevel );
-		SetSamplerState( i, D3DSAMP_MIPMAPLODBIAS, SamplerState(i).m_LodBias );
+#if defined ( POSIX )
+		SetSamplerState( i, D3DSAMP_SHADOWFILTER, SamplerState(i).m_bShadowFilterEnable );
+#endif
 
 		SetSamplerState( i, D3DSAMP_BORDERCOLOR, RGB( 0,0,0 ) );
 	}
 
 	// FIXME!!!!! : This barfs with the debug runtime on 6800.
-	for( i = 0; i < g_pHardwareConfig->ActualCaps().m_nVertexTextureCount; i++ )
+	for( int i = 0; i < g_pHardwareConfig->ActualCaps().m_NumVertexSamplers; i++ )
 	{
-		m_DynamicState.m_VertexTextureState[i].m_BoundTexture = INVALID_SHADERAPI_TEXTURE_HANDLE;
+		m_DynamicState.m_VertexTextureState[i].m_BoundVertexTexture = INVALID_SHADERAPI_TEXTURE_HANDLE;
 		Dx9Device()->SetTexture( D3DVERTEXTEXTURESAMPLER0 + i, NULL );
 
 		m_DynamicState.m_VertexTextureState[i].m_UTexWrap = D3DTADDRESS_CLAMP;
@@ -3592,15 +4411,11 @@ void CShaderAPIDx8::ResetRenderState( bool bFullReset )
 		SetSamplerState( D3DVERTEXTEXTURESAMPLER0 + i, D3DSAMP_MIPFILTER, m_DynamicState.m_VertexTextureState[i].m_MipFilter );
 	}
 
-	m_DynamicState.m_NumLights = 0;
-	for ( i = 0; i < MAX_NUM_LIGHTS; ++i)
-	{
-		m_DynamicState.m_LightEnable[i] = false;
-		m_DynamicState.m_LightChanged[i] = STATE_CHANGED;
-		m_DynamicState.m_LightEnableChanged[i] = STATE_CHANGED;
-	}
+	memset( &m_DynamicState.m_InstanceInfo, 0, sizeof(InstanceInfo_t) );
+	memset( &m_DynamicState.m_CompiledLightingState, 0, sizeof(CompiledLightingState_t) );
+	memset( &m_DynamicState.m_LightingState, 0, sizeof( MaterialLightingState_t ) );
 
-	for ( i = 0; i < NUM_MATRIX_MODES; ++i)
+	for ( int i = 0; i < NUM_MATRIX_MODES; ++i)
 	{
 		// By setting this to *not* be identity, we force an update...
 		m_DynamicState.m_TransformType[i] = TRANSFORM_IS_GENERAL;
@@ -3617,14 +4432,6 @@ void CShaderAPIDx8::ResetRenderState( bool bFullReset )
 	SetSupportedRenderState( D3DRS_CLIPPING, TRUE );
 	SetSupportedRenderState( D3DRS_LOCALVIEWER, TRUE );
 	SetSupportedRenderState( D3DRS_POINTSCALEENABLE, FALSE );
-	SetSupportedRenderState( D3DRS_DIFFUSEMATERIALSOURCE, D3DMCS_MATERIAL );
-	SetSupportedRenderState( D3DRS_SPECULARMATERIALSOURCE, D3DMCS_COLOR2 );
-	SetSupportedRenderState( D3DRS_AMBIENTMATERIALSOURCE, D3DMCS_MATERIAL );
-	SetSupportedRenderState( D3DRS_EMISSIVEMATERIALSOURCE, D3DMCS_MATERIAL );
-	SetSupportedRenderState( D3DRS_COLORVERTEX, TRUE ); // This defaults to true anyways. . . 
-
-	// Set a default identity material.
-	SetDefaultMaterial();
 
 #if 0
 	float fBias = -1.0f;
@@ -3637,7 +4444,7 @@ void CShaderAPIDx8::ResetRenderState( bool bFullReset )
 	if ( bFullReset )
 	{
 		// Set the modelview matrix to identity too
-		for ( i = 0; i < NUM_MODEL_TRANSFORMS; ++i )
+		for ( int i = 0; i < NUM_MODEL_TRANSFORMS; ++i )
 		{
 			SetIdentityMatrix( m_boneMatrix[i] );
 		}
@@ -3653,7 +4460,7 @@ void CShaderAPIDx8::ResetRenderState( bool bFullReset )
 #endif
 
 	m_DynamicState.m_Viewport.X = m_DynamicState.m_Viewport.Y = 
-		m_DynamicState.m_Viewport.Width = m_DynamicState.m_Viewport.Height = 0xFFFFFFFF;
+		m_DynamicState.m_Viewport.Width = m_DynamicState.m_Viewport.Height = (DWORD)-1;
 	m_DynamicState.m_Viewport.MinZ = m_DynamicState.m_Viewport.MaxZ = 0.0;
 
 	// Be sure scissoring is off
@@ -3677,7 +4484,7 @@ void CShaderAPIDx8::ResetRenderState( bool bFullReset )
 	m_DynamicState.m_UserClipPlaneEnabled = 0;
 	m_DynamicState.m_UserClipPlaneChanged = 0;
 	m_DynamicState.m_UserClipLastUpdatedUsingFixedFunction = false;
-	for( i = 0; i < g_pHardwareConfig->MaxUserClipPlanes(); i++ )
+	for ( int i = 0; i < g_pHardwareConfig->MaxUserClipPlanes(); i++ )
 	{
 		// Make sure that our state is dirty.
 		m_DynamicState.m_UserClipPlaneWorld[i][0] = -1.0f;
@@ -3698,7 +4505,7 @@ void CShaderAPIDx8::ResetRenderState( bool bFullReset )
 
 	// Viewport defaults to the window size
 	RECT windowRect;
-#if !defined( DX_TO_GL_ABSTRACTION )
+#if defined(_WIN32) && !defined( DX_TO_GL_ABSTRACTION )
 	GetClientRect( (HWND)m_hWnd, &windowRect );
 #else
 	toglGetClientRect( (VD3DHWND)m_hWnd, &windowRect );
@@ -3707,14 +4514,24 @@ void CShaderAPIDx8::ResetRenderState( bool bFullReset )
 	ShaderViewport_t viewport;
 	viewport.Init( windowRect.left, windowRect.top, 
 		windowRect.right - windowRect.left,	windowRect.bottom - windowRect.top );
-	SetViewports( 1, &viewport );
+	SetViewports( 1, &viewport, true );
 
 	// No render mesh
 	m_pRenderMesh = 0;
+	m_nRenderInstanceCount = 0;
+	m_pRenderInstances = NULL;
+	m_pRenderCompiledState = NULL;
+	m_pRenderInstanceInfo = NULL;
+	m_bRenderHasSetStencil = false;
 
 	// Reset cached vertex decl
 	m_DynamicState.m_pVertexDecl = NULL;
-	
+	m_DynamicState.m_DeclVertexFormat = 0;
+	m_DynamicState.m_bDeclHasColorMesh = false;
+	m_DynamicState.m_bDeclUsingFlex = false;
+	m_DynamicState.m_bDeclUsingMorph = false;
+	m_DynamicState.m_bDeclUsingPreTessPatch = false;
+
 	// Reset the render target to be the normal backbuffer
 	if ( IsX360() )
 	{
@@ -3724,50 +4541,80 @@ void CShaderAPIDx8::ResetRenderState( bool bFullReset )
 	AcquireInternalRenderTargets();
 	SetRenderTarget();
 
-	// Maintain vertex + pixel shader constant buffers
+	if ( !bFullReset )
+	{
+		// Full reset has already allocated and inited the default values and sent them (above).
+		// Normal reset sends the desired values.
+		if ( g_pHardwareConfig->Caps().m_NumVertexShaderConstants != 0 )
+		{
+#ifndef _PS3
+			// 217 on X360 to play nice with fast blatting code
+			SetVertexShaderConstantInternal( 0, m_DesiredState.m_pVectorVertexShaderConstant[0].Base(), IsX360() ? 217 : g_pHardwareConfig->Caps().m_NumVertexShaderConstants, true );
+#endif
+		}
+		
+		if ( g_pHardwareConfig->Caps().m_NumIntegerVertexShaderConstants != 0 )
+		{
+			SetIntegerVertexShaderConstant( 0, (int *)m_DesiredState.m_pIntegerVertexShaderConstant, g_pHardwareConfig->Caps().m_NumIntegerVertexShaderConstants, true );
+		}
+		
+		if ( g_pHardwareConfig->Caps().m_NumBooleanVertexShaderConstants != 0 )
+		{
+			SetBooleanVertexShaderConstant( 0, m_DesiredState.m_pBooleanVertexShaderConstant, g_pHardwareConfig->Caps().m_NumBooleanVertexShaderConstants, true );
+		}
+
+		if ( g_pHardwareConfig->Caps().m_NumPixelShaderConstants != 0 )
+		{
+#ifndef _PS3
+			SetPixelShaderConstantInternal( 0, m_DesiredState.m_pVectorPixelShaderConstant[0].Base(), g_pHardwareConfig->Caps().m_NumPixelShaderConstants, true );
+#endif
+		}
+
+		if ( g_pHardwareConfig->Caps().m_NumIntegerPixelShaderConstants != 0 )
+		{
+			SetIntegerPixelShaderConstant( 0, (int *)m_DesiredState.m_pIntegerPixelShaderConstant, g_pHardwareConfig->Caps().m_NumIntegerPixelShaderConstants, true );
+		}
+
+		if ( g_pHardwareConfig->Caps().m_NumBooleanPixelShaderConstants != 0 )
+		{
+			SetBooleanPixelShaderConstant( 0, m_DesiredState.m_pBooleanPixelShaderConstant, g_pHardwareConfig->Caps().m_NumBooleanPixelShaderConstants, true );
+		}
+	}
+
+	// apply any queued commits that have 'desired' state
+	CallCommitFuncs( COMMIT_PER_DRAW, true );
+	CallCommitFuncs( COMMIT_PER_PASS, true );
+
+	//
+	// All state setting now completed
+	//
+
+	// save vertex/pixel shader constant pointers
 	Vector4D *pVectorPixelShaderConstants = m_DesiredState.m_pVectorPixelShaderConstant;
 	int *pBooleanPixelShaderConstants = m_DesiredState.m_pBooleanPixelShaderConstant;
 	IntVector4D *pIntegerPixelShaderConstants = m_DesiredState.m_pIntegerPixelShaderConstant;
 	Vector4D *pVectorVertexShaderConstants = m_DesiredState.m_pVectorVertexShaderConstant;
 	int *pBooleanVertexShaderConstants = m_DesiredState.m_pBooleanVertexShaderConstant;
 	IntVector4D *pIntegerVertexShaderConstants = m_DesiredState.m_pIntegerVertexShaderConstant;
-	m_DesiredState = m_DynamicState;
+
+	// DesiredState = DynamicState
+	memcpy( &m_DesiredState, &m_DynamicState, sizeof( DynamicState_t ) );
+
+	// restore vertex/pixel shader constant pointers
 	m_DesiredState.m_pVectorPixelShaderConstant = pVectorPixelShaderConstants;
 	m_DesiredState.m_pBooleanPixelShaderConstant = pBooleanPixelShaderConstants;
 	m_DesiredState.m_pIntegerPixelShaderConstant = pIntegerPixelShaderConstants;
 	m_DesiredState.m_pVectorVertexShaderConstant = pVectorVertexShaderConstants;
 	m_DesiredState.m_pBooleanVertexShaderConstant = pBooleanVertexShaderConstants;
 	m_DesiredState.m_pIntegerVertexShaderConstant = pIntegerVertexShaderConstants;
-	if ( g_pHardwareConfig->Caps().m_SupportsPixelShaders )
-	{
-		if ( !bFullReset )
-		{
-			//Full resets init the values to defaults. Normal resets just leave them dirty.
-			if( g_pHardwareConfig->Caps().m_NumVertexShaderConstants != 0 )
-				SetVertexShaderConstant( 0, m_DesiredState.m_pVectorVertexShaderConstant[0].Base(), IsX360() ? 217 : g_pHardwareConfig->Caps().m_NumVertexShaderConstants, true ); //217 on X360 to play nice with fast blatting code
-			
-			if( g_pHardwareConfig->Caps().m_NumIntegerVertexShaderConstants != 0 )
-				SetIntegerVertexShaderConstant( 0, (int *)m_DesiredState.m_pIntegerVertexShaderConstant, g_pHardwareConfig->Caps().m_NumIntegerVertexShaderConstants, true );
-			
-			if( g_pHardwareConfig->Caps().m_NumBooleanVertexShaderConstants != 0 )
-				SetBooleanVertexShaderConstant( 0, m_DesiredState.m_pBooleanVertexShaderConstant, g_pHardwareConfig->Caps().m_NumBooleanVertexShaderConstants, true );
-
-
-			if( g_pHardwareConfig->Caps().m_NumPixelShaderConstants != 0 )
-				SetPixelShaderConstant( 0, m_DesiredState.m_pVectorPixelShaderConstant[0].Base(), g_pHardwareConfig->Caps().m_NumPixelShaderConstants, true );
-
-			if( g_pHardwareConfig->Caps().m_NumIntegerPixelShaderConstants != 0 )
-				SetIntegerPixelShaderConstant( 0, (int *)m_DesiredState.m_pIntegerPixelShaderConstant, g_pHardwareConfig->Caps().m_NumIntegerPixelShaderConstants, true );
-
-			if( g_pHardwareConfig->Caps().m_NumBooleanPixelShaderConstants != 0 )
-				SetBooleanPixelShaderConstant( 0, m_DesiredState.m_pBooleanPixelShaderConstant, g_pHardwareConfig->Caps().m_NumBooleanPixelShaderConstants, true );
-		}
-	}
-
-	RECORD_DEBUG_STRING( "END ResetRenderState" );
 
 	m_bResettingRenderState = false;
+
+	OwnGPUResources( true );
+
+	RECORD_DEBUG_STRING( "END ResetRenderState" );
 }
+
 
 //-----------------------------------------------------------------------------
 // Sets the default render state
@@ -3776,26 +4623,8 @@ void CShaderAPIDx8::SetDefaultState()
 {
 	LOCK_SHADERAPI();
 
-	// NOTE: This used to be in the material system, but I want to avoid all the per pass/batch
-	// virtual function calls.
-	int numTextureStages = g_pHardwareConfig->GetTextureStageCount();
-
-	// FIXME: This is a brutal hack. We only need to load these transforms for fixed-function
-	// hardware. Cap the max here to 4.
-	if ( IsPC() )
-	{
-		numTextureStages = min( numTextureStages, 4 );
-		int i;
-		for( i = 0; i < numTextureStages; i++ )
-		{
-			CShaderAPIDx8::DisableTextureTransform( (TextureStage_t)i );
-			CShaderAPIDx8::MatrixMode( (MaterialMatrixMode_t)(MATERIAL_TEXTURE0 + i) );
-			CShaderAPIDx8::LoadIdentity( );
-		}
-	}
 	CShaderAPIDx8::MatrixMode( MATERIAL_MODEL );
 
-	CShaderAPIDx8::Color4ub( 255, 255, 255, 255 );
 	CShaderAPIDx8::ShadeMode( SHADER_SMOOTH );
 	CShaderAPIDx8::SetVertexShaderIndex( );
 	CShaderAPIDx8::SetPixelShaderIndex( );
@@ -3815,19 +4644,37 @@ void CShaderAPIDx8::SetDefaultState()
 //-----------------------------------------------------------------------------
 // Sets the vertex
 //-----------------------------------------------------------------------------
-inline void CShaderAPIDx8::SetVertexDecl( VertexFormat_t vertexFormat, bool bHasColorMesh, bool bUsingFlex, bool bUsingMorph )
+inline void CShaderAPIDx8::SetVertexDecl( VertexFormat_t vertexFormat, bool bHasColorMesh, bool bUsingFlex, bool bUsingMorph, bool bUsingPreTessPatch, VertexStreamSpec_t *pStreamSpec )
 {
 	VPROF("CShaderAPIDx8::SetVertexDecl");
-	IDirect3DVertexDeclaration9 *pDecl = FindOrCreateVertexDecl( vertexFormat, bHasColorMesh, bUsingFlex, bUsingMorph );
-	Assert( pDecl );
-
-	if ( ( pDecl != m_DynamicState.m_pVertexDecl ) && pDecl )
+	if ( pStreamSpec || vertexFormat != m_DynamicState.m_DeclVertexFormat || 
+		bHasColorMesh != m_DynamicState.m_bDeclHasColorMesh || 
+		bUsingFlex != m_DynamicState.m_bDeclUsingFlex || 
+		bUsingMorph != m_DynamicState.m_bDeclUsingMorph ||
+		bUsingPreTessPatch != m_DynamicState.m_bDeclUsingPreTessPatch )
 	{
-		Dx9Device()->SetVertexDeclaration( pDecl );
-		m_DynamicState.m_pVertexDecl = pDecl;
+		IDirect3DVertexDeclaration9 *pDecl = FindOrCreateVertexDecl( vertexFormat, bHasColorMesh, bUsingFlex, bUsingMorph, bUsingPreTessPatch, pStreamSpec );
+		Assert( pDecl );
+
+		if ( ( pDecl != m_DynamicState.m_pVertexDecl ) && pDecl )
+		{
+			Dx9Device()->SetVertexDeclaration( pDecl );
+			m_DynamicState.m_pVertexDecl = pDecl;
+		}
+
+		m_DynamicState.m_DeclVertexFormat = vertexFormat;
+		m_DynamicState.m_bDeclHasColorMesh = bHasColorMesh;
+		m_DynamicState.m_bDeclUsingFlex = bUsingFlex;
+		m_DynamicState.m_bDeclUsingMorph = bUsingMorph;
+		m_DynamicState.m_bDeclUsingPreTessPatch = bUsingPreTessPatch;
 	}
 }
 
+
+void CShaderAPIDx8::SetTessellationMode( TessellationMode_t mode )
+{
+	m_DynamicState.m_TessellationMode = mode;
+}
 
 
 //-----------------------------------------------------------------------------
@@ -3889,35 +4736,417 @@ int CShaderAPIDx8::GetMaxIndicesToRender( )
 void CShaderAPIDx8::MarkUnusedVertexFields( unsigned int nFlags, int nTexCoordCount, bool *pUnusedTexCoords )
 {
 	LOCK_SHADERAPI();
-	MeshMgr()->MarkUnusedVertexFields( nFlags, nTexCoordCount, pUnusedTexCoords );
+	MeshMgr()->MarkUnusedVertexFields( nFlags, nTexCoordCount, pUnusedTexCoords ); 
 }
+
+
+#ifdef _GAMECONSOLE
+
+
+//-----------------------------------------------------------------------------
+// Backdoor used by the queued context to directly use write-combined memory
+//-----------------------------------------------------------------------------
+IMesh *CShaderAPIDx8::GetExternalMesh( const ExternalMeshInfo_t& info )
+{
+	LOCK_SHADERAPI();
+	return MeshMgr()->GetExternalMesh( info ); 
+}
+
+void CShaderAPIDx8::SetExternalMeshData( IMesh *pMesh, const ExternalMeshData_t &data )
+{
+	LOCK_SHADERAPI();
+	return MeshMgr()->SetExternalMeshData( pMesh, data ); 
+}
+
+IIndexBuffer *CShaderAPIDx8::GetExternalIndexBuffer( int nIndexCount, uint16 *pIndexData )
+{
+	LOCK_SHADERAPI();
+	return MeshMgr()->GetExternalIndexBuffer( nIndexCount, pIndexData ); 
+}
+
+void CShaderAPIDx8::FlushGPUCache( void *pBaseAddr, size_t nSizeInBytes )
+{
+#ifdef _X360
+	if ( nSizeInBytes > 0 )
+	{
+		Dx9Device()->InvalidateGpuCache( pBaseAddr, nSizeInBytes, 0 );
+	}
+#elif _PS3
+	Dx9Device()->FlushVertexCache(); // @TODO@
+#endif
+}
+
+#endif
+
+const char *_gShaderName;
 
 //-----------------------------------------------------------------------------
 // Draws the mesh
 //-----------------------------------------------------------------------------
-void CShaderAPIDx8::DrawMesh( CMeshBase *pMesh )
+void CShaderAPIDx8::DrawMesh( CMeshBase *pMesh, int nCount, const MeshInstanceData_t *pInstances,
+							  VertexCompressionType_t nCompressionType, CompiledLightingState_t* pCompiledState, 
+							  InstanceInfo_t *pInfo )
 {
+	Assert( nCount > 0 );
+
 	VPROF("CShaderAPIDx8::DrawMesh");
 	if ( ShaderUtil()->GetConfig().m_bSuppressRendering )
 		return;
 
-#if defined( PIX_INSTRUMENTATION ) || defined( NVPERFHUD )
-	PIXifyName( s_pPIXMaterialName, sizeof( s_pPIXMaterialName ), m_pMaterial->GetName() );
+	if ( m_pMaterial )
+	{
+		if ( IShader *pShader = m_pMaterial->GetShader() )
+		{
+			_gShaderName = pShader->GetName();
+
+			if ( !strcmp( _gShaderName, "VertexLitGeneric" ) )
+			{
+				m_bVtxLitMesh = true;
+			}
+			else if ( !strcmp( _gShaderName, "LightmappedGeneric" ) )
+			{
+				m_bLmapMesh = true;
+			}
+			else if ( !strcmp( _gShaderName, "UnlitGeneric" ) )
+			{
+				m_bUnlitMesh = true;
+			}
+		}
+	}
+
+	if (m_bGeneratingCSMs)
+	{
+		if (!(m_bVtxLitMesh || m_bLmapMesh || m_bUnlitMesh))
+		{
+			DrawShadowMesh(pMesh, nCount, pInstances, nCompressionType, pCompiledState, pInfo);
+		}
+		goto xit;
+	}
+	else if (m_bVtxLitMesh || m_bLmapMesh || m_bUnlitMesh)
+	{
+		DrawMesh2(pMesh, nCount, pInstances, nCompressionType, pCompiledState, pInfo);
+		goto xit;
+	}
+
+	// If we are here then it's neither vtx lit, lmap or shadows
+	DrawMeshInternal( pMesh, nCount, pInstances, nCompressionType, pCompiledState, pInfo );
+
+	// Stop profiling
+xit:
+
+	m_bVtxLitMesh = false;
+	m_bLmapMesh = false;
+	m_bUnlitMesh = false;
+}
+
+void CShaderAPIDx8::DrawMeshInternal( CMeshBase *pMesh, int nCount, const MeshInstanceData_t *pInstances,
+									  VertexCompressionType_t nCompressionType, CompiledLightingState_t* pCompiledState, 
+									  InstanceInfo_t *pInfo )
+{
+#if ( defined( PIX_INSTRUMENTATION ) || defined( NVPERFHUD ) || ( defined( PLATFORM_POSIX ) && ( GLMDEBUG > 0 ) ) )
 	BeginPIXEvent( PIX_VALVE_ORANGE, s_pPIXMaterialName );
 #endif
 
 	m_pRenderMesh = pMesh;
-	VertexFormat_t vertexFormat = m_pRenderMesh->GetVertexFormat();
-	SetVertexDecl( vertexFormat, m_pRenderMesh->HasColorMesh(), m_pRenderMesh->HasFlexMesh(), m_pMaterial->IsUsingVertexID() );
-	CommitStateChanges();
-	Assert( m_pRenderMesh && m_pMaterial );
-	m_pMaterial->DrawMesh( CompressionType( vertexFormat ) );
-	m_pRenderMesh = NULL;
+	m_nRenderInstanceCount = nCount;
+	m_pRenderInstances = pInstances;
+	m_pRenderCompiledState = pCompiledState;
+	m_pRenderInstanceInfo = pInfo;
+	m_bRenderHasSetStencil = false;
+	m_DynamicState.m_bLightStateComputed = false;
+	m_DynamicState.m_nLocalEnvCubemapSamplers = 0;
+	m_DynamicState.m_nLightmapSamplers = 0;
+	m_DynamicState.m_nPaintmapSamplers = 0;
+	GetCurrentStencilState( &m_RenderInitialStencilState );
+	bool bUsingPreTessPatches = false;
+	if ( m_pRenderMesh )
+	{
+		VertexFormat_t vertexFormat = m_pRenderMesh->GetVertexFormat();
+		bUsingPreTessPatches = ( m_pRenderMesh->GetTessellationType() > 0 ) && ( GetTessellationMode() == TESSELLATION_MODE_ACC_PATCHES_EXTRA || GetTessellationMode() == TESSELLATION_MODE_ACC_PATCHES_REG );
+		SetVertexDecl( vertexFormat, ( m_pMaterial->GetVertexFormat() & VERTEX_COLOR_STREAM_1 ) != 0, m_pRenderMesh->HasFlexMesh(),
+			m_pMaterial->IsUsingVertexID(), bUsingPreTessPatches, m_pRenderMesh->GetVertexStreamSpec() );
+	}
 
-#if defined( PIX_INSTRUMENTATION ) || defined( NVPERFHUD )
+	bool bIsAlphaModulating = pInstances[0].m_DiffuseModulation[3] != 1.0f;
+#ifdef _DEBUG
+	// NOTE: At the moment, if one instance is modulating, they all are.
+	// However, this is relatively easy to fix; I just don't have time.
+	// Each shader render pass needs to store 2 alphablending states: one for when we are alpha
+	// modulating and one when were are not. All shaders need to be rewritten
+	// to not have either static or dynamic combos as a result of modulating/not modulating
+	// Then this will work.
+	for ( int i = 1; i < nCount; ++i )
+	{
+		bool bTestIsAlphaModulating = pInstances[i].m_DiffuseModulation[3] != 1.0f;
+		Assert( bTestIsAlphaModulating == bIsAlphaModulating );
+	}
+#endif
+
+	CommitStateChanges();
+	Assert( m_pMaterial );
+	m_pMaterial->DrawMesh( nCompressionType, bIsAlphaModulating, bUsingPreTessPatches );
+
+	if ( m_bRenderHasSetStencil )
+	{
+		SetStencilStateInternal( m_RenderInitialStencilState );
+	}
+
+	m_pRenderMesh = NULL;
+	m_nRenderInstanceCount = 0;
+	m_pRenderInstances = NULL;
+	m_pRenderCompiledState = NULL;
+	m_pRenderInstanceInfo = NULL;
+	m_bRenderHasSetStencil = false;
+	m_DynamicState.m_bLightStateComputed = false;
+
+#if ( defined( PIX_INSTRUMENTATION ) || defined( NVPERFHUD ) || ( defined( PLATFORM_POSIX ) && ( GLMDEBUG > 0 ) ) )
 	EndPIXEvent();
 #endif
 }
+
+void CShaderAPIDx8::DrawMesh2( CMeshBase* pMesh, int nCount, const MeshInstanceData_t *pInstances, 
+							  VertexCompressionType_t nCompressionType, CompiledLightingState_t* pCompiledState, InstanceInfo_t *pInfo )
+{
+    int bFixedLightingMode;
+    bool inFlashlightMode;
+    uint32 mtlChangeTimestamp;
+    bool bIsAlphaModulating;
+    int modulationFlags;
+    CBasePerMaterialContextData **pContextDataPtr;
+    int dynVSIdx, dynPSIdx;
+    IShader *pShader;
+    IMaterialVar** params;
+    bool mtlChanged;
+
+	static ConVarRef r_staticlight_mode( "r_staticlight_mode" );
+
+	if ( (m_bVtxLitMesh && !mat_vtxlit_new_path.GetBool()) ||
+		 (m_bLmapMesh && !mat_lmap_new_path.GetBool()) ||
+		 (m_bUnlitMesh && !mat_unlit_new_path.GetBool()) )		 
+	{
+		goto useOldPath;
+	}
+
+	// old path only if using avg of 3 staticlight color streams, since we fall back to sm2b
+	if ( r_staticlight_mode.GetInt() == 1 )
+	{
+		goto useOldPath;
+	}
+
+	// Work out if this mesh can indeed use the new path
+	if ( m_bToolsMode )
+	{
+		goto useOldPath;
+	}
+
+	// Get the context data ptr
+	bIsAlphaModulating = pInstances[0].m_DiffuseModulation[3] != 1.0f;
+	modulationFlags = bIsAlphaModulating? SHADER_USING_ALPHA_MODULATION : 0;	
+
+	pContextDataPtr = m_pMaterial->GetContextData( modulationFlags );
+	if ( !pContextDataPtr || !(*pContextDataPtr) )
+	{
+		goto useOldPath;
+	}
+
+	mtlChangeTimestamp = m_pMaterial->GetChangeTimestamp();	
+	mtlChanged = (*pContextDataPtr)->m_nVarChangeID != mtlChangeTimestamp;
+	if ( mtlChanged )
+	{
+		goto useOldPath;
+	}
+
+	inFlashlightMode = InFlashlightMode();
+	if ( inFlashlightMode )
+	{
+		goto useOldPath;
+	}
+
+	bFixedLightingMode = GetIntRenderingParameter( INT_RENDERPARM_ENABLE_FIXED_LIGHTING );
+	if ( bFixedLightingMode != ENABLE_FIXED_LIGHTING_NONE )
+	{
+		goto useOldPath;
+	}
+
+	// Possibly new path
+
+	m_pRenderMesh = pMesh;
+	m_nRenderInstanceCount = nCount;
+	m_pRenderInstances = pInstances;
+	m_pRenderCompiledState = pCompiledState;
+	m_pRenderInstanceInfo = pInfo;
+	m_bRenderHasSetStencil = false;
+	m_DynamicState.m_bLightStateComputed = false;
+	m_DynamicState.m_nLocalEnvCubemapSamplers = 0;
+	m_DynamicState.m_nLightmapSamplers = 0;
+	m_DynamicState.m_nPaintmapSamplers = 0;
+
+	// Streams already set by the time we get here
+		
+	pShader = m_pMaterial->GetShader();
+	params = m_pMaterial->GetVars();
+	pShader->SetPPParams( params );
+	pShader->SetModulationFlags( modulationFlags );
+	pShader->ExecuteFastPath( &dynVSIdx, &dynPSIdx, params, this, nCompressionType, pContextDataPtr, m_bCSMsValidThisFrame );
+
+	if ( dynVSIdx != -1 )
+	{
+		unsigned char* pInstanceCommandBuffer = NULL;
+		StateSnapshot_t snapshotId = m_pMaterial->GetSnapshotId( modulationFlags, 0 );
+
+		CommitSetViewports( Dx9Device(), m_DesiredState, m_DynamicState, false );
+		ClearAllCommitFuncs( COMMIT_PER_DRAW );
+
+		CommitFastClipPlane();
+
+		CommitVertexShaderTransforms();
+
+		if (m_DynamicState.m_UserClipPlaneEnabled)
+		{
+			CommitUserClipPlanes();
+		}
+
+		m_TransitionTable.UseSnapshot( snapshotId, false );
+			
+		pInstanceCommandBuffer = m_pMaterial->GetInstanceCommandBuffer( modulationFlags );
+				
+		ShadowShaderState_t *pShadowShaderState = m_TransitionTable.GetShaderShadowState( snapshotId );
+
+		PixelShader_t ps = pShadowShaderState->m_PixelShader;
+		HardwareShader_t hps = ShaderManager()->GetPixelShader( ps, dynPSIdx );
+		ShaderManager()->SetPixelShaderState_Internal( hps, 0 );
+		
+		VertexShader_t vs = pShadowShaderState->m_VertexShader;
+		HardwareShader_t hvs = ShaderManager()->GetVertexShader( vs, dynVSIdx );
+		ShaderManager()->SetVertexShaderState_Internal( hvs, 0 );
+		
+		if ( pMesh )
+		{
+			// Set vertex decl
+			VertexFormat_t vertexFormat = pMesh->GetVertexFormat();	
+			SetVertexDecl( vertexFormat, ( m_pMaterial->GetVertexFormat() & VERTEX_COLOR_STREAM_1 ) != 0, pMesh->HasFlexMesh(),
+				m_pMaterial->IsUsingVertexID(), false, pMesh->GetVertexStreamSpec() );
+
+			pMesh->DrawPrims( pInstanceCommandBuffer );
+		}
+		else
+		{
+			
+			MeshMgr()->DrawInstancedPrims( pInstanceCommandBuffer );
+		}
+		pShader->SetPPParams(NULL);
+	}
+	else
+	{
+		// Could not take new path
+		pShader->SetPPParams(NULL);
+		goto useOldPath;
+	}
+
+	goto xit;
+
+useOldPath:	
+	DrawMeshInternal( pMesh, nCount, pInstances, nCompressionType, pCompiledState, pInfo );
+	goto xit;
+
+xit:
+
+	m_pRenderMesh = NULL;
+	m_nRenderInstanceCount = 0;
+	m_pRenderInstances = NULL;
+	m_pRenderCompiledState = NULL;
+	m_pRenderInstanceInfo = NULL;
+	m_bRenderHasSetStencil = false;
+	m_DynamicState.m_bLightStateComputed = false;
+
+	return;
+}
+
+void CShaderAPIDx8::DrawShadowMesh( CMeshBase *pMesh, int nCount, const MeshInstanceData_t *pInstances,
+								   VertexCompressionType_t nCompressionType, CompiledLightingState_t* pCompiledState, 
+								   InstanceInfo_t *pInfo )
+{	
+	if ( !mat_depthwrite_new_path.GetBool() )
+	{	
+		DrawMeshInternal( pMesh, nCount, pInstances, nCompressionType, pCompiledState, pInfo );
+		return;
+	}
+
+	// New DrawMesh
+	
+	// Work out shaders to set
+	int dynVSIdx, dynPSIdx;
+	IShader *pShader = m_pMaterial->GetShader();
+	IMaterialVar** params = m_pMaterial->GetVars();
+	pShader->SetPPParams( params );
+	pShader->ExecuteFastPath( &dynVSIdx, &dynPSIdx, params, this, nCompressionType, NULL, false );
+
+	if ( dynVSIdx != -1 )
+	{
+		StateSnapshot_t snapshotId = m_pMaterial->GetSnapshotId( 0, 0 );
+		ShadowShaderState_t *pShadowShaderState = m_TransitionTable.GetShaderShadowState( snapshotId );
+
+		if (m_DynamicState.m_UserClipPlaneEnabled)
+        {
+             CommitUserClipPlanes();
+        }
+
+		PixelShader_t ps = pShadowShaderState->m_PixelShader;
+		HardwareShader_t hps;
+		if ( ps != (PixelShader_t)-1 )
+		{
+			hps = ShaderManager()->GetPixelShader( ps, dynPSIdx );
+		}
+		else
+		{
+			hps = 0;
+		}
+		ShaderManager()->SetPixelShaderState_Internal( hps, 0 );
+		
+		VertexShader_t vs = pShadowShaderState->m_VertexShader;
+		HardwareShader_t hvs = ShaderManager()->GetVertexShader( vs, dynVSIdx );
+		ShaderManager()->SetVertexShaderState_Internal( hvs, 0 );
+		
+		if ( pMesh )
+		{
+			// Set skinning matrices if required
+			int numBones = GetCurrentNumBones();
+			if ( numBones > 0 )
+			{
+				SetSkinningMatrices( pInstances[0] );
+			}
+
+			// Work out vertex format. This involves an RB Tree lookup.
+			VertexFormat_t vertexFormat = pMesh->GetVertexFormat();
+			SetVertexDecl( vertexFormat, ( m_pMaterial->GetVertexFormat() & VERTEX_COLOR_STREAM_1 ) != 0, pMesh->HasFlexMesh(),
+				false, false, pMesh->GetVertexStreamSpec() );
+
+			// Draw
+			pMesh->DrawPrims( NULL );
+		}
+		else
+		{
+			MeshMgr()->DrawInstancedPrims( NULL );
+		}
+	}
+	else
+	{
+		//DevMsg("DrawShadowMesh: Bad dyn vs/ps index, cannot draw\n");	
+		
+		// gurjeets - Found bug on de_cbble where a couple of meshes get drawn into the CSM using Sprite_DX9, which actually
+		// turns Alpha Blending and Colour Writes ON for the CSM render target. This is wrong.
+		// The original DrawMesh deals with this by resetting the correct states when drawing subsequent (legit) meshes into the CSM.
+		// DrawShadowMesh doesn't cope because it relies on correct states being set at the start of CSM rendering
+
+		// No idea why de-cbble is trying to include some sprites in the CSM pass. They don't make it into the CSM anyway
+		
+		// I expect all geometry that is legit for CSM to be drawn using one of the shaders that have a FastPath version. Testing
+		// a bunch of maps seems to indicate this is reasonable expectation. If we find some objects not casting shadows where
+		// they should be I'll revisit this. 
+	}
+	pShader->SetPPParams( NULL );
+}
+
 
 void CShaderAPIDx8::DrawWithVertexAndIndexBuffers( void )
 {
@@ -3925,28 +5154,30 @@ void CShaderAPIDx8::DrawWithVertexAndIndexBuffers( void )
 	if ( ShaderUtil()->GetConfig().m_bSuppressRendering )
 		return;
 
-#if defined( PIX_INSTRUMENTATION ) || defined( NVPERFHUD )
-	PIXifyName( s_pPIXMaterialName, sizeof( s_pPIXMaterialName ), m_pMaterial->GetName());
+#if ( defined( PIX_INSTRUMENTATION ) || defined( NVPERFHUD ) || ( defined( PLATFORM_POSIX ) && ( GLMDEBUG > 0 ) ) )
 	BeginPIXEvent( PIX_VALVE_ORANGE, s_pPIXMaterialName );
 #endif
 
 //	m_pRenderMesh = pMesh;
 	// FIXME: need to make this deal with multiple streams, etc.
 	VertexFormat_t vertexFormat = MeshMgr()->GetCurrentVertexFormat();
-	SetVertexDecl( vertexFormat, false /*m_pRenderMesh->HasColorMesh()*/, 
-		false /*m_pRenderMesh->HasFlexMesh()*/, false /*m_pRenderMesh->IsUsingMorphData()*/ );
+	SetVertexDecl( vertexFormat, false /*( vertexFormat & VERTEX_COLOR_STEAM_1 ) != 0*/,
+		false /*m_pRenderMesh->HasFlexMesh()*/, false /*m_pRenderMesh->IsUsingMorphData()*/, 
+		false /*using pre tessellated patches*/,
+		NULL /*m_pRenderMesh->GetVertexStreamSpec()*/ );
 	CommitStateChanges();
 	if ( m_pMaterial )
-	{
-		m_pMaterial->DrawMesh( CompressionType( vertexFormat ) );
+	{		
+		// FIXME: Get alpha modulation state from instance information
+		m_pMaterial->DrawMesh( CompressionType( vertexFormat ), m_pMaterial->GetAlphaModulation() != 1.0f, false );
 	}
 	else
 	{
-		MeshMgr()->RenderPassWithVertexAndIndexBuffers();
+		MeshMgr()->RenderPassWithVertexAndIndexBuffers( NULL );
 	}
 //	m_pRenderMesh = NULL;
 
-#if defined( PIX_INSTRUMENTATION ) || defined( NVPERFHUD )
+#if ( defined( PIX_INSTRUMENTATION ) || defined( NVPERFHUD ) || ( defined( PLATFORM_POSIX ) && ( GLMDEBUG > 0 ) ) )
 	EndPIXEvent();
 #endif
 }
@@ -3961,16 +5192,14 @@ void CShaderAPIDx8::DiscardVertexBuffers()
 
 void CShaderAPIDx8::ForceHardwareSync_WithManagedTexture()
 {
-	if ( IsX360() || !m_pFrameSyncTexture )
+	if ( IsGameConsole() || IsOSX() || !m_pFrameSyncTexture )
 		return;
 
+#ifndef _PS3
 	// Set the default state for everything so we don't get more than we ask for here!
 	SetDefaultState();
 
 	D3DLOCKED_RECT rect;
-
-	tmZone( TELEMETRY_LEVEL1, TMZF_NONE, "%s", __FUNCTION__ );
-
 	HRESULT hr = m_pFrameSyncTexture->LockRect( 0, &rect, NULL, 0 );
 	if ( SUCCEEDED( hr ) )
 	{
@@ -3997,8 +5226,6 @@ void CShaderAPIDx8::ForceHardwareSync_WithManagedTexture()
 				// Now, draw the simplest primitive D3D has ever seen.
 				unsigned short indices[3] = { 0, 1, 2 };
 				Vector verts[3] = {vec3_origin, vec3_origin, vec3_origin};
-				
-				tmZone( TELEMETRY_LEVEL1, TMZF_NONE, "DrawIndexedPrimitiveUP" );
 
 				Dx9Device()->DrawIndexedPrimitiveUP(
 					D3DPT_TRIANGLELIST,
@@ -4010,7 +5237,7 @@ void CShaderAPIDx8::ForceHardwareSync_WithManagedTexture()
 					verts,			// Vertices
 					sizeof( Vector )// Vertex stride
 					);
-				
+
 				Dx9Device()->SetFVF( oldFVF );
 			}
 			Dx9Device()->SetTexture( iStage, pOldTexture );
@@ -4018,16 +5245,18 @@ void CShaderAPIDx8::ForceHardwareSync_WithManagedTexture()
 	}
 	// If this assert fails, then we failed somewhere above.
 	AssertOnce( SUCCEEDED( hr ) );
+#endif // !_PS3
 }
 
 void CShaderAPIDx8::UpdateFrameSyncQuery( int queryIndex, bool bIssue )
-{
+{	
+	if ( IsOSX() )
+		return;
+	
 	Assert(queryIndex < NUM_FRAME_SYNC_QUERIES);
 	// wait if already issued
 	if ( m_bQueryIssued[queryIndex] )
 	{
-		tmZone( TELEMETRY_LEVEL1, TMZF_NONE, "%s", __FUNCTION__ );
-
 		double flStartTime = Plat_FloatTime();
 		BOOL dummyData = 0;
 		HRESULT hr = S_OK;
@@ -4046,11 +5275,10 @@ void CShaderAPIDx8::UpdateFrameSyncQuery( int queryIndex, bool bIssue )
 			// Avoid burning a full core while waiting for the query. Spinning can actually harm performance
 			// because there might be driver threads that are trying to do work that end up starved, and the
 			// power drawn by the CPU may take away from the power available to the integrated graphics chip.
-			// A sleep of one millisecond should never be long enough to affect performance, especially since
-			// this should only trigger when the CPU is already ahead of the GPU.
-			// On L4D2/TF2 in GL mode this spinning was causing slowdowns.
+			// A sleep of one millisecond should never be long enough to affect performance.
 			ThreadSleep( 1 );
 		}
+
 		m_bQueryIssued[queryIndex] = false;
 		Assert(hr == S_OK || hr == D3DERR_DEVICELOST);
 
@@ -4067,20 +5295,20 @@ void CShaderAPIDx8::UpdateFrameSyncQuery( int queryIndex, bool bIssue )
 	}
 }
 
+
 void CShaderAPIDx8::ForceHardwareSync( void )
 {
 	LOCK_SHADERAPI();
 	VPROF( "CShaderAPIDx8::ForceHardwareSync" );
-
+	PERF_STATS_BLOCK( "CShaderAPIDx8::ForceHardwareSync", PERF_STATS_SLOT_FORCE_HARDWARE_SYNC );
+	TM_ZONE_PLOT( TELEMETRY_LEVEL1, "ForceHardwareSync", TELEMETRY_ZONE_PLOT_SLOT_4);
+	
 #ifdef DX_TO_GL_ABSTRACTION
 	if ( true )
 #else
 	if ( !mat_frame_sync_enable.GetInt() )
 #endif
 		return;
-
-	// need to flush the dynamic buffer	and make sure the entire image is there
-	FlushBufferedPrimitives();
 
 	RECORD_COMMAND( DX8_HARDWARE_SYNC, 0 );
 
@@ -4103,9 +5331,6 @@ void CShaderAPIDx8::ForceHardwareSync( void )
 		// FIXME: Could install a callback into the materialsystem to do something while waiting for
 		// the frame to finish (update sound, etc.)
 		
-		// Disable VCR mode here or else it'll screw up (and we don't really care if this part plays back in exactly the same amount of time).
-		VCRSetEnabled( false );
-
 		m_currentSyncQuery ++;
 		if ( m_currentSyncQuery >= ARRAYSIZE(m_pFrameSyncQueryObject) )
 		{
@@ -4115,8 +5340,7 @@ void CShaderAPIDx8::ForceHardwareSync( void )
 		int waitIndex = ((m_currentSyncQuery + NUM_FRAME_SYNC_QUERIES) - (NUM_FRAME_SYNC_FRAMES_LATENCY+1)) % NUM_FRAME_SYNC_QUERIES;
 		UpdateFrameSyncQuery( waitIndex, false );
 		UpdateFrameSyncQuery( m_currentSyncQuery, true );
-		VCRSetEnabled( true );
-	} 
+	}
 #else
 	DWORD hFence = Dx9Device()->InsertFence();
 	Dx9Device()->BlockOnFence( hFence );
@@ -4147,11 +5371,12 @@ void CShaderAPIDx8::BeginFrame()
 	}
 
 #if ALLOW_SMP_ACCESS
-	Dx9Device()->SetASyncMode( mat_use_smp.GetInt() != 0 );
+	Dx9Device()->SetASyncMode( mat_use_smp.GetBool() );
 #endif
 
 	++m_CurrentFrame;
 	m_nTextureMemoryUsedLastFrame = 0;
+	m_bCSMsValidThisFrame = false;
 }
 
 void CShaderAPIDx8::EndFrame()
@@ -4162,9 +5387,117 @@ void CShaderAPIDx8::EndFrame()
 	MEMCHECK;
 #endif
 
+#if SHADERAPI_BUFFER_D3DCALLS
+	Dx9Device()->ExecuteAllWork();
+#endif
+
 	ExportTextureList();
 }
 
+int CShaderAPIDx8::D3DFormatToBitsPerPixel( D3DFORMAT fmt ) const
+{
+	switch( fmt )
+	{
+	case D3DFMT_UNKNOWN:
+		return 0;
+
+#if !( defined( _X360 ) || defined( DX_TO_GL_ABSTRACTION ) )
+	case D3DFMT_R3G3B2:
+	case D3DFMT_P8:
+	case D3DFMT_A4L4:
+#endif
+	case D3DFMT_A8:
+	case D3DFMT_L8:
+		return 8;
+
+#if !( defined( _X360 ) || defined( DX_TO_GL_ABSTRACTION ) )
+	case D3DFMT_A8R3G3B2:
+	case D3DFMT_A8P8:
+	case D3DFMT_D16_LOCKABLE:
+	case D3DFMT_D15S1:
+#endif
+	case D3DFMT_R5G6B5:
+	case D3DFMT_X1R5G5B5:
+	case D3DFMT_A1R5G5B5:
+	case D3DFMT_A4R4G4B4:
+			
+	case D3DFMT_D16:
+	case D3DFMT_A8L8:
+	case D3DFMT_V8U8:
+#ifndef DX_TO_GL_ABSTRACTION
+	case D3DFMT_X4R4G4B4:
+	case D3DFMT_L6V5U5:
+	case D3DFMT_L16:
+	case D3DFMT_R16F:
+#endif
+		return 16;
+
+#if !defined( _X360 )
+	case D3DFMT_R8G8B8:
+		return 24;
+#endif
+
+#if !( defined( _X360 ) || defined( DX_TO_GL_ABSTRACTION ) )
+	case D3DFMT_D24X4S4:
+	case D3DFMT_D32F_LOCKABLE:
+#endif
+	case D3DFMT_A8R8G8B8:
+	case D3DFMT_X8R8G8B8:
+	case D3DFMT_X8L8V8U8:
+	case D3DFMT_Q8W8V8U8:
+
+	case D3DFMT_D24S8:
+	case D3DFMT_D24X8:
+#ifndef DX_TO_GL_ABSTRACTION			
+	case D3DFMT_A2B10G10R10:
+	case D3DFMT_A8B8G8R8:
+	case D3DFMT_X8B8G8R8:
+	case D3DFMT_G16R16:
+	case D3DFMT_A2R10G10B10:
+	case D3DFMT_V16U16:
+	case D3DFMT_A2W10V10U10:
+	case D3DFMT_R8G8_B8G8:
+	case D3DFMT_G8R8_G8B8:
+	case D3DFMT_D32:
+	case D3DFMT_D24FS8:
+	case D3DFMT_G16R16F:
+	case D3DFMT_R32F:
+#endif
+		return 32;
+
+	case D3DFMT_A16B16G16R16:
+	case D3DFMT_A16B16G16R16F:
+#ifndef DX_TO_GL_ABSTRACTION			
+	case D3DFMT_Q16W16V16U16:
+	case D3DFMT_G32R32F:
+#endif
+		return 64;
+
+	case D3DFMT_A32B32G32R32F:
+		return 128;
+
+#if !( defined( _X360 ) || defined( DX_TO_GL_ABSTRACTION ) )
+	case D3DFMT_MULTI2_ARGB8:
+	case D3DFMT_CxV8U8:
+	case D3DFMT_DXT2:
+	case D3DFMT_DXT4:
+#endif
+#ifndef DX_TO_GL_ABSTRACTION	
+	case D3DFMT_UYVY:
+	case D3DFMT_YUY2:
+#endif
+	case D3DFMT_DXT1:
+	case D3DFMT_DXT3:
+	case D3DFMT_DXT5:
+		Assert( !"Implement me" );
+		return 0;
+
+	default:
+		Assert( !"Unknown D3DFORMAT" );
+		return 0;
+	}
+	return 0;
+}
 
 void CShaderAPIDx8::AddBufferToTextureList( const char *pName, D3DSURFACE_DESC &desc )
 {
@@ -4175,13 +5508,16 @@ void CShaderAPIDx8::AddBufferToTextureList( const char *pName, D3DSURFACE_DESC &
 //		Assert( 0 );
 //		return;
 //	}
+	int nBpp = D3DFormatToBitsPerPixel( desc.Format );
 	KeyValues *pSubKey = m_pDebugTextureList->CreateNewKey();
 	pSubKey->SetString( "Name", pName );
 	pSubKey->SetString( "TexGroup", TEXTURE_GROUP_RENDER_TARGET );
 	pSubKey->SetInt( "Size", 
 //		ImageLoader::SizeInBytes( imageFormat ) * desc.Width * desc.Height );
-		4 * desc.Width * desc.Height );
-	pSubKey->SetString( "Format", "32 bit buffer (hack)" );//ImageLoader::GetName( imageFormat ) );
+		nBpp * desc.Width * desc.Height * MAX( 1, desc.MultiSampleType ) / 8 );
+	char pTmpBuf[64];
+	sprintf( pTmpBuf, "%d bit buffer", nBpp );
+	pSubKey->SetString( "Format", pTmpBuf );//ImageLoader::GetName( imageFormat ) );
 	pSubKey->SetInt( "Width", desc.Width );
 	pSubKey->SetInt( "Height", desc.Height );
 	
@@ -4194,9 +5530,11 @@ void CShaderAPIDx8::ExportTextureList()
 	if ( !m_bEnableDebugTextureList )
 		return;
 
-	if ( !m_pBackBufferSurface || !m_pZBufferSurface )
+	if ( !m_pBackBufferSurfaces[BACK_BUFFER_INDEX_DEFAULT] || !m_pZBufferSurface )
 		// Device vanished...
 		return;
+
+	m_DebugTextureListLock.Lock();
 
 	m_nDebugDataExportFrame = m_CurrentFrame;
 
@@ -4277,8 +5615,9 @@ void CShaderAPIDx8::ExportTextureList()
 		}
 
 		D3DSURFACE_DESC desc;
-		m_pBackBufferSurface->GetDesc( &desc );
+		m_pBackBufferSurfaces[BACK_BUFFER_INDEX_DEFAULT]->GetDesc( &desc );
 		AddBufferToTextureList( "BACKBUFFER", desc );
+		desc.MultiSampleType = D3DMULTISAMPLE_NONE;	// front-buffer isn't multisampled
 		AddBufferToTextureList( "FRONTBUFFER", desc );
 	//	ImageFormat imageFormat = ImageLoader::D3DFormatToImageFormat( desc.Format );
 	//	if( imageFormat >= 0 )
@@ -4286,7 +5625,7 @@ void CShaderAPIDx8::ExportTextureList()
 			VPROF_INCREMENT_GROUP_COUNTER( "TexGroup_frame_" TEXTURE_GROUP_RENDER_TARGET, 
 				COUNTER_GROUP_TEXTURE_PER_FRAME, 
 	//			ImageLoader::SizeInBytes( imageFormat ) * desc.Width * desc.Height );
-				2 * 4 * desc.Width * desc.Height ); // hack (times 2 for front and back buffer)
+				4 * desc.Width * desc.Height * ( 1 + MAX( 1, desc.MultiSampleType ) ) ); // hack (front-buffer (single-sampled) + back-buffer (multi-sampled) )
 		}
 
 		m_pZBufferSurface->GetDesc( &desc );
@@ -4297,7 +5636,18 @@ void CShaderAPIDx8::ExportTextureList()
 			VPROF_INCREMENT_GROUP_COUNTER( "TexGroup_frame_" TEXTURE_GROUP_RENDER_TARGET, 
 				COUNTER_GROUP_TEXTURE_PER_FRAME, 
 	//			ImageLoader::SizeInBytes( imageFormat ) * desc.Width * desc.Height );
-				4 * desc.Width * desc.Height ); // hack
+				4 * desc.Width * desc.Height * MAX( 1, desc.MultiSampleType ) ); // hack
+		}
+
+		if( m_pBackBufferSurfaces[BACK_BUFFER_INDEX_HDR] != NULL )
+		{
+			m_pBackBufferSurfaces[BACK_BUFFER_INDEX_HDR]->GetDesc( &desc );
+			AddBufferToTextureList( "HDR_BACKBUFFER", desc );
+			{
+				VPROF_INCREMENT_GROUP_COUNTER( "TexGroup_frame_" TEXTURE_GROUP_RENDER_TARGET, 
+					COUNTER_GROUP_TEXTURE_PER_FRAME, 
+					8 * desc.Width * desc.Height * MAX( 1, desc.MultiSampleType ) ); // hack
+			}
 		}
 	}
 
@@ -4323,6 +5673,8 @@ void CShaderAPIDx8::ExportTextureList()
 			continue;
 		}
 
+		IDirect3DBaseTexture *pD3DTexture = CShaderAPIDx8::GetD3DTexture( hTexture );
+
 		int refCount;
 		if ( tex.m_Flags & Texture_t::IS_DEPTH_STENCIL )
 		{
@@ -4331,7 +5683,7 @@ void CShaderAPIDx8::ExportTextureList()
 		}
 		else
 		{
-			refCount = GetD3DTextureRefCount( CShaderAPIDx8::GetD3DTexture( hTexture ) );
+			refCount = GetD3DTextureRefCount( pD3DTexture );
 		}
 
 		pXTextureList[numTextures].pName = tex.m_DebugName.String();
@@ -4347,13 +5699,44 @@ void CShaderAPIDx8::ExportTextureList()
 		pXTextureList[numTextures].edram = ( tex.m_Flags & Texture_t::IS_RENDER_TARGET_SURFACE ) != 0;
 		pXTextureList[numTextures].procedural = tex.m_NumCopies > 1;
 		pXTextureList[numTextures].final = ( tex.m_Flags & Texture_t::IS_FINALIZED ) != 0;
-		pXTextureList[numTextures].failed = ( tex.m_Flags & Texture_t::IS_FAILED ) != 0;
+		pXTextureList[numTextures].failed = ( tex.m_Flags & Texture_t::IS_ERROR_TEXTURE ) != 0;
+		pXTextureList[numTextures].pwl = ( tex.m_Flags & Texture_t::IS_PWL_CORRECTED ) != 0;
+
+		int reduced = 0;
+		if ( tex.m_CreationFlags & TEXTURE_CREATE_EXCLUDED )
+		{
+			reduced = 1;
+		}
+		else if ( tex.m_CreationFlags & TEXTURE_CREATE_REDUCED )
+		{
+			reduced = 2;
+		}
+		pXTextureList[numTextures].reduced = reduced;
+
+		cacheableState_e cacheableState = CS_STATIC;
+		int cacheableSize = 0;
+		if ( tex.m_Flags & Texture_t::IS_CACHEABLE )
+		{
+			if ( g_TextureHeap.IsTextureResident( pD3DTexture )	)
+			{
+				cacheableState = CS_VALID;
+			}
+			else
+			{
+				cacheableState = CS_EVICTED;
+			}
+			cacheableSize = g_TextureHeap.GetCacheableSize( pD3DTexture );
+		}
+
+		pXTextureList[numTextures].cacheableState = cacheableState;
+		pXTextureList[numTextures].cacheableSize = cacheableSize;
+
 		numTextures++;
 	}
 
 	// build special entries for implicit surfaces/textures
 	D3DSURFACE_DESC desc;
-	m_pBackBufferSurface->GetDesc( &desc );
+	m_pBackBufferSurfaces[BACK_BUFFER_INDEX_DEFAULT]->GetDesc( &desc );
 	int size = ImageLoader::GetMemRequired( 
 		desc.Width,
 		desc.Height,
@@ -4401,6 +5784,7 @@ void CShaderAPIDx8::ExportTextureList()
 	numTextures++;
 
 	int totalMemory = 0;
+	int cacheableMemory = 0;
 	for ( int i = 0; i < numTextures; i++ )
 	{
 		if ( pXTextureList[i].edram )
@@ -4409,19 +5793,30 @@ void CShaderAPIDx8::ExportTextureList()
 			continue;
 		}
 		totalMemory += pXTextureList[i].size;
+
+		if ( pXTextureList[i].cacheableSize )
+		{
+			// don't accumulate the cacheable component
+			cacheableMemory += pXTextureList[i].cacheableSize;
+		}
 	}
+
 	Msg( "Total D3D Texture Memory: %.2f MB\n", (float)totalMemory/( 1024.0f * 1024.0f ) );
+	Msg( "Static D3D Texture Memory: %.2f MB\n", (float)(totalMemory - cacheableMemory)/( 1024.0f * 1024.0f ) );
+	Msg( "Dynamic D3D Texture Heap Memory: %.2f MB\n", (float)g_TextureHeap.GetCacheableHeapSize()/( 1024.0f * 1024.0f ) );
 
 	// transmit to console
 	XBX_rTextureList( numTextures, pXTextureList );
 #endif
+
+	m_DebugTextureListLock.Unlock();
 }
 
 
 //-----------------------------------------------------------------------------
 // Releases/reloads resources when other apps want some memory
 //-----------------------------------------------------------------------------
-void CShaderAPIDx8::ReleaseShaderObjects()
+void CShaderAPIDx8::ReleaseShaderObjects( bool bReleaseManagedResources /*= true*/ )
 {
 	ReleaseInternalRenderTargets();
 	EvictManagedResourcesInternal();	
@@ -4430,7 +5825,7 @@ void CShaderAPIDx8::ReleaseShaderObjects()
 
 #ifdef _DEBUG
 	// Helps to find the unreleased textures.
-	if ( TextureCount() > 0 )
+	if ( TextureCount() > 0 && bReleaseManagedResources )
 	{
 		ShaderAPITextureHandle_t hTexture;
 		for ( hTexture = m_Textures.Head(); hTexture != m_Textures.InvalidIndex(); hTexture = m_Textures.Next( hTexture ) )
@@ -4457,7 +5852,7 @@ void CShaderAPIDx8::ReleaseShaderObjects()
 	}
 #endif
 
-	Assert( TextureCount() == 0 );
+	Assert( !bReleaseManagedResources || TextureCount() == 0 );
 }
 
 void CShaderAPIDx8::RestoreShaderObjects()
@@ -4466,37 +5861,18 @@ void CShaderAPIDx8::RestoreShaderObjects()
 	SetRenderTarget();
 }
 
-
-//--------------------------------------------------------------------
-// PIX instrumentation routines
-// Windows only for now.  Turn these on with PIX_INSTRUMENTATION above
-//--------------------------------------------------------------------
-
-#if 0	// hack versions for OSX to be able to PIX log even when not built debug...
-void CShaderAPIDx8::BeginPIXEvent( unsigned long color, const char* szName )
-	{
-		LOCK_SHADERAPI();
-		GLMBeginPIXEvent( szName );	// direct call no macro
-		return;
-	}
-
-	void CShaderAPIDx8::EndPIXEvent( void )
-	{
-		LOCK_SHADERAPI();
-		GLMEndPIXEvent();			// direct call no macro
-		return;
-	}
-	
-#else
-
-#if defined( PIX_INSTRUMENTATION ) || defined( NVPERFHUD )
+#if defined( PIX_INSTRUMENTATION )
 ConVar pix_break_on_event( "pix_break_on_event", "" );
 #endif
 
+//--------------------------------------------------------------------
+// PIX instrumentation routines Windows only for now.
+// Turn these on with PIX_INSTRUMENTATION in shaderdevicedx8.h
+//--------------------------------------------------------------------
 void CShaderAPIDx8::BeginPIXEvent( unsigned long color, const char* szName )
 {
 #if ( defined( PIX_INSTRUMENTATION ) || defined( NVPERFHUD ) )
-	//LOCK_SHADERAPI();
+	LOCK_SHADERAPI();
 
 	const char *p = pix_break_on_event.GetString();
 	if ( p && V_strlen( p ) )
@@ -4507,79 +5883,77 @@ void CShaderAPIDx8::BeginPIXEvent( unsigned long color, const char* szName )
 		}
 	}
 
-#if defined ( DX_TO_GL_ABSTRACTION )
-	GLMBeginPIXEvent( szName );
+	#if defined ( DX_TO_GL_ABSTRACTION )
+		GLMBeginPIXEvent( szName );
 
-#if defined( _WIN32 )
-	// AMD PerfStudio integration: Call into D3D9.DLL's D3DPERF_BeginEvent() (this gets intercepted by PerfStudio even in GL mode).
-	if ( g_pShaderDeviceMgrDx8->m_pBeginEvent )
-	{
+		#if defined( _WIN32 )
+			// AMD PerfStudio integration: Call into D3D9.DLL's D3DPERF_BeginEvent() (this gets intercepted by PerfStudio even in GL mode).
+			if ( g_pShaderDeviceMgrDx8->m_pBeginEvent )
+			{
+				wchar_t wszName[128];
+				mbstowcs( wszName, szName, 128 );
+
+				g_pShaderDeviceMgrDx8->m_pBeginEvent( 0x2F2F2F2F, wszName );
+			}
+		#endif
+	#elif defined(_X360 )
+		char szPIXEventName[32];
+		PIXifyName( szPIXEventName, szName );
+		PIXBeginNamedEvent( color, szPIXEventName );
+	#else // PC
+ 		if ( PIXError() )
+ 			return;
+
 		wchar_t wszName[128];
 		mbstowcs( wszName, szName, 128 );
 
-		g_pShaderDeviceMgrDx8->m_pBeginEvent( 0x2F2F2F2F, wszName );
-	}
-#endif
-#elif defined(_X360 )
-#ifndef _DEBUG
-	char szPIXEventName[32];
-	PIXifyName( szPIXEventName, szName );
-	PIXBeginNamedEvent( color, szPIXEventName );
-#endif
-#else // PC
-	if ( PIXError() )
-		return;
-
-	wchar_t wszName[128];
-	mbstowcs( wszName, szName, 128 );
-
-	// Fire the PIX event, trapping for errors...
-	if ( D3DPERF_BeginEvent( color, wszName ) < 0 )
-	{
-		Warning( "PIX error Beginning %s event\n", szName );
-		IncrementPIXError();
-	}
-#endif
+		// Fire the PIX event, trapping for errors...
+		if ( D3DPERF_BeginEvent( color, wszName ) < 0 )
+		{
+ 			Warning( "PIX error Beginning %s event\n", szName );
+ 			IncrementPIXError();
+		}
+	#endif
 #endif // #if defined( PIX_INSTRUMENTATION )
 }
 
 void CShaderAPIDx8::EndPIXEvent( void )
 {
 #if ( defined( PIX_INSTRUMENTATION ) || defined( NVPERFHUD ) )
-	//LOCK_SHADERAPI();
+	LOCK_SHADERAPI();
 
-#if defined ( DX_TO_GL_ABSTRACTION )
-	GLMEndPIXEvent();
+	#ifdef _X360
+		PIXEndNamedEvent();
+	#elif defined( _PS3 )
 
-#if defined( _WIN32 )
-	// AMD PerfStudio integration: Call into D3D9.DLL's D3DPERF_EndEvent() (this gets intercepted by PerfStudio even in GL mode).
-	if ( g_pShaderDeviceMgrDx8->m_pEndEvent )
-	{
-		g_pShaderDeviceMgrDx8->m_pEndEvent();
-	}
-#endif
-#elif defined( _X360 )
-#ifndef _DEBUG
-	PIXEndNamedEvent();
-#endif
-#else // PC
-	if ( PIXError() )
-		return;
+	#elif defined ( DX_TO_GL_ABSTRACTION )
+		GLMEndPIXEvent();
 
-#if !defined( NVPERFHUD )
-	// Fire the PIX event, trapping for errors...
-	if ( D3DPERF_EndEvent() < 0 )
-	{
-		Warning("PIX error ending event\n");
-		IncrementPIXError();
-	}
-#endif
-#endif
+		#if defined( _WIN32 )
+			// AMD PerfStudio integration: Call into D3D9.DLL's D3DPERF_EndEvent() (this gets intercepted by PerfStudio even in GL mode).
+			if ( g_pShaderDeviceMgrDx8->m_pEndEvent )
+			{
+				g_pShaderDeviceMgrDx8->m_pEndEvent();
+			}
+		#endif
+	#else // PC
+ 		if ( PIXError() )
+ 			return;
+	
+		int nPIXReturnCode = D3DPERF_EndEvent();
+
+		#if !defined( NVPERFHUD )
+			// Fire the PIX event, trapping for errors...
+			if ( nPIXReturnCode < 0 )
+			{
+ 				Warning("PIX error ending event\n");
+ 				IncrementPIXError();
+			}
+		#endif
+	#endif
 #endif // #if defined( PIX_INSTRUMENTATION )
 }
 
-#endif
-	
 void CShaderAPIDx8::AdvancePIXFrame()
 {
 #if defined( PIX_INSTRUMENTATION )
@@ -4615,31 +5989,33 @@ void CShaderAPIDx8::AdvancePIXFrame()
 // No begin-end for this...use this to put discrete markers in the PIX stream
 void CShaderAPIDx8::SetPIXMarker( unsigned long color, const char* szName )
 {
+#if !defined( POSIX )
 #if defined( PIX_INSTRUMENTATION )
 	LOCK_SHADERAPI();
 
-#if defined( DX_TO_GL_ABSTRACTION )
-	if ( g_pShaderDeviceMgrDx8->m_pSetMarker )
-	{
+	#if defined( DX_TO_GL_ABSTRACTION )
+		if ( g_pShaderDeviceMgrDx8->m_pSetMarker )
+		{
+			wchar_t wszName[128];
+			mbstowcs(wszName, szName, 128 );
+			g_pShaderDeviceMgrDx8->m_pSetMarker( 0x2F2F2F2F, wszName );
+		}
+	#elif defined( _X360 )
+		#ifndef _DEBUG
+			char szPIXMarkerName[32];
+			PIXifyName( szPIXMarkerName, szName );
+			PIXSetMarker( color, szPIXMarkerName );
+		#endif
+	#else // PC
+		if ( PIXError() )
+			return;
 		wchar_t wszName[128];
 		mbstowcs(wszName, szName, 128 );
-		g_pShaderDeviceMgrDx8->m_pSetMarker( 0x2F2F2F2F, wszName );
-	}
-#elif defined( _X360 )
-#ifndef _DEBUG
-	char szPIXMarkerName[32];
-	PIXifyName( szPIXMarkerName, szName );
-	PIXSetMarker( color, szPIXMarkerName );
-#endif
-#else // PC
-	if ( PIXError() )
-		return;
-	wchar_t wszName[128];
-	mbstowcs(wszName, szName, 128 );
-	D3DPERF_SetMarker( color, wszName );
-#endif
+		D3DPERF_SetMarker( color, wszName );
+	#endif
 
 #endif  // PIX_INSTRUMENTATION
+#endif // not POSIX
 }
 
 void CShaderAPIDx8::StartPIXInstrumentation()
@@ -4683,7 +6059,7 @@ bool CShaderAPIDx8::PIXError()
 //-----------------------------------------------------------------------------
 void CShaderAPIDx8::ChangeVideoMode( const ShaderDeviceInfo_t &info )
 {
-	if ( IsX360() )
+	if ( IsGameConsole() )
 		return;
 
 	LOCK_SHADERAPI();
@@ -4704,7 +6080,7 @@ void CShaderAPIDx8::ChangeVideoMode( const ShaderDeviceInfo_t &info )
 //-----------------------------------------------------------------------------
 void CShaderAPIDx8::ComputeFillRate()
 {
-	if ( IsX360() )
+	if ( IsGameConsole() )
 	{
 		// not valid
 		return;
@@ -4752,14 +6128,49 @@ void CShaderAPIDx8::ComputeFillRate()
 //-----------------------------------------------------------------------------
 // Use this to get the mesh builder that allows us to modify vertex data
 //-----------------------------------------------------------------------------
-CMeshBuilder* CShaderAPIDx8::GetVertexModifyBuilder()
-{
-	return &m_ModifyBuilder;
-}
-
 bool CShaderAPIDx8::InFlashlightMode() const
 {
 	return ShaderUtil()->InFlashlightMode();
+}
+
+bool CShaderAPIDx8::IsCascadedShadowMapping() const
+{
+	return ShaderUtil()->IsCascadedShadowMapping();
+}
+
+void CShaderAPIDx8::SetCascadedShadowMappingState( const CascadedShadowMappingState_t &state, ITexture *pDepthTextureAtlas )
+{
+	LOCK_SHADERAPI();
+
+	m_CascadedShadowMappingState = state;
+	m_CascadedShadowMappingState_LightMapScaled = state;
+
+	// save some PS instructions by pre-multiplying by (1/lightmapScale)
+	m_CascadedShadowMappingState_LightMapScaled.m_vLightColor.x *= m_CascadedShadowMappingState_LightMapScaled.m_vLightColor.w;
+	m_CascadedShadowMappingState_LightMapScaled.m_vLightColor.y *= m_CascadedShadowMappingState_LightMapScaled.m_vLightColor.w;
+	m_CascadedShadowMappingState_LightMapScaled.m_vLightColor.z *= m_CascadedShadowMappingState_LightMapScaled.m_vLightColor.w;
+
+	m_pCascadedShadowMappingDepthTexture = pDepthTextureAtlas;
+}
+
+const CascadedShadowMappingState_t &CShaderAPIDx8::GetCascadedShadowMappingState( ITexture **pDepthTextureAtlas, bool bLightMapScale ) const
+{
+	if ( pDepthTextureAtlas )
+		*pDepthTextureAtlas = m_pCascadedShadowMappingDepthTexture;
+
+	if ( bLightMapScale )
+	{
+		return m_CascadedShadowMappingState_LightMapScaled;
+	}
+	else
+	{
+		return m_CascadedShadowMappingState;
+	}
+}
+
+bool CShaderAPIDx8::IsRenderingPaint() const
+{
+	return ShaderUtil()->IsRenderingPaint();
 }
 
 bool CShaderAPIDx8::InEditorMode() const
@@ -4767,50 +6178,56 @@ bool CShaderAPIDx8::InEditorMode() const
 	return ShaderUtil()->InEditorMode();
 }
 
-//-----------------------------------------------------------------------------
-// Gets the bound morph's vertex format; returns 0 if no morph is bound
-//-----------------------------------------------------------------------------
-MorphFormat_t CShaderAPIDx8::GetBoundMorphFormat()
-{
-	return ShaderUtil()->GetBoundMorphFormat();
-}
 
 //-----------------------------------------------------------------------------
 // returns the current time in seconds...
 //-----------------------------------------------------------------------------
 double CShaderAPIDx8::CurrentTime() const
 {
-	// FIXME: Return game time instead of real time!
-	// Or eliminate this altogether and put it into a material var
-	// (this is used by vertex modifiers in shader code at the moment)
-	return Plat_FloatTime();
+	return m_flCurrGameTime;
 }
 
 
 //-----------------------------------------------------------------------------
+// Updates the depth bias
+//-----------------------------------------------------------------------------
+static void OnDepthBiasChanged( IConVar *var, const char *pOldValue, float flOldValue )
+{
+	g_ShaderAPIDX8.UpdateDepthBiasState();
+}
+
+#ifdef OSX
+static ConVar mat_slopescaledepthbias_decal( "mat_slopescaledepthbias_decal", "-4", FCVAR_CHEAT | FCVAR_DEVELOPMENTONLY, "", OnDepthBiasChanged );
+static ConVar mat_depthbias_decal( "mat_depthbias_decal", "-0.25", FCVAR_CHEAT | FCVAR_DEVELOPMENTONLY, "", OnDepthBiasChanged );
+static ConVar mat_slopescaledepthbias_normal( "mat_slopescaledepthbias_normal", "0.0f", FCVAR_CHEAT | FCVAR_DEVELOPMENTONLY, "", OnDepthBiasChanged );
+static ConVar mat_depthbias_normal( "mat_depthbias_normal", "0.0f", FCVAR_CHEAT | FCVAR_DEVELOPMENTONLY, "", OnDepthBiasChanged );
+#else
+static ConVar mat_slopescaledepthbias_decal( "mat_slopescaledepthbias_decal", "-2", FCVAR_CHEAT | FCVAR_DEVELOPMENTONLY, "", OnDepthBiasChanged );
+static ConVar mat_depthbias_decal( "mat_depthbias_decal", "-0.0000038", FCVAR_CHEAT | FCVAR_DEVELOPMENTONLY, "", OnDepthBiasChanged );
+static ConVar mat_slopescaledepthbias_normal( "mat_slopescaledepthbias_normal", "0.0f", FCVAR_CHEAT | FCVAR_DEVELOPMENTONLY, "", OnDepthBiasChanged );
+static ConVar mat_depthbias_normal( "mat_depthbias_normal", "0.0f", FCVAR_CHEAT | FCVAR_DEVELOPMENTONLY, "", OnDepthBiasChanged );
+#endif
+
+void CShaderAPIDx8::UpdateDepthBiasState()
+{
+	m_ZBias.m_flOOSlopeScaleDepthBias = mat_slopescaledepthbias_normal.GetFloat();
+	m_ZBias.m_flOODepthBias = mat_depthbias_normal.GetFloat();
+
+	m_ZBiasDecal.m_flOOSlopeScaleDepthBias = mat_slopescaledepthbias_decal.GetFloat();
+	m_ZBiasDecal.m_flOODepthBias = mat_depthbias_decal.GetFloat();
+}
+
+//-----------------------------------------------------------------------------
 // Methods called by the transition table that use dynamic state...
 //-----------------------------------------------------------------------------
-void CShaderAPIDx8::ApplyZBias( const ShadowState_t& shaderState )
+void CShaderAPIDx8::ApplyZBias( const DepthTestState_t& shaderState )
 {
-	MaterialSystem_Config_t &config = ShaderUtil()->GetConfig();
-    float a = (config.m_SlopeScaleDepthBias_Decal != 0.0f) ? 1.0f / config.m_SlopeScaleDepthBias_Decal : 0.0f;
-    float b = (config.m_SlopeScaleDepthBias_Normal != 0.0f) ? 1.0f / config.m_SlopeScaleDepthBias_Normal : 0.0f;
-    float c = (config.m_DepthBias_Decal != 0.0f) ? 1.0f / config.m_DepthBias_Decal : 0.0f;
-    float d = (config.m_DepthBias_Normal != 0.0f) ? 1.0f / config.m_DepthBias_Normal : 0.0f;
-
-	// FIXME: No longer necessary; may be necessary if you want to use cat 4.3 drivers?
-	// GR - hack for R200
-	bool bPS14Only = g_pHardwareConfig->Caps().m_SupportsPixelShaders_1_4 && !g_pHardwareConfig->Caps().m_SupportsPixelShaders_2_0;
-	if( ( g_pHardwareConfig->Caps().m_VendorID == 0x1002 ) && bPS14Only )
-	{
-		// Slam to m_SlopeScaleDepthBias_Decal = 0, m_DepthBias_Decal = -4096
-		// which empirically is what appears to look good on r200
-		// NOTE: Slamming to 0 instead of -1.0 / 4096 because on Cat 4.9, WinXP, 8500,
-		// this causes the z values to be more than 50 units away from the original z values
-
-		a = 0.0f;
-		c = -1.0/4096.0;
-	}
+	// PORTAL 2 hack: Disable slope scale z bias for decals if we have a poly offset matrix set. This avoids decals and overlays rendering
+	// on top of other stuff through portal views on the PS3.
+	float a = m_DynamicState.m_FastClipEnabled ? 0.0f : m_ZBiasDecal.m_flOOSlopeScaleDepthBias;
+    float b = m_ZBias.m_flOOSlopeScaleDepthBias;
+    float c = m_ZBiasDecal.m_flOODepthBias;
+    float d = m_ZBias.m_flOODepthBias;
 
 	// bias = (s * D3DRS_SLOPESCALEDEPTHBIAS) + D3DRS_DEPTHBIAS, where s is the maximum depth slope of the triangle being rendered
     if ( g_pHardwareConfig->Caps().m_ZBiasAndSlopeScaledDepthBiasSupported )
@@ -4825,6 +6242,7 @@ void CShaderAPIDx8::ApplyZBias( const ShadowState_t& shaderState )
 		{
 			fSlopeScaleDepthBias = m_fShadowSlopeScaleDepthBias;
 			fDepthBias = m_fShadowDepthBias;
+			m_TransitionTable.SetShadowDepthBiasValuesDirty( false );
 		}
 		else // assume SHADER_POLYOFFSET_DISABLE
 		{
@@ -4838,42 +6256,13 @@ void CShaderAPIDx8::ApplyZBias( const ShadowState_t& shaderState )
 			fDepthBias = -fDepthBias;
 		}
 
-		SetRenderStateConstMacro( this, D3DRS_SLOPESCALEDEPTHBIAS, *((DWORD*) (&fSlopeScaleDepthBias)) );
-		SetRenderStateConstMacro( this, D3DRS_DEPTHBIAS, *((DWORD*) (&fDepthBias)) );
+		SetRenderState( D3DRS_SLOPESCALEDEPTHBIAS, *((DWORD*) (&fSlopeScaleDepthBias)) );
+		SetRenderState( D3DRS_DEPTHBIAS, *((DWORD*) (&fDepthBias)) );
 	} 
 	else
 	{
 		MarkAllUserClipPlanesDirty();
-		m_DynamicState.m_TransformChanged[MATERIAL_PROJECTION] |= 
-			STATE_CHANGED_VERTEX_SHADER | STATE_CHANGED_FIXED_FUNCTION;
-	}
-}
-
-void CShaderAPIDx8::ApplyTextureEnable( const ShadowState_t& state, int nSampler )
-{
-	if ( state.m_SamplerState[nSampler].m_TextureEnable == SamplerState(nSampler).m_TextureEnable )
-		return;
-
-	if ( state.m_SamplerState[nSampler].m_TextureEnable )
-	{
-		SamplerState( nSampler ).m_TextureEnable = true;
-
-		// Should not be necessary/possible (SetTextureState() calls D3D9/DXAbstract, so the calling thread must already own the device.
-		//LOCK_SHADERAPI();
-
-		// Don't do this here!!  It ends up giving us extra texture sets.
-		// We'll Assert in debug mode if you enable a texture stage
-		// but don't bind a texture.
-		// see CShaderAPIDx8::RenderPass() for this check.
-		// NOTE: We aren't doing this optimization quite yet.  There are situations
-		// where you want a texture stage enabled for its texture coordinates, but
-		// you don't actually bind a texture (texmvspec for example.)
-		SetTextureState( (Sampler_t)nSampler, SamplerState(nSampler).m_BoundTexture, true );
-	}
-	else
-	{
-		SamplerState( nSampler ).m_TextureEnable = false;
-		SetTextureState( (Sampler_t)nSampler, INVALID_SHADERAPI_TEXTURE_HANDLE );
+		m_DynamicState.m_TransformChanged[MATERIAL_PROJECTION] |= STATE_CHANGED;
 	}
 }
 
@@ -4884,7 +6273,6 @@ void CShaderAPIDx8::ApplyTextureEnable( const ShadowState_t& state, int nSampler
 void CShaderAPIDx8::ClearSnapshots()
 {
 	LOCK_SHADERAPI();
-	FlushBufferedPrimitives();
 	m_TransitionTable.Reset();
 	InitRenderState();
 }
@@ -4986,7 +6374,7 @@ VertexFormat_t CShaderAPIDx8::ComputeVertexUsage( int num, StateSnapshot_t* pIds
 
 		for ( int j = 0; j < VERTEX_MAX_TEXTURE_COORDINATES; ++j )
 		{
-			int newSize = TexCoordSize( (TextureStage_t)j, fmt );
+			int newSize = TexCoordSize( j, fmt );
 			if ( ( texCoordSize[j] != newSize ) && ( newSize != 0 ) )
 			{
 				if ( texCoordSize[j] != 0 ) 
@@ -5014,29 +6402,14 @@ VertexFormat_t CShaderAPIDx8::ComputeVertexFormat( int num, StateSnapshot_t* pId
 
 
 //-----------------------------------------------------------------------------
-// What fields in the morph do we actually use?
-//-----------------------------------------------------------------------------
-MorphFormat_t CShaderAPIDx8::ComputeMorphFormat( int numSnapshots, StateSnapshot_t* pIds ) const
-{
-	LOCK_SHADERAPI();
-	MorphFormat_t format = 0;
-	for ( int i = 0; i < numSnapshots; ++i )
-	{
-		MorphFormat_t fmt = m_TransitionTable.GetSnapshotShader( pIds[i] ).m_MorphUsage;
-		format |= VertexFlags(fmt);
-	}
-	return format;
-}
-
-//-----------------------------------------------------------------------------
 // Commits a range of vertex shader constants
 //-----------------------------------------------------------------------------
-static void CommitVertexShaderConstantRange( IDirect3DDevice9 *pDevice, const DynamicState_t &desiredState,
+static void CommitVertexShaderConstantRange( D3DDeviceWrapper *pDevice, const DynamicState_t &desiredState,
 	DynamicState_t &currentState, bool bForce, int nFirstConstant, int nCount )
 {
 	if ( IsX360() )
 	{
-		// invalid code path for 360, not coded for 360 GPU contant awareness
+		// invalid code path for 360, not coded for 360 GPU constant awareness
 		Assert( 0 );
 		return;
 	}
@@ -5100,99 +6473,6 @@ void CShaderAPIDx8::GetBufferedState( BufferedState_t& state )
 
 
 //-----------------------------------------------------------------------------
-// constant color methods
-//-----------------------------------------------------------------------------
-
-void CShaderAPIDx8::Color3f( float r, float g, float b )
-{
-	unsigned int color = D3DCOLOR_ARGB( 255, (int)(r * 255), 
-		(int)(g * 255), (int)(b * 255) );
-	if (color != m_DynamicState.m_ConstantColor)
-	{
-		m_DynamicState.m_ConstantColor = color;
-		SetSupportedRenderState( D3DRS_TEXTUREFACTOR, color );
-	}
-}
-
-void CShaderAPIDx8::Color4f( float r, float g, float b, float a )
-{
-	unsigned int color = D3DCOLOR_ARGB( (int)(a * 255), (int)(r * 255), 
-		(int)(g * 255), (int)(b * 255) );
-	if (color != m_DynamicState.m_ConstantColor)
-	{
-		m_DynamicState.m_ConstantColor = color;
-		SetSupportedRenderState( D3DRS_TEXTUREFACTOR, color );
-	}
-}
-
-void CShaderAPIDx8::Color3fv( float const *c )
-{
-	Assert( c );
-	unsigned int color = D3DCOLOR_ARGB( 255, (int)(c[0] * 255), 
-		(int)(c[1] * 255), (int)(c[2] * 255) );
-	if (color != m_DynamicState.m_ConstantColor)
-	{
-		m_DynamicState.m_ConstantColor = color;
-		SetSupportedRenderState( D3DRS_TEXTUREFACTOR, color );
-	}
-}
-
-void CShaderAPIDx8::Color4fv( float const *c )
-{
-	Assert( c );
-	unsigned int color = D3DCOLOR_ARGB( (int)(c[3] * 255), (int)(c[0] * 255), 
-		(int)(c[1] * 255), (int)(c[2] * 255) );
-	if (color != m_DynamicState.m_ConstantColor)
-	{
-		m_DynamicState.m_ConstantColor = color;
-		SetSupportedRenderState( D3DRS_TEXTUREFACTOR, color );
-	}
-}
-
-void CShaderAPIDx8::Color3ub( unsigned char r, unsigned char g, unsigned char b )
-{
-	unsigned int color = D3DCOLOR_ARGB( 255, r, g, b ); 
-	if (color != m_DynamicState.m_ConstantColor)
-	{
-		m_DynamicState.m_ConstantColor = color;
-		SetSupportedRenderState( D3DRS_TEXTUREFACTOR, color );
-	}
-}
-
-void CShaderAPIDx8::Color3ubv( unsigned char const* pColor )
-{
-	Assert( pColor );
-	unsigned int color = D3DCOLOR_ARGB( 255, pColor[0], pColor[1], pColor[2] ); 
-	if (color != m_DynamicState.m_ConstantColor)
-	{
-		m_DynamicState.m_ConstantColor = color;
-		SetSupportedRenderState( D3DRS_TEXTUREFACTOR, color );
-	}
-}
-
-void CShaderAPIDx8::Color4ub( unsigned char r, unsigned char g, unsigned char b, unsigned char a )
-{
-	unsigned int color = D3DCOLOR_ARGB( a, r, g, b );
-	if (color != m_DynamicState.m_ConstantColor)
-	{
-		m_DynamicState.m_ConstantColor = color;
-		SetSupportedRenderState( D3DRS_TEXTUREFACTOR, color );
-	}
-}
-
-void CShaderAPIDx8::Color4ubv( unsigned char const* pColor )
-{
-	Assert( pColor );
-	unsigned int color = D3DCOLOR_ARGB( pColor[3], pColor[0], pColor[1], pColor[2] ); 
-	if (color != m_DynamicState.m_ConstantColor)
-	{
-		m_DynamicState.m_ConstantColor = color;
-		SetSupportedRenderState( D3DRS_TEXTUREFACTOR, color );
-	}
-}
-
-
-//-----------------------------------------------------------------------------
 // The shade mode
 //-----------------------------------------------------------------------------
 void CShaderAPIDx8::ShadeMode( ShaderShadeMode_t mode )
@@ -5202,7 +6482,7 @@ void CShaderAPIDx8::ShadeMode( ShaderShadeMode_t mode )
 	if (m_DynamicState.m_ShadeMode != shadeMode)
 	{
 		m_DynamicState.m_ShadeMode = shadeMode;
-		SetRenderStateConstMacro( this, D3DRS_SHADEMODE, shadeMode );
+		SetSupportedRenderState( D3DRS_SHADEMODE, shadeMode );
 	}
 }
 
@@ -5222,34 +6502,59 @@ void CShaderAPIDx8::EnableBuffer2FramesAhead( bool bEnable )
 #endif
 }
 
-void CShaderAPIDx8::SetDepthFeatheringPixelShaderConstant( int iConstant, float fDepthBlendScale )
+void CShaderAPIDx8::GetActualProjectionMatrix( float *pMatrix )
+{
+	memcpy( pMatrix, &GetProjectionMatrix(), sizeof( D3DMATRIX ) );
+}
+
+//-----------------------------------------------------------------------------
+// 
+// note this duplicates some constants for VS too (helps optimize away some PS ops for shaders that take advantage of it - currently only spritecard)
+// PS: sets c13, c14, iConstant
+// VS: sets c12, c13
+//
+//-----------------------------------------------------------------------------
+void CShaderAPIDx8::SetDepthFeatheringShaderConstants( int iConstant, float fDepthBlendScale )
 {
 	float fConstantValues[4];
 
-	if( IsX360() )
+	fConstantValues[0] = 50.0f / fDepthBlendScale;
+	// The old depth feathering shader code worked in proj. space, which wasn't a sane place to compute depth feathering on PS3 through portals 
+	// (because we use an oblique projection on PS3 to simulate user clip planes). The new methods computes depth feathering in viewspace, so 
+	// we need to convert fDepthBlendScale to something which looks reasonable vs. the computing the depth blend in proj. space.
+	const float flDepthFeatherFudgeFactor = 1.5f;		
+	fConstantValues[1] = flDepthFeatherFudgeFactor * fDepthBlendScale;
+	fConstantValues[2] = flDepthFeatherFudgeFactor / fDepthBlendScale;
+	fConstantValues[3] = 0.0f;
+				
+	VMatrix projToViewMatrix;
+	MatrixInverseGeneral( *reinterpret_cast< const VMatrix * >( &GetProjectionMatrix() ), projToViewMatrix );
+	projToViewMatrix = projToViewMatrix.Transpose();
+
+	// Send down rows 2 (Z) and 3 (W), because that's all the shader needs to recover worldspace Z.
+	SetPixelShaderConstantInternal( DEPTH_FEATHER_PROJ_TO_VIEW_Z, &projToViewMatrix.m[2][0], 2 );
+	// same for VS 
+	SetVertexShaderConstantInternal( VERTEX_SHADER_SHADER_SPECIFIC_CONST_12, &projToViewMatrix.m[2][0], 2 );
+
+	SetPixelShaderConstantInternal( iConstant, fConstantValues );
+}
+
+void CShaderAPIDx8::FlipCulling( bool bFlipCulling )
+{
+	if ( bFlipCulling != m_bFlipCulling )
 	{
-		const D3DMATRIX &projMatrix = GetProjectionMatrix();
+		m_bFlipCulling = bFlipCulling;
+		D3DCULL nCullMode = m_DynamicState.m_CullMode;
+		if ( m_bFlipCulling )
+		{
+			if ( nCullMode != D3DCULL_NONE )
+			{
+				nCullMode = ( nCullMode == D3DCULL_CW ) ? D3DCULL_CCW : D3DCULL_CW;
+			}
+		}
 
-		fConstantValues[0] = 50.0f / fDepthBlendScale;
-		fConstantValues[1] = 1.0f / projMatrix.m[2][2];
-		fConstantValues[2] = 1.0f / projMatrix.m[3][2];
-		fConstantValues[3] = projMatrix.m[2][2];
-
-		/*
-		D3DXMATRIX invProjMatrix;
-		D3DXMatrixInverse( &invProjMatrix, NULL, (D3DXMATRIX *)&projMatrix );
-		fConstantValues[1] = invProjMatrix.m[3][2];
-		fConstantValues[2] = invProjMatrix.m[3][3];
-		fConstantValues[3] = invProjMatrix.m[2][2];
-		*/
+		SetRenderState( D3DRS_CULLMODE, nCullMode );
 	}
-	else
-	{
-		fConstantValues[0] = m_DynamicState.m_DestAlphaDepthRange / fDepthBlendScale;
-		fConstantValues[1] = fConstantValues[2] = fConstantValues[3] = 0.0f; //empty
-	}
-
-	SetPixelShaderConstant( iConstant, fConstantValues );
 }
 
 
@@ -5258,17 +6563,39 @@ void CShaderAPIDx8::SetDepthFeatheringPixelShaderConstant( int iConstant, float 
 //-----------------------------------------------------------------------------
 void CShaderAPIDx8::SetCullModeState( bool bEnable, D3DCULL nDesiredCullMode )
 { 
-	D3DCULL nCullMode = bEnable ? nDesiredCullMode : D3DCULL_NONE;
-	if ( nCullMode != m_DynamicState.m_CullMode )
+	nDesiredCullMode = bEnable ? nDesiredCullMode : D3DCULL_NONE;
+	if ( nDesiredCullMode != m_DynamicState.m_CullMode )
 	{
-		SetRenderStateConstMacro( this, D3DRS_CULLMODE, nCullMode );
-		m_DynamicState.m_CullMode = nCullMode;
+		D3DCULL nCullMode = nDesiredCullMode;
+		if ( m_bFlipCulling )
+		{
+			if ( nCullMode != D3DCULL_NONE )
+			{
+				nCullMode = ( nCullMode == D3DCULL_CW ) ? D3DCULL_CCW : D3DCULL_CW;
+			}
+		}
+
+		SetRenderState( D3DRS_CULLMODE, nCullMode );
+		m_DynamicState.m_CullMode = nDesiredCullMode;
 	}
 }
 
 void CShaderAPIDx8::ApplyCullEnable( bool bEnable )
 {
 	m_DynamicState.m_bCullEnabled = bEnable;
+/*
+	int nCullOverride = GetIntRenderingParameter( INT_RENDERPARM_CULL_OVERRIDE );
+	if ( nCullOverride == RENDER_PARM_CULL_MODE_OVERRIDE_CW )
+	{
+		m_DynamicState.m_DesiredCullMode = D3DCULL_CW;
+		m_DynamicState.m_bCullEnabled = true;
+	}
+	else if ( nCullOverride == RENDER_PARM_CULL_MODE_OVERRIDE_CCW )
+	{
+		m_DynamicState.m_DesiredCullMode = D3DCULL_CCW;
+		m_DynamicState.m_bCullEnabled = true;
+	}
+*/
 	SetCullModeState( m_DynamicState.m_bCullEnabled, m_DynamicState.m_DesiredCullMode );
 }
 
@@ -5278,30 +6605,56 @@ void CShaderAPIDx8::CullMode( MaterialCullMode_t nCullMode )
 	D3DCULL nNewCullMode;
 	switch( nCullMode )
 	{
-	case MATERIAL_CULLMODE_CCW:
-		// Culls backfacing polys (normal)
-		nNewCullMode = D3DCULL_CCW;
-		break;
+		case MATERIAL_CULLMODE_CCW:
+			nNewCullMode = D3DCULL_CCW;	// Culls back-facing polygons (default)
+			break;
 
-	case MATERIAL_CULLMODE_CW:
-		// Culls frontfacing polys
-		nNewCullMode = D3DCULL_CW;
-		break;
+		case MATERIAL_CULLMODE_CW:
+			nNewCullMode = D3DCULL_CW;	// Culls front-facing polygons
+			break;
+		
+		case MATERIAL_CULLMODE_NONE:
+			nNewCullMode = D3DCULL_NONE;	// Culls nothing
+			break;
 
-	default:
-		Warning( "CullMode: invalid cullMode\n" );
-		return;
+		default:
+			Warning( "CullMode: invalid cullMode\n" );
+			return;
 	}
 
-	if (m_DynamicState.m_DesiredCullMode != nNewCullMode)
+	if ( m_DynamicState.m_DesiredCullMode != nNewCullMode )
 	{
-		FlushBufferedPrimitives();
 		m_DynamicState.m_DesiredCullMode = nNewCullMode;
 		SetCullModeState( m_DynamicState.m_bCullEnabled, m_DynamicState.m_DesiredCullMode );
 	}
 }
 
-static ConVar mat_alphacoverage( "mat_alphacoverage", "1" );
+void CShaderAPIDx8::FlipCullMode( void )
+{
+	LOCK_SHADERAPI();
+	switch( m_DynamicState.m_DesiredCullMode )
+	{
+	case D3DCULL_CCW:
+		m_DynamicState.m_DesiredCullMode = D3DCULL_CW;
+		break;
+
+	case D3DCULL_CW:
+		m_DynamicState.m_DesiredCullMode = D3DCULL_CCW;
+		break;
+	
+	case D3DCULL_NONE:
+		m_DynamicState.m_DesiredCullMode = D3DCULL_NONE;
+		break;
+		
+	default:
+		Warning( "FlipCullMode: invalid cullMode\n" );
+		return;
+	}
+	
+	SetCullModeState( m_DynamicState.m_bCullEnabled, m_DynamicState.m_DesiredCullMode );	
+}
+
+static ConVar mat_alphacoverage( "mat_alphacoverage", IsX360() ? "0" : "1", FCVAR_DEVELOPMENTONLY );
 void CShaderAPIDx8::ApplyAlphaToCoverage( bool bEnable )
 {
 	if ( mat_alphacoverage.GetBool() )
@@ -5323,8 +6676,10 @@ void CShaderAPIDx8::ApplyAlphaToCoverage( bool bEnable )
 D3DCULL CShaderAPIDx8::GetCullMode() const
 {
 	Assert( m_pMaterial );
+
 	if ( m_pMaterial->GetMaterialVarFlag( MATERIAL_VAR_NOCULL ) )
 		return D3DCULL_NONE;
+
 	return m_DynamicState.m_DesiredCullMode;
 }
 
@@ -5343,12 +6698,12 @@ void CShaderAPIDx8::ForceDepthFuncEquals( bool bEnable )
 	}
 }
 
-void CShaderAPIDx8::OverrideDepthEnable( bool bEnable, bool bDepthEnable )
+void CShaderAPIDx8::OverrideDepthEnable( bool bEnable, bool bDepthWriteEnable, bool bDepthTestEnable )
 {
 	LOCK_SHADERAPI();
 	if ( !g_pShaderDeviceDx8->IsDeactivated() )
 	{
-		m_TransitionTable.OverrideDepthEnable( bEnable, bDepthEnable );
+		m_TransitionTable.OverrideDepthEnable( bEnable, bDepthWriteEnable, bDepthTestEnable );
 	}
 }
 
@@ -5402,12 +6757,10 @@ void CShaderAPIDx8::SetHeightClipZ( float z )
 	LOCK_SHADERAPI();
 	if( z != m_DynamicState.m_HeightClipZ )
 	{
-		FlushBufferedPrimitives();
 		m_DynamicState.m_HeightClipZ = z;
 		UpdateVertexShaderFogParams();
 		UpdateFastClipUserClipPlane();
-		m_DynamicState.m_TransformChanged[MATERIAL_PROJECTION] |= 
-			STATE_CHANGED_VERTEX_SHADER | STATE_CHANGED_FIXED_FUNCTION;
+		m_DynamicState.m_TransformChanged[MATERIAL_PROJECTION] |= STATE_CHANGED;
 	}
 }
 
@@ -5416,12 +6769,10 @@ void CShaderAPIDx8::SetHeightClipMode( MaterialHeightClipMode_t heightClipMode )
 	LOCK_SHADERAPI();
 	if( heightClipMode != m_DynamicState.m_HeightClipMode )
 	{
-		FlushBufferedPrimitives();
 		m_DynamicState.m_HeightClipMode = heightClipMode;
 		UpdateVertexShaderFogParams();
 		UpdateFastClipUserClipPlane();
-		m_DynamicState.m_TransformChanged[MATERIAL_PROJECTION] |= 
-			STATE_CHANGED_VERTEX_SHADER | STATE_CHANGED_FIXED_FUNCTION;
+		m_DynamicState.m_TransformChanged[MATERIAL_PROJECTION] |= STATE_CHANGED;
 	}
 }
 
@@ -5441,8 +6792,6 @@ void CShaderAPIDx8::SetClipPlane( int index, const float *pPlane )
 
 	if ( plane != m_DynamicState.m_UserClipPlaneWorld[index] )
 	{
-		FlushBufferedPrimitives();
-
 		m_DynamicState.m_UserClipPlaneChanged |= ( 1 << index );
 		m_DynamicState.m_UserClipPlaneWorld[index] = plane;
 	}
@@ -5481,7 +6830,6 @@ void CShaderAPIDx8::EnableUserClipTransformOverride( bool bEnable )
 	LOCK_SHADERAPI();
 	if ( m_DynamicState.m_bUserClipTransformOverride != bEnable )
 	{
-		FlushBufferedPrimitives();
 		m_DynamicState.m_bUserClipTransformOverride = bEnable;
 		MarkAllUserClipPlanesDirty();
 	}
@@ -5502,7 +6850,6 @@ void CShaderAPIDx8::UserClipTransform( const VMatrix &worldToProjection )
 		m_DynamicState.m_UserClipTransform = dxWorldToProjection;
 		if ( m_DynamicState.m_bUserClipTransformOverride )
 		{
-			FlushBufferedPrimitives();
 			MarkAllUserClipPlanesDirty();
 		}
 	}
@@ -5518,8 +6865,7 @@ void CShaderAPIDx8::EnableClipPlane( int index, bool bEnable )
 	Assert( index < g_pHardwareConfig->MaxUserClipPlanes() && index >= 0 );
 	if( ( m_DynamicState.m_UserClipPlaneEnabled & ( 1 << index ) ? true : false ) != bEnable )
 	{
-		FlushBufferedPrimitives();
-		if( bEnable )
+		if ( bEnable )
 		{
 			m_DynamicState.m_UserClipPlaneEnabled |= ( 1 << index );
 		}
@@ -5527,9 +6873,51 @@ void CShaderAPIDx8::EnableClipPlane( int index, bool bEnable )
 		{
 			m_DynamicState.m_UserClipPlaneEnabled &= ~( 1 << index );
 		}
-		SetRenderStateConstMacro( this, D3DRS_CLIPPLANEENABLE, m_DynamicState.m_UserClipPlaneEnabled );
+		SetRenderState( D3DRS_CLIPPLANEENABLE, m_DynamicState.m_UserClipPlaneEnabled );
 	}
 }
+
+// Alternate oblique projectio matrix code adapted from http://www.terathon.com/code/oblique.html
+// Fixes for D3D Z range adapted from this thread: http://www.gamedev.net/community/forums/topic.asp?topic_id=398719
+static inline float sgn(float a)
+{
+	if (a > 0.0F) return (1.0F);
+	if (a < 0.0F) return (-1.0F);
+	return (0.0F);
+}
+
+// Clip plane must be in view space
+void ApplyClipPlaneToProjectionMatrix( D3DXMATRIX &projMatrix, const Vector4D& clipPlane )
+{
+	Vector4D q;
+
+	// Invalid projection matrix. (Sometimes we get in here with an identity transform as the projection matrix)
+	if ( projMatrix._43 == 0.0f )
+	{
+		return;
+	}
+
+	// Calculate the clip-space corner point opposite the clipping plane
+	// as (sgn(clipPlane.x), sgn(clipPlane.y), 1, 1) and
+	// transform it into camera space by multiplying it
+	// by the inverse of the projection matrix
+
+	q.x = ( sgn( clipPlane.x ) + projMatrix._31 ) / projMatrix._11;
+	q.y = ( sgn( clipPlane.y ) + projMatrix._32 ) / projMatrix._22;
+	q.z = -1.0f;
+	q.w = ( 1.0f + projMatrix._33 ) / projMatrix._43;
+
+	// Calculate the scaled plane vector
+	Vector4D c = clipPlane * ( 1.0f / DotProduct4D( clipPlane, q ) );
+
+	// Replace the third row of the projection matrix
+	projMatrix._13 = c.x;
+	projMatrix._23 = c.y;
+	projMatrix._33 = c.z;
+	projMatrix._43 = c.w;
+}
+
+ConVar mat_alternatefastclipalgorithm( "mat_alternatefastclipalgorithm", "1" );
 
 //-----------------------------------------------------------------------------
 // Recomputes the fast-clip plane matrices based on the current fast-clip plane
@@ -5553,59 +6941,96 @@ void CShaderAPIDx8::CommitFastClipPlane( )
 	D3DXMATRIX worldToViewInvTrans, worldToViewInv, worldToView = GetUserClipTransform();
 
 	D3DXMatrixInverse( &worldToViewInv, NULL, &worldToView );
+
+	// PS3's Cg likes things in row-major rather than column-major, so let's just save ourselves the work of fixing every shader and call it even?
+#ifdef _PS3
+	worldToViewInvTrans = worldToViewInv;
+#else // _PS3
 	D3DXMatrixTranspose( &worldToViewInvTrans, &worldToViewInv ); 	
+#endif // !_PS3
 
 	D3DXMatrixInverse( &viewToProjInv, NULL, &viewToProj );
+#ifdef _PS3
+	viewToProjInvTrans = viewToProjInv;
+#else // _PS3
 	D3DXMatrixTranspose( &viewToProjInvTrans, &viewToProjInv ); 
+#endif // !_PS3
 
-	D3DXPLANE plane;
-	D3DXPlaneNormalize( &plane, &m_DynamicState.m_FastClipPlane );
-	D3DXVECTOR4 clipPlane( plane.a, plane.b, plane.c, plane.d );
+	if ( !mat_alternatefastclipalgorithm.GetBool() )
+	{
+		// OLD code path
+		D3DXPLANE plane;
+		D3DXPlaneNormalize( &plane, &m_DynamicState.m_FastClipPlane );
+		D3DXVECTOR4 clipPlane( plane.a, plane.b, plane.c, plane.d );
 
-	// transform clip plane into view space
-	D3DXVec4Transform( &clipPlane, &clipPlane, &worldToViewInvTrans );
+		// transform clip plane into view space
+		D3DXVec4Transform( &clipPlane, &clipPlane, &worldToViewInvTrans );
 
-	// transform clip plane into projection space
-	D3DXVec4Transform( &clipPlane, &clipPlane, &viewToProjInvTrans );
-	
+		// transform clip plane into projection space
+		D3DXVec4Transform( &clipPlane, &clipPlane, &viewToProjInvTrans );
+
 #define ALLOW_FOR_FASTCLIPDUMPS 0
 
 #if (ALLOW_FOR_FASTCLIPDUMPS == 1)
-	static ConVar shader_dumpfastclipprojectioncoords( "shader_dumpfastclipprojectioncoords", "0", 0, "dump fast clip projected matrix" );
-	if( shader_dumpfastclipprojectioncoords.GetBool() )
-		DevMsg( "Fast clip plane projected coordinates: %f %f %f %f", clipPlane.x, clipPlane.y, clipPlane.z, clipPlane.w );
-#endif
-	
-	if( (clipPlane.z * clipPlane.w) <= -0.4f ) // a plane with (z*w) > -0.4 at this point is behind the camera and will cause graphical glitches. Toss it. (0.4 found through experimentation)
-	{
-#if (ALLOW_FOR_FASTCLIPDUMPS == 1)
+		static ConVar shader_dumpfastclipprojectioncoords( "shader_dumpfastclipprojectioncoords", "0", 0, "dump fast clip projected matrix" );
 		if( shader_dumpfastclipprojectioncoords.GetBool() )
-			DevMsg( "    %f %f %f %f\n", clipPlane.x, clipPlane.y, clipPlane.z, clipPlane.w );
+			DevMsg( "Fast clip plane projected coordinates: %f %f %f %f", clipPlane.x, clipPlane.y, clipPlane.z, clipPlane.w );
 #endif
 
-		D3DXVec4Normalize( &clipPlane, &clipPlane );
-
-		//if ((fabs(clipPlane.z) > 0.01) && (fabs(clipPlane.w) > 0.01f))  
+		if( (clipPlane.z * clipPlane.w) <= -0.4f ) // a plane with (z*w) > -0.4 at this point is behind the camera and will cause graphical glitches. Toss it. (0.4 found through experimentation)
 		{
-			// put projection space clip plane in Z column
-			m_CachedFastClipProjectionMatrix._13 = clipPlane.x;
-			m_CachedFastClipProjectionMatrix._23 = clipPlane.y;
-			m_CachedFastClipProjectionMatrix._33 = clipPlane.z;
-			m_CachedFastClipProjectionMatrix._43 = clipPlane.w;
-		}
-	}
 #if (ALLOW_FOR_FASTCLIPDUMPS == 1)
+			if( shader_dumpfastclipprojectioncoords.GetBool() )
+				DevMsg( "    %f %f %f %f\n", clipPlane.x, clipPlane.y, clipPlane.z, clipPlane.w );
+#endif
+
+			D3DXVec4Normalize( &clipPlane, &clipPlane );
+
+			//if ((fabs(clipPlane.z) > 0.01) && (fabs(clipPlane.w) > 0.01f))  
+			{
+				// put projection space clip plane in Z column
+				m_CachedFastClipProjectionMatrix._13 = clipPlane.x;
+				m_CachedFastClipProjectionMatrix._23 = clipPlane.y;
+				m_CachedFastClipProjectionMatrix._33 = clipPlane.z;
+				m_CachedFastClipProjectionMatrix._43 = clipPlane.w;
+			}
+		}
+#if (ALLOW_FOR_FASTCLIPDUMPS == 1)
+		else
+		{
+			if( shader_dumpfastclipprojectioncoords.GetBool() )
+				DevMsg( "\n" ); //finish off the line above
+		}
+#endif
+
+		m_CachedFastClipProjectionMatrix = viewToProj * m_CachedFastClipProjectionMatrix;
+	}
 	else
 	{
-		if( shader_dumpfastclipprojectioncoords.GetBool() )
-			DevMsg( "\n" ); //finish off the line above
-	}
-#endif
+		// NEW code path
 
-	m_CachedFastClipProjectionMatrix = viewToProj * m_CachedFastClipProjectionMatrix;
+		D3DXPLANE plane;
+		D3DXPlaneNormalize( &plane, &m_DynamicState.m_FastClipPlane );
+		D3DXVECTOR4 clipPlane( plane.a, plane.b, plane.c, plane.d );
+
+		// transform clip plane into view space
+		D3DXVec4Transform( &clipPlane, &clipPlane, &worldToViewInvTrans );
+
+		m_CachedFastClipProjectionMatrix = GetTransform( MATERIAL_PROJECTION );
+
+		// Fuck with proj matrix
+		ApplyClipPlaneToProjectionMatrix( m_CachedFastClipProjectionMatrix, Vector4D( clipPlane.x, clipPlane.y, clipPlane.z, clipPlane.w ) );
+	}
 
 	// Update the cached polyoffset matrix (with clip) too:
 	ComputePolyOffsetMatrix( m_CachedFastClipProjectionMatrix, m_CachedFastClipPolyOffsetProjectionMatrix );
+
+	// PORTAL 2 hack: Disable slope scale z bias for decals if we have a poly offset matrix set. This avoids decals and overlays rendering
+	// on top of other stuff through portal views on the PS3.
+	if ( m_TransitionTable.CurrentShadowState() )
+	{
+		ApplyZBias( m_TransitionTable.CurrentShadowState()->m_DepthTestState );
+	}
 }
 
 //-----------------------------------------------------------------------------
@@ -5621,7 +7046,6 @@ void CShaderAPIDx8::SetFastClipPlane( const float *pPlane )
 	plane.d = -pPlane[3];
 	if ( plane != m_DynamicState.m_FastClipPlane )
 	{
-		FlushBufferedPrimitives();		
 		UpdateVertexShaderFogParams();
 
 		m_DynamicState.m_FastClipPlane = plane;
@@ -5630,8 +7054,7 @@ void CShaderAPIDx8::SetFastClipPlane( const float *pPlane )
 		// we also update the fast clip matrices
 		m_DynamicState.m_bFastClipPlaneChanged = true;
 
-		m_DynamicState.m_TransformChanged[MATERIAL_PROJECTION] |= 
-			STATE_CHANGED_VERTEX_SHADER | STATE_CHANGED_FIXED_FUNCTION;
+		m_DynamicState.m_TransformChanged[MATERIAL_PROJECTION] |= STATE_CHANGED;
 	}
 }
 
@@ -5644,13 +7067,11 @@ void CShaderAPIDx8::EnableFastClip( bool bEnable )
 	LOCK_SHADERAPI();
 	if( m_DynamicState.m_FastClipEnabled != bEnable )
 	{
-		FlushBufferedPrimitives();
 		UpdateVertexShaderFogParams();
 
 		m_DynamicState.m_FastClipEnabled = bEnable;
 
-		m_DynamicState.m_TransformChanged[MATERIAL_PROJECTION] |= 
-			STATE_CHANGED_VERTEX_SHADER | STATE_CHANGED_FIXED_FUNCTION;
+		m_DynamicState.m_TransformChanged[MATERIAL_PROJECTION] |= STATE_CHANGED;
 	}
 }
 
@@ -5703,62 +7124,6 @@ void CShaderAPIDx8::SetInvariantClipVolume( Frustum_t *pFrustumPlanes )
 }
 */
 
-//-----------------------------------------------------------------------------
-// Vertex blending
-//-----------------------------------------------------------------------------
-void CShaderAPIDx8::SetVertexBlendState( int numBones )
-{
-	if (numBones < 0)
-	{
-		numBones = m_DynamicState.m_NumBones;
-	}
-
-	// For fixed-function, the number of weights is actually one less than
-	// the number of bones
-	if (numBones > 0)
-		--numBones;
-
-	bool normalizeNormals = true;
-	D3DVERTEXBLENDFLAGS vertexBlend;
-	switch(numBones)
-	{
-	case 0:
-		vertexBlend = D3DVBF_DISABLE;
-		normalizeNormals = false;
-		break;
-
-	case 1:
-		vertexBlend = D3DVBF_1WEIGHTS;
-		break;
-
-	case 2:
-		vertexBlend = D3DVBF_2WEIGHTS;
-		break;
-
-	case 3:
-		vertexBlend = D3DVBF_3WEIGHTS;
-		break;
-
-	default:
-		vertexBlend = D3DVBF_DISABLE;
-		Assert(0);
-		break;
-	}
-
-	if (m_DynamicState.m_VertexBlend != vertexBlend)
-	{
-		m_DynamicState.m_VertexBlend  = vertexBlend;
-		SetSupportedRenderState( D3DRS_VERTEXBLEND, vertexBlend );
-	}
-
-	// Activate normalize normals when skinning is on
-	if (m_DynamicState.m_NormalizeNormals != normalizeNormals)
-	{
-		m_DynamicState.m_NormalizeNormals  = normalizeNormals;
-		SetSupportedRenderState( D3DRS_NORMALIZENORMALS, normalizeNormals );
-	}
-}
-
 
 //-----------------------------------------------------------------------------
 // Vertex blending
@@ -5768,22 +7133,22 @@ void CShaderAPIDx8::SetNumBoneWeights( int numBones )
 	LOCK_SHADERAPI();
 	if (m_DynamicState.m_NumBones != numBones)
 	{
-		FlushBufferedPrimitives();
 		m_DynamicState.m_NumBones = numBones;
-
-		if ( m_TransitionTable.CurrentShadowState() )
-		{
-			SetVertexBlendState( m_TransitionTable.CurrentShadowState()->m_VertexBlendEnable ? -1 : 0 );
-		}
 	}
 }
 
 void CShaderAPIDx8::EnableHWMorphing( bool bEnable )
 {
 	LOCK_SHADERAPI();
+	
+	if ( bEnable )
+	{
+		Assert( 0 );
+		Warning( "CShaderAPIDx8::EnableHWMorphing: HW morphing is getting enabled! This is not a supported code path - bad things are going to happen!\n" );
+	}
+
 	if ( m_DynamicState.m_bHWMorphingEnabled != bEnable )
 	{
-		FlushBufferedPrimitives();
 		m_DynamicState.m_bHWMorphingEnabled = bEnable;
 	}
 }
@@ -5792,160 +7157,140 @@ void CShaderAPIDx8::EnabledSRGBWrite( bool bEnabled )
 {
 	m_DynamicState.m_bSRGBWritesEnabled = bEnabled;
 
-	if ( g_pHardwareConfig->SupportsPixelShaders_2_b() )
+	if ( g_pHardwareConfig->GetDXSupportLevel() >= 92 )
 	{
 		UpdatePixelFogColorConstant();
 
-		if ( bEnabled && g_pHardwareConfig->NeedsShaderSRGBConversion() )
-			BindTexture( SHADER_SAMPLER15, m_hLinearToGammaTableTexture );
-		else
-			BindTexture( SHADER_SAMPLER15, m_hLinearToGammaTableIdentityTexture );
+		//if ( bEnabled && g_pHardwareConfig->NeedsShaderSRGBConversion() )
+		//	BindTexture( SHADER_SAMPLER15, m_hLinearToGammaTableTexture );
+		//else
+		//	BindTexture( SHADER_SAMPLER15, m_hLinearToGammaTableIdentityTexture );
 	}
 }
 
-#if defined( _X360 )
-void CShaderAPIDx8::ApplySRGBReadState( int iTextureStage, bool bSRGBReadEnabled )
+void CShaderAPIDx8::SetSRGBWrite( bool bState )
 {
-	Sampler_t sampler = (Sampler_t)iTextureStage;
-	SamplerState_t &samplerState = SamplerState( sampler );
-	samplerState.m_SRGBReadEnable = bSRGBReadEnabled;
-
-	if ( ( samplerState.m_BoundTexture == INVALID_SHADERAPI_TEXTURE_HANDLE ) || !samplerState.m_TextureEnable )
-	{
-		return;
-	}
-
-	IDirect3DBaseTexture *pBindTexture = CShaderAPIDx8::GetD3DTexture( samplerState.m_BoundTexture );
-	if ( !pBindTexture )
-	{
-		return;
-	}
-	
-	DWORD linearFormatBackup = pBindTexture->Format.dword[0]; //if we convert to srgb format, we need the original format for reverting. We only need the first DWORD of GPUTEXTURE_FETCH_CONSTANT.
-	if ( bSRGBReadEnabled )
-	{
-		pBindTexture->Format.SignX = pBindTexture->Format.SignY = pBindTexture->Format.SignZ = 3; //convert to srgb format for the bind. This effectively emulates the old srgb read sampler state
-	}
-
-	Dx9Device()->SetTexture( sampler, pBindTexture );
-
-	// copy back the format in case we changed it
-	pBindTexture->Format.dword[0] = linearFormatBackup;
+	SetSupportedRenderState( D3DRS_SRGBWRITEENABLE, ( bState ) ? 1 : 0 );
+	m_DynamicState.m_bSRGBWritesEnabled = bState;
 }
-#endif
+
 
 //-----------------------------------------------------------------------------
 // Fog methods...
 //-----------------------------------------------------------------------------
-void CShaderAPIDx8::UpdatePixelFogColorConstant( void )
+void CShaderAPIDx8::UpdatePixelFogColorConstant( bool bMultiplyByToneMapScale )
 {
-	Assert( HardwareConfig()->SupportsPixelShaders_2_b() );
-	float fogColor[4];
+	Assert( HardwareConfig()->GetDXSupportLevel() >= 92 );
+	float flDestAlphaDepthRange = GetFloatRenderingParameter( FLOAT_RENDERPARM_DEST_ALPHA_DEPTH_SCALE );
+	float flInvDestAlphaDepthRange = flDestAlphaDepthRange > 0.0f ? 1.0f / flDestAlphaDepthRange : 0.0f;
+	Vector4D vecFogColor( 0.0f, 0.0f, 0.0f, flInvDestAlphaDepthRange );
 
-	switch( GetPixelFogMode() )
+	switch( GetSceneFogMode() )
 	{
-	case MATERIAL_FOG_NONE:
-		{
-			for( int i = 0; i != 3; ++i )
-				fogColor[i] = 0.0f;
-		}
-		break;
+		case MATERIAL_FOG_NONE:
+			// Don't worry about fog color since we aren't going to use it
+			// Even so, we do need to set LINEAR_FOG_COLOR since w component controls soft particles
+			break; 
 
-	case MATERIAL_FOG_LINEAR:
-		{
-			//setup the fog for mixing linear fog in the pixel shader so that it emulates ff range fog
-			for( int i = 0; i != 3; ++i )
-				fogColor[i] = m_DynamicState.m_PixelFogColor[i];
-
-			if( m_DynamicState.m_bSRGBWritesEnabled ) 
+		case MATERIAL_FOG_LINEAR:
 			{
-				//since the fog color will assuredly get converted from linear to gamma, we should probably convert it from gamma to linear
-				for( int i = 0; i != 3; ++i )
-					fogColor[i] = GammaToLinear_HardwareSpecific( fogColor[i] );
-			}
+				//setup the fog for mixing linear fog in the pixel shader so that it emulates ff range fog
+				if( m_DynamicState.m_bSRGBWritesEnabled ) 
+				{
+					vecFogColor.AsVector3D() = m_DynamicState.m_vecPixelFogColorLinear.AsVector3D();
+				}
+				else
+				{
+					vecFogColor.AsVector3D() = m_DynamicState.m_vecPixelFogColor.AsVector3D();
+				}
 
-			if( (!m_DynamicState.m_bFogGammaCorrectionDisabled) && (g_pHardwareConfig->GetHDRType() == HDR_TYPE_INTEGER) )
-			{
-				for( int i = 0; i != 3; ++i )
-					fogColor[i] *= m_ToneMappingScale.x; // Linear
 			}
-		}
-		break;
+			break;
 
-	case MATERIAL_FOG_LINEAR_BELOW_FOG_Z:
-		{
-			//water fog has been around a while and has never tonemap scaled, and has always been in linear space
-			if( g_pHardwareConfig->NeedsShaderSRGBConversion() )
+		case MATERIAL_FOG_LINEAR_BELOW_FOG_Z:
 			{
-				//srgb in ps2b uses the 2.2 curve
-				for( int i = 0; i != 3; ++i )
-					fogColor[i] = pow( m_DynamicState.m_PixelFogColor[i], 2.2f );
+				//water fog has been around a while and has never tonemap scaled, and has always been in linear space
+				if( g_pHardwareConfig->NeedsShaderSRGBConversion() )
+				{
+					// srgb in ps2b uses the 2.2 curve
+					for( int i = 0; i < 3; ++i )
+					{
+						vecFogColor[i] = pow( m_DynamicState.m_vecPixelFogColor[i], 2.2f );
+					}
+				}
+				else
+				{
+					vecFogColor.AsVector3D() = m_DynamicState.m_vecPixelFogColorLinear.AsVector3D(); //this is how water fog color has always been setup in the past
+				}
 			}
-			else
-			{
-				for( int i = 0; i != 3; ++i )
-					fogColor[i] = GammaToLinear_HardwareSpecific( m_DynamicState.m_PixelFogColor[i] ); //this is how water fog color has always been setup in the past
-			}
+			break;
 
-			if( (!m_DynamicState.m_bFogGammaCorrectionDisabled) && (g_pHardwareConfig->GetHDRType() == HDR_TYPE_INTEGER) )
-			{
-				for( int i = 0; i != 3; ++i )
-					fogColor[i] *= m_ToneMappingScale.x; // Linear
-			}
-		}
-		break;
-
-		NO_DEFAULT;
+			NO_DEFAULT;
 	};	
 
-	fogColor[3] = 1.0f / m_DynamicState.m_DestAlphaDepthRange;
+	if( bMultiplyByToneMapScale && ( (!m_DynamicState.m_bFogGammaCorrectionDisabled) && (g_pHardwareConfig->GetHDRType() == HDR_TYPE_INTEGER ) ) )
+	{
+		vecFogColor.AsVector3D() *= m_ToneMappingScale.x;
+	}
 
-	SetPixelShaderConstant( LINEAR_FOG_COLOR, fogColor );
+	SetPixelShaderConstantInternal( LINEAR_FOG_COLOR, vecFogColor.Base() );
+}
+
+FogMethod_t CShaderAPIDx8::ComputeFogMethod( ShaderFogMode_t shaderFogMode, MaterialFogMode_t sceneFogMode, bool bVertexFog )
+{
+	if ( sceneFogMode == MATERIAL_FOG_LINEAR_BELOW_FOG_Z )
+	{
+		return FOGMETHOD_PIXELSHADERFOG;
+	}
+
+	if ( HardwareConfig()->GetDXSupportLevel() <= 90 )
+	{
+		// ps20 always uses fixed-function fog if there is no water.
+		return FOGMETHOD_FIXEDFUNCTIONVERTEXFOG;
+	}
+
+	// use the vmt's $vertexfog param to decide what to do.
+	if ( bVertexFog )
+	{
+		return FOGMETHOD_VERTEXFOGBLENDEDINPIXELSHADER;
+	}
+	else
+	{
+		return FOGMETHOD_PIXELSHADERFOG;
+	}
 }
 
 
-void CShaderAPIDx8::ApplyFogMode( ShaderFogMode_t fogMode, bool bSRGBWritesEnabled, bool bDisableFogGammaCorrection )
-{
-	HDRType_t hdrType = g_pHardwareConfig->GetHDRType();
 
+
+Vector CShaderAPIDx8::CalculateFogColorConstant( D3DCOLOR *pPackedColorOut, FogMethod_t fogMethod, ShaderFogMode_t fogMode, 
+												 bool bDisableFogGammaCorrection, bool bSRGBWritesEnabled )
+{
 	if ( fogMode == SHADER_FOGMODE_DISABLED )
 	{
-		if( hdrType != HDR_TYPE_FLOAT )
-		{
-			FogMode( MATERIAL_FOG_NONE );
-		}
-
-		if( m_DelayedShaderConstants.iPixelShaderFogParams != -1 )
-			SetPixelShaderFogParams( m_DelayedShaderConstants.iPixelShaderFogParams, fogMode );
-
-		return;
+		return Vector( 0, 0, 0 );
 	}
 	
 	bool bShouldGammaCorrect = true;			// By default, we'll gamma correct.
-	unsigned char r = 0, g = 0, b = 0;			// Black fog
 
-	
-	if( hdrType != HDR_TYPE_FLOAT )
-	{
-		FogMode( m_SceneFogMode );
-	}
-
-	if( m_DelayedShaderConstants.iPixelShaderFogParams != -1 )
-		SetPixelShaderFogParams( m_DelayedShaderConstants.iPixelShaderFogParams, fogMode );
+	uint8 r = 0, g = 0, b = 0;								// Black fog
 
 	switch( fogMode )
 	{
 		case SHADER_FOGMODE_BLACK:				// Additive decals
 			bShouldGammaCorrect = false;
 			break;
+
 		case SHADER_FOGMODE_OO_OVERBRIGHT:
 		case SHADER_FOGMODE_GREY:				// Mod2x decals
 			r = g = b = 128;
 			break;
+
 		case SHADER_FOGMODE_WHITE:				// Multiplicative decals
 			r = g = b = 255;
 			bShouldGammaCorrect = false;
 			break;
+
 		case SHADER_FOGMODE_FOGCOLOR:
 			GetSceneFogColor( &r, &g, &b );		// Scene fog color
 			break;
@@ -5953,51 +7298,141 @@ void CShaderAPIDx8::ApplyFogMode( ShaderFogMode_t fogMode, bool bSRGBWritesEnabl
 	}
 
 	bShouldGammaCorrect &= !bDisableFogGammaCorrection;
-	m_DynamicState.m_bFogGammaCorrectionDisabled = !bShouldGammaCorrect;
 
-	D3DCOLOR color;
-	if ( bShouldGammaCorrect )
-	{
-		color = ComputeGammaCorrectedFogColor( r, g, b, bSRGBWritesEnabled );
-	}
-	else
-	{
-		color = D3DCOLOR_ARGB( 255, r, g, b );
-	}
 
 
 	const float fColorScale = 1.0f / 255.0f;
-	m_DynamicState.m_PixelFogColor[0] = (float)(r) * fColorScale;
-	m_DynamicState.m_PixelFogColor[1] = (float)(g) * fColorScale;
-	m_DynamicState.m_PixelFogColor[2] = (float)(b) * fColorScale;
 
-	if( g_pMaterialSystemHardwareConfig->SupportsPixelShaders_2_b() )
+	Vector vecRet;
+	vecRet.x = (float)(r) * fColorScale;
+	vecRet.y = (float)(g) * fColorScale;
+	vecRet.z = (float)(b) * fColorScale;
+	if ( pPackedColorOut )
 	{
-		UpdatePixelFogColorConstant();
+		D3DCOLOR color;
+		if ( bShouldGammaCorrect )
+		{
+			color = ComputeGammaCorrectedFogColor( r, g, b, bSRGBWritesEnabled );
+		}
+		else
+		{
+			color = D3DCOLOR_ARGB( 255, r, g, b );
+		}
+		
+		( *pPackedColorOut ) = color;
 	}
 
-	if ( color != m_DynamicState.m_FogColor )
+	return vecRet;
+
+}
+
+struct FogConstants_t
+{
+	Vector m_vecFogColorConstant[FOGMETHOD_NUMVALUES][SHADER_FOGMODE_NUMFOGMODES][2][2]; // [fogMode][bDisableFogGammaCorrection][bSRGBWritesEnabled]
+	Vector m_vecFogColorConstantLinear[FOGMETHOD_NUMVALUES][SHADER_FOGMODE_NUMFOGMODES][2][2]; // [fogMode][bDisableFogGammaCorrection][bSRGBWritesEnabled]
+	D3DCOLOR m_nPackedFogColorConstants[FOGMETHOD_NUMVALUES][SHADER_FOGMODE_NUMFOGMODES][2][2];
+};
+
+static FogConstants_t s_CurFogConstants;
+static bool s_bFirstTimeGeneratingConstants = true;
+
+void CShaderAPIDx8::RegenerateFogConstants( void )
+{
+	for( int nMethod = 0; nMethod < FOGMETHOD_NUMVALUES; nMethod++ )
 	{
-		if( hdrType != HDR_TYPE_FLOAT )
+		for( int nMode = 0; nMode < SHADER_FOGMODE_NUMFOGMODES; nMode++ )
 		{
-			m_DynamicState.m_FogColor = color;
-			SetRenderStateConstMacro( this, D3DRS_FOGCOLOR, m_DynamicState.m_FogColor );
+			if ( ( ! s_bFirstTimeGeneratingConstants ) && ( nMode != SHADER_FOGMODE_FOGCOLOR ) )
+				continue;									// state changes don't effect any mode execpt FOGCOLOR
+			for( int nDisabledFogGammaCorrection = 0; nDisabledFogGammaCorrection < 2; nDisabledFogGammaCorrection++ )
+			{
+				for( int nSRGBWritesEnabled = 0; nSRGBWritesEnabled < 2 ; nSRGBWritesEnabled++ )
+				{
+					s_CurFogConstants.m_vecFogColorConstant[nMethod][nMode][nDisabledFogGammaCorrection][nSRGBWritesEnabled] = CalculateFogColorConstant(
+						&( s_CurFogConstants.m_nPackedFogColorConstants[nMethod][nMode][nDisabledFogGammaCorrection][nSRGBWritesEnabled] ),
+						( FogMethod_t ) nMethod, ( ShaderFogMode_t ) nMode, ( nDisabledFogGammaCorrection != 0 ), ( nSRGBWritesEnabled != 0 ) );
+
+					// generate linear versions
+					for( int i = 0; i < 3; i++ )
+					{
+						float *pComponent = &( s_CurFogConstants.m_vecFogColorConstantLinear[nMethod][nMode][nDisabledFogGammaCorrection][nSRGBWritesEnabled][i] );
+						float *pSrcComponent = &( s_CurFogConstants.m_vecFogColorConstant[nMethod][nMode][nDisabledFogGammaCorrection][nSRGBWritesEnabled][i] );
+						*( pComponent ) = GammaToLinear_HardwareSpecific( *pSrcComponent );
+					}
+				}
+			}
 		}
+	}
+	s_bFirstTimeGeneratingConstants = false;				// next time around, don't regenerate the whole table
+}
+
+
+
+void CShaderAPIDx8::ApplyFogMode( ShaderFogMode_t fogMode, bool bVertexFog, bool bSRGBWritesEnabled, bool bDisableFogGammaCorrection )
+{
+	FogMethod_t fogMethod = ComputeFogMethod( fogMode, m_SceneFogMode, bVertexFog );
+
+	if ( fogMethod != FOGMETHOD_PIXELSHADERFOG )
+	{
+		UpdateVertexShaderFogParams( fogMode, bVertexFog );
+	}
+
+	if ( fogMode == SHADER_FOGMODE_DISABLED )
+	{
+		// Turn off fixed-function fog if it's currently enabled.
+		EnableFixedFunctionFog( false );
+
+		if ( m_DelayedShaderConstants.iPixelShaderFogParams != -1 )
+		{
+			SetPixelShaderFogParams( m_DelayedShaderConstants.iPixelShaderFogParams, fogMode );
+		}
+		return;
+	}
+	
+	D3DCOLOR fixedFunctionFogPackedColor = s_CurFogConstants.m_nPackedFogColorConstants[fogMethod][fogMode][bDisableFogGammaCorrection][bSRGBWritesEnabled ];
+	Vector vecFogColor = s_CurFogConstants.m_vecFogColorConstant[fogMethod][fogMode][bDisableFogGammaCorrection][bSRGBWritesEnabled];
+	Vector vecFogColorLinear = s_CurFogConstants.m_vecFogColorConstantLinear[fogMethod][fogMode][bDisableFogGammaCorrection][bSRGBWritesEnabled];
+
+	// Enable fixed-function fog if we are using it.
+	EnableFixedFunctionFog( ( fogMethod == FOGMETHOD_FIXEDFUNCTIONVERTEXFOG ) && ( m_SceneFogMode != MATERIAL_FOG_NONE ) );
+
+	if( m_DelayedShaderConstants.iPixelShaderFogParams != -1 )
+	{
+		// We set these for all methods since the pixel shader is always effectively doing fog, even when fog is disabled.
+		SetPixelShaderFogParams( m_DelayedShaderConstants.iPixelShaderFogParams, fogMode );
+	}
+
+	//?m_DynamicState.m_bFogGammaCorrectionDisabled = !bShouldGammaCorrect;
+
+	m_DynamicState.m_vecPixelFogColor.AsVector3D() = vecFogColor;
+	m_DynamicState.m_vecPixelFogColorLinear.AsVector3D() = vecFogColorLinear;
+
+	if ( fogMethod != FOGMETHOD_FIXEDFUNCTIONVERTEXFOG )
+	{
+		// All fog methods other than FOGMETHOD_FIXEDFUNCTIONVERTEXFOG use fog color int he pixel shader.
+		UpdatePixelFogColorConstant( fogMode != SHADER_FOGMODE_GREY );
+	}
+
+	if ( ( fogMethod == FOGMETHOD_FIXEDFUNCTIONVERTEXFOG ) && ( fixedFunctionFogPackedColor != m_DynamicState.m_FogColor ) )
+	{
+		// Set the hardware fog color for the one fog method that uses it, FOGMETHOD_FIXEDFUNCTIONVERTEXFOG.
+		m_DynamicState.m_FogColor = fixedFunctionFogPackedColor;
+		SetSupportedRenderState( D3DRS_FOGCOLOR, m_DynamicState.m_FogColor );
 	}
 }
 
 void CShaderAPIDx8::SceneFogMode( MaterialFogMode_t fogMode )
 {
 	LOCK_SHADERAPI();
+
 	if( m_SceneFogMode != fogMode )
 	{
-		FlushBufferedPrimitives();
 		m_SceneFogMode = fogMode;
 
 		if ( m_TransitionTable.CurrentShadowState() )
 		{
 			// Get the shadow state in sync since it depends on SceneFogMode.
-			ApplyFogMode( m_TransitionTable.CurrentShadowState()->m_FogMode, m_TransitionTable.CurrentShadowState()->m_SRGBWriteEnable, m_TransitionTable.CurrentShadowState()->m_bDisableFogGammaCorrection );
+			ApplyFogMode( m_TransitionTable.CurrentShadowState()->m_FogAndMiscState.FogMode(), m_TransitionTable.CurrentShadowState()->m_FogAndMiscState.m_bVertexFogEnable, m_TransitionTable.CurrentShadowState()->m_FogAndMiscState.m_SRGBWriteEnable, m_TransitionTable.CurrentShadowState()->m_FogAndMiscState.m_bDisableFogGammaCorrection );
 		}
 	}
 }
@@ -6007,100 +7442,21 @@ MaterialFogMode_t CShaderAPIDx8::GetSceneFogMode()
 	return m_SceneFogMode;
 }
 
-MaterialFogMode_t CShaderAPIDx8::GetPixelFogMode()
-{
-	if( ShouldUsePixelFogForMode( m_SceneFogMode ) )
-		return m_SceneFogMode;
-	else
-		return MATERIAL_FOG_NONE;
-}
-
 int CShaderAPIDx8::GetPixelFogCombo( void )
 {
-	if( (m_SceneFogMode != MATERIAL_FOG_NONE) && ShouldUsePixelFogForMode( m_SceneFogMode ) )
-		return m_SceneFogMode - 1; //PIXELFOGTYPE dynamic combos are shifted down one. MATERIAL_FOG_NONE is simulated by range fog with rigged parameters. Gets rid of a dynamic combo across the ps2x set
-	else	
-		return MATERIAL_FOG_NONE;
+	Assert( 0 ); // deprecated
+	return 0;
 }
-
-
-static ConVar r_pixelfog( "r_pixelfog", "1" );
-
-bool CShaderAPIDx8::ShouldUsePixelFogForMode( MaterialFogMode_t fogMode )
-{
-	if( fogMode == MATERIAL_FOG_NONE )
-		return false;
-
-	if( IsX360() || IsPosix() ) // Always use pixel fog on X360 and Posix
-		return true;
-
-	if( g_pHardwareConfig->Caps().m_nDXSupportLevel < 90 ) //pixel fog not available until at least ps2.0
-		return false;
-
-	switch( m_SceneFogMode )
-	{
-		case MATERIAL_FOG_LINEAR:
-			return (g_pHardwareConfig->SupportsPixelShaders_2_b() && //lightmappedgeneric_ps20.fxc can't handle the instruction count
-						r_pixelfog.GetBool()); //use pixel fog if preferred
-
-		case MATERIAL_FOG_LINEAR_BELOW_FOG_Z:
-			return true;
-	};
-
-	return false;
-}
-
 //-----------------------------------------------------------------------------
 // Fog methods...
 //-----------------------------------------------------------------------------
-void CShaderAPIDx8::FogMode( MaterialFogMode_t fogMode )
+void CShaderAPIDx8::EnableFixedFunctionFog( bool bFogEnable )
 {
-	bool bFogEnable;
-
-	if ( IsX360() )
+	if ( IsGameConsole() )
 	{
-		// FF fog not applicable on 360
+		// FF fog not applicable on 360 / PS3
 		return;
 	}
-
-	m_DynamicState.m_SceneFog = fogMode;
-	switch( fogMode )
-	{
-	default:
-		Assert( 0 );
-		// fall through
-
-	case MATERIAL_FOG_NONE:
-		bFogEnable = false;
-		break;
-
-	case MATERIAL_FOG_LINEAR:
-		// use vertex fog to achieve linear range fog
-		bFogEnable = true;
-		break;
-
-	case MATERIAL_FOG_LINEAR_BELOW_FOG_Z:
-		// use pixel fog on 9.0 and greater for height fog
-		bFogEnable = g_pHardwareConfig->Caps().m_nDXSupportLevel < 90;
-		break;
-	}
-
-	if( ShouldUsePixelFogForMode( fogMode ) )
-	{
-		bFogEnable = false; //disable FF fog when doing fog in the pixel shader
-	}
-
-#if 0
-	// HACK - do this to disable fog always
-	bFogEnable = false;
-	m_DynamicState.m_SceneFog = MATERIAL_FOG_NONE;
-#endif
-
-	// These two are always set to this, so don't bother setting them.
-	// We are always using vertex fog.
-//	SetRenderState( D3DRS_FOGTABLEMODE, D3DFOG_NONE );
-//	SetRenderState( D3DRS_RANGEFOGENABLE, false );
-
 	// Set fog enable if it's different than before.
 	if ( bFogEnable != m_DynamicState.m_FogEnable )
 	{
@@ -6115,10 +7471,7 @@ void CShaderAPIDx8::FogStart( float fStart )
 	LOCK_SHADERAPI();
 	if (fStart != m_DynamicState.m_FogStart)
 	{
-		// need to flush the dynamic buffer
-		FlushBufferedPrimitives();
-
-		SetRenderStateConstMacro( this, D3DRS_FOGSTART, *((DWORD*)(&fStart)));
+		SetSupportedRenderState(D3DRS_FOGSTART, *((DWORD*)(&fStart)));
 		m_VertexShaderFogParams[0] = fStart;
 		UpdateVertexShaderFogParams();
 		m_DynamicState.m_FogStart = fStart;
@@ -6130,10 +7483,7 @@ void CShaderAPIDx8::FogEnd( float fEnd )
 	LOCK_SHADERAPI();
 	if (fEnd != m_DynamicState.m_FogEnd)
 	{
-		// need to flush the dynamic buffer
-		FlushBufferedPrimitives();
-
-		SetRenderStateConstMacro( this, D3DRS_FOGEND, *((DWORD*)(&fEnd)));
+		SetSupportedRenderState(D3DRS_FOGEND, *((DWORD*)(&fEnd)));
 		m_VertexShaderFogParams[1] = fEnd;
 		UpdateVertexShaderFogParams();
 		m_DynamicState.m_FogEnd = fEnd;
@@ -6145,21 +7495,17 @@ void CShaderAPIDx8::SetFogZ( float fogZ )
 	LOCK_SHADERAPI();
 	if (fogZ != m_DynamicState.m_FogZ)
 	{
-		// need to flush the dynamic buffer
-		FlushBufferedPrimitives();
 		m_DynamicState.m_FogZ = fogZ;
 		UpdateVertexShaderFogParams();
 	}
 }
+
 
 void CShaderAPIDx8::FogMaxDensity( float flMaxDensity )
 {
 	LOCK_SHADERAPI();
 	if (flMaxDensity != m_DynamicState.m_FogMaxDensity)
 	{
-		// need to flush the dynamic buffer
-		FlushBufferedPrimitives();
-
 //		SetRenderState(D3DRS_FOGDENSITY, *((DWORD*)(&flMaxDensity)));  // ??? do I need to to this ???
 		m_flFogMaxDensity = flMaxDensity;
 		UpdateVertexShaderFogParams();
@@ -6185,14 +7531,14 @@ void CShaderAPIDx8::SceneFogColor3ub( unsigned char r, unsigned char g, unsigned
 	LOCK_SHADERAPI();
 	if( m_SceneFogColor[0] != r || m_SceneFogColor[1] != g || m_SceneFogColor[2] != b )
 	{
-		FlushBufferedPrimitives();
 		m_SceneFogColor[0] = r;
 		m_SceneFogColor[1] = g;
 		m_SceneFogColor[2] = b;
+		RegenerateFogConstants();
 
 		if ( m_TransitionTable.CurrentShadowState() )
 		{
-			ApplyFogMode( m_TransitionTable.CurrentShadowState()->m_FogMode, m_TransitionTable.CurrentShadowState()->m_SRGBWriteEnable, m_TransitionTable.CurrentShadowState()->m_bDisableFogGammaCorrection );
+			ApplyFogMode( m_TransitionTable.CurrentShadowState()->m_FogAndMiscState.FogMode(), m_TransitionTable.CurrentShadowState()->m_FogAndMiscState.m_bVertexFogEnable, m_TransitionTable.CurrentShadowState()->m_FogAndMiscState.m_SRGBWriteEnable, m_TransitionTable.CurrentShadowState()->m_FogAndMiscState.m_bDisableFogGammaCorrection );
 		}
 	}
 }
@@ -6251,9 +7597,9 @@ D3DCOLOR CShaderAPIDx8::ComputeGammaCorrectedFogColor( unsigned char r, unsigned
 		fb *= m_ToneMappingScale.w;			//
 	}
 
-	fr = min( fr, 1.0f );
-	fg = min( fg, 1.0f );
-	fb = min( fb, 1.0f );
+	fr = MIN( fr, 1.0f );
+	fg = MIN( fg, 1.0f );
+	fb = MIN( fb, 1.0f );
 	r = (int)( fr * 255 );
 	g = (int)( fg * 255 );
 	b = (int)( fb * 255 );
@@ -6289,9 +7635,10 @@ void CShaderAPIDx8::DestroyVertexBuffers( bool bExitingLevel )
 {
 	LOCK_SHADERAPI();
 	MeshMgr()->DestroyVertexBuffers( );
+
 	// After a map is shut down, we switch to using smaller dynamic VBs
 	// (VGUI shouldn't need much), so that we have more memory free during map loading
-	m_nDynamicVBSize = bExitingLevel ? DYNAMIC_VERTEX_BUFFER_MEMORY_SMALL : DYNAMIC_VERTEX_BUFFER_MEMORY;
+	m_nDynamicVBSize = ( bExitingLevel && !mat_do_not_shrink_dynamic_vb.GetBool() ) ? DYNAMIC_VERTEX_BUFFER_MEMORY_SMALL : DYNAMIC_VERTEX_BUFFER_MEMORY;
 }
 
 int CShaderAPIDx8::GetCurrentDynamicVBSize( void )
@@ -6299,29 +7646,29 @@ int CShaderAPIDx8::GetCurrentDynamicVBSize( void )
 	return m_nDynamicVBSize;
 }
 
+
+#ifdef _PS3
+
 FORCEINLINE void CShaderAPIDx8::SetVertexShaderConstantInternal( int var, float const* pVec, int numVecs, bool bForce )
 {
+	Dx9Device()->SetVertexShaderConstantF( var, pVec, numVecs );
+}
+
+#else
+
+
+FORCEINLINE void CShaderAPIDx8::SetVertexShaderConstantInternal( int var, float const* pVec, int numVecs, bool bForce )
+{
+	Assert( numVecs > 0 );
 	Assert( pVec );
 
-	// DX8 asm shaders use a constant mapping which has transforms and vertex shader
-	// specific constants shifted down by 10 constants (two 5-constant light structures)
-	if ( IsPC() )
+	if ( IsPC() || IsPS3() )
 	{
-		if ( (g_pHardwareConfig->Caps().m_nDXSupportLevel < 90) && (var >= VERTEX_SHADER_MODULATION_COLOR) )
-		{
-			var -= 10;
-		}
 		Assert( var + numVecs <= g_pHardwareConfig->NumVertexShaderConstants() );
 
-		if ( !bForce )
-		{
-			int skip = 0;
-			numVecs = AdjustUpdateRange( pVec, &m_DesiredState.m_pVectorVertexShaderConstant[var], numVecs, &skip );
-			if ( !numVecs )
-				return;
-			var += skip;
-			pVec += skip * 4;
-		}
+		if ( !bForce && memcmp( pVec, &m_DynamicState.m_pVectorVertexShaderConstant[var], numVecs * 4 * sizeof( float ) ) == 0 )
+			return;
+
 		Dx9Device()->SetVertexShaderConstantF( var, pVec, numVecs );
 		memcpy( &m_DynamicState.m_pVectorVertexShaderConstant[var], pVec, numVecs * 4 * sizeof(float) );
 	}
@@ -6330,14 +7677,24 @@ FORCEINLINE void CShaderAPIDx8::SetVertexShaderConstantInternal( int var, float 
 		Assert( var + numVecs <= g_pHardwareConfig->NumVertexShaderConstants() );
 	}
 
-	memcpy( &m_DesiredState.m_pVectorVertexShaderConstant[var], pVec, numVecs * 4 * sizeof(float) );	
-
 	if ( IsX360() )
 	{
-		m_MaxVectorVertexShaderConstant = max( m_MaxVectorVertexShaderConstant, var + numVecs );
-	}	
+		if ( !IsGPUOwnSupported() || !m_bGPUOwned )
+		{
+			Dx9Device()->SetVertexShaderConstantF( var, pVec, numVecs );
+			memcpy( &m_DynamicState.m_pVectorVertexShaderConstant[var], pVec, numVecs * 4 * sizeof(float) );
+		}
+		else if ( var + numVecs > m_MaxVectorVertexShaderConstant )
+		{
+			m_MaxVectorVertexShaderConstant = var + numVecs;
+		}
+	}
+
+	memcpy( &m_DesiredState.m_pVectorVertexShaderConstant[var], pVec, numVecs * 4 * sizeof(float) );		
 }
 
+
+#endif
 
 //-----------------------------------------------------------------------------
 // Sets the constant register for vertex and pixel shaders
@@ -6345,6 +7702,37 @@ FORCEINLINE void CShaderAPIDx8::SetVertexShaderConstantInternal( int var, float 
 void CShaderAPIDx8::SetVertexShaderConstant( int var, float const* pVec, int numVecs, bool bForce )
 {
 	SetVertexShaderConstantInternal( var, pVec, numVecs, bForce );
+}
+
+void CShaderAPIDx8::GenerateNonInstanceRenderState( MeshInstanceData_t *pInstance, CompiledLightingState_t** ppCompiledState, InstanceInfo_t **ppCompiledInfo )
+{
+	memset( pInstance, 0, sizeof(MeshInstanceData_t) );
+	pInstance->m_pLightingState = &m_DynamicState.m_LightingState;
+	if ( m_maxBoneLoaded && m_DynamicState.m_NumBones )
+	{
+		pInstance->m_nBoneCount = m_maxBoneLoaded + 1;
+		pInstance->m_pPoseToWorld = m_boneMatrix;
+		m_maxBoneLoaded = 0;
+	}
+	else
+	{
+		// casting from 4x3 matrices to a 4x4 D3DXMATRIX, need 4 floats of overflow
+		float results[12+4];
+		D3DXMatrixTranspose( (D3DXMATRIX *)&results[0], &GetTransform( MATERIAL_MODEL ) );
+		memcpy( m_boneMatrix[0].Base(), results, 12 * sizeof(float) );
+		pInstance->m_nBoneCount = 1;
+		pInstance->m_pPoseToWorld = m_boneMatrix;
+	}
+	*ppCompiledState = &m_DynamicState.m_CompiledLightingState;
+	*ppCompiledInfo = &m_DynamicState.m_InstanceInfo;
+}
+
+void CShaderAPIDx8::NotifyShaderConstantsChangedInRenderPass()
+{
+#if defined( _X360 )
+	// send updated shader constants to gpu
+	WriteShaderConstantsToGPU();
+#endif
 }
 
 //-----------------------------------------------------------------------------
@@ -6355,29 +7743,35 @@ void CShaderAPIDx8::SetBooleanVertexShaderConstant( int var, int const* pVec, in
 	Assert( pVec );
 	Assert( var + numBools <= g_pHardwareConfig->NumBooleanVertexShaderConstants() );
 
-	if ( IsPC() && g_pHardwareConfig->GetDXSupportLevel() < 90 )
-	{
-		return;
-	}
-
 	if ( IsPC() && !bForce && memcmp( pVec, &m_DesiredState.m_pBooleanVertexShaderConstant[var], numBools * sizeof( BOOL ) ) == 0 )
 	{
 		return;
 	}
 
-	if ( IsPC() )
+	if ( IsPC() || IsPS3() )
 	{
 		Dx9Device()->SetVertexShaderConstantB( var, pVec, numBools );
 		memcpy( &m_DynamicState.m_pBooleanVertexShaderConstant[var], pVec, numBools * sizeof(BOOL) );
 	}
 
-	memcpy( &m_DesiredState.m_pBooleanVertexShaderConstant[var], pVec, numBools * sizeof(BOOL) );
-
-	if ( IsX360() && var + numBools > m_MaxBooleanVertexShaderConstant )
+	if ( IsX360() )
 	{
-		m_MaxBooleanVertexShaderConstant = var + numBools;
-		Assert( m_MaxBooleanVertexShaderConstant <= 16 );
+		if ( !IsGPUOwnSupported() || !m_bGPUOwned )
+		{
+			Dx9Device()->SetVertexShaderConstantB( var, pVec, numBools );
+			if ( IsGPUOwnSupported() )
+			{
+				memcpy( &m_DynamicState.m_pBooleanVertexShaderConstant[var], pVec, numBools * sizeof(BOOL) );
+			}
+		}
+		else if ( var + numBools > m_MaxBooleanVertexShaderConstant )
+		{
+			m_MaxBooleanVertexShaderConstant = var + numBools;
+			Assert( m_MaxBooleanVertexShaderConstant <= 16 );
+		}
 	}
+
+	memcpy( &m_DesiredState.m_pBooleanVertexShaderConstant[var], pVec, numBools * sizeof(BOOL) );
 }
 
 
@@ -6389,58 +7783,89 @@ void CShaderAPIDx8::SetIntegerVertexShaderConstant( int var, int const* pVec, in
 	Assert( pVec );
 	Assert( var + numIntVecs <= g_pHardwareConfig->NumIntegerVertexShaderConstants() );
 
-	if ( IsPC() && g_pHardwareConfig->GetDXSupportLevel() < 90 )
-	{
-		return;
-	}
-
 	if ( IsPC() && !bForce && memcmp( pVec, &m_DesiredState.m_pIntegerVertexShaderConstant[var], numIntVecs * sizeof( IntVector4D ) ) == 0 )
 	{
 		return;
 	}
 
-	if ( IsPC() )
+	if ( IsPC() || IsPS3() )
 	{
 		Dx9Device()->SetVertexShaderConstantI( var, pVec, numIntVecs );
 		memcpy( &m_DynamicState.m_pIntegerVertexShaderConstant[var], pVec, numIntVecs * sizeof(IntVector4D) );
 	}
-	memcpy( &m_DesiredState.m_pIntegerVertexShaderConstant[var], pVec, numIntVecs * sizeof(IntVector4D) );
 
-	if ( IsX360() && var + numIntVecs > m_MaxIntegerVertexShaderConstant )
+	if ( IsX360() )
 	{
-		m_MaxIntegerVertexShaderConstant = var + numIntVecs;
-		Assert( m_MaxIntegerVertexShaderConstant <= 16 );
+		if ( !IsGPUOwnSupported() || !m_bGPUOwned )
+		{
+			Dx9Device()->SetVertexShaderConstantI( var, pVec, numIntVecs );
+			if ( IsGPUOwnSupported() )
+			{
+				memcpy( &m_DynamicState.m_pIntegerVertexShaderConstant[var], pVec, numIntVecs * sizeof(IntVector4D) );
+			}
+		}
+		else if ( var + numIntVecs > m_MaxIntegerVertexShaderConstant )
+		{
+			m_MaxIntegerVertexShaderConstant = var + numIntVecs;
+			Assert( m_MaxIntegerVertexShaderConstant <= 16 );
+		}
 	}
+
+	memcpy( &m_DesiredState.m_pIntegerVertexShaderConstant[var], pVec, numIntVecs * sizeof(IntVector4D) );
 }
 
+#ifndef _PS3
 FORCEINLINE void CShaderAPIDx8::SetPixelShaderConstantInternal( int nStartConst, float const* pValues, int nNumConsts, bool bForce )
 {
 	Assert( nStartConst + nNumConsts <= g_pHardwareConfig->NumPixelShaderConstants() );
 
-	if ( IsPC() )
+	if ( IsPC() || IsPS3() )
 	{
-		if ( ! bForce )
+		if ( !bForce )
 		{
-			int skip = 0;
-			nNumConsts = AdjustUpdateRange( pValues, &m_DesiredState.m_pVectorPixelShaderConstant[nStartConst], nNumConsts, &skip );
+			DWORD* pSrc = (DWORD*)pValues;
+			DWORD* pDst = (DWORD*)&m_DesiredState.m_pVectorPixelShaderConstant[nStartConst];
+			while( nNumConsts && ( pSrc[0] == pDst[0] ) && ( pSrc[1] == pDst[1] ) && ( pSrc[2] == pDst[2] ) && ( pSrc[3] == pDst[3] ) )
+			{
+				pSrc += 4;
+				pDst += 4;
+				nNumConsts--;
+				nStartConst++;
+			}
 			if ( !nNumConsts )
 				return;
-			nStartConst += skip;
-			pValues += skip * 4;
+			pValues = reinterpret_cast< float const * >( pSrc );
 		}
 					
 		Dx9Device()->SetPixelShaderConstantF( nStartConst, pValues, nNumConsts );
 		memcpy( &m_DynamicState.m_pVectorPixelShaderConstant[nStartConst], pValues, nNumConsts * 4 * sizeof(float) );
 	}
 
-	memcpy( &m_DesiredState.m_pVectorPixelShaderConstant[nStartConst], pValues, nNumConsts * 4 * sizeof(float) );
-					
 	if ( IsX360() )
 	{
-		m_MaxVectorPixelShaderConstant = max( m_MaxVectorPixelShaderConstant, nStartConst + nNumConsts );
-		Assert( m_MaxVectorPixelShaderConstant <= 32 );
+		if ( !IsGPUOwnSupported() || !m_bGPUOwned )
+		{
+			Dx9Device()->SetPixelShaderConstantF( nStartConst, pValues, nNumConsts );
+			if ( IsGPUOwnSupported() )
+			{
+				memcpy( &m_DynamicState.m_pVectorPixelShaderConstant[nStartConst], pValues, nNumConsts * 4 * sizeof(float) );
+			}
+		}
+		else if ( nStartConst + nNumConsts > m_MaxVectorPixelShaderConstant )
+		{
+			m_MaxVectorPixelShaderConstant = nStartConst + nNumConsts;
+			Assert( m_MaxVectorPixelShaderConstant <= 32 );
+			if ( m_MaxVectorPixelShaderConstant > 32 )
+			{
+				// NOTE!  There really are 224 pixel shader constants on the 360, but we do an optimization that only blasts the first 32 always.
+				Error( "Don't use more then the first 32 pixel shader constants on the 360!" );
+			}
+		}
 	}
+
+	memcpy( &m_DesiredState.m_pVectorPixelShaderConstant[nStartConst], pValues, nNumConsts * 4 * sizeof(float) );
 }
+#endif
 
 void CShaderAPIDx8::SetPixelShaderConstant( int var, float const* pVec, int numVecs, bool bForce )
 {
@@ -6458,10 +7883,42 @@ void CShaderAPIDx8::SetStandardTextureHandle( StandardTextureId_t nId, ShaderAPI
 {
 	Assert( nId < ARRAYSIZE( m_StdTextureHandles ) );
 	m_StdTextureHandles[nId] = nHandle;
+	
+	if ( nId == TEXTURE_LOCAL_ENV_CUBEMAP )
+	{
+		m_DynamicState.m_nLocalEnvCubemapSamplers = 0;
+
+		// NOTE: We could theoretically recompute localenvcubemapsamplers,
+		// but this will happen outside of rendering shaders, so it won't matter
+	}
+	if ( nId == TEXTURE_LIGHTMAP )
+	{
+		m_DynamicState.m_nLightmapSamplers = 0;
+	}
+	if ( nId == TEXTURE_PAINT )
+	{
+		m_DynamicState.m_nPaintmapSamplers = 0;
+	}
 }
+
+void CShaderAPIDx8::DrawInstances( int nInstanceCount, const MeshInstanceData_t *pInstances )
+{
+	MeshMgr()->DrawInstances( nInstanceCount, pInstances );
+}
+
+
+#ifdef _PS3
+
 
 void CShaderAPIDx8::ExecuteCommandBuffer( uint8 *pCmdBuf )
 {
+	gpGcmDrawState->SetWorldSpaceCameraPosition((float*)&m_WorldSpaceCameraPosition);
+	gpGcmDrawState->ExecuteCommandBuffer(pCmdBuf);
+}
+
+void CShaderAPIDx8::ExecuteCommandBufferPPU( uint8 *pCmdBuf )
+{
+
 	uint8 *pReturnStack[20];
 	uint8 **pSP = &pReturnStack[ARRAYSIZE(pReturnStack)];
 	uint8 *pLastCmd;
@@ -6471,7 +7928,20 @@ void CShaderAPIDx8::ExecuteCommandBuffer( uint8 *pCmdBuf )
 		int nCmd = GetData<int>( pCmdBuf );
 		switch( nCmd )
 		{
-			case CBCMD_END:
+
+		case CBCMD_LENGTH:
+			{
+				pCmdBuf += sizeof(int) *2 ;
+				break;
+			}
+
+		case CBCMD_PS3TEX:
+			{
+				pCmdBuf += sizeof(int) + (CBCMD_MAX_PS3TEX*sizeof(int));
+				break;
+			}
+
+		case CBCMD_END:
 			{
 				if ( pSP == &pReturnStack[ARRAYSIZE(pReturnStack)] )
 					return;
@@ -6483,21 +7953,174 @@ void CShaderAPIDx8::ExecuteCommandBuffer( uint8 *pCmdBuf )
 				}
 			}
 
-			case CBCMD_JUMP:
-				pCmdBuf = GetData<uint8 *>(  pCmdBuf + sizeof( int ) );
-				break;
-				
-			case CBCMD_JSR:
+		case CBCMD_JUMP:
+			pCmdBuf = GetData<uint8 *>(  pCmdBuf + sizeof( int ) );
+			break;
+
+		case CBCMD_JSR:
 			{
 				Assert( pSP > &(pReturnStack[0] ) );
-// 				*(--pSP ) = pCmdBuf + sizeof( int ) + sizeof( uint8 *);
-// 				pCmdBuf = GetData<uint8 *>(  pCmdBuf + sizeof( int ) );
+				// 				*(--pSP ) = pCmdBuf + sizeof( int ) + sizeof( uint8 *);
+				// 				pCmdBuf = GetData<uint8 *>(  pCmdBuf + sizeof( int ) );
 				ExecuteCommandBuffer( GetData<uint8 *>(  pCmdBuf + sizeof( int ) ) );
 				pCmdBuf = pCmdBuf + sizeof( int ) + sizeof( uint8 *);
 				break;
 			}
 
-			case CBCMD_SET_PIXEL_SHADER_FLOAT_CONST:
+		case CBCMD_SET_VERTEX_SHADER_FLASHLIGHT_STATE:
+			{
+				int nStartConst = GetData<int>( pCmdBuf + sizeof( int ) );
+				SetVertexShaderConstantInternal( nStartConst, m_FlashlightWorldToTexture.Base(), 4, false );
+				pCmdBuf += 2 * sizeof( int );
+				break;
+			}
+
+
+		case CBCMD_SET_PIXEL_SHADER_FLASHLIGHT_STATE:
+			{
+				int nLightSampler		= GetData<int>( pCmdBuf + sizeof( int ) );
+				int nDepthSampler		= GetData<int>( pCmdBuf + 2 * sizeof( int ) );
+				int nShadowNoiseSampler = GetData<int>( pCmdBuf + 3 * sizeof( int ) );
+				int nColorConst			= GetData<int>( pCmdBuf + 4 * sizeof( int ) );
+				int nAttenConst			= GetData<int>( pCmdBuf + 5 * sizeof( int ) );
+				int nOriginConst		= GetData<int>( pCmdBuf + 6 * sizeof( int ) );
+				int nDepthTweakConst	= GetData<int>( pCmdBuf + 7 * sizeof( int ) );
+				int nScreenScaleConst	= GetData<int>( pCmdBuf + 8 * sizeof( int ) );
+				int nWorldToTextureConstant = GetData<int>( pCmdBuf + 9 * sizeof( int ) );
+				bool bFlashlightNoLambert = GetData<int>( pCmdBuf + 10 * sizeof( int ) ) != 0;
+				bool bSinglePassFlashlight = GetData<int>( pCmdBuf + 11 * sizeof( int ) ) != 0;
+				pCmdBuf += 12 * sizeof( int );
+
+				ShaderAPITextureHandle_t hTexture = g_pShaderUtil->GetShaderAPITextureBindHandle( m_FlashlightState.m_pSpotlightTexture, m_FlashlightState.m_nSpotlightTextureFrame, 0 );
+				BindTexture( (Sampler_t)nLightSampler, TEXTURE_BINDFLAGS_SRGBREAD, hTexture ); // !!!BUG!!!srgb or not?
+
+				SetPixelShaderConstantInternal( nAttenConst, m_pFlashlightAtten, 1, false );
+				SetPixelShaderConstantInternal( nOriginConst, m_pFlashlightPos, 1, false );
+
+				m_pFlashlightColor[3] = bFlashlightNoLambert ? 2.0f : 0.0f; // This will be added to N.L before saturate to force a 1.0 N.L term
+
+				// DX10 hardware and single pass flashlight require a hack scalar since the flashlight is added in linear space
+				float flashlightColor[4] = { m_pFlashlightColor[0], m_pFlashlightColor[1], m_pFlashlightColor[2], m_pFlashlightColor[3] };
+				if ( ( g_pHardwareConfig->UsesSRGBCorrectBlending() ) || ( bSinglePassFlashlight ) )
+				{
+					// Magic number that works well on the 360 and NVIDIA 8800
+					flashlightColor[0] *= 2.5f;
+					flashlightColor[1] *= 2.5f;
+					flashlightColor[2] *= 2.5f;
+				}
+
+				SetPixelShaderConstantInternal( nColorConst, flashlightColor, 1, false );
+
+				if ( nWorldToTextureConstant >= 0 )
+				{
+					SetPixelShaderConstantInternal( nWorldToTextureConstant, m_FlashlightWorldToTexture.Base(), 4, false );
+				}
+
+				BindStandardTexture( (Sampler_t)nShadowNoiseSampler, TEXTURE_BINDFLAGS_NONE, TEXTURE_SHADOW_NOISE_2D );
+				if( m_pFlashlightDepthTexture && m_FlashlightState.m_bEnableShadows && ShaderUtil()->GetConfig().ShadowDepthTexture() )
+				{
+					ShaderAPITextureHandle_t hDepthTexture = g_pShaderUtil->GetShaderAPITextureBindHandle( m_pFlashlightDepthTexture, 0, 0 );
+					BindTexture( (Sampler_t)nDepthSampler, TEXTURE_BINDFLAGS_SHADOWDEPTH, hDepthTexture );
+
+					SetPixelShaderConstantInternal( nDepthTweakConst, m_pFlashlightTweaks, 1, false );
+
+					// Dimensions of screen, used for screen-space noise map sampling
+					float vScreenScale[4] = {1280.0f / 32.0f, 720.0f / 32.0f, 0, 0};
+					int nWidth, nHeight;
+					BaseClass::GetBackBufferDimensions( nWidth, nHeight );
+
+					int nTexWidth, nTexHeight;
+					GetStandardTextureDimensions( &nTexWidth, &nTexHeight, TEXTURE_SHADOW_NOISE_2D );
+
+					vScreenScale[0] = (float) nWidth  / nTexWidth;
+					vScreenScale[1] = (float) nHeight / nTexHeight;
+					vScreenScale[2] = 1.0f / m_FlashlightState.m_flShadowMapResolution;
+					vScreenScale[3] = 2.0f / m_FlashlightState.m_flShadowMapResolution;
+					SetPixelShaderConstantInternal( nScreenScaleConst, vScreenScale, 1, false );
+				}
+				else
+				{
+					BindStandardTexture( (Sampler_t)nDepthSampler, TEXTURE_BINDFLAGS_NONE, TEXTURE_WHITE );
+				}
+
+				if ( IsX360() )
+				{
+					SetBooleanPixelShaderConstant( 0, &m_FlashlightState.m_nShadowQuality, 1 );
+				}
+
+				break;
+			}
+
+		case CBCMD_SET_PIXEL_SHADER_UBERLIGHT_STATE:
+			{
+				int iEdge0Const			= GetData<int>( pCmdBuf + sizeof( int ) );
+				int iEdge1Const			= GetData<int>( pCmdBuf + 2 * sizeof( int ) );
+				int iEdgeOOWConst		= GetData<int>( pCmdBuf + 3 * sizeof( int ) );
+				int iShearRoundConst	= GetData<int>( pCmdBuf + 4 * sizeof( int ) );
+				int iAABBConst			= GetData<int>( pCmdBuf + 5 * sizeof( int ) );
+				int iWorldToLightConst	= GetData<int>( pCmdBuf + 6 * sizeof( int ) );
+				pCmdBuf += 7 * sizeof( int );
+
+				SetPixelShaderConstantInternal( iEdge0Const, m_UberlightRenderState.m_vSmoothEdge0.Base(), 1, false );
+				SetPixelShaderConstantInternal( iEdge1Const, m_UberlightRenderState.m_vSmoothEdge1.Base(), 1, false );
+				SetPixelShaderConstantInternal( iEdgeOOWConst, m_UberlightRenderState.m_vSmoothOneOverW.Base(), 1, false );
+				SetPixelShaderConstantInternal( iShearRoundConst, m_UberlightRenderState.m_vShearRound.Base(), 1, false );
+				SetPixelShaderConstantInternal( iAABBConst, m_UberlightRenderState.m_vaAbB.Base(), 1, false );
+				SetPixelShaderConstantInternal( iWorldToLightConst, m_UberlightRenderState.m_WorldToLight.Base(), 4, false );
+				break;
+			}
+
+#ifndef NDEBUG
+		default:
+			Assert(0);
+			break;
+#endif
+		}
+		pLastCmd = pCmd;
+	}
+}
+
+#else
+
+void CShaderAPIDx8::ExecuteCommandBuffer( uint8 *pCmdBuf )
+{
+
+	uint8 *pReturnStack[20];
+	uint8 **pSP = &pReturnStack[ARRAYSIZE(pReturnStack)];
+	uint8 *pLastCmd;
+	for(;;)
+	{
+		uint8 *pCmd=pCmdBuf;
+		int nCmd = GetData<int>( pCmdBuf );
+		switch( nCmd )
+		{
+		case CBCMD_END:
+			{
+				if ( pSP == &pReturnStack[ARRAYSIZE(pReturnStack)] )
+					return;
+				else
+				{
+					// pop pc
+					pCmdBuf = *( pSP ++ );
+					break;
+				}
+			}
+
+		case CBCMD_JUMP:
+			pCmdBuf = GetData<uint8 *>(  pCmdBuf + sizeof( int ) );
+			break;
+
+		case CBCMD_JSR:
+			{
+				Assert( pSP > &(pReturnStack[0] ) );
+				// 				*(--pSP ) = pCmdBuf + sizeof( int ) + sizeof( uint8 *);
+				// 				pCmdBuf = GetData<uint8 *>(  pCmdBuf + sizeof( int ) );
+				ExecuteCommandBuffer( GetData<uint8 *>(  pCmdBuf + sizeof( int ) ) );
+				pCmdBuf = pCmdBuf + sizeof( int ) + sizeof( uint8 *);
+				break;
+			}
+
+		case CBCMD_SET_PIXEL_SHADER_FLOAT_CONST:
 			{
 				int nStartConst = GetData<int>( pCmdBuf + sizeof( int ) );
 				int nNumConsts = GetData<int>( pCmdBuf + 2 * sizeof( int ) );
@@ -6507,55 +8130,35 @@ void CShaderAPIDx8::ExecuteCommandBuffer( uint8 *pCmdBuf )
 				break;
 			}
 
-			case CBCMD_SETPIXELSHADERFOGPARAMS:
+		case CBCMD_SETPIXELSHADERFOGPARAMS:
 			{
 				int nReg = GetData<int>( pCmdBuf + sizeof( int ) );
 				pCmdBuf += 2 * sizeof( int );
 				SetPixelShaderFogParams( nReg );			// !! speed fixme
 				break;
 			}
-			case CBCMD_STORE_EYE_POS_IN_PSCONST:
+
+		case CBCMD_STORE_EYE_POS_IN_PSCONST:
 			{
 				int nReg = GetData<int>( pCmdBuf + sizeof( int ) );
-				pCmdBuf += 2 * sizeof( int );
-				SetPixelShaderConstantInternal( nReg, m_WorldSpaceCameraPositon.Base(), 1, false  );
+				float flWValue = GetData<float>( pCmdBuf + 2 * sizeof( int ) );
+				pCmdBuf += 2 * sizeof( int ) + sizeof( float );
+
+				Vector4D vecValue( m_WorldSpaceCameraPosition.x, m_WorldSpaceCameraPosition.y, m_WorldSpaceCameraPosition.z, flWValue );
+				SetPixelShaderConstantInternal( nReg, vecValue.Base(), 1, false );
 				break;
 			}
 
-			case CBCMD_COMMITPIXELSHADERLIGHTING:
-			{
-				int nReg = GetData<int>( pCmdBuf + sizeof( int ) );
-				pCmdBuf += 2 * sizeof( int );
-				CommitPixelShaderLighting( nReg );
-				break;
-			}
-
-			case CBCMD_SETPIXELSHADERSTATEAMBIENTLIGHTCUBE:
-			{
-				int nReg = GetData<int>( pCmdBuf + sizeof( int ) );
-				pCmdBuf += 2 * sizeof( int );
-				float *pCubeBase = m_DynamicState.m_AmbientLightCube[0].Base();
-				SetPixelShaderConstantInternal( nReg, pCubeBase, 6, false );
-				break;
-			}
-
-			case CBCMD_SETAMBIENTCUBEDYNAMICSTATEVERTEXSHADER:
-			{
-				pCmdBuf +=sizeof( int );
-				SetVertexShaderStateAmbientLightCube();
-				break;
-			}
-
-			case CBCMD_SET_DEPTH_FEATHERING_CONST:
+		case CBCMD_SET_DEPTH_FEATHERING_CONST:
 			{
 				int nConst = GetData<int>( pCmdBuf + sizeof( int ) );
 				float fDepthBlendScale = GetData<float>( pCmdBuf + 2 * sizeof( int ) );
 				pCmdBuf += 2 * sizeof( int ) + sizeof( float );
-				SetDepthFeatheringPixelShaderConstant( nConst, fDepthBlendScale );
+				SetDepthFeatheringShaderConstants( nConst, fDepthBlendScale );
 				break;
 			}
 
-			case CBCMD_SET_VERTEX_SHADER_FLOAT_CONST:
+		case CBCMD_SET_VERTEX_SHADER_FLOAT_CONST:
 			{
 				int nStartConst = GetData<int>( pCmdBuf + sizeof( int ) );
 				int nNumConsts = GetData<int>( pCmdBuf + 2 * sizeof( int ) );
@@ -6565,33 +8168,30 @@ void CShaderAPIDx8::ExecuteCommandBuffer( uint8 *pCmdBuf )
 				break;
 			}
 
-			case CBCMD_BIND_STANDARD_TEXTURE:
+		case CBCMD_BIND_STANDARD_TEXTURE:
 			{
 				int nSampler = GetData<int>( pCmdBuf + sizeof( int ) );
+				int nBindFlags = ( nSampler & TEXTURE_BINDFLAGS_VALID_MASK );
+				nSampler &= ( MAX_SAMPLERS - 1 );
 				int nTextureID = GetData<int>( pCmdBuf + 2 * sizeof( int ) );
 				pCmdBuf += 3 * sizeof( int );
-				if ( m_StdTextureHandles[nTextureID] != INVALID_SHADERAPI_TEXTURE_HANDLE )
-				{
-					BindTexture( (Sampler_t) nSampler, m_StdTextureHandles[nTextureID] );
-				}
-				else
-				{
-					ShaderUtil()->BindStandardTexture( (Sampler_t) nSampler, (StandardTextureId_t ) nTextureID );
-				}
+				BindStandardTexture( (Sampler_t)nSampler, ( TextureBindFlags_t ) nBindFlags, (StandardTextureId_t )nTextureID );
 				break;
 			}
 
-			case CBCMD_BIND_SHADERAPI_TEXTURE_HANDLE:
+		case CBCMD_BIND_SHADERAPI_TEXTURE_HANDLE:
 			{
 				int nSampler = GetData<int>( pCmdBuf + sizeof( int ) );
+				int nBindFlags = ( nSampler & TEXTURE_BINDFLAGS_VALID_MASK );
+				nSampler &= ( MAX_SAMPLERS - 1 );
 				ShaderAPITextureHandle_t hTexture = GetData<ShaderAPITextureHandle_t>( pCmdBuf + 2 * sizeof( int ) );
 				Assert( hTexture != INVALID_SHADERAPI_TEXTURE_HANDLE );
 				pCmdBuf += 2 * sizeof( int ) + sizeof( ShaderAPITextureHandle_t );
-				BindTexture( (Sampler_t) nSampler, hTexture );
+				BindTexture( (Sampler_t) nSampler, ( TextureBindFlags_t ) nBindFlags, hTexture );
 				break;
 			}
 
-			case CBCMD_SET_PSHINDEX:
+		case CBCMD_SET_PSHINDEX:
 			{
 				int nIdx = GetData<int>( pCmdBuf + sizeof( int ) );
 				ShaderManager()->SetPixelShaderIndex( nIdx );
@@ -6599,7 +8199,7 @@ void CShaderAPIDx8::ExecuteCommandBuffer( uint8 *pCmdBuf )
 				break;
 			}
 
-			case CBCMD_SET_VSHINDEX:
+		case CBCMD_SET_VSHINDEX:
 			{
 				int nIdx = GetData<int>( pCmdBuf + sizeof( int ) );
 				ShaderManager()->SetVertexShaderIndex( nIdx );
@@ -6607,21 +8207,757 @@ void CShaderAPIDx8::ExecuteCommandBuffer( uint8 *pCmdBuf )
 				break;
 			}
 
+		case CBCMD_SET_VERTEX_SHADER_FLASHLIGHT_STATE:
+			{
+				int nStartConst = GetData<int>( pCmdBuf + sizeof( int ) );
+				SetVertexShaderConstantInternal( nStartConst, m_FlashlightWorldToTexture.Base(), 4, false );
+				pCmdBuf += 2 * sizeof( int );
+				break;
+			}
 
+		case CBCMD_SET_VERTEX_SHADER_NEARZFARZ_STATE:
+			{
+				int nStartConst = GetData<int>( pCmdBuf + sizeof( int ) );
+
+				VMatrix m;
+				GetMatrix( MATERIAL_PROJECTION, m.m[0] );
+
+				// m[2][2] =  F/(N-F)   (flip sign if RH)
+				// m[3][2] = NF/(N-F)
+
+				float vNearFar[4];
+
+				float N =     m[3][2] / m[2][2];
+				float F = (m[3][2]*N) / (N + m[3][2]);
+
+				vNearFar[0] = N;
+				vNearFar[1] = F;
+
+				SetVertexShaderConstantInternal( nStartConst, vNearFar, 1, false );
+				pCmdBuf += 2 * sizeof( int );
+				break;
+			}
+
+		case CBCMD_SET_PIXEL_SHADER_FLASHLIGHT_STATE:
+			{
+				int nLightSampler		= GetData<int>( pCmdBuf + sizeof( int ) );
+				int nDepthSampler		= GetData<int>( pCmdBuf + 2 * sizeof( int ) );
+				int nShadowNoiseSampler = GetData<int>( pCmdBuf + 3 * sizeof( int ) );
+				int nColorConst			= GetData<int>( pCmdBuf + 4 * sizeof( int ) );
+				int nAttenConst			= GetData<int>( pCmdBuf + 5 * sizeof( int ) );
+				int nOriginConst		= GetData<int>( pCmdBuf + 6 * sizeof( int ) );
+				int nDepthTweakConst	= GetData<int>( pCmdBuf + 7 * sizeof( int ) );
+				int nScreenScaleConst	= GetData<int>( pCmdBuf + 8 * sizeof( int ) );
+				int nWorldToTextureConstant = GetData<int>( pCmdBuf + 9 * sizeof( int ) );
+				bool bFlashlightNoLambert = GetData<int>( pCmdBuf + 10 * sizeof( int ) ) != 0;
+				bool bSinglePassFlashlight = GetData<int>( pCmdBuf + 11 * sizeof( int ) ) != 0;
+				pCmdBuf += 12 * sizeof( int );
+
+				ShaderAPITextureHandle_t hTexture = g_pShaderUtil->GetShaderAPITextureBindHandle( m_FlashlightState.m_pSpotlightTexture, m_FlashlightState.m_nSpotlightTextureFrame, 0 );
+				BindTexture( (Sampler_t)nLightSampler, TEXTURE_BINDFLAGS_SRGBREAD, hTexture ); // !!!BUG!!!srgb or not?
+
+				SetPixelShaderConstantInternal( nAttenConst, m_pFlashlightAtten, 1, false );
+				SetPixelShaderConstantInternal( nOriginConst, m_pFlashlightPos, 1, false );
+
+				m_pFlashlightColor[3] = bFlashlightNoLambert ? 2.0f : 0.0f; // This will be added to N.L before saturate to force a 1.0 N.L term
+
+				// DX10 hardware and single pass flashlight require a hack scalar since the flashlight is added in linear space
+				float flashlightColor[4] = { m_pFlashlightColor[0], m_pFlashlightColor[1], m_pFlashlightColor[2], m_pFlashlightColor[3] };
+				if ( ( g_pHardwareConfig->UsesSRGBCorrectBlending() ) || ( bSinglePassFlashlight ) )
+				{
+					// Magic number that works well on the 360 and NVIDIA 8800
+					flashlightColor[0] *= 2.5f;
+					flashlightColor[1] *= 2.5f;
+					flashlightColor[2] *= 2.5f;
+				}
+
+				SetPixelShaderConstantInternal( nColorConst, flashlightColor, 1, false );
+
+				if ( nWorldToTextureConstant >= 0 )
+				{
+					SetPixelShaderConstantInternal( nWorldToTextureConstant, m_FlashlightWorldToTexture.Base(), 4, false );
+				}
+
+				BindStandardTexture( (Sampler_t)nShadowNoiseSampler, TEXTURE_BINDFLAGS_NONE, TEXTURE_SHADOW_NOISE_2D );
+				if( m_pFlashlightDepthTexture && m_FlashlightState.m_bEnableShadows && ShaderUtil()->GetConfig().ShadowDepthTexture() )
+				{
+					ShaderAPITextureHandle_t hDepthTexture = g_pShaderUtil->GetShaderAPITextureBindHandle( m_pFlashlightDepthTexture, 0, 0 );
+					BindTexture( (Sampler_t)nDepthSampler, TEXTURE_BINDFLAGS_SHADOWDEPTH, hDepthTexture );
+
+					SetPixelShaderConstantInternal( nDepthTweakConst, m_pFlashlightTweaks, 1, false );
+
+					// Dimensions of screen, used for screen-space noise map sampling
+					float vScreenScale[4] = {1280.0f / 32.0f, 720.0f / 32.0f, 0, 0};
+					int nWidth, nHeight;
+					BaseClass::GetBackBufferDimensions( nWidth, nHeight );
+
+					int nTexWidth, nTexHeight;
+					GetStandardTextureDimensions( &nTexWidth, &nTexHeight, TEXTURE_SHADOW_NOISE_2D );
+
+					vScreenScale[0] = (float) nWidth  / nTexWidth;
+					vScreenScale[1] = (float) nHeight / nTexHeight;
+					vScreenScale[2] = 1.0f / m_FlashlightState.m_flShadowMapResolution;
+					vScreenScale[3] = 2.0f / m_FlashlightState.m_flShadowMapResolution;
+					SetPixelShaderConstantInternal( nScreenScaleConst, vScreenScale, 1, false );
+				}
+				else
+				{
+					BindStandardTexture( (Sampler_t)nDepthSampler, TEXTURE_BINDFLAGS_NONE, TEXTURE_WHITE );
+				}
+
+				if ( IsX360() )
+				{
+					SetBooleanPixelShaderConstant( 0, &m_FlashlightState.m_nShadowQuality, 1 );
+				}
+
+				break;
+			}
+
+		case CBCMD_SET_PIXEL_SHADER_UBERLIGHT_STATE:
+			{
+				int iEdge0Const			= GetData<int>( pCmdBuf + sizeof( int ) );
+				int iEdge1Const			= GetData<int>( pCmdBuf + 2 * sizeof( int ) );
+				int iEdgeOOWConst		= GetData<int>( pCmdBuf + 3 * sizeof( int ) );
+				int iShearRoundConst	= GetData<int>( pCmdBuf + 4 * sizeof( int ) );
+				int iAABBConst			= GetData<int>( pCmdBuf + 5 * sizeof( int ) );
+				int iWorldToLightConst	= GetData<int>( pCmdBuf + 6 * sizeof( int ) );
+				pCmdBuf += 7 * sizeof( int );
+
+				SetPixelShaderConstantInternal( iEdge0Const, m_UberlightRenderState.m_vSmoothEdge0.Base(), 1, false );
+				SetPixelShaderConstantInternal( iEdge1Const, m_UberlightRenderState.m_vSmoothEdge1.Base(), 1, false );
+				SetPixelShaderConstantInternal( iEdgeOOWConst, m_UberlightRenderState.m_vSmoothOneOverW.Base(), 1, false );
+				SetPixelShaderConstantInternal( iShearRoundConst, m_UberlightRenderState.m_vShearRound.Base(), 1, false );
+				SetPixelShaderConstantInternal( iAABBConst, m_UberlightRenderState.m_vaAbB.Base(), 1, false );
+				SetPixelShaderConstantInternal( iWorldToLightConst, m_UberlightRenderState.m_WorldToLight.Base(), 4, false );
+				break;
+			}
 
 #ifndef NDEBUG
-			default:
-			{
-				Assert(0);
-			}
+		default:
+			Assert(0);
+			break;
 #endif
-
-
 		}
 		pLastCmd = pCmd;
 	}
 }
+
+#endif
+
+
+
+//ConVar mat_use_old_gamma( "mat_use_old_gamma", "1" );
+#define USE_OLD_GAMMA ( false )
+
+//-----------------------------------------------------------------------------
+// Executes a command buffer containing per-instance data
+//-----------------------------------------------------------------------------
+
+#ifndef _PS3
+
+void CShaderAPIDx8::ExecuteInstanceCommandBuffer( const unsigned char *pCmdBuf, int nInstanceIndex, bool bForceStateSet )
+{
+	if ( !pCmdBuf )
+		return;
+
+	//SNPROF( "CShaderAPIDx8::ExecuteInstanceCommandBuffer" );
+
+	const MeshInstanceData_t &instance = m_pRenderInstances[nInstanceIndex];
+	CompiledLightingState_t *pCompiledState = &m_pRenderCompiledState[nInstanceIndex];
+	InstanceInfo_t *pInfo = &m_pRenderInstanceInfo[nInstanceIndex];
+
+	// First, deal with all env_cubemaps
+	if ( m_DynamicState.m_nLocalEnvCubemapSamplers )
+	{
+		ShaderAPITextureHandle_t hEnvCubemap;
+		if ( !instance.m_pEnvCubemap )
+		{
+			// Should only hit this codepath during fast path brush model rendering
+			hEnvCubemap = m_StdTextureHandles[TEXTURE_LOCAL_ENV_CUBEMAP];
+		}
+		else
+		{
+			// FIXME: Shitty!  But I don't see another way to convert the ITexture 
+			// into a ShaderAPITextureHandle_t, and we can't expose ShaderAPITextureHandle_t
+			// into MeshRenderData_t I don't think..?
+			hEnvCubemap = ShaderUtil()->GetShaderAPITextureBindHandle( (ITexture*)(instance.m_pEnvCubemap), 0, 0 );
+		}
+
+		int i = SHADER_SAMPLER0;
+		int nSamplerMask = m_DynamicState.m_nLocalEnvCubemapSamplers;
+		for ( i = 0; nSamplerMask; ++i, nSamplerMask >>= 1 )
+		{
+			if ( nSamplerMask & 0x1 )
+			{
+				// NOTE: Don't use BindTexture here, as it will not actually do the binding
+				SetTextureState( (Sampler_t)i, LastSetTextureBindFlags( i ), hEnvCubemap, true );
+			}
+		}
+	}
+
+	// Next, deal with the lightmap
+	if ( instance.m_nLightmapPageId != MATERIAL_SYSTEM_LIGHTMAP_PAGE_INVALID )
+	{
+		if ( m_DynamicState.m_nLightmapSamplers )
+		{
+			// FIXME: Shitty!  But I don't see another way to convert the ITexture
+			// into a ShaderAPITextureHandle_t, and we can't expose ShaderAPITextureHandle_t
+			// into MeshRenderData_t I don't think..?
+			ShaderAPITextureHandle_t hLightmap = ShaderUtil()->GetLightmapTexture( instance.m_nLightmapPageId );
+
+			int i = SHADER_SAMPLER0;
+			int nSamplerMask = m_DynamicState.m_nLightmapSamplers;
+			for ( i = 0; nSamplerMask; ++i, nSamplerMask >>= 1 )
+			{
+				if ( nSamplerMask & 0x1 )
+				{
+					// NOTE: Don't use BindTexture here, as it will not actually do the binding
+					SetTextureState( (Sampler_t)i, LastSetTextureBindFlags( i ), hLightmap, true );
+				}
+			}
+		}
+
+		if ( m_DynamicState.m_nPaintmapSamplers )
+		{
+			// FIXME: Shitty!  But I don't see another way to convert the ITexture
+			// into a ShaderAPITextureHandle_t, and we can't expose ShaderAPITextureHandle_t
+			// into MeshRenderData_t I don't think..?
+			ShaderAPITextureHandle_t hPaintmap = ShaderUtil()->GetPaintmapTexture( instance.m_nLightmapPageId );
+
+			int i = SHADER_SAMPLER0;
+			int nSamplerMask = m_DynamicState.m_nPaintmapSamplers;
+			for ( i = 0; nSamplerMask; ++i, nSamplerMask >>= 1 )
+			{
+				if ( nSamplerMask & 0x1 )
+				{
+					// NOTE: Don't use BindTexture here, as it will not actually do the binding
+					SetTextureState( (Sampler_t)i, LastSetTextureBindFlags( i ), hPaintmap, true );
+				}
+			}
+		}
+	}
+
+	// Next, deal with stencil state
+	if ( instance.m_pStencilState )
+	{
+		SetStencilStateInternal( *instance.m_pStencilState );
+		m_bRenderHasSetStencil = true;
+	}
+	else if ( m_bRenderHasSetStencil )
+	{
+		// If we've set the stencil state at any point, but this
+		// instance has a NULL stencil state, reset to initial state
+		SetStencilStateInternal( m_RenderInitialStencilState );
+		m_bRenderHasSetStencil = false;
+	}
+
+	MaterialSystem_Config_t &config = ShaderUtil()->GetConfig();
+
+	const unsigned char *pReturnStack[20];
+	const unsigned char **pSP = &pReturnStack[ARRAYSIZE(pReturnStack)];
+	static const unsigned char kInitialCmdString[] = "No Prev Cmd";
+	const unsigned char *pLastCmd = kInitialCmdString;
+	bool bConstantsChanged = false;
+
+#ifdef _DEBUG
+	uint32 nEncounteredCmd = 0;
+#endif
+
+	const unsigned char *pOrigCmd = pCmdBuf;
+	for(;;)
+	{
+		const unsigned char *pCmd=pCmdBuf;
+		int nCmd = GetData<int>( pCmdBuf );
+
+#ifdef _DEBUG
+		if ( ( nCmd > CBICMD_JSR ) && ( nEncounteredCmd & ( 1 << nCmd ) ) )
+		{
+			Warning( "Perf warning: Multiple identical commands (%d) in the per-instance command buffer!\n", nCmd );
+		}
+		nEncounteredCmd |= 1 << nCmd;
+#endif
+		switch( nCmd )
+		{
+		case CBICMD_END:
+			{
+				if ( pSP == &pReturnStack[ARRAYSIZE(pReturnStack)] )
+				{
+					if ( bConstantsChanged )
+					{
+						NotifyShaderConstantsChangedInRenderPass();
+					}
+					return;
+				}
+
+				// pop pc
+				pCmdBuf = *( pSP ++ );
+			}
+			break;
+
+		case CBICMD_JUMP:
+			pCmdBuf = GetData<const unsigned char *>( pCmdBuf + sizeof( int ) );
+			break;
+
+		case CBICMD_JSR:
+			{
+				Assert( pSP > &( pReturnStack[0] ) );
+				// 				*(--pSP ) = pCmdBuf + sizeof( int ) + sizeof( const unsigned char *);
+				// 				pCmdBuf = GetData<const unsigned char *>(  pCmdBuf + sizeof( int ) );
+				ExecuteInstanceCommandBuffer( GetData<const unsigned char *>( pCmdBuf + sizeof( int ) ), 
+					nInstanceIndex, bForceStateSet );
+				pCmdBuf = pCmdBuf + sizeof( int ) + sizeof( const unsigned char *);
+			}
+			break;
+
+		case CBICMD_SETSKINNINGMATRICES:
+			{
+				pCmdBuf += sizeof( int );
+				if ( bForceStateSet || !pInfo->m_bSetSkinConstants )
+				{
+					if ( SetSkinningMatrices( instance ) )
+					{
+						bConstantsChanged = true;
+					}
+					pInfo->m_bSetSkinConstants = true;
+				}
+			}
+			break;
+
+		case CBICMD_SETVERTEXSHADERLOCALLIGHTING:
+			{
+				pCmdBuf += sizeof( int );
+				if ( instance.m_pLightingState )
+				{
+					if ( !pInfo->m_bVertexShaderLocalLightsCompiled )
+					{
+						CompileVertexShaderLocalLights( pCompiledState, instance.m_pLightingState->m_nLocalLightCount, instance.m_pLightingState, m_DynamicState.m_ShaderLightState.m_bStaticLight && (!m_DynamicState.m_ShaderLightState.m_bStaticLightIndirectOnly) );
+						pInfo->m_bVertexShaderLocalLightsCompiled = true;
+					}
+
+					CommitVertexShaderLighting( pCompiledState );
+					bConstantsChanged = true;
+				}
+			}
+			break;
+
+		case CBICMD_SETPIXELSHADERLOCALLIGHTING:
+			{
+				int nReg = GetData<int>( pCmdBuf + sizeof( int ) );
+				pCmdBuf += 2 * sizeof( int );
+				if ( instance.m_pLightingState )
+				{
+					if ( !pInfo->m_bPixelShaderLocalLightsCompiled )
+					{
+						CompilePixelShaderLocalLights( pCompiledState, instance.m_pLightingState->m_nLocalLightCount, instance.m_pLightingState, m_DynamicState.m_ShaderLightState.m_bStaticLight && (!m_DynamicState.m_ShaderLightState.m_bStaticLightIndirectOnly) );
+						pInfo->m_bPixelShaderLocalLightsCompiled = true;
+					}
+
+					CommitPixelShaderLighting( nReg, pCompiledState );
+					bConstantsChanged = true;
+				}
+			}
+			break;
+
+		case CBICMD_SETPIXELSHADERAMBIENTLIGHTCUBE:
+			{
+				int nReg = GetData<int>( pCmdBuf + sizeof( int ) );
+				pCmdBuf += 2 * sizeof( int );
+				if ( instance.m_pLightingState )
+				{
+					if ( !pInfo->m_bAmbientCubeCompiled )
+					{
+						CompileAmbientCube( pCompiledState, instance.m_pLightingState->m_nLocalLightCount, instance.m_pLightingState );
+						pInfo->m_bAmbientCubeCompiled = true;
+					}
+
+					SetPixelShaderStateAmbientLightCube( nReg, pCompiledState );
+					bConstantsChanged = true;
+				}
+			}
+			break;
+
+		case CBICMD_SETVERTEXSHADERAMBIENTLIGHTCUBE:
+			{
+				pCmdBuf += sizeof( int );
+				if ( instance.m_pLightingState )
+				{
+					if ( !pInfo->m_bAmbientCubeCompiled )
+					{
+						CompileAmbientCube( pCompiledState, instance.m_pLightingState->m_nLocalLightCount, instance.m_pLightingState );
+						pInfo->m_bAmbientCubeCompiled = true;
+					}
+
+					SetVertexShaderStateAmbientLightCube( VERTEX_SHADER_AMBIENT_LIGHT, pCompiledState );
+					bConstantsChanged = true;
+				}
+			}
+			break;
+
+		case CBICMD_SETPIXELSHADERAMBIENTLIGHTCUBELUMINANCE:
+			{
+				int nReg = GetData<int>( pCmdBuf + sizeof( int ) );
+				pCmdBuf += 2 * sizeof( int );
+				float flLuminance = GetAmbientLightCubeLuminance( instance.m_pLightingState );
+				flLuminance = clamp( flLuminance, 0.0f, 1.0f );
+				Vector4D psReg( flLuminance, flLuminance, flLuminance, flLuminance );
+				SetPixelShaderConstantInternal( nReg, psReg.Base(), 1, false );
+			}
+			break;
+
+		case CBICMD_SETPIXELSHADERGLINTDAMPING:
+			{
+				int nReg = GetData<int>( pCmdBuf + sizeof( int ) );
+				pCmdBuf += 2 * sizeof( int );
+				float fGlintDamping = GetAmbientLightCubeLuminance( instance.m_pLightingState );
+
+				// Get luminance of ambient cube and saturate it
+				fGlintDamping = clamp( fGlintDamping, 0.0f, 1.0f );
+				const float fDimGlint = 0.01f;
+
+				// Remap so that glint damping smooth steps to zero for low luminances
+				if ( fGlintDamping > fDimGlint )
+					fGlintDamping = 1.0f;
+				else
+					fGlintDamping *= SimpleSplineRemapVal( fGlintDamping, 0.0f, fDimGlint, 0.0f, 1.0f );
+
+				Vector4D psReg( fGlintDamping, fGlintDamping, fGlintDamping, fGlintDamping );
+				SetPixelShaderConstantInternal( nReg, psReg.Base(), 1, false );
+			}
+			break;
+
+		case CBICMD_SETMODULATIONPIXELSHADERDYNAMICSTATE_LINEARCOLORSPACE:
+			{
+				// Skip the command.
+				pCmdBuf += sizeof( int );
 	
+				// Read the register number that we want to write the colormodulation value into.
+				int nReg = GetData<int>( pCmdBuf ); 
+				pCmdBuf += sizeof( int ); // skip register
+	
+				if ( config.nFullbright != 2 )
+				{
+					if ( USE_OLD_GAMMA )
+					{
+						// Read the material-level gamma color scale ($color2) 
+						Vector vSrcColor2 = GetData<Vector>( pCmdBuf );
+
+						// Get the per-model-instance diffuse modulation
+						const Vector4D &srcColor = instance.m_DiffuseModulation;
+						
+						Vector4D color;
+						
+						color[0] = srcColor[0] * vSrcColor2[0];
+						color[1] = srcColor[1] * vSrcColor2[1];
+						color[2] = srcColor[2] * vSrcColor2[2];
+						color[3] = srcColor[3];
+						
+						color[0] = color[0] > 1.0f ? color[0] : GammaToLinear( color[0] );
+						color[1] = color[1] > 1.0f ? color[1] : GammaToLinear( color[1] );
+						color[2] = color[2] > 1.0f ? color[2] : GammaToLinear( color[2] );
+						
+						SetPixelShaderConstantInternal( nReg, color.Base() );
+					}
+					else
+					{
+						// Read the material-level gamma color scale ($color2) 
+						fltx4 fl4DiffuseModulation = LoadUnalignedSIMD( &instance.m_DiffuseModulation );
+						fltx4 fl4Color = GammaToLinearExtendedSIMD( MulSIMD( LoadUnalignedSIMD( pCmdBuf ),fl4DiffuseModulation ) );
+
+						// restore alpha
+						fl4Color = SetWSIMD( fl4Color, fl4DiffuseModulation );
+
+						SetPixelShaderConstantInternal( nReg, (float const * ) &fl4Color );
+					}
+
+				}
+				else
+				{
+					Vector4D white( 1.0f, 1.0f, 1.0f, instance.m_DiffuseModulation[3] );
+					SetPixelShaderConstantInternal( nReg, white.Base() );
+				}
+				pCmdBuf += sizeof( Vector4D ); // skip vSrcColor2 Vector
+			}
+			break;
+
+		case CBICMD_SETMODULATIONPIXELSHADERDYNAMICSTATE:
+			{
+				// Skip the command.
+				pCmdBuf += sizeof( int );
+
+				// Read the register number that we want to write the colormodulation value into.
+				int nReg = GetData<int>( pCmdBuf ); 
+				pCmdBuf += sizeof( int ); // skip register
+
+				// Read the material-level gamma color scale ($color2) 
+				Vector vSrcColor2 = GetData<Vector>( pCmdBuf );
+				pCmdBuf += sizeof( Vector ); // skip vSrcColor2 Vector
+
+				if ( config.nFullbright != 2 )
+				{
+					// Get the per-model-instance diffuse modulation
+					const Vector4D &srcColor = instance.m_DiffuseModulation;
+
+					Vector4D color;
+
+					color[0] = srcColor[0] * vSrcColor2[0];
+					color[1] = srcColor[1] * vSrcColor2[1];
+					color[2] = srcColor[2] * vSrcColor2[2];
+					color[3] = srcColor[3];
+
+					SetPixelShaderConstantInternal( nReg, color.Base() );
+				}
+				else
+				{
+					Vector4D white( 1.0f, 1.0f, 1.0f, instance.m_DiffuseModulation[3] );
+					SetPixelShaderConstantInternal( nReg, white.Base() );
+				}
+
+			}
+			break;
+
+		case CBICMD_SETMODULATIONPIXELSHADERDYNAMICSTATE_IDENTITY:
+			{
+				// Skip the command.
+				pCmdBuf += sizeof( int );
+
+				// Read the register number that we want to write the colormodulation value into.
+				int nReg = GetData<int>( pCmdBuf ); 
+				pCmdBuf += sizeof( int ); // skip register
+
+				Vector4D color( 1.0f, 1.0f, 1.0f, instance.m_DiffuseModulation[3] );
+				SetPixelShaderConstantInternal( nReg, color.Base() );
+			}
+			break;
+
+		case CBICMD_SETMODULATIONPIXELSHADERDYNAMICSTATE_LINEARCOLORSPACE_LINEARSCALE:
+			{
+				// Skip the command.
+				pCmdBuf += sizeof( int );
+	
+				// Read the register number that we want to write the colormodulation value into.
+				int nReg = GetData<int>( pCmdBuf ); 
+				pCmdBuf += sizeof( int ); // skip register
+	
+	
+				if ( config.nFullbright != 2 )
+				{
+					// Read the material-level gamma color scale ($color2) 
+					if ( USE_OLD_GAMMA )
+					{
+						Vector4D vSrcColor2 = GetData<Vector4D>( pCmdBuf );
+						pCmdBuf += sizeof( Vector4D ); // skip vSrcColor2 Vector
+						
+						// Read the linear scale value
+						float scale = GetData<float>( pCmdBuf );
+						pCmdBuf += sizeof( float ); // skip the linear scale value
+
+						// Get the per-model-instance diffuse modulation
+						const Vector4D &srcColor = instance.m_DiffuseModulation;
+						Vector4D color;
+						
+						color[0] = srcColor[0] * vSrcColor2[0];
+						color[1] = srcColor[1] * vSrcColor2[1];
+						color[2] = srcColor[2] * vSrcColor2[2];
+						color[3] = srcColor[3];
+						
+						color[0] = ( color[0] > 1.0f ? color[0] : GammaToLinear( color[0] ) ) * scale;
+						color[1] = ( color[1] > 1.0f ? color[1] : GammaToLinear( color[1] ) ) * scale;
+						color[2] = ( color[2] > 1.0f ? color[2] : GammaToLinear( color[2] ) ) * scale;
+						
+						SetPixelShaderConstantInternal( nReg, color.Base() );
+					}
+					else
+					{
+						fltx4 fl4SrcColor2 = LoadUnaligned3SIMD( pCmdBuf ); 
+						pCmdBuf += sizeof( Vector4D );
+
+						float scale = GetData<float>( pCmdBuf );
+						pCmdBuf += sizeof( float ); // skip the linear scale value
+
+						fltx4 fl4Scale = ReplicateX4( scale );
+						fltx4 fl4SrcColor = LoadUnalignedSIMD( &instance.m_DiffuseModulation );
+
+						fl4SrcColor2 = MulSIMD( GammaToLinearExtendedSIMD( MulSIMD( fl4SrcColor2, fl4SrcColor ) ), fl4Scale );
+						fl4SrcColor2 = SetWSIMD( fl4SrcColor2, fl4SrcColor ); // copy back the original unmodified alpha
+
+						SetPixelShaderConstantInternal( nReg, ( float const * ) &fl4SrcColor2 );
+					}
+				}
+				else
+				{
+					Vector4D white( 1.0f, 1.0f, 1.0f, instance.m_DiffuseModulation[3] );
+					SetPixelShaderConstantInternal( nReg, white.Base() );
+					pCmdBuf += sizeof( float ) + sizeof( Vector4D );
+				}
+
+			}
+			break;
+
+		case CBICMD_SETMODULATIONPIXELSHADERDYNAMICSTATE_LINEARSCALE:
+			{
+				// Skip the command.
+				pCmdBuf += sizeof( int );
+
+				// Read the register number that we want to write the colormodulation value into.
+				int nReg = GetData<int>( pCmdBuf ); 
+				pCmdBuf += sizeof( int ); // skip register
+
+				// Read the material-level gamma color scale ($color2) 
+				Vector vSrcColor2 = GetData<Vector>( pCmdBuf );
+				pCmdBuf += sizeof( Vector ); // skip vSrcColor2 Vector
+
+				// skip the pad
+				pCmdBuf += sizeof( float );
+
+				// Read the linear scale value
+				float scale = GetData<float>( pCmdBuf );
+				pCmdBuf += sizeof( float ); // skip the linear scale value
+
+				if (config.nFullbright != 2 )
+				{
+					// Get the per-model-instance diffuse modulation
+					const Vector4D &srcColor = instance.m_DiffuseModulation;
+					Vector4D color;
+
+					color[0] = srcColor[0] * vSrcColor2[0] * scale;
+					color[1] = srcColor[1] * vSrcColor2[1] * scale;
+					color[2] = srcColor[2] * vSrcColor2[2] * scale;
+					color[3] = srcColor[3];
+
+					SetPixelShaderConstantInternal( nReg, color.Base() );
+				}
+				else
+				{
+					Vector4D white( 1.0f, 1.0f, 1.0f, instance.m_DiffuseModulation[3] );
+					SetPixelShaderConstantInternal( nReg, white.Base() );
+				}
+			}
+			break;
+
+		case CBICMD_SETMODULATIONPIXELSHADERDYNAMICSTATE_LINEARSCALE_SCALEINW:
+			{
+				// Skip the command.
+				pCmdBuf += sizeof( int );
+
+				// Read the register number that we want to write the colormodulation value into.
+				int nReg = GetData<int>( pCmdBuf ); 
+				pCmdBuf += sizeof( int ); // skip register
+
+				// Read the material-level gamma color scale ($color2) 
+				Vector vSrcColor2 = GetData<Vector>( pCmdBuf );
+				pCmdBuf += sizeof( Vector ); // skip vSrcColor2 Vector
+
+				// Read the linear scale value
+				float scale = GetData<float>( pCmdBuf );
+				pCmdBuf += sizeof( float ); // skip the linear scale value
+
+				if ( config.nFullbright != 2 )
+				{
+					// Get the per-model-instance diffuse modulation
+					const Vector4D &srcColor = instance.m_DiffuseModulation;
+					Vector4D color;
+
+					color[0] = srcColor[0] * vSrcColor2[0] * scale;
+					color[1] = srcColor[1] * vSrcColor2[1] * scale;
+					color[2] = srcColor[2] * vSrcColor2[2] * scale;
+					color[3] = scale;
+
+					SetPixelShaderConstantInternal( nReg, color.Base() );
+				}
+				else
+				{
+					Vector4D vecScale( scale, scale, scale, scale );
+					SetPixelShaderConstantInternal( nReg, vecScale.Base() );
+				}
+			}
+			break;
+
+		case CBICMD_SETMODULATIONVERTEXSHADERDYNAMICSTATE:
+			{
+				// Skip the command.
+				pCmdBuf += sizeof( int );
+
+				// Read the register number that we want to write the colormodulation value into.
+				int nReg = GetData<int>( pCmdBuf ); 
+				pCmdBuf += sizeof( int ); // skip register
+
+				// Read the material-level gamma color scale ($color2) 
+				Vector vSrcColor2 = GetData<Vector>( pCmdBuf );
+				pCmdBuf += sizeof( Vector ); // skip vSrcColor2 Vector
+
+				if ( config.nFullbright != 2 )
+				{
+					// Get the per-model-instance diffuse modulation
+					const Vector4D &srcColor = instance.m_DiffuseModulation;
+
+					Vector4D color;
+
+					color[0] = srcColor[0] * vSrcColor2[0];
+					color[1] = srcColor[1] * vSrcColor2[1];
+					color[2] = srcColor[2] * vSrcColor2[2];
+					color[3] = srcColor[3];
+
+					SetVertexShaderConstantInternal( nReg, color.Base() );
+				}
+				else
+				{
+					Vector4D white( 1.0f, 1.0f, 1.0f, instance.m_DiffuseModulation[3] );
+					SetVertexShaderConstantInternal( nReg, white.Base() );
+				}
+			}
+			break;
+
+		case CBICMD_SETMODULATIONVERTEXSHADERDYNAMICSTATE_LINEARSCALE:
+			{
+				// Skip the command.
+				pCmdBuf += sizeof( int );
+
+				// Read the register number that we want to write the colormodulation value into.
+				int nReg = GetData<int>( pCmdBuf ); 
+				pCmdBuf += sizeof( int ); // skip register
+
+				// Read the material-level gamma color scale ($color2) 
+				Vector vSrcColor2 = GetData<Vector>( pCmdBuf );
+				pCmdBuf += sizeof( Vector ); // skip vSrcColor2 Vector
+
+				float flScale = GetData<float>( pCmdBuf );
+				pCmdBuf += sizeof( float );
+
+				if ( config.nFullbright != 2 )
+				{
+					// Get the per-model-instance diffuse modulation
+					const Vector4D &srcColor = instance.m_DiffuseModulation;
+
+					Vector4D color;
+
+					color[0] = srcColor[0] * vSrcColor2[0] * flScale;
+					color[1] = srcColor[1] * vSrcColor2[1] * flScale;
+					color[2] = srcColor[2] * vSrcColor2[2] * flScale;
+					color[3] = srcColor[3];
+
+					SetVertexShaderConstantInternal( nReg, color.Base() );
+				}
+				else
+				{
+					Vector4D white( 1.0f, 1.0f, 1.0f, instance.m_DiffuseModulation[3] );
+					SetVertexShaderConstantInternal( nReg, white.Base() );
+				}
+			}
+			break;
+
+#ifndef NDEBUG
+		default:
+			Warning( " unknown instance command %d last = %d\n", nCmd, GetData<int>( pLastCmd ) );
+			DebuggerBreak();
+			break;
+#endif
+		}
+		pLastCmd = pCmd;
+	}
+}
+
+#endif
+
 
 //-----------------------------------------------------------------------------
 // Sets the boolean registers for pixel shader control flow
@@ -6636,19 +8972,27 @@ void CShaderAPIDx8::SetBooleanPixelShaderConstant( int var, int const* pVec, int
 		return;
 	}
 
-	if ( IsPC() )
+	if ( IsPC() || IsPS3() )
 	{
 		Dx9Device()->SetPixelShaderConstantB( var, pVec, numBools );
 		memcpy( &m_DynamicState.m_pBooleanPixelShaderConstant[var], pVec, numBools * sizeof(BOOL) );
 	}
 
-	memcpy( &m_DesiredState.m_pBooleanPixelShaderConstant[var], pVec, numBools * sizeof(BOOL) );
-
-	if ( IsX360() && var + numBools > m_MaxBooleanPixelShaderConstant )
+	if ( IsX360() )
 	{
-		m_MaxBooleanPixelShaderConstant = var + numBools;
-		Assert( m_MaxBooleanPixelShaderConstant <= 16 );
+		if ( !IsGPUOwnSupported() || !m_bGPUOwned )
+		{
+			Dx9Device()->SetPixelShaderConstantB( var, pVec, numBools );
+			memcpy( &m_DynamicState.m_pBooleanPixelShaderConstant[var], pVec, numBools * sizeof(BOOL) );
+		}
+		else if ( var + numBools > m_MaxBooleanPixelShaderConstant )
+		{
+			m_MaxBooleanPixelShaderConstant = var + numBools;
+			Assert( m_MaxBooleanPixelShaderConstant <= 16 );
+		}
 	}
+
+	memcpy( &m_DesiredState.m_pBooleanPixelShaderConstant[var], pVec, numBools * sizeof(BOOL) );
 }
 
 
@@ -6665,19 +9009,27 @@ void CShaderAPIDx8::SetIntegerPixelShaderConstant( int var, int const* pVec, int
 		return;
 	}
 
-	if ( IsPC() )
+	if ( IsPC() || IsPS3() )
 	{
 		Dx9Device()->SetPixelShaderConstantI( var, pVec, numIntVecs );
 		memcpy( &m_DynamicState.m_pIntegerPixelShaderConstant[var], pVec, numIntVecs * sizeof(IntVector4D) );
 	}
 
-	memcpy( &m_DesiredState.m_pIntegerPixelShaderConstant[var], pVec, numIntVecs * sizeof(IntVector4D) );
-
-	if ( IsX360() && var + numIntVecs > m_MaxIntegerPixelShaderConstant )
+	if ( IsX360() )
 	{
-		m_MaxIntegerPixelShaderConstant = var + numIntVecs;
-		Assert( m_MaxBooleanPixelShaderConstant <= 16 );
+		if ( !IsGPUOwnSupported() || !m_bGPUOwned )
+		{
+			Dx9Device()->SetPixelShaderConstantI( var, pVec, numIntVecs );
+			memcpy( &m_DynamicState.m_pIntegerPixelShaderConstant[var], pVec, numIntVecs * sizeof(IntVector4D) );
+		}
+		else if ( var + numIntVecs > m_MaxIntegerPixelShaderConstant )
+		{
+			m_MaxIntegerPixelShaderConstant = var + numIntVecs;
+			Assert( m_MaxBooleanPixelShaderConstant <= 16 );
+		}
 	}
+
+	memcpy( &m_DesiredState.m_pIntegerPixelShaderConstant[var], pVec, numIntVecs * sizeof(IntVector4D) );
 }
 
 
@@ -6714,6 +9066,23 @@ inline IDirect3DBaseTexture* CShaderAPIDx8::GetD3DTexture( ShaderAPITextureHandl
 	{
 		return tex.GetTexture( tex.m_CurrentCopy );
 	}
+}
+
+bool CShaderAPIDx8::IsStandardTextureHandleValid( StandardTextureId_t textureId )
+{
+	ShaderAPITextureHandle_t hTex = GetStandardTextureHandle( textureId );
+	if ( hTex == INVALID_SHADERAPI_TEXTURE_HANDLE )
+		return false;
+
+	if ( !GetD3DTexture( hTex ) )
+		return false;
+
+	return true;
+}
+
+inline void* CShaderAPIDx8::GetD3DTexturePtr( ShaderAPITextureHandle_t hTexture )
+{
+	return (void *)GetD3DTexture( hTexture );	
 }
 
 //-----------------------------------------------------------------------------
@@ -6767,31 +9136,932 @@ inline bool CShaderAPIDx8::WouldBeOverTextureLimit( ShaderAPITextureHandle_t hTe
 }
 
 
+//-----------------------------------------------------------------------------
+// Moves to head of LRU. Allocates and queues for loading if evicted. Returns
+// true if texture is resident, false otherwise.
+//-----------------------------------------------------------------------------
+FORCEINLINE void CShaderAPIDx8::TouchTexture( Sampler_t sampler, IDirect3DBaseTexture *pD3DTexture )
+{
+#ifdef _X360
+	bool bValid = true;
+	if ( pD3DTexture->GetType() == D3DRTYPE_TEXTURE )
+	{
+		CXboxTexture *pXboxTexture = (CXboxTexture *)pD3DTexture;
+		if ( pXboxTexture->m_nFrameCount != m_CurrentFrame )
+		{
+			pXboxTexture->m_nFrameCount = m_CurrentFrame;
+			bValid = g_TextureHeap.TouchTexture( pXboxTexture );
+		}
+		else
+			bValid = ( pXboxTexture->m_BaseValid != 0 );
+	}
+	if ( bValid )
+	{
+		// base is valid for rendering
+		Dx9Device()->SetSamplerState( sampler, D3DSAMP_MAXMIPLEVEL, 0 );
+	}
+	else
+	{
+		// base is invalid for rendering
+		Dx9Device()->SetSamplerState( sampler, D3DSAMP_MAXMIPLEVEL, 1 );
+	}
+#endif
+}
+
+#ifndef _PS3
+
 #define SETSAMPLESTATEANDMIRROR( sampler, samplerState, state_type, mirror_field, value )	\
 	if ( samplerState.mirror_field != value )												\
 	{																						\
 		samplerState.mirror_field = value;													\
-		::SetSamplerState( g_pD3DDevice, sampler, state_type, value );	\
+		SetSamplerState( sampler, state_type, samplerState.mirror_field );					\
 	}
 
-#define SETSAMPLESTATEANDMIRROR_FLOAT( sampler, samplerState, state_type, mirror_field, value )	\
-	if ( samplerState.mirror_field != value )												\
-		{																					\
-		samplerState.mirror_field = value;													\
-		::SetSamplerState( g_pD3DDevice, sampler, state_type, *(DWORD*)&value );	\
-		}
+#define SETSAMPLEADRESSSTATEANDMIRROR( sampler, samplerState, state_type, mirror_field, value )	\
+	if ( samplerState.mirror_field != D3DTEXTUREADDRESS(value) )												\
+{																						\
+	samplerState.mirror_field = D3DTEXTUREADDRESS(value);													\
+	SetSamplerState( sampler, state_type, samplerState.mirror_field );					\
+}
 
+#else
+
+// No Mirroring on SPU, the redundant set sampler states are on SPU
+
+#define SETSAMPLESTATEANDMIRROR( sampler, samplerState, state_type, mirror_field, value )	\
+	SetSamplerState( sampler, state_type, value );			
+
+#define SETSAMPLEADRESSSTATEANDMIRROR( sampler, samplerState, state_type, mirror_field, value )	\
+	SetSamplerState( sampler, state_type, D3DTEXTUREADDRESS(value) );
+
+#endif 
+
+#ifdef _X360
+const DWORD g_MapLinearToSrgbGpuFormat[] = 
+{
+	GPUTEXTUREFORMAT_1_REVERSE,
+	GPUTEXTUREFORMAT_1,
+	GPUTEXTUREFORMAT_8,
+	GPUTEXTUREFORMAT_1_5_5_5,
+	GPUTEXTUREFORMAT_5_6_5,
+	GPUTEXTUREFORMAT_6_5_5,
+	GPUTEXTUREFORMAT_8_8_8_8_AS_16_16_16_16,
+	GPUTEXTUREFORMAT_2_10_10_10_AS_16_16_16_16,
+	GPUTEXTUREFORMAT_8_A,
+	GPUTEXTUREFORMAT_8_B,
+	GPUTEXTUREFORMAT_8_8,
+	GPUTEXTUREFORMAT_Cr_Y1_Cb_Y0_REP,     
+	GPUTEXTUREFORMAT_Y1_Cr_Y0_Cb_REP,      
+	GPUTEXTUREFORMAT_16_16_EDRAM,          
+	GPUTEXTUREFORMAT_8_8_8_8_A,
+	GPUTEXTUREFORMAT_4_4_4_4,
+	GPUTEXTUREFORMAT_10_11_11_AS_16_16_16_16,
+	GPUTEXTUREFORMAT_11_11_10_AS_16_16_16_16,
+	GPUTEXTUREFORMAT_DXT1_AS_16_16_16_16,
+	GPUTEXTUREFORMAT_DXT2_3_AS_16_16_16_16,  
+	GPUTEXTUREFORMAT_DXT4_5_AS_16_16_16_16,
+	GPUTEXTUREFORMAT_16_16_16_16_EDRAM,
+	GPUTEXTUREFORMAT_24_8,
+	GPUTEXTUREFORMAT_24_8_FLOAT,
+	GPUTEXTUREFORMAT_16,
+	GPUTEXTUREFORMAT_16_16,
+	GPUTEXTUREFORMAT_16_16_16_16,
+	GPUTEXTUREFORMAT_16_EXPAND,
+	GPUTEXTUREFORMAT_16_16_EXPAND,
+	GPUTEXTUREFORMAT_16_16_16_16_EXPAND,
+	GPUTEXTUREFORMAT_16_FLOAT,
+	GPUTEXTUREFORMAT_16_16_FLOAT,
+	GPUTEXTUREFORMAT_16_16_16_16_FLOAT,
+	GPUTEXTUREFORMAT_32,
+	GPUTEXTUREFORMAT_32_32,
+	GPUTEXTUREFORMAT_32_32_32_32,
+	GPUTEXTUREFORMAT_32_FLOAT,
+	GPUTEXTUREFORMAT_32_32_FLOAT,
+	GPUTEXTUREFORMAT_32_32_32_32_FLOAT,
+	GPUTEXTUREFORMAT_32_AS_8,
+	GPUTEXTUREFORMAT_32_AS_8_8,
+	GPUTEXTUREFORMAT_16_MPEG,
+	GPUTEXTUREFORMAT_16_16_MPEG,
+	GPUTEXTUREFORMAT_8_INTERLACED,
+	GPUTEXTUREFORMAT_32_AS_8_INTERLACED,
+	GPUTEXTUREFORMAT_32_AS_8_8_INTERLACED,
+	GPUTEXTUREFORMAT_16_INTERLACED,
+	GPUTEXTUREFORMAT_16_MPEG_INTERLACED,
+	GPUTEXTUREFORMAT_16_16_MPEG_INTERLACED,
+	GPUTEXTUREFORMAT_DXN,
+	GPUTEXTUREFORMAT_8_8_8_8_AS_16_16_16_16,
+	GPUTEXTUREFORMAT_DXT1_AS_16_16_16_16,
+	GPUTEXTUREFORMAT_DXT2_3_AS_16_16_16_16,
+	GPUTEXTUREFORMAT_DXT4_5_AS_16_16_16_16,
+	GPUTEXTUREFORMAT_2_10_10_10_AS_16_16_16_16,
+	GPUTEXTUREFORMAT_10_11_11_AS_16_16_16_16,
+	GPUTEXTUREFORMAT_11_11_10_AS_16_16_16_16,
+	GPUTEXTUREFORMAT_32_32_32_FLOAT,
+	GPUTEXTUREFORMAT_DXT3A,
+	GPUTEXTUREFORMAT_DXT5A,
+	GPUTEXTUREFORMAT_CTX1,
+	GPUTEXTUREFORMAT_DXT3A_AS_1_1_1_1,
+	GPUTEXTUREFORMAT_8_8_8_8_GAMMA_EDRAM,
+	GPUTEXTUREFORMAT_2_10_10_10_FLOAT_EDRAM,
+};
+
+DWORD GetAs16SRGBFormatGPU( D3DFORMAT fmtBase )
+{
+	return g_MapLinearToSrgbGpuFormat[ (fmtBase & D3DFORMAT_TEXTUREFORMAT_MASK) >> D3DFORMAT_TEXTUREFORMAT_SHIFT ];
+}
+
+void ConvertTextureToAs16SRGBFormat( D3DTexture *pTexture )
+{
+	// First thing, mark the texture SignX, SignY and SignZ as sRGB.
+	pTexture->Format.SignX = GPUSIGN_GAMMA;
+	pTexture->Format.SignY = GPUSIGN_GAMMA;
+	pTexture->Format.SignZ = GPUSIGN_GAMMA;
+
+	// Get the texture format...
+	XGTEXTURE_DESC desc;
+	XGGetTextureDesc( pTexture, 0, &desc );
+
+	// ...and convert it to a "good" format (AS_16_16_16_16).
+	pTexture->Format.DataFormat = GetAs16SRGBFormatGPU( desc.Format );
+}
+
+ConVar r_use16bit_srgb_sampling( "r_use16bit_srgb_sampling", "1", FCVAR_CHEAT );
+#endif
+
+
+//--------------------------------------------------------------------------------------------------
+// PS3 Texture Setting
+//--------------------------------------------------------------------------------------------------
+
+ShaderAPITextureHandle_t CShaderAPIDx8::GetStandardTextureHandle(StandardTextureId_t id)
+{
+	ShaderAPITextureHandle_t hTexture = INVALID_SHADERAPI_TEXTURE_HANDLE;
+
+	if ( m_StdTextureHandles[id] != INVALID_SHADERAPI_TEXTURE_HANDLE )
+	{
+		hTexture = m_StdTextureHandles[id];
+	}
+	else
+	{
+		hTexture = ShaderUtil()->GetStandardTexture( id );
+	}
+
+	return hTexture;
+}
+
+#ifdef _PS3
+
+
+void CShaderAPIDx8::GetPs3Texture(void* pPs3tex, ShaderAPITextureHandle_t hTexture )
+{
+	CPs3BindTexture_t& ps3tex = *(CPs3BindTexture_t*)pPs3tex;
+
+	if (hTexture != INVALID_SHADERAPI_TEXTURE_HANDLE)
+	{
+		IDirect3DBaseTexture *pTexture = CShaderAPIDx8::GetD3DTexture( hTexture );
+		Texture_t &tex = GetTexture( hTexture );
+
+		ps3tex.m_UWrap	   = tex.m_UTexWrap;
+		ps3tex.m_VWrap	   = tex.m_VTexWrap;
+		ps3tex.m_WWrap	   = tex.m_WTexWrap;
+		ps3tex.m_minFilter = tex.m_MinFilter;
+		ps3tex.m_magFilter = tex.m_MagFilter;
+		ps3tex.m_mipFilter = tex.m_MipFilter;
+
+		ps3tex.m_nLayout = (uint32)pTexture->m_tex->m_layout;
+		ps3tex.m_pLmBlock = &pTexture->m_tex->m_lmBlock;
+	}
+	else
+	{
+		ps3tex.m_nLayout = 0;
+	}
+
+}
+
+void CShaderAPIDx8::GetPs3Texture(void* pPs3tex, StandardTextureId_t nTextureId  )
+{
+	CPs3BindTexture_t& ps3tex = *(CPs3BindTexture_t*)pPs3tex;
+
+	ShaderAPITextureHandle_t hTexture = GetStandardTextureHandle(nTextureId);
+
+	if (hTexture != INVALID_SHADERAPI_TEXTURE_HANDLE)
+	{
+		IDirect3DBaseTexture *pTexture = CShaderAPIDx8::GetD3DTexture( hTexture );
+		Texture_t &tex = GetTexture( hTexture );
+
+		ps3tex.m_UWrap	   = tex.m_UTexWrap;
+		ps3tex.m_VWrap	   = tex.m_VTexWrap;
+		ps3tex.m_WWrap	   = tex.m_WTexWrap;
+		ps3tex.m_minFilter = tex.m_MinFilter;
+		ps3tex.m_magFilter = tex.m_MagFilter;
+		ps3tex.m_mipFilter = tex.m_MipFilter;
+
+		ps3tex.m_nLayout = (uint32)pTexture->m_tex->m_layout;
+		ps3tex.m_pLmBlock = &pTexture->m_tex->m_lmBlock;
+	}
+	else
+	{
+		ps3tex.m_nLayout = 0;
+	}
+
+}
+
+void CShaderAPIDx8::SetTextureState( Sampler_t sampler, TextureBindFlags_t nBindFlags, ShaderAPITextureHandle_t hTexture, bool force )
+{
+	// Get the dynamic texture info
+	SamplerState_t &samplerState = SamplerState( sampler );
+
+// 	// Set the texture state, but only if it changes
+// 	if ( ( samplerState.m_BoundTexture == hTexture ) && ( LastSetTextureBindFlags( sampler ) == nBindFlags ))
+// 		return;
+// 
+	// Disabling texturing
+	if ( hTexture == INVALID_SHADERAPI_TEXTURE_HANDLE)
+	{
+		Dx9Device()->SetTexture( sampler, 0 );
+		return;
+	}
+
+	samplerState.m_BoundTexture = hTexture;
+
+	IDirect3DBaseTexture *pTexture = CShaderAPIDx8::GetD3DTexture( hTexture );
+
+	SetSamplerState( sampler, D3DSAMP_SRGBTEXTURE, ( nBindFlags & TEXTURE_BINDFLAGS_SRGBREAD ) != 0 );
+
+	samplerState.m_nTextureBindFlags = nBindFlags;
+
+	Dx9Device()->SetTexture( sampler, pTexture );
+
+	Texture_t &tex = GetTexture( hTexture );
+			
+	SETSAMPLEADRESSSTATEANDMIRROR( sampler, samplerState, D3DSAMP_ADDRESSU, m_UTexWrap, tex.m_UTexWrap );
+	SETSAMPLEADRESSSTATEANDMIRROR( sampler, samplerState, D3DSAMP_ADDRESSV, m_VTexWrap, tex.m_VTexWrap );
+	SETSAMPLEADRESSSTATEANDMIRROR( sampler, samplerState, D3DSAMP_ADDRESSW, m_WTexWrap, tex.m_WTexWrap );
+	
+
+	const uint nNewShadowFilterState = ( nBindFlags & TEXTURE_BINDFLAGS_SHADOWDEPTH ) ? 1 : 0;
+	SETSAMPLESTATEANDMIRROR( sampler, samplerState, D3DSAMP_SHADOWFILTER, m_bShadowFilterEnable, nNewShadowFilterState );
+		
+	D3DTEXTUREFILTERTYPE minFilter = D3DTEXTUREFILTERTYPE(tex.m_MinFilter);
+	SETSAMPLESTATEANDMIRROR( sampler, samplerState, D3DSAMP_MINFILTER, m_MinFilter, minFilter );
+
+	D3DTEXTUREFILTERTYPE magFilter = D3DTEXTUREFILTERTYPE(tex.m_MagFilter);
+	SETSAMPLESTATEANDMIRROR( sampler, samplerState, D3DSAMP_MAGFILTER, m_MagFilter, magFilter );
+	
+	D3DTEXTUREFILTERTYPE mipFilter = D3DTEXTUREFILTERTYPE(tex.m_MipFilter);
+	SETSAMPLESTATEANDMIRROR( sampler, samplerState, D3DSAMP_MIPFILTER, m_MipFilter, mipFilter );
+
+}
+
+void CShaderAPIDx8::SetTextureFilterMode( Sampler_t sampler, TextureFilterMode_t nMode )
+{
+	SamplerState_t &samplerState = SamplerState( sampler );
+	D3DTEXTUREFILTERTYPE minFilter = samplerState.m_MinFilter;
+	D3DTEXTUREFILTERTYPE magFilter = samplerState.m_MagFilter;
+	D3DTEXTUREFILTERTYPE mipFilter = samplerState.m_MipFilter;
+
+
+	switch( nMode )
+	{
+	case TFILTER_MODE_POINTSAMPLED:
+		minFilter = D3DTEXF_POINT;
+		magFilter = D3DTEXF_POINT;
+		mipFilter = D3DTEXF_POINT;
+		break;
+	}
+	SETSAMPLESTATEANDMIRROR( sampler, samplerState, D3DSAMP_MINFILTER, m_MinFilter, minFilter );
+	SETSAMPLESTATEANDMIRROR( sampler, samplerState, D3DSAMP_MAGFILTER, m_MagFilter, magFilter );
+	SETSAMPLESTATEANDMIRROR( sampler, samplerState, D3DSAMP_MIPFILTER, m_MipFilter, mipFilter );
+
+}
+
+
+void CShaderAPIDx8::BindTexture( Sampler_t sampler, TextureBindFlags_t nBindFlags, ShaderAPITextureHandle_t textureHandle )
+{
+	//SNPROF("CShaderAPIDx8::BindTexture <><><><>");
+
+	LOCK_SHADERAPI();
+
+	SetTextureState( sampler, nBindFlags, textureHandle );
+}
+
+void CShaderAPIDx8::BindStandardTexture( Sampler_t sampler, TextureBindFlags_t nBindFlags, StandardTextureId_t id )
+{
+	ShaderAPITextureHandle_t hTexture = GetStandardTextureHandle(id);
+	
+	BindTexture( sampler, nBindFlags, hTexture );
+
+	if ((id == TEXTURE_LIGHTMAP_BUMPED) ||(id == TEXTURE_LIGHTMAP_BUMPED_FULLBRIGHT))
+	{
+		BindTexture( (Sampler_t)((int)sampler+1), nBindFlags, hTexture );
+		BindTexture( (Sampler_t)((int)sampler+2), nBindFlags, hTexture );
+	}
+
+	Assert( LastSetTextureBindFlags( sampler ) == nBindFlags );
+}
+
+
+void CShaderAPIDx8::ExecuteInstanceCommandBuffer( const unsigned char *pCmdBuf, int nInstanceIndex, bool bForceStateSet )
+{
+	if ( !pCmdBuf )
+		return;
+
+	//SNPROF( "CShaderAPIDx8::ExecuteInstanceCommandBuffer" );
+
+	const MeshInstanceData_t &instance = m_pRenderInstances[nInstanceIndex];
+	CompiledLightingState_t *pCompiledState = &m_pRenderCompiledState[nInstanceIndex];
+	InstanceInfo_t *pInfo = &m_pRenderInstanceInfo[nInstanceIndex];
+
+	{
+		//
+		// Texture replacements for instances
+		//
+
+		if (IsRenderingInstances())
+		{
+			CPs3BindTexture_t			tex;
+			ShaderAPITextureHandle_t	hTexture;
+
+			// Env maps
+
+			if (instance.m_pEnvCubemap)
+			{
+				hTexture = ShaderUtil()->GetShaderAPITextureBindHandle( (ITexture*)(instance.m_pEnvCubemap), 0, 0 );
+				GetPs3Texture( (void*)&tex,hTexture );
+				gpGcmDrawState->TextureReplace(TEXTURE_LOCAL_ENV_CUBEMAP, tex);
+			}
+
+			// Lightmaps/paint
+
+			if (instance.m_nLightmapPageId != MATERIAL_SYSTEM_LIGHTMAP_PAGE_INVALID)
+			{
+				hTexture = ShaderUtil()->GetLightmapTexture( instance.m_nLightmapPageId );
+				GetPs3Texture( (void*)&tex,hTexture );
+				gpGcmDrawState->TextureReplace(TEXTURE_LIGHTMAP, tex);
+
+				hTexture = ShaderUtil()->GetPaintmapTexture( instance.m_nLightmapPageId );
+				GetPs3Texture( (void*)&tex,hTexture );
+				gpGcmDrawState->TextureReplace(TEXTURE_PAINT, tex);
+			}
+		}
+	}
+
+	// Next, deal with stencil state
+	if ( instance.m_pStencilState )
+	{
+		SetStencilStateInternal( *instance.m_pStencilState );
+		m_bRenderHasSetStencil = true;
+	}
+	else if ( m_bRenderHasSetStencil )
+	{
+		// If we've set the stencil state at any point, but this
+		// instance has a NULL stencil state, reset to initial state
+		SetStencilStateInternal( m_RenderInitialStencilState );
+		m_bRenderHasSetStencil = false;
+	}
+
+	MaterialSystem_Config_t &config = ShaderUtil()->GetConfig();
+
+	const unsigned char *pReturnStack[20];
+	const unsigned char **pSP = &pReturnStack[ARRAYSIZE(pReturnStack)];
+	const unsigned char *pLastCmd;
+	bool bConstantsChanged = false;
+
+#ifdef _DEBUG
+	uint32 nEncounteredCmd = 0;
+#endif
+
+	const unsigned char *pOrigCmd = pCmdBuf;
+
+
+
+	for(;;)
+	{
+
+		const unsigned char *pCmd=pCmdBuf;
+		int nCmd = GetData<int>( pCmdBuf );
+
+#ifdef _DEBUG
+		if ( ( nCmd > CBICMD_JSR ) && ( nEncounteredCmd & ( 1 << nCmd ) ) )
+		{
+			Warning( "Perf warning: Multiple identical commands (%d) in the per-instance command buffer!\n", nCmd );
+		}
+		nEncounteredCmd |= 1 << nCmd;
+#endif
+		switch( nCmd )
+		{
+		case CBICMD_END:
+			{
+				if ( pSP == &pReturnStack[ARRAYSIZE(pReturnStack)] )
+				{
+					if ( bConstantsChanged )
+					{
+						NotifyShaderConstantsChangedInRenderPass();
+					}
+					return;
+				}
+
+				// pop pc
+				pCmdBuf = *( pSP ++ );
+			}
+			break;
+
+		case CBICMD_JUMP:
+			pCmdBuf = GetData<const unsigned char *>( pCmdBuf + sizeof( int ) );
+			break;
+
+		case CBICMD_JSR:
+			{
+				Assert( pSP > &( pReturnStack[0] ) );
+				// 				*(--pSP ) = pCmdBuf + sizeof( int ) + sizeof( const unsigned char *);
+				// 				pCmdBuf = GetData<const unsigned char *>(  pCmdBuf + sizeof( int ) );
+				ExecuteInstanceCommandBuffer( GetData<const unsigned char *>( pCmdBuf + sizeof( int ) ), 
+					nInstanceIndex, bForceStateSet );
+				pCmdBuf = pCmdBuf + sizeof( int ) + sizeof( const unsigned char *);
+			}
+			break;
+
+		case CBICMD_SETSKINNINGMATRICES:
+			{
+
+				pCmdBuf += sizeof( int );
+				if ( bForceStateSet || !pInfo->m_bSetSkinConstants )
+				{
+					if ( SetSkinningMatrices( instance ) )
+					{
+						bConstantsChanged = true;
+					}
+					pInfo->m_bSetSkinConstants = true;
+				}
+			}
+			break;
+
+		case CBICMD_SETVERTEXSHADERLOCALLIGHTING:
+			{
+
+				pCmdBuf += sizeof( int );
+				if ( instance.m_pLightingState )
+				{
+					if ( !pInfo->m_bVertexShaderLocalLightsCompiled )
+					{
+						CompileVertexShaderLocalLights( pCompiledState, instance.m_pLightingState->m_nLocalLightCount, instance.m_pLightingState );
+						pInfo->m_bVertexShaderLocalLightsCompiled = true;
+					}
+
+					CommitVertexShaderLighting( pCompiledState );
+					bConstantsChanged = true;
+				}
+			}
+			break;
+
+		case CBICMD_SETPIXELSHADERLOCALLIGHTING:
+			{
+
+
+				int nReg = GetData<int>( pCmdBuf + sizeof( int ) );
+				pCmdBuf += 2 * sizeof( int );
+				if ( instance.m_pLightingState )
+				{
+					if ( !pInfo->m_bPixelShaderLocalLightsCompiled )
+					{
+						CompilePixelShaderLocalLights( pCompiledState, instance.m_pLightingState->m_nLocalLightCount, instance.m_pLightingState );
+						pInfo->m_bPixelShaderLocalLightsCompiled = true;
+					}
+
+					CommitPixelShaderLighting( nReg, pCompiledState );
+					bConstantsChanged = true;
+				}
+			}
+			break;
+
+		case CBICMD_SETPIXELSHADERAMBIENTLIGHTCUBE:
+			{
+
+				int nReg = GetData<int>( pCmdBuf + sizeof( int ) );
+				pCmdBuf += 2 * sizeof( int );
+				if ( instance.m_pLightingState )
+				{
+					if ( !pInfo->m_bAmbientCubeCompiled )
+					{
+						CompileAmbientCube( pCompiledState, instance.m_pLightingState->m_nLocalLightCount, instance.m_pLightingState );
+						pInfo->m_bAmbientCubeCompiled = true;
+					}
+
+					SetPixelShaderStateAmbientLightCube( nReg, pCompiledState );
+					bConstantsChanged = true;
+				}
+			}
+			break;
+
+		case CBICMD_SETVERTEXSHADERAMBIENTLIGHTCUBE:
+			{
+
+				pCmdBuf += sizeof( int );
+				if ( instance.m_pLightingState )
+				{
+					if ( !pInfo->m_bAmbientCubeCompiled )
+					{
+						CompileAmbientCube( pCompiledState, instance.m_pLightingState->m_nLocalLightCount, instance.m_pLightingState );
+						pInfo->m_bAmbientCubeCompiled = true;
+					}
+
+					SetVertexShaderStateAmbientLightCube( VERTEX_SHADER_AMBIENT_LIGHT, pCompiledState );
+					bConstantsChanged = true;
+				}
+			}
+			break;
+
+		case CBICMD_SETPIXELSHADERAMBIENTLIGHTCUBELUMINANCE:
+			{
+
+
+				int nReg = GetData<int>( pCmdBuf + sizeof( int ) );
+				pCmdBuf += 2 * sizeof( int );
+				float flLuminance = GetAmbientLightCubeLuminance( instance.m_pLightingState );
+				flLuminance = clamp( flLuminance, 0.0f, 1.0f );
+				Vector4D psReg( flLuminance, flLuminance, flLuminance, flLuminance );
+				SetPixelShaderConstantInternal( nReg, psReg.Base(), 1, false );
+			}
+			break;
+
+		case CBICMD_SETPIXELSHADERGLINTDAMPING:
+			{
+
+				int nReg = GetData<int>( pCmdBuf + sizeof( int ) );
+				pCmdBuf += 2 * sizeof( int );
+				float fGlintDamping = GetAmbientLightCubeLuminance( instance.m_pLightingState );
+
+				// Get luminance of ambient cube and saturate it
+				fGlintDamping = clamp( fGlintDamping, 0.0f, 1.0f );
+				const float fDimGlint = 0.01f;
+
+				// Remap so that glint damping smooth steps to zero for low luminances
+				if ( fGlintDamping > fDimGlint )
+					fGlintDamping = 1.0f;
+				else
+					fGlintDamping *= SimpleSplineRemapVal( fGlintDamping, 0.0f, fDimGlint, 0.0f, 1.0f );
+
+				Vector4D psReg( fGlintDamping, fGlintDamping, fGlintDamping, fGlintDamping );
+				SetPixelShaderConstantInternal( nReg, psReg.Base(), 1, false );
+			}
+			break;
+
+		case CBICMD_SETMODULATIONPIXELSHADERDYNAMICSTATE_LINEARCOLORSPACE:
+			{
+
+				// Skip the command.
+				pCmdBuf += sizeof( int );
+
+				// Read the register number that we want to write the colormodulation value into.
+				int nReg = GetData<int>( pCmdBuf ); 
+				pCmdBuf += sizeof( int ); // skip register
+
+				if ( config.nFullbright != 2 )
+				{
+					if ( USE_OLD_GAMMA )
+					{
+						// Read the material-level gamma color scale ($color2) 
+						Vector vSrcColor2 = GetData<Vector>( pCmdBuf );
+
+						// Get the per-model-instance diffuse modulation
+						const Vector4D &srcColor = instance.m_DiffuseModulation;
+
+						Vector4D color;
+
+						color[0] = srcColor[0] * vSrcColor2[0];
+						color[1] = srcColor[1] * vSrcColor2[1];
+						color[2] = srcColor[2] * vSrcColor2[2];
+						color[3] = srcColor[3];
+
+						color[0] = color[0] > 1.0f ? color[0] : GammaToLinear( color[0] );
+						color[1] = color[1] > 1.0f ? color[1] : GammaToLinear( color[1] );
+						color[2] = color[2] > 1.0f ? color[2] : GammaToLinear( color[2] );
+
+						SetPixelShaderConstantInternal( nReg, color.Base() );
+					}
+					else
+					{
+						// Read the material-level gamma color scale ($color2) 
+						fltx4 fl4DiffuseModulation = LoadUnalignedSIMD( &instance.m_DiffuseModulation );
+						fltx4 fl4Color = GammaToLinearExtendedSIMD( MulSIMD( LoadUnalignedSIMD( pCmdBuf ),fl4DiffuseModulation ) );
+
+						// restore alpha
+						fl4Color = SetWSIMD( fl4Color, fl4DiffuseModulation );
+
+						SetPixelShaderConstantInternal( nReg, (float const * ) &fl4Color );
+					}
+
+				}
+				else
+				{
+					Vector4D white( 1.0f, 1.0f, 1.0f, instance.m_DiffuseModulation[3] );
+					SetPixelShaderConstantInternal( nReg, white.Base() );
+				}
+				pCmdBuf += sizeof( Vector4D ); // skip vSrcColor2 Vector
+			}
+			break;
+
+		case CBICMD_SETMODULATIONPIXELSHADERDYNAMICSTATE:
+			{
+
+
+				// Skip the command.
+				pCmdBuf += sizeof( int );
+
+				// Read the register number that we want to write the colormodulation value into.
+				int nReg = GetData<int>( pCmdBuf ); 
+				pCmdBuf += sizeof( int ); // skip register
+
+				// Read the material-level gamma color scale ($color2) 
+				Vector vSrcColor2 = GetData<Vector>( pCmdBuf );
+				pCmdBuf += sizeof( Vector ); // skip vSrcColor2 Vector
+
+				if ( config.nFullbright != 2 )
+				{
+					// Get the per-model-instance diffuse modulation
+					const Vector4D &srcColor = instance.m_DiffuseModulation;
+
+					Vector4D color;
+
+					color[0] = srcColor[0] * vSrcColor2[0];
+					color[1] = srcColor[1] * vSrcColor2[1];
+					color[2] = srcColor[2] * vSrcColor2[2];
+					color[3] = srcColor[3];
+
+					SetPixelShaderConstantInternal( nReg, color.Base() );
+				}
+				else
+				{
+					Vector4D white( 1.0f, 1.0f, 1.0f, instance.m_DiffuseModulation[3] );
+					SetPixelShaderConstantInternal( nReg, white.Base() );
+				}
+
+			}
+			break;
+
+		case CBICMD_SETMODULATIONPIXELSHADERDYNAMICSTATE_IDENTITY:
+			{
+
+
+				// Skip the command.
+				pCmdBuf += sizeof( int );
+
+				// Read the register number that we want to write the colormodulation value into.
+				int nReg = GetData<int>( pCmdBuf ); 
+				pCmdBuf += sizeof( int ); // skip register
+
+				Vector4D color( 1.0f, 1.0f, 1.0f, instance.m_DiffuseModulation[3] );
+				SetPixelShaderConstantInternal( nReg, color.Base() );
+			}
+			break;
+
+		case CBICMD_SETMODULATIONPIXELSHADERDYNAMICSTATE_LINEARCOLORSPACE_LINEARSCALE:
+			{
+
+				// Skip the command.
+				pCmdBuf += sizeof( int );
+
+				// Read the register number that we want to write the colormodulation value into.
+				int nReg = GetData<int>( pCmdBuf ); 
+				pCmdBuf += sizeof( int ); // skip register
+
+
+				if ( config.nFullbright != 2 )
+				{
+					// Read the material-level gamma color scale ($color2) 
+					if ( USE_OLD_GAMMA )
+					{
+						Vector4D vSrcColor2 = GetData<Vector4D>( pCmdBuf );
+						pCmdBuf += sizeof( Vector4D ); // skip vSrcColor2 Vector
+
+						// Read the linear scale value
+						float scale = GetData<float>( pCmdBuf );
+						pCmdBuf += sizeof( float ); // skip the linear scale value
+
+						// Get the per-model-instance diffuse modulation
+						const Vector4D &srcColor = instance.m_DiffuseModulation;
+						Vector4D color;
+
+						color[0] = srcColor[0] * vSrcColor2[0];
+						color[1] = srcColor[1] * vSrcColor2[1];
+						color[2] = srcColor[2] * vSrcColor2[2];
+						color[3] = srcColor[3];
+
+						color[0] = ( color[0] > 1.0f ? color[0] : GammaToLinear( color[0] ) ) * scale;
+						color[1] = ( color[1] > 1.0f ? color[1] : GammaToLinear( color[1] ) ) * scale;
+						color[2] = ( color[2] > 1.0f ? color[2] : GammaToLinear( color[2] ) ) * scale;
+
+						SetPixelShaderConstantInternal( nReg, color.Base() );
+					}
+					else
+					{
+						fltx4 fl4SrcColor2 = LoadUnaligned3SIMD( pCmdBuf ); 
+						pCmdBuf += sizeof( Vector4D );
+
+						float scale = GetData<float>( pCmdBuf );
+						pCmdBuf += sizeof( float ); // skip the linear scale value
+
+						fltx4 fl4Scale = ReplicateX4( scale );
+						fltx4 fl4SrcColor = LoadUnalignedSIMD( &instance.m_DiffuseModulation );
+
+						fl4SrcColor2 = MulSIMD( GammaToLinearExtendedSIMD( MulSIMD( fl4SrcColor2, fl4SrcColor ) ), fl4Scale );
+						fl4SrcColor2 = SetWSIMD( fl4SrcColor2, fl4SrcColor ); // copy back the original unmodified alpha
+
+						SetPixelShaderConstantInternal( nReg, ( float const * ) &fl4SrcColor2 );
+					}
+				}
+				else
+				{
+					Vector4D white( 1.0f, 1.0f, 1.0f, instance.m_DiffuseModulation[3] );
+					SetPixelShaderConstantInternal( nReg, white.Base() );
+					pCmdBuf += sizeof( float ) + sizeof( Vector4D );
+				}
+
+			}
+			break;
+
+		case CBICMD_SETMODULATIONPIXELSHADERDYNAMICSTATE_LINEARSCALE:
+			{
+
+				// Skip the command.
+				pCmdBuf += sizeof( int );
+
+				// Read the register number that we want to write the colormodulation value into.
+				int nReg = GetData<int>( pCmdBuf ); 
+				pCmdBuf += sizeof( int ); // skip register
+
+				// Read the material-level gamma color scale ($color2) 
+				Vector vSrcColor2 = GetData<Vector>( pCmdBuf );
+				pCmdBuf += sizeof( Vector ); // skip vSrcColor2 Vector
+
+				// skip the pad
+				pCmdBuf += sizeof( float );
+
+				// Read the linear scale value
+				float scale = GetData<float>( pCmdBuf );
+				pCmdBuf += sizeof( float ); // skip the linear scale value
+
+				if (config.nFullbright != 2 )
+				{
+					// Get the per-model-instance diffuse modulation
+					const Vector4D &srcColor = instance.m_DiffuseModulation;
+					Vector4D color;
+
+					color[0] = srcColor[0] * vSrcColor2[0] * scale;
+					color[1] = srcColor[1] * vSrcColor2[1] * scale;
+					color[2] = srcColor[2] * vSrcColor2[2] * scale;
+					color[3] = srcColor[3];
+
+					SetPixelShaderConstantInternal( nReg, color.Base() );
+				}
+				else
+				{
+					Vector4D white( 1.0f, 1.0f, 1.0f, instance.m_DiffuseModulation[3] );
+					SetPixelShaderConstantInternal( nReg, white.Base() );
+				}
+			}
+			break;
+
+		case CBICMD_SETMODULATIONPIXELSHADERDYNAMICSTATE_LINEARSCALE_SCALEINW:
+			{
+
+				// Skip the command.
+				pCmdBuf += sizeof( int );
+
+				// Read the register number that we want to write the colormodulation value into.
+				int nReg = GetData<int>( pCmdBuf ); 
+				pCmdBuf += sizeof( int ); // skip register
+
+				// Read the material-level gamma color scale ($color2) 
+				Vector vSrcColor2 = GetData<Vector>( pCmdBuf );
+				pCmdBuf += sizeof( Vector ); // skip vSrcColor2 Vector
+
+				// Read the linear scale value
+				float scale = GetData<float>( pCmdBuf );
+				pCmdBuf += sizeof( float ); // skip the linear scale value
+
+				if ( config.nFullbright != 2 )
+				{
+					// Get the per-model-instance diffuse modulation
+					const Vector4D &srcColor = instance.m_DiffuseModulation;
+					Vector4D color;
+
+					color[0] = srcColor[0] * vSrcColor2[0] * scale;
+					color[1] = srcColor[1] * vSrcColor2[1] * scale;
+					color[2] = srcColor[2] * vSrcColor2[2] * scale;
+					color[3] = scale;
+
+					SetPixelShaderConstantInternal( nReg, color.Base() );
+				}
+				else
+				{
+					Vector4D vecScale( scale, scale, scale, scale );
+					SetPixelShaderConstantInternal( nReg, vecScale.Base() );
+				}
+			}
+			break;
+
+		case CBICMD_SETMODULATIONVERTEXSHADERDYNAMICSTATE:
+			{
+
+				// Skip the command.
+				pCmdBuf += sizeof( int );
+
+				// Read the register number that we want to write the colormodulation value into.
+				int nReg = GetData<int>( pCmdBuf ); 
+				pCmdBuf += sizeof( int ); // skip register
+
+				// Read the material-level gamma color scale ($color2) 
+				Vector vSrcColor2 = GetData<Vector>( pCmdBuf );
+				pCmdBuf += sizeof( Vector ); // skip vSrcColor2 Vector
+
+				if ( config.nFullbright != 2 )
+				{
+					// Get the per-model-instance diffuse modulation
+					const Vector4D &srcColor = instance.m_DiffuseModulation;
+
+					Vector4D color;
+
+					color[0] = srcColor[0] * vSrcColor2[0];
+					color[1] = srcColor[1] * vSrcColor2[1];
+					color[2] = srcColor[2] * vSrcColor2[2];
+					color[3] = srcColor[3];
+
+					SetVertexShaderConstantInternal( nReg, color.Base() );
+				}
+				else
+				{
+					Vector4D white( 1.0f, 1.0f, 1.0f, instance.m_DiffuseModulation[3] );
+					SetVertexShaderConstantInternal( nReg, white.Base() );
+				}
+			}
+			break;
+
+		case CBICMD_SETMODULATIONVERTEXSHADERDYNAMICSTATE_LINEARSCALE:
+			{
+
+				// Skip the command.
+				pCmdBuf += sizeof( int );
+
+				// Read the register number that we want to write the colormodulation value into.
+				int nReg = GetData<int>( pCmdBuf ); 
+				pCmdBuf += sizeof( int ); // skip register
+
+				// Read the material-level gamma color scale ($color2) 
+				Vector vSrcColor2 = GetData<Vector>( pCmdBuf );
+				pCmdBuf += sizeof( Vector ); // skip vSrcColor2 Vector
+
+				float flScale = GetData<float>( pCmdBuf );
+				pCmdBuf += sizeof( float );
+
+				if ( config.nFullbright != 2 )
+				{
+					// Get the per-model-instance diffuse modulation
+					const Vector4D &srcColor = instance.m_DiffuseModulation;
+
+					Vector4D color;
+
+					color[0] = srcColor[0] * vSrcColor2[0] * flScale;
+					color[1] = srcColor[1] * vSrcColor2[1] * flScale;
+					color[2] = srcColor[2] * vSrcColor2[2] * flScale;
+					color[3] = srcColor[3];
+
+					SetVertexShaderConstantInternal( nReg, color.Base() );
+				}
+				else
+				{
+					Vector4D white( 1.0f, 1.0f, 1.0f, instance.m_DiffuseModulation[3] );
+					SetVertexShaderConstantInternal( nReg, white.Base() );
+				}
+			}
+			break;
+
+#ifndef NDEBUG
+		default:
+			Warning( " unknown instance command %d last = %d\n", nCmd, GetData<int>( pLastCmd ) );
+			DebuggerBreak();
+			break;
+#endif
+		}
+		pLastCmd = pCmd;
+	}
+}
+
+#endif //_PS3
 
 //-----------------------------------------------------------------------------
 // Sets state on the board related to the texture state
 //-----------------------------------------------------------------------------
-void CShaderAPIDx8::SetTextureState( Sampler_t sampler, ShaderAPITextureHandle_t hTexture, bool force )
+
+#ifndef _PS3
+
+void CShaderAPIDx8::SetTextureState( Sampler_t sampler, TextureBindFlags_t nBindFlags, ShaderAPITextureHandle_t hTexture, bool force )
 {
 	// Get the dynamic texture info
 	SamplerState_t &samplerState = SamplerState( sampler );
 
 	// Set the texture state, but only if it changes
-	if ( ( samplerState.m_BoundTexture == hTexture ) && !force )
+	if ( ( samplerState.m_BoundTexture == hTexture ) && ( LastSetTextureBindFlags( sampler ) == nBindFlags ) && !force )
 		return;
 
 	// Disabling texturing
@@ -6803,33 +10073,49 @@ void CShaderAPIDx8::SetTextureState( Sampler_t sampler, ShaderAPITextureHandle_t
 
 	samplerState.m_BoundTexture = hTexture;
 
-	// Don't set this if we're disabled
-	if ( !samplerState.m_TextureEnable )
-		return;
-
 	RECORD_COMMAND( DX8_SET_TEXTURE, 3 );
-	RECORD_INT( stage );
+	RECORD_INT( sampler );
 	RECORD_INT( hTexture );
 	RECORD_INT( GetTexture( hTexture).m_CurrentCopy );
 
 	IDirect3DBaseTexture *pTexture = CShaderAPIDx8::GetD3DTexture( hTexture );
-
+	
 #if defined( _X360 )
-	DWORD linearFormatBackup = pTexture->Format.dword[0]; 
-	if ( samplerState.m_SRGBReadEnable ) 
+	GPUTEXTURE_FETCH_CONSTANT linearFormatBackup = pTexture->Format;
+
+	if ( nBindFlags & TEXTURE_BINDFLAGS_SRGBREAD )
 	{
-		// convert to srgb format for the bind. This effectively emulates the old srgb read sampler state
-		pTexture->Format.SignX = 
-			pTexture->Format.SignY = 
-			pTexture->Format.SignZ = 3; 
+#if defined( CSTRIKE15 )
+
+		// [mariod] - no PWL textures
+		// TODO - ensure all textures coming through here are set appropriately for shader srgb reads (not all shaders currently set to do this)
+#else
+		// Use X360 HW path
+		if ( r_use16bit_srgb_sampling.GetBool() )
+		{
+			// Convert the GPU format to an EXPAND or AS_16 higher precision variant if one is available, and enable GAMMA.
+			ConvertTextureToAs16SRGBFormat( reinterpret_cast< D3DTexture * >( pTexture ) );
+		}
+		else 
+		{
+			// convert to srgb format for the bind. This effectively emulates the old srgb read sampler state
+			pTexture->Format.SignX = pTexture->Format.SignY = pTexture->Format.SignZ = 3; 
+		}
+#endif
 	}
+
+#else
+	SetSamplerState( sampler, D3DSAMP_SRGBTEXTURE, ( nBindFlags & TEXTURE_BINDFLAGS_SRGBREAD ) != 0 );
 #endif
 
+	samplerState.m_nTextureBindFlags = nBindFlags;
+
+	TouchTexture( sampler, pTexture );
 	Dx9Device()->SetTexture( sampler, pTexture );
 
 #if defined( _X360 )
 	// put the format back in linear space
-	pTexture->Format.dword[0] = linearFormatBackup;
+	pTexture->Format = linearFormatBackup;
 #endif
 
 	Texture_t &tex = GetTexture( hTexture );
@@ -6852,37 +10138,53 @@ void CShaderAPIDx8::SetTextureState( Sampler_t sampler, ShaderAPITextureHandle_t
 		++tex.m_nTimesBoundThisFrame;
 
 	tex.m_nTimesBoundMax = MAX( tex.m_nTimesBoundMax, tex.m_nTimesBoundThisFrame );
+	
+	MaterialSystem_Config_t &config = ShaderUtil()->GetConfig();
+	bool noFilter = config.bFilterTextures == 0;
+	bool noMipFilter = config.bMipMapTextures == 0;
 
-	static MaterialSystem_Config_t &materialSystemConfig = ShaderUtil()->GetConfig();
+	// Set SHADOWFILTER or ATI Fetch4
+#if defined ( DX_TO_GL_ABSTRACTION ) && !defined( _PS3 )
+	const uint nNewShadowFilterState = ( nBindFlags & TEXTURE_BINDFLAGS_SHADOWDEPTH ) ? 1 : 0;
+	SETSAMPLESTATEANDMIRROR( sampler, samplerState, D3DSAMP_SHADOWFILTER, m_bShadowFilterEnable, nNewShadowFilterState );
+#elif !defined( PLATFORM_X360 )
+	if ( g_pHardwareConfig->SupportsFetch4() )
+	{
+		const uint nNewFetch4State = ( nBindFlags & TEXTURE_BINDFLAGS_SHADOWDEPTH ) ? ATI_FETCH4_ENABLE : ATI_FETCH4_DISABLE;
+		SETSAMPLESTATEANDMIRROR( sampler, samplerState, ATISAMP_FETCH4, m_bShadowFilterEnable, nNewFetch4State );
 
-	D3DTEXTUREFILTERTYPE minFilter = tex.m_MinFilter;
-	D3DTEXTUREFILTERTYPE magFilter = tex.m_MagFilter;
-	D3DTEXTUREFILTERTYPE mipFilter = tex.m_MipFilter;
-	int finestMipmapLevel		   = tex.m_FinestMipmapLevel;
-	float lodBias				   = tex.m_LodBias;
+		if ( nBindFlags & TEXTURE_BINDFLAGS_SHADOWDEPTH )
+		{
+			noFilter = true;
+			noMipFilter = true;
+		}
+	}
+#endif
 
-	if ( materialSystemConfig.bMipMapTextures == 0 )
+	if ( nBindFlags & TEXTURE_BINDFLAGS_NOMIP )
+	{
+		noMipFilter = true;
+	}
+
+	D3DTEXTUREFILTERTYPE minFilter = noFilter ? D3DTEXF_NONE : D3DTEXTUREFILTERTYPE(tex.m_MinFilter);
+	D3DTEXTUREFILTERTYPE magFilter = noFilter ? D3DTEXF_NONE : D3DTEXTUREFILTERTYPE(tex.m_MagFilter);
+	D3DTEXTUREFILTERTYPE mipFilter = D3DTEXTUREFILTERTYPE(tex.m_MipFilter);
+	if ( noMipFilter )
 	{
 		mipFilter = D3DTEXF_NONE;
 	} 
-
-	if ( materialSystemConfig.bFilterTextures == 0 && tex.m_NumLevels > 1 ) 
+	else if ( noFilter )
 	{
-		minFilter = D3DTEXF_NONE;
-		magFilter = D3DTEXF_NONE;
 		mipFilter = D3DTEXF_POINT;
 	}
 
-	D3DTEXTUREADDRESS uTexWrap = tex.m_UTexWrap;
-	D3DTEXTUREADDRESS vTexWrap = tex.m_VTexWrap;
-	D3DTEXTUREADDRESS wTexWrap = tex.m_WTexWrap;
-
-	// For now do this the old way on OSX since the dxabstract layer doesn't support SetSamplerStates
-	// ###OSX### punting on OSX for now
-#if DX_TO_GL_ABSTRACTION && !OSX
+	D3DTEXTUREADDRESS uTexWrap = D3DTEXTUREADDRESS(tex.m_UTexWrap);
+	D3DTEXTUREADDRESS vTexWrap = D3DTEXTUREADDRESS(tex.m_VTexWrap);
+	D3DTEXTUREADDRESS wTexWrap = D3DTEXTUREADDRESS(tex.m_WTexWrap);
+		
+#if DX_TO_GL_ABSTRACTION
 	if ( ( samplerState.m_MinFilter != minFilter ) || ( samplerState.m_MagFilter != magFilter ) || ( samplerState.m_MipFilter != mipFilter ) ||
-		( samplerState.m_UTexWrap != uTexWrap ) || ( samplerState.m_VTexWrap != vTexWrap ) || ( samplerState.m_WTexWrap != wTexWrap ) || 
-		( samplerState.m_FinestMipmapLevel != finestMipmapLevel ) || ( samplerState.m_LodBias != lodBias ) )
+		 ( samplerState.m_UTexWrap != uTexWrap ) || ( samplerState.m_VTexWrap != vTexWrap ) || ( samplerState.m_WTexWrap != wTexWrap ) )
 	{
 		samplerState.m_UTexWrap = uTexWrap;
 		samplerState.m_VTexWrap = vTexWrap;
@@ -6890,9 +10192,7 @@ void CShaderAPIDx8::SetTextureState( Sampler_t sampler, ShaderAPITextureHandle_t
 		samplerState.m_MinFilter = minFilter;
 		samplerState.m_MagFilter = magFilter;
 		samplerState.m_MipFilter = mipFilter;
-		samplerState.m_FinestMipmapLevel = finestMipmapLevel;
-		samplerState.m_LodBias = lodBias;
-		Dx9Device()->SetSamplerStates( sampler, uTexWrap, vTexWrap, wTexWrap, minFilter, magFilter, mipFilter, finestMipmapLevel, lodBias );
+		Dx9Device()->SetSamplerStates( sampler, uTexWrap, vTexWrap, wTexWrap, minFilter, magFilter, mipFilter );
 	}
 #else
 	SETSAMPLESTATEANDMIRROR( sampler, samplerState, D3DSAMP_ADDRESSU, m_UTexWrap, uTexWrap );
@@ -6901,24 +10201,83 @@ void CShaderAPIDx8::SetTextureState( Sampler_t sampler, ShaderAPITextureHandle_t
 	SETSAMPLESTATEANDMIRROR( sampler, samplerState, D3DSAMP_MINFILTER, m_MinFilter, minFilter );
 	SETSAMPLESTATEANDMIRROR( sampler, samplerState, D3DSAMP_MAGFILTER, m_MagFilter, magFilter );
 	SETSAMPLESTATEANDMIRROR( sampler, samplerState, D3DSAMP_MIPFILTER, m_MipFilter, mipFilter );
-	SETSAMPLESTATEANDMIRROR( sampler, samplerState, D3DSAMP_MAXMIPLEVEL, m_FinestMipmapLevel, finestMipmapLevel );
-	SETSAMPLESTATEANDMIRROR_FLOAT( sampler, samplerState, D3DSAMP_MIPMAPLODBIAS, m_LodBias, lodBias );
-	
 #endif
 }
 
-void CShaderAPIDx8::BindTexture( Sampler_t sampler, ShaderAPITextureHandle_t textureHandle )
+void CShaderAPIDx8::SetTextureFilterMode( Sampler_t sampler, TextureFilterMode_t nMode )
+{
+	SamplerState_t &samplerState = SamplerState( sampler );
+	D3DTEXTUREFILTERTYPE minFilter = samplerState.m_MinFilter;
+	D3DTEXTUREFILTERTYPE magFilter = samplerState.m_MagFilter;
+	D3DTEXTUREFILTERTYPE mipFilter = samplerState.m_MipFilter;
+	
+
+	switch( nMode )
+	{
+		case TFILTER_MODE_POINTSAMPLED:
+			minFilter = D3DTEXF_POINT;
+			magFilter = D3DTEXF_POINT;
+			mipFilter = D3DTEXF_POINT;
+			break;
+	}
+	SETSAMPLESTATEANDMIRROR( sampler, samplerState, D3DSAMP_MINFILTER, m_MinFilter, minFilter );
+	SETSAMPLESTATEANDMIRROR( sampler, samplerState, D3DSAMP_MAGFILTER, m_MagFilter, magFilter );
+	SETSAMPLESTATEANDMIRROR( sampler, samplerState, D3DSAMP_MIPFILTER, m_MipFilter, mipFilter );
+	
+}
+
+void CShaderAPIDx8::BindTexture( Sampler_t sampler, TextureBindFlags_t nBindFlags, ShaderAPITextureHandle_t textureHandle )
 {
 	LOCK_SHADERAPI();
-	SetTextureState( sampler, textureHandle );
+
+	// A little trickery to deal with instance-based rendering.
+	// BindTexture calls are expected to come from shaders. We need to sniff the
+	// state sets here to see if any bind are set to the current local env cubemap.
+	// If so, we need to keep track of that so that when we change per-instance
+	// state, we know that we need to change these textures. Each time we start
+	// rendering a new pass, we reset the bitfield indicating which samplers to modify.
+	if ( IsRenderingInstances() )
+	{
+		int nMask = ( 1 << sampler );
+		m_DynamicState.m_nLocalEnvCubemapSamplers &= ~nMask;
+		m_DynamicState.m_nLightmapSamplers &= ~nMask;
+		m_DynamicState.m_nPaintmapSamplers &= ~nMask;
+
+		bool bIsLocalEnvCubemap = ( textureHandle == m_StdTextureHandles[TEXTURE_LOCAL_ENV_CUBEMAP] );
+		if ( bIsLocalEnvCubemap )
+		{
+			m_DynamicState.m_nLocalEnvCubemapSamplers |= nMask;
+			SetLastSetTextureBindFlags( sampler, nBindFlags );
+			return;
+		}
+
+		bool bIsLightmap = ( textureHandle == m_StdTextureHandles[TEXTURE_LIGHTMAP] );
+		if ( bIsLightmap )
+		{
+			m_DynamicState.m_nLightmapSamplers |= nMask;
+			SetLastSetTextureBindFlags( sampler, nBindFlags );
+			return;
+		}
+
+		bool bIsPaintmap = ( textureHandle == m_StdTextureHandles[TEXTURE_PAINT] );
+		if ( bIsPaintmap )
+		{
+			m_DynamicState.m_nPaintmapSamplers |= nMask;
+			SetLastSetTextureBindFlags( sampler, nBindFlags );
+			return;
+		}
+	}
+
+	SetTextureState( sampler, nBindFlags, textureHandle );
 }
+
+#endif
 
 void CShaderAPIDx8::BindVertexTexture( VertexTextureSampler_t nStage, ShaderAPITextureHandle_t textureHandle )
 {
-	Assert( g_pMaterialSystemHardwareConfig->GetVertexTextureCount() != 0 );
+	Assert( g_pMaterialSystemHardwareConfig->GetVertexSamplerCount() != 0 );
 	LOCK_SHADERAPI();
-	ADD_VERTEX_TEXTURE_FUNC( COMMIT_PER_PASS, COMMIT_VERTEX_SHADER, 
-		CommitVertexTextures, nStage, m_BoundTexture, textureHandle );
+	ADD_VERTEX_TEXTURE_FUNC( COMMIT_PER_PASS, CommitVertexTextures, nStage, m_BoundVertexTexture, textureHandle );
 }
 
 
@@ -6929,7 +10288,7 @@ void CShaderAPIDx8::BindVertexTexture( VertexTextureSampler_t nStage, ShaderAPIT
 //-----------------------------------------------------------------------------
 // Computes stats info for a texture
 //-----------------------------------------------------------------------------
-void CShaderAPIDx8::ComputeStatsInfo( ShaderAPITextureHandle_t hTexture, bool isCubeMap, bool isVolumeTexture )
+void CShaderAPIDx8::ComputeStatsInfo( ShaderAPITextureHandle_t hTexture, bool bIsCubeMap, bool isVolumeTexture )
 {
 	Texture_t &textureData = GetTexture( hTexture );
 
@@ -6945,7 +10304,7 @@ void CShaderAPIDx8::ComputeStatsInfo( ShaderAPITextureHandle_t hTexture, bool is
 
 	if ( IsPC() || !IsX360() )
 	{
-		if ( isCubeMap )
+		if ( bIsCubeMap )
 		{
 			IDirect3DCubeTexture* pTex = static_cast<IDirect3DCubeTexture*>(pD3DTex);
 			if ( !pTex )
@@ -7009,11 +10368,11 @@ void CShaderAPIDx8::ComputeStatsInfo( ShaderAPITextureHandle_t hTexture, bool is
 #endif
 }
 
-static D3DFORMAT ComputeFormat( IDirect3DBaseTexture* pTexture, bool isCubeMap )
+static D3DFORMAT ComputeFormat( IDirect3DBaseTexture* pTexture, bool bIsCubeMap )
 {
 	Assert( pTexture );
 	D3DSURFACE_DESC desc;
-	if (isCubeMap)
+	if ( bIsCubeMap )
 	{
 		IDirect3DCubeTexture* pTex = static_cast<IDirect3DCubeTexture*>(pTexture);
 		HRESULT hr = pTex->GetLevelDesc( 0, &desc );
@@ -7033,8 +10392,11 @@ ShaderAPITextureHandle_t CShaderAPIDx8::CreateDepthTexture(
 	int width, 
 	int height, 
 	const char *pDebugName,
-	bool bTexture )
+	bool bTexture, 
+	bool bAliasDepthSurfaceOverColorX360 )
 {
+	bAliasDepthSurfaceOverColorX360;
+
 	LOCK_SHADERAPI();
 
 	ShaderAPITextureHandle_t i = CreateTextureHandle();
@@ -7060,7 +10422,7 @@ ShaderAPITextureHandle_t CShaderAPIDx8::CreateDepthTexture(
 	pTexture->m_NumCopies = 1;
 	pTexture->m_CurrentCopy = 0;
 
-	ImageFormat renderFormat = FindNearestSupportedFormat( renderTargetFormat, false, true, false );
+	ImageFormat renderFormat = ImageLoader::D3DFormatToImageFormat( FindNearestSupportedFormat( renderTargetFormat, false, true, false ) );
 #if defined( _X360 )
 	D3DFORMAT nDepthFormat = ReverseDepthOnX360() ? D3DFMT_D24FS8 : D3DFMT_D24S8;
 #else
@@ -7089,9 +10451,27 @@ ShaderAPITextureHandle_t CShaderAPIDx8::CreateDepthTexture(
 		D3DFORMAT backBufferFormat = ImageLoader::ImageFormatToD3DFormat( g_pShaderDevice->GetBackBufferFormat() );
 		// immediately follows back buffer in EDRAM
 		D3DSURFACE_PARAMETERS surfParameters;
-		surfParameters.Base = 2*XGSurfaceSize( backWidth, backHeight, backBufferFormat, D3DMULTISAMPLE_NONE );
+		V_memset( &surfParameters, 0, sizeof( surfParameters ) );
+
+		// FIXME: The multiply by two below seems suspect. I believe it's to account for size of the color buffer AND the size of the 
+		// depth buffer, but it assumes that both buffers always have the same size. This is probably the case now, but might not be in the future.
+		surfParameters.Base = 2*XGSurfaceSize( backWidth, backHeight, backBufferFormat, g_TextureHeap.GetBackBufferMultiSampleType() );
+
+		if ( !bAliasDepthSurfaceOverColorX360 )
+		{
+			// If we don't do this, the color RT and depth RT will be co-located in EDRAM
+			surfParameters.Base += XGSurfaceSize( width, height, ImageLoader::ImageFormatToD3DFormat( renderFormat ), D3DMULTISAMPLE_NONE );
+		}
+
 		surfParameters.ColorExpBias = 0;
 		surfParameters.HierarchicalZBase = 0;
+		surfParameters.HiZFunc = D3DHIZFUNC_DEFAULT;
+		if ( XGHierarchicalZSize( backWidth, backHeight, D3DMULTISAMPLE_NONE ) + XGHierarchicalZSize( width, height, D3DMULTISAMPLE_NONE ) > GPU_HIERARCHICAL_Z_TILES )
+		{
+			// overflow, disable HiZ
+			surfParameters.HierarchicalZBase = 0xFFFFFFFF;
+		}
+
 		hr = Dx9Device()->CreateDepthStencilSurface(
 			width, height, format, multisampleType, 0, TRUE, &pTexture->GetDepthStencilSurface(), &surfParameters );
 #else
@@ -7122,22 +10502,8 @@ ShaderAPITextureHandle_t CShaderAPIDx8::CreateDepthTexture(
 		Assert( 0 );
 	}
 
-#ifdef _XBOX
-	D3DSURFACE_DESC desc;
-	hr = pTexture->GetDepthStencilSurface()->GetDesc( &desc );
-	Assert( !FAILED( hr ) );
-
-	pTexture->m_nTimesBoundThisFrame = 0;
-	pTexture->m_StaticSizeBytes  = desc.Size;
-	pTexture->m_DynamicSizeBytes = 0;
-	pTexture->m_DebugName        = pDebugName;
-	pTexture->m_TextureGroupName = TEXTURE_GROUP_RENDER_TARGET;
-	pTexture->SetImageFormat( IMAGE_FORMAT_UNKNOWN );
-#endif
-
 	return i;
 }
-
 
 // FIXME!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 // Could keep a free-list for this instead of linearly searching.  We
@@ -7145,40 +10511,55 @@ ShaderAPITextureHandle_t CShaderAPIDx8::CreateDepthTexture(
 // FIXME!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 ShaderAPITextureHandle_t CShaderAPIDx8::CreateTextureHandle( void )
 {
-	ShaderAPITextureHandle_t handle;
-	CreateTextureHandles( &handle, 1 );
+	ShaderAPITextureHandle_t handle = INVALID_SHADERAPI_TEXTURE_HANDLE;
+	CreateTextureHandles( &handle, 1, false );
 	return handle;
 }
 
-void CShaderAPIDx8::CreateTextureHandles( ShaderAPITextureHandle_t *handles, int count )
+void CShaderAPIDx8::CreateTextureHandles( ShaderAPITextureHandle_t *pHandles, int nCount, bool bReuseHandles )
 {
-	TM_ZONE_DEFAULT( TELEMETRY_LEVEL0 );
-
-	if ( count <= 0 )
+	if ( nCount <= 0 )
 		return;
 
 	MEM_ALLOC_CREDIT();
 
-	int idxCreating = 0;
 	ShaderAPITextureHandle_t hTexture;
 
+	if ( bReuseHandles )
 	{
-		tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s - Search", __FUNCTION__ );
-
-		for ( hTexture = m_Textures.Head(); hTexture != m_Textures.InvalidIndex(); hTexture = m_Textures.Next( hTexture ) )
+		int nValid = 0;
+		for ( int i = 0; i < nCount; i++ )
 		{
-			if ( !( m_Textures[hTexture].m_Flags & Texture_t::IS_ALLOCATED ) )
+			// prior handles were freed and caller wants them back
+			hTexture = pHandles[i];
+			if ( m_Textures.IsValidIndex( hTexture) && !( m_Textures[hTexture].m_Flags & Texture_t::IS_ALLOCATED ) )
 			{
-				handles[ idxCreating ++ ] = hTexture;
-				if ( idxCreating >= count )
-					return;
+				nValid++;
 			}
+		}
+
+		if ( nValid == nCount )
+		{
+			// all prior handles are available and can be re-used
+			return;
 		}
 	}
 
-	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s - Add", __FUNCTION__ );
-	while ( idxCreating < count )
-		handles[ idxCreating ++ ] = m_Textures.AddToTail();
+	int idxCreating = 0;
+	for ( hTexture = m_Textures.Head(); hTexture != m_Textures.InvalidIndex(); hTexture = m_Textures.Next( hTexture ) )
+	{
+		if ( !( m_Textures[hTexture].m_Flags & Texture_t::IS_ALLOCATED ) )
+		{
+			pHandles[ idxCreating++ ] = hTexture;
+			if ( idxCreating >= nCount )
+				return;
+		}
+	}
+
+	while ( idxCreating < nCount )
+	{
+		pHandles[ idxCreating++ ] = m_Textures.AddToTail();
+	}
 }
 
 //-----------------------------------------------------------------------------
@@ -7214,64 +10595,41 @@ void CShaderAPIDx8::CreateTextures(
 	const char *pDebugName,
 	const char *pTextureGroupName )
 {
-	TM_ZONE_DEFAULT( TELEMETRY_LEVEL0 );
-
 	LOCK_SHADERAPI();
-
-	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s - PostLock", __FUNCTION__ );
-
-	Assert( this == g_pShaderAPI );
 
 	if ( depth == 0 )
 	{
 		depth = 1;
 	}
 
-	bool isCubeMap = (creationFlags & TEXTURE_CREATE_CUBEMAP) != 0;
-	bool isRenderTarget = (creationFlags & TEXTURE_CREATE_RENDERTARGET) != 0;
-	bool managed = (creationFlags & TEXTURE_CREATE_MANAGED) != 0;
-	bool isDepthBuffer = (creationFlags & TEXTURE_CREATE_DEPTHBUFFER) != 0;
-	bool isDynamic = (creationFlags & TEXTURE_CREATE_DYNAMIC) != 0;
-	bool isSRGB = (creationFlags & TEXTURE_CREATE_SRGB) != 0;			// for Posix/GL only... not used here ?
-
-#if defined(IS_WINDOWS_PC) && defined(SHADERAPIDX9)
-	extern bool g_ShaderDeviceUsingD3D9Ex;
-	if ( g_ShaderDeviceUsingD3D9Ex && managed )
-	{
-		// Managed textures aren't available under D3D9Ex, but we never lose
-		// texture data, so it's ok to use the default pool. Really. We can't
-		// lock default-pool textures like we normally would to upload, but we
-		// have special logic to blit full updates via D3DX helper functions
-		// in D3D9Ex mode (see texturedx8.cpp)
-		managed = false;
-		creationFlags &= ~TEXTURE_CREATE_MANAGED;
-	}
-#endif
+	bool bIsCubeMap = ( creationFlags & TEXTURE_CREATE_CUBEMAP ) != 0;
+	bool bIsRenderTarget = ( creationFlags & TEXTURE_CREATE_RENDERTARGET ) != 0;
+	bool bIsManaged = ( creationFlags & TEXTURE_CREATE_MANAGED ) != 0;
+	bool bIsDepthBuffer = ( creationFlags & TEXTURE_CREATE_DEPTHBUFFER ) != 0;
+	bool bIsDynamic = ( creationFlags & TEXTURE_CREATE_DYNAMIC ) != 0;
+	bool isSRGB = ( creationFlags & TEXTURE_CREATE_SRGB ) != 0;			// for Posix/GL only... not used here ?
+	bool bReuseHandles = ( creationFlags & TEXTURE_CREATE_REUSEHANDLES ) != 0;
 
 	// Can't be both managed + dynamic. Dynamic is an optimization, but 
 	// if it's not managed, then we gotta do special client-specific stuff
 	// So, managed wins out!
-	if ( managed )
+	if ( bIsManaged )
 	{
-		creationFlags &= ~TEXTURE_CREATE_DYNAMIC;
-		isDynamic = false;
+		bIsDynamic = false;
 	}
 
-	
-
 	// Create a set of texture handles
-	CreateTextureHandles( pHandles, count );
+	CreateTextureHandles( pHandles, count, bReuseHandles );
 	Texture_t **arrTxp = ( Texture_t ** ) stackalloc( count * sizeof( Texture_t * ) );
 
 	unsigned short usSetFlags = 0;
-	usSetFlags |= ( IsPosix() || ( creationFlags & (TEXTURE_CREATE_DYNAMIC | TEXTURE_CREATE_MANAGED) ) ) ? Texture_t::IS_LOCKABLE : 0;
-	usSetFlags |= ( creationFlags & TEXTURE_CREATE_VERTEXTEXTURE) ? Texture_t::IS_VERTEX_TEXTURE : 0;
-#if defined( _X360 )
+	usSetFlags |= ( creationFlags & TEXTURE_CREATE_VERTEXTEXTURE)  ? Texture_t::IS_VERTEX_TEXTURE : 0;
+#if defined( _GAMECONSOLE )
 	usSetFlags |= ( creationFlags & TEXTURE_CREATE_RENDERTARGET ) ? Texture_t::IS_RENDER_TARGET : 0;
 	usSetFlags |= ( creationFlags & TEXTURE_CREATE_CANCONVERTFORMAT ) ? Texture_t::CAN_CONVERT_FORMAT : 0;
+	usSetFlags |= ( creationFlags & TEXTURE_CREATE_PWLCORRECTED ) ? Texture_t::IS_PWL_CORRECTED : 0;
+	usSetFlags |= ( creationFlags & TEXTURE_CREATE_ERROR ) ? Texture_t::IS_ERROR_TEXTURE : 0;
 #endif
-
-	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s - CreateFrames", __FUNCTION__ );
 
 	for ( int idxFrame = 0; idxFrame < count; ++ idxFrame )
 	{
@@ -7293,30 +10651,26 @@ void CShaderAPIDx8::CreateTextures(
 		RECORD_INT( width );
 		RECORD_INT( height );
 		RECORD_INT( depth );		// depth for volume textures
-		RECORD_INT( ImageLoader::ImageFormatToD3DFormat( FindNearestSupportedFormat(dstImageFormat)) );
+		RECORD_INT( FindNearestSupportedFormat(dstImageFormat) );
 		RECORD_INT( numMipLevels );
-		RECORD_INT( isCubeMap );
+		RECORD_INT( bIsCubeMap );
 		RECORD_INT( numCopies <= 1 ? 1 : numCopies );
-		RECORD_INT( isRenderTarget ? 1 : 0 );
-		RECORD_INT( managed );
-		RECORD_INT( isDepthBuffer ? 1 : 0 );
-		RECORD_INT( isDynamic ? 1 : 0 );
+		RECORD_INT( bIsRenderTarget ? 1 : 0 );
+		RECORD_INT( bIsManaged );
+		RECORD_INT( bIsDepthBuffer ? 1 : 0 );
+		RECORD_INT( bIsDynamic ? 1 : 0 );
 
 		IDirect3DBaseTexture* pD3DTex;
 
 		// Set the initial texture state
 		if ( numCopies <= 1 )
 		{
-			tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s - CreateD3DTexture", __FUNCTION__ );
-
 			pTexture->m_NumCopies = 1;
 			pD3DTex = CreateD3DTexture( width, height, depth, dstImageFormat, numMipLevels, creationFlags, (char*)pDebugName );
 			pTexture->SetTexture( pD3DTex );
 		}
 		else
 		{
-			tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s - CreateD3DTexture", __FUNCTION__ );
-
 			pTexture->m_NumCopies = numCopies;
 			{
 // X360TEMP
@@ -7357,6 +10711,15 @@ void CShaderAPIDx8::CreateTextures(
 			{
 				pTexture->m_Flags |= Texture_t::IS_LINEAR;
 			}
+
+			if ( creationFlags & TEXTURE_CREATE_CACHEABLE ) 
+			{
+				// actual caching ability was resolved by the texture heap
+				if ( g_TextureHeap.IsTextureCacheManaged( pD3DTex ) )
+				{
+					pTexture->m_Flags |= Texture_t::IS_CACHEABLE;
+				}
+			}
 		}
 #endif
 
@@ -7365,11 +10728,11 @@ void CShaderAPIDx8::CreateTextures(
 		pTexture->m_VTexWrap = D3DTADDRESS_CLAMP;
 		pTexture->m_WTexWrap = D3DTADDRESS_CLAMP;
 
-		if ( isRenderTarget )
+		if ( bIsRenderTarget )
 		{
-#if !defined( _X360 )
-			if ( ( dstImageFormat == IMAGE_FORMAT_NV_INTZ   ) || ( dstImageFormat == IMAGE_FORMAT_NV_RAWZ   ) || 
-				 ( dstImageFormat == IMAGE_FORMAT_ATI_DST16 ) || ( dstImageFormat == IMAGE_FORMAT_ATI_DST24 ) )
+#if !defined( _X360 ) && !defined( _PS3 )
+			if ( ( g_pHardwareConfig->Caps().m_VendorID == VENDORID_ATI ) &&  
+				 ( ( dstImageFormat == IMAGE_FORMAT_D16_SHADOW ) || ( dstImageFormat == IMAGE_FORMAT_D24X8_SHADOW ) ) )
 			{
 				pTexture->m_MinFilter = pTexture->m_MagFilter = D3DTEXF_POINT;
 			}
@@ -7390,7 +10753,7 @@ void CShaderAPIDx8::CreateTextures(
 		}
 		pTexture->m_SwitchNeeded = false;
 		
-		ComputeStatsInfo( pHandles[idxFrame], isCubeMap, (depth > 1) );
+		ComputeStatsInfo( pHandles[idxFrame], bIsCubeMap, (depth > 1) );
 		SetupTextureGroup( pHandles[idxFrame], pTextureGroupName );
 	}
 }
@@ -7498,7 +10861,8 @@ void CShaderAPIDx8::DeleteD3DTexture( ShaderAPITextureHandle_t hTexture )
 	if ( texture.m_pTextureGroupCounterGlobal )
 	{
 		*texture.m_pTextureGroupCounterGlobal -= texture.GetMemUsage();
-		Assert( *texture.m_pTextureGroupCounterGlobal >= 0 );
+		// <sergiy> this is an old assert that Mike Dussault added in 2002. It affects computation of free memory. Iestyn said it's better to keep the assert in to find out what's wrong with free memory computation.
+		Assert( *texture.m_pTextureGroupCounterGlobal >= 0 ); 
 		texture.m_pTextureGroupCounterGlobal = NULL;
 	}
 
@@ -7506,7 +10870,9 @@ void CShaderAPIDx8::DeleteD3DTexture( ShaderAPITextureHandle_t hTexture )
 	for( int i=0 ; i < ARRAYSIZE( m_StdTextureHandles ) ; i++ )
 	{
 		if ( m_StdTextureHandles[i] == hTexture )
+		{
 			m_StdTextureHandles[i] = INVALID_SHADERAPI_TEXTURE_HANDLE;
+		}
 	}
 
 }
@@ -7525,17 +10891,17 @@ void CShaderAPIDx8::UnbindTexture( ShaderAPITextureHandle_t hTexture )
 			// Gotta set this here because INVALID_SHADERAPI_TEXTURE_HANDLE means don't actually
 			// set bound texture (it's used for disabling texturemapping)
 			SamplerState( unit ).m_BoundTexture = INVALID_SHADERAPI_TEXTURE_HANDLE;
-			SetTextureState( (Sampler_t)unit, INVALID_SHADERAPI_TEXTURE_HANDLE );
+			SetTextureState( (Sampler_t)unit, TEXTURE_BINDFLAGS_NONE, INVALID_SHADERAPI_TEXTURE_HANDLE );
 		}
 	}
 
-	int nVertexTextureCount = g_pHardwareConfig->GetVertexTextureCount();
-	for ( int nSampler = 0; nSampler < nVertexTextureCount; ++nSampler )
+	int nVertexSamplerCount = g_pHardwareConfig->GetVertexSamplerCount();
+	for ( int nSampler = 0; nSampler < nVertexSamplerCount; ++nSampler )
 	{
-		if ( hTexture == m_DynamicState.m_VertexTextureState[ nSampler ].m_BoundTexture )
+		if ( hTexture == m_DynamicState.m_VertexTextureState[ nSampler ].m_BoundVertexTexture )
 		{
 			// Gotta set this here because INVALID_SHADERAPI_TEXTURE_HANDLE means don't actually
-			// set bound texture (it's used for disabling texturemapping)
+			// set bound texture (it's used for disabling texture mapping)
 			BindVertexTexture( (VertexTextureSampler_t)nSampler, INVALID_SHADERAPI_TEXTURE_HANDLE );
 		}
 	}
@@ -7577,7 +10943,7 @@ void CShaderAPIDx8::WriteTextureToFile( ShaderAPITextureHandle_t hTexture, const
 
 	// Get the level of the texture we want to read from
 	IDirect3DSurface* pTextureLevel;
-	HRESULT hr = pD3DTexture ->GetSurfaceLevel( 0, &pTextureLevel );
+	HRESULT hr = hr = pD3DTexture ->GetSurfaceLevel( 0, &pTextureLevel );
 	if ( FAILED( hr ) )
 		return;
 
@@ -7588,7 +10954,7 @@ void CShaderAPIDx8::WriteTextureToFile( ShaderAPITextureHandle_t hTexture, const
 
 	
 	//if( pTexInt->m_Flags & Texture_t::IS_RENDER_TARGET )
-#if !defined( _X360 ) //TODO: x360 version
+#if !defined( _GAMECONSOLE ) //TODO: X360+PS3 versions
 	{
 		//render targets can't be locked, luckily we can copy the surface to system memory and lock that.
 		IDirect3DSurface *pSystemSurface;
@@ -7650,7 +11016,7 @@ void CShaderAPIDx8::ReleaseAllTextures()
 	for (int unit = 0; unit < g_pHardwareConfig->GetSamplerCount(); ++unit )
 	{
 		SamplerState( unit ).m_BoundTexture = INVALID_SHADERAPI_TEXTURE_HANDLE;
-		SetTextureState( (Sampler_t)unit, INVALID_SHADERAPI_TEXTURE_HANDLE );
+		SetTextureState( (Sampler_t)unit, TEXTURE_BINDFLAGS_NONE, INVALID_SHADERAPI_TEXTURE_HANDLE );
 	}
 }
 
@@ -7690,8 +11056,6 @@ bool CShaderAPIDx8::IsTexture( ShaderAPITextureHandle_t textureHandle )
 #endif
 }
 
-
-
 //-----------------------------------------------------------------------------
 // Gets the surface associated with a texture (refcount of surface is increased)
 //-----------------------------------------------------------------------------
@@ -7703,6 +11067,17 @@ IDirect3DSurface* CShaderAPIDx8::GetTextureSurface( ShaderAPITextureHandle_t tex
 
 	// We'll be modifying this sucka
 	AssertValidTextureHandle( textureHandle );
+
+	//APSFIXME
+	//tmauer
+	//right now the 360 is getting invalid texture hadles here
+	// <sergiy> 5/20/2015: There's significant number of crashes in Windows NT - Crash Reports for CShaderAPIDx8::ReadPixelsAsync(int, int, int, int, unsigned char*, ImageFormat, ITexture*, CThreadEvent*)
+	//                     due to this handle being invalid. It may have to do with losing D3D device. Robustifying this code to check if the crashes will end.
+	if ( !m_Textures.IsValidIndex( textureHandle ) )
+	{
+		return NULL;
+	}
+
 	Texture_t &tex = GetTexture( textureHandle );
 	if ( !( tex.m_Flags & Texture_t::IS_ALLOCATED ) )
 	{
@@ -7712,14 +11087,7 @@ IDirect3DSurface* CShaderAPIDx8::GetTextureSurface( ShaderAPITextureHandle_t tex
 	if ( IsX360() && ( tex.m_Flags & Texture_t::IS_RENDER_TARGET_SURFACE ) )
 	{
 		pSurface = tex.GetRenderTargetSurface( false );
-
-#if POSIX
-		// dxabstract's AddRef/Release have optional args to help track usage
-		pSurface->AddRef( 0, "CShaderAPIDx8::GetTextureSurface public addref");
-#else
 		pSurface->AddRef();
-#endif
-
 		return pSurface;
 	}
 
@@ -7761,14 +11129,11 @@ void CShaderAPIDx8::SetRenderTargetEx( int nRenderTargetID, ShaderAPITextureHand
 		return;
 	}
 
-	// GR - need to flush batched geometry
-	FlushBufferedPrimitives();
-
 #if defined( PIX_INSTRUMENTATION )
 	{
 		const char *pRT = "Backbuffer";
 		const char *pDS = "DefaultDepthStencil";
-
+		
 		if ( colorTextureHandle == SHADER_RENDERTARGET_NONE )
 		{
 			pRT = "None";
@@ -7778,7 +11143,7 @@ void CShaderAPIDx8::SetRenderTargetEx( int nRenderTargetID, ShaderAPITextureHand
 			Texture_t &tex = GetTexture( colorTextureHandle );
 			pRT = tex.m_DebugName.String();
 		}
-
+		
 		if ( depthTextureHandle == SHADER_RENDERTARGET_NONE )
 		{
 			pDS = "None";
@@ -7814,6 +11179,8 @@ void CShaderAPIDx8::SetRenderTargetEx( int nRenderTargetID, ShaderAPITextureHand
 	RECORD_INT( colorTextureHandle );
 	RECORD_INT( depthTextureHandle );
 
+	int backBufferIdx = GetIntRenderingParameter( INT_RENDERPARM_BACK_BUFFER_INDEX );
+
 	// The 0th render target defines which depth buffer we are using, so 
 	// don't bother if we are another render target
 	if ( nRenderTargetID > 0 )
@@ -7825,21 +11192,11 @@ void CShaderAPIDx8::SetRenderTargetEx( int nRenderTargetID, ShaderAPITextureHand
 	bool usingTextureTarget = false;
 	if ( colorTextureHandle == SHADER_RENDERTARGET_BACKBUFFER )
 	{
-		pColorSurface = m_pBackBufferSurface;
+		pColorSurface = m_pBackBufferSurfaces[ backBufferIdx ];
 
-#ifdef ENABLE_NULLREF_DEVICE_SUPPORT
-		if( pColorSurface )
-#endif
-		{
-			// This is just to make the code a little simpler...
-			// (simplifies the release logic)
-#if POSIX
-			// dxabstract's AddRef/Release have optional args to help track usage
-			pColorSurface->AddRef( 0, "+C  CShaderAPIDx8::SetRenderTargetEx public addref 1");
-#else
-			pColorSurface->AddRef();
-#endif
-		}
+		// This is just to make the code a little simpler...
+		// (simplifies the release logic)
+		pColorSurface->AddRef();
 	}
 	else
 	{
@@ -7854,23 +11211,15 @@ void CShaderAPIDx8::SetRenderTargetEx( int nRenderTargetID, ShaderAPITextureHand
 		usingTextureTarget = true;
 	}
 
+	bool bGetSurfaceLevelZSurface = false;
 	if ( depthTextureHandle == SHADER_RENDERTARGET_DEPTHBUFFER )
 	{
 		// using the default depth buffer
 		pZSurface = m_pZBufferSurface;
 
-#ifdef ENABLE_NULLREF_DEVICE_SUPPORT
-		if( pZSurface )
-#endif
-		{
-			// simplify the prologue logic
-#if POSIX
-			// dxabstract's AddRef/Release have optional args to help track usage
-			pZSurface->AddRef( 0, "+D  CShaderAPIDx8::SetRenderTargetEx public addref 1");
-#else
-			pZSurface->AddRef();
-#endif
-		}
+		// simplify the prologue logic
+		pZSurface->AddRef();
+		SPEW_REFCOUNT( pZSurface );
 	}
 	else if ( depthTextureHandle == SHADER_RENDERTARGET_NONE )
 	{
@@ -7892,28 +11241,31 @@ void CShaderAPIDx8::SetRenderTargetEx( int nRenderTargetID, ShaderAPITextureHand
 			pZSurface = GetDepthTextureSurface( depthTextureHandle );
 			if ( pZSurface )
 			{	
-#if POSIX
-				// dxabstract's AddRef/Release have optional args to help track usage
-				pZSurface->AddRef( 0, "+D CShaderAPIDx8::SetRenderTargetEx public addref 2");
-#else
 				pZSurface->AddRef();
-#endif
+				SPEW_REFCOUNT( pZSurface );
 			}
 		}
 		else
 		{	
-			HRESULT hr = ((IDirect3DTexture9*)tex.GetTexture())->GetSurfaceLevel( 0, &pZSurface );
+			IDirect3DTexture9 *pD3DTexture = (IDirect3DTexture9*)tex.GetTexture();
+			if(pD3DTexture)
+			{
+				HRESULT hr = pD3DTexture->GetSurfaceLevel( 0, &pZSurface );
+				SPEW_REFCOUNT( pZSurface );
+
+				bGetSurfaceLevelZSurface = true;
+			}
+			else
+			{
+				pZSurface = NULL;
+				Warning("Unexpected NULL texture in CShaderAPIDx8::SetRenderTargetEx()\n");
+			}
 		}
 
 		if ( !pZSurface )
 		{
 			// Refcount of color surface was increased above
-#if POSIX
-			// dxabstract's AddRef/Release have optional args to help track usage
-			pColorSurface->Release( 0, "-C  CShaderAPIDx8::SetRenderTargetEx public release 1" );
-#else
 			pColorSurface->Release();
-#endif
 			return;
 		}
 		usingTextureTarget = true;
@@ -7926,25 +11278,18 @@ void CShaderAPIDx8::SetRenderTargetEx( int nRenderTargetID, ShaderAPITextureHand
 		pZSurface->GetDesc( &zSurfaceDesc );
 		pColorSurface->GetDesc( &colorSurfaceDesc );
 
-		if ( !HushAsserts() )
-		{
-			Assert( colorSurfaceDesc.Width <= zSurfaceDesc.Width );
-			Assert( colorSurfaceDesc.Height <= zSurfaceDesc.Height );
-		}
+		Assert( colorSurfaceDesc.Width <= zSurfaceDesc.Width );
+		Assert( colorSurfaceDesc.Height <= zSurfaceDesc.Height );
 	}
 #endif
-
-	// we only set this flag for the 0th render target so that NULL
-	// render targets 1-3 don't mess with the viewport on the main RT
-	if( nRenderTargetID == 0 )
-		m_UsingTextureRenderTarget = usingTextureTarget;
-
+	
 	// NOTE: The documentation says that SetRenderTarget increases the refcount
 	// but it doesn't appear to in practice. If this somehow changes (perhaps
 	// in a device-specific manner, we're in trouble).
+	bool bSetValidRenderTarget = false;
 	if ( IsPC() || !IsX360() )
 	{
-		if ( pColorSurface == m_pBackBufferSurface && nRenderTargetID > 0 )
+		if ( pColorSurface == m_pBackBufferSurfaces[backBufferIdx] && nRenderTargetID > 0 )
 		{
 			// SetRenderTargetEx is overloaded so that if you pass NULL in for anything that
 			// isn't the zeroth render target, you effectively disable that MRT index.
@@ -7956,78 +11301,71 @@ void CShaderAPIDx8::SetRenderTargetEx( int nRenderTargetID, ShaderAPITextureHand
 		else
 		{
 			Dx9Device()->SetRenderTarget( nRenderTargetID, pColorSurface );
+			
+			bSetValidRenderTarget = true;
 		}
 	}
 	else
 	{
 		Assert( nRenderTargetID == 0 );
 		SetRenderTargetInternalXbox( colorTextureHandle );
+		
+		bSetValidRenderTarget = true;
 	}
 
 	// The 0th render target defines which depth buffer we are using, so 
 	// don't bother if we are another render target
 	if ( nRenderTargetID == 0 )
 	{
+		SPEW_REFCOUNT( pZSurface );
 		Dx9Device()->SetDepthStencilSurface( pZSurface );
+		SPEW_REFCOUNT( pZSurface );
 	}
 
-	// The 0th render target defines the viewport, therefore it also defines
-	// the viewport limits.
-	if ( m_UsingTextureRenderTarget && nRenderTargetID == 0 )
+	// Only record if we're rendering to a texture or not (and its dimensions) when we actually set a valid render target (or depth-stencil surface).
+	// If nRenderTargetID==0, we're always setting at least the depth-stencil surface.
+	// Otherwise, only execute this logic when we are actually setting a valid surface.
+	if ( ( !nRenderTargetID ) || ( bSetValidRenderTarget ) )
 	{
-		D3DSURFACE_DESC  desc;
-		HRESULT hr;
-		if ( !pZSurface )
+		m_UsingTextureRenderTarget = usingTextureTarget;
+
+		if ( m_UsingTextureRenderTarget )
 		{
-			hr = pColorSurface->GetDesc( &desc );
+			D3DSURFACE_DESC  desc;
+			HRESULT hr;
+			if ( !pZSurface )
+			{
+				hr = pColorSurface->GetDesc( &desc );
+			}
+			else
+			{
+				hr = pZSurface->GetDesc( &desc );
+			}
+			Assert( !FAILED(hr) );
+			m_ViewportMaxWidth = desc.Width;
+			m_ViewportMaxHeight = desc.Height;
 		}
-		else
-		{
-			hr = pZSurface->GetDesc( &desc );
-		}
-		Assert( !FAILED(hr) );
-		m_ViewportMaxWidth = desc.Width;
-		m_ViewportMaxHeight = desc.Height;
 	}
 
-	static bool assert_on_refzero = false;
 	int ref;
 	if ( pZSurface )
 	{
-#if POSIX
-		ref = pZSurface->Release( 0, "-D  CShaderAPIDx8::SetRenderTargetEx public release (z surface)");
-#else
+		SPEW_REFCOUNT( pZSurface );
 		ref = pZSurface->Release();
-#endif
-
-		if(assert_on_refzero)
-		{
-			Assert( ref != 0 );
-		}
+		SPEW_REFCOUNT( pZSurface );
+		Assert( bGetSurfaceLevelZSurface || ref != 0 );
 	}
 
-#ifdef ENABLE_NULLREF_DEVICE_SUPPORT
-	if( pColorSurface )
-#endif
-	{
-#if POSIX
-		ref = pColorSurface->Release( 0, "-C  CShaderAPIDx8::SetRenderTargetEx public release (color surface)");
-#else
-		ref = pColorSurface->Release();
-#endif
-		if(assert_on_refzero)
-		{
-			Assert( ref != 0 );
-		}
-	}
+	ref = pColorSurface->Release();
+//	Assert( ref != 0 );
 
-	// Changing the render target sets a default viewport.  Force rewrite to preserve the current desired state.
+	// Changing the render target sets a default viewport. 
+	// Force an update but preserve the current desired state.
 	m_DynamicState.m_Viewport.X = 0;
 	m_DynamicState.m_Viewport.Y = 0;
 	m_DynamicState.m_Viewport.Width = (DWORD)-1;
 	m_DynamicState.m_Viewport.Height = (DWORD)-1;
-
-	ADD_COMMIT_FUNC( COMMIT_PER_DRAW, COMMIT_ALWAYS, CommitSetViewports );
+	ADD_COMMIT_FUNC( COMMIT_PER_DRAW, CommitSetViewports );
 }
 
 
@@ -8045,13 +11383,13 @@ void CShaderAPIDx8::SetRenderTarget( ShaderAPITextureHandle_t colorTextureHandle
 //-----------------------------------------------------------------------------
 ImageFormat CShaderAPIDx8::GetNearestSupportedFormat( ImageFormat fmt, bool bFilteringRequired /* = true */ ) const
 {
-	return FindNearestSupportedFormat( fmt, false, false, bFilteringRequired );
+	return ImageLoader::D3DFormatToImageFormat( FindNearestSupportedFormat( fmt, false, false, bFilteringRequired ) );
 }
 
 
 ImageFormat CShaderAPIDx8::GetNearestRenderTargetFormat( ImageFormat fmt ) const
 {
-	return FindNearestSupportedFormat( fmt, false, true, false );
+	return ImageLoader::D3DFormatToImageFormat( FindNearestSupportedFormat( fmt, false, true, false ) );
 }
 
 
@@ -8067,8 +11405,6 @@ bool CShaderAPIDx8::DoRenderTargetsNeedSeparateDepthBuffer() const
 //-----------------------------------------------------------------------------
 void CShaderAPIDx8::ModifyTexture( ShaderAPITextureHandle_t textureHandle )
 {
-	tmZone( TELEMETRY_LEVEL2, TMZF_NONE, "%s", __FUNCTION__ );
-
 	LOCK_SHADERAPI();
 	// Can't do this if we're locked!
 	Assert( m_ModifyTextureLockedLevel < 0 );
@@ -8110,12 +11446,9 @@ void CShaderAPIDx8::AdvanceCurrentCopy( ShaderAPITextureHandle_t hTexture )
 //-----------------------------------------------------------------------------
 // Locks, unlocks the current texture
 //-----------------------------------------------------------------------------
-
 bool CShaderAPIDx8::TexLock( int level, int cubeFaceID, int xOffset, int yOffset, 
 								int width, int height, CPixelWriter& writer )
 {
-	tmZone( TELEMETRY_LEVEL2, TMZF_NONE, "%s", __FUNCTION__ );
-
 	LOCK_SHADERAPI();
 
 	Assert( m_ModifyTextureLockedLevel < 0 );
@@ -8124,17 +11457,11 @@ bool CShaderAPIDx8::TexLock( int level, int cubeFaceID, int xOffset, int yOffset
 	if ( !m_Textures.IsValidIndex( hTexture ) )
 		return false;
 
-	// Blow off mip levels if we don't support mipmapping
-	if ( !g_pHardwareConfig->SupportsMipmapping() && ( level > 0 ) )
-		return false;
-
 	// This test here just makes sure we don't try to download mipmap levels
 	// if we weren't able to create them in the first place
 	Texture_t& tex = GetTexture( hTexture );
 	if ( level >= tex.m_NumLevels  )
-	{
 		return false;
-	}
 
 	// May need to switch textures....
 	if ( tex.m_SwitchNeeded )
@@ -8146,7 +11473,7 @@ bool CShaderAPIDx8::TexLock( int level, int cubeFaceID, int xOffset, int yOffset
 	IDirect3DBaseTexture *pTexture = GetModifyTexture();
 #if defined( _X360 )
 	// 360 can't lock a bound texture
-	if ( pTexture->IsSet( Dx9Device() ) )
+	if ( pTexture && pTexture->IsSet( Dx9Device() ) )
 	{
 		UnbindTexture( hTexture );
 	}
@@ -8164,14 +11491,12 @@ bool CShaderAPIDx8::TexLock( int level, int cubeFaceID, int xOffset, int yOffset
 
 void CShaderAPIDx8::TexUnlock( )
 {
-	tmZone( TELEMETRY_LEVEL2, TMZF_NONE, "%s", __FUNCTION__ );
-
 	LOCK_SHADERAPI();
 	if ( m_ModifyTextureLockedLevel >= 0 )
 	{
 		Texture_t& tex = GetTexture( GetModifyTextureHandle() );
 		UnlockTexture( GetModifyTextureHandle(), tex.m_CurrentCopy, GetModifyTexture(),
-			m_ModifyTextureLockedLevel, (D3DCUBEMAP_FACES)m_ModifyTextureLockedFace );
+			m_ModifyTextureLockedLevel, (D3DCUBEMAP_FACES)(int)m_ModifyTextureLockedFace );
 
 		m_ModifyTextureLockedLevel = -1;
 	}
@@ -8197,25 +11522,15 @@ void CShaderAPIDx8::TexImage2D(
 	AssertValidTextureHandle( GetModifyTextureHandle() );
 
 	if ( !m_Textures.IsValidIndex( GetModifyTextureHandle() ) )
-	{
 		return;
-	}
 
 	Assert( (width <= g_pHardwareConfig->Caps().m_MaxTextureWidth) && (height <= g_pHardwareConfig->Caps().m_MaxTextureHeight) );
-
-	// Blow off mip levels if we don't support mipmapping
-	if ( !g_pHardwareConfig->SupportsMipmapping() && (level > 0))
-	{
-		return;
-	}
 
 	// This test here just makes sure we don't try to download mipmap levels
 	// if we weren't able to create them in the first place
 	Texture_t& tex = GetTexture( GetModifyTextureHandle() );
 	if ( level >= tex.m_NumLevels )
-	{
 		return;
-	}
 
 	// May need to switch textures....
 	if (tex.m_SwitchNeeded)
@@ -8238,8 +11553,6 @@ void CShaderAPIDx8::TexImage2D(
 #if defined( _X360 )
 	info.m_bSrcIsTiled = bSrcIsTiled;
 	info.m_bCanConvertFormat = ( tex.m_Flags & Texture_t::CAN_CONVERT_FORMAT ) != 0;
-#else
-	info.m_bTextureIsLockable = ( tex.m_Flags & Texture_t::IS_LOCKABLE ) != 0;
 #endif
 	LoadTexture( info );
 	SetModifyTexture( info.m_pTexture );
@@ -8267,15 +11580,7 @@ void CShaderAPIDx8::TexSubImage2D(
 	AssertValidTextureHandle( GetModifyTextureHandle() );
 
 	if ( !m_Textures.IsValidIndex( GetModifyTextureHandle() ) )
-	{
 		return;
-	}
-
-	// Blow off mip levels if we don't support mipmapping
-	if ( !g_pHardwareConfig->SupportsMipmapping() && ( level > 0 ) )
-	{
-		return;
-	}
 
 	// NOTE: This can only be done with procedural textures if this method is
 	// being used to download the entire texture, cause last frame's partial update
@@ -8317,72 +11622,81 @@ void CShaderAPIDx8::TexSubImage2D(
 #if defined( _X360 )
 	info.m_bSrcIsTiled = bSrcIsTiled;
 	info.m_bCanConvertFormat = ( tex.m_Flags & Texture_t::CAN_CONVERT_FORMAT ) != 0;
-#else
-	info.m_bTextureIsLockable = ( tex.m_Flags & Texture_t::IS_LOCKABLE ) != 0;
 #endif
 	LoadSubTexture( info, xOffset, yOffset, srcStride );
 }
 
+
 //-----------------------------------------------------------------------------
-// Volume texture upload
+// Upload to a default pool texture from a sysmem texture
 //-----------------------------------------------------------------------------
-void CShaderAPIDx8::TexImageFromVTF( IVTFTexture *pVTF, int iVTFFrame )
+void CShaderAPIDx8::UpdateTexture( int xOffset, int yOffset, int w, int h, ShaderAPITextureHandle_t hDstTexture, ShaderAPITextureHandle_t hSrcTexture )
 {
+	Assert( IsPC() );
+
 	LOCK_SHADERAPI();
-	Assert( pVTF );
-	AssertValidTextureHandle( GetModifyTextureHandle() );
-	if ( !m_Textures.IsValidIndex( GetModifyTextureHandle() ) )
-	{
+
+	AssertValidTextureHandle( hDstTexture );
+	if ( !m_Textures.IsValidIndex( hDstTexture ) )
 		return;
-	}
-	Texture_t& tex = GetTexture( GetModifyTextureHandle() );
 
-	// May need to switch textures....
-	if (tex.m_SwitchNeeded)
-	{
-		AdvanceCurrentCopy( GetModifyTextureHandle() );
-		tex.m_SwitchNeeded = false;
-	}
+	AssertValidTextureHandle( hSrcTexture );
+	if ( !m_Textures.IsValidIndex( hSrcTexture ) )
+		return;
 
-	TextureLoadInfo_t info;
-	info.m_TextureHandle = GetModifyTextureHandle();
-	info.m_pTexture = GetModifyTexture();
-	info.m_nLevel = 0;
-	info.m_nCopy = tex.m_CurrentCopy;
-	info.m_CubeFaceID = (D3DCUBEMAP_FACES)0;
-	info.m_nWidth = 0;
-	info.m_nHeight = 0;
-	info.m_nZOffset = 0;
-	info.m_SrcFormat = pVTF->Format();
-	info.m_pSrcData = NULL;
-#if defined( _X360 )
-	info.m_bSrcIsTiled = pVTF->IsPreTiled();
-	info.m_bCanConvertFormat = ( tex.m_Flags & Texture_t::CAN_CONVERT_FORMAT ) != 0;
+	IDirect3DTexture *pDstTexture = (IDirect3DTexture *) g_ShaderAPIDX8.GetTexture( hDstTexture ).GetTexture();
+	IDirect3DSurface9 *pDstSurface;
+	HRESULT hr = pDstTexture->GetSurfaceLevel( 0, &pDstSurface );
+	Assert( !FAILED( hr ) );
+
+	IDirect3DTexture *pSrcTexture = (IDirect3DTexture *) g_ShaderAPIDX8.GetTexture( hSrcTexture ).GetTexture();
+	IDirect3DSurface9 *pSrcSurface;
+	hr = pSrcTexture->GetSurfaceLevel( 0, &pSrcSurface );
+	Assert( !FAILED( hr ) );
+
+	RECT srcRect = { xOffset, yOffset, w, h };
+	POINT dstPoint = { 0, 0 };
+#if ( defined( _X360 ) || defined( DX_TO_GL_ABSTRACTION ) )
+	AssertMsg( false, "Not supported on Xbox 360 or Posix." );
 #else
-	info.m_bTextureIsLockable = ( tex.m_Flags & Texture_t::IS_LOCKABLE ) != 0;
+	hr = Dx9Device()->UpdateSurface( pSrcSurface, &srcRect, pDstSurface, &dstPoint );
+	Assert( !FAILED( hr ) );
 #endif
-	if ( pVTF->Depth() > 1 )
-	{
-		LoadVolumeTextureFromVTF( info, pVTF, iVTFFrame );
-	}
-	else if ( pVTF->IsCubeMap() )
-	{
-		if ( HardwareConfig()->SupportsCubeMaps() )
-		{
-			LoadCubeTextureFromVTF( info, pVTF, iVTFFrame );
-		}
-		else
-		{
-			info.m_CubeFaceID = (D3DCUBEMAP_FACES)6;
-			LoadTextureFromVTF( info, pVTF, iVTFFrame );
-		}
-	}
-	else
-	{
-		LoadTextureFromVTF( info, pVTF, iVTFFrame );
-	}
-	SetModifyTexture( info.m_pTexture );
+
+	pDstSurface->Release();	// The GetSurfaceLevel calls incremented ref count
+	pSrcSurface->Release();
 }
+
+void *CShaderAPIDx8::LockTex( ShaderAPITextureHandle_t hTexture )
+{
+	IDirect3DTexture *pTex = (IDirect3DTexture *) g_ShaderAPIDX8.GetTexture( hTexture ).GetTexture();
+	IDirect3DSurface9 *pSurf;
+	HRESULT hr = pTex->GetSurfaceLevel( 0, &pSurf );
+	Assert( !FAILED( hr ) );
+
+	D3DLOCKED_RECT lockedRect;
+	hr = pSurf->LockRect( &lockedRect, NULL, D3DLOCK_NO_DIRTY_UPDATE );
+	Assert( !FAILED( hr ) );
+
+	pSurf->Release();	// The GetSurfaceLevel call incremented ref count
+
+	return lockedRect.pBits;
+}
+
+void CShaderAPIDx8::UnlockTex( ShaderAPITextureHandle_t hTexture )
+{
+	IDirect3DTexture *pTex = (IDirect3DTexture *) g_ShaderAPIDX8.GetTexture( hTexture ).GetTexture();
+	IDirect3DSurface9 *pSurf;
+	HRESULT hr = pTex->GetSurfaceLevel( 0, &pSurf );
+	Assert( !FAILED( hr ) );
+
+	hr = pSurf->UnlockRect();
+	Assert( !FAILED( hr ) );
+
+	pSurf->Release();	// The GetSurfaceLevel call incremented ref count
+}
+
+
 
 
 //-----------------------------------------------------------------------------
@@ -8397,6 +11711,7 @@ bool CShaderAPIDx8::IsTextureResident( ShaderAPITextureHandle_t textureHandle )
 //-----------------------------------------------------------------------------
 // Level of anisotropic filtering
 //-----------------------------------------------------------------------------
+ConVar mat_aniso_disable( "mat_aniso_disable", "0", FCVAR_CHEAT, "NOTE: You must change mat_forceaniso after changing this convar for this to take effect" );
 void CShaderAPIDx8::SetAnisotropicLevel( int nAnisotropyLevel )
 {
 	LOCK_SHADERAPI();
@@ -8407,14 +11722,33 @@ void CShaderAPIDx8::SetAnisotropicLevel( int nAnisotropyLevel )
 	g_pShaderUtil->NoteAnisotropicLevel( nAnisotropyLevel );
 
 	// Never set this to 1. In the case we want it set to 1, we will use this to override
-	//   aniso per-texture, so set it to something reasonable
-	if ( nAnisotropyLevel > g_pHardwareConfig->Caps().m_nMaxAnisotropy || nAnisotropyLevel <= 1 )
+	//   aniso per-texture, so set it to something reasonable.
+	if ( mat_aniso_disable.GetInt() == 1 )
 	{
-		// Set it to 1/4 the max but between 2-8
-		nAnisotropyLevel = max( 2, min( 8, ( g_pHardwareConfig->Caps().m_nMaxAnisotropy / 4 ) ) );
+		// Don't allow any aniso at all
+		nAnisotropyLevel = 1;
+	}
+	else
+	{
+		int nAnisotropyLevelOverride = 1;
+		if ( IsGameConsole() )
+		{
+			nAnisotropyLevelOverride = 4;
+		}
+		else
+		{
+			// Set it to 1/2 the max but at least 2
+			nAnisotropyLevelOverride = MAX( 2, g_pHardwareConfig->Caps().m_nMaxAnisotropy / 2 );
+		}
+
+		// Use the larger value
+		nAnisotropyLevel = MAX( nAnisotropyLevel, nAnisotropyLevelOverride );
 	}
 
-	// Set the D3D max insotropy state for all samplers
+	// Make sure the value is in range
+	nAnisotropyLevel = MIN( nAnisotropyLevel, g_pHardwareConfig->Caps().m_nMaxAnisotropy );
+
+	// Set the D3D max anisotropy state for all samplers
 	for ( int i = 0; i < g_pHardwareConfig->Caps().m_NumSamplers; ++i)
 	{
 		SamplerState(i).m_nAnisotropicLevel = nAnisotropyLevel;
@@ -8442,37 +11776,12 @@ void CShaderAPIDx8::TexSetPriority( int priority )
 		for (int i = 0; i < tex.m_NumCopies; ++i)
 			tex.GetTexture( i )->SetPriority( priority );
 	}
-	else
+	else if ( tex.GetTexture() ) // null check
 	{
 		tex.GetTexture()->SetPriority( priority );
 	}
 #endif
 }
-
-void CShaderAPIDx8::TexLodClamp( int finest )
-{
-	LOCK_SHADERAPI();
-
-	ShaderAPITextureHandle_t hModifyTexture = GetModifyTextureHandle();
-	if ( hModifyTexture == INVALID_SHADERAPI_TEXTURE_HANDLE )
-		return;
-
-	Texture_t& tex = GetTexture( hModifyTexture );
-	tex.m_FinestMipmapLevel = finest;
-}
-
-void CShaderAPIDx8::TexLodBias( float bias )
-{
-	LOCK_SHADERAPI();
-
-	ShaderAPITextureHandle_t hModifyTexture = GetModifyTextureHandle();
-	if ( hModifyTexture == INVALID_SHADERAPI_TEXTURE_HANDLE )
-		return;
-
-	Texture_t& tex = GetTexture( hModifyTexture );
-	tex.m_LodBias = bias;
-}
-
 
 
 //-----------------------------------------------------------------------------
@@ -8542,27 +11851,27 @@ void CShaderAPIDx8::TexMinFilter( ShaderTexFilterMode_t texFilterMode )
 	case SHADER_TEXFILTERMODE_NEAREST_MIPMAP_NEAREST:
 		GetTexture( hModifyTexture ).m_MinFilter = D3DTEXF_POINT;
 		GetTexture( hModifyTexture ).m_MipFilter = 
-			GetTexture( hModifyTexture ).m_NumLevels != 1 ? D3DTEXF_POINT : D3DTEXF_NONE;
+		GetTexture( hModifyTexture ).m_NumLevels != 1 ? D3DTEXF_POINT : D3DTEXF_NONE;
 		break;
 	case SHADER_TEXFILTERMODE_LINEAR_MIPMAP_NEAREST:
 		GetTexture( hModifyTexture ).m_MinFilter = D3DTEXF_LINEAR;
 		GetTexture( hModifyTexture ).m_MipFilter = 
-			GetTexture( hModifyTexture ).m_NumLevels != 1 ? D3DTEXF_POINT : D3DTEXF_NONE;
+		GetTexture( hModifyTexture ).m_NumLevels != 1 ? D3DTEXF_POINT : D3DTEXF_NONE;
 		break;
 	case SHADER_TEXFILTERMODE_NEAREST_MIPMAP_LINEAR:
 		GetTexture( hModifyTexture ).m_MinFilter = D3DTEXF_POINT;
 		GetTexture( hModifyTexture ).m_MipFilter = 
-			GetTexture( hModifyTexture ).m_NumLevels != 1 ? D3DTEXF_LINEAR : D3DTEXF_NONE;
+		GetTexture( hModifyTexture ).m_NumLevels != 1 ? D3DTEXF_LINEAR : D3DTEXF_NONE;
 		break;
 	case SHADER_TEXFILTERMODE_LINEAR_MIPMAP_LINEAR:
 		GetTexture( hModifyTexture ).m_MinFilter = D3DTEXF_LINEAR;
 		GetTexture( hModifyTexture ).m_MipFilter = 
-			GetTexture( hModifyTexture ).m_NumLevels != 1 ? D3DTEXF_LINEAR : D3DTEXF_NONE;
+		GetTexture( hModifyTexture ).m_NumLevels != 1 ? D3DTEXF_LINEAR : D3DTEXF_NONE;
 		break;
 	case SHADER_TEXFILTERMODE_ANISOTROPIC:
 		GetTexture( hModifyTexture ).m_MinFilter = D3DTEXF_ANISOTROPIC;
 		GetTexture( hModifyTexture ).m_MipFilter = 
-			GetTexture( hModifyTexture ).m_NumLevels != 1 ? D3DTEXF_LINEAR : D3DTEXF_NONE;
+		GetTexture( hModifyTexture ).m_NumLevels != 1 ? D3DTEXF_LINEAR : D3DTEXF_NONE;
 		break;
 	default:
 		Warning( "CShaderAPIDx8::TexMinFilter: Unknown texFilterMode\n" );
@@ -8618,173 +11927,88 @@ int CShaderAPIDx8::GetMatrixStack( MaterialMatrixMode_t mode ) const
 	return mode;
 }
 
-//-----------------------------------------------------------------------------
-// Returns true if we're modulating constant color into the vertex color
-//-----------------------------------------------------------------------------
-bool CShaderAPIDx8::IsModulatingVertexColor() const
-{
-	return m_TransitionTable.CurrentShadowShaderState()->m_ModulateConstantColor;
-}
-
-
-//-----------------------------------------------------------------------------
-// Material property (used to deal with overbright for lights)
-//-----------------------------------------------------------------------------
-void CShaderAPIDx8::SetDefaultMaterial()
-{
-#if !defined( _X360 )
-	D3DMATERIAL mat;
-	mat.Diffuse.r = mat.Diffuse.g = mat.Diffuse.b = mat.Diffuse.a = 1.0f;
-	mat.Ambient.r = mat.Ambient.g = mat.Ambient.b = mat.Ambient.a = 0.0f;
-	mat.Specular.r = mat.Specular.g = mat.Specular.b = mat.Specular.a = 0.0f;
-	mat.Emissive.r = mat.Emissive.g = mat.Emissive.b = mat.Emissive.a = 0.0f;
-	mat.Power = 1.0f;
-	Dx9Device()->SetMaterial( &mat );
-#endif
-}
 
 //-----------------------------------------------------------------------------
 // lighting related methods
 //-----------------------------------------------------------------------------
-
-void CShaderAPIDx8::SetAmbientLight( float r, float g, float b )
+void CShaderAPIDx8::SetLightingState( const MaterialLightingState_t& state )
 {
-	LOCK_SHADERAPI();
-	unsigned int ambient = D3DCOLOR_ARGB( 255, (int)(r * 255), 
-		(int)(g * 255), (int)(b * 255) );
-	if (ambient != m_DynamicState.m_Ambient)
+	bool bAmbientChanged = Q_memcmp( m_DynamicState.m_LightingState.m_vecAmbientCube, state.m_vecAmbientCube, sizeof(state.m_vecAmbientCube) ) != 0;
+	bool bLightsChanged = ( state.m_nLocalLightCount != 0 ) || ( m_DynamicState.m_LightingState.m_nLocalLightCount != 0 );
+	if ( !bAmbientChanged && !bLightsChanged )
+		return;
+
+	m_DynamicState.m_LightingState = state;
+	if ( bAmbientChanged )
 	{
-		m_DynamicState.m_Ambient = ambient;
-		SetSupportedRenderState( D3DRS_AMBIENT, ambient );
+		m_DynamicState.m_InstanceInfo.m_bAmbientCubeCompiled = false;
+	}
+	if ( bLightsChanged )
+	{
+		m_DynamicState.m_InstanceInfo.m_bPixelShaderLocalLightsCompiled = false;
+		m_DynamicState.m_InstanceInfo.m_bVertexShaderLocalLightsCompiled = false;
+		m_DynamicState.m_InstanceInfo.m_bSetLightVertexShaderConstants = false;
+
+		//#ifdef _DEBUG
+		for ( int i = 0; i < m_DynamicState.m_LightingState.m_nLocalLightCount; ++i )
+		{
+			// NOTE: This means we haven't set the light up correctly
+			if ( ( m_DynamicState.m_LightingState.m_pLocalLightDesc[i].m_Flags & LIGHTTYPE_OPTIMIZATIONFLAGS_DERIVED_VALUES_CALCED ) == 0 )
+			{
+				Warning( "Client code forgot to call LightDesc_t::RecalculateDerivedValues\n" );
+				m_DynamicState.m_LightingState.m_pLocalLightDesc[i].RecalculateDerivedValues();
+			}
+
+			Assert( m_DynamicState.m_LightingState.m_pLocalLightDesc[i].m_Type != MATERIAL_LIGHT_DISABLE );
+		}
+		//#endif
 	}
 }
+
 
 void CShaderAPIDx8::SetLightingOrigin( Vector vLightingOrigin )
 {
-	if ( vLightingOrigin != m_DynamicState.m_vLightingOrigin )
-	{
-		FlushBufferedPrimitives();
-		m_DynamicState.m_vLightingOrigin = vLightingOrigin;
-	}
+	m_DynamicState.m_LightingState.m_vecLightingOrigin = vLightingOrigin;
 }
 
 //#define NO_LOCAL_LIGHTS
-void CShaderAPIDx8::SetLight( int lightNum, const LightDesc_t& desc_ )
+void CShaderAPIDx8::SetLights( int nCount, const LightDesc_t* pDesc )
 {
 	LOCK_SHADERAPI();
 #ifdef NO_LOCAL_LIGHTS
-	LightDesc_t desc = desc_;
-	desc.m_Type = MATERIAL_LIGHT_DISABLE;
-#else
-	LightDesc_t &desc = const_cast<LightDesc_t &>(desc_); // to permit '&'
+	nCount = 0;
 #endif
-	Assert( lightNum < g_pHardwareConfig->Caps().m_MaxNumLights && lightNum >= 0 );
 
-	if( lightNum >= g_pHardwareConfig->Caps().m_MaxNumLights || lightNum < 0 )
-		return;
-	
-	m_DynamicState.m_LightDescs[lightNum] = desc;
-	
-	FlushBufferedPrimitives();
+	int nMaxLight = MIN( g_pHardwareConfig->Caps().m_MaxNumLights, MATERIAL_MAX_LIGHT_COUNT );
+	nCount = MIN( nMaxLight, nCount );
 
-	if (desc.m_Type == MATERIAL_LIGHT_DISABLE)
+	m_DynamicState.m_LightingState.m_nLocalLightCount = nCount;
+	if ( nCount > 0 )
 	{
-		if (m_DynamicState.m_LightEnable[lightNum])
+		memcpy( m_DynamicState.m_LightingState.m_pLocalLightDesc, pDesc, nCount * sizeof(LightDesc_t) );
+
+#ifdef _DEBUG
+		for ( int i = 0; i < nCount; ++i )
 		{
-			m_DynamicState.m_LightEnableChanged[lightNum] = STATE_CHANGED;
-			m_DynamicState.m_LightEnable[lightNum] = false;
+			Assert( m_DynamicState.m_LightingState.m_pLocalLightDesc[i].m_Type != MATERIAL_LIGHT_DISABLE );
 		}
-		return;
+#endif
 	}
-
-	if (!m_DynamicState.m_LightEnable[lightNum])
-	{
-		m_DynamicState.m_LightEnableChanged[lightNum] = STATE_CHANGED;
-		m_DynamicState.m_LightEnable[lightNum] = true;
-	}
-
-	D3DLIGHT light;
-	switch( desc.m_Type )
-	{
-	case MATERIAL_LIGHT_POINT:
-		light.Type = D3DLIGHT_POINT;
-		light.Range = desc.m_Range;
-		break;
-
-	case MATERIAL_LIGHT_DIRECTIONAL:
-		light.Type = D3DLIGHT_DIRECTIONAL;
-		light.Range = 1e12;	// This is supposed to be ignored
-		break;
-
-	case MATERIAL_LIGHT_SPOT:
-		light.Type = D3DLIGHT_SPOT;
-		light.Range = desc.m_Range;
-		break;
-
-	default:
-		m_DynamicState.m_LightEnable[lightNum] = false;
-		return;
-	}
-
-	// This is a D3D limitation
-	Assert( (light.Range >= 0) && (light.Range <= sqrt(FLT_MAX)) );
-
-	memcpy( &light.Diffuse, &desc.m_Color[0], 3*sizeof(float) );
-	memcpy( &light.Specular, &desc.m_Color[0], 3*sizeof(float) );
-	light.Diffuse.a = 1.0f;
-	light.Specular.a = 1.0f;
-	light.Ambient.a = light.Ambient.b = light.Ambient.g = light.Ambient.r = 0;
-	memcpy( &light.Position, &desc.m_Position[0], 3 * sizeof(float) );
-	memcpy( &light.Direction, &desc.m_Direction[0], 3 * sizeof(float) );
-	light.Falloff = desc.m_Falloff;
-	light.Attenuation0 = desc.m_Attenuation0;
-	light.Attenuation1 = desc.m_Attenuation1;
-	light.Attenuation2 = desc.m_Attenuation2;
-
-	// normalize light color...
-	light.Theta = desc.m_Theta;
-	light.Phi = desc.m_Phi;
-	if (light.Phi > M_PI)
-		light.Phi = M_PI;
-
-	// This piece of crap line of code is because if theta gets too close to phi,
-	// we get no light at all.
-	if (light.Theta - light.Phi > -1e-3)
-		light.Theta = light.Phi - 1e-3;
-
-	m_DynamicState.m_LightChanged[lightNum] = STATE_CHANGED;
-	memcpy( &m_DynamicState.m_Lights[lightNum], &light, sizeof(light) );
+	m_DynamicState.m_InstanceInfo.m_bPixelShaderLocalLightsCompiled = false;
+	m_DynamicState.m_InstanceInfo.m_bVertexShaderLocalLightsCompiled = false;
+	m_DynamicState.m_InstanceInfo.m_bSetLightVertexShaderConstants = false;
 }
 
 void CShaderAPIDx8::DisableAllLocalLights()
 {
 	LOCK_SHADERAPI();
-	bool bFlushed = false;
-	for ( int lightNum = 0; lightNum < MAX_NUM_LIGHTS; lightNum++ )
+	if ( m_DynamicState.m_LightingState.m_nLocalLightCount != 0 )
 	{
-		if (m_DynamicState.m_LightEnable[lightNum])
-		{
-			if ( !bFlushed )
-			{
-				FlushBufferedPrimitives();
-				bFlushed = true;
-			}
-			m_DynamicState.m_LightDescs[lightNum].m_Type = MATERIAL_LIGHT_DISABLE;
-			m_DynamicState.m_LightEnableChanged[lightNum] = STATE_CHANGED;
-			m_DynamicState.m_LightEnable[lightNum] = false;
-		}
+		m_DynamicState.m_LightingState.m_nLocalLightCount = 0;
+		m_DynamicState.m_InstanceInfo.m_bPixelShaderLocalLightsCompiled = false;
+		m_DynamicState.m_InstanceInfo.m_bVertexShaderLocalLightsCompiled = false;
+		m_DynamicState.m_InstanceInfo.m_bSetLightVertexShaderConstants = false;
 	}
-}
-
-int CShaderAPIDx8::GetMaxLights( void ) const
-{
-	return g_pHardwareConfig->Caps().m_MaxNumLights;
-}
-
-const LightDesc_t& CShaderAPIDx8::GetLight( int lightNum ) const
-{
-	Assert( lightNum < g_pHardwareConfig->Caps().m_MaxNumLights && lightNum >= 0 );
-	return m_DynamicState.m_LightDescs[lightNum];
 }
 
 //-----------------------------------------------------------------------------
@@ -8806,84 +12030,75 @@ void CShaderAPIDx8::SetAmbientLightCube( Vector4D cube[6] )
 //		}
 	}
 */
-	if (memcmp(&m_DynamicState.m_AmbientLightCube[0][0], cube, 6 * sizeof(Vector4D)))
+	if ( memcmp(&m_DynamicState.m_CompiledLightingState.m_AmbientLightCube[0][0], cube, 6 * sizeof(Vector4D)) )
 	{
-		memcpy( &m_DynamicState.m_AmbientLightCube[0][0], cube, 6 * sizeof(Vector4D) );
+		memcpy( &m_DynamicState.m_CompiledLightingState.m_AmbientLightCube[0][0], cube, 6 * sizeof(Vector4D) );
 
 #ifdef NO_AMBIENT_CUBE
-		memset( &m_DynamicState.m_AmbientLightCube[0][0], 0, 6 * sizeof(Vector4D) );
+		memset( &m_DynamicState.m_CompiledLightingState.m_AmbientLightCube[0][0], 0, 6 * sizeof(Vector4D) );
 #endif
 
 //#define DEBUG_AMBIENT_CUBE
 
 #ifdef DEBUG_AMBIENT_CUBE
-		m_DynamicState.m_AmbientLightCube[0][0] = 1.0f;
-		m_DynamicState.m_AmbientLightCube[0][1] = 0.0f;
-		m_DynamicState.m_AmbientLightCube[0][2] = 0.0f;
+		m_DynamicState.m_CompiledLightingState.m_AmbientLightCube[0][0] = 1.0f;
+		m_DynamicState.m_CompiledLightingState.m_AmbientLightCube[0][1] = 0.0f;
+		m_DynamicState.m_CompiledLightingState.m_AmbientLightCube[0][2] = 0.0f;
 
-		m_DynamicState.m_AmbientLightCube[1][0] = 0.0f;
-		m_DynamicState.m_AmbientLightCube[1][1] = 1.0f;
-		m_DynamicState.m_AmbientLightCube[1][2] = 0.0f;
+		m_DynamicState.m_CompiledLightingState.m_AmbientLightCube[1][0] = 0.0f;
+		m_DynamicState.m_CompiledLightingState.m_AmbientLightCube[1][1] = 1.0f;
+		m_DynamicState.m_CompiledLightingState.m_AmbientLightCube[1][2] = 0.0f;
 
-		m_DynamicState.m_AmbientLightCube[2][0] = 0.0f;
-		m_DynamicState.m_AmbientLightCube[2][1] = 0.0f;
-		m_DynamicState.m_AmbientLightCube[2][2] = 1.0f;
+		m_DynamicState.m_CompiledLightingState.m_AmbientLightCube[2][0] = 0.0f;
+		m_DynamicState.m_CompiledLightingState.m_AmbientLightCube[2][1] = 0.0f;
+		m_DynamicState.m_CompiledLightingState.m_AmbientLightCube[2][2] = 1.0f;
 
-		m_DynamicState.m_AmbientLightCube[3][0] = 1.0f;
-		m_DynamicState.m_AmbientLightCube[3][1] = 0.0f;
-		m_DynamicState.m_AmbientLightCube[3][2] = 1.0f;
+		m_DynamicState.m_CompiledLightingState.m_AmbientLightCube[3][0] = 1.0f;
+		m_DynamicState.m_CompiledLightingState.m_AmbientLightCube[3][1] = 0.0f;
+		m_DynamicState.m_CompiledLightingState.m_AmbientLightCube[3][2] = 1.0f;
 
-		m_DynamicState.m_AmbientLightCube[4][0] = 1.0f;
-		m_DynamicState.m_AmbientLightCube[4][1] = 1.0f;
-		m_DynamicState.m_AmbientLightCube[4][2] = 0.0f;
+		m_DynamicState.m_CompiledLightingState.m_AmbientLightCube[4][0] = 1.0f;
+		m_DynamicState.m_CompiledLightingState.m_AmbientLightCube[4][1] = 1.0f;
+		m_DynamicState.m_CompiledLightingState.m_AmbientLightCube[4][2] = 0.0f;
 
-		m_DynamicState.m_AmbientLightCube[5][0] = 0.0f;
-		m_DynamicState.m_AmbientLightCube[5][1] = 1.0f;
-		m_DynamicState.m_AmbientLightCube[5][2] = 1.0f;
+		m_DynamicState.m_CompiledLightingState.m_AmbientLightCube[5][0] = 0.0f;
+		m_DynamicState.m_CompiledLightingState.m_AmbientLightCube[5][1] = 1.0f;
+		m_DynamicState.m_CompiledLightingState.m_AmbientLightCube[5][2] = 1.0f;
 #endif
 
-		m_CachedAmbientLightCube = STATE_CHANGED;
+		// Copy into other state
+		for ( int i = 0; i < 6; ++i )
+		{
+			m_DynamicState.m_LightingState.m_vecAmbientCube[i] = m_DynamicState.m_CompiledLightingState.m_AmbientLightCube[i].AsVector3D();
+		}
+		m_DynamicState.m_InstanceInfo.m_bAmbientCubeCompiled = true;
 	}
 }
 
-void CShaderAPIDx8::SetVertexShaderStateAmbientLightCube()
+void CShaderAPIDx8::SetVertexShaderStateAmbientLightCube( int nRegister, CompiledLightingState_t *pLightingState )
 {
-	if (m_CachedAmbientLightCube & STATE_CHANGED_VERTEX_SHADER)
-	{
-		SetVertexShaderConstant( VERTEX_SHADER_AMBIENT_LIGHT, m_DynamicState.m_AmbientLightCube[0].Base(), 6 );
-		m_CachedAmbientLightCube &= ~STATE_CHANGED_VERTEX_SHADER;
-	}
+	float *pCubeBase = pLightingState->m_AmbientLightCube[0].Base();
+	SetVertexShaderConstantInternal( nRegister, pCubeBase, 6 );
 }
 
 
-void CShaderAPIDx8::SetPixelShaderStateAmbientLightCube( int pshReg, bool bForceToBlack )
+void CShaderAPIDx8::SetPixelShaderStateAmbientLightCube( int nRegister, CompiledLightingState_t *pLightingState )
 {
-	float *pCubeBase;
-	Vector4D tempCube[6];
-
-	if( bForceToBlack )
-	{
-		for ( int i=0; i<6 ; i++ )
-			tempCube[i].Init();
-		
-		pCubeBase = tempCube[0].Base();
-	}
-	else
-	{
-		pCubeBase = m_DynamicState.m_AmbientLightCube[0].Base();
-	}
-
-	SetPixelShaderConstant( pshReg, pCubeBase, 6 );
+	float *pCubeBase = pLightingState->m_AmbientLightCube[0].Base();
+	SetPixelShaderConstantInternal( nRegister, pCubeBase, 6 );
 }
 
-float CShaderAPIDx8::GetAmbientLightCubeLuminance( void )
+float CShaderAPIDx8::GetAmbientLightCubeLuminance( MaterialLightingState_t *pLightingState )
 {
-	Vector4D vLuminance( 0.3f, 0.59f, 0.11f, 0.0f );
+	if ( !pLightingState )
+		return 0.0f;
+
+	Vector vLuminance( 0.3f, 0.59f, 0.11f );
 	float fLuminance = 0.0f;
 
 	for (int i=0; i<6; i++)
 	{
-		fLuminance += vLuminance.Dot( m_DynamicState.m_AmbientLightCube[i] );
+		fLuminance += vLuminance.Dot( pLightingState->m_vecAmbientCube[i] );
 	}
 
 	return fLuminance / 6.0f;
@@ -8901,6 +12116,15 @@ static inline RECT* RectToRECT( Rect_t *pSrcRect, RECT &dstRect )
 	return &dstRect;
 }
 
+// special code for RESZ resolve trick on ATI & Intel
+#define RESZ_CODE 0x7fa05000
+
+struct sRESZDummyVB
+{
+	float pos[ 3 ];
+};
+static sRESZDummyVB gRESZDummyVB[ 1 ] = { 0.0f, 0.0f, 0.0f };
+
 void CShaderAPIDx8::CopyRenderTargetToTextureEx( ShaderAPITextureHandle_t textureHandle, int nRenderTargetID, Rect_t *pSrcRect, Rect_t *pDstRect )
 {
 	LOCK_SHADERAPI();
@@ -8912,7 +12136,7 @@ void CShaderAPIDx8::CopyRenderTargetToTextureEx( ShaderAPITextureHandle_t textur
 #if defined( PIX_INSTRUMENTATION )
 	{
 		const char *pRT = ( nRenderTargetID < 0 ) ? "DS" : "RT";
-
+		
 		if ( textureHandle == SHADER_RENDERTARGET_NONE )
 		{
 			pRT = "None";
@@ -8922,7 +12146,7 @@ void CShaderAPIDx8::CopyRenderTargetToTextureEx( ShaderAPITextureHandle_t textur
 			Texture_t &tex = GetTexture( textureHandle );
 			pRT = tex.m_DebugName.String();
 		}
-
+				
 		char buf[256];
 		sprintf( buf, "CopyRTToTexture:%s", pRT ? pRT : "?" );
 		BeginPIXEvent( 0xFFFFFFFF, buf );
@@ -8939,38 +12163,258 @@ void CShaderAPIDx8::CopyRenderTargetToTextureEx( ShaderAPITextureHandle_t textur
 	IDirect3DTexture *pD3DTexture = (IDirect3DTexture *)pTexture->GetTexture();
 	Assert( pD3DTexture );
 
-#if !defined( _X360 )
-	IDirect3DSurface* pRenderTargetSurface;
-	HRESULT hr = Dx9Device()->GetRenderTarget( nRenderTargetID, &pRenderTargetSurface );
-	if ( FAILED( hr ) )
+	if ( !pD3DTexture )
 	{
-		Assert( 0 );
+		Warning("Unexpected NULL texture in CShaderAPIDx8::CopyRenderTargetToTextureEx()\n");
 		return;
 	}
 
+#if defined( _PS3 )
 	IDirect3DSurface *pDstSurf;
-	hr = pD3DTexture->GetSurfaceLevel( 0, &pDstSurf );
+	RECT srcRect, dstRect;
+	HRESULT hr = pD3DTexture->GetSurfaceLevel( 0, &pDstSurf );
 	Assert( !FAILED( hr ) );
 	if ( FAILED( hr ) )
 	{
-		pRenderTargetSurface->Release();
 		return;
 	}
 
-	bool tryblit = true;
-	if ( tryblit )
-	{
-		RECORD_COMMAND( DX8_COPY_FRAMEBUFFER_TO_TEXTURE, 1 );
-		RECORD_INT( textureHandle );
-		
-		RECT srcRect, dstRect;
-		hr = Dx9Device()->StretchRect( pRenderTargetSurface, RectToRECT( pSrcRect, srcRect ),
-			pDstSurf, RectToRECT( pDstRect, dstRect ), D3DTEXF_LINEAR );
-		Assert( !FAILED( hr ) );
-	}
-
+	// On PS3, we use some openGL functionality to blit one of the currently-bound ender targets to the given texture.
+	// Like Xbox360, this cannot actually stretch the render target; we simply ignore the destination rect width/height.
+	hr = Dx9Device()->StretchRect( ( IDirect3DSurface9 * )nRenderTargetID, RectToRECT( pSrcRect, srcRect ),
+		pDstSurf, RectToRECT( pDstRect, dstRect ), D3DTEXF_LINEAR );
 	pDstSurf->Release();
-	pRenderTargetSurface->Release();
+	Assert( !FAILED( hr ) );
+
+#elif defined( _WIN32 ) && !defined( DX_TO_GL_ABSTRACTION )
+	static ConVarRef mat_resolveFullFrameDepth( "mat_resolveFullFrameDepth" );
+
+	if ( ( nRenderTargetID == -1 ) && g_pHardwareConfig->SupportsResolveDepth() && g_pHardwareConfig->HasFullResolutionDepthTexture() )
+	{
+		// z buffer resolve tricks
+
+		/*
+		not supporting this path yet
+		benefit is no depth resolve required (if MSAA off)
+		downside is risk of using/modifying depth buffer while rendering (now or in the future), and in managing depth surfaces - resolve at this stage is a much cleaner/safer way of using depth
+		if ( g_pHardwareConfig->ActualCaps().m_bSupportsINTZ && ( config.m_nAASamples <= 1 ) )
+		{
+		// Supports INTZ and MSAA must be OFF
+		// Can 'use' the depth stencil surface as is, without need to resolve
+		// nothing to do here other than to check that the current DepthStencilSurface and DepthTexture are bound with our INTZ texture
+		}
+		else
+		*/
+		if ( g_pHardwareConfig->ActualCaps().m_bSupportsRESZ )
+		{
+			// Supports RESZ (ATI and Intel only)
+			// Use a dummy draw call to set sampler 0 to our destination depth texture 
+			// and set the pointsize renderstate to RESZ_CODE in order to perform the resolve
+			// Works with or without MSAA
+
+			Dx9Device()->SetVertexShader( NULL );
+			Dx9Device()->SetPixelShader( NULL );
+			Dx9Device()->SetFVF( D3DFVF_XYZ );
+
+			// Bind depth stencil texture to texture sampler 0
+			Dx9Device()->SetTexture( 0, pD3DTexture );
+
+			// Perform a dummy draw call to ensure texture sampler 0 is set before the resolve is triggered
+			// Vertex declaration and shaders may need to be adjusted to ensure no debug error message is produced
+			SetRenderStateForce( D3DRS_ZENABLE, FALSE );
+			SetRenderStateForce( D3DRS_ZWRITEENABLE, FALSE );
+			SetRenderStateForce( D3DRS_COLORWRITEENABLE, 0 );
+
+			Dx9Device()->DrawPrimitiveUP_RESZ( &gRESZDummyVB );
+
+			SetRenderStateForce( D3DRS_ZWRITEENABLE, TRUE );
+			SetRenderStateForce( D3DRS_ZENABLE, TRUE );
+			SetRenderStateForce( D3DRS_COLORWRITEENABLE, 0x0F );
+
+			// Trigger the depth buffer resolve; after this call texture sampler 0
+			// will contain the contents of the resolve operation
+			SetRenderStateForce( D3DRS_POINTSIZE, RESZ_CODE );
+
+			// This hack to fix resz hack, has been found by Maksym Bezus
+			// Without this line resz will be resolved only for first frame
+			SetRenderStateForce( D3DRS_POINTSIZE, 0 );
+
+			// reset vertex decl, fvf
+			VertexFormat_t vertexFormat = MeshMgr()->GetCurrentVertexFormat();
+			m_DynamicState.m_pVertexDecl = NULL;
+			SetVertexDecl( vertexFormat, false, false, false, false, NULL );
+
+			// reset VS/PS
+			ShaderManager()->ResetShaderState();
+
+			// reset bound texture
+			SamplerState( 0 ).m_BoundTexture = INVALID_SHADERAPI_TEXTURE_HANDLE;
+			Dx9Device()->SetTexture( 0, 0 );
+		}
+		else if ( g_pHardwareConfig->ActualCaps().m_VendorID == VENDORID_NVIDIA )
+		{
+			// Use NvAPI_D3D9_StretchRectEx to perform the resolve
+			// Works with or without MSAA
+			TM_ZONE( TELEMETRY_LEVEL1, TMZF_NONE, "NVIDIA Setup Resolve" );
+
+			Assert( m_pZBufferSurface );
+
+			if ( m_pNVAPI_registeredDepthStencilSurface != m_pZBufferSurface )
+			{
+				SPEW_REFCOUNT( m_pZBufferSurface );
+				NvAPI_D3D9_RegisterResource( m_pZBufferSurface );
+				SPEW_REFCOUNT( m_pZBufferSurface );
+
+				if ( m_pNVAPI_registeredDepthStencilSurface != NULL )
+				{
+					// Unregister old one if there is any
+					SPEW_REFCOUNT( m_pNVAPI_registeredDepthStencilSurface );
+					NvAPI_D3D9_UnregisterResource( m_pNVAPI_registeredDepthStencilSurface );
+					SPEW_REFCOUNT( m_pNVAPI_registeredDepthStencilSurface );
+				}
+				m_pNVAPI_registeredDepthStencilSurface = m_pZBufferSurface;
+			}
+
+			if ( m_pNVAPI_registeredDepthTexture != pD3DTexture )
+			{
+				SPEW_REFCOUNT( pD3DTexture );
+				NvAPI_D3D9_RegisterResource( pD3DTexture );
+				SPEW_REFCOUNT( pD3DTexture );
+
+				if ( m_pNVAPI_registeredDepthTexture != NULL )
+				{
+					// Unregister old one if there is any
+					SPEW_REFCOUNT( m_pNVAPI_registeredDepthStencilSurface );
+					NvAPI_D3D9_UnregisterResource( m_pNVAPI_registeredDepthTexture );
+					SPEW_REFCOUNT( m_pNVAPI_registeredDepthStencilSurface );
+				}
+				m_pNVAPI_registeredDepthTexture = pD3DTexture;
+			}
+
+			// Resolve
+			SPEW_REFCOUNT( m_pZBufferSurface );
+			Dx9Device()->StretchRectEx_NvAPI( m_pZBufferSurface, NULL, pD3DTexture, NULL, D3DTEXF_POINT );
+			SPEW_REFCOUNT( m_pZBufferSurface );
+		}
+		else
+		{
+			// Fallback, extra depth only pass required
+			// See SSAO_DepthPass()
+		}
+		return;
+	}
+	else
+	{
+		if ( nRenderTargetID == -1 )
+		{
+			// copy depth request
+			// nothing to do here, extra depth pass required
+			return;
+		}
+
+		IDirect3DSurface* pRenderTargetSurface;
+		HRESULT hr = Dx9Device()->GetRenderTarget( nRenderTargetID, &pRenderTargetSurface );
+		if ( FAILED( hr ) )
+		{
+			Assert( 0 );
+			return;
+		}
+
+		IDirect3DSurface *pDstSurf;
+		hr = pD3DTexture->GetSurfaceLevel( 0, &pDstSurf );
+		Assert( !FAILED( hr ) );
+		if ( FAILED( hr ) )
+		{
+			pRenderTargetSurface->Release();
+			return;
+		}
+
+		bool tryblit = true;
+		if ( tryblit )
+		{
+			RECORD_COMMAND( DX8_COPY_FRAMEBUFFER_TO_TEXTURE, 1 );
+			RECORD_INT( textureHandle );
+
+			RECT srcRect, dstRect;
+			hr = Dx9Device()->StretchRect( pRenderTargetSurface, RectToRECT( pSrcRect, srcRect ),
+										   pDstSurf, RectToRECT( pDstRect, dstRect ), D3DTEXF_LINEAR );
+			Assert( !FAILED( hr ) );
+		}
+
+		pDstSurf->Release();
+		pRenderTargetSurface->Release();
+	}
+#elif !defined( _X360 )
+	static ConVarRef mat_resolveFullFrameDepth( "mat_resolveFullFrameDepth" );
+
+	if ( ( nRenderTargetID == -1 ) && g_pHardwareConfig->SupportsResolveDepth() && g_pHardwareConfig->HasFullResolutionDepthTexture() )
+	{
+		Assert( m_pZBufferSurface );
+
+		IDirect3DSurface* pDstSurf;
+		HRESULT hr = pD3DTexture->GetSurfaceLevel( 0, &pDstSurf );
+		Assert( !FAILED( hr ) );
+		if ( FAILED( hr ) )
+		{
+			Assert( 0 );
+			return;
+		}
+
+		bool tryblit = true;
+		if ( tryblit )
+		{
+			RECORD_COMMAND( DX8_COPY_FRAMEBUFFER_TO_TEXTURE, 1 );
+			RECORD_INT( textureHandle );
+
+			RECT srcRect, dstRect;
+			hr = Dx9Device()->StretchRect( m_pZBufferSurface, RectToRECT( pSrcRect, srcRect ),
+										   pDstSurf, RectToRECT( pDstRect, dstRect ), D3DTEXF_POINT );
+			Assert( !FAILED( hr ) );
+		}
+
+		pDstSurf->Release();
+	}
+	else
+	{
+		if ( nRenderTargetID == -1 )
+		{
+			// copy depth request
+			// nothing to do here, extra depth pass required
+			return;
+		}
+
+		IDirect3DSurface* pRenderTargetSurface;
+		HRESULT hr = Dx9Device()->GetRenderTarget( nRenderTargetID, &pRenderTargetSurface );
+		if ( FAILED( hr ) )
+		{
+			Assert( 0 );
+			return;
+		}
+
+		IDirect3DSurface *pDstSurf;
+		hr = pD3DTexture->GetSurfaceLevel( 0, &pDstSurf );
+		Assert( !FAILED( hr ) );
+		if ( FAILED( hr ) )
+		{
+			pRenderTargetSurface->Release();
+			return;
+		}
+
+		bool tryblit = true;
+		if ( tryblit )
+		{
+			RECORD_COMMAND( DX8_COPY_FRAMEBUFFER_TO_TEXTURE, 1 );
+			RECORD_INT( textureHandle );
+
+			RECT srcRect, dstRect;
+			hr = Dx9Device()->StretchRect( pRenderTargetSurface, RectToRECT( pSrcRect, srcRect ),
+										   pDstSurf, RectToRECT( pDstRect, dstRect ), D3DTEXF_LINEAR );
+			Assert( !FAILED( hr ) );
+		}
+
+		pDstSurf->Release();
+		pRenderTargetSurface->Release();
+	}
 #else
 	DWORD flags = 0;
 	switch( nRenderTargetID )
@@ -9033,9 +12477,9 @@ void CShaderAPIDx8::CopyRenderTargetToTextureEx( ShaderAPITextureHandle_t textur
 		srcRect.left = srcRect.top = 0;
 		srcRect.right = m_DynamicState.m_Viewport.Width;
 		srcRect.bottom = m_DynamicState.m_Viewport.Height;
-		if( (srcRect.right < 0) || (srcRect.bottom < 0) )
+		if ( (srcRect.right < 0) || (srcRect.bottom < 0) )
 		{
-			if( m_UsingTextureRenderTarget )
+			if ( m_UsingTextureRenderTarget )
 			{
 				srcRect.right = m_ViewportMaxWidth;
 				srcRect.bottom = m_ViewportMaxHeight;
@@ -9052,7 +12496,10 @@ void CShaderAPIDx8::CopyRenderTargetToTextureEx( ShaderAPITextureHandle_t textur
 		srcHeight = srcRect.bottom;
 	}
 
-	if( (srcWidth != destWidth) || (srcHeight != destHeight) )
+	// Save off width and height so we can restore it after the resolve
+	int nD3DTextureFormatSizeTwoDWidth = pD3DTexture->Format.Size.TwoD.Width;
+	int nD3DTextureFormatSizeTwoDHeight = pD3DTexture->Format.Size.TwoD.Height;
+	if ( ( srcWidth != destWidth ) || ( srcHeight != destHeight ) )
 	{
 		//Not a 1:1 resolve, we should only have gotten this far if we can downsize the target texture to compensate
 		Assert( (destWidth > srcWidth) && (destHeight > srcHeight) && (dstPoint.x == 0) && (dstPoint.y == 0) );
@@ -9064,12 +12511,6 @@ void CShaderAPIDx8::CopyRenderTargetToTextureEx( ShaderAPITextureHandle_t textur
 		pD3DTexture->Format.Size.TwoD.Height = srcHeight - 1; //no idea why they store it as size-1, but they do
 		pResolveRect = NULL;
 	}
-	else
-	{
-		//restore D3D texture to full size in case it was previously downsized
-		pD3DTexture->Format.Size.TwoD.Width = pTexture->GetWidth() - 1;
-		pD3DTexture->Format.Size.TwoD.Height = pTexture->GetHeight() - 1; //no idea why they store it as size-1, but they do
-	}
 
 	// if we convert to srgb format, we need the original format for reverting. We only need the first DWORD of GPUTEXTURE_FETCH_CONSTANT.
 	DWORD linearFormatBackup = pD3DTexture->Format.dword[0]; 
@@ -9077,279 +12518,78 @@ void CShaderAPIDx8::CopyRenderTargetToTextureEx( ShaderAPITextureHandle_t textur
 	{
 		// we need a matched resolve regarding sRGB to get values transfered as-is
 		// when the surface is sRGB, use the corresponding sRGB texture
-		pD3DTexture->Format.SignX = pD3DTexture->Format.SignY = pD3DTexture->Format.SignZ = 3;
+		pD3DTexture->Format.SignX = 
+			pD3DTexture->Format.SignY = 
+			pD3DTexture->Format.SignZ = 3;
 	}
+	
+	if ( IsDebug() )
+	{
+		// From XDK Resolve() docs...
+		// Each coordinate of the rectangle must be a multiple of 8 (use GPU_RESOLVE_ALIGNMENT).
+		// The alignment requirement is relaxed for the lower right coordinate under one conditionif,
+		// in conjunction with pDestPoint, it results in a destination rectangle whose lower right corner matches
+		// the lower right corner of the destination.
+		if ( pResolveRect )
+		{
+			bool bUnaligned = false;
+
+			if ( ( pResolveRect->left % GPU_RESOLVE_ALIGNMENT ) ||
+				( pResolveRect->right % GPU_RESOLVE_ALIGNMENT ) ||
+				( pResolveRect->top % GPU_RESOLVE_ALIGNMENT ) ||
+				( pResolveRect->bottom % GPU_RESOLVE_ALIGNMENT ) )
+			{
+				bUnaligned = true;
+			}
+			if ( ( abs( pResolveRect->left - dstPoint.x ) % 32 ) ||
+				 ( abs( pResolveRect->top - dstPoint.y ) % 32 ) )
+			{
+				bUnaligned = true;
+			}
+
+			if ( bUnaligned )
+			{
+				// allowed if resolve is a 1:1
+				if ( ( pResolveRect->left == 0 ) &&
+					( pResolveRect->top == 0 ) &&
+					( dstPoint.x == 0 ) &&
+					( dstPoint.y == 0 ) &&
+					( (unsigned int)pResolveRect->right - 1 == pD3DTexture->Format.Size.TwoD.Width ) &&
+					( (unsigned int)pResolveRect->bottom - 1 == pD3DTexture->Format.Size.TwoD.Height ) )
+				{
+					bUnaligned = false;
+				}
+			}
+			
+			Assert( bUnaligned == false );
+		}
+	}
+
+#if defined( DBGFLAG_ASSERT )
+	if( pResolveRect )
+	{
+		D3DVIEWPORT9 viewPort;
+		Dx9Device()->GetViewport( &viewPort );
+		Assert( ( int ) viewPort.Width >= (pResolveRect->right - pResolveRect->left) ); //easier to catch here than with the cryptic error from d3d
+	}
+#endif
 
 	HRESULT hr = Dx9Device()->Resolve( flags, (D3DRECT*)pResolveRect, pD3DTexture, &dstPoint, 0, 0, NULL, 0, 0,	NULL );
 	Assert( !FAILED( hr ) );
 
 	pD3DTexture->Format.dword[0] = linearFormatBackup;
+
+	// Restore D3D texture to full size in case it was downsized above
+	pD3DTexture->Format.Size.TwoD.Width = nD3DTextureFormatSizeTwoDWidth;
+	pD3DTexture->Format.Size.TwoD.Height = nD3DTextureFormatSizeTwoDHeight;
 #endif
 }
-
-void CShaderAPIDx8::CopyRenderTargetToScratchTexture( ShaderAPITextureHandle_t srcRt, ShaderAPITextureHandle_t dstTex, Rect_t *pSrcRect, Rect_t *pDstRect )
-{
-	LOCK_SHADERAPI();
-
-	if  ( !TextureIsAllocated( srcRt ) || !TextureIsAllocated( dstTex ) )
-	{
-		Assert( !"Fix that render target or dest texture aren't allocated." );
-		return;
-	}
-
-	HRESULT hr = D3D_OK;
-
-	IDirect3DSurface9* srcSurf = NULL;
-	AssertValidTextureHandle( srcRt );
-	Texture_t *pSrcRt = &GetTexture( srcRt );
-	Assert( pSrcRt );
-	IDirect3DTexture *pD3DSrcRt = ( IDirect3DTexture * ) pSrcRt->GetTexture();
-	Assert( pD3DSrcRt );
-	hr = pD3DSrcRt->GetSurfaceLevel( 0, &srcSurf );
-	Assert( SUCCEEDED( hr ) && srcSurf );
-
-	IDirect3DSurface9* dstSurf = NULL;
-	AssertValidTextureHandle( dstTex );
-	Texture_t *pDstTex = &GetTexture( dstTex );
-	Assert( pDstTex );
-	IDirect3DTexture *pD3DDstTex = ( IDirect3DTexture * ) pDstTex->GetTexture();
-	Assert( pD3DDstTex );
-	hr = pD3DDstTex->GetSurfaceLevel( 0, &dstSurf );
-	Assert( SUCCEEDED( hr ) && dstSurf );
-
-	// This does it.
-	hr = Dx9Device()->GetRenderTargetData( srcSurf, dstSurf );
-	Assert( SUCCEEDED( hr ) );
-
-	srcSurf->Release();
-	dstSurf->Release();
-}
-
-//-------------------------------------------------------------------------
-// Allows locking and unlocking of very specific surface types. pOutBits and pOutPitch will not be touched if 
-// the lock fails.
-//-------------------------------------------------------------------------
-void CShaderAPIDx8::LockRect( void** pOutBits, int* pOutPitch, ShaderAPITextureHandle_t texHandle, int mipmap, int x, int y, int w, int h, bool bWrite, bool bRead )
-{
-	LOCK_SHADERAPI();
-
-	Assert( pOutBits );
-	Assert( pOutPitch );
-
-	if ( !TextureIsAllocated( texHandle ) )
-	{
-		Assert( !"Fix that texture isn't allocated." );
-		return;
-	}
-
-	HRESULT hr = D3D_OK;
-	IDirect3DSurface9* surf = NULL;
-	AssertValidTextureHandle( texHandle );
-	Texture_t *pTex = &GetTexture( texHandle );
-	Assert( pTex );
-	IDirect3DTexture *pD3DTex = ( IDirect3DTexture * ) pTex->GetTexture();
-	Assert( pD3DTex );
-
-	hr = pD3DTex->GetSurfaceLevel( mipmap, &surf );
-	Assert( SUCCEEDED( hr ) && surf );
-
-	D3DLOCKED_RECT lockRect = { 0 };
-	RECT srcRect = { x, y, w, h };
-	DWORD flags = 0;
-
-	if ( !bRead && !bWrite )
-	{
-		Assert( !"Asking to neither read nor write? Probably a caller bug." );
-		goto cleanup;
-	}
-
-	if (  bRead && !bWrite )
-		flags = D3DLOCK_READONLY;
-
-	hr = surf->LockRect( &lockRect, &srcRect, flags );
-	if ( FAILED( hr ) )
-	{
-		Assert( !"Lock failed, look into why." );
-		goto cleanup;
-	}
-
-	(*pOutBits)  = lockRect.pBits;
-	(*pOutPitch) = lockRect.Pitch;
-
-cleanup:
-	surf->Release();
-}
-
-void CShaderAPIDx8::UnlockRect( ShaderAPITextureHandle_t texHandle, int mipmap )
-{
-	LOCK_SHADERAPI();
-
-	if ( !TextureIsAllocated( texHandle ) )
-	{
-		Assert( !"Fix that texture isn't allocated." );
-		return;
-	}
-
-	HRESULT hr = D3D_OK;
-	IDirect3DSurface9* surf = NULL;
-	AssertValidTextureHandle( texHandle );
-	Texture_t *pTex = &GetTexture( texHandle );
-	Assert( pTex );
-	IDirect3DTexture *pD3DTex = ( IDirect3DTexture * ) pTex->GetTexture();
-	Assert( pD3DTex );
-
-	hr = pD3DTex->GetSurfaceLevel( mipmap, &surf );
-	Assert( SUCCEEDED( hr ) && surf );
-
-	hr = surf->UnlockRect();
-	Assert( SUCCEEDED( hr ) );
-
-	surf->Release();
-}
-
-static float GetAspectRatio( const Texture_t* pTex )
-{
-	Assert( pTex );
-	if ( pTex->m_Height != 0 )
-		return float( pTex->m_Width ) / float( pTex->m_Height );
-
-	Assert( !"Height of texture is 0, that seems like a bug." );
-	return 0.0f;
-}
-
-struct TextureExtents_t
-{
-	int width;
-	int height;
-	int depth;
-	int mipmaps;
-
-	int fine;
-	int coarse;
-
-	TextureExtents_t() : width( 0 ), height( 0 ), depth( 0 ), mipmaps( 0 ), fine( 0 ), coarse( 0 ) { }
-};
-
-// Returns positive integer on success, 0 or <0 on failure.
-static int FindCommonMipmapRange( int *pOutSrcFine, int *pOutDstFine, Texture_t *pSrcTex, Texture_t *pDstTex )
-{
-	Assert( pOutSrcFine && pOutDstFine );
-	Assert( pSrcTex && pDstTex );
-
-	if ( GetAspectRatio( pSrcTex ) != GetAspectRatio( pDstTex ) )
-		return 0;
-
-	TextureExtents_t src, 
-		             dst;
-
-	// LOD Clamp indicates that there's no actual data in the finer mipmap levels yet, so respect it when determining
-	// the source and destination levels that could have data.
-	const int srcLodClamp = pSrcTex->GetLodClamp();
-	src.width =  Max( 1, pSrcTex->GetWidth()  >> srcLodClamp );
-	src.height = Max( 1, pSrcTex->GetHeight() >> srcLodClamp );
-	src.depth =  Max( 1, pSrcTex->GetDepth()  >> srcLodClamp );
-	src.mipmaps = pSrcTex->m_NumLevels - srcLodClamp;
-	Assert( src.mipmaps >= 1 );
-	
-
-	const int dstLodClamp = pDstTex->GetLodClamp();
-	dst.width =  Max( 1, pDstTex->GetWidth()  >> dstLodClamp );
-	dst.height = Max( 1, pDstTex->GetHeight() >> dstLodClamp );
-	dst.depth =  Max( 1, pDstTex->GetDepth()  >> dstLodClamp );
-	dst.mipmaps = pDstTex->m_NumLevels - dstLodClamp;
-	Assert( dst.mipmaps >= 1 );
-
-	TextureExtents_t *pLarger = NULL, 
-		             *pSmaller = NULL;
-
-	if ( src.width >= dst.width && src.height >= dst.height && src.depth >= dst.depth )
-	{
-		pLarger = &src;
-		pSmaller = &dst;
-	}
-	else
-	{
-		pLarger = &dst;
-		pSmaller = &src;
-	}
-
-	// Since we are same aspect ratio, only need to test one dimension
-	while ( ( pLarger->width >> pLarger->fine ) > pSmaller->width )
-	{
-		++pLarger->fine;
-		--pLarger->mipmaps;
-	}
-
-	( *pOutSrcFine ) = src.fine;
-	( *pOutDstFine ) = dst.fine;
-
-	return Min( src.mipmaps, dst.mipmaps );
-}
-
-void CShaderAPIDx8::CopyTextureToTexture( ShaderAPITextureHandle_t srcTex, ShaderAPITextureHandle_t dstTex )
-{
-	LOCK_SHADERAPI();
-
-	AssertValidTextureHandle( srcTex );
-	AssertValidTextureHandle( dstTex );
-
-	Assert( TextureIsAllocated( srcTex ) && TextureIsAllocated( dstTex ) );
-
-	Texture_t *pSrcTex = &GetTexture( srcTex );
-	Texture_t *pDstTex = &GetTexture( dstTex );
-
-	Assert( pSrcTex && pDstTex );
-
-	// Must have same image format
-	Assert( pSrcTex->GetImageFormat() == pDstTex->GetImageFormat() );
-
-	int srcFine = 0,
-		dstFine = 0;
-	
-	int mipmapCount = FindCommonMipmapRange( &srcFine, &dstFine, pSrcTex, pDstTex );
-	
-	if ( mipmapCount <= 0 )
-	{
-		// This is legit for things that are streamed in that are very small (near the 32x32 cutoff we do at the 
-		// tip of the mipmap pyramid). But leaving it here because it's useful if you're tracking a specific bug.
-		// Warning( "Attempted to copy textures that had non-overlapping mipmap pyramids. This has failed and no copy has taken place.\n" );
-		return;
-	}
-
-	IDirect3DTexture* pSrcD3DTex = ( IDirect3DTexture * ) pSrcTex->GetTexture();
-	IDirect3DTexture* pDstD3DTex = ( IDirect3DTexture * ) pDstTex->GetTexture();
-
-	HRESULT hr = S_OK;
-	for ( int i = 0; i < mipmapCount; ++i )
-	{
-		int srcMipmap = srcFine + i;
-		int dstMipmap = dstFine + i;
-
-		IDirect3DSurface9* pSrcSurf = NULL;
-		IDirect3DSurface9* pDstSurf = NULL;
-
-		hr = pSrcD3DTex->GetSurfaceLevel( srcMipmap, &pSrcSurf );
-		Assert( SUCCEEDED( hr ) && pSrcSurf );
-
-		hr = pDstD3DTex->GetSurfaceLevel( dstMipmap, &pDstSurf );
-		Assert( SUCCEEDED( hr ) && pDstSurf );
-
-		hr = g_pD3DDevice->StretchRect( pSrcSurf, NULL, pDstSurf, NULL, D3DTEXF_NONE );
-		Assert( SUCCEEDED( hr ) );
-
-		pSrcSurf->Release();
-		pDstSurf->Release();
-	}
-}
-
-
 
 void CShaderAPIDx8::CopyRenderTargetToTexture( ShaderAPITextureHandle_t textureHandle )
 {
 	LOCK_SHADERAPI();
 	CopyRenderTargetToTextureEx( textureHandle, 0 );
 }
-
 
 void CShaderAPIDx8::CopyTextureToRenderTargetEx( int nRenderTargetID, ShaderAPITextureHandle_t textureHandle, Rect_t *pSrcRect, Rect_t *pDstRect )
 {
@@ -9402,44 +12642,6 @@ void CShaderAPIDx8::CopyTextureToRenderTargetEx( int nRenderTargetID, ShaderAPIT
 	pRenderTargetSurface->Release();
 #else
 	Assert( 0 );
-#endif
-}
-
-
-//-----------------------------------------------------------------------------
-// modifies the vertex data when necessary
-//-----------------------------------------------------------------------------
-void CShaderAPIDx8::ModifyVertexData( )
-{
-	// this should be a dead code path
-	Assert( 0 );
-#if 0
-	// We have to modulate the vertex color by the constant color sometimes
-	if (IsModulatingVertexColor())
-	{
-		m_ModifyBuilder.Reset();
-
-		float factor[4];
-		unsigned char* pColor = (unsigned char*)&m_DynamicState.m_ConstantColor;
-		factor[0] = pColor[0] / 255.0f;
-		factor[1] = pColor[1] / 255.0f;
-		factor[2] = pColor[2] / 255.0f;
-		factor[3] = pColor[3] / 255.0f;
-
-		for ( int i = 0; i < m_ModifyBuilder.VertexCount(); ++i )
-		{
-			unsigned int color = m_ModifyBuilder.Color();
-			unsigned char* pVertexColor = (unsigned char*)&color;
-
-			pVertexColor[0] = (unsigned char)((float)pVertexColor[0] * factor[0]);
-			pVertexColor[1] = (unsigned char)((float)pVertexColor[1] * factor[1]);
-			pVertexColor[2] = (unsigned char)((float)pVertexColor[2] * factor[2]);
-			pVertexColor[3] = (unsigned char)((float)pVertexColor[3] * factor[3]);
-			m_ModifyBuilder.Color4ubv( pVertexColor );
-
-			m_ModifyBuilder.AdvanceVertex();
-		}
-	}
 #endif
 }
 
@@ -9724,30 +12926,22 @@ void CShaderAPIDx8::SpewBoardState()
 	ShadowShaderState_t &boardShaderState = m_TransitionTable.BoardShaderState();
 
 	sprintf(buf,"Depth States: ZFunc %d, ZWrite %d, ZEnable %d, ZBias %d\n",
-		boardState.m_ZFunc, boardState.m_ZWriteEnable, 
-		boardState.m_ZEnable, boardState.m_ZBias );
+		boardState.m_DepthTestState.m_ZFunc, boardState.m_DepthTestState.m_ZWriteEnable, 
+		boardState.m_DepthTestState.m_ZEnable, boardState.m_DepthTestState.m_ZBias );
 	Plat_DebugString(buf);
-	sprintf(buf,"Cull Enable %d Cull Mode %d Color Write %d Fill %d Const Color Mod %d sRGBWriteEnable %d\n",
-		boardState.m_CullEnable, m_DynamicState.m_CullMode, boardState.m_ColorWriteEnable, 
-		boardState.m_FillMode, boardShaderState.m_ModulateConstantColor, boardState.m_SRGBWriteEnable );
+	sprintf(buf,"Cull Enable %d Cull Mode %d Color Write %d Fill %d Const Color sRGBWriteEnable %d\n",
+		boardState.m_AlphaTestAndMiscState.m_CullEnable, m_DynamicState.m_CullMode, boardState.m_DepthTestState.m_ColorWriteEnable, 
+		boardState.m_AlphaTestAndMiscState.m_FillMode, boardState.m_FogAndMiscState.m_SRGBWriteEnable );
 	Plat_DebugString(buf);
-	sprintf(buf,"Blend States: Blend Enable %d Test Enable %d Func %d SrcBlend %d (%s) DstBlend %d (%s)\n",
-		boardState.m_AlphaBlendEnable, boardState.m_AlphaTestEnable, 
-		boardState.m_AlphaFunc, boardState.m_SrcBlend, BlendModeToString( boardState.m_SrcBlend ),
-		boardState.m_DestBlend, BlendModeToString( boardState.m_DestBlend ) );
-	Plat_DebugString(buf);
-	int len = sprintf(buf,"Alpha Ref %d, Lighting: %d, Ambient Color %x, LightsEnabled ",
-		boardState.m_AlphaRef, boardState.m_Lighting, m_DynamicState.m_Ambient);
+	AlphaBlendState_t const &boardAlpha = boardState.m_AlphaBlendState;
 
-	int i;
-	for ( i = 0; i < g_pHardwareConfig->Caps().m_MaxNumLights; ++i)
-	{
-		len += sprintf(buf+len,"%d ", m_DynamicState.m_LightEnable[i] );
-	}
-	sprintf(buf+len,"\n");
+	sprintf(buf,"Blend States: Blend Enable %d Test Enable %d Func %d SrcBlend %d (%s) DstBlend %d (%s)\n",
+		boardAlpha.m_AlphaBlendEnable, boardState.m_AlphaTestAndMiscState.m_AlphaTestEnable, 
+		boardState.m_AlphaTestAndMiscState.m_AlphaFunc, boardAlpha.m_SrcBlend, BlendModeToString( boardAlpha.m_SrcBlend ),
+		boardAlpha.m_DestBlend, BlendModeToString( boardAlpha.m_DestBlend ) );
 	Plat_DebugString(buf);
-	sprintf(buf,"Fixed Function: %d, VertexBlend %d\n",
-		boardState.m_UsingFixedFunction, m_DynamicState.m_VertexBlend );
+	int len = sprintf(buf,"Alpha Ref %d, LightsEnabled %d\n",
+		boardState.m_AlphaTestAndMiscState.m_AlphaRef, m_DynamicState.m_LightingState.m_nLocalLightCount );
 	Plat_DebugString(buf);
 	
 	sprintf(buf,"Pass Vertex Usage: %llx Pixel Shader %p Vertex Shader %p\n",
@@ -9807,32 +13001,6 @@ void CShaderAPIDx8::SpewBoardState()
 		m_DynamicState.m_Viewport.MinZ, m_DynamicState.m_Viewport.MaxZ);
 	Plat_DebugString(buf);
 
-	for (i = 0; i < MAX_TEXTURE_STAGES; ++i)
-	{
-		sprintf(buf,"Stage %d :\n", i);
-		Plat_DebugString(buf);
-		sprintf(buf,"   Color Op: %d (%s) Color Arg1: %d (%s)",
-			boardState.m_TextureStage[i].m_ColorOp, 
-			TextureOpToString( boardState.m_TextureStage[i].m_ColorOp ),
-			boardState.m_TextureStage[i].m_ColorArg1, 
-			TextureArgToString( boardState.m_TextureStage[i].m_ColorArg1 ) );
-		Plat_DebugString(buf);
-		sprintf( buf, " Color Arg2: %d (%s)\n",
-			boardState.m_TextureStage[i].m_ColorArg2,
-			TextureArgToString( boardState.m_TextureStage[i].m_ColorArg2 ) );
-		Plat_DebugString(buf);
-		sprintf(buf,"   Alpha Op: %d (%s) Alpha Arg1: %d (%s)",
-			boardState.m_TextureStage[i].m_AlphaOp, 
-			TextureOpToString( boardState.m_TextureStage[i].m_AlphaOp ),
-			boardState.m_TextureStage[i].m_AlphaArg1, 
-			TextureArgToString( boardState.m_TextureStage[i].m_AlphaArg1 ) );
-		Plat_DebugString(buf);
-		sprintf(buf," Alpha Arg2: %d (%s)\n",
-			boardState.m_TextureStage[i].m_AlphaArg2,
-			TextureArgToString( boardState.m_TextureStage[i].m_AlphaArg2 ) );
-		Plat_DebugString(buf);
-	}
-
 	for ( int i = 0; i < MAX_SAMPLERS; ++i )
 	{
 		sprintf(buf,"	Texture Enabled: %d Bound Texture: %d UWrap: %d VWrap: %d\n",
@@ -9842,7 +13010,6 @@ void CShaderAPIDx8::SpewBoardState()
 		sprintf(buf,"	Mag Filter: %d Min Filter: %d Mip Filter: %d\n",
 			SamplerState(i).m_MagFilter, SamplerState(i).m_MinFilter,
 			SamplerState(i).m_MipFilter );
-		sprintf(buf,"   MaxMipLevel: %d\n", SamplerState(i).m_FinestMipmapLevel );
 		Plat_DebugString(buf);
 	}
 #else
@@ -9873,14 +13040,14 @@ void CShaderAPIDx8::BeginPass( StateSnapshot_t snapshot )
 //-----------------------------------------------------------------------------
 // Render da polygon!
 //-----------------------------------------------------------------------------
-void CShaderAPIDx8::RenderPass( int nPass, int nPassCount )
+void CShaderAPIDx8::RenderPass( const unsigned char *pInstanceCommandBuffer, int nPass, int nPassCount )
 {
 	if ( IsDeactivated() )
 		return;
 
 	Assert( m_nCurrentSnapshot != -1 );
 //	Assert( m_pRenderMesh );  MESHFIXME
-
+	
 	m_TransitionTable.UseSnapshot( m_nCurrentSnapshot );
 	CommitPerPassStateChanges( m_nCurrentSnapshot );
 
@@ -9909,11 +13076,11 @@ void CShaderAPIDx8::RenderPass( int nPass, int nPassCount )
 //	Assert( m_pRenderMesh );  MESHFIXME
 	if ( m_pRenderMesh )
 	{
-		m_pRenderMesh->RenderPass();
+		m_pRenderMesh->RenderPass( pInstanceCommandBuffer );
 	}
 	else
 	{
-		MeshMgr()->RenderPassWithVertexAndIndexBuffers();
+		MeshMgr()->RenderPassWithVertexAndIndexBuffers( pInstanceCommandBuffer );
 	}
 	m_nCurrentSnapshot = -1;
 }
@@ -9927,48 +13094,45 @@ void CShaderAPIDx8::MatrixMode( MaterialMatrixMode_t matrixMode )
 	// NOTE!!!!!!
 	// The only time that m_MatrixMode is used is for texture matrices.  Do not use
 	// it for anything else unless you change this code!
-	if ( matrixMode >= MATERIAL_TEXTURE0 && matrixMode <= MATERIAL_TEXTURE7 )
-	{
-		m_MatrixMode = ( D3DTRANSFORMSTATETYPE )( matrixMode - MATERIAL_TEXTURE0 + D3DTS_TEXTURE0 );
-	}
-	else
-	{
-		m_MatrixMode = (D3DTRANSFORMSTATETYPE)-1;
-	}
-
+	m_MatrixMode = (D3DTRANSFORMSTATETYPE)-1;
 	m_CurrStack = GetMatrixStack( matrixMode );
 }
 				 	    
-//-----------------------------------------------------------------------------
-// the current camera position in world space.
-//-----------------------------------------------------------------------------
+// The current camera position in world space.
 void CShaderAPIDx8::GetWorldSpaceCameraPosition( float* pPos ) const
 {
-	memcpy( pPos, m_WorldSpaceCameraPositon.Base(), sizeof( float[3] ) );
+	memcpy( pPos, m_WorldSpaceCameraPosition.Base(), sizeof( float[3] ) );
 }
 
-void CShaderAPIDx8::CacheWorldSpaceCameraPosition()
+// The current camera direction in world space.
+void CShaderAPIDx8::GetWorldSpaceCameraDirection( float* pPos ) const
 {
-	D3DXMATRIX& view = GetTransform(MATERIAL_VIEW);
-	m_WorldSpaceCameraPositon[0] = 
+	memcpy( pPos, m_WorldSpaceCameraDirection.Base(), sizeof( float[3] ) );
+}
+
+void CShaderAPIDx8::CacheWorldSpaceCamera()
+{
+	D3DXMATRIX& view = GetTransform( MATERIAL_VIEW );
+	m_WorldSpaceCameraPosition[0] = 
 		-( view( 3, 0 ) * view( 0, 0 ) + 
-		   view( 3, 1 ) * view( 0, 1 ) + 
-		   view( 3, 2 ) * view( 0, 2 ) );
-	m_WorldSpaceCameraPositon[1] = 
+		view( 3, 1 ) * view( 0, 1 ) + 
+		view( 3, 2 ) * view( 0, 2 ) );
+	m_WorldSpaceCameraPosition[1] = 
 		-( view( 3, 0 ) * view( 1, 0 ) + 
-		   view( 3, 1 ) * view( 1, 1 ) + 
-		   view( 3, 2 ) * view( 1, 2 ) );
-	m_WorldSpaceCameraPositon[2] = 
+		view( 3, 1 ) * view( 1, 1 ) + 
+		view( 3, 2 ) * view( 1, 2 ) );
+	m_WorldSpaceCameraPosition[2] = 
 		-( view( 3, 0 ) * view( 2, 0 ) + 
-		   view( 3, 1 ) * view( 2, 1 ) + 
-		   view( 3, 2 ) * view( 2, 2 ) );
-	m_WorldSpaceCameraPositon[3] = 1.0f;
+		view( 3, 1 ) * view( 2, 1 ) + 
+		view( 3, 2 ) * view( 2, 2 ) );
 
 	// Protect against zero, as some pixel shaders will divide by this in CalcWaterFogAlpha() in common_ps_fxc.h
-	if ( fabs( m_WorldSpaceCameraPositon[2] ) <= 0.00001f )
+	if ( fabs( m_WorldSpaceCameraPosition[2] ) <= 0.00001f )
 	{
-		m_WorldSpaceCameraPositon[2] = 0.01f;
+		m_WorldSpaceCameraPosition[2] = 0.01f;
 	}
+
+	m_WorldSpaceCameraDirection.Init( -view(0,2), -view(1,2), -view(2, 2) );
 }
 
 
@@ -10006,91 +13170,21 @@ void CShaderAPIDx8::CachePolyOffsetProjectionMatrix()
 bool CShaderAPIDx8::MatrixIsChanging( TransformType_t type )
 {
 	if ( IsDeactivated() )	
-	{
 		return false;
-	}
 
 	// early out if the transform is already one of our standard types
 	if ((type != TRANSFORM_IS_GENERAL) && (type == m_DynamicState.m_TransformType[m_CurrStack]))
 		return false;
 
-	// Only flush state if we're changing something other than a texture transform
-	int textureMatrix = m_CurrStack - MATERIAL_TEXTURE0;
-	if (( textureMatrix < 0 ) || (textureMatrix >= NUM_TEXTURE_TRANSFORMS))
-		FlushBufferedPrimitivesInternal();
-
 	return true;
 }
 
-void CShaderAPIDx8::SetTextureTransformDimension( TextureStage_t textureMatrix, int dimension, bool projected )
-{
-	D3DTEXTURETRANSFORMFLAGS textureTransformFlags = ( D3DTEXTURETRANSFORMFLAGS )dimension;
-	if( projected )
-	{
-		Assert( sizeof( int ) == sizeof( D3DTEXTURETRANSFORMFLAGS ) );
-		( *( int * )&textureTransformFlags ) |= D3DTTFF_PROJECTED;
-	}
-
-	if (TextureStage(textureMatrix).m_TextureTransformFlags != textureTransformFlags )
-	{
-		SetTextureStageState( textureMatrix, D3DTSS_TEXTURETRANSFORMFLAGS, textureTransformFlags );
-		TextureStage(textureMatrix).m_TextureTransformFlags = textureTransformFlags;
-	}
-}
-
-void CShaderAPIDx8::DisableTextureTransform( TextureStage_t textureMatrix )
-{
-	if (TextureStage(textureMatrix).m_TextureTransformFlags != D3DTTFF_DISABLE )
-	{
-		SetTextureStageState( textureMatrix, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE );
-		TextureStage(textureMatrix).m_TextureTransformFlags = D3DTTFF_DISABLE;
-	}
-}
-
-void CShaderAPIDx8::SetBumpEnvMatrix( TextureStage_t textureStage, float m00, float m01, float m10, float m11 )
-{	
-	TextureStageState_t &textureStageState = TextureStage( textureStage );
-	
-	if( textureStageState.m_BumpEnvMat00 != m00 ||
-		textureStageState.m_BumpEnvMat01 != m01 ||
-		textureStageState.m_BumpEnvMat10 != m10 ||
-		textureStageState.m_BumpEnvMat11 != m11 )
-	{
-		SetTextureStageState( textureStage, D3DTSS_BUMPENVMAT00, *( ( LPDWORD ) (&m00) ) );
-		SetTextureStageState( textureStage, D3DTSS_BUMPENVMAT01, *( ( LPDWORD ) (&m01) ) );
-		SetTextureStageState( textureStage, D3DTSS_BUMPENVMAT10, *( ( LPDWORD ) (&m10) ) );
-		SetTextureStageState( textureStage, D3DTSS_BUMPENVMAT11, *( ( LPDWORD ) (&m11) ) );
-		textureStageState.m_BumpEnvMat00 = m00;
-		textureStageState.m_BumpEnvMat01 = m01;
-		textureStageState.m_BumpEnvMat10 = m10;
-		textureStageState.m_BumpEnvMat11 = m11;
-	}
-}
 
 //-----------------------------------------------------------------------------
 // Sets the actual matrix state
 //-----------------------------------------------------------------------------
 void CShaderAPIDx8::UpdateMatrixTransform( TransformType_t type )
 {
-	int textureMatrix = m_CurrStack - MATERIAL_TEXTURE0;
-	if (( textureMatrix >= 0 ) && (textureMatrix < NUM_TEXTURE_TRANSFORMS))
-	{
-		// NOTE: Flush shouldn't happen here because we
-		// expect that texture transforms will be set within the shader
-
-		// FIXME: We only want to use D3DTTFF_COUNT3 for cubemaps
-		// D3DTFF_COUNT2 is used for non-cubemaps. Of course, if there's
-		// no performance penalty for COUNT3, we should just use that.
-		D3DTEXTURETRANSFORMFLAGS transformFlags;
-		transformFlags = (type == TRANSFORM_IS_IDENTITY) ? D3DTTFF_DISABLE : D3DTTFF_COUNT3;
-
-		if (TextureStage(textureMatrix).m_TextureTransformFlags != transformFlags )
-		{
-			SetTextureStageState( textureMatrix, D3DTSS_TEXTURETRANSFORMFLAGS, transformFlags );
-			TextureStage(textureMatrix).m_TextureTransformFlags = transformFlags;
-		}
-	}
-
 	m_DynamicState.m_TransformType[m_CurrStack] = type;
 	m_DynamicState.m_TransformChanged[m_CurrStack] = STATE_CHANGED;
 
@@ -10102,9 +13196,14 @@ void CShaderAPIDx8::UpdateMatrixTransform( TransformType_t type )
 	memcpy( pDst, pSrc, sizeof(D3DXMATRIX) );
 #endif
 
+	if ( m_CurrStack == MATERIAL_MODEL )
+	{
+		m_DynamicState.m_InstanceInfo.m_bSetSkinConstants = false;
+	}
+
 	if ( m_CurrStack == MATERIAL_VIEW )
 	{
-		CacheWorldSpaceCameraPosition();
+		CacheWorldSpaceCamera();
 	}
 
 	if ( !IsX360() && m_CurrStack == MATERIAL_PROJECTION )
@@ -10118,12 +13217,6 @@ void CShaderAPIDx8::UpdateMatrixTransform( TransformType_t type )
 		 ( ( m_CurrStack == MATERIAL_VIEW ) && ( !m_DynamicState.m_bUserClipTransformOverride ) ) )
 	{
 		MarkAllUserClipPlanesDirty();
-	}
-
-	// Set the state if it's a texture transform
-	if ( (m_CurrStack >= MATERIAL_TEXTURE0) && (m_CurrStack <= MATERIAL_TEXTURE7) )
-	{
-		SetTransform( m_MatrixMode, &GetTransform(m_CurrStack) );
 	}
 }
 
@@ -10165,6 +13258,52 @@ int CShaderAPIDx8::GetNumActiveDeformations( void ) const
 	return ( m_DeformationStack + DEFORMATION_STACK_DEPTH ) - m_pDeformationStackPtr;
 }
 
+bool CShaderAPIDx8::IsStereoSupported() const
+{
+#if defined( _GAMECONSOLE )
+	return false;
+#else
+	LOCK_SHADERAPI();
+	return Dx9Device()->IsStereoSupported();
+#endif
+}
+
+void CShaderAPIDx8::UpdateStereoTexture( ShaderAPITextureHandle_t texHandle, bool *pStereoActiveThisFrame )
+{
+#if defined( _GAMECONSOLE )
+	return;
+#else
+	LOCK_SHADERAPI();
+
+	if ( ( texHandle == INVALID_SHADERAPI_TEXTURE_HANDLE ) || !m_Textures.IsValidIndex( texHandle ) )
+	{
+		if ( pStereoActiveThisFrame )
+		{
+			*pStereoActiveThisFrame = false;
+		}
+		m_bIsStereoActiveThisFrame = false;
+		return;
+	}
+
+	IDirect3DBaseTexture *baseTex = GetTexture( texHandle ).GetTexture();
+	if ( ( baseTex == NULL ) || ( baseTex->GetType() != D3DRTYPE_TEXTURE ) )
+	{
+		if ( pStereoActiveThisFrame )
+		{
+			*pStereoActiveThisFrame = false;
+		}
+		m_bIsStereoActiveThisFrame = false;
+		return;
+	}
+
+	Dx9Device()->UpdateStereoTexture( ( IDirect3DTexture9 * )baseTex, m_bQueuedDeviceLost, pStereoActiveThisFrame );
+
+	if ( pStereoActiveThisFrame )
+	{
+		m_bIsStereoActiveThisFrame = *pStereoActiveThisFrame;
+	}
+#endif
+}
 
 // for shaders to set vertex shader constants. returns a packed state which can be used to set the dynamic combo
 int CShaderAPIDx8::GetPackedDeformationInformation( int nMaskOfUnderstoodDeformations,
@@ -10213,6 +13352,11 @@ void CShaderAPIDx8::PopMatrix()
 	{
 		m_pMatrixStack[m_CurrStack]->Pop();
 		UpdateMatrixTransform();
+	}
+	else
+	{
+		// Have to pop even while deactivated, otherwise the stack will overflow and we'll crash
+		m_pMatrixStack[m_CurrStack]->Pop();
 	}
 }
 
@@ -10280,12 +13424,13 @@ void CShaderAPIDx8::LoadBoneMatrix( int boneIndex, const float *m )
 		MatrixTranspose( transposeMatrix, transposeMatrix );
 		LoadMatrix( (float*)transposeMatrix.m );
 	}
+	m_DynamicState.m_InstanceInfo.m_bSetSkinConstants = false;
 }
 
 //-----------------------------------------------------------------------------
 // Commits morph target factors
 //-----------------------------------------------------------------------------
-static void CommitFlexWeights( IDirect3DDevice9 *pDevice, const DynamicState_t &desiredState, 
+static void CommitFlexWeights( D3DDeviceWrapper *pDevice, const DynamicState_t &desiredState, 
 									 DynamicState_t &currentState, bool bForce )
 {
 	if ( IsX360() )
@@ -10322,7 +13467,7 @@ void CShaderAPIDx8::SetFlexWeights( int nFirstWeight, int nCount, const MorphWei
 	float *pDest = m_DesiredState.m_pVectorVertexShaderConstant[ VERTEX_SHADER_FLEX_WEIGHTS + nFirstWeight ].Base();
 	memcpy( pDest, pWeights, nCount * sizeof(MorphWeight_t) );
 
-	ADD_COMMIT_FUNC( COMMIT_PER_DRAW, COMMIT_VERTEX_SHADER, CommitFlexWeights );
+	ADD_COMMIT_FUNC( COMMIT_PER_DRAW, CommitFlexWeights );
 }
 
 void CShaderAPIDx8::MultMatrix( float *m )
@@ -10492,7 +13637,8 @@ void CShaderAPIDx8::PickMatrix( int x, int y, int width, int height )
 
 void CShaderAPIDx8::GetMatrix( MaterialMatrixMode_t matrixMode, float *dst )
 {
-	memcpy( dst, (void*)(FLOAT*)GetTransform(matrixMode), sizeof(D3DXMATRIX) );
+	void *pSrc = &GetTransform( matrixMode );
+	memcpy( (void *)dst, pSrc, sizeof(D3DXMATRIX) );
 }
 
 
@@ -10504,19 +13650,13 @@ inline bool CShaderAPIDx8::VertexShaderTransformChanged( int i )
 	return (m_DynamicState.m_TransformChanged[i] & STATE_CHANGED_VERTEX_SHADER) != 0;
 }
 
-inline bool CShaderAPIDx8::FixedFunctionTransformChanged( int i )
-{
-	return (m_DynamicState.m_TransformChanged[i] & STATE_CHANGED_FIXED_FUNCTION) != 0;
-}
-
-
 const D3DXMATRIX &CShaderAPIDx8::GetProjectionMatrix( void )
 {
 	bool bUsingZBiasProjectionMatrix = 
 		!g_pHardwareConfig->Caps().m_ZBiasAndSlopeScaledDepthBiasSupported &&
 		( m_TransitionTable.CurrentSnapshot() != -1 ) &&
 		m_TransitionTable.CurrentShadowState() &&
-		m_TransitionTable.CurrentShadowState()->m_ZBias;
+		m_TransitionTable.CurrentShadowState()->m_DepthTestState.m_ZBias;
 
 	if ( !m_DynamicState.m_FastClipEnabled )
 	{
@@ -10542,18 +13682,9 @@ void CShaderAPIDx8::SetupSelectionModeVisualizationState()
 
 	D3DXMATRIX ident;
 	D3DXMatrixIdentity( &ident );
-	SetTransform( D3DTS_WORLD, &ident );
-	SetTransform( D3DTS_VIEW, &ident );
-	SetTransform( D3DTS_PROJECTION, &ident );
-
-	if ( g_pHardwareConfig->Caps().m_SupportsPixelShaders )
-	{
-		SetVertexShaderConstant( VERTEX_SHADER_VIEWPROJ, ident, 4 );
-		SetVertexShaderConstant( VERTEX_SHADER_MODELVIEWPROJ, ident, 4 );
-		float *pRowTwo = (float *)ident + 8;
-		SetVertexShaderConstant( VERTEX_SHADER_MODELVIEWPROJ_THIRD_ROW, pRowTwo, 1 ); // Row two of an identity matrix
-		SetVertexShaderConstant( VERTEX_SHADER_MODEL, ident, 3 * NUM_MODEL_TRANSFORMS );
-	}
+	SetVertexShaderConstantInternal( VERTEX_SHADER_VIEWPROJ, ident, 4 );
+	SetVertexShaderConstantInternal( VERTEX_SHADER_MODELVIEWPROJ, ident, 4 );
+	SetVertexShaderConstantInternal( VERTEX_SHADER_MODEL, ident, 3 * NUM_MODEL_TRANSFORMS );
 }
 
 
@@ -10591,119 +13722,42 @@ static void printmat4x4( char *label, float *m00 )
 
 void CShaderAPIDx8::SetVertexShaderViewProj()
 {
-	//GLM_FUNC;
-	//GLMPRINTF(( ">-M- SetVertexShaderViewProj" ));
+	D3DXMATRIX	transpose, matView, matProj;
 	
-	if (g_pHardwareConfig->Caps().m_SupportsPixelShaders)
-	{
-		D3DXMATRIX transpose;
-		if(0)
-		{
-			transpose = GetTransform(MATERIAL_VIEW) * GetProjectionMatrix();
-			D3DXMatrixTranspose( &transpose, &transpose );
-		}
-		else
-		{
-			// show work
-			D3DXMATRIX	matView,matProj;
-			
-			matView		= GetTransform(MATERIAL_VIEW);
-			matProj		= GetProjectionMatrix();
-			transpose	= matView * matProj;
-			
-			//printmat4x4( "matView", (float*)&matView );
-			//printmat4x4( "matProj", (float*)&matProj );
-			//printmat4x4( "result (view * proj) pre-transpose", (float*)&transpose );
+	matView		= GetTransform(MATERIAL_VIEW);
+	matProj		= GetProjectionMatrix();
+	transpose	= matView * matProj;
 
-			D3DXMatrixTranspose( &transpose, &transpose );
-
-			#if 0	// turned off while we try to do fixup-Y in shader translate
-				if (IsPosix())			// flip all shader projection matrices for Y on GL since you can't have an upside-down viewport specification
-				{
-					// flip Y
-					transpose._21 *= -1.0f;
-					transpose._22 *= -1.0f;
-					transpose._23 *= -1.0f;
-					transpose._24 *= -1.0f;
-				}
-			#endif
-			
-			//printmat4x4( "result (view * proj) post-transpose", (float*)&transpose );
-		}
-
+// PS3's Cg likes things in row-major rather than column-major, so let's just save ourselves the work of fixing every shader and call it even?
+#ifndef _PS3
+	D3DXMatrixTranspose( &transpose, &transpose );
+#endif // _PS3
 		
-		SetVertexShaderConstant( VERTEX_SHADER_VIEWPROJ, transpose, 4 );
-
-		// If we're doing FastClip, the above viewproj matrix won't work well for
-		// vertex shaders which compute projPos.z, hence we'll compute a more useful
-		// viewproj and put the third row of it in another constant
-		transpose = GetTransform( MATERIAL_VIEW ) * GetTransform( MATERIAL_PROJECTION ); // Get the non-FastClip projection matrix
-		D3DXMatrixTranspose( &transpose, &transpose );
-
-		float *pRowTwo = (float *)transpose + 8;
-		SetVertexShaderConstant( VERTEX_SHADER_VIEWPROJ_THIRD_ROW, pRowTwo, 1 );
-	}
-	//GLMPRINTF(( "<-M- SetVertexShaderViewProj" ));
+	SetVertexShaderConstantInternal( VERTEX_SHADER_VIEWPROJ, transpose, 4 );
 }
 
 void CShaderAPIDx8::SetVertexShaderModelViewProjAndModelView( void )
 {
-	//GLM_FUNC;
-	//GLMPRINTF(( ">-M- SetVertexShaderModelViewProjAndModelView" ));
+	D3DXMATRIX modelView, transpose, matView, matProj, matModel;
 	
-	if (g_pHardwareConfig->Caps().m_SupportsPixelShaders)
-	{
-		D3DXMATRIX modelView, transpose;
-		
-		if (0)
-		{
-			D3DXMatrixMultiply( &modelView, &GetTransform(MATERIAL_MODEL), &GetTransform(MATERIAL_VIEW) );
-			D3DXMatrixMultiply( &transpose, &modelView, &GetProjectionMatrix() );
-		}
-		else
-		{
-			// show work
-			D3DXMATRIX	matView,matProj,matModel;
-			
-			matModel	= GetTransform(MATERIAL_MODEL);
-			matView		= GetTransform(MATERIAL_VIEW);
-			matProj		= GetProjectionMatrix();
-			
-			D3DXMatrixMultiply( &modelView, &matModel, &matView );
-			D3DXMatrixMultiply( &transpose, &modelView, &matProj );
-			
-			//printmat4x4( "matModel", (float*)&matModel );
-			//printmat4x4( "matView", (float*)&matView );
-			//printmat4x4( "matProj", (float*)&matProj );
-			//printmat4x4( "result (model * view * proj) pre-transpose", (float*)&transpose );
-		}
-
-		D3DXMatrixTranspose( &transpose, &transpose );
-		
-		#if 0	// turned off while we try to do fixup-Y in shader translate
-			if (IsPosix())			// flip all shader projection matrices for Y on GL since you can't have an upside-down viewport specification
-			{
-				// flip Y
-				transpose._21 *= -1.0f;
-				transpose._22 *= -1.0f;
-				transpose._23 *= -1.0f;
-				transpose._24 *= -1.0f;
-			}
-		#endif
-		
-		SetVertexShaderConstant( VERTEX_SHADER_MODELVIEWPROJ, transpose, 4 );
-
-		// If we're doing FastClip, the above modelviewproj matrix won't work well for
-		// vertex shaders which compute projPos.z, hence we'll compute a more useful
-		// modelviewproj and put the third row of it in another constant
-		D3DXMatrixMultiply( &transpose, &modelView, &GetTransform( MATERIAL_PROJECTION ) ); // Get the non-FastClip projection matrix
-		D3DXMatrixTranspose( &transpose, &transpose );
-
-		float *pRowTwo = (float *)transpose + 8;
-		SetVertexShaderConstant( VERTEX_SHADER_MODELVIEWPROJ_THIRD_ROW, pRowTwo, 1 );
-	}
+	matModel	= GetTransform(MATERIAL_MODEL);
+	matView		= GetTransform(MATERIAL_VIEW);
+	matProj		= GetProjectionMatrix();
 	
-	//GLMPRINTF(( "<-M- SetVertexShaderModelViewProjAndModelView" ));
+	D3DXMatrixMultiply( &modelView, &matModel, &matView );
+	D3DXMatrixMultiply( &transpose, &modelView, &matProj );
+
+// PS3's Cg likes things in row-major rather than column-major, so let's just save ourselves the work of fixing every shader and call it even?
+#ifndef _PS3
+	D3DXMatrixTranspose( &transpose, &transpose );
+#endif // !_PS3
+	SetVertexShaderConstantInternal( VERTEX_SHADER_MODELVIEWPROJ, transpose, 4 );
+
+	// If we're doing FastClip, the above modelviewproj matrix won't work well for
+	// vertex shaders which compute projPos.z, hence we'll compute a more useful
+	// modelviewproj and put the third row of it in another constant
+	//D3DXMatrixMultiply( &transpose, &modelView, &GetTransform( MATERIAL_PROJECTION ) ); // Get the non-FastClip projection matrix
+	//D3DXMatrixTranspose( &transpose, &transpose );
 }
 
 void CShaderAPIDx8::UpdateVertexShaderMatrix( int iMatrix )
@@ -10719,7 +13773,7 @@ void CShaderAPIDx8::UpdateVertexShaderMatrix( int iMatrix )
 			// Put the transform into the vertex shader constants...
 			D3DXMATRIX transpose;
 			D3DXMatrixTranspose( &transpose, &GetTransform(matrix) );
-			SetVertexShaderConstant( vertexShaderConstant, transpose, 3 );
+			SetVertexShaderConstantInternal( vertexShaderConstant, transpose, 3 );
 
 			// clear the change flag
 			m_DynamicState.m_TransformChanged[matrix] &= ~STATE_CHANGED_VERTEX_SHADER;
@@ -10727,45 +13781,19 @@ void CShaderAPIDx8::UpdateVertexShaderMatrix( int iMatrix )
 	}
 	else
 	{
-		SetVertexShaderConstant( VERTEX_SHADER_MODEL + iMatrix, m_boneMatrix[iMatrix].Base(), 3 );
+		SetVertexShaderConstantInternal( VERTEX_SHADER_MODEL + iMatrix, m_boneMatrix[iMatrix].Base(), 3 );
 	}
 }
 
 
-void CShaderAPIDx8::SetVertexShaderStateSkinningMatrices()
-{
 	//GLM_FUNC;
-	// casting from 4x3 matrices to a 4x4 D3DXMATRIX, need 4 floats of overflow
-	float results[12+4];
-
-	// get the first one from the MATERIAL_MODEL matrix stack
-	D3DXMatrixTranspose( (D3DXMATRIX *)&results[0], &GetTransform( MATERIAL_MODEL ) );
-	memcpy( m_boneMatrix[0].Base(), results, 12 * sizeof(float) );
-
-	m_maxBoneLoaded++;
-	int matricesLoaded = max( 1, m_maxBoneLoaded );
-	m_maxBoneLoaded = 0;
-
-	m_DynamicState.m_TransformChanged[MATERIAL_MODEL] &= ~STATE_CHANGED_VERTEX_SHADER;
-	SetVertexShaderConstant( VERTEX_SHADER_MODEL, m_boneMatrix[0].Base(), matricesLoaded * 3, true );
-
-	// ###OSX### punting on OSX for now		
-#if defined( DX_TO_GL_ABSTRACTION ) && !defined( OSX )
-	Dx9Device()->SetMaxUsedVertexShaderConstantsHint( VERTEX_SHADER_MODEL + ( matricesLoaded * 3 ) );
-#endif
-
-}
-
 //-----------------------------------------------------------------------------
 // Commits vertex shader transforms that can change on a per pass basis
 //-----------------------------------------------------------------------------
 void CShaderAPIDx8::CommitPerPassVertexShaderTransforms()
 {
 	//GLMPRINTF(( ">-M- CommitPerPassVertexShaderTransforms" ));
-	Assert( g_pHardwareConfig->Caps().m_SupportsPixelShaders );
-
 	bool projChanged = VertexShaderTransformChanged( MATERIAL_PROJECTION );
-	//projChanged = true;	//only for debug
 	if ( projChanged )
 	{
 		//GLMPRINTF(( "-M- projChanged=true in CommitPerPassVertexShaderTransforms" ));
@@ -10789,8 +13817,6 @@ void CShaderAPIDx8::CommitPerPassVertexShaderTransforms()
 void CShaderAPIDx8::CommitVertexShaderTransforms()
 {
 	//GLMPRINTF(( ">-M- CommitVertexShaderTransforms" ));
-
-	Assert( g_pHardwareConfig->Caps().m_SupportsPixelShaders );
 
 	bool viewChanged = VertexShaderTransformChanged(MATERIAL_VIEW);
 	bool projChanged = VertexShaderTransformChanged(MATERIAL_PROJECTION);
@@ -10830,433 +13856,337 @@ void CShaderAPIDx8::CommitVertexShaderTransforms()
 }
 
 
-void CShaderAPIDx8::UpdateFixedFunctionMatrix( int iMatrix )
+bool CShaderAPIDx8::IsRenderingInstances() const
 {
-	if ( IsX360() )
-		return;
-
-	int matrix = MATERIAL_MODEL + iMatrix;
-	if ( FixedFunctionTransformChanged( matrix ) )
-	{
-		SetTransform( D3DTS_WORLDMATRIX(iMatrix), &GetTransform(matrix) );
-
-		// clear the change flag
-		m_DynamicState.m_TransformChanged[matrix] &= ~STATE_CHANGED_FIXED_FUNCTION;
-	}
+	// Kind of hackery, but it works
+	return ( m_pRenderCompiledState != &m_DynamicState.m_CompiledLightingState ); 
 }
 
-
-void CShaderAPIDx8::SetFixedFunctionStateSkinningMatrices()
+static Vector4D s_IdentityPoseToWorld[3] = 
 {
-	if ( IsX360() )
-		return;
+	Vector4D( 1, 0, 0, 0 ),
+	Vector4D( 0, 1, 0, 0 ),
+	Vector4D( 0, 0, 1, 0 )
+};
 
-	for( int i=1; i < g_pHardwareConfig->MaxBlendMatrices(); i++ )
-	{
-		UpdateFixedFunctionMatrix( i );
-	}
-}
-
-//-----------------------------------------------------------------------------
-// Commits transforms for the fixed function pipeline that can happen on a per pass basis
-//-----------------------------------------------------------------------------
-void CShaderAPIDx8::CommitPerPassFixedFunctionTransforms()
+bool CShaderAPIDx8::SetSkinningMatrices( const MeshInstanceData_t &instance )
 {
-	if ( IsX360() )
-		return;
-
-	// Update projection
-	if ( FixedFunctionTransformChanged( MATERIAL_PROJECTION ) )
+	if ( ( m_DynamicState.m_NumBones == 0 ) && !IsRenderingInstances() )
 	{
-		D3DTRANSFORMSTATETYPE matrix = D3DTS_PROJECTION;
-
-		SetTransform( matrix, &GetProjectionMatrix() );
-		// clear the change flag
-		m_DynamicState.m_TransformChanged[MATERIAL_PROJECTION] &= ~STATE_CHANGED_FIXED_FUNCTION;
-	}
-}
-
-
-//-----------------------------------------------------------------------------
-// Commits transforms for the fixed function pipeline
-//-----------------------------------------------------------------------------
-
-void CShaderAPIDx8::CommitFixedFunctionTransforms()
-{
-	if ( IsX360() )
-		return;
-
-	// Update view + projection
-	int i;
-	for ( i = MATERIAL_VIEW; i <= MATERIAL_PROJECTION; ++i)
-	{
-		if (FixedFunctionTransformChanged( i ))
-		{
-			D3DTRANSFORMSTATETYPE matrix = (i == MATERIAL_VIEW) ? D3DTS_VIEW : D3DTS_PROJECTION;
-			if ( i == MATERIAL_PROJECTION )
-			{
-				SetTransform( matrix, &GetProjectionMatrix() );
-			}
-			else
-			{
-				SetTransform( matrix, &GetTransform(i) );
-			}
-
-			// clear the change flag
-			m_DynamicState.m_TransformChanged[i] &= ~STATE_CHANGED_FIXED_FUNCTION;
-		}
-	}
-
-	UpdateFixedFunctionMatrix( 0 );
-}
-
-
-void CShaderAPIDx8::SetSkinningMatrices()
-{
-	LOCK_SHADERAPI();
-	Assert( m_pMaterial );
-
-	if ( m_DynamicState.m_NumBones == 0 )
-	{
-		// ###OSX### punting on OSX for now
-#if defined( DX_TO_GL_ABSTRACTION ) && !defined( OSX)
+#if defined( DX_TO_GL_ABSTRACTION )
 		Dx9Device()->SetMaxUsedVertexShaderConstantsHint( VERTEX_SHADER_BONE_TRANSFORM( 0 ) + 3 );
 #endif
-		return;
+		return false;
 	}
 	
+	// We're changing the model matrix here, we must be force the next draw call to set it
+	m_DynamicState.m_TransformChanged[MATERIAL_MODEL] = STATE_CHANGED;
+
 	uint nMaxVertexConstantIndex = 0;
 
-	if ( IsX360() || UsesVertexShader(m_pMaterial->GetVertexFormat()) )
+	if ( instance.m_pBoneRemap )
 	{
-		SetVertexShaderStateSkinningMatrices();
-	}
-	else if ( IsPC() )
-	{
-#if defined( DX_TO_GL_ABSTRACTION ) && !defined( OSX)
-		Assert( 0 );
-#else
-		SetFixedFunctionStateSkinningMatrices();
-#endif
+		for ( int k = 0; k < instance.m_nBoneCount; ++k )
+		{
+			const int nDestBone = instance.m_pBoneRemap[k].m_nActualBoneIndex;
+			const int nSrcBone = instance.m_pBoneRemap[k].m_nSrcBoneIndex;
+			uint nIndex = VERTEX_SHADER_BONE_TRANSFORM( nDestBone );
+			SetVertexShaderConstantInternal( nIndex, instance.m_pPoseToWorld[ nSrcBone ].Base(), 3, true );
+			nMaxVertexConstantIndex = MAX( nMaxVertexConstantIndex, nIndex + 3 );
+		}
 	}
 	else
 	{
-		Assert( 0 );
-	}
-}
-
-
-
-//-----------------------------------------------------------------------------
-// Commits vertex shader lighting
-//-----------------------------------------------------------------------------
-
-inline bool CShaderAPIDx8::VertexShaderLightingChanged( int i )
-{
-	return (m_DynamicState.m_LightChanged[i] & STATE_CHANGED_VERTEX_SHADER) != 0;
-}
-
-inline bool CShaderAPIDx8::VertexShaderLightingEnableChanged( int i )
-{
-	return (m_DynamicState.m_LightEnableChanged[i] & STATE_CHANGED_VERTEX_SHADER) != 0;
-}
-
-inline bool CShaderAPIDx8::FixedFunctionLightingChanged( int i )
-{
-	return (m_DynamicState.m_LightChanged[i] & STATE_CHANGED_FIXED_FUNCTION) != 0;
-}
-
-inline bool CShaderAPIDx8::FixedFunctionLightingEnableChanged( int i )
-{
-	return (m_DynamicState.m_LightEnableChanged[i] & STATE_CHANGED_FIXED_FUNCTION) != 0;
-}
-
-
-//-----------------------------------------------------------------------------
-// Computes the light type
-//-----------------------------------------------------------------------------
-
-VertexShaderLightTypes_t CShaderAPIDx8::ComputeLightType( int i ) const
-{
-	if (!m_DynamicState.m_LightEnable[i])
-		return LIGHT_NONE;
-
-	switch( m_DynamicState.m_Lights[i].Type )
-	{
-	case D3DLIGHT_POINT:
-		return LIGHT_POINT;
-
-	case D3DLIGHT_DIRECTIONAL:
-		return LIGHT_DIRECTIONAL;
-
-	case D3DLIGHT_SPOT:
-		return LIGHT_SPOT;
-	}
-
-	Assert(0);
-	return LIGHT_NONE;
-}
-
-
-//-----------------------------------------------------------------------------
-// Sort the lights by type
-//-----------------------------------------------------------------------------
-
-void CShaderAPIDx8::SortLights( int* index )
-{
-	m_DynamicState.m_NumLights = 0;
-
-	for (int i = 0; i < MAX_NUM_LIGHTS; ++i)
-	{
-		VertexShaderLightTypes_t type = ComputeLightType(i);	// returns LIGHT_NONE if the light is disabled
-		int j = m_DynamicState.m_NumLights;
-		if (type != LIGHT_NONE)
+		// 0 bones can come in; static prop case
+		if ( instance.m_pPoseToWorld )
 		{
-			while ( --j >= 0 )
-			{
-				if (m_DynamicState.m_LightType[j] <= type)
-					break;
-
-				// shift...
-				m_DynamicState.m_LightType[j+1] = m_DynamicState.m_LightType[j];
-				index[j+1] = index[j];
-			}
-			++j;
-
-			m_DynamicState.m_LightType[j] = type;
-			index[j] = i;
-
-			++m_DynamicState.m_NumLights;
-		}
-	}
-}
-
-//-----------------------------------------------------------------------------
-// Vertex Shader lighting
-//-----------------------------------------------------------------------------
-void CShaderAPIDx8::CommitVertexShaderLighting()
-{
-	// If nothing changed, then don't bother. Otherwise, reload...
-	int i;
-	for ( i = 0; i < MAX_NUM_LIGHTS; ++i )
-	{
-		if (VertexShaderLightingChanged(i) || VertexShaderLightingEnableChanged(i))
-			break;
-	}
-
-	// Yeah baby
-	if ( i == MAX_NUM_LIGHTS )
-		return;
-
-	// First, gotta sort the lights by their type
-	int lightIndex[MAX_NUM_LIGHTS];
-	memset( lightIndex, 0, sizeof( lightIndex ) );
-	SortLights( lightIndex );
-
-	// Clear the lighting enable flags
-	for ( i = 0; i < MAX_NUM_LIGHTS; ++i )
-	{
-		m_DynamicState.m_LightEnableChanged[i] &= ~STATE_CHANGED_VERTEX_SHADER;
-		m_DynamicState.m_LightChanged[i] &= ~STATE_CHANGED_VERTEX_SHADER;
-	}
-
-	bool bAtLeastDX90 = g_pHardwareConfig->GetDXSupportLevel() >= 90; 
-
-	// Set the lighting state
-	for ( i = 0; i < m_DynamicState.m_NumLights; ++i )
-	{
-		D3DLIGHT& light = m_DynamicState.m_Lights[lightIndex[i]];
-
-		Vector4D lightState[5];
-
-		// The first one is the light color (and light type code on DX9)
-		float w = (light.Type == D3DLIGHT_DIRECTIONAL) && bAtLeastDX90 ? 1.0f : 0.0f;
-		lightState[0].Init( light.Diffuse.r, light.Diffuse.g, light.Diffuse.b, w);
-
-		// The next constant holds the light direction (and light type code on DX9)
-		w = (light.Type == D3DLIGHT_SPOT) && bAtLeastDX90 ? 1.0f : 0.0f;
-		lightState[1].Init( light.Direction.x, light.Direction.y, light.Direction.z, w );
-
-		// The next constant holds the light position
-		lightState[2].Init( light.Position.x, light.Position.y, light.Position.z, 1.0f );
-
-		// The next constant holds exponent, stopdot, stopdot2, 1 / (stopdot - stopdot2)
-		if (light.Type == D3DLIGHT_SPOT)
-		{
-			float stopdot = cos( light.Theta * 0.5f );
-			float stopdot2 = cos( light.Phi * 0.5f );
-			float oodot = (stopdot > stopdot2) ? 1.0f / (stopdot - stopdot2) : 0.0f;
-			lightState[3].Init( light.Falloff, stopdot, stopdot2, oodot );
+			int nBoneCount = MAX( 1, instance.m_nBoneCount );
+			uint nIndex = VERTEX_SHADER_BONE_TRANSFORM( 0 );
+			SetVertexShaderConstantInternal( nIndex, instance.m_pPoseToWorld[ 0 ].Base(), 3 * nBoneCount, true );
+			nMaxVertexConstantIndex = MAX( nMaxVertexConstantIndex, nIndex + 3 * nBoneCount );
 		}
 		else
 		{
-			lightState[3].Init( 0, 1, 1, 1 );
+			uint nIndex = VERTEX_SHADER_BONE_TRANSFORM( 0 );
+			SetVertexShaderConstantInternal( nIndex, s_IdentityPoseToWorld[ 0 ].Base(), 3, true );
+			nMaxVertexConstantIndex = MAX( nMaxVertexConstantIndex, nIndex + 3 );
+		}
+	}
+#if defined( DX_TO_GL_ABSTRACTION )
+	Dx9Device()->SetMaxUsedVertexShaderConstantsHint( nMaxVertexConstantIndex );
+#endif
+
+	return true;
+}
+
+
+//-----------------------------------------------------------------------------
+// Compiles the ambient cube lighting state
+//-----------------------------------------------------------------------------
+void CShaderAPIDx8::CompileAmbientCube( CompiledLightingState_t *pCompiledState, int nLightCount, const MaterialLightingState_t *pLightingState )
+{
+	Vector4D *vecCube = pCompiledState->m_AmbientLightCube;
+	const Vector *pAmbient = pLightingState->m_vecAmbientCube;
+	vecCube[0].Init( pAmbient[0].x, pAmbient[0].y, pAmbient[0].z, 1.0f );
+	vecCube[1].Init( pAmbient[1].x, pAmbient[1].y, pAmbient[1].z, 1.0f );
+	vecCube[2].Init( pAmbient[2].x, pAmbient[2].y, pAmbient[2].z, 1.0f );
+	vecCube[3].Init( pAmbient[3].x, pAmbient[3].y, pAmbient[3].z, 1.0f );
+	vecCube[4].Init( pAmbient[4].x, pAmbient[4].y, pAmbient[4].z, 1.0f );
+	vecCube[5].Init( pAmbient[5].x, pAmbient[5].y, pAmbient[5].z, 1.0f );
+}
+
+//-----------------------------------------------------------------------------
+// Fixes material light state so the first local light is a directional light, 
+// so the CSM shadow occlusion term can always be applied to the first light.
+//
+// Modified to be skipped for statically lit meshes (occlusion term implicitly baked into the vertex colors)
+// This also allows statically lit meshes to have one extra dynamic light.
+//-----------------------------------------------------------------------------
+static const MaterialLightingState_t *CanonicalizeMaterialLightingStateForCSM( const MaterialLightingState_t *pOrigLightingState, MaterialLightingState_t &newLightingState, bool bStaticLight )
+{
+	if ( !r_force_first_dynamic_light_to_directional_for_csm.GetBool() || bStaticLight )
+		return pOrigLightingState;
+
+	// Nothing to do if there are no local lights (the shader will be adding in no light at all, so the occlusion term can't affect anything.)
+	if ( ( !pOrigLightingState->m_nLocalLightCount ) || ( !g_pHardwareConfig->SupportsCascadedShadowMapping() ) )
+		return pOrigLightingState;
+
+	// Also nothing to do if there's >= 1 light, and the first light is a directional light.
+	if ( ( pOrigLightingState->m_nLocalLightCount >= 1 ) && ( pOrigLightingState->m_pLocalLightDesc[0].m_Type == MATERIAL_LIGHT_DIRECTIONAL ) )
+		return pOrigLightingState;
+	
+	// Attempt to find a directional light in the list.
+	int nDirectionalLightIndex = -1;
+	for ( int i = 0; i < pOrigLightingState->m_nLocalLightCount; ++i)
+	{
+		if ( pOrigLightingState->m_pLocalLightDesc[i].m_Type == MATERIAL_LIGHT_DIRECTIONAL )
+		{
+			nDirectionalLightIndex = i;
+			break;
+		}
+	}
+	
+	// Create the new material lighting state.
+	V_memcpy( &newLightingState, pOrigLightingState, sizeof( MaterialLightingState_t ) - MATERIAL_MAX_LIGHT_COUNT * sizeof( LightDesc_t ) );
+	V_memset( &newLightingState.m_pLocalLightDesc, 0, sizeof( newLightingState.m_pLocalLightDesc ) );
+		
+	if ( nDirectionalLightIndex == -1 )
+	{
+		// Couldn't find a directional light, so make an all-black dummy one in the first slot.
+		newLightingState.m_pLocalLightDesc[0].InitDirectional( Vector( 0, 0, -1 ), Vector( 0, 0, 0 ) );
+	}
+	else
+	{
+		// Force the first slot to contain the directional light.
+		newLightingState.m_pLocalLightDesc[0] = pOrigLightingState->m_pLocalLightDesc[nDirectionalLightIndex];
+	}
+
+	// Now copy as many local lights as possible into the new material lighting state.
+	int nSrcLightIndex = 0;
+	int nDestLightIndex = 1;
+	while ( ( nSrcLightIndex < pOrigLightingState->m_nLocalLightCount ) && ( nDestLightIndex < MATERIAL_MAX_LIGHT_COUNT ) )
+	{
+		// Don't copy the light if its the directional light found and copied earlier.
+		if ( nSrcLightIndex != nDirectionalLightIndex )
+		{
+			newLightingState.m_pLocalLightDesc[nDestLightIndex] = pOrigLightingState->m_pLocalLightDesc[nSrcLightIndex];
+			nDestLightIndex++;
+		}
+		
+		nSrcLightIndex++;
+	}
+
+	// Set the # of local lights in the new material lighting state.
+	newLightingState.m_nLocalLightCount = nDestLightIndex;
+
+	return &newLightingState;
+}
+
+//-----------------------------------------------------------------------------
+// Generates the vertex shader constants for lights
+//-----------------------------------------------------------------------------
+void CShaderAPIDx8::CompileVertexShaderLocalLights( CompiledLightingState_t *pCompiledState, int nLightCount, const MaterialLightingState_t *pOrigLightingState, bool bStaticLight )
+{
+	// For vertex shaders, we don't need to bother with the max instance lightcount
+	// because we use static conditionals (NOTE: test this!! might be faster to
+	// have lightcounts all be the same)
+	
+	MaterialLightingState_t canonicalizedLightingState;
+	const MaterialLightingState_t *pLightingState = CanonicalizeMaterialLightingStateForCSM( pOrigLightingState, canonicalizedLightingState, bStaticLight );
+	
+	// We can just use the data for this specific instance
+	nLightCount = MIN( pLightingState->m_nLocalLightCount, g_pHardwareConfig->MaxNumLights() );
+	pCompiledState->m_nLocalLightCount = nLightCount;
+
+	// Set the lighting state
+	for ( int i = 0; i < nLightCount; ++i )
+	{
+		Vector4D *pDest = &pCompiledState->m_VertexShaderLocalLights[ i * 5 ];
+		const LightDesc_t& light = pLightingState->m_pLocalLightDesc[ i ];
+		Assert( light.m_Type != MATERIAL_LIGHT_DISABLE );
+
+		// The first one is the light color (and light type code on DX9)
+		float w = ( light.m_Type == MATERIAL_LIGHT_DIRECTIONAL ) ? 1.0f : 0.0f;
+		pDest[0].Init( light.m_Color.x, light.m_Color.y, light.m_Color.z, w);
+
+		// The next constant holds the light direction (and light type code on DX9)
+		w = ( light.m_Type == MATERIAL_LIGHT_SPOT ) ? 1.0f : 0.0f;
+		if ( light.m_Type == MATERIAL_LIGHT_POINT )
+		{
+			pDest[1].Init( 0, 0, 0, w );
+		}
+		else
+		{
+			pDest[1].Init( light.m_Direction.x, light.m_Direction.y, light.m_Direction.z, w );
+		}
+
+		// The next constant holds the light position
+		pDest[2].Init( light.m_Position.x, light.m_Position.y, light.m_Position.z, 1.0f );
+
+		// The next constant holds exponent, stopdot, stopdot2, 1 / (stopdot - stopdot2)
+		if ( light.m_Type == MATERIAL_LIGHT_SPOT )
+		{
+			float oodot = light.OneOverThetaDotMinusPhiDot();
+			pDest[3].Init( light.m_Falloff, light.m_ThetaDot, light.m_PhiDot, oodot );
+		}
+		else
+		{
+			pDest[3].Init( 0, 1, 1, 1 );
 		}
 
 		// The last constant holds attenuation0, attenuation1, attenuation2
-		lightState[4].Init( light.Attenuation0, light.Attenuation1, light.Attenuation2, 0.0f );
-
-		// Set the state
-		SetVertexShaderConstant( VERTEX_SHADER_LIGHTS + i * 5, lightState[0].Base(), 5 );
+		pDest[4].Init( light.m_Attenuation0, light.m_Attenuation1, light.m_Attenuation2, 0.0f );
 	}
 
-	if ( g_pHardwareConfig->NumIntegerVertexShaderConstants() > 0 && g_pHardwareConfig->NumBooleanVertexShaderConstants() > 0 )
+	// Vertex Shader loop counter for number of lights (Only the .x component is used by our shaders) 
+	// .x is the iteration count, .y is the initial value and .z is the increment step 
+	int *pLoopControl = pCompiledState->m_VertexShaderLocalLightLoopControl;
+	pLoopControl[0] = nLightCount; pLoopControl[1] = 0; pLoopControl[2] = 1; pLoopControl[3] = 0;
+
+	// Enable lights using vertex shader static flow control
+	int *pEnable = pCompiledState->m_VertexShaderLocalLightEnable;
+	for ( int i = 0; i < VERTEX_SHADER_LIGHT_ENABLE_BOOL_CONST_COUNT; ++i )
 	{
-		// Vertex Shader loop counter for number of lights (Only the .x component is used by our shaders) 
-		// .x is the iteration count, .y is the initial value and .z is the increment step 
-		int nLoopControl[4] = {m_DynamicState.m_NumLights, 0, 1, 0};
-		SetIntegerVertexShaderConstant( 0, nLoopControl, 1 );
-
-		// Enable lights using vertex shader static flow control
-		int nLightEnable[VERTEX_SHADER_LIGHT_ENABLE_BOOL_CONST_COUNT] = {0, 0, 0, 0};
-		for ( i = 0; i < m_DynamicState.m_NumLights; ++i )
-		{
-			nLightEnable[i] = 1;
-		}
-
-		SetBooleanVertexShaderConstant( VERTEX_SHADER_LIGHT_ENABLE_BOOL_CONST, nLightEnable, VERTEX_SHADER_LIGHT_ENABLE_BOOL_CONST_COUNT );
+		pEnable[i] = ( i < nLightCount ) ? 1 : 0;
 	}
 }
 
 //-----------------------------------------------------------------------------
-// Set the pixel shader constants for lights
+// Generates the pixel shader constants for lights
 //-----------------------------------------------------------------------------
-void CShaderAPIDx8::CommitPixelShaderLighting( int pshReg )
+void CShaderAPIDx8::CompilePixelShaderLocalLights( CompiledLightingState_t *pCompiledState, int nLightCount, const MaterialLightingState_t *pOrigLightingState, bool bStaticLight )
 {
 #ifndef NDEBUG
-	char const *materialName = m_pMaterial->GetName();
+	const char *materialName = m_pMaterial->GetName();
 #endif
 
-	// First, gotta sort the lights by their type
-	int lightIndex[MAX_NUM_LIGHTS];
-	SortLights( lightIndex );
+	// Total pixel shader lighting state for four lights
+	for ( int i = 0; i < 6; i++ )
+	{
+		pCompiledState->m_PixelShaderLocalLights[i].Init();
+	}
+
+	if ( !pOrigLightingState )
+		return;
+
+	MaterialLightingState_t canonicalizedLightingState;
+	const MaterialLightingState_t *pLightingState = CanonicalizeMaterialLightingStateForCSM( pOrigLightingState, canonicalizedLightingState, bStaticLight );
+	
+	nLightCount = pLightingState->m_nLocalLightCount;
 
 	// Offset to create a point light from directional
 	const float fFarAway = 10000.0f;
 
-	// Total pixel shader lighting state for four lights
-	Vector4D lightState[6];
-	for ( int i = 0; i < 6; i++ )
-		lightState[i].Init();
-
-	int nNumLights = m_DynamicState.m_NumLights;
-	if ( nNumLights > 0  )
+	// NOTE: Use maxlights so we can render instances with different #s of lights
+	// without needing to change shader
+	const int nNumLights = pLightingState->m_nLocalLightCount;
+	int nIterCount = MIN( nLightCount, 3 );
+	for ( int i = 0; i < nIterCount; ++i )
 	{
-		D3DLIGHT *light = &m_DynamicState.m_Lights[lightIndex[0]];
-		lightState[0].Init( light->Diffuse.r, light->Diffuse.g, light->Diffuse.b, 0.0f );
+		int nIndex = 2 * i;
+		const LightDesc_t *light = &pLightingState->m_pLocalLightDesc[i];
+		Assert( light->m_Type != MATERIAL_LIGHT_DISABLE );
+		pCompiledState->m_PixelShaderLocalLights[nIndex].Init( light->m_Color.x, light->m_Color.y, light->m_Color.z, 0.0f );
 
-		if ( light->Type == D3DLIGHT_DIRECTIONAL )
+		if ( light->m_Type == MATERIAL_LIGHT_DIRECTIONAL )
 		{
-			Vector vDir(light->Direction.x, light->Direction.y, light->Direction.z );
-			Vector vPos = m_DynamicState.m_vLightingOrigin - vDir * fFarAway;
-			lightState[1].Init( vPos.x,  vPos.y,  vPos.z, 0.0f );
+			VectorMA( pLightingState->m_vecLightingOrigin, -fFarAway, light->m_Direction, pCompiledState->m_PixelShaderLocalLights[nIndex + 1].AsVector3D() ); 
 		}
 		else
 		{
-			lightState[1].Init( light->Position.x,  light->Position.y,  light->Position.z, 0.0f );
-		}
-
-		if ( nNumLights > 1 )															// At least two lights
-		{
-			light = &m_DynamicState.m_Lights[lightIndex[1]];
-			lightState[2].Init( light->Diffuse.r, light->Diffuse.g, light->Diffuse.b, 0.0f );
-
-			if ( light->Type == D3DLIGHT_DIRECTIONAL )
-			{
-				Vector vDir(light->Direction.x, light->Direction.y, light->Direction.z );
-				Vector vPos = m_DynamicState.m_vLightingOrigin - vDir * fFarAway;
-				lightState[3].Init( vPos.x,  vPos.y,  vPos.z, 0.0f );
-			}
-			else
-			{
-				lightState[3].Init( light->Position.x,  light->Position.y,  light->Position.z, 0.0f );
-			}
-
-			if ( nNumLights > 2 )														// At least three lights
-			{
-				light = &m_DynamicState.m_Lights[lightIndex[2]];
-				lightState[4].Init( light->Diffuse.r,   light->Diffuse.g,   light->Diffuse.b, 0.0f );
-
-				if ( light->Type == D3DLIGHT_DIRECTIONAL )
-				{
-					Vector vDir(light->Direction.x, light->Direction.y, light->Direction.z );
-					Vector vPos = m_DynamicState.m_vLightingOrigin - vDir * fFarAway;
-					lightState[5].Init( vPos.x,  vPos.y,  vPos.z, 0.0f );
-				}
-				else
-				{
-					lightState[5].Init( light->Position.x,  light->Position.y,  light->Position.z, 0.0f );
-				}
-
-				if ( nNumLights > 3 )													// At least four lights (our current max)
-				{
-					light = &m_DynamicState.m_Lights[lightIndex[3]];		// Spread 4th light's constants across w components
-					lightState[0].w = light->Diffuse.r;
-					lightState[1].w = light->Diffuse.g;
-					lightState[2].w = light->Diffuse.b;
-
-					if ( light->Type == D3DLIGHT_DIRECTIONAL )
-					{
-						Vector vDir(light->Direction.x, light->Direction.y, light->Direction.z );
-						Vector vPos = m_DynamicState.m_vLightingOrigin - vDir * fFarAway;
-						lightState[3].w = vPos.x;
-						lightState[4].w = vPos.y;
-						lightState[5].w = vPos.z;
-					}
-					else
-					{
-						lightState[3].w = light->Position.x;
-						lightState[4].w = light->Position.y;
-						lightState[5].w = light->Position.z;
-					}
-				}
-			}
+			VectorCopy( light->m_Position, pCompiledState->m_PixelShaderLocalLights[nIndex + 1].AsVector3D() );
 		}
 	}
-	SetPixelShaderConstant( pshReg, lightState[0].Base(), 6 );
+
+	if ( nNumLights > 3 ) // At least four lights (our current max)
+	{
+		const LightDesc_t *light = &pLightingState->m_pLocalLightDesc[3];
+		// Spread 4th light's constants across w components
+		pCompiledState->m_PixelShaderLocalLights[0].w = light->m_Color.x;
+		pCompiledState->m_PixelShaderLocalLights[1].w = light->m_Color.y;
+		pCompiledState->m_PixelShaderLocalLights[2].w = light->m_Color.z;
+
+		if ( light->m_Type == MATERIAL_LIGHT_DIRECTIONAL )
+		{
+			Vector vPos;
+			VectorMA( pLightingState->m_vecLightingOrigin, -fFarAway, light->m_Direction, vPos ); 
+			pCompiledState->m_PixelShaderLocalLights[3].w = vPos.x;
+			pCompiledState->m_PixelShaderLocalLights[4].w = vPos.y;
+			pCompiledState->m_PixelShaderLocalLights[5].w = vPos.z;
+		}
+		else
+		{
+			pCompiledState->m_PixelShaderLocalLights[3].w = light->m_Position.x;
+			pCompiledState->m_PixelShaderLocalLights[4].w = light->m_Position.y;
+			pCompiledState->m_PixelShaderLocalLights[5].w = light->m_Position.z;
+		}
+	}
 }
 
+
+
 //-----------------------------------------------------------------------------
-// Fixed function lighting
+// Vertex Shader lighting
 //-----------------------------------------------------------------------------
-void CShaderAPIDx8::CommitFixedFunctionLighting()
-{	
-	if ( IsX360() )
+static float s_pTwoEmptyLights[40] = { 0,0,0,0, 1,0,0,0, 0,0,0,0, 1,1,1,1, 1,1,1,1, 0,0,0,0, 1,0,0,0, 0,0,0,0, 1,1,1,1, 1,1,1,1 };
+
+void CShaderAPIDx8::CommitVertexShaderLighting( CompiledLightingState_t *pLightingState )
+{
+	// Set the lighting state
+	if ( pLightingState->m_nLocalLightCount > 0 )
 	{
-		return;
+		SetVertexShaderConstantInternal( VERTEX_SHADER_LIGHTS, pLightingState->m_VertexShaderLocalLights[0].Base(), 5 * MIN( pLightingState->m_nLocalLightCount, g_pHardwareConfig->MaxNumLights() ) );
 	}
 
-	// Commit each light
-	for (int i = 0; i < g_pHardwareConfig->MaxNumLights(); ++i)
+	// Zero out subsequent lights if we don't support static control flow
+	if ( ( pLightingState->m_nLocalLightCount < g_pHardwareConfig->MaxNumLights() ) && !g_pHardwareConfig->SupportsStaticControlFlow() )
 	{
-		// Change light enable
-		if ( FixedFunctionLightingEnableChanged( i ) )
-		{
-			LightEnable( i, m_DynamicState.m_LightEnable[i] );
+		int nLightsToSet = g_pHardwareConfig->MaxNumLights() - pLightingState->m_nLocalLightCount;
 
-			// Clear change flag
-			m_DynamicState.m_LightEnableChanged[i] &= ~STATE_CHANGED_FIXED_FUNCTION;
-		}
+		// The following logic breaks if max lights is more than two
+		Assert( g_pHardwareConfig->MaxNumLights() == 2 );
 
-		// Change lighting state...
-		if ( m_DynamicState.m_LightEnable[i] )
-		{
-			if ( FixedFunctionLightingChanged( i ) )
-			{
-				// Store off the "correct" falloff...
-				D3DLIGHT& light = m_DynamicState.m_Lights[i];
+		SetVertexShaderConstantInternal( VERTEX_SHADER_LIGHTS + 5 * (g_pHardwareConfig->MaxNumLights() - nLightsToSet), s_pTwoEmptyLights, 5 * nLightsToSet );
+	}
+	
+	// On PS3, we don't have integer constants, so the shader code relies on the boolean flags instead
+	if ( !IsPS3() )
+	{
+		SetIntegerVertexShaderConstant( 0, pLightingState->m_VertexShaderLocalLightLoopControl, 1 );
+	}
 
-				float falloff = light.Falloff;
+	SetBooleanVertexShaderConstant( VERTEX_SHADER_LIGHT_ENABLE_BOOL_CONST, pLightingState->m_VertexShaderLocalLightEnable, VERTEX_SHADER_LIGHT_ENABLE_BOOL_CONST_COUNT );
+}
 
-				SetLight( i, &light );
-
-				// Clear change flag
-				m_DynamicState.m_LightChanged[i] &= ~STATE_CHANGED_FIXED_FUNCTION;
-
-				// restore the correct falloff
-				light.Falloff = falloff;
-			}
-		}
+void CShaderAPIDx8::CommitPixelShaderLighting( int pshReg, CompiledLightingState_t *pLightingState )
+{
+	if( g_pHardwareConfig->MaxNumLights() == 2 )
+	{
+		SetPixelShaderConstantInternal( pshReg, pLightingState->m_PixelShaderLocalLights[0].Base(), 4, false );
+	}
+	else
+	{
+		SetPixelShaderConstantInternal( pshReg, pLightingState->m_PixelShaderLocalLights[0].Base(), 6, false );
 	}
 }
 
@@ -11276,50 +14206,23 @@ D3DXMATRIX& CShaderAPIDx8::GetUserClipTransform( )
 //-----------------------------------------------------------------------------
 // Commits user clip planes
 //-----------------------------------------------------------------------------
-void CShaderAPIDx8::CommitUserClipPlanes( bool bUsingFixedFunction )
+void CShaderAPIDx8::CommitUserClipPlanes( )
 {
 	// We need to transform the clip planes, specified in world space,
 	// to be in projection space.. To transform the plane, we must transform
 	// the intercept and then transform the normal.
-
-	if( bUsingFixedFunction != m_DynamicState.m_UserClipLastUpdatedUsingFixedFunction )
-	{
-		//fixed function clip planes are in world space, vertex shader clip planes are in clip space, so we need to update every clip plane whenever there's a flip
-		m_DynamicState.m_UserClipPlaneChanged = (1 << g_pHardwareConfig->MaxUserClipPlanes()) - 1;
-		m_DynamicState.m_UserClipLastUpdatedUsingFixedFunction = bUsingFixedFunction;
-	}
 
 	D3DXMATRIX worldToProjectionInvTrans;
 #ifndef _DEBUG
 	if( m_DynamicState.m_UserClipPlaneChanged & m_DynamicState.m_UserClipPlaneEnabled & ((1 << g_pHardwareConfig->MaxUserClipPlanes()) - 1) )
 #endif
 	{
-		//we're going to need the transformation matrix at least once this call
-		if( bUsingFixedFunction )
-		{
-			if( m_DynamicState.m_bUserClipTransformOverride )
-			{
-				//D3DXMatrixIdentity( &worldToProjectionInvTrans ); //TODO: Test user clip transforms with this
-				//Since GetUserClipTransform() returns the view matrix if a user supplied transform doesn't exist, the general solution to this should be to transform the user transform by the inverse view matrix
-				//Since we don't know if the user clip is invertable, we'll premultiply by inverse view and cross our fingers that it's right more often than wrong
-				D3DXMATRIX viewInverse = GetTransform( MATERIAL_VIEW );
-				D3DXMatrixInverse(&viewInverse, NULL, &viewInverse);
-				worldToProjectionInvTrans = viewInverse * GetUserClipTransform(); //taking a cue from the multiplication below, multiplication goes left into right
-				
-				D3DXMatrixInverse(&worldToProjectionInvTrans, NULL, &worldToProjectionInvTrans);
-				D3DXMatrixTranspose(&worldToProjectionInvTrans, &worldToProjectionInvTrans);
-			}
-			else
-			{
-				D3DXMatrixIdentity( &worldToProjectionInvTrans );
-			}
-		}
-		else
-		{
-			worldToProjectionInvTrans = GetUserClipTransform( ) * GetTransform( MATERIAL_PROJECTION );
-			D3DXMatrixInverse(&worldToProjectionInvTrans, NULL, &worldToProjectionInvTrans);
-			D3DXMatrixTranspose(&worldToProjectionInvTrans, &worldToProjectionInvTrans);
-		}
+		worldToProjectionInvTrans = GetUserClipTransform( ) * GetTransform( MATERIAL_PROJECTION );
+		D3DXMatrixInverse(&worldToProjectionInvTrans, NULL, &worldToProjectionInvTrans);
+		// PS3's Cg likes things in row-major rather than column-major, so let's just save ourselves the work of fixing every shader and call it even?
+#ifndef _PS3
+		D3DXMatrixTranspose(&worldToProjectionInvTrans, &worldToProjectionInvTrans);
+#endif // !_PS3
 	}
 
 	for (int i = 0; i < g_pHardwareConfig->MaxUserClipPlanes(); ++i)
@@ -11359,9 +14262,9 @@ void CShaderAPIDx8::CommitUserClipPlanes( bool bUsingFixedFunction )
 //-----------------------------------------------------------------------------
 void CShaderAPIDx8::CommitPerPassFogMode( bool bUsingVertexAndPixelShaders )
 {
-	if ( IsX360() )
+	if ( IsGameConsole() )
 	{
-		// FF fog not applicable on 360
+		// FF fog not applicable on 360 / PS3
 		return;
 	}
 
@@ -11374,7 +14277,7 @@ void CShaderAPIDx8::CommitPerPassFogMode( bool bUsingVertexAndPixelShaders )
 	// Set fog mode if it's different than before.
 	if( m_DynamicState.m_FogMode != dxFogMode )
 	{
-		SetRenderStateConstMacro( this, D3DRS_FOGVERTEXMODE, dxFogMode );
+		SetSupportedRenderState( D3DRS_FOGVERTEXMODE, dxFogMode );
 		m_DynamicState.m_FogMode = dxFogMode;
 	}
 }
@@ -11398,23 +14301,10 @@ void CShaderAPIDx8::CommitPerPassXboxFixups()
 //-----------------------------------------------------------------------------
 void CShaderAPIDx8::CommitPerPassStateChanges( StateSnapshot_t id )
 {
-	if ( IsX360() || UsesVertexAndPixelShaders(id) )
-	{
-		CommitPerPassVertexShaderTransforms();
-		CommitPerPassFogMode( true );
-		CommitPerPassXboxFixups();
-		CallCommitFuncs( COMMIT_PER_PASS, false );
-	}
-	else if ( IsPC() )
-	{
-		CommitPerPassFixedFunctionTransforms();
-		CommitPerPassFogMode( false );
-		CallCommitFuncs( COMMIT_PER_PASS, true );
-	}
-	else
-	{
-		Assert( 0 );
-	}
+	CommitPerPassVertexShaderTransforms();
+	CommitPerPassFogMode( true );
+	CommitPerPassXboxFixups();
+	CallCommitFuncs( COMMIT_PER_PASS, false );
 }
 
 
@@ -11426,53 +14316,27 @@ void CShaderAPIDx8::CommitStateChanges()
 	VPROF("CShaderAPIDx8::CommitStateChanges");
 	CommitFastClipPlane();
 
-	bool bUsingFixedFunction = !IsX360() && m_pMaterial && !UsesVertexShader( m_pMaterial->GetVertexFormat() );
-
-	// xboxissue - cannot support ff pipeline
-	Assert ( IsPC() || ( IsX360() && !bUsingFixedFunction ) );
-
-	if ( IsX360() || !bUsingFixedFunction )
-	{
-		CommitVertexShaderTransforms();
-
-		if ( m_pMaterial && m_pMaterial->IsVertexLit() )
-		{
-			CommitVertexShaderLighting();
-		}
-	}
-	else if ( IsPC() )
-	{
-		CommitFixedFunctionTransforms();
-
-		if ( m_pMaterial && ( m_pMaterial->IsVertexLit() || m_pMaterial->NeedsFixedFunctionFlashlight() ) )
-		{
-			CommitFixedFunctionLighting();
-		}
-	}
-	else
-	{
-		Assert( 0 );
-	}
+	CommitVertexShaderTransforms();
 
 	if ( m_DynamicState.m_UserClipPlaneEnabled )
 	{
-		CommitUserClipPlanes( bUsingFixedFunction );
+		CommitUserClipPlanes( );
 	}
 
-	CallCommitFuncs( COMMIT_PER_DRAW, bUsingFixedFunction );
+	CallCommitFuncs( COMMIT_PER_DRAW );
 }
 
 //-----------------------------------------------------------------------------
 // Commits viewports
 //-----------------------------------------------------------------------------
-static void CommitSetViewports( IDirect3DDevice9 *pDevice, const DynamicState_t &desiredState, DynamicState_t &currentState, bool bForce )
+static void CommitSetViewports( D3DDeviceWrapper *pDevice, const DynamicState_t &desiredState, DynamicState_t &currentState, bool bForce )
 {
 	bool bChanged = bForce || memcmp( &desiredState.m_Viewport, &currentState.m_Viewport, sizeof(D3DVIEWPORT9) );
 
 	// The width + height can be zero at startup sometimes.
 	if ( bChanged && ( desiredState.m_Viewport.Width != 0 ) && ( desiredState.m_Viewport.Height != 0 ) )
 	{
-		if( ReverseDepthOnX360() ) //reverse depth on 360 for better perf through hierarchical z
+		if ( ReverseDepthOnX360() ) //reverse depth on 360 for better perf through hierarchical z
 		{
 			D3DVIEWPORT9 reverseDepthViewport;
 			reverseDepthViewport = desiredState.m_Viewport;
@@ -11489,7 +14353,7 @@ static void CommitSetViewports( IDirect3DDevice9 *pDevice, const DynamicState_t 
 }
 
 
-void CShaderAPIDx8::SetViewports( int nCount, const ShaderViewport_t* pViewports )
+void CShaderAPIDx8::SetViewports( int nCount, const ShaderViewport_t* pViewports, bool setImmediately )
 {
 	Assert( nCount == 1 && pViewports[0].m_nVersion == SHADER_VIEWPORT_VERSION );
 	if ( nCount != 1 )
@@ -11514,15 +14378,15 @@ void CShaderAPIDx8::SetViewports( int nCount, const ShaderViewport_t* pViewports
 		if ( IsPC() && m_IsResizing )
 		{
 			RECT viewRect;
-#if !defined( DX_TO_GL_ABSTRACTION )
+#if defined(_WIN32) && !defined( DX_TO_GL_ABSTRACTION )
 			GetClientRect( ( HWND )m_ViewHWnd, &viewRect );
 #else
 			toglGetClientRect( (VD3DHWND)m_ViewHWnd, &viewRect );
 #endif
 			m_nWindowWidth = viewRect.right - viewRect.left;
 			m_nWindowHeight = viewRect.bottom - viewRect.top;
-			nMaxWidth = min( m_nWindowWidth, nMaxWidth );
-			nMaxHeight = min( m_nWindowHeight, nMaxHeight );
+			nMaxWidth = MIN( m_nWindowWidth, nMaxWidth );
+			nMaxHeight = MIN( m_nWindowHeight, nMaxHeight );
 		}
 
 		// Dimensions can freak out on app exit, so at least make sure the viewport is positive
@@ -11553,16 +14417,17 @@ void CShaderAPIDx8::SetViewports( int nCount, const ShaderViewport_t* pViewports
 	// and avoid the memcmp and copy
 	if ( memcmp( &m_DesiredState.m_Viewport, &viewport, sizeof(D3DVIEWPORT9) ) )
 	{
-		if ( !IsDeactivated() )
-		{
-			// State changed... need to flush the dynamic buffer
-			FlushBufferedPrimitives();
-		}
-
 		memcpy( &m_DesiredState.m_Viewport, &viewport, sizeof(D3DVIEWPORT9) );
 	}
 
-	ADD_COMMIT_FUNC( COMMIT_PER_DRAW, COMMIT_ALWAYS, CommitSetViewports );
+	if ( setImmediately )
+	{
+		 CommitSetViewports( Dx9Device(), m_DesiredState, m_DynamicState, false);
+	}
+	else
+	{
+		ADD_COMMIT_FUNC( COMMIT_PER_DRAW, CommitSetViewports );
+	}
 }
 
 
@@ -11587,45 +14452,11 @@ int CShaderAPIDx8::GetViewports( ShaderViewport_t* pViewports, int nMax ) const
 
 
 //-----------------------------------------------------------------------------
-// Flushes buffered primitives
-//-----------------------------------------------------------------------------
-void CShaderAPIDx8::FlushBufferedPrimitives( )
-{
-	if ( ShaderUtil() )
-	{
-		if ( !ShaderUtil()->OnFlushBufferedPrimitives() )
-		{
-			return;
-		}
-	}
-	FlushBufferedPrimitivesInternal();
-}
-
-void CShaderAPIDx8::FlushBufferedPrimitivesInternal( )
-{
-	LOCK_SHADERAPI();
-	// This shouldn't happen in the inner rendering loop!
-	Assert( m_pRenderMesh == 0 );
-
-	// NOTE: We've gotta store off the matrix mode because
-	// it'll get reset by the default state application caused by the flush
-	int tempStack = m_CurrStack;
-	D3DTRANSFORMSTATETYPE tempMatrixMode = m_MatrixMode;
-
-	MeshMgr()->Flush();
-
-	m_CurrStack = tempStack;
-	m_MatrixMode = tempMatrixMode;
-}
-
-
-//-----------------------------------------------------------------------------
 // Flush the hardware
 //-----------------------------------------------------------------------------
 void CShaderAPIDx8::FlushHardware( )
 {
 	LOCK_SHADERAPI();
-	FlushBufferedPrimitives();
 
 	Dx9Device()->EndScene();
 
@@ -11643,7 +14474,7 @@ void CShaderAPIDx8::FlushHardware( )
 //-----------------------------------------------------------------------------
 void CShaderAPIDx8::HandleDeviceLost()
 {
-	if ( IsX360() )
+	if ( IsGameConsole() )
 	{
 		return;
 	}
@@ -11652,9 +14483,6 @@ void CShaderAPIDx8::HandleDeviceLost()
 
 	if ( !IsActive() )
 		return;
-
-	// need to flush the dynamic buffer
-	FlushBufferedPrimitives();
 
 	if ( !IsDeactivated() )
 	{
@@ -11750,8 +14578,6 @@ void CShaderAPIDx8::ClearBuffersObeyStencilEx( bool bClearColor, bool bClearAlph
 	if ( !bClearColor && !bClearAlpha && !bClearDepth )
 		return;
 
-	FlushBufferedPrimitives();
-
 	// Before clearing can happen, user clip planes must be disabled
 	SetRenderState( D3DRS_CLIPPLANEENABLE, 0 );
 
@@ -11766,7 +14592,6 @@ void CShaderAPIDx8::ClearBuffersObeyStencilEx( bool bClearColor, bool bClearAlph
 	ShaderUtil()->DrawClearBufferQuad( r, g, b, a, bClearColor, bClearAlpha, bClearDepth );
 
 	// Reset user clip plane state
-	FlushBufferedPrimitives();
 	SetRenderState( D3DRS_CLIPPLANEENABLE, m_DynamicState.m_UserClipPlaneEnabled );
 }
 
@@ -11777,16 +14602,13 @@ void CShaderAPIDx8::PerformFullScreenStencilOperation( void )
 {
 	LOCK_SHADERAPI();
 
-	FlushBufferedPrimitives();
-
 	// We'll be drawing a large quad in altered worldspace, user clip planes must be disabled
-	SetRenderStateConstMacro( this, D3DRS_CLIPPLANEENABLE, 0 );
+	SetRenderState( D3DRS_CLIPPLANEENABLE, 0 );
 
 	ShaderUtil()->DrawClearBufferQuad( 0, 0, 0, 0, false, false, false );
 
 	// Reset user clip plane state
-	FlushBufferedPrimitives();
-	SetRenderStateConstMacro( this, D3DRS_CLIPPLANEENABLE, m_DynamicState.m_UserClipPlaneEnabled );
+	SetRenderState( D3DRS_CLIPPLANEENABLE, m_DynamicState.m_UserClipPlaneEnabled );
 }
 
 
@@ -11803,7 +14625,6 @@ void CShaderAPIDx8::ClearBuffers( bool bClearColor, bool bClearDepth, bool bClea
 		return;
 
 	// State changed... need to flush the dynamic buffer
-	FlushBufferedPrimitives();
 	CallCommitFuncs( COMMIT_PER_DRAW, true );
 
 	float depth = (ShaderUtil()->GetConfig().bReverseDepth ^ ReverseDepthOnX360()) ? 0.0f : 1.0f;
@@ -11818,11 +14639,32 @@ void CShaderAPIDx8::ClearBuffers( bool bClearColor, bool bClearDepth, bool bClea
 	{
 		mask |= D3DCLEAR_ZBUFFER;
 	}
-	
+
+	/*
+	// HACK HACK HACK
+	if ( bClearDepth )
+	{
+		bClearStencil = true;
+	}
+	*/
+
+
+	ShaderStencilState_t stencilState;
 	if ( bClearStencil && m_bUsingStencil )
 	{
 		mask |= D3DCLEAR_STENCIL;
+
+#if defined( _X360 )
+		// Clear hi stencil to 1 (for deferred shadows)
+		// FIXME: Add possibility to set hi stencil clear value
+		GetCurrentStencilState( &stencilState );
+		SetSupportedRenderStateForce( D3DRS_HISTENCILENABLE, FALSE );
+		SetSupportedRenderStateForce( D3DRS_HISTENCILWRITEENABLE, TRUE );
+		SetSupportedRenderStateForce( D3DRS_HISTENCILFUNC, D3DHSCMP_NOTEQUAL ); // toggle func to EQUAL to clear to 0
+		SetSupportedRenderStateForce( D3DRS_HISTENCILREF, 0 );
+#endif
 	}
+
 
 	// Only clear the current view... right!??!
 	D3DRECT clear;
@@ -11835,14 +14677,15 @@ void CShaderAPIDx8::ClearBuffers( bool bClearColor, bool bClearDepth, bool bClea
 	bool bSRGBWriteEnable = false;
 	if ( !IsX360() && bClearColor && m_TransitionTable.CurrentShadowState() )
 	{
-		bSRGBWriteEnable = m_TransitionTable.CurrentShadowState()->m_SRGBWriteEnable;
+		bSRGBWriteEnable = m_TransitionTable.CurrentShadowState()->m_FogAndMiscState.m_SRGBWriteEnable;
 	}
 	
 #if !defined( _X360 )
 	if ( bSRGBWriteEnable )
 	{
-		// This path used to be !IsPosix(), but this makes no sense and causes the clear color to differ in D3D9 vs. GL.
+#ifndef DX_TO_GL_ABSTRACTION
 		Dx9Device()->SetRenderState( D3DRS_SRGBWRITEENABLE, 0 );
+#endif
 	}
 #endif
 	
@@ -11882,6 +14725,14 @@ void CShaderAPIDx8::ClearBuffers( bool bClearColor, bool bClearDepth, bool bClea
 		}
 	}
 
+#if defined( _X360 )
+	if ( mask & D3DCLEAR_STENCIL )
+	{
+		// reset hi-stencil state
+		SetStencilStateInternal( stencilState );
+	}
+#endif
+
 	// Restore state
 	if ( bSRGBWriteEnable )
 	{
@@ -11890,7 +14741,6 @@ void CShaderAPIDx8::ClearBuffers( bool bClearColor, bool bClearDepth, bool bClea
 		m_TransitionTable.ApplySRGBWriteEnable( *m_TransitionTable.CurrentShadowState() );
 	}
 }
-
 
 //-----------------------------------------------------------------------------
 // Bind
@@ -11917,9 +14767,6 @@ void CShaderAPIDx8::BindPixelShader( PixelShaderHandle_t hPixelShader )
 IDirect3DSurface* CShaderAPIDx8::GetFrontBufferImage( ImageFormat& format )
 {
 #if !defined( _X360 )
-	// need to flush the dynamic buffer	and make sure the entire image is there
-	FlushBufferedPrimitives();
-
 	int w, h;
 	GetBackBufferDimensions( w, h );
 
@@ -12049,11 +14896,7 @@ IDirect3DSurface* CShaderAPIDx8::GetBackBufferImageHDR( Rect_t *pSrcRect, Rect_t
 				NULL );
 		}
 		pTmpSurface = m_pSmallBackBufferFP16TempSurface;
-#if POSIX
-		pTmpSurface->AddRef( 0, "CShaderAPIDx8::GetBackBufferImageHDR public addref");
-#else
 		pTmpSurface->AddRef();
-#endif
 
 		desc.Width = SMALL_BACK_BUFFER_SURFACE_WIDTH;
 		desc.Height = SMALL_BACK_BUFFER_SURFACE_HEIGHT;
@@ -12121,14 +14964,69 @@ CleanUp:
 //-----------------------------------------------------------------------------
 IDirect3DSurface* CShaderAPIDx8::GetBackBufferImage( Rect_t *pSrcRect, Rect_t *pDstRect, ImageFormat& format )
 {
-#if !defined( _X360 )
-	if ( !m_pBackBufferSurface || ( m_hFullScreenTexture == INVALID_SHADERAPI_TEXTURE_HANDLE ) )
+#if defined( _PS3 )
+	IDirect3DSurface *pSurf = m_pBackBufferSurfaces[BACK_BUFFER_INDEX_DEFAULT];
+	if ( ( pSurf ) && 
+		( pSrcRect->width == pDstRect->width ) && ( pSrcRect->height == pDstRect->height ) && 
+		( pSrcRect->x == 0 ) && ( pSrcRect->y == 0 ) && 
+		( pDstRect->x == 0 ) && ( pDstRect->y == 0 ) )
+	{
+		D3DSURFACE_DESC desc;
+		HRESULT hr = pSurf->GetDesc( &desc );
+		if ( !FAILED( hr ) )
+		{
+			format = ImageLoader::D3DFormatToImageFormat( desc.Format );
+
+			// The actual surface data on PS3 is big endian, and the caller expects little endian data, so flip the component order. (Yes this is a big hack.)
+			// This is the simplest/least intrusive solution to get savegame screenshots working on ps3 I could think of.
+			if ( format == IMAGE_FORMAT_BGRA8888 )
+			{
+				format = IMAGE_FORMAT_ARGB8888;
+			}
+			else if ( format == IMAGE_FORMAT_ARGB8888 )
+			{
+				format = IMAGE_FORMAT_BGRA8888;
+			}
+			else if ( format == IMAGE_FORMAT_RGBA8888 )
+			{
+				format = IMAGE_FORMAT_ABGR8888;
+			}
+			else if ( format == IMAGE_FORMAT_ABGR8888 )
+			{
+				format = IMAGE_FORMAT_RGBA8888;
+			}
+			else
+			{
+				AssertOnce( "Unsupported backbuffer format in GetBackBufferImage\n" );
+			}
+
+			pSurf->AddRef();
+
+			// For safety, wait until the GPU backend finishes writing to the backbuffer.
+			IDirect3DQuery9 *pQuery = NULL;
+			Dx9Device()->CreateQuery( D3DQUERYTYPE_EVENT, &pQuery );
+			if ( pQuery )
+			{
+				pQuery->Issue( D3DISSUE_END );
+				
+				BOOL bQueryResult;
+				pQuery->GetData( &bQueryResult, sizeof( bQueryResult ), D3DGETDATA_FLUSH );
+				
+				pQuery->Release();
+
+				__sync();
+			}
+
+			return pSurf;
+		}
+	}
+	return NULL;
+#elif !defined( _X360 )
+	if ( !m_pBackBufferSurfaces[BACK_BUFFER_INDEX_DEFAULT] || ( m_hFullScreenTexture == INVALID_SHADERAPI_TEXTURE_HANDLE ) )
 		return NULL;
 
 	HRESULT hr;
 	D3DSURFACE_DESC desc;
-
-	FlushBufferedPrimitives();
 
 	// Get the current render target
 	IDirect3DSurface* pRenderTarget;
@@ -12145,19 +15043,15 @@ IDirect3DSurface* CShaderAPIDx8::GetBackBufferImage( Rect_t *pSrcRect, Rect_t *p
 	IDirect3DSurface *pSurfaceBits = NULL;
 	IDirect3DSurface *pTmpSurface = NULL;
 	int nRenderTargetRefCount;
-	nRenderTargetRefCount = 0;
+	REFERENCE( nRenderTargetRefCount );
 
-	if ( (desc.MultiSampleType == D3DMULTISAMPLE_NONE) && (pRenderTarget != m_pBackBufferSurface) && 
+	if ( (desc.MultiSampleType == D3DMULTISAMPLE_NONE) && (pRenderTarget != m_pBackBufferSurfaces[BACK_BUFFER_INDEX_DEFAULT]) && 
 		 (pSrcRect->width == pDstRect->width) && (pSrcRect->height == pDstRect->height) )
 	{
 		// Don't bother to blit through the full-screen texture if we don't
 		// have to stretch, we're not coming from the backbuffer, and we don't have to do AA resolve
 		pTmpSurface = pRenderTarget;
-#if POSIX
-		pTmpSurface->AddRef( 0, "CShaderAPIDx8::GetBackBufferImage public addref");
-#else
 		pTmpSurface->AddRef();
-#endif
 	}
 	else
 	{
@@ -12227,7 +15121,7 @@ IDirect3DSurface* CShaderAPIDx8::GetBackBufferImage( Rect_t *pSrcRect, Rect_t *p
 	nRenderTargetRefCount = 
 #endif
 		pRenderTarget->Release();
-	AssertOnce( nRenderTargetRefCount == 1 );
+	Assert( nRenderTargetRefCount == 1 );
 	return pSurfaceBits;
 
 CleanUp:
@@ -12264,9 +15158,6 @@ void CShaderAPIDx8::CopyBitsFromHostSurface( IDirect3DSurface* pSurfaceBits,
 	D3DLOCKED_RECT lockedRect;
 	HRESULT hr;
 	int flags = D3DLOCK_READONLY | D3DLOCK_NOSYSLOCK;
-
-	tmZone( TELEMETRY_LEVEL1, TMZF_NONE, "%s", __FUNCTION__ );
-
 	hr = pSurfaceBits->LockRect( &lockedRect, &rect, flags );
 	if ( !FAILED( hr ) )
 	{
@@ -12321,7 +15212,7 @@ void CShaderAPIDx8::ReadPixels( Rect_t *pSrcRect, Rect_t *pDstRect, unsigned cha
 //-----------------------------------------------------------------------------
 // Reads from the current read buffer
 //-----------------------------------------------------------------------------
-void CShaderAPIDx8::ReadPixels( int x, int y, int width, int height, unsigned char *pData, ImageFormat dstFormat )
+void CShaderAPIDx8::ReadPixels( int x, int y, int width, int height, unsigned char *pData, ImageFormat dstFormat, ITexture *pRenderTargetTexture )
 {
 	Rect_t rect;
 	rect.x = x;
@@ -12332,7 +15223,41 @@ void CShaderAPIDx8::ReadPixels( int x, int y, int width, int height, unsigned ch
 	if ( IsPC() || !IsX360() )
 	{
 		ImageFormat format;
-		IDirect3DSurface* pSurfaceBits = GetBackBufferImage( &rect, &rect, format );
+		IDirect3DSurface* pSurfaceBits = NULL;
+
+		if ( pRenderTargetTexture != NULL )
+		{
+			format = pRenderTargetTexture->GetImageFormat();
+			ShaderAPITextureHandle_t hRenderTargetTexture = ShaderUtil()->GetShaderAPITextureBindHandle( pRenderTargetTexture, 0, 0 );
+
+			//render targets can't be locked, luckily we can copy the surface to system memory and lock that.
+			IDirect3DSurface *pSystemSurface;
+			IDirect3DSurface* pRTSurface = GetTextureSurface( hRenderTargetTexture );
+
+			D3DSURFACE_DESC surfaceDesc;
+			pRTSurface->GetDesc( &surfaceDesc );
+
+			Assert( !IsX360() );
+
+			HRESULT hr = Dx9Device()->CreateOffscreenPlainSurface( surfaceDesc.Width, surfaceDesc.Height, surfaceDesc.Format, D3DPOOL_SYSTEMMEM, &pSystemSurface, NULL );
+			Assert( SUCCEEDED( hr ) );
+
+			if ( pSystemSurface != NULL )
+			{
+				pSystemSurface->GetDesc( &surfaceDesc );
+
+				hr = Dx9Device()->GetRenderTargetData( pRTSurface, pSystemSurface );
+				Assert( SUCCEEDED( hr ) );
+			}
+
+			//pretend this is the texture level we originally grabbed with GetSurfaceLevel() and continue on
+			pRTSurface->Release();
+			pSurfaceBits = pSystemSurface;
+		}
+		else
+		{
+			pSurfaceBits = GetBackBufferImage( &rect, &rect, format );
+		}
 		if (pSurfaceBits)
 		{
 			CopyBitsFromHostSurface( pSurfaceBits, rect, pData, format, dstFormat, 0 );
@@ -12350,6 +15275,94 @@ void CShaderAPIDx8::ReadPixels( int x, int y, int width, int height, unsigned ch
 	}
 }
 
+static IDirect3DSurface *s_pSystemSurface = NULL;
+static ImageFormat s_format;
+
+// this is not fully async, it syncronizes the queue
+// it does get queued and run from the render thread (if enabled)
+void CShaderAPIDx8::ReadPixelsAsync( int x, int y, int width, int height, unsigned char *pData, ImageFormat dstFormat, ITexture *pRenderTargetTexture, CThreadEvent *pPixelsReadEvent )
+{
+	TM_ZONE( TELEMETRY_LEVEL1, TMZF_NONE, "%s", __FUNCTION__ );
+
+	Rect_t rect;
+	rect.x = x;
+	rect.y = y;
+	rect.width = width;
+	rect.height = height;
+
+	if ( IsPC() || !IsX360() )
+	{
+		if ( pRenderTargetTexture != NULL )
+		{
+			s_format = pRenderTargetTexture->GetImageFormat();
+			ShaderAPITextureHandle_t hRenderTargetTexture = ShaderUtil()->GetShaderAPITextureBindHandle( pRenderTargetTexture, 0, 0 );
+
+			//render targets can't be locked, luckily we can copy the surface to system memory and lock that.
+			if ( IDirect3DSurface* pRTSurface = GetTextureSurface( hRenderTargetTexture ) )
+			{
+				D3DSURFACE_DESC surfaceDesc;
+				pRTSurface->GetDesc( &surfaceDesc );
+
+				Assert( !IsX360() );
+
+				HRESULT hr = Dx9Device()->CreateOffscreenPlainSurface( surfaceDesc.Width, surfaceDesc.Height, surfaceDesc.Format, D3DPOOL_SYSTEMMEM, &s_pSystemSurface, NULL );
+				Assert( SUCCEEDED( hr ) );
+
+				if ( s_pSystemSurface != NULL )
+				{
+					s_pSystemSurface->GetDesc( &surfaceDesc );
+
+					hr = Dx9Device()->GetRenderTargetData( pRTSurface, s_pSystemSurface );
+					Assert( SUCCEEDED( hr ) );
+				}
+
+				//pretend this is the texture level we originally grabbed with GetSurfaceLevel() and continue on
+				pRTSurface->Release();
+			}
+		}
+		else
+		{
+			s_pSystemSurface = GetBackBufferImage( &rect, &rect, s_format );
+		}
+	}
+	else
+	{
+#if defined( _X360 )
+		Assert( 0 ); // not supported
+#endif
+	}
+
+	// if the caller gave us a thread event, then signal the event
+	if ( pPixelsReadEvent )
+	{
+		pPixelsReadEvent->Set();
+	}
+}
+
+void CShaderAPIDx8::ReadPixelsAsyncGetResult( int x, int y, int width, int height, unsigned char *pData, ImageFormat dstFormat, CThreadEvent *pGetResultEvent )
+{
+	TM_ZONE( TELEMETRY_LEVEL1, TMZF_NONE, "%s", __FUNCTION__ );
+
+	Rect_t rect;
+	rect.x = x;
+	rect.y = y;
+	rect.width = width;
+	rect.height = height;
+
+	if (s_pSystemSurface)
+	{
+		CopyBitsFromHostSurface( s_pSystemSurface, rect, pData, s_format, dstFormat, 0 );
+		
+		// Release the temporary surface
+		s_pSystemSurface->Release();
+	}
+
+	// if the caller gave us a thread event, then signal the event
+	if ( pGetResultEvent )
+	{
+		pGetResultEvent->Set();
+	}
+}
 
 //-----------------------------------------------------------------------------
 // Binds a particular material to render with
@@ -12371,7 +15384,6 @@ void CShaderAPIDx8::Bind( IMaterial* pMaterial )
 
 	if ( bMaterialChanged )
 	{
-		FlushBufferedPrimitives();
 #ifdef RECORDING
 		RECORD_DEBUG_STRING( ( char * )pMaterial->GetName() );
 		IShader *pShader = pMatInt->GetShader();
@@ -12386,8 +15398,23 @@ void CShaderAPIDx8::Bind( IMaterial* pMaterial )
 #endif
 		m_pMaterial = pMatInt;
 
-#if ( defined( PIX_INSTRUMENTATION ) || defined( NVPERFHUD ) )
-		PIXifyName( s_pPIXMaterialName, sizeof( s_pPIXMaterialName ), m_pMaterial->GetName() );
+#if ( defined( PIX_INSTRUMENTATION ) || defined( NVPERFHUD ) || ( defined( PLATFORM_POSIX ) && GLMDEBUG ) )
+		PIXifyName( s_pPIXMaterialName, m_pMaterial->GetName() );
+#endif
+
+#ifdef _GAMECONSOLE
+		if ( m_bInZPass )
+		{
+			if ( pMatInt->IsAlphaTested() || pMatInt->IsTranslucent() )
+			{
+				// we need to predicate render calls with this material to only occur during main rendering and not the z pass
+				Dx9Device()->SetPredication( D3DPRED_ALL_RENDER );
+			}
+			else
+			{
+				Dx9Device()->SetPredication( 0 );
+			}
+		}
 #endif
 	}
 }
@@ -12398,21 +15425,59 @@ IMaterialInternal* CShaderAPIDx8::GetBoundMaterial()
 	return m_pMaterial;
 }
 
-
 //-----------------------------------------------------------------------------
 // Binds a standard texture
 //-----------------------------------------------------------------------------
-void CShaderAPIDx8::BindStandardTexture( Sampler_t sampler, StandardTextureId_t id )
+
+#ifndef _PS3
+
+void CShaderAPIDx8::BindStandardTexture( Sampler_t sampler, TextureBindFlags_t nBindFlags, StandardTextureId_t id )
 {
+	if ( IsRenderingInstances() )
+	{
+		// when rendering instances, if they are binding one of the per-instance replacable std
+		// textures, we don't want to bind it - we just want to remember what sampler it was bound
+		// to so we can plug in the correct texture at the time we draw the instances.
+
+		int nMask = ( 1 << sampler );
+		m_DynamicState.m_nLocalEnvCubemapSamplers &= ~nMask;
+		m_DynamicState.m_nLightmapSamplers &= ~nMask;
+		m_DynamicState.m_nPaintmapSamplers &= ~nMask;
+
+		if ( id == TEXTURE_LOCAL_ENV_CUBEMAP )
+		{
+			m_DynamicState.m_nLocalEnvCubemapSamplers |= nMask;
+			SetLastSetTextureBindFlags( sampler, nBindFlags );
+			return;
+		}
+
+		if ( id == TEXTURE_LIGHTMAP )
+		{
+			m_DynamicState.m_nLightmapSamplers |= nMask;
+			SetLastSetTextureBindFlags( sampler, nBindFlags );
+			return;
+		}
+
+		if ( id == TEXTURE_PAINT )
+		{
+			m_DynamicState.m_nPaintmapSamplers |= nMask;
+			SetLastSetTextureBindFlags( sampler, nBindFlags );
+			return;
+		}
+	}
+
 	if ( m_StdTextureHandles[id] != INVALID_SHADERAPI_TEXTURE_HANDLE )
 	{
-		BindTexture( sampler, m_StdTextureHandles[id] );
+		BindTexture( sampler, nBindFlags, m_StdTextureHandles[id] );
 	}
 	else
 	{
-		ShaderUtil()->BindStandardTexture( sampler, id );
+		ShaderUtil()->BindStandardTexture( sampler, nBindFlags, id );
 	}
+	Assert( LastSetTextureBindFlags( sampler ) == nBindFlags );
 }
+
+#endif
 
 void CShaderAPIDx8::BindStandardVertexTexture( VertexTextureSampler_t sampler, StandardTextureId_t id )
 {
@@ -12424,6 +15489,15 @@ void CShaderAPIDx8::GetStandardTextureDimensions( int *pWidth, int *pHeight, Sta
 	ShaderUtil()->GetStandardTextureDimensions( pWidth, pHeight, id );
 }
 
+float CShaderAPIDx8::GetSubDHeight()
+{
+	return ShaderUtil()->GetSubDHeight();
+}
+
+bool CShaderAPIDx8::IsStereoActiveThisFrame() const
+{
+	return m_bIsStereoActiveThisFrame;
+}
 
 //-----------------------------------------------------------------------------
 // Gets the lightmap dimensions
@@ -12509,8 +15583,6 @@ void CShaderAPIDx8::PopSelectionName()
 
 void CShaderAPIDx8::WriteHitRecord( )
 {
-	FlushBufferedPrimitives();
-
 	if (m_SelectionNames.Count() && (m_SelectionMinZ != FLT_MAX))
 	{
 		Assert( m_pCurrSelectionRecord + m_SelectionNames.Count() + 3 <	m_pSelectionBufferEnd );
@@ -12531,7 +15603,7 @@ void CShaderAPIDx8::WriteHitRecord( )
 	m_SelectionMaxZ = FLT_MIN;
 }
 
-// We hit somefin in selection mode
+// We hit something in selection mode
 void CShaderAPIDx8::RegisterSelectionHit( float minz, float maxz )
 {
 	if (minz < 0)
@@ -12554,246 +15626,96 @@ bool CShaderAPIDx8::IsHWMorphingEnabled( ) const
 	return m_DynamicState.m_bHWMorphingEnabled;
 }
 
-
-//-----------------------------------------------------------------------------
-// Inserts the lighting block into the code
-//-----------------------------------------------------------------------------
-
-// If you change the number of lighting combinations, change this enum
-enum
+TessellationMode_t CShaderAPIDx8::GetTessellationMode( ) const
 {
-	DX8_LIGHTING_COMBINATION_COUNT = 22,
-	DX9_LIGHTING_COMBINATION_COUNT = 35
-};
+	return m_DynamicState.m_TessellationMode;
+}
 
-#define MAX_LIGHTS 4
-
-
-// NOTE: These should match g_lightType* in vsh_prep.pl!
-static int g_DX8LightCombinations[][4] = 
+static Vector s_EmptyCube[6];
+void CShaderAPIDx8::RecomputeAggregateLightingState( void )
 {
-	// static		ambient				local1				local2
+	m_DynamicState.m_ShaderLightState.m_bAmbientLight = false;
+	m_DynamicState.m_ShaderLightState.m_nNumLights = 0;
+	m_DynamicState.m_ShaderLightState.m_bStaticLight = false;
+	m_DynamicState.m_ShaderLightState.m_bStaticLightIndirectOnly = false;
 
-	// This is a special case for no lighting at all.
-	{ LIGHT_NONE,	LIGHT_NONE,			LIGHT_NONE,			LIGHT_NONE },			
-
-	// This is a special case so that we don't have to do the ambient cube
-	// when we only have static lighting
-	{ LIGHT_STATIC,	LIGHT_NONE,			LIGHT_NONE,			LIGHT_NONE },			
-
-	{ LIGHT_NONE,	LIGHT_AMBIENTCUBE,	LIGHT_NONE,			LIGHT_NONE },			
-	{ LIGHT_NONE,	LIGHT_AMBIENTCUBE,	LIGHT_SPOT,			LIGHT_NONE },
-	{ LIGHT_NONE,	LIGHT_AMBIENTCUBE,	LIGHT_POINT,		LIGHT_NONE },
-	{ LIGHT_NONE,	LIGHT_AMBIENTCUBE,	LIGHT_DIRECTIONAL,	LIGHT_NONE },
-	{ LIGHT_NONE,	LIGHT_AMBIENTCUBE,	LIGHT_SPOT,			LIGHT_SPOT },
-	{ LIGHT_NONE,	LIGHT_AMBIENTCUBE,	LIGHT_SPOT,			LIGHT_POINT, },			
-	{ LIGHT_NONE,	LIGHT_AMBIENTCUBE,	LIGHT_SPOT,			LIGHT_DIRECTIONAL, },
-	{ LIGHT_NONE,	LIGHT_AMBIENTCUBE,	LIGHT_POINT,		LIGHT_POINT, },
-	{ LIGHT_NONE,	LIGHT_AMBIENTCUBE,	LIGHT_POINT,		LIGHT_DIRECTIONAL, },
-	{ LIGHT_NONE,	LIGHT_AMBIENTCUBE,	LIGHT_DIRECTIONAL,	LIGHT_DIRECTIONAL, },
-
-	{ LIGHT_STATIC,	LIGHT_AMBIENTCUBE,	LIGHT_NONE,			LIGHT_NONE },			
-	{ LIGHT_STATIC,	LIGHT_AMBIENTCUBE,	LIGHT_SPOT,			LIGHT_NONE },
-	{ LIGHT_STATIC,	LIGHT_AMBIENTCUBE,	LIGHT_POINT,		LIGHT_NONE },
-	{ LIGHT_STATIC,	LIGHT_AMBIENTCUBE,	LIGHT_DIRECTIONAL,	LIGHT_NONE },
-	{ LIGHT_STATIC,	LIGHT_AMBIENTCUBE,	LIGHT_SPOT,			LIGHT_SPOT },
-	{ LIGHT_STATIC,	LIGHT_AMBIENTCUBE,	LIGHT_SPOT,			LIGHT_POINT, },			
-	{ LIGHT_STATIC,	LIGHT_AMBIENTCUBE,	LIGHT_SPOT,			LIGHT_DIRECTIONAL, },
-	{ LIGHT_STATIC,	LIGHT_AMBIENTCUBE,	LIGHT_POINT,		LIGHT_POINT, },
-	{ LIGHT_STATIC,	LIGHT_AMBIENTCUBE,	LIGHT_POINT,		LIGHT_DIRECTIONAL, },
-	{ LIGHT_STATIC,	LIGHT_AMBIENTCUBE,	LIGHT_DIRECTIONAL,	LIGHT_DIRECTIONAL, }
-};
-
-// NOTE: These should match g_lightType* in vsh_prep.pl!
-// They also correspond to the parallel g_LocalLightTypeXArray[] arrays in common_vs_fxc.h
-static int g_DX9LightCombinations[][MAX_LIGHTS] = 
-{
-	// local0				local1				local2				local3
-	{ LIGHT_NONE,			LIGHT_NONE,			LIGHT_NONE,			LIGHT_NONE },			// Zero lights		[ Combo 0]
-
-	{ LIGHT_SPOT,			LIGHT_NONE,			LIGHT_NONE,			LIGHT_NONE },			// One light		[ Combo 1]
-	{ LIGHT_POINT,			LIGHT_NONE,			LIGHT_NONE,			LIGHT_NONE },
-	{ LIGHT_DIRECTIONAL,	LIGHT_NONE,			LIGHT_NONE,			LIGHT_NONE },
-
-	{ LIGHT_SPOT,			LIGHT_SPOT,			LIGHT_NONE,			LIGHT_NONE },			// Two lights		[ Combo 4]
-	{ LIGHT_SPOT,			LIGHT_POINT,		LIGHT_NONE,			LIGHT_NONE },
-	{ LIGHT_SPOT,			LIGHT_DIRECTIONAL,	LIGHT_NONE,			LIGHT_NONE },
-	{ LIGHT_POINT,			LIGHT_POINT,		LIGHT_NONE,			LIGHT_NONE },
-	{ LIGHT_POINT,			LIGHT_DIRECTIONAL,	LIGHT_NONE,			LIGHT_NONE },
-	{ LIGHT_DIRECTIONAL,	LIGHT_DIRECTIONAL,	LIGHT_NONE,			LIGHT_NONE },
-
-	{ LIGHT_SPOT,			LIGHT_SPOT,			LIGHT_SPOT,			LIGHT_NONE },			// Three lights		[ Combo 10]
-	{ LIGHT_SPOT,			LIGHT_SPOT,			LIGHT_POINT,		LIGHT_NONE },
-	{ LIGHT_SPOT,			LIGHT_SPOT,			LIGHT_DIRECTIONAL,	LIGHT_NONE },
-	{ LIGHT_SPOT,			LIGHT_POINT,		LIGHT_POINT,		LIGHT_NONE },
-	{ LIGHT_SPOT,			LIGHT_POINT,		LIGHT_DIRECTIONAL,	LIGHT_NONE },
-	{ LIGHT_SPOT,			LIGHT_DIRECTIONAL,	LIGHT_DIRECTIONAL,	LIGHT_NONE },
-	{ LIGHT_POINT,			LIGHT_POINT,		LIGHT_POINT,		LIGHT_NONE },
-	{ LIGHT_POINT,			LIGHT_POINT,		LIGHT_DIRECTIONAL,	LIGHT_NONE },
-	{ LIGHT_POINT,			LIGHT_DIRECTIONAL,	LIGHT_DIRECTIONAL,	LIGHT_NONE },
-	{ LIGHT_DIRECTIONAL,	LIGHT_DIRECTIONAL,	LIGHT_DIRECTIONAL,	LIGHT_NONE },
-
-	{ LIGHT_SPOT,			LIGHT_SPOT,			LIGHT_SPOT,			LIGHT_SPOT },			// Four lights		[ Combo 20]
-	{ LIGHT_SPOT,			LIGHT_SPOT,			LIGHT_SPOT,			LIGHT_POINT },
-	{ LIGHT_SPOT,			LIGHT_SPOT,			LIGHT_SPOT,			LIGHT_DIRECTIONAL },
-	{ LIGHT_SPOT,			LIGHT_SPOT,			LIGHT_POINT,		LIGHT_POINT },
-	{ LIGHT_SPOT,			LIGHT_SPOT,			LIGHT_POINT,		LIGHT_DIRECTIONAL },
-	{ LIGHT_SPOT,			LIGHT_SPOT,			LIGHT_DIRECTIONAL,	LIGHT_DIRECTIONAL },
-	{ LIGHT_SPOT,			LIGHT_POINT,		LIGHT_POINT,		LIGHT_POINT },
-	{ LIGHT_SPOT,			LIGHT_POINT,		LIGHT_POINT,		LIGHT_DIRECTIONAL },
-	{ LIGHT_SPOT,			LIGHT_POINT,		LIGHT_DIRECTIONAL,	LIGHT_DIRECTIONAL },
-	{ LIGHT_SPOT,			LIGHT_DIRECTIONAL,	LIGHT_DIRECTIONAL,	LIGHT_DIRECTIONAL },
-	{ LIGHT_POINT,			LIGHT_POINT,		LIGHT_POINT,		LIGHT_POINT },
-	{ LIGHT_POINT,			LIGHT_POINT,		LIGHT_POINT,		LIGHT_DIRECTIONAL },
-	{ LIGHT_POINT,			LIGHT_POINT,		LIGHT_DIRECTIONAL,	LIGHT_DIRECTIONAL },
-	{ LIGHT_POINT,			LIGHT_DIRECTIONAL,	LIGHT_DIRECTIONAL,	LIGHT_DIRECTIONAL },
-	{ LIGHT_DIRECTIONAL,	LIGHT_DIRECTIONAL,	LIGHT_DIRECTIONAL,	LIGHT_DIRECTIONAL }
-};
-
-// This is just for getting light combos for DX8
-// For DX9, use GetDX9LightState()
-// It is up to the shader cpp files to use the right method
-int CShaderAPIDx8::GetCurrentLightCombo( void ) const
-{
-	Assert( g_pHardwareConfig->Caps().m_nDXSupportLevel <= 81 );
-
-	Assert( m_DynamicState.m_NumLights <= 2 );
-
-	COMPILE_TIME_ASSERT( DX8_LIGHTING_COMBINATION_COUNT == 
-		sizeof( g_DX8LightCombinations ) / sizeof( g_DX8LightCombinations[0] ) );
-	
-	// hack . . do this a cheaper way.
-	bool bUseAmbientCube;
-	if( m_DynamicState.m_AmbientLightCube[0][0] == 0.0f && 
-		m_DynamicState.m_AmbientLightCube[0][1] == 0.0f && 
-		m_DynamicState.m_AmbientLightCube[0][2] == 0.0f && 
-		m_DynamicState.m_AmbientLightCube[1][0] == 0.0f && 
-		m_DynamicState.m_AmbientLightCube[1][1] == 0.0f && 
-		m_DynamicState.m_AmbientLightCube[1][2] == 0.0f && 
-		m_DynamicState.m_AmbientLightCube[2][0] == 0.0f && 
-		m_DynamicState.m_AmbientLightCube[2][1] == 0.0f && 
-		m_DynamicState.m_AmbientLightCube[2][2] == 0.0f && 
-		m_DynamicState.m_AmbientLightCube[3][0] == 0.0f && 
-		m_DynamicState.m_AmbientLightCube[3][1] == 0.0f && 
-		m_DynamicState.m_AmbientLightCube[3][2] == 0.0f && 
-		m_DynamicState.m_AmbientLightCube[4][0] == 0.0f && 
-		m_DynamicState.m_AmbientLightCube[4][1] == 0.0f && 
-		m_DynamicState.m_AmbientLightCube[4][2] == 0.0f && 
-		m_DynamicState.m_AmbientLightCube[5][0] == 0.0f && 
-		m_DynamicState.m_AmbientLightCube[5][1] == 0.0f && 
-		m_DynamicState.m_AmbientLightCube[5][2] == 0.0f )
+	for ( int i = 0; i < m_nRenderInstanceCount; ++i )
 	{
-		bUseAmbientCube = false;
-	}
-	else
-	{
-		bUseAmbientCube = true;
-	}
+		const MaterialLightingState_t *pLightingState = m_pRenderInstances[i].m_pLightingState;
+		if ( !pLightingState )
+			continue;
 
-	Assert( m_pRenderMesh );
+		if ( !m_DynamicState.m_ShaderLightState.m_bAmbientLight )
+		{
+			m_DynamicState.m_ShaderLightState.m_bAmbientLight = ( memcmp( s_EmptyCube, pLightingState->m_vecAmbientCube, 18 * sizeof(float) ) != 0 );
+		}
 
-	const VertexShaderLightTypes_t *pLightType = m_DynamicState.m_LightType;
+		if ( !m_DynamicState.m_ShaderLightState.m_bStaticLight )
+		{
+			m_DynamicState.m_ShaderLightState.m_bStaticLight = ( m_pRenderInstances[i].m_pColorBuffer != NULL );
+		}
 
-	if( m_DynamicState.m_NumLights == 0 && !bUseAmbientCube )
-	{
-		if( m_pRenderMesh->HasColorMesh() )
-			return 1;		// special case for static lighting only
+		if ( !m_DynamicState.m_ShaderLightState.m_bStaticLightIndirectOnly )
+		{
+			m_DynamicState.m_ShaderLightState.m_bStaticLightIndirectOnly = m_pRenderInstances[i].m_bColorBufferHasIndirectLightingOnly;
+		}
+
+#ifdef _DEBUG
+		if ( g_pHardwareConfig->GetDXSupportLevel() >= 92 )
+		{
+			Assert( pLightingState->m_nLocalLightCount <= MATERIAL_MAX_LIGHT_COUNT );		// 2b hardware gets four lights
+		}
 		else
-			return 0;		// special case for no lighting at all.
-	}
-	
-	int i;
-	// hack - skip the first two for now since we don't know if the ambient cube is needed or not.
-	for( i = 2; i < DX9_LIGHTING_COMBINATION_COUNT; ++i )
-	{
-		int j;
-		for( j = 0; j < m_DynamicState.m_NumLights; ++j )
 		{
-			if( pLightType[j] != g_DX8LightCombinations[i][j+2] )
-				break;
+			Assert( pLightingState->m_nLocalLightCount <= (MATERIAL_MAX_LIGHT_COUNT-2) );	// 2.0 hardware gets two less
 		}
-		if( j == m_DynamicState.m_NumLights )
-		{
-			while( j < 2 )
-			{
-				if (g_DX8LightCombinations[i][j+2] != LIGHT_NONE)
-					break;
-				++j;
-			}
-			if( j == 2 )
-			{
-				if( m_pRenderMesh->HasColorMesh() )
-				{
-					return i + 10;
-				}
-				else
-				{
-					return i;
-				}
-			}
-		}
-	}
+#endif
 
-	// should never get here!
-	Assert( 0 );
-	return 0;
+		int nNumLights = pLightingState->m_nLocalLightCount;
+
+		// Only force the first dynamic light to directional for csm for non statically lit meshes (or those that only have indirect lighting baked, like phong static props)
+		if ( nNumLights &&
+			 ( ( !m_DynamicState.m_ShaderLightState.m_bStaticLight ) || m_DynamicState.m_ShaderLightState.m_bStaticLightIndirectOnly ) &&
+			 r_force_first_dynamic_light_to_directional_for_csm.GetBool() &&
+			 g_pHardwareConfig->SupportsCascadedShadowMapping() )
+		{
+			int j;
+			for ( j = 0; j < nNumLights; ++j )
+			{
+				 if ( pLightingState->m_pLocalLightDesc[j].m_Type == MATERIAL_LIGHT_DIRECTIONAL )
+					break;
+			}
+			if ( j == nNumLights )
+			{
+				// Bump up the # of actual lights to account for the hidden all-black directional light.
+				// This solution sucks, because if numlights already equals MATERIAL_MAX_LIGHT_COUNT we will be deleting the last local light.
+				// A better way would be to add a scalar in the compiled light state which suppresses the CSM shadows.
+				nNumLights = MIN( nNumLights + 1, MATERIAL_MAX_LIGHT_COUNT );
+			}
+		}
+
+		m_DynamicState.m_ShaderLightState.m_nNumLights = MAX( m_DynamicState.m_ShaderLightState.m_nNumLights, nNumLights );
+		// Cap it to the maximum number of lights supported by the hardware
+		m_DynamicState.m_ShaderLightState.m_nNumLights = MIN( m_DynamicState.m_ShaderLightState.m_nNumLights, g_pHardwareConfig->MaxNumLights() );
+
+	}
 }
 
 void CShaderAPIDx8::GetDX9LightState( LightState_t *state ) const
 {
-	// hack . . do this a cheaper way.
-	if( m_DynamicState.m_AmbientLightCube[0][0] == 0.0f && 
-		m_DynamicState.m_AmbientLightCube[0][1] == 0.0f && 
-		m_DynamicState.m_AmbientLightCube[0][2] == 0.0f && 
-		m_DynamicState.m_AmbientLightCube[1][0] == 0.0f && 
-		m_DynamicState.m_AmbientLightCube[1][1] == 0.0f && 
-		m_DynamicState.m_AmbientLightCube[1][2] == 0.0f && 
-		m_DynamicState.m_AmbientLightCube[2][0] == 0.0f && 
-		m_DynamicState.m_AmbientLightCube[2][1] == 0.0f && 
-		m_DynamicState.m_AmbientLightCube[2][2] == 0.0f && 
-		m_DynamicState.m_AmbientLightCube[3][0] == 0.0f && 
-		m_DynamicState.m_AmbientLightCube[3][1] == 0.0f && 
-		m_DynamicState.m_AmbientLightCube[3][2] == 0.0f && 
-		m_DynamicState.m_AmbientLightCube[4][0] == 0.0f && 
-		m_DynamicState.m_AmbientLightCube[4][1] == 0.0f && 
-		m_DynamicState.m_AmbientLightCube[4][2] == 0.0f && 
-		m_DynamicState.m_AmbientLightCube[5][0] == 0.0f && 
-		m_DynamicState.m_AmbientLightCube[5][1] == 0.0f && 
-		m_DynamicState.m_AmbientLightCube[5][2] == 0.0f )
+	if ( !m_DynamicState.m_bLightStateComputed )
 	{
-		state->m_bAmbientLight = false;
-	}
-	else
-	{
-		state->m_bAmbientLight = true;
+		const_cast<CShaderAPIDx8*>(this)->RecomputeAggregateLightingState();
+		m_DynamicState.m_bLightStateComputed = true;
 	}
 
-	Assert( m_pRenderMesh );
-	Assert( m_DynamicState.m_NumLights <= 4 );
-
-	if ( g_pHardwareConfig->SupportsPixelShaders_2_b() )
-	{
-		Assert( m_DynamicState.m_NumLights <= MAX_LIGHTS );		// 2b hardware gets four lights
-	}
-	else
-	{
-		Assert( m_DynamicState.m_NumLights <= (MAX_LIGHTS-2) );	// 2.0 hardware gets two less
-	}
-
-#ifdef OSX
-	state->m_nNumLights = MIN(MAX_NUM_LIGHTS,m_DynamicState.m_NumLights);
-#else
-	state->m_nNumLights = m_DynamicState.m_NumLights;
-#endif	
-	
-	state->m_nNumLights = m_DynamicState.m_NumLights;
-	state->m_bStaticLightVertex = m_pRenderMesh->HasColorMesh();
-	state->m_bStaticLightTexel = false; // For now
+	memcpy( state, &m_DynamicState.m_ShaderLightState, sizeof(LightState_t) );
 }
 
 MaterialFogMode_t CShaderAPIDx8::GetCurrentFogType( void ) const
 {
-	return m_DynamicState.m_SceneFog;
+	Assert( 0 ); // deprecated. don't use
+	return MATERIAL_FOG_NONE;
 }
 
 void CShaderAPIDx8::RecordString( const char *pStr )
@@ -12803,7 +15725,7 @@ void CShaderAPIDx8::RecordString( const char *pStr )
 
 void CShaderAPIDx8::EvictManagedResourcesInternal()
 {
-	if ( IsX360() )
+	if ( IsGameConsole() )
 		return;
 
 	if ( !ThreadOwnsDevice() || !ThreadInMainThread() )
@@ -12826,7 +15748,7 @@ void CShaderAPIDx8::EvictManagedResourcesInternal()
 
 void CShaderAPIDx8::EvictManagedResources( void )
 {
-	if ( IsX360() )
+	if ( IsGameConsole() )
 	{
 		return;
 	}
@@ -12836,6 +15758,16 @@ void CShaderAPIDx8::EvictManagedResources( void )
 	// Tell other material system applications to release resources
 	SendIPCMessage( EVICT_MESSAGE );
 	EvictManagedResourcesInternal();
+}
+
+void CShaderAPIDx8::GetGPUMemoryStats( GPUMemoryStats &stats )
+{
+#ifdef _PS3
+	Dx9Device()->GetGPUMemoryStats( stats );
+#else
+	// TODO: 360/PC/mac (if possible/useful)
+	memset( &stats, 0, sizeof( stats ) );
+#endif
 }
 
 bool CShaderAPIDx8::IsDebugTextureListFresh( int numFramesAllowed /* = 1 */ )
@@ -12860,9 +15792,15 @@ void CShaderAPIDx8::EnableGetAllTextures( bool bEnable )
 	m_bDebugGetAllTextures = bEnable;
 }
 
-KeyValues* CShaderAPIDx8::GetDebugTextureList()
+KeyValues* CShaderAPIDx8::LockDebugTextureList( void )
 {
+	m_DebugTextureListLock.Lock();
 	return m_pDebugTextureList;
+}
+
+void CShaderAPIDx8::UnlockDebugTextureList( void )
+{
+	m_DebugTextureListLock.Unlock();
 }
 
 int CShaderAPIDx8::GetTextureMemoryUsed( TextureMemoryType eTextureMemory )
@@ -12882,12 +15820,11 @@ int CShaderAPIDx8::GetTextureMemoryUsed( TextureMemoryType eTextureMemory )
 	}
 }
 
-
 // Allocate and delete query objects.
 ShaderAPIOcclusionQuery_t CShaderAPIDx8::CreateOcclusionQueryObject( void )
 {
 	// don't allow this on <80 because it falls back to wireframe in that case
-	if( m_DeviceSupportsCreateQuery == 0 || g_pHardwareConfig->Caps().m_nDXSupportLevel < 80 )
+	if( m_DeviceSupportsCreateQuery == 0 )
 		return INVALID_SHADERAPI_OCCLUSION_QUERY_HANDLE;
 
 	// While we're deactivated, m_OcclusionQueryObjects just holds NULL pointers.
@@ -12932,14 +15869,12 @@ int CShaderAPIDx8::OcclusionQuery_GetNumPixelsRendered( ShaderAPIOcclusionQuery_
 	LOCK_SHADERAPI();
 	IDirect3DQuery9 *pQuery = (IDirect3DQuery9 *)handle;
 
-	tmZone( TELEMETRY_LEVEL1, TMZF_NONE, "%s", __FUNCTION__ );
-
 	DWORD nPixels;
 	HRESULT hResult = pQuery->GetData( &nPixels, sizeof( nPixels ), bFlush ? D3DGETDATA_FLUSH : 0 );
 
 	// This means that the query will not finish and resulted in an error, game should use
 	// the previous query's results and not reissue the query
-	if ( ( hResult == D3DERR_DEVICELOST ) || ( hResult == D3DERR_NOTAVAILABLE ) )
+	if ( hResult == D3DERR_DEVICELOST )
 		return OCCLUSION_QUERY_RESULT_ERROR;
 
 	// This means the query isn't finished yet, game will have to use the previous query's
@@ -12955,13 +15890,14 @@ int CShaderAPIDx8::OcclusionQuery_GetNumPixelsRendered( ShaderAPIOcclusionQuery_
 	return nPixels;
 }
 
-
 void CShaderAPIDx8::SetPixelShaderFogParams( int reg, ShaderFogMode_t fogMode )
 {
 	m_DelayedShaderConstants.iPixelShaderFogParams = reg; //save it off in case the ShaderFogMode_t disables fog. We only find out later.
 	float fogParams[4];
 
-	if( (GetPixelFogMode() != MATERIAL_FOG_NONE) && (fogMode != SHADER_FOGMODE_DISABLED) )
+	MaterialFogMode_t pixelFogMode = GetSceneFogMode();
+
+	if( (pixelFogMode != MATERIAL_FOG_NONE) && ( fogMode != SHADER_FOGMODE_DISABLED ) )
 	{
 		float ooFogRange = 1.0f;
 
@@ -12974,34 +15910,42 @@ void CShaderAPIDx8::SetPixelShaderFogParams( int reg, ShaderFogMode_t fogMode )
 			ooFogRange = 1.0f / ( fEnd - fStart );
 		}
 
-		fogParams[0] = fStart * ooFogRange;		// fogStart / ( fogEnd - fogStart )
-		fogParams[1] = m_DynamicState.m_FogZ;	// water height
+		// Fixed-function-blended per-vertex fog requires some inverted params since a fog factor of 0 means fully fogged and 1 means no fog.
+		// We could implement shader fog the same way, but would require an extra subtract in the vertex and/or pixel shader, which we want to avoid.
+		fogParams[0] = 1.0f - ooFogRange * fEnd; // -start / ( fogEnd - fogStart )
+		fogParams[1] = m_DynamicState.m_FogZ; // water height
 		fogParams[2] = clamp( m_flFogMaxDensity, 0.0f, 1.0f ); // Max fog density
-		fogParams[3] = ooFogRange;				// 1 / ( fogEnd - fogStart );
-
-		if (GetPixelFogMode() == MATERIAL_FOG_LINEAR_BELOW_FOG_Z)
-		{
-			// terms are unused for height fog, forcing 1.0 allows unified PS math
-			fogParams[0] = 0.0f;
-			fogParams[2] = 1.0f;
-		}
+		fogParams[3] = ooFogRange; // 1 / ( fogEnd - fogStart );
 	}
 	else
 	{
+		// Fixed-function-blended per-vertex fog requires some inverted params since a fog factor of 0 means fully fogged and 1 means no fog.
+		// We could implement shader fog the same way, but would require an extra subtract in the vertex and/or pixel shader, which we want to avoid.
 		//emulating MATERIAL_FOG_NONE by setting the parameters so that CalcRangeFog() always returns 0. Gets rid of a dynamic combo across the ps2x set.
 		fogParams[0] = 0.0f;
-		fogParams[1] = m_DynamicState.m_FogZ; // water height
-		fogParams[2] = 1.0f; // Max fog density
+		fogParams[1] = -FLT_MAX;
+		fogParams[2] = 0.0f;
 		fogParams[3] = 0.0f;
 	}
 
 	// cFogEndOverFogRange, cFogOne, unused, cOOFogRange
-	SetPixelShaderConstant( reg, fogParams, 1 );
+	SetPixelShaderConstantInternal( reg, fogParams, 1 );
 }
 
 void CShaderAPIDx8::SetPixelShaderFogParams( int reg )
 {
-	SetPixelShaderFogParams( reg, m_TransitionTable.CurrentShadowState()->m_FogMode );
+	ShadowState_t const *pState = m_TransitionTable.CurrentShadowState();
+	if ( pState )
+	{
+		SetPixelShaderFogParams( reg, pState->m_FogAndMiscState.FogMode() );
+	}
+	else
+	{
+		// Have to do this so that m_DelayedShaderConstants.iPixelShaderFogParams gets updated so that we 
+		// get this set properly when the currnent shadow state is set.  If we don't do this, the 
+		// first draw call of every frame will not get a fog constant set.
+		SetPixelShaderFogParams( reg, SHADER_FOGMODE_DISABLED );
+	}
 }
 
 void CShaderAPIDx8::SetFlashlightState( const FlashlightState_t &state, const VMatrix &worldToTexture )
@@ -13010,19 +15954,121 @@ void CShaderAPIDx8::SetFlashlightState( const FlashlightState_t &state, const VM
 	SetFlashlightStateEx( state, worldToTexture, NULL );
 }
 
+FORCEINLINE float ShadowAttenFromState( const FlashlightState_t &state )
+{
+	// DX10 requires some hackery due to sRGB/blend ordering change from DX9, which makes the shadows too light
+	if ( g_pHardwareConfig->UsesSRGBCorrectBlending() )
+		return state.m_flShadowAtten * 0.1f; // magic number
+
+	return state.m_flShadowAtten;
+}
+
+FORCEINLINE float ShadowFilterFromState( const FlashlightState_t &state )
+{
+	// We developed shadow maps at 1024, so we expect the penumbra size to have been tuned relative to that
+	return state.m_flShadowFilterSize / 1024.0f;
+}
+
+FORCEINLINE void HashShadow2DJitter( const float fJitterSeed, float *fU, float* fV )
+{
+	const int nTexRes = 128;
+	int nSeed = fmod (fJitterSeed, 1.0f) * nTexRes * nTexRes;
+
+	int nRow = nSeed / nTexRes;
+	int nCol = nSeed % nTexRes;
+
+	// Div and mod to get an individual texel in the fTexRes x fTexRes grid
+	*fU = nRow / (float) nTexRes;	// Row
+	*fV = nCol / (float) nTexRes;	// Column
+}
+
+void SetupUberlightFromState( UberlightRenderState_t *pUberlight, const FlashlightState_t &state )
+{
+	// Bail if we can't do ps30 or we don't even want an uberlight
+	if ( !( g_pHardwareConfig->GetDXSupportLevel() < 95 ) || !state.m_bUberlight )
+		return;
+
+	const UberlightState_t &u = state.m_uberlightState;
+
+	// Trap values to prevent dividing by zero
+	float flNearEdge = u.m_fNearEdge < 0.0001f ? 0.001f : u.m_fNearEdge;
+	float flFarEdge = u.m_fFarEdge < 0.0001f ? 0.001f : u.m_fFarEdge;
+	float flRoundness = u.m_fRoundness < 0.0001f ? 0.001f : u.m_fRoundness;
+
+	// Set uberlight shader parameters as function of user controls from UberlightState_t
+	pUberlight->m_vSmoothEdge0.Init(	0.0f,			u.m_fCutOn - u.m_fNearEdge,	u.m_fCutOff,				0.0f );
+	pUberlight->m_vSmoothEdge1.Init(	0.0f,			u.m_fCutOn,					u.m_fCutOff + u.m_fFarEdge,	0.0f );
+	pUberlight->m_vSmoothOneOverW.Init(	0.0f,			1.0f / flNearEdge,			1.0f / flFarEdge,			0.0f );
+	pUberlight->m_vShearRound.Init(		u.m_fShearx,	u.m_fSheary,				2.0f / flRoundness,		   -u.m_fRoundness / 2.0f );
+	pUberlight->m_vaAbB.Init(			u.m_fWidth,		u.m_fWidth + u.m_fWedge,	u.m_fHeight,				u.m_fHeight + u.m_fHedge );
+
+	QAngle angles;
+	QuaternionAngles( state.m_quatOrientation, angles );
+
+	// World to Light's View matrix
+	VMatrix viewMatrixInverse;
+	viewMatrixInverse.SetupMatrixOrgAngles( state.m_vecLightOrigin, angles );
+	MatrixInverseGeneral( viewMatrixInverse, pUberlight->m_WorldToLight );
+}
+
+ConVar r_flashlightbrightness( "r_flashlightbrightness", "0.25", FCVAR_CHEAT );
+
 void CShaderAPIDx8::SetFlashlightStateEx( const FlashlightState_t &state, const VMatrix &worldToTexture, ITexture *pFlashlightDepthTexture )
 {
 	LOCK_SHADERAPI();
 	// fixme: do a test here.
-	FlushBufferedPrimitives();
 	m_FlashlightState = state;
 	m_FlashlightWorldToTexture = worldToTexture;
 	m_pFlashlightDepthTexture = pFlashlightDepthTexture;
 
-	if ( !g_pHardwareConfig->SupportsPixelShaders_2_b() )
+	if ( g_pHardwareConfig->GetDXSupportLevel() < 92 )
 	{
 		m_FlashlightState.m_bEnableShadows = false;
 		m_pFlashlightDepthTexture = NULL;
+	}
+
+	// FIXME: This is shader specific code, only in here because of the command-buffer
+	// stuff required to make the 360 be fast. We need this to be in the shader DLLs,
+	// callable from shaderapidx8 in a fast way somehow.
+
+	// Cache off pixel shader + vertex shader values
+	m_pFlashlightAtten[0] = m_FlashlightState.m_fConstantAtten;		// Set the flashlight attenuation factors
+	m_pFlashlightAtten[1] = m_FlashlightState.m_fLinearAtten;
+	m_pFlashlightAtten[2] = m_FlashlightState.m_fQuadraticAtten;
+	m_pFlashlightAtten[3] = m_FlashlightState.m_FarZAtten;
+
+	m_pFlashlightPos[0] = m_FlashlightState.m_vecLightOrigin[0];		// Set the flashlight origin
+	m_pFlashlightPos[1] = m_FlashlightState.m_vecLightOrigin[1];
+	m_pFlashlightPos[2] = m_FlashlightState.m_vecLightOrigin[2];
+	m_pFlashlightPos[3] = m_FlashlightState.m_FarZ;
+
+	float flFlashlightScale = r_flashlightbrightness.GetFloat();
+
+	if ( IsPC() && !g_pHardwareConfig->GetHDREnabled() )
+	{
+		// Non-HDR path requires 2.0 flashlight
+		flFlashlightScale = 2.0f;
+	}
+
+	flFlashlightScale *= m_FlashlightState.m_fBrightnessScale;
+
+	// Generate pixel shader constant
+	float const *pFlashlightColor = m_FlashlightState.m_Color;
+	m_pFlashlightColor[0] = flFlashlightScale * pFlashlightColor[0];
+	m_pFlashlightColor[1] = flFlashlightScale * pFlashlightColor[1];
+	m_pFlashlightColor[2] = flFlashlightScale * pFlashlightColor[2];
+	m_pFlashlightColor[3] = pFlashlightColor[3];	// not used, will be whacked by ExecuteCommandBuffer
+
+	// Red flashlight for testing
+	//m_pFlashlightColor[0] = 0.5f; m_pFlashlightColor[1] = 0.0f; m_pFlashlightColor[2] = 0.0f;
+
+	m_pFlashlightTweaks[0] = ShadowFilterFromState( m_FlashlightState );
+	m_pFlashlightTweaks[1] = ShadowAttenFromState( m_FlashlightState );
+	HashShadow2DJitter( m_FlashlightState.m_flShadowJitterSeed, &m_pFlashlightTweaks[2], &m_pFlashlightTweaks[3] );
+
+	if ( !IsX360() )
+	{
+		SetupUberlightFromState( &m_UberlightRenderState, m_FlashlightState );
 	}
 }
 
@@ -13039,11 +16085,33 @@ const FlashlightState_t &CShaderAPIDx8::GetFlashlightStateEx( VMatrix &worldToTe
 	return m_FlashlightState;
 }
 
+void CShaderAPIDx8::GetFlashlightShaderInfo( bool *pShadowsEnabled, bool *pUberLight ) const
+{
+	// Adding NULL ptr check on m_pFlashlightDepthTexture here so we slam the FLASHLIGHTSHADOWS dynamic combo off if a flashlight depth texture isn't actually bound (otherwise we set a TEXTURE_WHITE texture, 
+	// which isn't depth which results in the pixel shader sampling a regular color texture as depth)
+	*pShadowsEnabled = m_FlashlightState.m_bEnableShadows && ( m_pFlashlightDepthTexture != NULL );
+	*pUberLight = m_FlashlightState.m_bUberlight;
+}
+
+float CShaderAPIDx8::GetFlashlightAmbientOcclusion( ) const
+{
+	return m_FlashlightState.m_flAmbientOcclusion;
+}
+
 bool CShaderAPIDx8::SupportsMSAAMode( int nMSAAMode )
 {
 	if ( IsX360() )
 	{
 		return false;
+	}
+
+	if ( m_PresentParameters.BackBufferFormat == D3DFMT_UNKNOWN )
+	{
+		// Autodetection code running during application startup:
+		return ( D3D_OK == D3D()->CheckDeviceMultiSampleType( m_DisplayAdapter, DX8_DEVTYPE,
+			D3DFMT_A8R8G8B8,
+			false,
+			ComputeMultisampleType( nMSAAMode ), NULL ) );
 	}
 
 	return ( D3D_OK == D3D()->CheckDeviceMultiSampleType( m_DisplayAdapter, m_DeviceType, 
@@ -13055,7 +16123,6 @@ bool CShaderAPIDx8::SupportsMSAAMode( int nMSAAMode )
 bool CShaderAPIDx8::SupportsCSAAMode( int nNumSamples, int nQualityLevel )
 {
 #ifdef DX_TO_GL_ABSTRACTION
-	// GL_NV_framebuffer_multisample_coverage
 	return false;
 #endif
 
@@ -13072,35 +16139,67 @@ bool CShaderAPIDx8::SupportsCSAAMode( int nNumSamples, int nQualityLevel )
 	return ( ( D3D_OK == hr ) && ( (int) dwQualityLevels >= nQualityLevel ) );
 }
 
-bool CShaderAPIDx8::SupportsShadowDepthTextures( void )
+void CShaderAPIDx8::BeginGeneratingCSMs()
 {
-	return g_pHardwareConfig->Caps().m_bSupportsShadowDepthTextures;
+	m_bGeneratingCSMs = true;
+
+	if ( mat_depthwrite_new_path.GetBool() )
+	{
+		// Set bunch of render states for shadow drawing
+		SetRenderStateForce( D3DRS_ZWRITEENABLE, TRUE );
+		SetRenderStateForce( D3DRS_ZENABLE, D3DZB_TRUE );
+		SetRenderStateForce( D3DRS_ZFUNC, D3DCMP_LESSEQUAL );
+		SetRenderStateForce( D3DRS_DEPTHBIAS, 0.0f );
+		SetRenderStateForce( D3DRS_COLORWRITEENABLE, 0 );
+		SetRenderStateForce( D3DRS_ALPHATESTENABLE, FALSE );
+		SetRenderStateForce( D3DRS_FILLMODE, D3DFILL_SOLID );
+
+		// Disable culling 
+		ApplyCullEnable( false );
+	}
 }
 
-bool CShaderAPIDx8::SupportsBorderColor( void ) const
+void CShaderAPIDx8::EndGeneratingCSMs()
 {
-	return g_pHardwareConfig->Caps().m_bSupportsBorderColor;
+	if ( mat_depthwrite_new_path.GetBool() )
+	{
+		SetRenderStateForce( D3DRS_COLORWRITEENABLE, D3DCOLORWRITEENABLE_BLUE |
+			D3DCOLORWRITEENABLE_GREEN | D3DCOLORWRITEENABLE_RED | D3DCOLORWRITEENABLE_ALPHA );
+		SetRenderStateForce( D3DRS_DEPTHBIAS, 0.0f );
+
+		float fShadowSlopeScaleDepthBias = 0.0f;
+		SetRenderStateForce( D3DRS_SLOPESCALEDEPTHBIAS, *(DWORD*)&fShadowSlopeScaleDepthBias );
+
+		// Re-enable culling 
+		ApplyCullEnable( true );
+		
+	}
+
+	m_bGeneratingCSMs = false;
+	m_bCSMsValidThisFrame = true;
 }
 
-bool CShaderAPIDx8::SupportsFetch4( void )
+void CShaderAPIDx8::PerpareForCascadeDraw( int cascade, float fShadowSlopeScaleDepthBias, float fShadowDepthBias )
 {
-	return IsPC() && g_pHardwareConfig->Caps().m_bSupportsFetch4;
+	if ( mat_depthwrite_new_path.GetBool() )
+	{
+		SetRenderStateForce( D3DRS_SLOPESCALEDEPTHBIAS, *(DWORD*)&fShadowSlopeScaleDepthBias );
+		SetRenderState( D3DRS_DEPTHBIAS, *((DWORD*) (&fShadowDepthBias)) );
+	}
 }
 
-ImageFormat CShaderAPIDx8::GetShadowDepthTextureFormat( void )
-{
-	return g_pHardwareConfig->Caps().m_ShadowDepthTextureFormat;
-}
-
-ImageFormat CShaderAPIDx8::GetNullTextureFormat( void )
-{
-	return g_pHardwareConfig->Caps().m_NullTextureFormat;
-}
 
 void CShaderAPIDx8::SetShadowDepthBiasFactors( float fShadowSlopeScaleDepthBias, float fShadowDepthBias )
 {
 	m_fShadowSlopeScaleDepthBias = fShadowSlopeScaleDepthBias;
 	m_fShadowDepthBias = fShadowDepthBias;
+	m_TransitionTable.SetShadowDepthBiasValuesDirty( true );
+	if ( m_TransitionTable.CurrentShadowState() && m_TransitionTable.CurrentShadowState()->m_DepthTestState.m_ZBias == SHADER_POLYOFFSET_SHADOW_BIAS )
+	{
+		// Need to set the render state here right away, because changing bias values between different draws
+		// using the same depthwrite shader won't apply the snapshot again.
+		ApplyZBias( m_TransitionTable.CurrentShadowState()->m_DepthTestState );
+	}
 }
 
 void CShaderAPIDx8::ClearVertexAndPixelShaderRefCounts()
@@ -13120,72 +16219,57 @@ bool CShaderAPIDx8::UsingSoftwareVertexProcessing() const
 	return g_pHardwareConfig->Caps().m_bSoftwareVertexProcessing;
 }
 
-ITexture *CShaderAPIDx8::GetRenderTargetEx( int nRenderTargetID )
+ITexture *CShaderAPIDx8::GetRenderTargetEx( int nRenderTargetID ) const
 {
 	return ShaderUtil()->GetRenderTargetEx( nRenderTargetID );
 }
 
-float CShaderAPIDx8::GetLightMapScaleFactor( void ) const
+void CShaderAPIDx8::SetToneMappingScaleLinear( const Vector &scale )
 {
+	Vector scale_to_use = scale;
+	m_ToneMappingScale.AsVector3D() = scale_to_use;
+	
+	bool mode_uses_srgb=false;
+
 	switch( HardwareConfig()->GetHDRType() )
 	{
+		case HDR_TYPE_NONE:
+			m_ToneMappingScale.x = 1.0;										// output scale
+			m_ToneMappingScale.z = 1.0;										// reflection map scale
+			break;
 
 		case HDR_TYPE_FLOAT:
-			return 1.0;
+			m_ToneMappingScale.x = scale_to_use.x;							// output scale
+			m_ToneMappingScale.z = 1.0;										// reflection map scale
 			break;
 
 		case HDR_TYPE_INTEGER:
-			return 16.0;
-
-		case HDR_TYPE_NONE:
-		default:
-			return GammaToLinearFullRange( 2.0 );	// light map scale
+			mode_uses_srgb = true;
+			m_ToneMappingScale.x = scale_to_use.x;							// output scale
+			m_ToneMappingScale.z = 16.0;									// reflection map scale
+			break;
 	}
-}
 
-void CShaderAPIDx8::SetToneMappingScaleLinear( const Vector &scale )
-{
-	if ( g_pHardwareConfig->SupportsPixelShaders_2_0() )
+#ifdef _PS3
+	// We're using floating point cubemaps but not the full HDR_TYPE_FLOAT codepath
+	m_ToneMappingScale.z = 1.0f;
+#endif // _PS3
+
+	m_ToneMappingScale.y = g_pHardwareConfig->GetLightMapScaleFactor();	// light map scale
+
+	// w component gets gamma scale
+	m_ToneMappingScale.w = LinearToGammaFullRange( m_ToneMappingScale.x );
+	// For people trying to search the shader cpp code trying to figure out where these constants get set:
+	// TONE_MAPPING_SCALE_PSH_CONSTANT == PSREG_LIGHT_SCALE (same register)
+	// This is the same constant as cLightScale which corresponds to LINEAR_LIGHT_SCALE, LIGHT_MAP_SCALE, ENV_MAP_SCALE, and GAMMA_LIGHT_SCALE
+	SetPixelShaderConstantInternal( TONE_MAPPING_SCALE_PSH_CONSTANT, m_ToneMappingScale.Base() );
+	RegenerateFogConstants();
+
+	// We have to change the fog color since we tone map directly in the shaders in integer HDR mode.
+	if ( HardwareConfig()->GetHDRType() == HDR_TYPE_INTEGER && m_TransitionTable.CurrentShadowState() )
 	{
-		// Flush buffered primitives before changing the tone map scalar!
-		FlushBufferedPrimitives();
-
-		Vector scale_to_use = scale;
-		m_ToneMappingScale.AsVector3D() = scale_to_use;
-		
-		bool mode_uses_srgb=false;
-
-		switch( HardwareConfig()->GetHDRType() )
-		{
-			case HDR_TYPE_NONE:
-				m_ToneMappingScale.x = 1.0;										// output scale
-				m_ToneMappingScale.z = 1.0;										// reflection map scale
-				break;
-
-			case HDR_TYPE_FLOAT:
-				m_ToneMappingScale.x = scale_to_use.x;							// output scale
-				m_ToneMappingScale.z = 1.0;										// reflection map scale
-				break;
-
-			case HDR_TYPE_INTEGER:
-				mode_uses_srgb = true;
-				m_ToneMappingScale.x = scale_to_use.x;							// output scale
-				m_ToneMappingScale.z = 16.0;									// reflection map scale
-				break;
-		}
-
-		m_ToneMappingScale.y = GetLightMapScaleFactor();	// light map scale
-
-		// w component gets gamma scale
-		m_ToneMappingScale.w = LinearToGammaFullRange( m_ToneMappingScale.x );
-		SetPixelShaderConstant( TONE_MAPPING_SCALE_PSH_CONSTANT, m_ToneMappingScale.Base() );
-
-		// We have to change the fog color since we tone map directly in the shaders in integer HDR mode.
-		if ( HardwareConfig()->GetHDRType() == HDR_TYPE_INTEGER && m_TransitionTable.CurrentShadowState() )
-		{
-			// Get the shadow state in sync since it depends on SetToneMappingScaleLinear.
-			ApplyFogMode( m_TransitionTable.CurrentShadowState()->m_FogMode, mode_uses_srgb, m_TransitionTable.CurrentShadowState()->m_bDisableFogGammaCorrection );
-		}
+		// Get the shadow state in sync since it depends on SetToneMappingScaleLinear.
+		ApplyFogMode( m_TransitionTable.CurrentShadowState()->m_FogAndMiscState.FogMode(), m_TransitionTable.CurrentShadowState()->m_FogAndMiscState.m_bVertexFogEnable, mode_uses_srgb, m_TransitionTable.CurrentShadowState()->m_FogAndMiscState.m_bDisableFogGammaCorrection );
 	}
 }
 
@@ -13200,28 +16284,6 @@ void CShaderAPIDx8::EnableLinearColorSpaceFrameBuffer( bool bEnable )
 	m_TransitionTable.EnableLinearColorSpaceFrameBuffer( bEnable );
 }
 
-
-void CShaderAPIDx8::SetPSNearAndFarZ( int pshReg )
-{
-	VMatrix m;
-	GetMatrix( MATERIAL_PROJECTION, m.m[0] );
-
-	// m[2][2] =  F/(N-F)   (flip sign if RH)
-	// m[3][2] = NF/(N-F)
-
-	float vNearFar[4];
-
-	float N =     m[3][2] / m[2][2];
-	float F = (m[3][2]*N) / (N + m[3][2]);
-
-	vNearFar[0] = N;
-	vNearFar[1] = F;
-
-
-	SetPixelShaderConstant( pshReg, vNearFar, 1 );
-}
-
-
 void CShaderAPIDx8::SetFloatRenderingParameter( int parm_number, float value )
 {
 	LOCK_SHADERAPI();
@@ -13235,6 +16297,14 @@ void CShaderAPIDx8::SetIntRenderingParameter( int parm_number, int value )
 	if ( parm_number < ARRAYSIZE( IntRenderingParameters ))
 		IntRenderingParameters[parm_number] = value;
 }
+
+void CShaderAPIDx8::SetTextureRenderingParameter( int parm_number, ITexture *pTexture )
+{
+	LOCK_SHADERAPI();
+	if ( parm_number < ARRAYSIZE( TextureRenderingParameters ))
+		TextureRenderingParameters[parm_number] = pTexture;
+}
+
 
 void CShaderAPIDx8::SetVectorRenderingParameter( int parm_number, Vector const & value )
 {
@@ -13261,6 +16331,15 @@ int CShaderAPIDx8::GetIntRenderingParameter( int parm_number ) const
 		return 0;
 }
 
+ITexture *CShaderAPIDx8::GetTextureRenderingParameter( int parm_number ) const
+{
+	LOCK_SHADERAPI();
+	if ( parm_number < ARRAYSIZE( TextureRenderingParameters ))
+		return TextureRenderingParameters[parm_number];
+	else
+		return 0;
+}
+
 Vector CShaderAPIDx8::GetVectorRenderingParameter( int parm_number ) const
 {
 	LOCK_SHADERAPI();
@@ -13270,53 +16349,153 @@ Vector CShaderAPIDx8::GetVectorRenderingParameter( int parm_number ) const
 		return Vector( 0, 0, 0 );
 }
 
+#if defined( _GAMECONSOLE )
+void CShaderAPIDx8::BeginConsoleZPass2( int nNumSpilloverIndicesNeeded )
+{
+	bool bEnableZPass = true;
+
+	if ( MeshMgr()->GetDynamicIndexBufferIndicesLeft() < nNumSpilloverIndicesNeeded )
+	{
+		bEnableZPass = false;
+
+		// TODO: If nNumDynamicIndicesNeeded <= GetDynamicIBAllocationCount() we could potentially flush the dynamic IB completely
+		// and start filling it from the beginning, enabling the z pass
+	}
+
+	if ( bEnableZPass )
+	{
+		Assert( m_bInZPass == false );
+
+		// reset renderstate to make sure the Zfunc is set to a state that's compatible with the Z pass
+		m_TransitionTable.UseSnapshot( m_zPassSnapshot );
+
+		Dx9Device()->BeginZPass( 0 );
+
+		#if defined( _X360 )
+		// set up predicated vertexshader GPR allocations so that we max out VS threads in the Z pass and
+		// use the currently requested alloction for the main render pass
+		Dx9Device()->SetPredication( D3DPRED_ALL_Z );
+		Dx9Device()->SetShaderGPRAllocation( D3DSETALLOCATION_PREDICATED, 96, 32 );
+		Dx9Device()->SetPredication( 0 );
+
+		// this function knows about predication inside of a zpass block
+		CommitShaderGPRs( Dx9Device(), m_DesiredState, m_DynamicState, true );
+		#else
+		Dx9Device()->SetPredication( 0 ); // just disable predication
+		#endif
+
+		m_bInZPass = true;
+		m_nZPassCounter++;
+	}
+	else
+	{
+#ifndef _PS3
+		Warning( "Cannot satisfy Console Z pass request due to large dynamic index count (indices left %d < spilloever %d). Tell Thorsten.\n", MeshMgr()->GetDynamicIndexBufferIndicesLeft(), nNumSpilloverIndicesNeeded );
+#endif
+	}
+}
+
+void CShaderAPIDx8::EndConsoleZPass()
+{
+	if ( m_bInZPass )
+	{
+		m_bInZPass = false;
+
+		// reset all command predication
+		Dx9Device()->SetPredication( 0 );
+
+		HRESULT retVal = Dx9Device()->EndZPass();
+		if ( retVal != S_OK )
+		{
+			Warning( "EndConsoleZPass() failed! Tell Thorsten.\n" );
+		}
+
+		#if defined( _X360 )
+		// Reset shader GPRs un-predicated
+		CommitShaderGPRs( Dx9Device(), m_DesiredState, m_DynamicState, true );
+		#endif
+	}
+}
+
+void CShaderAPIDx8::EnablePredication( bool bZPass, bool bRenderPass )
+{
+	DWORD mask = 0;
+	mask |= bZPass ? D3DPRED_ALL_Z : 0;
+	mask |= bRenderPass ? D3DPRED_ALL_RENDER : 0;
+	Dx9Device()->SetPredication( mask );
+}
+
+void CShaderAPIDx8::DisablePredication()
+{
+	Dx9Device()->SetPredication( 0 );
+}
+
+#endif
+
 // stencil entry points
-void CShaderAPIDx8::SetStencilEnable( bool onoff )
+void CShaderAPIDx8::GetCurrentStencilState( ShaderStencilState_t *pState )
 {
-	LOCK_SHADERAPI();
-	SetRenderState( D3DRS_STENCILENABLE, onoff?TRUE:FALSE, true );
+	pState->m_bEnable = ( m_DynamicState.m_RenderState[D3DRS_STENCILENABLE] == ( (DWORD) TRUE ) );
+	pState->m_FailOp = (ShaderStencilOp_t)( m_DynamicState.m_RenderState[D3DRS_STENCILFAIL] );
+	pState->m_ZFailOp = (ShaderStencilOp_t)( m_DynamicState.m_RenderState[D3DRS_STENCILZFAIL] );
+	pState->m_PassOp = (ShaderStencilOp_t)( m_DynamicState.m_RenderState[D3DRS_STENCILPASS] );
+	pState->m_CompareFunc = (ShaderStencilFunc_t)( m_DynamicState.m_RenderState[D3DRS_STENCILFUNC] );
+	pState->m_nReferenceValue = m_DynamicState.m_RenderState[D3DRS_STENCILREF];
+	pState->m_nTestMask = m_DynamicState.m_RenderState[D3DRS_STENCILMASK];
+	pState->m_nWriteMask = m_DynamicState.m_RenderState[D3DRS_STENCILWRITEMASK];
+#if defined( _X360 )
+	pState->m_bHiStencilEnable = ( m_DynamicState.m_RenderState[D3DRS_HISTENCILENABLE] == TRUE );
+	pState->m_bHiStencilWriteEnable = ( m_DynamicState.m_RenderState[D3DRS_HISTENCILWRITEENABLE] == TRUE );
+	pState->m_HiStencilCompareFunc = (ShaderHiStencilFunc_t)( m_DynamicState.m_RenderState[D3DRS_HISTENCILFUNC] );
+	pState->m_nHiStencilReferenceValue = m_DynamicState.m_RenderState[D3DRS_HISTENCILREF];
+#endif
 }
 
-void CShaderAPIDx8::SetStencilFailOperation( StencilOperation_t op )
+//#define WORKAROUND_DEBUG_SHADERAPI_ERRORS
+
+void CShaderAPIDx8::SetStencilStateInternal( const ShaderStencilState_t &state )
 {
-	LOCK_SHADERAPI();
-	SetRenderState( D3DRS_STENCILFAIL, op, true );
+#ifdef WORKAROUND_DEBUG_SHADERAPI_ERRORS
+	if ( m_bInZPass )
+	{
+		SetRenderState( D3DRS_STENCILENABLE, FALSE );
+	}
+	else
+	{
+		SetRenderState( D3DRS_STENCILENABLE, state.m_bEnable ? TRUE:FALSE );
+	}
+#else
+	SetRenderState( D3DRS_STENCILENABLE, state.m_bEnable ? TRUE:FALSE );
+#endif
+#if defined( _X360 )
+	SetRenderState( D3DRS_HISTENCILENABLE, mat_hi_stencil_enable.GetBool() ? state.m_bHiStencilEnable : FALSE );
+	SetRenderState( D3DRS_HISTENCILWRITEENABLE, state.m_bHiStencilWriteEnable );
+	SetRenderState( D3DRS_HISTENCILFUNC, state.m_HiStencilCompareFunc );
+	SetRenderState( D3DRS_HISTENCILREF, state.m_nHiStencilReferenceValue );
+#endif
+
+	if ( !state.m_bEnable )
+		return;
+
+	SetRenderState( D3DRS_STENCILFAIL, state.m_FailOp );
+	SetRenderState( D3DRS_STENCILZFAIL, state.m_ZFailOp );
+	SetRenderState( D3DRS_STENCILPASS, state.m_PassOp );
+	SetRenderState( D3DRS_STENCILFUNC, state.m_CompareFunc );
+	SetRenderState( D3DRS_STENCILREF, state.m_nReferenceValue );
+	SetRenderState( D3DRS_STENCILMASK, state.m_nTestMask );
+	SetRenderState( D3DRS_STENCILWRITEMASK, state.m_nWriteMask );
 }
 
-void CShaderAPIDx8::SetStencilZFailOperation( StencilOperation_t op )
+void CShaderAPIDx8::SetStencilState( const ShaderStencilState_t &state )
 {
 	LOCK_SHADERAPI();
-	SetRenderState( D3DRS_STENCILZFAIL, op, true );
-}
-
-void CShaderAPIDx8::SetStencilPassOperation( StencilOperation_t op )
-{
-	LOCK_SHADERAPI();
-	SetRenderState( D3DRS_STENCILPASS, op, true );
-}
-
-void CShaderAPIDx8::SetStencilCompareFunction( StencilComparisonFunction_t cmpfn )
-{
-	LOCK_SHADERAPI();
-	SetRenderState( D3DRS_STENCILFUNC, cmpfn, true );
-}
-
-void CShaderAPIDx8::SetStencilReferenceValue( int ref )
-{
-	LOCK_SHADERAPI();
-	SetRenderState( D3DRS_STENCILREF, ref, true );
-}
-
-void CShaderAPIDx8::SetStencilTestMask( uint32 msk )
-{
-	LOCK_SHADERAPI();
-	SetRenderState( D3DRS_STENCILMASK, msk, true );
-}
-
-void CShaderAPIDx8::SetStencilWriteMask( uint32 msk )
-{
-	LOCK_SHADERAPI();
-	SetRenderState( D3DRS_STENCILWRITEMASK, msk, true );
+#ifdef _DEBUG
+	if ( state.m_bEnable && state.m_CompareFunc == SHADER_STENCILFUNC_ALWAYS )
+	{
+		AssertMsg( state.m_FailOp == SHADER_STENCILOP_KEEP, "Always set failop to keep when comparefunc is always for hi-z perf reasons" );
+	}
+#endif
+	SetStencilStateInternal( state );
 }
 
 void CShaderAPIDx8::ClearStencilBufferRectangle(
@@ -13332,6 +16511,36 @@ void CShaderAPIDx8::ClearStencilBufferRectangle(
 	Dx9Device()->Clear( 
 		1, &clear, D3DCLEAR_STENCIL, 0, 0, value );	
 }
+
+#if defined( _X360 )
+// Flush Hi-Stencil changes to Hierarchical Z/Stencil tile memory. Introduces about 2000 cycle stall on GPU.
+// There's an asynchronous flush, but it's less robust, so we'll take the stall for now.
+void CShaderAPIDx8::FlushHiStencil()
+{
+	LOCK_SHADERAPI();
+	Dx9Device()->FlushHiZStencil( D3DFHZS_SYNCHRONOUS );
+}
+#endif
+
+
+
+void CShaderAPIDx8::AntiAliasingHint( int nHint )
+{
+#if defined( _PS3 )
+	Dx9Device()->AntiAliasingHint( nHint );
+#endif
+}
+
+
+
+#if defined( _PS3 )
+
+void CShaderAPIDx8::FlushTextureCache()
+{
+	Dx9Device()->FlushTextureCache();
+}
+
+#endif // _PS3
 
 int CShaderAPIDx8::CompareSnapshots( StateSnapshot_t snapshot0, StateSnapshot_t snapshot1 )
 {
@@ -13367,40 +16576,39 @@ HXUIFONT CShaderAPIDx8::OpenTrueTypeFont( const char *pFontname, int tall, int s
 {
 	LOCK_SHADERAPI();
 
-	struct fontTable_t
+	struct FontTable_t
 	{
 		const char	*pFontName;
 		const char	*pPath;
+		bool		m_bRestrictiveLoadIntoMemory;
+		bool		m_bAlwaysLoadIntoMemory;
 	};
 
-	// explicit mapping now required, dvd searching to expensive
-	static fontTable_t fontToFilename[] = 
+	// explicit mapping required, dvd searching too expensive
+	static FontTable_t s_pFontToFilename[] = 
 	{
-		{"tf2",				"tf/resource/tf2.ttf"},
-		{"tf2 build",		"tf/resource/tf2build.ttf"},
-		{"tf2 professor",	"tf/resource/tf2professor.ttf"},
-		{"tf2 secondary",	"tf/resource/tf2secondary.ttf"},
-		{"team fortress",	"tf/resource/tf.ttf"},
-		{"tfd",				"tf/resource/tfd.ttf"},
-		{"tflogo",			"tf/resource/tflogo.ttf"},
-		{"hl2ep2",			"ep2/resource/hl2ep2.ttf"},
-		{"hl2ep1",			"episodic/resource/hl2ep1.ttf"},
-		{"halflife2",		"hl2/resource/halflife2.ttf"},
-		{"hl2cross",		"hl2/resource/HL2Crosshairs.ttf"},
-		{"courier new",		"platform/vgui/fonts/cour.ttf"},
-		{"times new roman",	"platform/vgui/fonts/times.ttf"},
-		{"trebuchet ms",	"platform/vgui/fonts/trebuc.ttf"},
-		{"verdana",			"platform/vgui/fonts/verdana.ttf"},
-		{"tahoma",			"platform/vgui/fonts/tahoma.ttf"},
+#include "fontremaptable.h"
 	};
+
+	MEM_ALLOC_CREDIT_( "CShaderAPIDx8::OpenTrueTypeFont ( -> Xui*)" );
 
 	// remap typeface to diskname
 	const char *pDiskname = NULL;
-	for ( int i=0; i<ARRAYSIZE( fontToFilename ); i++ )
+	bool bUsingInMemoryFont = false;
+	for ( int i = 0; i < ARRAYSIZE( s_pFontToFilename ); i++ )
 	{
-		if ( !V_stricmp( pFontname, fontToFilename[i].pFontName ) )
+		if ( !V_stricmp( pFontname, s_pFontToFilename[i].pFontName ) )
 		{
-			pDiskname = fontToFilename[i].pPath;
+			pDiskname = s_pFontToFilename[i].pPath;
+			// force all the names rto be normalized, want Courier to match to courier to COURIER
+			pFontname = s_pFontToFilename[i].pFontName;
+
+			bUsingInMemoryFont = s_pFontToFilename[i].m_bAlwaysLoadIntoMemory;
+			if ( XBX_IsRestrictiveLanguage() && s_pFontToFilename[i].m_bRestrictiveLoadIntoMemory )
+			{
+				bUsingInMemoryFont = true;
+			}
+			
 			break;
 		}
 	}
@@ -13411,7 +16619,7 @@ HXUIFONT CShaderAPIDx8::OpenTrueTypeFont( const char *pFontname, int tall, int s
 		return NULL;
 	}
 
-	// font will be registered using typeface name
+	// font will be registered using the !!!Table's!!! typeface name
 	wchar_t	wchFontname[MAX_PATH];
 	Q_UTF8ToUnicode( pFontname, wchFontname, sizeof( wchFontname ) );
 
@@ -13427,25 +16635,70 @@ HXUIFONT CShaderAPIDx8::OpenTrueTypeFont( const char *pFontname, int tall, int s
 	bool bRegistered = false;
 	for ( DWORD i=0; i<numTypeFaces; i++ )
 	{
-		if ( !V_wcscmp( pDescriptors->szTypeface, wchFontname ) )
+		if ( !V_wcscmp( pDescriptors[i].szTypeface, wchFontname ) )
 		{
 			bRegistered = true;
 			break;
 		}
 	}
 
+	// release enumeration query
 	XuiDestroyTypefaceList( pDescriptors, numTypeFaces );
 
 	if ( !bRegistered )
 	{
-		// unregistered type face, register type face and retry
-		// only file based resource locators work
 		char filename[MAX_PATH];
-		V_snprintf( filename, sizeof( filename ), "file://d:/%s", pDiskname );
-		Q_FixSlashes( filename, '/' );
 
+		if ( bUsingInMemoryFont )
+		{
+			void *pMemory = NULL;
+			int nAlignedSize = 0;
+			int nFileSize = 0;
+
+			int iMapIndex = m_XboxFontMemoryDict.Find( pFontname );
+			if ( iMapIndex == m_XboxFontMemoryDict.InvalidIndex() )
+			{
+				V_snprintf( filename, sizeof( filename ), "d:/%s", pDiskname );
+				V_FixSlashes( filename, '/' );
+				nFileSize = g_pFullFileSystem->Size( filename, NULL );
+				if ( nFileSize <= 0 )
+				{
+					return NULL;
+				}
+
+				// Size must be aligned to 32k for optimal load
+				nAlignedSize = AlignValue( nFileSize, 32 * 1024 );	
+				pMemory = XPhysicalAlloc( nAlignedSize, MAXULONG_PTR, 0, PAGE_READWRITE );
+
+				CUtlBuffer buf;
+				buf.SetExternalBuffer( pMemory, nAlignedSize, 0 );
+				if ( !g_pFullFileSystem->ReadFile( filename, NULL, buf ) )
+				{
+					XPhysicalFree( pMemory );
+					return NULL;
+				}
+
+				iMapIndex = m_XboxFontMemoryDict.Insert( pFontname );
+				m_XboxFontMemoryDict[iMapIndex].m_pPhysicalMemory = pMemory;
+				m_XboxFontMemoryDict[iMapIndex].m_nMemorySize = nAlignedSize;
+				m_XboxFontMemoryDict[iMapIndex].m_nFontFileSize = nFileSize;
+			}
+			else
+			{
+				pMemory = m_XboxFontMemoryDict[iMapIndex].m_pPhysicalMemory;
+				nFileSize = m_XboxFontMemoryDict[iMapIndex].m_nFontFileSize;
+			}
+
+			V_snprintf( filename, sizeof( filename ), "memory://%X,%X", (intp)pMemory, nFileSize );
+		}
+		else
+		{
+			V_snprintf( filename, sizeof( filename ), "file://d:/%s", pDiskname );
+		}
+
+		V_FixSlashes( filename, '/' );
 		wchar_t	wchFilename[MAX_PATH];
-		Q_UTF8ToUnicode( filename, wchFilename, sizeof( wchFilename ) );
+		V_UTF8ToUnicode( filename, wchFilename, sizeof( wchFilename ) );
 
 		TypefaceDescriptor desc;
 		desc.fBaselineAdjust = 0;
@@ -13491,44 +16744,46 @@ void CShaderAPIDx8::CloseTrueTypeFont( HXUIFONT hFont )
 // Get the TTF Metrics
 //-----------------------------------------------------------------------------
 #if defined( _X360 )
-bool CShaderAPIDx8::GetTrueTypeFontMetrics( HXUIFONT hFont, XUIFontMetrics *pFontMetrics, XUICharMetrics charMetrics[256] )
+bool CShaderAPIDx8::GetTrueTypeFontMetrics( HXUIFONT hFont, wchar_t wchFirst, wchar_t wchLast, XUIFontMetrics *pFontMetrics, XUICharMetrics *pCharMetrics )
 {
 	if ( !hFont )
 		return false;
 
 	LOCK_SHADERAPI();
 
-	V_memset( charMetrics, 0, 256 * sizeof( XUICharMetrics ) );
+	int numChars = wchLast - wchFirst + 1;
+
+	V_memset( pCharMetrics, 0, numChars * sizeof( XUICharMetrics ) );
 
 	HRESULT hr = XuiGetFontMetrics( hFont, pFontMetrics );
 	if ( !FAILED( hr ) )
 	{
 		// X360 issue: max character width may be too small.
 		// Run through each character and fixup
-		for ( int i = 1; i < 256; i++ )
+		for ( int i = 0; i < numChars; i++ )
 		{
-			wchar_t wch = i;
-			hr = XuiGetCharMetrics( hFont, wch, &charMetrics[i] );
+			hr = XuiGetCharMetrics( hFont, wchFirst + i, pCharMetrics + i );
 			if ( !FAILED( hr ) )
 			{
-				float maxWidth = charMetrics[i].fMaxX;
-				if ( charMetrics[i].fMinX < 0 )
+				float maxWidth = pCharMetrics[i].fMaxX;
+				if ( pCharMetrics[i].fMinX < 0 )
 				{
-					maxWidth = charMetrics[i].fMaxX - charMetrics[i].fMinX;
+					maxWidth = pCharMetrics[i].fMaxX - pCharMetrics[i].fMinX;
 				}
 				if ( maxWidth > pFontMetrics->fMaxWidth )
 				{
 					pFontMetrics->fMaxWidth = maxWidth;
 				}
-				if ( charMetrics[i].fAdvance > pFontMetrics->fMaxWidth )
+				if ( pCharMetrics[i].fAdvance > pFontMetrics->fMaxWidth )
 				{
-					pFontMetrics->fMaxWidth = charMetrics[i].fAdvance;
+					pFontMetrics->fMaxWidth = pCharMetrics[i].fAdvance;
 				}
 			}
 		}
 
-		// fonts are getting cut off, MaxHeight seems to be misreported smaller
-		// take MaxHeight to be the larger of its reported value or (ascent + descent)
+		// Fonts are getting cut off, MaxHeight seems to be misreported smaller in some cases when fMaxDescent <= 0.
+		// Additionally, XuiGetFontHeight() returns the same value as pFontMetrics->fLineHeight, not fMaxHeight, so we can't use that!
+		// So, use MAX( fMaxHeight, ( fMaxAscent - fMaxDescent ) ) when fMaxDescent <= 0
 		float maxHeight = 0;
 		if ( pFontMetrics->fMaxDescent <= 0 )
 		{
@@ -13559,7 +16814,6 @@ bool CShaderAPIDx8::GetTrueTypeGlyphs( HXUIFONT hFont, int numChars, wchar_t *pW
 	// Ensure this doesn't talk to D3D at the same time as the loading bar
 	AUTO_LOCK_FM( m_nonInteractiveModeMutex );
 
-
 	LOCK_SHADERAPI();
 	bool bSuccess = false;
 	IDirect3DSurface *pRTSurface = NULL;
@@ -13571,9 +16825,13 @@ bool CShaderAPIDx8::GetTrueTypeGlyphs( HXUIFONT hFont, int numChars, wchar_t *pW
     D3DXMATRIX matXForm;
 	D3DLOCKED_RECT lockedRect;
 
+	// must release resources for xui
+	bool bPreviousOwnState = OwnGPUResources( false );
+
 	// have to reset to default state to rasterize glyph correctly
 	// state will get re-established during next mesh draw
 	ResetRenderState( false );
+
 	Dx9Device()->SetRenderState( D3DRS_ZENABLE, FALSE );
 
 	Dx9Device()->GetRenderTarget( 0, &pSavedSurface );
@@ -13586,12 +16844,16 @@ bool CShaderAPIDx8::GetTrueTypeGlyphs( HXUIFONT hFont, int numChars, wchar_t *pW
 	for ( int i = 0; i < numChars; i++ )
 	{
 		rtWidth += pWidth[i];
-		rtHeight = max( rtHeight, pHeight[i] );
+		rtHeight = MAX( rtHeight, pHeight[i] );
 	}
 
-	// per resolve() restrictions
-	rtWidth = AlignValue( rtWidth, 32 );
-	rtHeight = AlignValue( rtHeight, 32 );
+	// per resolve() restrictions, need to be 32 aligned
+	// The 64 is critical to fixing their internal clip logic. Apprarently if the glyph is really larger
+	// than our metrics, it won't render. This happens with foreign characters where we think its 28
+	// wide, it's actually 34 (by XuiMeasureText numbers), we snap to 32, glyph gets culled.
+	// The downside to this is we have bad metrics and we may be clipping bottom and right.
+	rtWidth = AlignValue( rtWidth, 64 );
+	rtHeight = AlignValue( rtHeight, 64 );
 
 	// create a render target to capture the glyph render
 	pRTSurface = g_TextureHeap.AllocRenderTargetSurface( rtWidth, rtHeight, D3DFMT_A8R8G8B8 );
@@ -13608,8 +16870,6 @@ bool CShaderAPIDx8::GetTrueTypeGlyphs( HXUIFONT hFont, int numChars, wchar_t *pW
 	if ( FAILED( hr ) )
 		goto cleanUp;
 
-
-	bool bPreviousOwnState = OwnGPUResources( false );
 	XuiRenderBegin( m_hDC, 0x00000000 );
 
 	D3DXMatrixIdentity( &matView );
@@ -13632,8 +16892,6 @@ bool CShaderAPIDx8::GetTrueTypeGlyphs( HXUIFONT hFont, int numChars, wchar_t *pW
 	}
 
 	XuiRenderEnd( m_hDC );
-	OwnGPUResources( bPreviousOwnState );
-
 
 	// transfer from edram to system
 	hr = Dx9Device()->Resolve( 0, NULL, pTexture, NULL, 0, 0, NULL, 0, 0, NULL );
@@ -13708,8 +16966,10 @@ cleanUp:
 	if ( pSavedSurface )
 		pSavedSurface->Release();
 
-	// XUI changed renderstates behind our back, so we need to reset to defaults again to get back in synch:
+	// XUI changed renderstates behind our back, so we need to reset to defaults again to get matching states
 	ResetRenderState( false );
+
+	OwnGPUResources( bPreviousOwnState );
 
 	return bSuccess;
 }
@@ -13719,14 +16979,15 @@ cleanUp:
 // Create a 360 Render Target Surface
 //-----------------------------------------------------------------------------
 #if defined( _X360 )
-ShaderAPITextureHandle_t CShaderAPIDx8::CreateRenderTargetSurface( int width, int height, ImageFormat format, const char *pDebugName, const char *pTextureGroupName )
+ShaderAPITextureHandle_t CShaderAPIDx8::CreateRenderTargetSurface( int width, int height, ImageFormat format, RTMultiSampleCount360_t multiSampleCount, const char *pDebugName, const char *pTextureGroupName )
 {
 	LOCK_SHADERAPI();
 	ShaderAPITextureHandle_t textureHandle = CreateTextureHandle();
 	Texture_t *pTexture = &GetTexture( textureHandle );
 
 	pTexture->m_Flags = (Texture_t::IS_ALLOCATED | Texture_t::IS_RENDER_TARGET_SURFACE);
-	
+	pTexture->m_CreationFlags = 0;
+
 	pTexture->m_DebugName = pDebugName;
 	pTexture->m_Width = width;
 	pTexture->m_Height = height;
@@ -13734,11 +16995,17 @@ ShaderAPITextureHandle_t CShaderAPIDx8::CreateRenderTargetSurface( int width, in
 	pTexture->m_NumCopies = 1;
 	pTexture->m_CurrentCopy = 0;
 
-	ImageFormat dstImageFormat = FindNearestSupportedFormat( format, false, true, false );
-	D3DFORMAT actualFormat = ImageLoader::ImageFormatToD3DFormat( dstImageFormat );
+	D3DFORMAT actualFormat = FindNearestSupportedFormat( format, false, true, false );
+	ImageFormat dstImageFormat  = ImageLoader::D3DFormatToImageFormat( actualFormat );
 
-	pTexture->GetRenderTargetSurface( false ) = g_TextureHeap.AllocRenderTargetSurface( width, height, actualFormat );
-	pTexture->GetRenderTargetSurface( true ) = g_TextureHeap.AllocRenderTargetSurface( width, height, (D3DFORMAT)MAKESRGBFMT( actualFormat ) );
+	pTexture->GetRenderTargetSurface( false ) = g_TextureHeap.AllocRenderTargetSurface( width, height, actualFormat, multiSampleCount );
+
+#if defined( CSTRIKE15 )
+	// [mariod] - implicit srgb render targets (regular 8888, writes happen in shaders) as opposed to PWL
+	pTexture->GetRenderTargetSurface( true ) = g_TextureHeap.AllocRenderTargetSurface( width, height, actualFormat, multiSampleCount );
+#else
+	pTexture->GetRenderTargetSurface( true ) = g_TextureHeap.AllocRenderTargetSurface( width, height, (D3DFORMAT)MAKESRGBFMT( actualFormat ), multiSampleCount );
+#endif
 
 	pTexture->SetImageFormat( dstImageFormat );
 
@@ -13758,14 +17025,20 @@ ShaderAPITextureHandle_t CShaderAPIDx8::CreateRenderTargetSurface( int width, in
 
 	return textureHandle;
 }
+
 #endif
 
 //-----------------------------------------------------------------------------
 // Shader constants are batched and written to gpu once prior to draw.
 //-----------------------------------------------------------------------------
 void CShaderAPIDx8::WriteShaderConstantsToGPU()
-{	
+{
 #if defined( _X360 )
+	if ( !IsGPUOwnSupported() || !m_bGPUOwned )
+	{
+		return;
+	}
+
 	// vector vertex constants can just blast their set range
 	if ( m_MaxVectorVertexShaderConstant )
 	{
@@ -13874,11 +17147,12 @@ void CShaderAPIDx8::PersistDisplay()
 }
 #endif
 
-#if defined( _X360 )
+#if defined( _GAMECONSOLE )
 bool CShaderAPIDx8::PostQueuedTexture( const void *pData, int nDataSize, ShaderAPITextureHandle_t *pHandles, int numHandles, int nWidth, int nHeight, int nDepth, int numMips, int *pRefCount )
 {
 	CUtlBuffer vtfBuffer;	
 	IVTFTexture *pVTFTexture = NULL;
+	int iTopMip = 0;
 	bool bOK = false;
 	
 	if ( !pData || !nDataSize )
@@ -13898,7 +17172,6 @@ bool CShaderAPIDx8::PostQueuedTexture( const void *pData, int nDataSize, ShaderA
 	}
 
 	// provided vtf buffer is all mips, determine top mip due to possible picmip
-	int iTopMip = 0;
 	int mipWidth, mipHeight, mipDepth;
 	do
 	{
@@ -13917,16 +17190,24 @@ bool CShaderAPIDx8::PostQueuedTexture( const void *pData, int nDataSize, ShaderA
 		ShaderAPITextureHandle_t hTexture = pHandles[iFrame];
 		Texture_t *pTexture = &GetTexture( hTexture );
 
-		int nFaceCount = ( pTexture->m_CreationFlags & TEXTURE_CREATE_CUBEMAP ) ? CUBEMAP_FACE_COUNT-1 : 1;
+		int nFaceCount = ( pTexture->m_CreationFlags & TEXTURE_CREATE_CUBEMAP ) ? CUBEMAP_FACE_COUNT : 1;
 
 		IDirect3DBaseTexture *pD3DTexture;
 		if ( pTexture->m_CreationFlags & TEXTURE_CREATE_NOD3DMEMORY )
 		{
+			// We created the texture, but deferred allocating storage for the bits until now
 			pD3DTexture = pTexture->GetTexture();
-			if ( !g_TextureHeap.AllocD3DMemory( pD3DTexture ) )
+#if defined( _X360 )
+			if ( !g_TextureHeap.FixupAllocD3DMemory( pD3DTexture ) )
 			{
 				goto cleanUp;
 			}
+#elif defined( _PS3 )
+			if ( !Dx9Device()->AllocateTextureStorage( pD3DTexture ) )
+			{
+				goto cleanUp;
+			}
+#endif // _X360/_PS3
 		}
 		else
 		{
@@ -13952,8 +17233,10 @@ bool CShaderAPIDx8::PostQueuedTexture( const void *pData, int nDataSize, ShaderA
 				info.m_nZOffset = 0;
 				info.m_SrcFormat = pVTFTexture->Format();
 				info.m_pSrcData = pSourceBits;
+#if defined( _X360 )
 				info.m_bSrcIsTiled = pVTFTexture->IsPreTiled();
 				info.m_bCanConvertFormat = ( pTexture->m_Flags & Texture_t::CAN_CONVERT_FORMAT ) != 0;
+#endif // _X360
 				LoadTexture( info );
 			}
 		}
@@ -13982,6 +17265,23 @@ cleanUp:
 #endif
 
 #if defined( _X360 )
+void CShaderAPIDx8::SetCacheableTextureParams( ShaderAPITextureHandle_t *pHandles, int count, const char *pFilename, int mipSkipCount )
+{
+	for ( int i = 0; i < count; i++ )
+	{
+		Texture_t *pTexture = &GetTexture( pHandles[i] );
+		if ( !( pTexture->m_Flags & Texture_t::IS_CACHEABLE ) )
+		{
+			// ignore
+			continue;
+		}
+
+		g_TextureHeap.SetCacheableTextureParams( pTexture->GetTexture(), pFilename, mipSkipCount );
+	}
+}
+#endif
+
+#if defined( _X360 )
 void *CShaderAPIDx8::GetD3DDevice()
 {
 	return Dx9Device();
@@ -14000,14 +17300,23 @@ static void r_enable_gpr_allocations_callback( IConVar *var, const char *pOldVal
 		}
 	}
 }
-
 ConVar r_enable_gpr_allocations( "r_enable_gpr_allocations", "1", 0, "Enable usage of IDirect3DDevice9::SetShaderGPRAllocation()", r_enable_gpr_allocations_callback );
 
-static void CommitShaderGPRs( IDirect3DDevice9 *pDevice, const DynamicState_t &desiredState, DynamicState_t &currentState, bool bForce )
+static void CommitShaderGPRs( D3DDeviceWrapper *pDevice, const DynamicState_t &desiredState, DynamicState_t &currentState, bool bForce )
 {
-	if( desiredState.m_iVertexShaderGPRAllocation != currentState.m_iVertexShaderGPRAllocation )
+	if ( ( desiredState.m_iVertexShaderGPRAllocation != currentState.m_iVertexShaderGPRAllocation ) || bForce )
 	{
-		pDevice->SetShaderGPRAllocation( 0, desiredState.m_iVertexShaderGPRAllocation, 128 - desiredState.m_iVertexShaderGPRAllocation );
+		if ( pDevice->GetDeviceState() & D3DDEVICESTATE_ZPASS_BRACKET )
+		{
+			// if a z pass is active, we need to predicate the allocation to only happen in the main render pass
+			pDevice->SetPredication( D3DPRED_ALL_RENDER );
+			pDevice->SetShaderGPRAllocation( D3DSETALLOCATION_PREDICATED, desiredState.m_iVertexShaderGPRAllocation, 128 - desiredState.m_iVertexShaderGPRAllocation );
+			pDevice->SetPredication( 0 );
+		}
+		else
+		{
+			pDevice->SetShaderGPRAllocation( 0, desiredState.m_iVertexShaderGPRAllocation, 128 - desiredState.m_iVertexShaderGPRAllocation );
+		}
 		currentState.m_iVertexShaderGPRAllocation = desiredState.m_iVertexShaderGPRAllocation;
 	}
 }
@@ -14019,10 +17328,10 @@ void CShaderAPIDx8::PushVertexShaderGPRAllocation( int iVertexShaderCount )
 
 	if ( r_enable_gpr_allocations.GetBool() )
 	{
-		if ( m_DynamicState.m_iVertexShaderGPRAllocation != iVertexShaderCount )
+		if ( m_DesiredState.m_iVertexShaderGPRAllocation != iVertexShaderCount )
 		{
 			m_DesiredState.m_iVertexShaderGPRAllocation = iVertexShaderCount;
-			ADD_COMMIT_FUNC( COMMIT_PER_DRAW, COMMIT_ALWAYS, CommitShaderGPRs );
+			ADD_COMMIT_FUNC( COMMIT_PER_DRAW, CommitShaderGPRs );
 		}
 	}
 }
@@ -14039,19 +17348,19 @@ void CShaderAPIDx8::PopVertexShaderGPRAllocation( void )
 		else
 			iVertexShaderCount = 64;
 
-		if ( m_DynamicState.m_iVertexShaderGPRAllocation != iVertexShaderCount )
+		if ( m_DesiredState.m_iVertexShaderGPRAllocation != iVertexShaderCount )
 		{
 			m_DesiredState.m_iVertexShaderGPRAllocation = iVertexShaderCount;
-			ADD_COMMIT_FUNC( COMMIT_PER_DRAW, COMMIT_ALWAYS, CommitShaderGPRs );
+			ADD_COMMIT_FUNC( COMMIT_PER_DRAW, CommitShaderGPRs );
 		}
 	}
 }
 
 void CShaderAPIDx8::EnableVSync_360( bool bEnable )
 {
-	if( bEnable )
+	if ( bEnable )
 	{
-		Dx9Device()->SetRenderState( D3DRS_PRESENTIMMEDIATETHRESHOLD, 0 ); //only swap on vertical blanks
+		Dx9Device()->SetRenderState( D3DRS_PRESENTIMMEDIATETHRESHOLD, mat_x360_vblank_miss_threshold.GetInt() ); //only swap on vertical blanks
 	}
 	else
 	{
@@ -14084,42 +17393,18 @@ void CShaderAPIDx8::Draw( MaterialPrimitiveType_t primitiveType, int nFirstIndex
 
 float CShaderAPIDx8::GammaToLinear_HardwareSpecific( float fGamma ) const
 {
-	if( IsPC() )
-	{
-		return SrgbGammaToLinear( fGamma );
-	}
-	else if( IsX360() )
-	{
-		return SrgbGammaToLinear( fGamma );
-	}
-	else
-	{
-		// Unknown console
-		return pow( fGamma, 2.2f ); // Use a gamma 2.2 curve
-	}
+	return SrgbGammaToLinear( fGamma );
 }
 
 float CShaderAPIDx8::LinearToGamma_HardwareSpecific( float fLinear ) const
 {
-	if ( IsPC() )
-	{
-		return SrgbLinearToGamma( fLinear );
-	}
-	else if ( IsX360() )
-	{
-		return SrgbLinearToGamma( fLinear );
-	}
-	else
-	{
-		// Unknown console
-		return pow( fLinear, ( 1.0f / 2.2f ) ); // Use a gamma 2.2 curve
-	}
+	return SrgbLinearToGamma( fLinear );
 }
 
 
 bool CShaderAPIDx8::ShouldWriteDepthToDestAlpha( void ) const
 {
-	return IsPC() && g_pHardwareConfig->SupportsPixelShaders_2_b() &&
+	return IsPC() && g_pHardwareConfig->GetDXSupportLevel() >= 92 &&
 			(m_SceneFogMode != MATERIAL_FOG_LINEAR_BELOW_FOG_Z) && 
 			(GetIntRenderingParameter(INT_RENDERPARM_WRITE_DEPTH_TO_DESTALPHA) != 0);
 }
@@ -14129,7 +17414,8 @@ bool CShaderAPIDx8::ShouldWriteDepthToDestAlpha( void ) const
 void CShaderAPIDx8::AcquireThreadOwnership()
 {
 	SetCurrentThreadAsOwner();
-#if (defined( _X360 ) || defined( DX_TO_GL_ABSTRACTION ))
+
+#if defined( _X360 ) || defined( DX_TO_GL_ABSTRACTION )
 	Dx9Device()->AcquireThreadOwnership();
 #endif
 }
@@ -14139,7 +17425,8 @@ void CShaderAPIDx8::AcquireThreadOwnership()
 void CShaderAPIDx8::ReleaseThreadOwnership()
 {
 	RemoveThreadOwner();
-#if (defined( _X360 ) || defined( DX_TO_GL_ABSTRACTION ))
+
+#if defined( _X360 ) || defined( DX_TO_GL_ABSTRACTION )
 	Dx9Device()->ReleaseThreadOwnership();
 #endif
 }
@@ -14180,12 +17467,13 @@ bool CShaderAPIDx8::SetRenderTargetInternalXbox( ShaderAPITextureHandle_t hRende
 	m_bUsingSRGBRenderTarget = m_DynamicState.m_bSRGBWritesEnabled;
 	m_hCachedRenderTarget = hRenderTargetTexture;
 
+#if defined( _X360 )
 	IDirect3DSurface *pSurface;
 	if ( m_hCachedRenderTarget == SHADER_RENDERTARGET_BACKBUFFER )
 	{
 		if ( !m_bUsingSRGBRenderTarget )
 		{
-			pSurface = m_pBackBufferSurface;
+			pSurface = m_pBackBufferSurfaces[BACK_BUFFER_INDEX_DEFAULT];
 		}
 		else
 		{
@@ -14196,13 +17484,12 @@ bool CShaderAPIDx8::SetRenderTargetInternalXbox( ShaderAPITextureHandle_t hRende
 	{
 		AssertValidTextureHandle( m_hCachedRenderTarget );
 		Texture_t *pTexture = &GetTexture( m_hCachedRenderTarget );
-		pSurface = pTexture->GetRenderTargetSurface( m_bUsingSRGBRenderTarget );
+	    pSurface = pTexture->GetRenderTargetSurface( m_bUsingSRGBRenderTarget );
 	}
 
 	// the 360 does a wierd reset of some states on a SetRenderTarget()
 	// the viewport is a clobbered state, it may not be changed by later callers, so it MUST be put back as expected
 	// the other clobbered states are waiting to be discovered ... sigh
-#if defined( _X360 )
 	D3DVIEWPORT9 viewport;
 	Dx9Device()->GetViewport( &viewport );
 	Dx9Device()->SetRenderTarget( 0, pSurface );
@@ -14212,6 +17499,17 @@ bool CShaderAPIDx8::SetRenderTargetInternalXbox( ShaderAPITextureHandle_t hRende
 	return true;
 }
 
+
+void CShaderAPIDx8::OnPresent( void )
+{
+	CallCommitFuncs( COMMIT_PER_DRAW );
+}
+
+
+void CShaderAPIDx8::AddShaderComboInformation( const ShaderComboSemantics_t *pSemantics )
+{
+	ShaderManager()->AddShaderComboInformation( pSemantics );
+}
 
 //-----------------------------------------------------------------------------
 // debug logging
@@ -14227,7 +17525,7 @@ void CShaderAPIDx8::PrintfVA( char *fmt, va_list vargs )
 #endif
 }
 
-void CShaderAPIDx8::Printf( const char *fmt, ... )
+void CShaderAPIDx8::Printf( char *fmt, ... )
 {
 #ifdef DX_TO_GL_ABSTRACTION
 	#if GLMDEBUG
@@ -14257,14 +17555,47 @@ float CShaderAPIDx8::Knob( char *knobname, float *setvalue )
 #endif
 }
 
+float CShaderAPIDx8::GetLightMapScaleFactor() const
+{
+	return HardwareConfig()->GetLightMapScaleFactor();
+}
 
+ShaderAPITextureHandle_t CShaderAPIDx8::FindTexture( const char *pDebugName )
+{
+	for ( ShaderAPITextureHandle_t hTexture = m_Textures.Head() ; hTexture != m_Textures.InvalidIndex(); hTexture = m_Textures.Next( hTexture ) )
+	{
+		Texture_t &tex = m_Textures[hTexture];
+		if ( !V_stricmp( tex.m_DebugName.String(), pDebugName ) )
+		{
+			return hTexture;
+		}
+	}
+
+	// not found
+	return INVALID_SHADERAPI_TEXTURE_HANDLE;
+}
+
+void CShaderAPIDx8::GetTextureDimensions( ShaderAPITextureHandle_t hTexture, int &nWidth, int &nHeight, int &nDepth )
+{
+	nWidth = 0;
+	nHeight = 0;
+	nDepth = 1;
+
+	if ( hTexture == INVALID_SHADERAPI_TEXTURE_HANDLE || !TextureIsAllocated( hTexture ) )
+		return;
+
+	Texture_t *pTexture = &GetTexture( hTexture );
+	nWidth = pTexture->m_Width;
+	nHeight = pTexture->m_Height;
+	nDepth = pTexture->m_Depth;
+}
 
 #if defined( _X360 )
 
 extern ConVar r_blocking_spew_threshold;
 void D3DBlockingSpewCallback( DWORD Flags, D3DBLOCKTYPE BlockType, float ClockTime, DWORD ThreadTime )
 {
-	if( ClockTime >= r_blocking_spew_threshold.GetFloat() )
+	if ( ClockTime >= r_blocking_spew_threshold.GetFloat() )
 	{
 		const char *pBlockType = "";
 		switch( BlockType )
@@ -14336,7 +17667,7 @@ void D3DBlockingSpewCallback( DWORD Flags, D3DBLOCKTYPE BlockType, float ClockTi
 
 static void r_blocking_spew_threshold_callback( IConVar *var, const char *pOldValue, float flOldValue )
 {
-	if( Dx9Device() != NULL )
+	if ( Dx9Device() != NULL )
 	{
 		if ( ((ConVar *)var)->GetFloat() >= 0.0f )
 		{
@@ -14348,7 +17679,12 @@ static void r_blocking_spew_threshold_callback( IConVar *var, const char *pOldVa
 		}
 	}
 }
-
 ConVar r_blocking_spew_threshold( "r_blocking_spew_threshold", "-1", 0, "Enable spew of Direct3D Blocks. Specify the minimum blocking time in milliseconds before spewing a warning.", r_blocking_spew_threshold_callback );
 #endif
 
+
+
+
+#ifdef _PS3
+#include "shaderapidx8_ps3nonvirt.inl"
+#endif

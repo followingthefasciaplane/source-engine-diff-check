@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -21,6 +21,8 @@ class ConCommandBase;
 class CCommand;
 class CUtlBuffer;
 
+#define COMMAND_COMPLETION_MAXITEMS		64
+#define COMMAND_COMPLETION_ITEM_LENGTH	64
 
 //-----------------------------------------------------------------------------
 // Purpose: 
@@ -28,11 +30,11 @@ class CUtlBuffer;
 class CCvarUtilities
 {
 public:
-	bool IsCommand( const CCommand &args );
+	bool IsCommand( const CCommand &args, const int iSplitscreenSlot = -1 );
 
 	// Writes lines containing "set variable value" for all variables
 	// with the archive flag set to true.
-	void WriteVariables( CUtlBuffer &buff, bool bAllVars );
+	void WriteVariables( CUtlBuffer *buff, const int iSplitscreenSlot = -1, bool bSlotRequired = false, void *pConvarsList = 0 );
 
 	// Returns the # of cvars with the server flag set.
 	int	CountVariablesWithFlags( int flags );
@@ -55,14 +57,25 @@ public:
 	// Finds commands with a specified flag.
 	void CvarFindFlags_f( const CCommand &args );
 
+	// Enable cvars marked with FCVAR_DEVELOPMENTONLY
+	void EnableDevCvars();
+
+	int CvarFindFlagsCompletionCallback( const char *partial, char commands[ COMMAND_COMPLETION_MAXITEMS ][ COMMAND_COMPLETION_ITEM_LENGTH ] );
+
+
+	void ResetConVarsToDefaultValues( const char *pMatchStr ); // reset all convars that start with pMatchStr to their default values
+
 private:
 	// just like Cvar_set, but optimizes out the search
 	void SetDirect( ConVar *var, const char *value );
 
 	bool IsValidToggleCommand( const char *cmd );
+	bool IsHidden( const ConCommandBase	*var );
 };
 
-extern CCvarUtilities *cv;
+extern CCvarUtilities *ConVarUtilities;
 
+// reset basic game convars to defaults. what is reset is specific to l4d
+void ResetGameConVarsToDefaults( void );
 
 #endif // CVAR_H

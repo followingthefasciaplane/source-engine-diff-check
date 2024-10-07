@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -44,13 +44,12 @@ public:
 	};
 
 	CSoundPicker( vgui::Panel *pParent, int nFlags );
-	~CSoundPicker();
 
 	// overridden frame functions
 	virtual void Activate();
 
 	// Forward arrow keys to the list
-	virtual void OnKeyCodePressed( vgui::KeyCode code );
+	virtual void OnKeyCodeTyped( vgui::KeyCode code );
 
 	// Sets the current sound choice
 	void SetSelectedSound( PickType_t type, const char *pSoundName );
@@ -59,6 +58,8 @@ public:
 	PickType_t GetSelectedSoundType();
 	const char *GetSelectedSoundName( int nSelectionIndex = -1 );
 	int GetSelectedSoundCount();
+
+	void StopSoundPreview( );
 
 private:
 	// Purpose: Called when a page is shown
@@ -71,7 +72,6 @@ private:
 	void RefreshGameSoundList();
 	void PlayGameSound( const char *pSoundName );
 	void PlayWavSound( const char *pSoundName );
-	void StopSoundPreview( );
 	void OnGameSoundFilterTextChanged( );
 
 	// Derived classes have this called when the previewed asset changes
@@ -110,6 +110,8 @@ class CSoundPickerFrame : public CBaseAssetPickerFrame
 public:
 	CSoundPickerFrame( vgui::Panel *pParent, const char *pTitle, int nFlags );
 	virtual ~CSoundPickerFrame();
+
+	virtual void OnClose();
 
 	// Purpose: Activate the dialog
 	// The message "SoundSelected" will be sent if a sound is picked

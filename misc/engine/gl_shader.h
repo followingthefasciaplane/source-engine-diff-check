@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2006, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -39,6 +39,7 @@ extern	IMaterial*	g_materialTranslucentVertexColor;
 
 extern	IMaterial*	g_materialWorldWireframe;
 extern	IMaterial*	g_materialWorldWireframeZBuffer;
+extern	IMaterial*	g_materialWorldWireframeGreen;
 extern	IMaterial*	g_materialBrushWireframe;
 extern	IMaterial*	g_materialDecalWireframe;
 extern	IMaterial*	g_materialDebugLightmap;
@@ -57,12 +58,12 @@ extern	IMaterial*	g_pMaterialWaterSecondPass;
 extern	IMaterial*	g_pMaterialAmbientCube;
 extern	IMaterial*	g_pMaterialDebugFlat;
 extern	IMaterial*	g_pMaterialDepthWrite[2][2];
-extern	IMaterial*	g_pMaterialSSAODepthWrite[2][2];
+extern	IMaterial*	g_pMaterialSSAODepthWrite[ 2 ][ 2 ];
+
 
 extern	ConVar	r_norefresh;
 extern  ConVar	r_lightmapcolorscale;
 extern	ConVar	r_decals;
-extern	ConVar	mp_decals;
 extern	ConVar	r_lightmap;
 extern	ConVar	r_lightstyle;
 extern	ConVar	r_dynamic;

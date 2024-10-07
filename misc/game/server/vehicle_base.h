@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -86,12 +86,13 @@ public:
 	unsigned int GetVehicleType( void )							{ return m_nVehicleType; }
 
 	// CBaseEntity
+	virtual void	Precache();
 	void			Spawn( void );
 	virtual int		Restore( IRestore &restore );
 	void			VPhysicsUpdate( IPhysicsObject *pPhysics );
 	void			DrawDebugGeometryOverlays();
 	int				DrawDebugTextOverlays();
-	void			Teleport( const Vector *newPosition, const QAngle *newAngles, const Vector *newVelocity );
+	void			Teleport( const Vector *newPosition, const QAngle *newAngles, const Vector *newVelocity, bool bUseSlowHighAccuracyContacts );
 	virtual void	Think( void );
 	CFourWheelVehiclePhysics *GetPhysics( void ) { return &m_VehiclePhysics; }
 	CBasePlayer		*HasPhysicsAttacker( float dt );
@@ -180,7 +181,7 @@ public:
 	virtual void	VehicleAngleVectors( const QAngle &angles, Vector *pForward, Vector *pRight, Vector *pUp );
 	virtual void	Use( CBaseEntity *pActivator, CBaseEntity *pCaller, USE_TYPE useType, float value );
 	virtual void	Think( void );
-	virtual void	TraceAttack( const CTakeDamageInfo &info, const Vector &vecDir, trace_t *ptr, CDmgAccumulator *pAccumulator );
+	virtual void	TraceAttack( const CTakeDamageInfo &info, const Vector &vecDir, trace_t *ptr );
 	virtual void	Event_KilledOther( CBaseEntity *pVictim, const CTakeDamageInfo &info );
 
 	// Vehicle handling

@@ -1,4 +1,3 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
 /*
 ** $Id: lualib.h,v 1.36 2005/12/27 17:12:00 roberto Exp $
 ** Lua standard libraries

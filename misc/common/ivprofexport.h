@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -15,7 +15,7 @@
 
 
 #define VPROF_EXPORT_INTERFACE_VERSION "VProfExport001"
-#include <Color.h>
+#include <color.h>
 
 abstract_class IVProfExport
 {

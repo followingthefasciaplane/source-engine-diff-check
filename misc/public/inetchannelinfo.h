@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -32,6 +32,7 @@ public:
 		ENTITIES,		// all other entity bytes
 		SOUNDS,			// game sounds
 		EVENTS,			// event messages
+		TEMPENTS,		// temp entities
 		USERMESSAGES,	// user messages
 		ENTMESSAGES,	// entity messages
 		VOICE,			// voice data
@@ -39,7 +40,15 @@ public:
 		MOVE,			// client move cmds
 		STRINGCMD,		// string command
 		SIGNON,			// various signondata
+		PAINTMAP,			// paintmap data
+		ENCRYPTED,		// encrypted data
 		TOTAL,			// must be last and is not a real group
+	};
+
+	enum ENetworkEventType_t
+	{
+		k_ENetworkEventType_Generic = 0,		// Generic network event
+		k_ENetworkEventType_TimedOut = 1,		// Network connection timed out
 	};
 	
 	virtual const char  *GetName( void ) const = 0;	// get channel name
@@ -60,6 +69,7 @@ public:
 	virtual float		GetAvgData( int flow ) const = 0;	 // data flow in bytes/sec
 	virtual float		GetAvgPackets( int flow ) const = 0; // avg packets/sec
 	virtual int			GetTotalData( int flow ) const = 0;	 // total flow in/out in bytes
+	virtual int			GetTotalPackets( int flow ) const = 0;
 	virtual int			GetSequenceNr( int flow ) const = 0;	// last send seq number
 	virtual bool		IsValidPacket( int flow, int frame_number ) const = 0; // true if packet was not lost/dropped/chocked/flushed
 	virtual float		GetPacketTime( int flow, int frame_number ) const = 0; // time when packet was send
@@ -68,9 +78,11 @@ public:
 	virtual float		GetTimeSinceLastReceived( void ) const = 0;	// get time since last recieved packet in seconds
 	virtual	float		GetCommandInterpolationAmount( int flow, int frame_number ) const = 0;
 	virtual void		GetPacketResponseLatency( int flow, int frame_number, int *pnLatencyMsecs, int *pnChoke ) const = 0;
-	virtual void		GetRemoteFramerate( float *pflFrameTime, float *pflFrameTimeStdDeviation ) const = 0;
+	virtual void		GetRemoteFramerate( float *pflFrameTime, float *pflFrameTimeStdDeviation, float *pflFrameStartTimeStdDeviation ) const = 0;
 
 	virtual float		GetTimeoutSeconds() const = 0;
 };
 
 #endif // INETCHANNELINFO_H
+
+

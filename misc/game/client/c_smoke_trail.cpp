@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -13,10 +13,10 @@
 #include "c_te_effect_dispatch.h"
 #include "glow_overlay.h"
 #include "fx_explosion.h"
-#include "tier1/KeyValues.h"
+#include "tier1/keyvalues.h"
 #include "toolframework_client.h"
 #include "view.h"
-#include "clienteffectprecachesystem.h"
+#include "precache_register.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -396,12 +396,12 @@ void C_SmokeTrail::CleanupToolRecordingState( KeyValues *msg )
 	{
 		int nId = m_pSmokeEmitter->AllocateToolParticleEffectId();
 
-		KeyValues *oldmsg = new KeyValues( "OldParticleSystem_Create" );
-		oldmsg->SetString( "name", "C_SmokeTrail" );
-		oldmsg->SetInt( "id", nId );
-		oldmsg->SetFloat( "time", gpGlobals->curtime );
+		KeyValues *msg = new KeyValues( "OldParticleSystem_Create" );
+		msg->SetString( "name", "C_SmokeTrail" );
+		msg->SetInt( "id", nId );
+		msg->SetFloat( "time", gpGlobals->curtime );
 
-		KeyValues *pRandomEmitter = oldmsg->FindKey( "DmeRandomEmitter", true );
+		KeyValues *pRandomEmitter = msg->FindKey( "DmeRandomEmitter", true );
 		pRandomEmitter->SetInt( "count", m_SpawnRate );	// particles per second, when duration is < 0
 		pRandomEmitter->SetFloat( "duration", -1 );
 		pRandomEmitter->SetInt( "active", bEmitterActive );
@@ -445,11 +445,10 @@ void C_SmokeTrail::CleanupToolRecordingState( KeyValues *msg )
  		pRollSpeed->SetFloat( "maxRollSpeed", 1.0f );
 
 		KeyValues *pColor = pInitializers->FindKey( "DmeRandomValueColorInitializer", true );
-		Color c(
-			FastFToC( clamp( m_StartColor.x, 0.f, 1.f ) ),
-			FastFToC( clamp( m_StartColor.y, 0.f, 1.f ) ),
-			FastFToC( clamp( m_StartColor.z, 0.f, 1.f ) ),
-			255 );
+		Color c( 
+			clamp( m_StartColor.x * 255.0f, 0, 255 ),
+			clamp( m_StartColor.y * 255.0f, 0, 255 ),
+			clamp( m_StartColor.z * 255.0f, 0, 255 ), 255 );
 		pColor->SetColor( "startColor", c );
 		pColor->SetFloat( "minStartValueDelta", -0.2f );
  		pColor->SetFloat( "maxStartValueDelta", 0.2f );
@@ -487,18 +486,18 @@ void C_SmokeTrail::CleanupToolRecordingState( KeyValues *msg )
 		pEmitter2->SetString( "material", "particle/particle_noisesphere" );
 		pEmitterParent2->AddSubKey( pEmitter2 );
 
-		ToolFramework_PostToolMessage( HTOOLHANDLE_INVALID, oldmsg );
-		oldmsg->deleteThis();
+		ToolFramework_PostToolMessage( HTOOLHANDLE_INVALID, msg );
+		msg->deleteThis();
 	}
 	else 
 	{
-		KeyValues *oldmsg = new KeyValues( "OldParticleSystem_ActivateEmitter" );
-		oldmsg->SetInt( "id", m_pSmokeEmitter->GetToolParticleEffectId() );
-		oldmsg->SetInt( "emitter", 0 );
-		oldmsg->SetInt( "active", bEmitterActive );
-		oldmsg->SetFloat( "time", gpGlobals->curtime );
-		ToolFramework_PostToolMessage( HTOOLHANDLE_INVALID, oldmsg );
-		oldmsg->deleteThis();
+		KeyValues *msg = new KeyValues( "OldParticleSystem_ActivateEmitter" );
+		msg->SetInt( "id", m_pSmokeEmitter->GetToolParticleEffectId() );
+		msg->SetInt( "emitter", 0 );
+		msg->SetInt( "active", bEmitterActive );
+		msg->SetFloat( "time", gpGlobals->curtime );
+		ToolFramework_PostToolMessage( HTOOLHANDLE_INVALID, msg );
+		msg->deleteThis();
 	}
 }
 
@@ -771,6 +770,8 @@ void C_RocketTrail::Update( float fTimeDelta )
 	
 	if ( m_bDamaged )
 	{
+		SimpleParticle	*pParticle;
+		Vector			offset;
 		Vector			offsetColor;
 
 		CSmartPtr<CEmberEffect>	pEmitter = CEmberEffect::Create("C_RocketTrail::damaged");
@@ -1048,9 +1049,10 @@ void C_SporeExplosion::Update( float fTimeDelta )
 {
 	if( m_bEmit )
 	{
+		int nSlot = GET_ACTIVE_SPLITSCREEN_SLOT();
 		float tempDelta = fTimeDelta;
 
-		float flDist = (MainViewOrigin() - GetAbsOrigin()).Length();
+		float flDist = (MainViewOrigin(nSlot) - GetAbsOrigin()).Length();
 
 		//Lower the spawnrate by half if we're far away from it.
 		if ( cl_sporeclipdistance.GetFloat() <= flDist )
@@ -1122,7 +1124,9 @@ void RPGShotDownCallback( const CEffectData &data )
 	}
 }
 
-DECLARE_CLIENT_EFFECT( "RPGShotDown", RPGShotDownCallback );
+DECLARE_CLIENT_EFFECT_BEGIN( RPGShotDown, RPGShotDownCallback )
+	PRECACHE( GAMESOUND, "Missile.ShotDown" )
+DECLARE_CLIENT_EFFECT_END()
 
 
 
@@ -1399,7 +1403,7 @@ void C_SporeTrail::GetAimEntOrigin( IClientEntity *pAttachedTo, Vector *pAbsOrig
 
 	AngleMatrix( *pAbsAngles, *pAbsOrigin, matrix );
 
-	m_mAttachmentMatrix = matrix;
+	m_mAttachmentMatrix.Init( matrix );
 }
 
 //==================================================
@@ -1507,6 +1511,7 @@ void C_FireTrail::Update( float fTimeDelta )
 		numPuffs = clamp( numPuffs, 1, 32 );
 
 		SimpleParticle	*pParticle;
+		Vector			offset;
 		Vector			offsetColor;
 		float			step = moveLength / numPuffs;
 
@@ -1579,47 +1584,7 @@ void C_FireTrail::Update( float fTimeDelta )
 	m_vecLastPosition = GetAbsOrigin();
 }
 
-//-----------------------------------------------------------------------------
-// Purpose:  High drag, non color changing particle
-//-----------------------------------------------------------------------------
 
-
-class CDustFollower : public CSimpleEmitter
-{
-public:
-	
-	CDustFollower( const char *pDebugName ) : CSimpleEmitter( pDebugName ) {}
-	
-	//Create
-	static CDustFollower *Create( const char *pDebugName )
-	{
-		return new CDustFollower( pDebugName );
-	}
-
-	//Alpha
-	virtual float UpdateAlpha( const SimpleParticle *pParticle )
-	{
-		return ( ((float)pParticle->m_uchStartAlpha/255.0f) * sin( M_PI * (pParticle->m_flLifetime / pParticle->m_flDieTime) ) );
-	}
-
-	virtual	void	UpdateVelocity( SimpleParticle *pParticle, float timeDelta )
-	{
-		pParticle->m_vecVelocity = pParticle->m_vecVelocity * ExponentialDecay( 0.3, timeDelta );
-	}
-
-	//Roll
-	virtual	float UpdateRoll( SimpleParticle *pParticle, float timeDelta )
-	{
-		pParticle->m_flRoll += pParticle->m_flRollDelta * timeDelta;
-		
-		pParticle->m_flRollDelta *= ExponentialDecay( 0.5, timeDelta );
-
-		return pParticle->m_flRoll;
-	}
-
-private:
-	CDustFollower( const CDustFollower & );
-};
 
 
 // Datatable.. this can have all the smoketrail parameters when we need it to.
@@ -1725,26 +1690,26 @@ void C_DustTrail::OnDataChanged(DataUpdateType_t updateType)
 
 
 // FIXME: These all have to be moved out of this old system and into the new to leverage art assets!
-CLIENTEFFECT_REGISTER_BEGIN( PrecacheEffectDusttrail )
-CLIENTEFFECT_MATERIAL( "particle/smokesprites_0001" )
+PRECACHE_REGISTER_BEGIN( GLOBAL, PrecacheEffectDusttrail )
+PRECACHE( MATERIAL, "particle/smokesprites_0001" )
 /*
-CLIENTEFFECT_MATERIAL( "particle/smokesprites_0002" )
-CLIENTEFFECT_MATERIAL( "particle/smokesprites_0003" )
-CLIENTEFFECT_MATERIAL( "particle/smokesprites_0004" )
-CLIENTEFFECT_MATERIAL( "particle/smokesprites_0005" )
-CLIENTEFFECT_MATERIAL( "particle/smokesprites_0006" )
-CLIENTEFFECT_MATERIAL( "particle/smokesprites_0007" )
-CLIENTEFFECT_MATERIAL( "particle/smokesprites_0008" )
-CLIENTEFFECT_MATERIAL( "particle/smokesprites_0009" )
-CLIENTEFFECT_MATERIAL( "particle/smokesprites_0010" )
-CLIENTEFFECT_MATERIAL( "particle/smokesprites_0011" )
-CLIENTEFFECT_MATERIAL( "particle/smokesprites_0012" )
-CLIENTEFFECT_MATERIAL( "particle/smokesprites_0013" )
-CLIENTEFFECT_MATERIAL( "particle/smokesprites_0014" )
-CLIENTEFFECT_MATERIAL( "particle/smokesprites_0015" )
-CLIENTEFFECT_MATERIAL( "particle/smokesprites_0016" )
+PRECACHE( MATERIAL, "particle/smokesprites_0002" )
+PRECACHE( MATERIAL, "particle/smokesprites_0003" )
+PRECACHE( MATERIAL, "particle/smokesprites_0004" )
+PRECACHE( MATERIAL, "particle/smokesprites_0005" )
+PRECACHE( MATERIAL, "particle/smokesprites_0006" )
+PRECACHE( MATERIAL, "particle/smokesprites_0007" )
+PRECACHE( MATERIAL, "particle/smokesprites_0008" )
+PRECACHE( MATERIAL, "particle/smokesprites_0009" )
+PRECACHE( MATERIAL, "particle/smokesprites_0010" )
+PRECACHE( MATERIAL, "particle/smokesprites_0011" )
+PRECACHE( MATERIAL, "particle/smokesprites_0012" )
+PRECACHE( MATERIAL, "particle/smokesprites_0013" )
+PRECACHE( MATERIAL, "particle/smokesprites_0014" )
+PRECACHE( MATERIAL, "particle/smokesprites_0015" )
+PRECACHE( MATERIAL, "particle/smokesprites_0016" )
 */
-CLIENTEFFECT_REGISTER_END()
+PRECACHE_REGISTER_END()
 
 
 //-----------------------------------------------------------------------------
@@ -1915,12 +1880,12 @@ void C_DustTrail::CleanupToolRecordingState( KeyValues *msg )
 	{
 		int nId = m_pDustEmitter->AllocateToolParticleEffectId();
 
-		KeyValues *oldmsg = new KeyValues( "OldParticleSystem_Create" );
-		oldmsg->SetString( "name", "C_DustTrail" );
-		oldmsg->SetInt( "id", nId );
-		oldmsg->SetFloat( "time", gpGlobals->curtime );
+		KeyValues *msg = new KeyValues( "OldParticleSystem_Create" );
+		msg->SetString( "name", "C_DustTrail" );
+		msg->SetInt( "id", nId );
+		msg->SetFloat( "time", gpGlobals->curtime );
 
-		KeyValues *pEmitter = oldmsg->FindKey( "DmeSpriteEmitter", true );
+		KeyValues *pEmitter = msg->FindKey( "DmeSpriteEmitter", true );
 		pEmitter->SetString( "material", "particle/smokesprites_0001" );
 		pEmitter->SetInt( "count", m_SpawnRate );	// particles per second, when duration is < 0
 		pEmitter->SetFloat( "duration", -1 ); // FIXME
@@ -1958,10 +1923,9 @@ void C_DustTrail::CleanupToolRecordingState( KeyValues *msg )
 
 		KeyValues *pColor = pInitializers->FindKey( "DmeRandomValueColorInitializer", true );
 		Color c( 
-			FastFToC( clamp( m_Color.x, 0.f, 1.f ) ),
-			FastFToC( clamp( m_Color.y, 0.f, 1.f ) ),
-			FastFToC( clamp( m_Color.z, 0.f, 1.f ) ),
-			255 );
+			clamp( m_Color.x * 255.0f, 0, 255 ),
+			clamp( m_Color.y * 255.0f, 0, 255 ),
+			clamp( m_Color.z * 255.0f, 0, 255 ), 255 );
 		pColor->SetColor( "startColor", c );
 		pColor->SetFloat( "minStartValueDelta", 0.0f );
  		pColor->SetFloat( "maxStartValueDelta", 0.0f );
@@ -1994,17 +1958,17 @@ void C_DustTrail::CleanupToolRecordingState( KeyValues *msg )
 		pUpdaters->FindKey( "DmeColorUpdater", true );
 		pUpdaters->FindKey( "DmeSizeUpdater", true );
 
-		ToolFramework_PostToolMessage( HTOOLHANDLE_INVALID, oldmsg );
-		oldmsg->deleteThis();
+		ToolFramework_PostToolMessage( HTOOLHANDLE_INVALID, msg );
+		msg->deleteThis();
 	}
 	else 
 	{
-		KeyValues *oldmsg = new KeyValues( "OldParticleSystem_ActivateEmitter" );
-		oldmsg->SetInt( "id", m_pDustEmitter->GetToolParticleEffectId() );
-		oldmsg->SetInt( "emitter", 0 );
-		oldmsg->SetInt( "active", bEmitterActive );
-		oldmsg->SetFloat( "time", gpGlobals->curtime );
-		ToolFramework_PostToolMessage( HTOOLHANDLE_INVALID, oldmsg );
-		oldmsg->deleteThis();
+		KeyValues *msg = new KeyValues( "OldParticleSystem_ActivateEmitter" );
+		msg->SetInt( "id", m_pDustEmitter->GetToolParticleEffectId() );
+		msg->SetInt( "emitter", 0 );
+		msg->SetInt( "active", bEmitterActive );
+		msg->SetFloat( "time", gpGlobals->curtime );
+		ToolFramework_PostToolMessage( HTOOLHANDLE_INVALID, msg );
+		msg->deleteThis();
 	}
 }

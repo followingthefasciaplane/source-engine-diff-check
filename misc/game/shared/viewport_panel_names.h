@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -16,6 +16,7 @@
 #define PANEL_ACTIVE		"active"	// current active panel			
 
 #define PANEL_SCOREBOARD	"scores"
+#define PANEL_PLAYERDETAILS	"playerdetails"
 #define PANEL_OVERVIEW		"overview"
 #define PANEL_CLASS			"class"
 #define PANEL_TEAM			"team"
@@ -34,5 +35,11 @@
 
 
 #define PANEL_COMMENTARY_MODELVIEWER	"commentary_modelviewer"
+
+#define PANEL_SURVEY					"surveypanel"
+
+#ifdef PORTAL2
+#define PANEL_RADIAL_MENU "radialmenupanel"
+#endif // PORTAL2
 
 #endif // VIEWPORT_PANEL_NAMES_H

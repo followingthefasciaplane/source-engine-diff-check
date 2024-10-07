@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -10,15 +10,15 @@
 #include "c_basetempentity.h"
 #include "c_te_legacytempents.h"
 #include "fx.h"
-#include "tier1/KeyValues.h"
+#include "tier1/keyvalues.h"
 #include "tier0/vprof.h"
 #include "toolframework_client.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
-extern short		g_sModelIndexBloodDrop;	
-extern short		g_sModelIndexBloodSpray;
+extern int		g_sModelIndexBloodDrop;	
+extern int		g_sModelIndexBloodSpray;
 
 //-----------------------------------------------------------------------------
 // Purpose: Blood sprite
@@ -156,6 +156,9 @@ void C_TEBloodSprite::PostDataUpdate( DataUpdateType_t updateType )
 
 void TE_BloodSprite( IRecipientFilter& filter, float delay, KeyValues *pKeyValues )
 {
+#ifdef PORTAL2
+	Error( "Attempted to create blood particle!\n" );
+#else
 	Vector vecOrigin, vecDirection;
 	vecOrigin.x = pKeyValues->GetFloat( "originx" );
 	vecOrigin.y = pKeyValues->GetFloat( "originy" );
@@ -167,5 +170,7 @@ void TE_BloodSprite( IRecipientFilter& filter, float delay, KeyValues *pKeyValue
 //	const char *pSprayModelName = pKeyValues->GetString( "spraymodel" );
 //	const char *pDropModelName = pKeyValues->GetString( "dropmodel" );
 	int nSize = pKeyValues->GetInt( "size" );
+
 	TE_BloodSprite( filter, 0.0f, &vecOrigin, &vecDirection, c.r(), c.g(), c.b(), c.a(), nSize );
+#endif // P2
 }

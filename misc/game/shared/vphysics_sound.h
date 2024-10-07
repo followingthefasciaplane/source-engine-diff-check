@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -63,7 +63,7 @@ namespace physicssound
 
 				if ( sound.volume > 1 )
 					sound.volume = 1;
-				CPASAttenuationFilter filter( sound.origin, params.soundlevel );
+				CBroadcastRecipientFilter filter;
 				// JAY: If this entity gets deleted, the sound comes out at the world origin
 				// this sounds bad!  Play on ent 0 for now.
 				EmitSound_t ep;
@@ -73,6 +73,8 @@ namespace physicssound
 				ep.m_SoundLevel = params.soundlevel;
 				ep.m_nPitch = params.pitch;
 				ep.m_pOrigin = &sound.origin;
+				ep.m_hSoundScriptHash = params.m_hSoundScriptHash;
+				ep.m_nSoundEntryVersion = params.m_nSoundEntryVersion;
 
 				CBaseEntity::EmitSound( filter, 0 /*sound.entityIndex*/, ep );
 			}
@@ -159,7 +161,7 @@ namespace physicssound
 				return;
 
 			// Play from the world, because the entity is breaking, so it'll be destroyed soon
-			CPASAttenuationFilter filter( sound.origin, params.soundlevel );
+			CBroadcastRecipientFilter filter;
 			EmitSound_t ep;
 			ep.m_nChannel = CHAN_STATIC;
 			ep.m_pSoundName = params.soundname;
@@ -167,6 +169,9 @@ namespace physicssound
 			ep.m_SoundLevel = params.soundlevel;
 			ep.m_nPitch = params.pitch;
 			ep.m_pOrigin = &sound.origin;
+			ep.m_hSoundScriptHash = params.m_hSoundScriptHash;
+			ep.m_nSoundEntryVersion = params.m_nSoundEntryVersion;
+
 			CBaseEntity::EmitSound( filter, 0 /*sound.entityIndex*/, ep );
 		}
 		list.RemoveAll();

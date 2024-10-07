@@ -1,9 +1,9 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========== Copyright (c) Valve Corporation, All rights reserved. ==========//
 //
 // Purpose: Provide convenient mapping for shader constants
 //
 // $NoKeywords: $
-//=============================================================================
+//===========================================================================//
 
 #ifndef C_CODE_HACK
 #include "common_vertexlitgeneric_dx9.h"
@@ -19,7 +19,7 @@
 //		PSREG_AMBIENT_CUBE						PSREG_CONSTANT_07
 //		PSREG_AMBIENT_CUBE						PSREG_CONSTANT_08
 //		PSREG_AMBIENT_CUBE						PSREG_CONSTANT_09
-#define PSREG_ENVMAP_FRESNEL__SELFILLUMMASK		PSREG_CONSTANT_10
+#define PSREG_SHADER_CONTROLS_2					PSREG_CONSTANT_10
 #define PSREG_EYEPOS_SPEC_EXPONENT				PSREG_CONSTANT_11
 #define PSREG_FOG_PARAMS						PSREG_CONSTANT_12
 #define PSREG_FLASHLIGHT_ATTENUATION			PSREG_CONSTANT_13
@@ -36,13 +36,26 @@
 //		PSREG_LIGHT_INFO_ARRAY					PSREG_CONSTANT_24
 //		PSREG_LIGHT_INFO_ARRAY					PSREG_CONSTANT_25
 #define PSREG_SPEC_RIM_PARAMS					PSREG_CONSTANT_26
-// #define **free**								PSREG_CONSTANT_27	//actually using this often blows constant limits, since literals have to get stuffed somewhere...
+#define PSREG_SHADER_CONTROLS					PSREG_CONSTANT_27
 #define	PSREG_FLASHLIGHT_COLOR					PSREG_CONSTANT_28
 #define	PSREG_LINEAR_FOG_COLOR					PSREG_CONSTANT_29
 #define	PSREG_LIGHT_SCALE						PSREG_CONSTANT_30
 #define	PSREG_FLASHLIGHT_SCREEN_SCALE			PSREG_CONSTANT_31
-//  --- End of ps_2_0 and ps_2_b constants ---
-
+//  --- End of ps_2_0 and ps_2_b constants --- available to ps_3_0 though! ---
+#define	PSREG_SCREEN_SIZE						PSREG_CONSTANT_32
+#define	PSREG_UBERLIGHT_SMOOTH_EDGE_0			PSREG_CONSTANT_33
+#define	PSREG_UBERLIGHT_SMOOTH_EDGE_1			PSREG_CONSTANT_34
+#define	PSREG_UBERLIGHT_SMOOTH_EDGE_OOW			PSREG_CONSTANT_35
+#define	PSREG_UBERLIGHT_SHEAR_ROUND				PSREG_CONSTANT_36
+#define	PSREG_UBERLIGHT_AABB					PSREG_CONSTANT_37
+#define PSREG_UBERLIGHT_WORLD_TO_LIGHT			PSREG_CONSTANT_38
+//		PSREG_UBERLIGHT_WORLD_TO_LIGHT			PSREG_CONSTANT_39
+//		PSREG_UBERLIGHT_WORLD_TO_LIGHT			PSREG_CONSTANT_40
+//		PSREG_UBERLIGHT_WORLD_TO_LIGHT			PSREG_CONSTANT_41
+#define PSREG_RIMPARAMS							PSREG_CONSTANT_42
+#define PSREG_FLESH_LIGHTING_PARAMS				PSREG_CONSTANT_43
+#define PSREG_FLESH_SUBSURFACE_PARAMS			PSREG_CONSTANT_44
+#define PSREG_FLESH_SUBSURFACE_MODULATION		PSREG_CONSTANT_45
 
 #ifndef C_CODE_HACK
 //for fxc code, map the constants to register names.
@@ -78,4 +91,18 @@
 #define PSREG_CONSTANT_29	c29
 #define PSREG_CONSTANT_30	c30
 #define PSREG_CONSTANT_31	c31
+#define PSREG_CONSTANT_32	c32
+#define PSREG_CONSTANT_33	c33
+#define PSREG_CONSTANT_34	c34
+#define PSREG_CONSTANT_35	c35
+#define PSREG_CONSTANT_36	c36
+#define PSREG_CONSTANT_37	c37
+#define PSREG_CONSTANT_38	c38
+#define PSREG_CONSTANT_39	c39
+#define PSREG_CONSTANT_40	c40
+#define PSREG_CONSTANT_41	c41
+#define PSREG_CONSTANT_42	c42
+#define PSREG_CONSTANT_43	c43
+#define PSREG_CONSTANT_44	c44
+#define PSREG_CONSTANT_45	c45
 #endif

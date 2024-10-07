@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright (c) 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -16,11 +16,14 @@
 #include "shadershadowdx10.h"
 #include "meshdx10.h"
 #include "shaderapidx10_global.h"
-#include "tier1/KeyValues.h"
+#include "tier1/keyvalues.h"
 #include "tier2/tier2.h"
 #include "tier0/icommandline.h"
 #include "inputlayoutdx10.h"
 #include "shaderapibase.h"
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
 
 
 //-----------------------------------------------------------------------------
@@ -48,7 +51,6 @@ CShaderDeviceDx10* g_pShaderDeviceDx10 = &g_ShaderDeviceDx10;
 CShaderDeviceMgrDx10::CShaderDeviceMgrDx10()
 {
 	m_pDXGIFactory = NULL;
-	m_bObeyDxCommandlineOverride = true;
 }
 
 CShaderDeviceMgrDx10::~CShaderDeviceMgrDx10()
@@ -182,14 +184,8 @@ bool CShaderDeviceMgrDx10::ComputeCapsFromD3D( HardwareCaps_t *pCaps, IDXGIAdapt
 	pCaps->m_SubSysID = desc.SubSysId;
 	pCaps->m_Revision = desc.Revision;
 	pCaps->m_NumSamplers = 16;
-	pCaps->m_NumTextureStages = 0;
 	pCaps->m_HasSetDeviceGammaRamp = true;
 	pCaps->m_bSoftwareVertexProcessing = false;
-	pCaps->m_SupportsVertexShaders = true;
-	pCaps->m_SupportsVertexShaders_2_0 = false;
-	pCaps->m_SupportsPixelShaders = true;
-	pCaps->m_SupportsPixelShaders_1_4 = false;
-	pCaps->m_SupportsPixelShaders_2_0 = false;
 	pCaps->m_SupportsPixelShaders_2_b = false;
 	pCaps->m_SupportsShaderModel_3_0 = false;
 	pCaps->m_SupportsCompressedTextures = COMPRESSED_TEXTURES_ON;
@@ -204,36 +200,27 @@ bool CShaderDeviceMgrDx10::ComputeCapsFromD3D( HardwareCaps_t *pCaps, IDXGIAdapt
 	pCaps->m_MaxTextureAspectRatio = 1024;	// FIXME
 	pCaps->m_MaxPrimitiveCount = 65536;		// FIXME
 	pCaps->m_ZBiasAndSlopeScaledDepthBiasSupported = true;
-	pCaps->m_SupportsMipmapping = true;
-	pCaps->m_SupportsOverbright = true;
-	pCaps->m_SupportsCubeMaps = true;
 	pCaps->m_NumPixelShaderConstants = 1024;	// FIXME
 	pCaps->m_NumVertexShaderConstants = 1024;	// FIXME
 	pCaps->m_TextureMemorySize = desc.DedicatedVideoMemory;
 	pCaps->m_MaxNumLights = 4;
-	pCaps->m_SupportsHardwareLighting = false;
-	pCaps->m_MaxBlendMatrices = 0;
-	pCaps->m_MaxBlendMatrixIndices = 0;
 	pCaps->m_MaxVertexShaderBlendMatrices = 53;	// FIXME
 	pCaps->m_SupportsMipmappedCubemaps = true;
-	pCaps->m_SupportsNonPow2Textures = true;
 	pCaps->m_nDXSupportLevel = 100;
 	pCaps->m_PreferDynamicTextures = false;
-	pCaps->m_HasProjectedBumpEnv = true;
 	pCaps->m_MaxUserClipPlanes = 6;		// FIXME
 	pCaps->m_HDRType = bForceFloatHDR ? HDR_TYPE_FLOAT : HDR_TYPE_INTEGER;
 	pCaps->m_SupportsSRGB = true;
 	pCaps->m_FakeSRGBWrite = true;
 	pCaps->m_CanDoSRGBReadFromRTs = true;
-	pCaps->m_bSupportsSpheremapping = true;
 	pCaps->m_UseFastClipping = false;
 	pCaps->m_pShaderDLL[0] = 0;
 	pCaps->m_bNeedsATICentroidHack = false;
-	pCaps->m_bColorOnSecondStream = true;
 	pCaps->m_bSupportsStreamOffset = true;
+	pCaps->m_nMinDXSupportLevel = 92;
 	pCaps->m_nMaxDXSupportLevel = 100;
 	pCaps->m_bFogColorSpecifiedInLinearSpace = ( desc.VendorId == VENDORID_NVIDIA );
-	pCaps->m_nVertexTextureCount = 16;
+	pCaps->m_NumVertexSamplers = 4;
 	pCaps->m_nMaxVertexTextureDimension = D3D10_REQ_TEXTURE2D_U_OR_V_DIMENSION;
 	pCaps->m_bSupportsAlphaToCoverage = false;	// FIXME
 	pCaps->m_bSupportsShadowDepthTextures = true;
@@ -247,7 +234,7 @@ bool CShaderDeviceMgrDx10::ComputeCapsFromD3D( HardwareCaps_t *pCaps, IDXGIAdapt
 	pCaps->m_flMinGammaControlPoint = gammaCaps.MinConvertedValue;
 	pCaps->m_flMaxGammaControlPoint = gammaCaps.MaxConvertedValue;
 	pCaps->m_nGammaControlPointCount = gammaCaps.NumGammaControlPoints;
-	pCaps->m_bCanStretchRectFromTextures = true;
+
 	return true;
 }
 
@@ -286,6 +273,25 @@ IDXGIAdapter* CShaderDeviceMgrDx10::GetAdapter( int nAdapter ) const
 
 
 //-----------------------------------------------------------------------------
+// Returns the screen resolution
+//-----------------------------------------------------------------------------
+void CShaderDeviceMgrDx10::GetDesktopResolution( int *pWidth, int *pHeight, int nAdapter ) const
+{
+	/*
+	HMONITOR hMonitor = m_pDXGIFactory->GetAdapterMonitor( nAdapter );
+	MONITORINFO monitorInfo;
+	memset( &monitorInfo, 0, sizeof(monitorInfo) );
+	monitorInfo.cbSize = sizeof(monitorInfo); 
+	GetMonitorInfo( hMonitor, &monitorInfo );
+	*pWidth = monitorInfo.rcMonitor.right - monitorInfo.rcMonitor.left;
+	*pHeight = monitorInfo.rcMonitor.bottom - monitorInfo.rcMonitor.top;
+	*/
+	*pWidth = 1024;
+	*pHeight = 768;
+}
+
+
+//-----------------------------------------------------------------------------
 // Returns the amount of video memory in bytes for a particular adapter
 //-----------------------------------------------------------------------------
 int CShaderDeviceMgrDx10::GetVidMemBytes( int nAdapter ) const
@@ -297,7 +303,7 @@ int CShaderDeviceMgrDx10::GetVidMemBytes( int nAdapter ) const
 
 	DXGI_ADAPTER_DESC desc;
 
-#ifdef DBGFLAG_ASSERT
+#ifdef _DEBUG
 	HRESULT hr = 
 #endif
 		pAdapter->GetDesc( &desc );
@@ -436,11 +442,6 @@ CreateInterfaceFn CShaderDeviceMgrDx10::SetMode( void *hWnd, int nAdapter, const
 
 	Assert( nAdapter < GetAdapterCount() );
 	int nDXLevel = mode.m_nDXLevel != 0 ? mode.m_nDXLevel : m_Adapters[nAdapter].m_ActualCaps.m_nDXSupportLevel;
-	if ( m_bObeyDxCommandlineOverride )
-	{
-		nDXLevel = CommandLine()->ParmValue( "-dxlevel", nDXLevel );
-		m_bObeyDxCommandlineOverride = false;
-	}
 	if ( nDXLevel > m_Adapters[nAdapter].m_ActualCaps.m_nMaxDXSupportLevel )
 	{
 		nDXLevel = m_Adapters[nAdapter].m_ActualCaps.m_nMaxDXSupportLevel;
@@ -935,7 +936,7 @@ ID3D10InputLayout* CShaderDeviceDx10::GetInputLayout( VertexShaderHandle_t hShad
 //-----------------------------------------------------------------------------
 // Creates/destroys Mesh
 //-----------------------------------------------------------------------------
-IMesh* CShaderDeviceDx10::CreateStaticMesh( VertexFormat_t vertexFormat, const char *pBudgetGroup, IMaterial * pMaterial )
+IMesh* CShaderDeviceDx10::CreateStaticMesh( VertexFormat_t vertexFormat, const char *pBudgetGroup, IMaterial * pMaterial, VertexStreamSpec_t *pStreamSpec )
 {
 	LOCK_SHADERAPI();
 	return NULL;
@@ -992,7 +993,7 @@ IVertexBuffer *CShaderDeviceDx10::GetDynamicVertexBuffer( int nStreamID, VertexF
 	return NULL;
 }
 
-IIndexBuffer *CShaderDeviceDx10::GetDynamicIndexBuffer( MaterialIndexFormat_t fmt, bool bBuffered )
+IIndexBuffer *CShaderDeviceDx10::GetDynamicIndexBuffer( )
 {
 	LOCK_SHADERAPI();
 	return NULL;

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -6,15 +6,15 @@
 
 #include "cheatcodes.h"
 #include "cmd.h"
-#include "KeyValues.h"
+#include "keyvalues.h"
 #include "filesystem.h"
 #include "tier2/tier2.h"
 #include "inputsystem/iinputsystem.h"
 #include "host.h"
+#include "common.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
-
 
 //=========================================================
 // Cheat Codes
@@ -24,7 +24,6 @@
 #define CHEAT_COMMAND_MAX_LEN	128
 static ButtonCode_t s_pKeyLog[CHEAT_CODE_MAX_LEN];
 static int s_nKeyLogIndex = 0;
-
 
 struct CheatCodeData_t
 {
@@ -37,10 +36,7 @@ struct CheatCodeData_t
 
 	char			szCommand[ CHEAT_COMMAND_MAX_LEN ];
 };
-
-
 static CUtlVector<CheatCodeData_t> s_CheatCodeCommands;
-
 
 void ClearCheatCommands( void )
 {
@@ -49,39 +45,45 @@ void ClearCheatCommands( void )
 
 void ReadCheatCommandsFromFile( char *pchFileName )
 {
+#if defined( _CERT )
+	return;
+#endif
 	KeyValues *pCheatCodeKeys = new KeyValues( "cheat_codes" );
-	pCheatCodeKeys->LoadFromFile( g_pFullFileSystem, pchFileName, NULL );
-
-	KeyValues *pKey = NULL;
-	for ( pKey = pCheatCodeKeys->GetFirstTrueSubKey(); pKey; pKey = pKey->GetNextTrueSubKey() )
+	if ( pCheatCodeKeys->LoadFromFile( g_pFullFileSystem, pchFileName, NULL ) )
 	{
-		int iCheat = s_CheatCodeCommands.AddToTail();
-		CheatCodeData_t *pNewCheatCode = &(s_CheatCodeCommands[ iCheat ]);
-
-		Q_strncpy( pNewCheatCode->szName, pKey->GetName(), CHEAT_NAME_MAX_LEN );	// Get the name
-		pNewCheatCode->bDevOnly = ( pKey->GetInt( "dev", 0 ) != 0 );				// Get developer only flag
-		pNewCheatCode->iCodeLength = 0;												// Start at zero code elements
-		Q_strncpy( pNewCheatCode->szCommand, pKey->GetString( "command", "echo \"Cheat code has no command!\"" ), CHEAT_COMMAND_MAX_LEN );
-
-		KeyValues *pSubKey = NULL;
-		for ( pSubKey = pKey->GetFirstSubKey(); pSubKey; pSubKey = pSubKey->GetNextKey() )
+		KeyValues *pKey = NULL;
+		for ( pKey = pCheatCodeKeys->GetFirstTrueSubKey(); pKey; pKey = pKey->GetNextTrueSubKey() )
 		{
-			const char *pchType = pSubKey->GetName();
-			if ( Q_strcmp( pchType, "code" ) == 0 )
-			{
-				AssertMsg( ( pNewCheatCode->iCodeLength < CHEAT_NAME_MAX_LEN ), "Cheat code elements exceeded max!" );
+			int iCheat = s_CheatCodeCommands.AddToTail();
+			CheatCodeData_t *pNewCheatCode = &(s_CheatCodeCommands[ iCheat ]);
 
-				pNewCheatCode->pButtonCodes[ pNewCheatCode->iCodeLength ] = g_pInputSystem->StringToButtonCode( pSubKey->GetString() );
-				++pNewCheatCode->iCodeLength;
+			Q_strncpy( pNewCheatCode->szName, pKey->GetName(), CHEAT_NAME_MAX_LEN );	// Get the name
+			pNewCheatCode->bDevOnly = ( pKey->GetInt( "dev", 0 ) != 0 );				// Get developer only flag
+			pNewCheatCode->iCodeLength = 0;												// Start at zero code elements
+			Q_strncpy( pNewCheatCode->szCommand, pKey->GetString( "command", "echo \"Cheat code has no command!\"" ), CHEAT_COMMAND_MAX_LEN );
+
+			KeyValues *pSubKey = NULL;
+			for ( pSubKey = pKey->GetFirstSubKey(); pSubKey; pSubKey = pSubKey->GetNextKey() )
+			{
+				const char *pchType = pSubKey->GetName();
+				if ( Q_strcmp( pchType, "code" ) == 0 )
+				{
+					AssertMsg( ( pNewCheatCode->iCodeLength < CHEAT_NAME_MAX_LEN ), "Cheat code elements exceeded max!" );
+
+					pNewCheatCode->pButtonCodes[ pNewCheatCode->iCodeLength ] = g_pInputSystem->StringToButtonCode( pSubKey->GetString() );
+					++pNewCheatCode->iCodeLength;
+				}
+			}
+
+			if ( pNewCheatCode->iCodeLength < CHEAT_NAME_MAX_LEN )
+			{
+				// If it's activation is a subsequence of another cheat, the longer cheat can't be activated!
+				DevWarning( "Cheat code \"%s\" has less than %i code elements!", pKey->GetName(), CHEAT_NAME_MAX_LEN );
 			}
 		}
-
-		if ( pNewCheatCode->iCodeLength < CHEAT_NAME_MAX_LEN )
-		{
-			// If it's activation is a subsequence of another cheat, the longer cheat can't be activated!
-			DevWarning( "Cheat code \"%s\" has less than %i code elements!", pKey->GetName(), CHEAT_NAME_MAX_LEN );
-		}
 	}
+
+	pCheatCodeKeys->deleteThis();
 }
 
 //---------------------------------------------------------
@@ -95,6 +97,9 @@ void ResetKeyLogging()
 //---------------------------------------------------------
 void LogKeyPress( ButtonCode_t code )
 {
+#if defined( _CERT )
+	return;
+#endif
 	if ( s_nKeyLogIndex < CHEAT_CODE_MAX_LEN )
 	{
 		// Log isn't full, so add it in the next spot
@@ -118,6 +123,9 @@ void LogKeyPress( ButtonCode_t code )
 //---------------------------------------------------------
 void CheckCheatCodes()
 {
+#if defined( _CERT )
+	return;
+#endif
 	// Loop through all cheat codes
 	int iNumCheatCodes = s_CheatCodeCommands.Count();
 	for ( int iCheatCode = 0; iCheatCode < iNumCheatCodes; ++iCheatCode )
@@ -145,9 +153,7 @@ void CheckCheatCodes()
 			// Every part of the code was correct
 			DevMsg( "Cheat code \"%s\" activated!", pCheatCode->szName );
 
-			Cbuf_AddText( "sv_cheats 1\n" );
-			Cbuf_AddText( pCheatCode->szCommand );
-			Cbuf_AddText( "\n" );
+			Cbuf_AddText( Cbuf_GetCurrentPlayer(), va( "sv_cheats 1\n%s\n", pCheatCode->szCommand ) );
 
 			ResetKeyLogging();
 			return;

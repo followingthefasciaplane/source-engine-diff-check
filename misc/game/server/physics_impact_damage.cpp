@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -11,6 +11,10 @@
 #include "vphysics/friction.h"
 #include "vphysics/player_controller.h"
 #include "world.h"
+
+#ifdef PORTAL2
+	#include "portal_grabcontroller_shared.h"
+#endif
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -441,7 +445,11 @@ float CalculatePhysicsImpactDamage( int index, gamevcollisionevent_t *pEvent, co
 		if ( gpGlobals->maxClients == 1 )
 		{
 			// if the player is holding the object, use it's real mass (player holding reduced the mass)
+#ifdef PORTAL2
+			CBasePlayer *pPlayer = GetPlayerHoldingEntity( static_cast<CBaseEntity *>( pEvent->pObjects[index]->GetGameData() ) );
+#else
 			CBasePlayer *pPlayer = UTIL_GetLocalPlayer();
+#endif
 			if ( pPlayer )
 			{
 				float mass = pPlayer->GetHeldObjectMass( pEvent->pObjects[index] );
@@ -459,7 +467,7 @@ float CalculatePhysicsImpactDamage( int index, gamevcollisionevent_t *pEvent, co
 
 	if ( !pEvent->pObjects[otherIndex]->IsStatic() && otherMass < table.smallMassMax && table.smallMassCap > 0 )
 	{
-		damage = clamp( damage, 0.f, table.smallMassCap );
+		damage = clamp( damage, 0, table.smallMassCap );
 	}
 
 	return damage;

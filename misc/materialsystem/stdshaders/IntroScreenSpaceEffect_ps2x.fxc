@@ -1,10 +1,8 @@
+//========== Copyright (c) Valve Corporation, All rights reserved. ==========//
+
 // DYNAMIC: "MODE"				"0..9"
 
-// STATIC: "CONVERT_TO_SRGB"	"0..1"	[ps20b][= g_pHardwareConfig->NeedsShaderSRGBConversion()] [PC]
-// STATIC: "CONVERT_TO_SRGB"	"0..0"	[= 0] [XBOX]
 // STATIC: "LINEAR_TO_SRGB"		"0..1"	[ps20b]
-
-#define HDRTYPE HDR_TYPE_NONE
 #include "common_ps_fxc.h"
 
 const float g_Alpha : register( c0 );
@@ -25,7 +23,7 @@ float3 RGBtoHSV( in float3 rgb )
 	fmax = max( max( rgb.r, rgb.g) , rgb.b );
 	hsv.b = fmax;				// v
 	delta = fmax - fmin;
-	if( delta != 0 )
+//	if( fmax != 0 )
 	{
 		hsv.g = delta / fmax;		// s
 		if( rgb.r == fmax )
@@ -38,12 +36,12 @@ float3 RGBtoHSV( in float3 rgb )
 		if( hsv.r < 0 )
 			hsv.r += 360;
 	}
-	else 
-	{
-		// r = g = b = 0		// s = 0, v is undefined
-		hsv.g = 0;
-		hsv.r = -1;
-	}
+//	else 
+// {
+//		// r = g = b = 0		// s = 0, v is undefined
+//		hsv.g = 0;
+//		hsv.r = -1;
+//	}
 	return hsv;
 }
 
@@ -68,37 +66,37 @@ float3 HSVtoRGB( in float3 hsv )
 		p = v * ( 1 - s );
 		q = v * ( 1 - s * f );
 		t = v * ( 1 - s * ( 1 - f ) );
-		if( h < 1)
+		if( i == 0 )
 		{
 			rgb.r = v;
 			rgb.g = t;
 			rgb.b = p;
 		}
-		else if( h >= 1 && h < 2 )
+		else if( i == 1 )
 		{
 			rgb.r = q;
 			rgb.g = v;
 			rgb.b = p;
 		}
-		else if( h >= 2 && h < 3 )
+		else if( i == 2 )
 		{
 			rgb.r = p;
 			rgb.g = v;
 			rgb.b = t;
 		}
-		else if( h >= 3 && h < 4 )
+		else if( i == 3 )
 		{
 			rgb.r = p;
 			rgb.g = q;
 			rgb.b = v;
 		}
-		else if( h >= 4 && h < 5 )
+		else if( i == 4 )
 		{
 			rgb.r = t;
 			rgb.g = p;
 			rgb.b = v;
 		}
-		else // if ( h >= 5 )
+		else // if( i == 5 )
 		{
 			rgb.r = v;
 			rgb.g = p;

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -15,8 +15,9 @@
 #endif
 
 class CBaseAnimatingOverlay;
+class IBoneSetup;
 
-class CAnimationLayer
+class CAnimationLayer : public CMemZeroOnNew
 {
 public:	
 	DECLARE_CLASS_NOBASE( CAnimationLayer );
@@ -43,6 +44,7 @@ public:
 #define ANIM_LAYER_DONTRESTORE	0x0008
 #define ANIM_LAYER_CHECKACCESS	0x0010
 #define ANIM_LAYER_DYING		0x0020
+#define ANIM_LAYER_NOEVENTS		0x0040
 
 	int		m_fFlags;
 
@@ -51,10 +53,10 @@ public:
 	
 	CNetworkVar( int, m_nSequence );
 	CNetworkVar( float, m_flCycle );
+	CNetworkVar( float, m_flPlaybackRate );
 	CNetworkVar( float, m_flPrevCycle );
 	CNetworkVar( float, m_flWeight );
-	
-	float	m_flPlaybackRate;
+	CNetworkVar( float, m_flWeightDeltaRate );
 
 	float	m_flBlendIn; // start and end blend frac (0.0 for now blend)
 	float	m_flBlendOut; 
@@ -65,12 +67,18 @@ public:
 	float	m_flLayerAnimtime;
 	float	m_flLayerFadeOuttime;
 
+	// dispatch flags
+	CStudioHdr *m_pDispatchedStudioHdr;
+	int		m_nDispatchedSrc;
+	int		m_nDispatchedDst;
+
 	// For checking for duplicates
 	Activity	m_nActivity;
 
 	// order of layering on client
 	int		m_nPriority;
 	CNetworkVar( int, m_nOrder );
+	int		GetOrder( void ) { return m_nOrder; }
 
 	bool	IsActive( void ) { return ((m_fFlags & ANIM_LAYER_ACTIVE) != 0); }
 	bool	IsAutokill( void ) { return ((m_fFlags & ANIM_LAYER_AUTOKILL) != 0); }
@@ -80,6 +88,21 @@ public:
 	void	Dying( void ) { m_fFlags |= ANIM_LAYER_DYING; }
 	bool	IsDying( void ) { return ((m_fFlags & ANIM_LAYER_DYING) != 0); }
 	void	Dead( void ) { m_fFlags &= ~ANIM_LAYER_DYING; }
+	bool	NoEvents( void ) { return ((m_fFlags & ANIM_LAYER_NOEVENTS) != 0); }
+
+	void	SetSequence( int nSequence );
+	void	SetCycle( float flCycle );
+	void	SetPrevCycle( float flCycle );
+	void	SetPlaybackRate( float flPlaybackRate );
+	void	SetWeight( float flWeight );
+	void	SetWeightDeltaRate( float flDelta );
+
+	int		GetSequence( ) const;
+	float	GetCycle( ) const;
+	float	GetPrevCycle( ) const;
+	float	GetPlaybackRate( ) const;
+	float	GetWeight( ) const;
+	float	GetWeightDeltaRate( ) const;
 
 	bool	IsAbandoned( void );
 	void	MarkActive( void );
@@ -120,7 +143,65 @@ inline float CAnimationLayer::GetFadeout( float flCurTime )
 	return s;
 }
 
+FORCEINLINE void CAnimationLayer::SetSequence( int nSequence )
+{
+	m_nSequence = nSequence;
+}
 
+FORCEINLINE void CAnimationLayer::SetCycle( float flCycle )
+{
+	m_flCycle = flCycle;
+}
+
+FORCEINLINE void CAnimationLayer::SetWeight( float flWeight )
+{
+	m_flWeight = flWeight;
+}
+
+FORCEINLINE void CAnimationLayer::SetWeightDeltaRate( float flDelta )
+{
+	m_flWeightDeltaRate = flDelta;
+}
+
+FORCEINLINE void CAnimationLayer::SetPrevCycle( float flPrevCycle )
+{
+	m_flPrevCycle = flPrevCycle;
+}
+
+FORCEINLINE void CAnimationLayer::SetPlaybackRate( float flPlaybackRate )
+{
+	m_flPlaybackRate = flPlaybackRate;
+}
+
+FORCEINLINE int	CAnimationLayer::GetSequence( ) const
+{
+	return m_nSequence;
+}
+
+FORCEINLINE float CAnimationLayer::GetCycle( ) const
+{
+	return m_flCycle;
+}
+
+FORCEINLINE float CAnimationLayer::GetPrevCycle( ) const
+{
+	return m_flPrevCycle;
+}
+
+FORCEINLINE float CAnimationLayer::GetPlaybackRate( ) const
+{
+	return m_flPlaybackRate;
+}
+
+FORCEINLINE float CAnimationLayer::GetWeight( ) const
+{
+	return m_flWeight;
+}
+
+FORCEINLINE float CAnimationLayer::GetWeightDeltaRate( ) const
+{
+	return m_flWeightDeltaRate;
+}
 
 class CBaseAnimatingOverlay : public CBaseAnimating
 {
@@ -139,11 +220,14 @@ private:
 
 public:
 	
+	virtual CBaseAnimatingOverlay *	GetBaseAnimatingOverlay() { return this; }
+	
 	virtual void	OnRestore();
+	virtual void	SetModel( const char *szModelName );
 
 	virtual void	StudioFrameAdvance();
 	virtual	void	DispatchAnimEvents ( CBaseAnimating *eventHandler );
-	virtual void	GetSkeleton( CStudioHdr *pStudioHdr, Vector pos[], Quaternion q[], int boneMask );
+	virtual void	GetSkeleton( CStudioHdr *pStudioHdr, BoneVector pos[], BoneQuaternionAligned q[], int boneMask );
 
 	int		AddGestureSequence( int sequence, bool autokill = true );
 	int		AddGestureSequence( int sequence, float flDuration, bool autokill = true );
@@ -165,7 +249,6 @@ public:
 
 	void	SetLayerCycle( int iLayer, float flCycle );
 	void	SetLayerCycle( int iLayer, float flCycle, float flPrevCycle );
-	void	SetLayerCycle( int iLayer, float flCycle, float flPrevCycle, float flLastEventCheck );
 	float	GetLayerCycle( int iLayer );
 
 	void	SetLayerPlaybackRate( int iLayer, float flPlaybackRate );
@@ -176,6 +259,7 @@ public:
 	void	SetLayerAutokill( int iLayer, bool bAutokill );
 	void	SetLayerLooping( int iLayer, bool bLooping );
 	void	SetLayerNoRestore( int iLayer, bool bNoRestore );
+	void	SetLayerNoEvents( int iLayer, bool bNoEvents );
 
 	Activity	GetLayerActivity( int iLayer );
 	int			GetLayerSequence( int iLayer );
@@ -185,13 +269,17 @@ public:
 	void	RemoveLayer( int iLayer, float flKillRate = 0.2, float flKillDelay = 0.0 );
 	void	FastRemoveLayer( int iLayer );
 
-	CAnimationLayer *GetAnimOverlay( int iIndex );
+	CAnimationLayer *GetAnimOverlay( int iIndex, bool bUseOrder = true );
 	int GetNumAnimOverlays() const;
 	void SetNumAnimOverlays( int num );
 
 	void VerifyOrder( void );
 
 	bool	HasActiveLayer( void );
+
+	virtual bool UpdateDispatchLayer( CAnimationLayer *pLayer, CStudioHdr *pWeaponStudioHdr, int iSequence );
+	void AccumulateDispatchedLayers( CBaseAnimatingOverlay *pWeapon, CStudioHdr *pWeaponStudioHdr, IBoneSetup &boneSetup, BoneVector pos[], BoneQuaternion q[], float currentTime );
+	void RegenerateDispatchedLayers( IBoneSetup &boneSetup, BoneVector pos[], BoneQuaternion q[], float currentTime );
 
 private:
 	int		AllocateLayer( int iPriority = 0 ); // lower priorities are processed first

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Core Temp Entity client implementation.
 //
@@ -92,11 +92,11 @@ void C_BaseTempEntity::Precache( void )
 //-----------------------------------------------------------------------------
 void C_BaseTempEntity::PrecacheTempEnts( void )
 {
-	C_BaseTempEntity *pTe = GetList();
-	while ( pTe )
+	C_BaseTempEntity *te = GetList();
+	while ( te )
 	{
-		pTe->Precache();
-		pTe = pTe->GetNext();
+		te->Precache();
+		te = te->GetNext();
 	}
 }
 
@@ -106,12 +106,12 @@ void C_BaseTempEntity::PrecacheTempEnts( void )
 void C_BaseTempEntity::ClearDynamicTempEnts( void )
 {
 	C_BaseTempEntity *next;
-	C_BaseTempEntity *pTe = s_pDynamicEntities;
-	while ( pTe )
+	C_BaseTempEntity *te = s_pDynamicEntities;
+	while ( te )
 	{
-		next = pTe->GetNextDynamic();
-		delete pTe;
-		pTe = next;
+		next = te->GetNextDynamic();
+		delete te;
+		te = next;
 	}
 
 	s_pDynamicEntities = NULL;
@@ -123,20 +123,20 @@ void C_BaseTempEntity::ClearDynamicTempEnts( void )
 void C_BaseTempEntity::CheckDynamicTempEnts( void )
 {
 	C_BaseTempEntity *next, *newlist = NULL;
-	C_BaseTempEntity *pTe = s_pDynamicEntities;
-	while ( pTe )
+	C_BaseTempEntity *te = s_pDynamicEntities;
+	while ( te )
 	{
-		next = pTe->GetNextDynamic();
-		if ( pTe->ShouldDestroy() )
+		next = te->GetNextDynamic();
+		if ( te->ShouldDestroy() )
 		{
-			delete pTe;
+			delete te;
 		}
 		else
 		{
-			pTe->m_pNextDynamic = newlist;
-			newlist = pTe;
+			te->m_pNextDynamic = newlist;
+			newlist = te;
 		}
-		pTe = next;
+		te = next;
 	}
 
 	s_pDynamicEntities = newlist;
@@ -190,7 +190,7 @@ void C_BaseTempEntity::PostDataUpdate( DataUpdateType_t updateType ) { Assert( 0
 void C_BaseTempEntity::OnPreDataChanged( DataUpdateType_t updateType ) { Assert( 0 ); }
 void C_BaseTempEntity::OnDataChanged( DataUpdateType_t updateType ) { Assert( 0 ); }
 void C_BaseTempEntity::SetDormant( bool bDormant ) { Assert( 0 ); }
-bool C_BaseTempEntity::IsDormant( void ) { Assert( 0 ); return false; };
+bool C_BaseTempEntity::IsDormant( void ) const { Assert( 0 ); return false; };
 void C_BaseTempEntity::ReceiveMessage( int classID, bf_read &msg ) { Assert( 0 ); }
 void C_BaseTempEntity::SetDestroyedOnRecreateEntities( void ) { Assert(0); }
 

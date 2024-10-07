@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // The copyright to the contents herein is the property of Valve, L.L.C.
 // The contents may be used and/or copied only with the written permission of
@@ -14,7 +14,13 @@
 #pragma once
 #endif
 
-#include "appframework/IAppSystem.h"
+#include "appframework/iappsystem.h"
+
+#define BIK_LOOP		0x00000001	// play endlessly
+#define BIK_PRELOAD		0x00000002	// causes the entire move to load into memory
+#define BIK_NO_AUDIO	0x00000004	// video doesn't have audio
+
+#define ENABLE_BIK_PERF_SPEW 0
 
 //-----------------------------------------------------------------------------
 // Forward declarations
@@ -77,17 +83,17 @@ enum
 //-----------------------------------------------------------------------------
 // Main AVI interface
 //-----------------------------------------------------------------------------
-#define BIK_INTERFACE_VERSION "VBik001"
-
 class IBik : public IAppSystem
 {
 public:
 	// Create/destroy a BINK material (a materialsystem IMaterial)
-	virtual BIKMaterial_t CreateMaterial( const char *pMaterialName, const char *pFileName, const char *pPathID ) = 0;
+	virtual BIKMaterial_t CreateMaterial( const char *pMaterialName, const char *pFileName, const char *pPathID, int flags = 0 ) = 0;
 	virtual void DestroyMaterial( BIKMaterial_t hMaterial ) = 0;
 	
 	// Update the frame (if necessary)
 	virtual bool Update( BIKMaterial_t hMaterial ) = 0;
+
+	virtual bool ReadyForSwap( BIKMaterial_t hMaterial ) = 0;
 
 	// Gets the IMaterial associated with an BINK material
 	virtual IMaterial* GetMaterial( BIKMaterial_t hMaterial ) = 0;
@@ -104,6 +110,9 @@ public:
 	// Returns the total frame count of the BINK
 	virtual int GetFrameCount( BIKMaterial_t hMaterial ) = 0;
 
+	// Get our current frame
+	virtual int GetFrame( BIKMaterial_t hMaterial ) = 0;
+
 	// Sets the frame for an BINK material (use instead of SetTime)
 	virtual void SetFrame( BIKMaterial_t hMaterial, float flFrame ) = 0;
 
@@ -111,22 +120,34 @@ public:
 #if !defined( _X360 )
 	// Sets the direct sound device that Bink will decode to
 	virtual bool SetDirectSoundDevice( void	*pDevice ) = 0;
+	virtual bool SetMilesSoundDevice( void *pDevice ) = 0;
 #else
 	//needs to be called after xaudio is initialized
 	virtual bool HookXAudio( void ) = 0;
 #endif
-#elif defined( LINUX )
-	// Sets the SDL device that Bink will decode to
-	virtual bool SetSDLDevice( int frequency, uint16 format, int nchannels ) = 0;
-
-	// Called to mix in Bink audio. Returns true if audio was mixed in, false otherwise.
-	virtual bool SDLMixerAudioCallback( void *stream, int len ) = 0;
 #endif
 
-	// Plays a given Bink file until it completes or the user presses ESC, SPACE, or ENTER
-	virtual void PlayBinkVideo( const char *filename, void *mainWindow, int width, int height, float forcedMinTime ) = 0;
+#if defined( _PS3 )
+	virtual bool SetPS3SoundDevice( int nChannelCount ) = 0;
+#endif // _PS3
+
+	// Pause and unpause the movie playback
+	virtual void Pause( BIKMaterial_t hMaterial ) = 0;
+	virtual void Unpause( BIKMaterial_t hMaterial ) = 0;
+
+	// Number for appending the current material name
+	virtual int GetGlobalMaterialAllocationNumber( void ) = 0;
+
+	virtual bool PrecacheMovie( const char *pFileName, const char *pPathID = NULL ) = 0;
+	virtual void *GetPrecachedMovie( const char *pFileName ) = 0;
+	virtual void EvictPrecachedMovie( const char *pFileName ) = 0;
+	virtual void EvictAllPrecachedMovies() = 0;
+
+	virtual void UpdateVolume( BIKMaterial_t hMaterial ) = 0;
+
+	virtual bool IsMovieResidentInMemory( BIKMaterial_t hMaterial ) = 0;
 };
 
-
+extern IBik *g_pBIK;
 
 #endif // IBIK_H

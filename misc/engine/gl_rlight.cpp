@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -25,6 +25,9 @@
 //-----------------------------------------------------------------------------
 extern ConVar r_avglight;
 extern int r_surfacevisframe;
+extern ConVar r_unloadlightmaps;
+extern ConVar r_keepstyledlightmapsonly;
+extern bool g_bHunkAllocLightmaps;
 
 static model_t* s_pLightVecModel = 0;
 
@@ -71,14 +74,14 @@ R_AnimateLight
 */
 void R_AnimateLight (void)
 {
-	INetworkStringTable *table = cl.m_pLightStyleTable;
+	INetworkStringTable *table = GetBaseLocalClient().m_pLightStyleTable;
 
 	if ( !table )
 		return;
 
 	// light animations
 	// 'm' is normal light, 'a' is no light, 'z' is double bright
-	int i = (int)(cl.GetTime()*10);
+	int i = (int)(GetBaseLocalClient().GetTime()*10);
 
 	for (int j=0 ; j<MAX_LIGHTSTYLES ; j++)
 	{
@@ -279,7 +282,7 @@ void R_MarkDLightsOnSurface( mnode_t* pNode )
 	dlight_t	*l = cl_dlights;
 	for (int i=0 ; i<MAX_DLIGHTS ; i++, l++)
 	{
-		if (l->die < cl.GetTime() || !l->IsRadiusGreaterThanZero() )
+		if (l->die < GetBaseLocalClient().GetTime() || !l->IsRadiusGreaterThanZero() )
 			continue;
 		if (l->flags & DLIGHT_NO_WORLD_ILLUMINATION)
 			continue;
@@ -340,6 +343,22 @@ static void ComputeLightmapCoordsAtIntersection( msurfacelighting_t *pLighting, 
 	}
 }
 
+//-----------------------------------------------------------------------------
+// Computes the lightmap color at a particular point
+//-----------------------------------------------------------------------------
+static void ComputeLightmapColorFromAverage( msurfacelighting_t *pLighting, bool bUseLightStyles, Vector& c )
+{
+	int nMaxMaps = bUseLightStyles ? MAXLIGHTMAPS : 1; 
+	for (int maps = 0 ; maps < nMaxMaps && pLighting->m_nStyles[maps] != 255 ; ++maps)
+	{
+		float scale = LightStyleValue( pLighting->m_nStyles[maps] );
+
+		ColorRGBExp32* pAvgColor = pLighting->AvgLightColor(maps);
+		c[0] += TexLightToLinear( pAvgColor->r, pAvgColor->exponent ) * scale;
+		c[1] += TexLightToLinear( pAvgColor->g, pAvgColor->exponent ) * scale;
+		c[2] += TexLightToLinear( pAvgColor->b, pAvgColor->exponent ) * scale;
+	}
+}
 
 //-----------------------------------------------------------------------------
 // Computes the lightmap color at a particular point
@@ -357,6 +376,14 @@ static void ComputeLightmapColor( SurfaceHandle_t surfID, int ds, int dt, bool b
 			// Stop spamming. I heard you already!!!
 			ConMsg( "hit surface has no samples\n" );
 		}
+		return;
+	}
+
+
+	if ( !g_bHunkAllocLightmaps && r_keepstyledlightmapsonly.GetBool() )
+	{
+		// lightmap data is gone, can only fallback to an apporximate
+		ComputeLightmapColorFromAverage( pLighting, bUseLightStyles, c );
 		return;
 	}
 
@@ -382,25 +409,6 @@ static void ComputeLightmapColor( SurfaceHandle_t surfID, int ds, int dt, bool b
 		pLightmap += offset;
 	}
 }
-
-
-//-----------------------------------------------------------------------------
-// Computes the lightmap color at a particular point
-//-----------------------------------------------------------------------------
-static void ComputeLightmapColorFromAverage( msurfacelighting_t *pLighting, bool bUseLightStyles, Vector& c )
-{
-	int nMaxMaps = bUseLightStyles ? MAXLIGHTMAPS : 1; 
-	for (int maps = 0 ; maps < nMaxMaps && pLighting->m_nStyles[maps] != 255 ; ++maps)
-	{
-		float scale = LightStyleValue( pLighting->m_nStyles[maps] );
-
-		ColorRGBExp32* pAvgColor = pLighting->AvgLightColor(maps);
-		c[0] += TexLightToLinear( pAvgColor->r, pAvgColor->exponent ) * scale;
-		c[1] += TexLightToLinear( pAvgColor->g, pAvgColor->exponent ) * scale;
-		c[2] += TexLightToLinear( pAvgColor->b, pAvgColor->exponent ) * scale;
-	}
-}
-
 
 //-----------------------------------------------------------------------------
 // Tests a particular surface
@@ -551,7 +559,6 @@ static SurfaceHandle_t R_LightVecDisplacementChain( LightVecState_t& state, bool
 
 	for ( int i = 0; i < state.m_LightTestDisps.Count(); i++ )
 	{
-	
 		float dist;
 		Vector2D luv, tuv;
 		IDispInfo *pDispInfo = state.m_LightTestDisps[i];

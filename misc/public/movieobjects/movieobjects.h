@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -12,7 +12,9 @@
 
 #include "movieobjects/dmeclip.h"
 #include "movieobjects/dmetransform.h"
+#include "movieobjects/dmeoverlay.h"
 #include "movieobjects/dmetransformlist.h"
+#include "movieobjects/dmedag.h"
 #include "movieobjects/dmecamera.h"
 #include "movieobjects/dmeshape.h"
 #include "movieobjects/dmevertexdata.h"
@@ -20,12 +22,11 @@
 #include "movieobjects/dmefaceset.h"
 #include "movieobjects/dmematerial.h"
 #include "movieobjects/dmetimeframe.h"
-#include "movieobjects/dmedag.h"
 #include "movieobjects/dmelight.h"
+#include "movieobjects/dmeoperator.h"
 #include "movieobjects/dmegamemodel.h"
 #include "movieobjects/dmemdl.h"
 #include "movieobjects/dmesound.h"
-#include "movieobjects/dmeoperator.h"
 #include "movieobjects/dmeanimationlist.h"
 #include "movieobjects/dmeattachment.h"
 #include "movieobjects/dmejoint.h"
@@ -36,7 +37,6 @@
 #include "movieobjects/dmeunpackoperators.h"
 #include "movieobjects/dmeexpressionoperator.h"
 #include "movieobjects/dmeinput.h"
-#include "movieobjects/dmegamemodelinput.h"
 #include "movieobjects/dmekeyboardinput.h"
 #include "movieobjects/dmemouseinput.h"
 #include "movieobjects/dmechannel.h"
@@ -44,7 +44,6 @@
 #include "movieobjects/dmetrack.h"
 #include "movieobjects/dmetrackgroup.h"
 #include "movieobjects/dmeanimationset.h"
-#include "movieobjects/dmebalancetostereocalculatoroperator.h"
 #include "movieobjects/dmemodel.h"
 #include "movieobjects/dmemakefile.h"
 #include "movieobjects/dmedccmakefile.h"
@@ -53,9 +52,14 @@
 #include "movieobjects/dmephonememapping.h"
 #include "movieobjects/dmetimeselection.h"
 #include "movieobjects/dmeselection.h"
-#include "movieobjects/dmeeyeposition.h"
-#include "movieobjects/dmeeyeball.h"
 #include "movieobjects/dmedrawsettings.h"
+#include "movieobjects/dmerig.h"
+#include "movieobjects/dmerighandle.h"
+#include "movieobjects/dmerigconstraintoperators.h"
+#include "movieobjects/dmetransformcontrol.h"
+#include "movieobjects/dmecontrolgroup.h"
+#include "movieobjects/dmeconnectionoperator.h"
+#include "movieobjects/dmeflexrules.h"
 
 #define USING_ELEMENT_FACTORY( className )			\
 	extern C##className *g_##C##className##LinkerHack;		\

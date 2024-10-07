@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: Random number generator
 //
@@ -170,14 +170,8 @@ int CUniformRandomStream::RandomInt( int iLow, int iHigh )
 	unsigned int maxAcceptable;
 	unsigned int x = iHigh-iLow+1;
 	unsigned int n;
-
-	// If you hit either of these assert, you're not getting back the random number that you thought you were.
-	Assert( x == iHigh-(int64)iLow+1 ); // Check that we didn't overflow int
-	Assert( x-1 <= MAX_RANDOM_RANGE ); // Check that the values provide an acceptable range
-
 	if (x <= 1 || MAX_RANDOM_RANGE < x-1)
 	{
-		Assert( iLow == iHigh ); // This is the only time it is OK to have a range containing a single number
 		return iLow;
 	}
 

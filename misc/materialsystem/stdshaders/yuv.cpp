@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -51,7 +51,7 @@ BEGIN_VS_SHADER_FLAGS( YUV, "Help for YUV", SHADER_NOT_EDITABLE )
 
 		DYNAMIC_STATE
 		{
-			pShaderAPI->BindStandardTexture( SHADER_SAMPLER0, TEXTURE_FRAME_BUFFER_FULL_TEXTURE_0 );
+			pShaderAPI->BindStandardTexture( SHADER_SAMPLER0, false, TEXTURE_FRAME_BUFFER_FULL_TEXTURE_0 );
 
 			screenspaceeffect_Dynamic_Index vshIndex;
 			vshIndex.SetDOWATERFOG( pShaderAPI->GetSceneFogMode() == MATERIAL_FOG_LINEAR_BELOW_FOG_Z );

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -30,17 +30,18 @@
 #include "precache.h"
 #include "baseclientstate.h"
 #include "clientframe.h"
+#include "netmessages.h"
 
 
 
 struct model_t;
-struct SoundInfo_t;
 
 class ClientClass;
 class CSfxTable;
 class CPureServerWhitelist;
 
 #define	MAX_DEMOS		32
+#define	MAX_DEMONAME	32
 
 struct AddAngle
 {
@@ -48,6 +49,17 @@ struct AddAngle
 	float starttime;
 };
 
+class CQueuedEntityMessage
+{
+public:
+
+	bool operator==( const CQueuedEntityMessage &val ) const 
+	{ 
+		return this->m_msg.ent_index() == val.m_msg.ent_index(); 
+	}
+
+	CSVCMsg_EntityMsg m_msg;
+};
 
 //-----------------------------------------------------------------------------
 // Purpose: CClientState should hold all pieces of the client state
@@ -55,6 +67,8 @@ struct AddAngle
 //-----------------------------------------------------------------------------
 class CClientState : public CBaseClientState, public CClientFrameManager
 {
+	typedef CBaseClientState BaseClass;
+
 	typedef struct CustomFile_s
 	{
 		CRC32_t			crc;	//file CRC
@@ -63,6 +77,7 @@ class CClientState : public CBaseClientState, public CClientFrameManager
 
 public:
 	CClientState();
+	void ResetHltvReplayState();
 	~CClientState();
 
 public: // IConnectionlessPacketHandler interface:
@@ -70,21 +85,25 @@ public: // IConnectionlessPacketHandler interface:
 	bool ProcessConnectionlessPacket(struct netpacket_s *packet);
 
 public: // CBaseClientState overrides:
-	void Disconnect( const char *pszReason, bool bShowMainMenu );
-	void FullConnect( netadr_t &adr );
-	bool SetSignonState ( int state, int count );
+	void Disconnect(bool bShowMainMenu);
+	virtual void ConnectionStart( INetChannel *chan ) OVERRIDE;
+	virtual void ConnectionStop() OVERRIDE;
+	virtual void FullConnect( const ns_address &adr, int nEncryptionKey ) OVERRIDE;
+	bool SetSignonState ( int state, int count, const CNETMsg_SignonState *msg );
 	void PacketStart(int incoming_sequence, int outgoing_acknowledged);
 	void PacketEnd( void );
-	void FileReceived( const char *fileName, unsigned int transferID );
-	void FileRequested(const char *fileName, unsigned int transferID );
-	void FileDenied(const char *fileName, unsigned int transferID );
-	void FileSent( const char *fileName, unsigned int transferID );
+	void FileReceived( const char *fileName, unsigned int transferID, bool isReplayDemoFile );
+	void FileRequested(const char *fileName, unsigned int transferID, bool isReplayDemoFile );
+	void FileDenied(const char *fileName, unsigned int transferID, bool isReplayDemoFile );
 	void ConnectionCrashed( const char * reason );
 	void ConnectionClosing( const char * reason );
 	const char *GetCDKeyHash( void );
 	void SetFriendsID( uint friendsID, const char *friendsName );
 	void SendClientInfo( void );
+	void SendLoadingProgress( int nProgress );
 	void SendServerCmdKeyValues( KeyValues *pKeyValues );
+	bool SendNetMsg( INetMessage &msg, bool bForceReliable = false, bool bVoice = false );
+
 	void InstallStringTableCallback( char const *tableName );
 	bool HookClientStringTable( char const *tableName );
 	bool InstallEngineStringTableCallback( char const *tableName );
@@ -96,11 +115,11 @@ public: // CBaseClientState overrides:
 	void ConsistencyCheck(bool bForce);
 	void RunFrame();
 
-	void ReadEnterPVS( CEntityReadInfo &u );
-	void ReadLeavePVS( CEntityReadInfo &u );
-	void ReadDeltaEnt( CEntityReadInfo &u );
-	void ReadPreserveEnt( CEntityReadInfo &u );
 	void ReadDeletions( CEntityReadInfo &u );
+	void ReadPacketEntities( CEntityReadInfo &u );
+
+	void SendQueuedEntityMessage( int iEntity );
+	void RemoveQueuedMessageForEntity( int iEntity );
 
 	// In case the client DLL is using the old interface to set area bits,
 	// copy what they've passed to us into the m_chAreaBits array (and 0xFF-out the m_chAreaPortalBits array).
@@ -109,27 +128,34 @@ public: // CBaseClientState overrides:
 	// Used to be pAreaBits.
 	unsigned char** GetAreaBits_BackwardCompatibility();
 
+	int GetHltvReplayDelay()const { return m_nHltvReplayDelay; }
+	float GetHltvReplayTimeScale()const;
+	void StopHltvReplay();
+
 public: // IServerMessageHandlers
 	
-	PROCESS_NET_MESSAGE( Tick );
-	
-	PROCESS_NET_MESSAGE( StringCmd );
-	PROCESS_SVC_MESSAGE( ServerInfo );
-	PROCESS_SVC_MESSAGE( ClassInfo );
-	PROCESS_SVC_MESSAGE( SetPause );
-	PROCESS_SVC_MESSAGE( VoiceInit );
-	PROCESS_SVC_MESSAGE( VoiceData );
-	PROCESS_SVC_MESSAGE( Sounds );
-	PROCESS_SVC_MESSAGE( FixAngle );
-	PROCESS_SVC_MESSAGE( CrosshairAngle );
-	PROCESS_SVC_MESSAGE( BSPDecal );
-	PROCESS_SVC_MESSAGE( GameEvent );
-	PROCESS_SVC_MESSAGE( UserMessage );
-	PROCESS_SVC_MESSAGE( EntityMessage );
-	PROCESS_SVC_MESSAGE( PacketEntities );
-	PROCESS_SVC_MESSAGE( TempEntities );
-	PROCESS_SVC_MESSAGE( Prefetch );
-	PROCESS_SVC_MESSAGE( SetPauseTimed );
+	virtual bool NETMsg_Tick( const CNETMsg_Tick& msg ) OVERRIDE;
+	virtual bool NETMsg_StringCmd( const CNETMsg_StringCmd& msg ) OVERRIDE;
+
+	virtual bool SVCMsg_ServerInfo( const CSVCMsg_ServerInfo& msg ) OVERRIDE;
+	virtual bool SVCMsg_ClassInfo( const CSVCMsg_ClassInfo& msg ) OVERRIDE;
+	virtual bool SVCMsg_SetPause( const CSVCMsg_SetPause& msg ) OVERRIDE;
+	virtual bool SVCMsg_VoiceInit( const CSVCMsg_VoiceInit& msg ) OVERRIDE;
+	virtual bool SVCMsg_VoiceData( const CSVCMsg_VoiceData& msg ) OVERRIDE;
+	virtual bool SVCMsg_FixAngle( const CSVCMsg_FixAngle& msg ) OVERRIDE;
+	virtual bool SVCMsg_Prefetch( const CSVCMsg_Prefetch& msg ) OVERRIDE;
+	virtual bool SVCMsg_CrosshairAngle( const CSVCMsg_CrosshairAngle& msg ) OVERRIDE;
+	virtual bool SVCMsg_BSPDecal( const CSVCMsg_BSPDecal& msg ) OVERRIDE;
+	virtual bool SVCMsg_UserMessage( const CSVCMsg_UserMessage& msg ) OVERRIDE;
+	virtual bool SVCMsg_PaintmapData( const CSVCMsg_PaintmapData& msg ) OVERRIDE;
+	virtual bool SVCMsg_GameEvent( const CSVCMsg_GameEvent& msg ) OVERRIDE;
+	virtual bool SVCMsg_TempEntities( const CSVCMsg_TempEntities& msg ) OVERRIDE;
+	virtual bool SVCMsg_PacketEntities( const CSVCMsg_PacketEntities &msg ) OVERRIDE;
+	virtual bool SVCMsg_Sounds( const CSVCMsg_Sounds& msg ) OVERRIDE;
+	virtual bool SVCMsg_EntityMsg( const CSVCMsg_EntityMsg& msg ) OVERRIDE;
+	virtual bool SVCMsg_HltvReplay( const CSVCMsg_HltvReplay &msg );
+
+	CNetMessageBinder m_SVCMsgHltvReplay;
 
 public:
 
@@ -143,8 +169,10 @@ public:
 	int			lastoutgoingcommand;// Sequence number of last outgoing command
 	int			chokedcommands;		// number of choked commands
 	int			last_command_ack;	// last command sequence number acknowledged by server
+	int			last_server_tick;	// same update pattern as last_command_ack, but with server ticks
 	int			command_ack;		// current command sequence acknowledged by server
 	int			m_nSoundSequence;	// current processed reliable sound sequence number
+	int			m_nLastProgressPercent;	// last progress percent sent to server
 	
 	//
 	// information that is static for the entire time connected to a server
@@ -154,7 +182,8 @@ public:
 	bool		isreplay;		// true if Replay server/demo
 #endif
 
-	MD5Value_t	serverMD5;              // To determine if client is playing hacked .map. (entities lump is skipped)
+	CRC32_t		serverCRC;              // To determine if client is playing hacked .map. (entities lump is skipped)
+	CRC32_t		serverClientSideDllCRC; // To determine if client is playing on a hacked client dll.
 	
 	unsigned char	m_chAreaBits[MAX_AREA_STATE_BYTES];
 	unsigned char	m_chAreaPortalBits[MAX_AREA_PORTAL_STATE_BYTES];
@@ -177,8 +206,9 @@ public:
 
 // demo loop control
 	int			demonum;		                  // -1 = don't play demos
-	CUtlString	demos[MAX_DEMOS];				  // when not playing
+	char		demos[MAX_DEMOS][MAX_DEMONAME];	  // when not playing
 
+	CUtlVector< CQueuedEntityMessage >	queuedmessage;
 public:
 
 	// If 'insimulation', returns the time (in seconds) at the client's current tick.
@@ -187,7 +217,6 @@ public:
 	
 	
 	bool				IsPaused() const;
-	float				GetPausedExpireTime() const { return m_flPausedExpireTime; }
 
 	float				GetFrameTime( void ) const;
 	void				SetFrameTime( float dt ) { m_frameTime = dt; }
@@ -228,6 +257,7 @@ public:
 
 
 	INetworkStringTable *m_pModelPrecacheTable;	
+	INetworkStringTable *m_pDynamicModelTable;	
 	INetworkStringTable *m_pGenericPrecacheTable;	
 	INetworkStringTable *m_pSoundPrecacheTable;
 	INetworkStringTable *m_pDecalPrecacheTable;
@@ -236,7 +266,6 @@ public:
 	INetworkStringTable *m_pUserInfoTable;
 	INetworkStringTable *m_pServerStartupTable;
 	INetworkStringTable *m_pDownloadableFileTable;
-	INetworkStringTable *m_pDynamicModelsTable;
 	
 	CPrecacheItem		model_precache[ MAX_MODELS ];
 	CPrecacheItem		generic_precache[ MAX_GENERIC ];
@@ -247,19 +276,22 @@ public:
 	bool m_bUpdateSteamResources;
 	bool m_bShownSteamResourceUpdateProgress;
 	bool m_bDownloadResources;
-	bool m_bPrepareClientDLL;
+	bool m_bDownloadingUGCMap;
 	bool m_bCheckCRCsWithServer;
 	float m_flLastCRCBatchTime;
 
-	// This is only kept around to print out the whitelist info if sv_pure is used.
+	int m_modelIndexLoaded;
+	int m_lastModelPercent;
+
+	// This is only kept around to print out the whitelist info if sv_pure is used.	
 	CPureServerWhitelist *m_pPureServerWhitelist;
 
-	IFileList *m_pPendingPureFileReloads;
-
-private:
-
-	void ProcessSoundsWithProtoVersion( SVC_Sounds *msg, CUtlVector< SoundInfo_t > &sounds, int nProtoVersion );
-
+	int m_nHltvReplayDelay;
+	int m_nHltvReplayStopAt;
+	int m_nHltvReplayStartAt;
+	int m_nHltvReplaySlowdownBeginAt;
+	int m_nHltvReplaySlowdownEndAt;
+	float m_flHltvReplaySlowdownRate;
 private:
 	
 	// Note: This is only here for backwards compatibility. If it is set to something other than NULL,
@@ -271,9 +303,13 @@ private:
 	bool		m_bMarkedCRCsUnverified;
 };  //CClientState
 
-extern	CClientState	cl;
+#ifndef DEDICATED
+extern	CClientState	&GetLocalClient( int nSlot = -1 );
+extern CClientState		&GetBaseLocalClient(); // The player in the first slot (all split users depend on this one)
+#endif
 
-#ifndef SWDS
+
+#ifndef DEDICATED
 extern CGlobalVarsBase g_ClientGlobalVariables;
 #endif
 

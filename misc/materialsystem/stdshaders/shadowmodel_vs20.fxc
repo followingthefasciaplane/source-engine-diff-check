@@ -48,7 +48,7 @@ VS_OUTPUT main( const VS_INPUT v )
 	o.projPos = mul( float4( worldPos, 1 ), cViewProj );
 
 	// Compute fog
-	o.fog = CalcFog( worldPos, o.projPos, g_FogType );
+	o.fog = CalcNonFixedFunctionFog( worldPos, g_FogType );
 
 	// Transform position into texture space (from 0 to 1)
 	float3 vTexturePos;

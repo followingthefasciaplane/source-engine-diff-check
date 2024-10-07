@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -13,8 +13,13 @@
 
 void CServerGameClients::GetPlayerLimits( int& minplayers, int& maxplayers, int &defaultMaxPlayers ) const
 {
+#ifdef PORTAL2
+	minplayers = defaultMaxPlayers = 1;
+	maxplayers = CommandLine()->FindParm( "-allowspectators" ) ? 3 : 2;
+#else
 	minplayers = defaultMaxPlayers = 1; 
 	maxplayers = MAX_PLAYERS;
+#endif
 }
 
 

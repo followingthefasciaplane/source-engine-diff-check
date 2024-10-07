@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Utility functions used by AI code.
 //
@@ -31,8 +31,8 @@ bool g_fDrawLines = FALSE;
 bool FBoxVisible( CBaseEntity *pLooker, CBaseEntity *pTarget, Vector &vecTargetOrigin, float flSize )
 {
 	// don't look through water
-	if ((pLooker->GetWaterLevel() != 3 && pTarget->GetWaterLevel() == 3) 
-		|| (pLooker->GetWaterLevel() == 3 && pTarget->GetWaterLevel() == 0))
+	if ((pLooker->GetWaterLevel() != WL_Eyes && pTarget->GetWaterLevel() == WL_Eyes) 
+		|| (pLooker->GetWaterLevel() == WL_Eyes && pTarget->GetWaterLevel() == WL_NotInWater))
 		return FALSE;
 
 	trace_t tr;
@@ -83,7 +83,7 @@ Vector VecCheckToss( CBaseEntity *pEntity, ITraceFilter *pFilter, Vector vecSpot
 	Vector			vecScale;
 	Vector			vecTossVel;
 	Vector			vecTemp;
-	float			flGravity = GetCurrentGravity() * flGravityAdj;
+	float			flGravity = sv_gravity.GetFloat() * flGravityAdj;
 
 	if (vecSpot2.z - vecSpot1.z > 500)
 	{
@@ -213,7 +213,7 @@ Vector VecCheckToss( CBaseEntity *pEntity, Vector vecSpot1, Vector vecSpot2, flo
 // 
 Vector VecCheckThrow ( CBaseEntity *pEdict, const Vector &vecSpot1, Vector vecSpot2, float flSpeed, float flGravityAdj, Vector *vecMins, Vector *vecMaxs )
 {
-	float			flGravity = GetCurrentGravity() * flGravityAdj;
+	float			flGravity = sv_gravity.GetFloat() * flGravityAdj;
 
 	Vector vecGrenadeVel = (vecSpot2 - vecSpot1);
 

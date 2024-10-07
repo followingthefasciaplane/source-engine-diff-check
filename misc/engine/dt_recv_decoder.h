@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -131,19 +131,7 @@ inline int CRecvDecoder::GetNumProps() const
 
 inline const RecvProp* CRecvDecoder::GetProp( int i ) const
 {
-	// When called from RecvTable_Decode it is expected that this will
-	// return NULL if 'i' is out of range, but for two years there has been
-	// nothing to ensure that this is true. This has caused significant
-	// crashes in RecvTable_Decode. Putting the check here rather
-	// than in RecvTable_Decode helps check for other functions that might
-	// have this same assumption. If the cost is too great then this check
-	// can be moved to RecvTable_Decode. Initial testing suggests that this
-	// function is called ~1,200 times per second, so the cost of the branch is
-	// not significant.
-	// Do the check using unsigned math to check for < 0 simultaneously.
-	if ( (unsigned)i < (unsigned)GetNumProps() )
-		return m_Props[i];
-	return NULL;
+	return m_Props[i]; 
 }
 
 inline const SendProp* CRecvDecoder::GetSendProp( int i ) const

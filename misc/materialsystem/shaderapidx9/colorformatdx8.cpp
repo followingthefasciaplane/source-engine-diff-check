@@ -1,11 +1,22 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright (c) 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
 // $NoKeywords: $
 //
-//===========================================================================//
+//=============================================================================//
 
+////#define APIENTRY 
+//#if defined(_WIN32) && !defined(_X360)
+////#define WIN32_LEAN_AND_MEAN
+////#define _WIN32_WINNT 0x0500
+////#include <windows.h>
+////#include <assert.h>
+//#endif
+//#include <GL/gl.h>
+//#include "tier0/platform.h"
+////#include <GL/glext.h>
+////#include "tier0/dynfunction.h"
 #define DISABLE_PROTECTED_THINGS
 #include "togl/rendermechanism.h"
 #include "locald3dtypes.h"
@@ -61,7 +72,7 @@ static bool TestTextureFormat( D3DFORMAT format, bool bIsRenderTarget,
 	HRESULT hr;
 
 	// IHV depth texture formats require a slightly different check...
-	if ( !IsX360() && bIsRenderTarget && ( ( format == NVFMT_RAWZ ) || ( format == NVFMT_INTZ   ) ||
+	if ( !IsGameConsole() && bIsRenderTarget && ( ( format == NVFMT_RAWZ ) || ( format == NVFMT_INTZ   ) ||
 										   ( format == D3DFMT_D16 ) || ( format == D3DFMT_D24S8 ) ||
 										   ( format == ATIFMT_D16 ) || ( format == ATIFMT_D24S8 ) ) )
 	{
@@ -69,20 +80,25 @@ static bool TestTextureFormat( D3DFORMAT format, bool bIsRenderTarget,
 			g_DisplayAdapter, g_DeviceType, ImageLoader::ImageFormatToD3DFormat( g_DeviceFormat ),
 			D3DUSAGE_DEPTHSTENCIL, D3DRTYPE_TEXTURE, format );
 	}
-	else if ( !IsX360() || !bIsRenderTarget )
+	else if ( IsX360() && bIsRenderTarget )
+	{
+		// 360 can only validate render targets as surface display format
+		hr = D3D()->CheckDeviceFormat( g_DisplayAdapter, g_DeviceType, format, 0, D3DRTYPE_SURFACE, format );
+	}
+	else // general case:
 	{
 		// See if we can do it!
 		hr = D3D()->CheckDeviceFormat( 
 			g_DisplayAdapter, g_DeviceType, ImageLoader::ImageFormatToD3DFormat( g_DeviceFormat ),
 			nUsage, D3DRTYPE_TEXTURE, format );
 	}
-	else // 360
-	{
-		// 360 can only validate render targets as surface display format
-		hr = D3D()->CheckDeviceFormat( g_DisplayAdapter, g_DeviceType, format, 0, D3DRTYPE_SURFACE, format );
-	}
 
+#ifdef _PS3
+	// We have a conflict with the SUCCEEDED macro
+	return hr >= 0;
+#else // _PS3
     return SUCCEEDED( hr );
+#endif // !_PS3
 }
 
 D3DFORMAT GetNearestD3DColorFormat( ImageFormat fmt,
@@ -129,7 +145,7 @@ D3DFORMAT GetNearestD3DColorFormat( ImageFormat fmt,
 		// fall through. . . .
 	case IMAGE_FORMAT_RGB888:
 	case IMAGE_FORMAT_BGR888:
-#if !defined( _X360 )
+#if !defined( _GAMECONSOLE )
 		if (TestTextureFormat(D3DFMT_R8G8B8, isRenderTarget, bIsVertexTexture, bIsFilterableRequired))
 			return D3DFMT_R8G8B8;
 #endif
@@ -153,7 +169,7 @@ D3DFORMAT GetNearestD3DColorFormat( ImageFormat fmt,
 			return D3DFMT_X1R5G5B5;
 		if (TestTextureFormat(D3DFMT_A1R5G5B5, isRenderTarget, bIsVertexTexture, bIsFilterableRequired))
 			return D3DFMT_A1R5G5B5;
-#if !defined( _X360 )
+#if !defined( _GAMECONSOLE )
 		if (TestTextureFormat(D3DFMT_R8G8B8, isRenderTarget, bIsVertexTexture, bIsFilterableRequired))
 			return D3DFMT_R8G8B8;
 #endif
@@ -170,7 +186,7 @@ D3DFORMAT GetNearestD3DColorFormat( ImageFormat fmt,
 			return D3DFMT_A1R5G5B5;
 		if (TestTextureFormat(D3DFMT_R5G6B5, isRenderTarget, bIsVertexTexture, bIsFilterableRequired))
 			return D3DFMT_R5G6B5;
-#if !defined( _X360 )
+#if !defined( _GAMECONSOLE )
 		if (TestTextureFormat(D3DFMT_R8G8B8, isRenderTarget, bIsVertexTexture, bIsFilterableRequired))
 			return D3DFMT_R8G8B8;
 #endif
@@ -230,6 +246,13 @@ D3DFORMAT GetNearestD3DColorFormat( ImageFormat fmt,
 		if (TestTextureFormat(D3DFMT_A8R8G8B8, isRenderTarget, bIsVertexTexture, bIsFilterableRequired))
 			return D3DFMT_A8R8G8B8;
 		break;
+		
+#if defined( _X360 )
+	case IMAGE_FORMAT_LINEAR_A8:
+		if (TestTextureFormat(D3DFMT_LIN_A8, isRenderTarget, bIsVertexTexture, bIsFilterableRequired))
+			return D3DFMT_LIN_A8;
+		break;
+#endif
 
 	case IMAGE_FORMAT_DXT1:
 	case IMAGE_FORMAT_DXT1_ONEBITALPHA:
@@ -238,16 +261,37 @@ D3DFORMAT GetNearestD3DColorFormat( ImageFormat fmt,
 			return D3DFMT_DXT1;
 		break;
 
+#if defined( _X360 )
+	case IMAGE_FORMAT_LINEAR_DXT1:
+		if (TestTextureFormat(D3DFMT_LIN_DXT1, isRenderTarget, bIsVertexTexture, bIsFilterableRequired))
+			return D3DFMT_LIN_DXT1;
+		break;
+#endif
+
 	case IMAGE_FORMAT_DXT3:
 		if (TestTextureFormat(D3DFMT_DXT3, isRenderTarget, bIsVertexTexture, bIsFilterableRequired ))
 			return D3DFMT_DXT3;
 		break;
+
+#if defined( _X360 )
+	case IMAGE_FORMAT_LINEAR_DXT3:
+		if (TestTextureFormat(D3DFMT_LIN_DXT3, isRenderTarget, bIsVertexTexture, bIsFilterableRequired))
+			return D3DFMT_LIN_DXT3;
+		break;
+#endif
 
 	case IMAGE_FORMAT_DXT5:
 	case IMAGE_FORMAT_DXT5_RUNTIME:
 		if (TestTextureFormat(D3DFMT_DXT5, isRenderTarget, bIsVertexTexture, bIsFilterableRequired ))
 			return D3DFMT_DXT5;
 		break;
+
+#if defined( _X360 )
+	case IMAGE_FORMAT_LINEAR_DXT5:
+		if (TestTextureFormat(D3DFMT_LIN_DXT5, isRenderTarget, bIsVertexTexture, bIsFilterableRequired))
+			return D3DFMT_LIN_DXT5;
+		break;
+#endif
 
 	case IMAGE_FORMAT_UV88:
 		if (TestTextureFormat(D3DFMT_V8U8, isRenderTarget, bIsVertexTexture, bIsFilterableRequired ))
@@ -295,14 +339,16 @@ D3DFORMAT GetNearestD3DColorFormat( ImageFormat fmt,
 			return D3DFMT_A32B32G32R32F;
 		break;
 
-#if defined( _X360 )
-	case IMAGE_FORMAT_X360_DST16:
+#if defined( _X360 ) || defined( _PS3 )
+	case IMAGE_FORMAT_D16:
 		return D3DFMT_D16;
 
-	case IMAGE_FORMAT_X360_DST24:
+	case IMAGE_FORMAT_D24S8:
 		return D3DFMT_D24S8;
+#endif // _X360 || _PS3
 
-	case IMAGE_FORMAT_X360_DST24F:
+#if defined( _X360 )
+	case IMAGE_FORMAT_D24FS8:
 		return D3DFMT_D24FS8;
 
 	case IMAGE_FORMAT_LE_BGRX8888:
@@ -310,41 +356,61 @@ D3DFORMAT GetNearestD3DColorFormat( ImageFormat fmt,
 
 	case IMAGE_FORMAT_LE_BGRA8888:
 		return D3DFMT_LE_A8R8G8B8;
+#endif // _X360
+
+#if defined( DX_TO_GL_ABSTRACTION )
+	case IMAGE_FORMAT_D24S8:
+		return D3DFMT_D24S8;
+
+	case IMAGE_FORMAT_D24X8:
+		return D3DFMT_D24X8;
 #endif
 
 	// nVidia overloads DST formats as texture formats
-	case IMAGE_FORMAT_NV_DST16:
-		if ( TestTextureFormat( D3DFMT_D16, isRenderTarget, bIsVertexTexture, bIsFilterableRequired ) )
+	case IMAGE_FORMAT_D16:
+	case IMAGE_FORMAT_D16_SHADOW:
+	
+		if ( IsOpenGL() )
+		{
 			return D3DFMT_D16;
+		}
+		
+		// Only try ATIFMT_D16 on non-DX10 capable ATI cards (where we use fetch4). On DX10 capable ATI cards we use hardware PCF.
+		if ( g_pHardwareConfig->Caps().m_VendorID == VENDORID_ATI && ( CommandLine()->CheckParm( "-forceatifetch4" ) || !g_pHardwareConfig->Caps().m_bDX10Card ) )
+		{
+			if ( TestTextureFormat( ATIFMT_D16, isRenderTarget, bIsVertexTexture, false ) )
+				return ATIFMT_D16;
+		}
+		else
+		{
+			if ( TestTextureFormat( D3DFMT_D16, isRenderTarget, bIsVertexTexture, bIsFilterableRequired ) )
+				return D3DFMT_D16;
+		}
 		break;
 
-	case IMAGE_FORMAT_NV_DST24:
-		if ( TestTextureFormat( D3DFMT_D24S8, isRenderTarget, bIsVertexTexture, bIsFilterableRequired ) )
-			return D3DFMT_D24S8;
-		break;
-	case IMAGE_FORMAT_NV_INTZ:
-		if ( TestTextureFormat( NVFMT_INTZ, isRenderTarget, bIsVertexTexture, false ) )
-			return NVFMT_INTZ;
+	case IMAGE_FORMAT_D24X8_SHADOW:
+	
+		if ( IsOSXOpenGL() )
+		{
+			return D3DFMT_D24X8;
+		}
+		
+		// Only try ATIFMT_D24S8 on non-DX10 capable ATI cards (where we use fetch4). On DX10 capable ATI cards we use hardware PCF.
+		if ( g_pHardwareConfig->Caps().m_VendorID == VENDORID_ATI && ( CommandLine()->CheckParm( "-forceatifetch4" ) || !g_pHardwareConfig->Caps().m_bDX10Card ) )
+		{
+			if ( TestTextureFormat( ATIFMT_D24S8, isRenderTarget, bIsVertexTexture, false ) )
+				return ATIFMT_D24S8;
+		}
+		else
+		{
+			if ( TestTextureFormat( D3DFMT_D24S8, isRenderTarget, bIsVertexTexture, bIsFilterableRequired ) )
+				return D3DFMT_D24S8;
+		}
 		break;
 
-	case IMAGE_FORMAT_NV_RAWZ:
-		if ( TestTextureFormat( NVFMT_RAWZ, isRenderTarget, bIsVertexTexture, false ) )
-			return NVFMT_RAWZ;
-		break;
-
-	case IMAGE_FORMAT_NV_NULL:
+	case IMAGE_FORMAT_NULL:
 		if ( TestTextureFormat( NVFMT_NULL, isRenderTarget, bIsVertexTexture, false ) )
 			return NVFMT_NULL;
-		break;
-
-	case IMAGE_FORMAT_ATI_DST16:
-		if ( TestTextureFormat( ATIFMT_D16, isRenderTarget, bIsVertexTexture, false ) )
-			return ATIFMT_D16;
-		break;
-
-	case IMAGE_FORMAT_ATI_DST24:
-		if ( TestTextureFormat( ATIFMT_D24S8, isRenderTarget, bIsVertexTexture, false ) )
-			return ATIFMT_D24S8;
 		break;
 
 	case IMAGE_FORMAT_ATI2N:
@@ -355,6 +421,10 @@ D3DFORMAT GetNearestD3DColorFormat( ImageFormat fmt,
 	case IMAGE_FORMAT_ATI1N:
 		if ( TestTextureFormat( ATIFMT_ATI1N, isRenderTarget, bIsVertexTexture, bIsFilterableRequired ) )
 			return ATIFMT_ATI1N;
+		break;
+	case IMAGE_FORMAT_INTZ:
+		if ( TestTextureFormat( NVFMT_INTZ, isRenderTarget, bIsVertexTexture, bIsFilterableRequired ) )
+			return NVFMT_INTZ;
 		break;
 	}
 
@@ -435,9 +505,9 @@ bool D3DSupportsCompressedTextures()
 //-----------------------------------------------------------------------------
 // Returns closest supported format
 //-----------------------------------------------------------------------------
-ImageFormat FindNearestSupportedFormat( ImageFormat format, bool bIsVertexTexture, bool bIsRenderTarget, bool bFilterableRequired )
+D3DFORMAT FindNearestSupportedFormat( ImageFormat format, bool bIsVertexTexture, bool bIsRenderTarget, bool bFilterableRequired )
 {
-	return ImageLoader::D3DFormatToImageFormat( g_D3DColorFormat[format][bIsVertexTexture][bIsRenderTarget][bFilterableRequired] );
+	return g_D3DColorFormat[format][bIsVertexTexture][bIsRenderTarget][bFilterableRequired];
 }
 
 

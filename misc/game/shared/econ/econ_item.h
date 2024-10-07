@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright ©, Valve Corporation, All rights reserved. =======
 //
 // Purpose: CEconItem, a shared object for econ items
 //
@@ -21,24 +21,15 @@
 
 #define ENABLE_TYPED_ATTRIBUTE_PARANOIA		1
 
-#ifdef GC_DLL
-class CSchItem;
-class CEconSharedObjectCache;
-#endif
-
 namespace GCSDK
 {
 	class CColumnSet;
-#ifdef GC_DLL
-	class CWebAPIValues;
-#endif
 };
 
 class CEconItem;
 class CSOEconItem;
 class CEconItemCustomData;
 class CEconSessionItemAudit;
-
 //-----------------------------------------------------------------------------
 // Stats tracking for the attributes attached to CEconItem instances.
 //-----------------------------------------------------------------------------
@@ -53,7 +44,7 @@ struct schema_attribute_stat_bucket_t
 	uint64 m_unLifetimeHeapCount;
 
 	void OnAllocateInlineInstance() { m_unLiveInlineCount++; m_unLifetimeInlineCount++; }
-	void OnFreeInlineInstance() { Assert( m_unLiveInlineCount > 0 ); m_unLiveInlineCount--; }
+	void OnFreeInlineInstance() { /* temporarily disabling to avoid spew until the rest of the minor attribute changelists are brought from TF to Dota: -> Assert( m_unLiveInlineCount > 0 ); */ m_unLiveInlineCount--; }
 	void OnAllocateHeapInstance() { m_unLiveHeapCount++; m_unLifetimeHeapCount++; }
 	void OnFreeHeapInstance() { Assert( m_unLiveHeapCount ); m_unLiveHeapCount--; }
 };
@@ -82,18 +73,10 @@ private:
 //-----------------------------------------------------------------------------
 // Base class interface for attributes of a certain in-memory type.
 //-----------------------------------------------------------------------------
-unsigned int Internal_GetAttributeTypeUniqueIdentifierNextValue();
 
 template < typename T >
-unsigned int GetAttributeTypeUniqueIdentifier()
-{
-	static unsigned int s_unUniqueCounter = Internal_GetAttributeTypeUniqueIdentifierNextValue();
-	return s_unUniqueCounter;
-}
+unsigned int GetAttributeTypeUniqueIdentifier();
 
-//-----------------------------------------------------------------------------
-// Base class interface for attributes of a certain in-memory type.
-//-----------------------------------------------------------------------------
 template < typename TAttribInMemoryType >
 class ISchemaAttributeTypeBase : public ISchemaAttributeType
 {
@@ -103,40 +86,7 @@ public:
 	ISchemaAttributeTypeBase()
 	{
 		CSchemaAttributeStats::RegisterAttributeType< ISchemaAttributeTypeBase<TAttribInMemoryType>, TAttribInMemoryType >();
-
-		// The implementation of the attributes-in-memory system is such that it may or may not behave according to
-		// expectations. Rather than have to stare at all the details to answer questions about where memory is allocated
-		// or managed, or when it will be freed, for all our current use cases it makes more sense to just disable raw
-		// pointer types from being an attribute-in-memory type and instead steer people towards this message explaining
-		// why.
-		COMPILE_TIME_ASSERT( !IsPointerType<TAttribInMemoryType>::kValue );
 	}
-
-#ifdef GC_DLL
-	// By default, without a specific type we don't support any sort of custom value generation, so all we can do
-	// to load an attribute is to copy the value out from the generic format (union) and turn it into whatever our
-	// type is, and then add that type to the item as an attribute.
-	//
-	// Unlike most of the functions in this class, this is not meant to be a catch-all default implementation but
-	// is instead a base implementation. Subclasses are intended to override to add or change functionality.
-	virtual void LoadOrGenerateEconAttributeValue( CEconItem *pTargetItem, const CEconItemAttributeDefinition *pAttrDef,  const static_attrib_t& staticAttrib, const CEconGameAccount *pGameAccount ) const OVERRIDE
-	{
-		Assert( pTargetItem );
-		Assert( pAttrDef );
-		AssertMsg( !staticAttrib.m_pKVCustomData, "Default implementation of LoadOrGenerateEconAttributeValue() doesn't support custom value generation!" );
-		AssertMsg( pGameAccount || !staticAttrib.m_pKVCustomData, "Cannot run custom logic with no game account object! Passing in NULL for pGameAccount is only supported when we know we won't be running custom value generation code!" );
-
-		LoadEconAttributeValue( pTargetItem, pAttrDef, staticAttrib.m_value );
-	}
-
-	// By default, we dont generate any custom value
-	virtual void GenerateEconAttributeValue( const CEconItemAttributeDefinition *pAttrDef, const static_attrib_t& staticAttrib, const CEconGameAccount *pGameAccount, attribute_data_union_t* out_pValue ) const OVERRIDE
-	{
-		Assert( pAttrDef );
-		Assert( pGameAccount );
-		Assert( out_pValue );
-	}
-#endif // GC_DLL
 
 	virtual void LoadEconAttributeValue( CEconItem *pTargetItem, const CEconItemAttributeDefinition *pAttrDef, const union attribute_data_union_t& value ) const OVERRIDE;
 
@@ -146,9 +96,7 @@ public:
 		return GetAttributeTypeUniqueIdentifier<TAttribInMemoryType>();
 	}
 
-	// Takes the value specified in [typedValue] and stores it in the most appropriate way
-	// somewhere attached to [out_pValue]. This may hit the heap. The storage itself is
-	// intended to be opaque but can be reversed by calling GetTypedValueContentsFromEconAttributeValue(). 
+	// ...
 	void ConvertTypedValueToEconAttributeValue( const TAttribInMemoryType& typedValue, attribute_data_union_t *out_pValue ) const
 	{
 		// If our type is smaller than an int, we don't know how to copy the memory into our flat structure. We could write
@@ -170,7 +118,11 @@ public:
 		// to that.
 		else
 		{
-			Assert( out_pValue->asBlobPointer );
+			if ( !out_pValue->asBlobPointer )
+			{
+				InitializeNewEconAttributeValue( out_pValue );
+			}
+			
 			*reinterpret_cast<TAttribInMemoryType *>( out_pValue->asBlobPointer ) = typedValue;
 		}
 	}
@@ -243,7 +195,8 @@ public:
 		// destruct, but we do have to manually free.
 		else
 		{
-			Assert( out_pValue->asBlobPointer );
+			if ( !out_pValue->asBlobPointer )
+				return;
 
 			delete reinterpret_cast<TAttribInMemoryType *>( out_pValue->asBlobPointer );
 			s_InstanceStats.OnFreeHeapInstance();
@@ -269,25 +222,11 @@ private:
 	static schema_attribute_stat_bucket_t s_InstanceStats;
 };
 
-// This function exists only to back-convert code that relies on the old untyped
-// attribute system, doing things like shoving floating-point bits into a uint32
-// value in the database.
-//
-// There is no reason to use this function moving forward! If you're writing new
-// code and calling this function seems like the only way to get the effect you
-// want, it probably just means that there is no attribute type for what you're
-// trying to do yet.
-template < typename T >	uint32 WrapDeprecatedUntypedEconItemAttribute( T tValue ) { COMPILE_TIME_ASSERT( sizeof( T ) == sizeof( uint32 ) ); return *reinterpret_cast<uint32 *>( &tValue ); }
-
 template < typename TAttribInMemoryType >
 schema_attribute_stat_bucket_t ISchemaAttributeTypeBase<TAttribInMemoryType>::s_InstanceStats;
 
-class CEconItem : public GCSDK::CSharedObject, public CMaterialOverrideContainer< IEconItemInterface >
+class CEconItem : public GCSDK::CSharedObject, public IEconItemInterface
 {
-#ifdef GC_DLL
-	DECLARE_CLASS_MEMPOOL( CEconItem );
-#endif
-
 public:
 	typedef GCSDK::CSharedObject BaseClass;
 
@@ -308,17 +247,38 @@ public:
 		equipped_slot_t m_unEquippedSlot;
 	};
 
-#ifdef GC_DLL
-	class CAuditEntry
+	struct CustomDataOptimizedObject_t
 	{
+		// This is preceding the attributes block, attributes tightly packed and follow immediately
+		// 25% of CS:GO items have no attributes and don't allocate anything here
+		// one attribute case = [uint16] + [uint16+uint32] = 8 bytes (SBH bucket 8)
+		// 2 attributes case = [uint16]+2x[uint16+uint32] = 14 bytes (SBH bucket 16)
+		// 3 attributes case = [uint16]+3x[uint16+uint32] = 20 bytes (SBH bucket 24)  (60% of CS:GO items)
+		// 4 attributes case = [uint16]+4x[uint16+uint32] = 26 bytes (SBH bucket 32)
+		// 5 attributes case = [uint16]+4x[uint16+uint32] = 26 bytes (SBH bucket 32)
+
+		uint16 m_equipInstanceSlot1 : 6;			// Equip Instance Slot									#6 // if equipped
+		uint16 m_equipInstanceClass1 : 3;			// Equip Instance Class									#9
+		uint16 m_equipInstanceClass2Bit : 1;		// Whether the item is equipped for complementary class	#10
+		uint16 m_numAttributes : 6;					// Length of following attributes						#16
+
+		// 32-bit GC size = 2 bytes!
+
+		inline attribute_t * GetAttribute( uint32 j ) { return ( reinterpret_cast< attribute_t * >( this + 1 ) ) + j ; }
+		inline const attribute_t * GetAttribute( uint32 j ) const { return ( reinterpret_cast< const attribute_t * >( this + 1 ) ) + j ; }
+
+	private:	// forbid all operations including constructor/destructor
+		CustomDataOptimizedObject_t();
+		CustomDataOptimizedObject_t( const CustomDataOptimizedObject_t & );
+		~CustomDataOptimizedObject_t();
+		CustomDataOptimizedObject_t & operator=( const CustomDataOptimizedObject_t & );
+
 	public:
-		CAuditEntry( EItemAction eAction, uint32 unData ) : m_eAction( eAction ), m_unData( unData ) { }
-
-		bool BAddAuditEntryToTransaction( CSQLAccess& sqlAccess, const CEconItem *pItem ) const;
-
-	private:
-		EItemAction m_eAction;
-		uint32 m_unData;
+		static CustomDataOptimizedObject_t *Alloc( uint32 numAttributes );			// allocates enough memory to include attributes
+		static attribute_t * AddAttribute( CustomDataOptimizedObject_t * &rptr );	// reallocs the ptr
+		
+		void RemoveAndFreeAttrMemory( uint32 idxAttributeInArray );					// keeps the memory allocated
+		void FreeObjectAndAttrMemory();
 	};
 
 	// Set only the top 16 bits for field ID types! These will be or'd into the index of
@@ -326,35 +286,34 @@ public:
 	enum
 	{
 		kUpdateFieldIDType_FieldID				= 0x00000000,	// this must stay as 0 for legacy code
-		kUpdateFieldIDType_AttributeID			= 0x00010000,
+		kUpdateFieldIDType_AttributeID			= 0x00010000,	// this will modify existing attribute in the database
 	};
-#endif // GC_DLL
 
 	const static int k_nTypeID = k_EEconTypeItem;
 	virtual int GetTypeID() const { return k_nTypeID; }
 
 	CEconItem();
-	CEconItem( const CEconItem& rhs );
 	virtual ~CEconItem();
 
+private:
+	CEconItem( const CEconItem &copy ); // no impl - don't want to allow accidental pass-by-value
+
+public:
 	CEconItem &operator=( const CEconItem& rhs );
-
-	//called to determine if this item is tradable or not. This will return the time after which it can be traded. If 0 it can be traded. This is
-	//needed since the base implementation of this is protected
-	RTime32 GetTradableAfterDateTime() const		 { return IEconItemInterface::GetTradableAfterDateTime(); }
-
-	//called to set a tradable after date/time value onto this item (this avoids a lot of potential inefficiencies around this process)
-	void SetTradableAfterDateTime( RTime32 rtTime );
 
 	// IEconItemInterface interface.
 	const GameItemDefinition_t *GetItemDefinition() const;
 public:
 
-	virtual void IterateAttributes( class IEconItemAttributeIterator *pIterator ) const OVERRIDE;
-	virtual itemid_t GetID() const { return GetItemID(); }
-	
+#ifndef GC_DLL
+	virtual void SetSOUpdateFrame( int nNewValue ) const { m_bSOUpdateFrame = nNewValue; }
+	virtual int GetSOUpdateFrame( void ) const           { return m_bSOUpdateFrame; }
+#endif
+
+	virtual void IterateAttributes( class IEconItemAttributeIterator *pIterator ) const;
+
 	// Accessors/Settors
-	itemid_t GetItemID() const { return m_ulID; }
+	virtual itemid_t GetItemID() const { return m_ulID; }
 	void SetItemID( uint64 ulID );
 
 	itemid_t GetOriginalID() const;
@@ -363,7 +322,7 @@ public:
 	uint32 GetAccountID() const { return m_unAccountID; }
 	void SetAccountID( uint32 unAccountID ) { m_unAccountID = unAccountID; }
 
-	uint32 GetDefinitionIndex() const { return m_unDefIndex; }
+	item_definition_index_t GetDefinitionIndex() const { return m_unDefIndex; }
 	void SetDefinitionIndex( uint32 unDefinitionIndex ) { m_unDefIndex = unDefinitionIndex; }
 
 	uint32 GetItemLevel() const { return m_unLevel; }
@@ -372,10 +331,13 @@ public:
 	int32 GetQuality() const { return m_nQuality; }
 	void SetQuality( int32 nQuality ) { m_nQuality = nQuality; }
 
+	int32 GetRarity() const;
+	void SetRarity( int32 nRarity ) { m_nRarity = nRarity; }
+
 	uint32 GetInventoryToken() const { return m_unInventory; }
 	void SetInventoryToken( uint32 unToken ) { m_unInventory = unToken; }
 
-	int GetQuantity() const;
+	uint16 GetQuantity() const;
 	void SetQuantity( uint16 unQuantity );
 
 	uint8 GetFlags() const { return m_unFlags; }
@@ -389,45 +351,28 @@ public:
 	void SetOrigin( eEconItemOrigin unOrigin ) { m_unOrigin = unOrigin; Assert( m_unOrigin == unOrigin ); }
 	bool IsForeign() const { return m_unOrigin == kEconItemOrigin_Foreign; }
 
-	style_index_t GetStyle() const;
-	void SetStyle( uint8 unStyle ) { m_unStyle = unStyle; DirtyIconURL(); }
-
-	const char *GetIconURLSmall() const;
-	const char *GetIconURLLarge() const;
-
 	const char *GetCustomName() const;
 	void SetCustomName( const char *pName );
 
 	const char *GetCustomDesc() const;
 	void SetCustomDesc( const char *pDesc );
 
+	virtual int GetItemSetIndex() const;
+
+	void InitAttributesDroppedFromListEntry( item_list_entry_t const *pEntryInfo );
+
 	bool IsEquipped() const;
 	bool IsEquippedForClass( equipped_class_t unClass ) const;
 	equipped_slot_t GetEquippedPositionForClass( equipped_class_t unClass ) const;
-
-	void Equip( equipped_class_t unClass, equipped_slot_t unSlot );
-	void Unequip();
-	void UnequipFromClass( equipped_class_t unClass );
-	
-	// This should really only used for the WebAPIs, debugging, etc. Data manipulation during gameplay should use
-	// the above functions.
-	int GetEquippedInstanceCount() const;
-	const EquippedInstance_t &GetEquippedInstance( int iIdx ) const;
+	void UpdateEquippedState( equipped_class_t unClass, equipped_slot_t unSlot ) { UpdateEquippedState( EquippedInstance_t( unClass, unSlot ) ); }
+	void UpdateEquippedState( EquippedInstance_t equipInstance );
 
 	virtual bool GetInUse() const;
 	void SetInUse( bool bInUse );
 
 	bool IsTradable() const;
 	bool IsMarketable() const;
-	bool IsCommodity() const;
-
-	void AdoptMoreRestrictedTradabilityFromItem( const CEconItem *pOther, uint32 nTradabilityFlagsToAccept = 0xFFFFFFFF );
-	void AdoptMoreRestrictedTradability( uint32 nTradabilityFlags, RTime32 nUntradableTime );
 	bool IsUsableInCrafting() const;
-
-#ifdef GC_DLL
-	RTime32 GetAssetInfoExpirationCacheExpirationTime() const;
-#endif // GC_DLL
 
 	// --------------------------------------------------------------------------------------------
 	// Typed attributes. These are methods for accessing and setting values of attributes with
@@ -447,24 +392,18 @@ public:
 		Assert( pAttrDef );
 
 		const ISchemaAttributeTypeBase<T> *pAttrType = GetTypedAttributeType<T>( pAttrDef );
-#ifdef GC_DLL
-		// The GC is expected to always have internally-consistent information and so be able to access the
-		// type information of any attribute if we started up successfully.
 		Assert( pAttrType );
-#else
-		// Game clients and servers may be running code that doesn't have all of the types for the new attributes
-		// for a GC that just propped. Because we're not authoritative over items here, about the best we can do
-		// here is abort entirely. This means that the client may not display certain attributes at all, or even
-		// have them in the attribute list in memory, but we don't understand those attributes anyway.
 		if ( !pAttrType )
 			return;
-#endif
 		
 		// Fail right off the bat if we're trying to write a dynamic attribute value for an item that already
 		// has this as a static value.
-		AssertMsg4( !::FindAttribute( GetItemDefinition(), pAttrDef ),
-				    "Item id %llu (%s) attempting to set dynamic attribute value for '%s' (%d) when static attribute exists!",
-				    GetItemID(), GetItemDefinition()->GetDefinitionName(), pAttrDef->GetDefinitionName(), pAttrDef->GetDefinitionIndex() );
+
+		/*
+		AssertMsg( !::FindAttribute( GetItemDefinition(), pAttrDef ),
+				   "Item id %llu (%s) attempting to set dynamic attribute value for '%s' (%d) when static attribute exists!",
+				   GetItemID(), GetItemDefinition()->GetDefinitionName(), pAttrDef->GetDefinitionName(), pAttrDef->GetDefinitionIndex() );
+				   */
 		
 		// Alright, we have a data type match so we can safely store data. Some types may need to initialize
 		// their data to a current state if it's the first time we're writing to this value (as opposed to
@@ -497,10 +436,6 @@ public:
 #endif // ENABLE_TYPED_ATTRIBUTE_PARANOIA
 	}
 
-	// Called to set a time stamp dynamic attribute on this item. But it will first check the current value assigned to this item, and will
-	// only set it if this new time extends beyond the current one
-	void SetDynamicMaxTimeAttributeValue( const CEconItemAttributeDefinition *pAttrDef, RTime32 rtTime );
-
 	// Remove an instance of an attribute from this item. This will also free any dynamic memory associated
 	// with that instance if any was allocated.
 	void RemoveDynamicAttribute( const CEconItemAttributeDefinition *pAttrDef );
@@ -510,13 +445,10 @@ public:
 	// values set to whatever [source] specifies.
 	void CopyAttributesFrom( const CEconItem& source );
 
-	bool BHasDynamicAttributes() const { return GetDynamicAttributeCountInternal() > 0; }
+	// Copy everything about the item without the attributes
+	void CopyWithoutAttributesFrom( const CEconItem& source );
 
 private:
-	const char* FindIconURL( bool bLarge ) const;
-
-	void Init();
-
 	template < typename T >
 	static const ISchemaAttributeTypeBase<T> *GetTypedAttributeType( const CEconItemAttributeDefinition *pAttrDef )
 	{
@@ -534,164 +466,79 @@ private:
 	}
 
 public:
-	void Compact();
+	void AddCustomAttribute( uint16 usDefinitionIndex, float flValue );
+	void AddOrSetCustomAttribute( uint16 usDefinitionIndex, float flValue );
+	
+	bool BDeserializeFromKV( KeyValues *pKVItem, const CEconItemSchema &pschema, CUtlVector<CUtlString> *pVecErrors = NULL );
 
-#ifdef GC
-	bool BDeserializeFromKV( KeyValues *pKVItem, CUtlVector<CUtlString> *pVecErrors );
-#endif // GC
 
-#ifdef GC_DLL
-	void ExportToAPI( GCSDK::CWebAPIValues *pValues ) const;
-	bool BImportFromAPI( GCSDK::CWebAPIValues *pValues );
-#endif // GC_DLL
-
-	// these are overridden to handle attributes
-#ifdef GC_DLL
-	virtual bool BYieldingAddInsertToTransaction( GCSDK::CSQLAccess & sqlAccess );
-	virtual bool BYieldingAddWriteToTransaction( GCSDK::CSQLAccess & sqlAccess, const CUtlVector< int > &fields );
-	virtual bool BYieldingAddRemoveToTransaction( GCSDK::CSQLAccess & sqlAccess );
-
-	void SerializeToSchemaItem( CSchItem &item ) const;
-	void DeserializeFromSchemaItem( const CSchItem &item );
-
-	void SetInteriorItem( CEconItem* pInteriorItem );
-#endif // GC_DLL
 	virtual bool BParseFromMessage( const CUtlBuffer &buffer ) OVERRIDE;
 	virtual bool BParseFromMessage( const std::string &buffer ) OVERRIDE;
 	virtual bool BUpdateFromNetwork( const CSharedObject & objUpdate ) OVERRIDE;
 
-#ifdef GC
-	virtual bool BAddToMessage( CUtlBuffer & bufOutput ) const OVERRIDE;
 	virtual bool BAddToMessage( std::string *pBuffer ) const OVERRIDE; // short cut to remove an extra copy
-	virtual bool BAddDestroyToMessage( CUtlBuffer & bufDestroy ) const OVERRIDE;
 	virtual bool BAddDestroyToMessage( std::string *pBuffer ) const OVERRIDE;
-
-	bool BYieldingSerializeFromDatabase( itemid_t ulItemID );
-#endif
 
 	virtual bool BIsKeyLess( const CSharedObject & soRHS ) const ;
 	virtual void Copy( const CSharedObject & soRHS );
 	virtual void Dump() const;
-	virtual CUtlString GetDebugString() const OVERRIDE;
 
 	void SerializeToProtoBufItem( CSOEconItem &msgItem ) const;
 	void DeserializeFromProtoBufItem( const CSOEconItem &msgItem );
 
-#ifdef GC_DLL
-	CEconItem* YieldingGetInteriorItem();
-	const CEconItem* YieldingGetInteriorItem() const { return const_cast<CEconItem *>(this)->YieldingGetInteriorItem(); }
-
-	void SetEquippedThisGameServerSession( bool bEquipped ) { m_bEquippedThisGameServerSession = bEquipped; }
-	bool EquippedThisGameServerSession() const { return m_bEquippedThisGameServerSession; }
-#endif
-
-	// Non-yielding -- will return current interior item if it exists and is already loaded
-	// but will make no attempt to load.
-	CEconItem* GetInteriorItem();
-	const CEconItem* GetInteriorItem() const { return const_cast<CEconItem *>(this)->GetInteriorItem(); }
-
-	const CEconItemCustomData* GetCustomData() const { return m_pCustomData; }
-
-	void OnTraded( uint32 unTradabilityDelaySeconds );
-	void OnReceivedFromMarket( bool bFromRollback );
+	typedef CUtlVectorFixed< CEconItem::EquippedInstance_t, 2 > EquippedInstanceArray_t;
+	int GetEquippedInstanceArray( EquippedInstanceArray_t &equips ) const;
 
 protected:
-
-	// Call this when the appearance of this item changes (ex. paintkit, style, festive). This will
-	// cause the icon to be lazily re-evaluated (ie. so that changing the style will change the icon)
-	void DirtyIconURL() { m_pszLargeIcon = NULL; m_pszSmallIcon = NULL; } 
 	// CSharedObject
 	// adapted from CSchemaSharedObject
 	void GetDirtyColumnSet( const CUtlVector< int > &fields, GCSDK::CColumnSet &cs ) const;
-
-	void EnsureCustomDataExists();
-	
-	bool BYieldingLoadInteriorItem();	
-
 	void OnTransferredOwnership();
 
 	// Internal attribute interface.
 	friend class CWebAPIStringExporterAttributeIterator;
-	friend class CAttributeToStringIterator;
 
 	attribute_t&	   AddDynamicAttributeInternal();													// add another chunk of data to our internal storage to store a new attribute -- initialization is the responsibility of the caller
 	attribute_t		  *FindDynamicAttributeInternal( const CEconItemAttributeDefinition *pAttrDef );	// search for an instance of a dynamic attribute with this definition -- ignores static properties, etc. and will return NULL if not found
 	int				   GetDynamicAttributeCountInternal() const;										// how many attributes are there attached to this instance?
-	attribute_t&	   GetMutableDynamicAttributeInternal( int iAttrIndexIntoArray );					// get a writable version of our attribute memory base chunk (added by AddDynamicAttributeInternal) for this index (same "array" as GetDynamicAttributeCountInternal)
-	const attribute_t& GetDynamicAttributeInternal( int iAttrIndexIntoArray ) const						// read-only version of our attribute memory base chunk for this index (same "array" as GetDynamicAttributeCountInternal)
-	{
-		return const_cast<CEconItem *>( this )->GetMutableDynamicAttributeInternal( iAttrIndexIntoArray );
-	}
+	const attribute_t & GetDynamicAttributeInternal( int iAttrIndexIntoArray ) const;
 
-	const EquippedInstance_t *FindEquippedInstanceForClass( equipped_class_t nClass ) const;
-	void InternalVerifyEquipInstanceIntegrity() const;
 
-	struct dirty_bits_t
-	{
-		// other
-		uint8 m_bInUse : 1;
-		uint8 m_bHasEquipSingleton : 1;
-		uint8 m_bHasAttribSingleton: 1;
-	};
-
-	mutable const char* m_pszSmallIcon;
-	mutable const char* m_pszLargeIcon;
 public:
+	//
+	// GC object data breakdown (32-bit build)
+	//
+	// already starting with TWO VTBLS due to multiple inheritance :(
+	// 8 bytes spent on VTBLS
+	//
+
 	// data that is most commonly changed
 	uint64 m_ulID;							// Item ID
+	uint64 m_ulOriginalID;					// Original ID is often different from item ID itself
+	
+	// optional data (custom name, additional attributes, etc.)
+	CustomDataOptimizedObject_t *m_pCustomDataOptimizedObject;
+	
 	uint32 m_unAccountID;					// Item Owner
 	uint32 m_unInventory;					// App managed int representing inventory placement
-	item_definition_index_t m_unDefIndex;	// Item definition index
-	uint8 m_unLevel;						// Item Level
-	uint8 m_nQuality;						// Item quality (rarity)
-	uint8 m_unFlags;						// Flags
-	uint8 m_unOrigin;						// Origin (eEconItemOrigin)
-	style_index_t m_unStyle;				// Style
 
-	dirty_bits_t m_dirtyBits;	// dirty bits
+	// === + 7*4 = 36 bytes here already, uint16 packing below ===
 
-	// Fields that we often have zero or one of, but not often more
-	EquippedInstance_t m_EquipInstanceSingleton; // Where the item is equipped. Valid only if m_bHasEquipSingleton and there is no custom data
-	attribute_t m_CustomAttribSingleton;	// Custom attribute. Valid only if m_bHasAttribSingleton and there is no custom data
+	item_definition_index_t m_unDefIndex;	// Item definition index							+16
 
-	// optional data (custom name, additional attributes, etc.)
-	CEconItemCustomData *m_pCustomData;
-
-#ifdef GC_DLL
-private:
-	bool m_bEquippedThisGameServerSession;
-#endif // GC_DLL
-};
-
-//-----------------------------------------------------------------------------
-// Purpose: Storage for data that is not commonly changed in CEconItem, primarily
-// as a memory savings mechanism.
-//-----------------------------------------------------------------------------
-class CEconItemCustomData
-{
+	uint16 m_unOrigin : 5;					// Origin (eEconItemOrigin) (0-31)					#5
+	uint16 m_nQuality : 4;					// Item quality (0-14)								#9
+	uint16 m_unLevel:2;						// Item Level (0-1-2-3)								#11
+	uint16 m_nRarity:4;						// Item rarity	(0-14)								#15
+	uint16 m_dirtybitInUse:1;				// In Use											#16
+protected:
+	mutable int16 m_iItemSet;				// packs it tightly with defindex field
+	mutable int  m_bSOUpdateFrame;
 public:
-	CEconItemCustomData()
-		: m_pInteriorItem( NULL )
-		, m_ulOriginalID( INVALID_ITEM_ID )
-		, m_unQuantity( 1 )
-		, m_vecAttributes( /* grow size: */ 1, /* init size: */ 0 )
-		, m_vecEquipped( /* grow size: */ 1, /* init size: */ 0 )
-	{}
-
-	~CEconItemCustomData();
-
-	CUtlVector< CEconItem::attribute_t > m_vecAttributes;
-	CEconItem* m_pInteriorItem;
-	uint64 m_ulOriginalID;	// Original Item ID
-	uint16 m_unQuantity;	// Consumable stack count (ammo, money, etc)	
-
-	CUtlVector<CEconItem::EquippedInstance_t> m_vecEquipped;
+	uint8 m_unFlags;						// Flags
+	// + 6 bytes = 42 bytes total (in 32-bit build)
 
 	static void FreeAttributeMemory( CEconItem::attribute_t *pAttrib );
-
-#ifdef GC_DLL
-	DECLARE_CLASS_MEMPOOL( CEconItemCustomData );
-#endif
 };
 
 //-----------------------------------------------------------------------------
@@ -718,147 +565,24 @@ template < typename TAttribInMemoryType >
 	ConvertTypedValueToByteStream( GetTypedValueContentsFromEconAttributeValue( value ), out_psBytes );
 }
 
-//-----------------------------------------------------------------------------
-// Purpose:
-//-----------------------------------------------------------------------------
+bool ItemsMatch( CEconItemView *pCurItem, CEconItemView *pNewItem );
+
+class CEconDefaultEquippedDefinitionInstanceClient : public GCSDK::CProtoBufSharedObject< CSOEconDefaultEquippedDefinitionInstanceClient, k_EEconTypeDefaultEquippedDefinitionInstanceClient >
+{
+public:
+	const static int k_nTypeID = k_EEconTypeDefaultEquippedDefinitionInstanceClient;
+	virtual int GetTypeID() const { return k_nTypeID; }
+};
+
+void YieldingAddAuditRecord( GCSDK::CSQLAccess *sqlAccess, const CEconItem *pItem, uint32 unOwnerID, EItemAction eAction, uint32 unData, CEconSessionItemAudit* pItemAudit = NULL );
+void YieldingAddAuditRecord( GCSDK::CSQLAccess *sqlAccess, uint64 ulItemID, uint32 unOwnerID, EItemAction eAction, uint32 unData, CEconSessionItemAudit* pItemAudit = NULL );
+void YieldingAddAttributeChangeAuditRecord( GCSDK::CSQLAccess *sqlAccess, uint64 ulItemID, uint32 unOwnerID, uint16 unAttributeDefIndex, uint32 uiOriginalValue, EItemAction eAction, uint32 unData );
+bool YieldingAddItemToDatabase( CEconItem *pItem, const CSteamID & steamID, EItemAction eAction, uint32 unData, CEconSessionItemAudit* pItemAudit = NULL );
+
 template < typename TAttribInMemoryType >
-/*virtual*/ void ISchemaAttributeTypeBase<TAttribInMemoryType>::LoadEconAttributeValue( CEconItem *pTargetItem, const CEconItemAttributeDefinition *pAttrDef, const union attribute_data_union_t& value ) const
+void ISchemaAttributeTypeBase<TAttribInMemoryType>::LoadEconAttributeValue( CEconItem *pTargetItem, const CEconItemAttributeDefinition *pAttrDef, const union attribute_data_union_t& value ) const
 {
 	pTargetItem->SetDynamicAttributeValue( pAttrDef, GetTypedValueContentsFromEconAttributeValue( value ) );
 }
-
-#ifdef GC_DLL
-//-----------------------------------------------------------------------------
-// Purpose:
-//-----------------------------------------------------------------------------
-struct CEconItemEquipInstanceHelpers
-{
-	static void AssignItemToSlot( CEconSharedObjectCache *pSOCache, CEconItem *pItem, equipped_class_t unClass, equipped_slot_t unSlot, CEconUserSession *pOptionalSession = NULL );
-};
-#endif // GC_DLL
-
-void YieldingAddAuditRecord( GCSDK::CSQLAccess *sqlAccess, CEconItem *pItem, uint32 unOwnerID, EItemAction eAction, uint32 unData );
-void YieldingAddAuditRecord( GCSDK::CSQLAccess *sqlAccess, uint64 ulItemID, uint32 unOwnerID, EItemAction eAction, uint32 unData );
-bool YieldingAddItemToDatabase( CEconItem *pItem, const CSteamID & steamID, EItemAction eAction, uint32 unData );
-
-//-----------------------------------------------------------------------------
-// Purpose: wrap the idea of "get a loot list from this item"; some loot lists
-//			are static definitions and some are temporary heap-allocated objects
-//			and this means you don't care which you're dealing with until we
-//			come up with a better interface
-//-----------------------------------------------------------------------------
-class CCrateLootListWrapper
-{
-public:
-	CCrateLootListWrapper( const IEconItemInterface *pEconItem )
-		: m_pLootList( NULL )
-		, m_unAuditDetailData( 0 )
-		, m_bIsDynamicallyAllocatedLootList( false )
-	{
-		Assert( pEconItem );
-
-		if ( !BAttemptCrateSeriesInitialization( pEconItem )
-		  && !BAttemptLootListStringInitialization( pEconItem )
-		  && !BAttemptLineItemInitialization( pEconItem ) )
-		{
-			// We don't actually have anything to do here. We'll return NULL when someone asks for our
-			// loot list and we're done.
-		}
-	}
-
-	~CCrateLootListWrapper()
-	{
-		if ( m_bIsDynamicallyAllocatedLootList )
-		{
-			delete m_pLootList;
-		}
-	}
-
-	const IEconLootList *GetEconLootList() const
-	{
-		return m_pLootList;
-	}
-
-	uint32 GetAuditDetailData() const
-	{
-		return m_unAuditDetailData;
-	}
-	
-private:
-	CCrateLootListWrapper( const CCrateLootListWrapper& );		// intentionally unimplemented
-	void operator=( const CCrateLootListWrapper& );				// intentionally unimplemented
-
-private:
-	// Look for an attribute that specifies a crate series.
-	MUST_CHECK_RETURN bool BAttemptCrateSeriesInitialization( const IEconItemInterface *pEconItem );
-
-	// Look for an attribute that specifies a loot list by string name.
-	MUST_CHECK_RETURN bool BAttemptLootListStringInitialization( const IEconItemInterface *pEconItem );
-
-	// Look for a line-item-per-attribute list.
-	MUST_CHECK_RETURN bool BAttemptLineItemInitialization( const IEconItemInterface *pEconItem );
-
-private:
-	const IEconLootList *m_pLootList;
-	uint32 m_unAuditDetailData;
-	bool m_bIsDynamicallyAllocatedLootList;
-};
-
-//-----------------------------------------------------------------------------
-// Purpose: Maintains a handle to an CEconItem.  If the item gets deleted, this
-//			handle will return NULL when dereferenced
-//-----------------------------------------------------------------------------
-class CEconItemHandle : GCSDK::ISharedObjectListener
-{
-public:
-	CEconItemHandle()
-		: m_pItem( NULL )
-		, m_iItemID( INVALID_ITEM_ID )
-	{}
-
-	CEconItemHandle( CEconItem* pItem )
-		: m_pItem( pItem )
-	{
-		SetItem( pItem );
-	}
-
-	virtual ~CEconItemHandle();
-
-	void SetItem( CEconItem* pItem );
-
-	operator CEconItem *( void ) const
-	{
-		return m_pItem;
-	}
-
-	CEconItem* operator->( void ) const
-	{
-		return m_pItem;
-	}
-
-	CEconItem* operator=( CEconItem* pRhs )
-	{
-		SetItem( pRhs );
-		return m_pItem;
-	}
-
-	virtual void SODestroyed( const CSteamID & steamIDOwner, const GCSDK::CSharedObject *pObject, GCSDK::ESOCacheEvent eEvent ) OVERRIDE;
-
-	virtual void SOCacheUnsubscribed( const CSteamID & steamIDOwner, GCSDK::ESOCacheEvent eEvent ) OVERRIDE;
-	virtual void SOCreated( const CSteamID & steamIDOwner, const GCSDK::CSharedObject *pObject, GCSDK::ESOCacheEvent eEvent ) OVERRIDE;
-	virtual void SOUpdated( const CSteamID & steamIDOwner, const GCSDK::CSharedObject *pObject, GCSDK::ESOCacheEvent eEvent ) OVERRIDE;
-
-	virtual void PreSOUpdate( const CSteamID & steamIDOwner, GCSDK::ESOCacheEvent eEvent ) OVERRIDE{}
-	virtual void PostSOUpdate( const CSteamID & steamIDOwner, GCSDK::ESOCacheEvent eEvent ) OVERRIDE{}
-	virtual void SOCacheSubscribed( const CSteamID & steamIDOwner, GCSDK::ESOCacheEvent eEvent ) OVERRIDE{}
-
-private:
-
-	void UnsubscribeFromSOEvents();
-
-	CEconItem* m_pItem;			// The item
-	itemid_t m_iItemID;			// The stored itemID
-	CSteamID m_OwnerSteamID;	// Steam ID of the item owner.  Used for registering/unregistering from SOCache
-};
 
 #endif // ECONITEM_H

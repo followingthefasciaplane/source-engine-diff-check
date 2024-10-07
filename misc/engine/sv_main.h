@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: Expose functions from sv_main.cpp.
 //
@@ -17,8 +17,11 @@
 #include "checksum_crc.h"
 #include "soundflags.h"
 #include "tier1/bitbuf.h"
+#include "SoundEmitterSystem/isoundemittersystembase.h"
+#include "netmessages.pb.h"
 
 class CGameClient;
+
 
 //===========================================================
 
@@ -27,6 +30,7 @@ class CGameClient;
 // Which areas are we going to transmit (usually 1, but with portals you can see into multiple other areas).
 extern CUtlVector<int> g_AreasNetworked;
 
+void SV_ProcessVoice( void );
 void SV_Frame( bool send_client_updates );
 void SV_FrameExecuteThreadDeferred();
 
@@ -39,8 +43,9 @@ void SV_InstallClientStringTableMirrors( void );
 void SV_ResetModInfo( void );
 
 class IRecipientFilter;
-void SV_StartSound ( IRecipientFilter& filter, edict_t *pSoundEmittingEntity, int iChannel, const char *pSample, 
-	float flVolume, soundlevel_t iSoundLevel, int iFlags, int iPitch, int iSpecialDSP, const Vector *pOrigin, float soundtime, int speakerentity, CUtlVector< Vector >* pUtlVecOrigins );
+
+void SV_StartSound ( IRecipientFilter& filter, edict_t *pSoundEmittingEntity, int iChannel, const char *pSoundEntry, HSOUNDSCRIPTHASH iSoundEntryHash, const char *pSample, 
+	float flVolume, soundlevel_t iSoundLevel, int iFlags, int iPitch, const Vector *pOrigin, float soundtime, int speakerentity, CUtlVector< Vector >* pUtlVecOrigins, int nSeed );
 
 
 int SV_ModelIndex (const char *name);
@@ -52,6 +57,7 @@ int SV_FindOrAddGeneric(const char *name, bool preload );
 int SV_DecalIndex(const char *name);
 int SV_FindOrAddDecal(const char *name, bool preload );
 
+void SV_ForceExactFile( const char *name );
 void SV_ForceSimpleMaterial( const char *name );
 void SV_ForceModelBounds( const char *name, const Vector &mins, const Vector &maxs );
 
@@ -63,7 +69,6 @@ class IServerEntity;
 void SV_ExecuteClientMessage (CGameClient *cl);
 
 bool SV_ActivateServer();
-void SV_InitGameServerSteam();
 
 #ifdef ENABLE_RPT
 void SV_NotifyRPTOfDisconnect( int nClientSlot );
@@ -95,7 +100,7 @@ void SV_InitSendTables( ServerClass *pClasses );
 void SV_TermSendTables( ServerClass *pClasses );
 
 // send voice data from cl to other clients
-void SV_BroadcastVoiceData(IClient * cl, int nBytes, char * data, int64 xuid);
+void SV_BroadcastVoiceData(IClient * cl, const CCLCMsg_VoiceData& msg );
 void SV_SendRestoreMsg( bf_write &dest );
 
 // A client has uploaded its logo to us;
@@ -114,7 +119,11 @@ void SV_AddOriginToPVS( const Vector& origin );
 
 extern CGlobalVars g_ServerGlobalVariables;
 
+void SV_CheckForFlushMemory( const char *pCurrentMapName, const char *pDestMapName );
+bool SV_FlushMemoryIfMarked();
 void SV_FlushMemoryOnNextServer();
+
+void SV_SetSteamCrashComment();
 
 #endif
 

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright (c), Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Holds the CEconGameServerAccount object
 //
@@ -94,17 +94,5 @@ inline const char *GameServerAccount_GetStandingTrendString( eGameServerScoreSta
 	} // switch
 	return pStandingTrend;
 }
-
-//---------------------------------------------------------------------------------
-// Purpose: Selective account-level data for game servers
-//---------------------------------------------------------------------------------
-class CEconGameAccountForGameServers : public GCSDK::CProtoBufSharedObject < CSOEconGameAccountForGameServers, k_EEconTypeGameAccountForGameServers >
-{
-#ifdef GC
-	DECLARE_CLASS_MEMPOOL( CEconGameAccountForGameServers );
-public:
-	virtual bool BIsDatabaseBacked() const { return false; }
-#endif
-};
 
 #endif //ECON_GAME_SERVER_ACCOUNT_H

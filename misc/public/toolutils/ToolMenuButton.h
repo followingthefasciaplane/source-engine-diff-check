@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: Core Movie Maker UI API
 //
@@ -13,7 +13,7 @@
 
 #include "vgui_controls/menubutton.h"
 #include "tier1/utldict.h"
-#include "tier1/utlsymbol.h"
+#include "tier1/UtlSymbol.h"
 
 
 //-----------------------------------------------------------------------------
@@ -38,6 +38,7 @@ public:
 	virtual int AddCheckableMenuItem( char const *itemName, const wchar_t *itemText, KeyValues *message, Panel *target, const KeyValues *userData = NULL, char const *kbcommandname = NULL );
 
 	virtual int FindMenuItem( char const *itemName );
+	virtual vgui::MenuItem *GetMenuItem( int itemID );
 	virtual void AddSeparatorAfterItem( char const *itemName );
 	virtual void MoveMenuItem( int itemID, int moveBeforeThisItemID );
 

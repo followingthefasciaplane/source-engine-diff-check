@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright (c) 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -8,14 +8,59 @@
 
 #include "audio_pch.h"
 #include "snd_mp3_source.h"
-#include "snd_wave_mixer_mp3.h"
+#include "vaudio/ivaudio.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
-#ifndef DEDICATED  // have to test this because VPC is forcing us to compile this file.
-
 extern IVAudio *vaudio;
+
+static const int MP3_BUFFER_SIZE = 16384;
+
+//-----------------------------------------------------------------------------
+// Purpose: Mixer for ADPCM encoded audio
+//-----------------------------------------------------------------------------
+class CAudioMixerWaveMP3 : public CAudioMixerWave, public IAudioStreamEvent
+{
+public:
+	CAudioMixerWaveMP3( IWaveData *data );
+	~CAudioMixerWaveMP3( void );
+	
+	virtual void Mix( channel_t *pChannel, void *pData, int outputOffset, int inputOffset, fixedint fracRate, int outCount, int timecompress );
+	virtual int	 GetOutputData( void **pData, int sampleCount, char copyBuf[AUDIOSOURCE_COPYBUF_SIZE] );
+
+	// need to override this to fixup blocks
+	// UNDONE: This doesn't quite work with MP3 - we need a MP3 position, not a sample position
+	void SetSampleStart( int newPosition );
+
+	int GetPositionForSave() { return m_pStream->GetPosition(); }
+	void SetPositionFromSaved(int position) { m_pStream->SetPosition(position); }
+
+	// IAudioStreamEvent
+	virtual int StreamRequestData( void *pBuffer, int bytesRequested, int offset );
+
+	virtual void SetStartupDelaySamples( int delaySamples );
+	virtual int GetMixSampleSize() { return CalcSampleSize( 16, m_channelCount ); }
+
+	bool IsValid() { return m_pStream != NULL; }
+
+	virtual int GetStreamOutputRate() { return m_pStream->GetOutputRate(); }
+
+private:
+	bool					DecodeBlock( void );
+	void					GetID3HeaderOffset();
+
+
+	IAudioStream			*m_pStream;
+	char					m_samples[MP3_BUFFER_SIZE];
+	int						m_sampleCount;
+	int						m_samplePosition;
+	int						m_channelCount;
+	int						m_offset;
+	int						m_delaySamples;
+	int						m_headerOffset;
+};
+
 
 CAudioMixerWaveMP3::CAudioMixerWaveMP3( IWaveData *data ) : CAudioMixerWave( data ) 
 {
@@ -25,25 +70,37 @@ CAudioMixerWaveMP3::CAudioMixerWaveMP3( IWaveData *data ) : CAudioMixerWave( dat
 	m_delaySamples = 0;
 	m_headerOffset = 0;
 	m_pStream = NULL;
-	m_bStreamInit = false;
-	m_channelCount = 0;
+	if ( vaudio )
+		m_pStream = vaudio->CreateMP3StreamDecoder( static_cast<IAudioStreamEvent *>(this) );
+	if ( m_pStream )
+	{
+		m_channelCount = m_pStream->GetOutputChannels();
+		//Assert( m_pStream->GetOutputRate() == m_pData->Source().SampleRate() );
+	}
 }
 
 
 CAudioMixerWaveMP3::~CAudioMixerWaveMP3( void )
 {
 	if ( m_pStream )
-		delete m_pStream;
+	{
+		vaudio->DestroyMP3StreamDecoder( m_pStream );
+		m_pStream = NULL;
+	}
 }
 
 
-void CAudioMixerWaveMP3::Mix( IAudioDevice *pDevice, channel_t *pChannel, void *pData, int outputOffset, int inputOffset, fixedint fracRate, int outCount, int timecompress )
+void CAudioMixerWaveMP3::Mix( channel_t *pChannel, void *pData, int outputOffset, int inputOffset, fixedint fracRate, int outCount, int timecompress )
 {
-	Assert( IsReadyToMix() );
 	if ( m_channelCount == 1 )
-		pDevice->Mix16Mono( pChannel, (short *)pData, outputOffset, inputOffset, fracRate, outCount, timecompress );
+	{
+		Device_Mix16Mono( pChannel, (short *)pData, outputOffset, inputOffset, fracRate, outCount, timecompress );
+	}
 	else
-		pDevice->Mix16Stereo( pChannel, (short *)pData, outputOffset, inputOffset, fracRate, outCount, timecompress );
+	{
+		Device_Mix16Stereo( pChannel, (short *)pData, outputOffset, inputOffset, fracRate, outCount, timecompress );
+	}
+
 }
 
 
@@ -124,45 +181,9 @@ int CAudioMixerWaveMP3::StreamRequestData( void *pBuffer, int bytesRequested, in
 
 bool CAudioMixerWaveMP3::DecodeBlock()
 {
-	IAudioStream *pStream = GetStream();
-	if ( !pStream )
-	{
-		return false;
-	}
-
-	m_sampleCount = pStream->Decode( m_samples, sizeof(m_samples) );
+	m_sampleCount = m_pStream->Decode( m_samples, sizeof(m_samples) );
 	m_samplePosition = 0;
 	return m_sampleCount > 0;
-}
-
-IAudioStream *CAudioMixerWaveMP3::GetStream()
-{
-	if ( !m_bStreamInit )
-	{
-		m_bStreamInit = true;
-
-		if ( vaudio )
-		{
-			m_pStream = vaudio->CreateMP3StreamDecoder( static_cast<IAudioStreamEvent *>(this) );
-		}
-		else
-		{
-			Warning( "Attempting to play MP3 with no vaudio [ %s ]\n", m_pData->Source().GetFileName() );
-		}
-
-		if ( m_pStream )
-		{
-			m_channelCount = m_pStream->GetOutputChannels();
-			//Assert( m_pStream->GetOutputRate() == m_pData->Source().SampleRate() );
-		}
-
-		if ( !m_pStream )
-		{
-			Warning( "Failed to create decoder for MP3 [ %s ]\n", m_pData->Source().GetFileName() );
-		}
-	}
-
-	return m_pStream;
 }
 
 //-----------------------------------------------------------------------------
@@ -179,16 +200,9 @@ int CAudioMixerWaveMP3::GetOutputData( void **pData, int sampleCount, char copyB
 			return 0;
 	}
 
-	IAudioStream *pStream = GetStream();
-	if ( !pStream )
-	{
-		// Needed for channel count, and with a failed stream init we probably should fail to return data anyway.
-		return 0;
-	}
-
 	if ( m_samplePosition < m_sampleCount )
 	{
-		int sampleSize = pStream->GetOutputChannels() * 2;
+		int sampleSize = m_channelCount * 2;
 		*pData = (void *)(m_samples + m_samplePosition);
 		int available = m_sampleCount - m_samplePosition;
 		int bytesRequired = sampleCount * sampleSize;
@@ -196,7 +210,7 @@ int CAudioMixerWaveMP3::GetOutputData( void **pData, int sampleCount, char copyB
 			available = bytesRequired;
 
 		m_samplePosition += available;
-
+		
 		int samples_loaded = available / sampleSize;
 
 		// update count of max samples loaded in CAudioMixerWave
@@ -235,4 +249,25 @@ void CAudioMixerWaveMP3::SetStartupDelaySamples( int delaySamples )
 	m_delaySamples = delaySamples;
 }
 
-#endif
+//-----------------------------------------------------------------------------
+// Purpose: Abstract factory function for MP3 mixers
+// Input  : *data - wave data access object
+//			channels - 
+// Output : CAudioMixer
+//-----------------------------------------------------------------------------
+CAudioMixer *CreateMP3Mixer( IWaveData *data, int *pSampleRate )
+{
+	CAudioMixerWaveMP3 *pMixer = new CAudioMixerWaveMP3( data );
+	if ( pMixer->IsValid() )
+	{
+		// pass the sample rate back just in time to save parsing the MP3 file twice to get sample rate
+		if ( pSampleRate )
+		{
+			*pSampleRate = pMixer->GetStreamOutputRate();
+		}
+		return pMixer;
+	}
+
+	delete pMixer;
+	return NULL;
+}

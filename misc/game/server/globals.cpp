@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -22,6 +22,6 @@
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
-Vector			g_vecAttackDir;
-int				g_iSkillLevel;
-bool			g_fGameOver;
+Vector			g_vecAttackDir(0.0f, 0.0f, 0.0f);
+int				g_iSkillLevel = 0;
+bool			g_fGameOver = false;

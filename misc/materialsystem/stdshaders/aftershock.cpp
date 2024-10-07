@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright (c) 1996-2006, Valve Corporation, All rights reserved. ============//
 
 #include "BaseVSShader.h"
 #include "aftershock_helper.h"
@@ -52,11 +52,6 @@ BEGIN_VS_SHADER( Aftershock_dx9, "Aftershock" )
 
 	SHADER_FALLBACK
 	{
-		if ( g_pHardwareConfig->GetDXSupportLevel() < 90 )
-		{
-			return "Aftershock_dx8";
-		}
-
 		return 0;
 	}
 

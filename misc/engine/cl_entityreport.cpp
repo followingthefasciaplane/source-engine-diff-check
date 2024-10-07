@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -6,20 +6,17 @@
 //=============================================================================//
 #include "client_pch.h"
 #include "ivideomode.h"
+#include "characterset.h"
+#include <ctype.h>
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
 ConVar cl_entityreport( "cl_entityreport", "0", FCVAR_CHEAT, "For debugging, draw entity states to console" );
-ConVar cl_entityreport_sorted( "cl_entityreport_sorted", "0", FCVAR_CHEAT, "For debugging, draw entity states to console in sorted order. [0 = disabled, 1 = average, 2 = current, 3 = peak" );
 
-enum
-{
-	ENTITYSORT_NONE		= 0,
-	ENTITYSORT_AVG		= 1,
-	ENTITYSORT_CURRENT	= 2,
-	ENTITYSORT_PEAK		= 3,
-};
+static ConVar er_colwidth( "er_colwidth", "100", 0 );
+static ConVar er_maxname( "er_maxname", "14", 0 );
+static ConVar er_graphwidthfrac( "er_graphwidthfrac", "0.2", 0 );
 
 // How quickly to move rolling average for entityreport
 #define BITCOUNT_AVERAGE 0.95f
@@ -42,8 +39,20 @@ enum
 //-----------------------------------------------------------------------------
 // Purpose: Data about an entity
 //-----------------------------------------------------------------------------
-typedef struct
+class CEntityBits
 {
+public:
+	CEntityBits() :
+		bits( 0 ),
+		average( 0.0f ),
+		peak( 0 ),
+		peaktime( 0.0f ),
+		flags( 0 ),
+		effectfinishtime( 0.0f ),
+		deletedclientclass( NULL )
+	{
+	}
+
 	// Bits used for last message
 	int				bits;
 	// Rolling average of bits used
@@ -58,90 +67,58 @@ typedef struct
 	float			effectfinishtime;
 	// If event was deletion, remember client class for a little bit
 	ClientClass		*deletedclientclass;
-} ENTITYBITS;
+};
 
-// List of entities we are keeping data bout
-static ENTITYBITS s_EntityBits[ MAX_EDICTS ];
-
-// Used to sort by average
-int CompareEntityBits(const void* pIndexA, const void* pIndexB )
+class CEntityReportManager
 {
-	int indexA = *(int*)pIndexA;
-	int indexB = *(int*)pIndexB;
+public:
 
-	ENTITYBITS *pEntryA = &s_EntityBits[indexA];
-	ENTITYBITS *pEntryB = &s_EntityBits[indexB];
+	void Reset();
+	void Record( int entnum, int bitcount );
+	void Add( int entnum );
+	void LeavePVS( int entnum );
+	void DeleteEntity( int entnum, ClientClass *pclass );
 
-	/*
-	if ( pEntryA->flags == FENTITYBITS_ZERO )
-	{
-		if ( pEntryB->flags == FENTITYBITS_ZERO )
-		{
-			return 0;
-		}
-		return 1;
-	}
-	else if ( pEntryB->flags == FENTITYBITS_ZERO )
-	{
-		return -1;
-	}
-	*/
+	int  Count();
+	CEntityBits *Base();
 
-	// sort dormant, out-of-pvs to the end
-	IClientNetworkable *pNetA = entitylist->GetClientNetworkable( indexA );
-	IClientNetworkable *pNetB = entitylist->GetClientNetworkable( indexB );
+private:
+	CUtlVector< CEntityBits > m_EntityBits;
+};
 
-	bool bDormantA = pNetA == NULL || pNetA->IsDormant();
-	bool bDormantB = pNetB == NULL || pNetB->IsDormant();
+static CEntityReportManager g_EntityReportMgr;
 
-	if ( bDormantA != bDormantB )
-	{
-		return bDormantA ? 1 : -1;
-	}
+void CL_ResetEntityBits( void )
+{
+	g_EntityReportMgr.Reset();
+}
 
-	switch ( cl_entityreport_sorted.GetInt() )
-	{
-	case ENTITYSORT_AVG:
-		if ( pEntryA->average > pEntryB->average )
-		{
-			return -1;
-		}
-		if ( pEntryA->average < pEntryB->average )
-		{
-			return 1;
-		}
-		break;
-	case ENTITYSORT_CURRENT:
-		if ( pEntryA->bits > pEntryB->bits )
-		{
-			return -1;
-		}
-		if ( pEntryA->bits < pEntryB->bits )
-		{
-			return 1;
-		}
-		break;
-	case ENTITYSORT_PEAK:
-	default:
-		if ( pEntryA->peak > pEntryB->peak )
-		{
-			return -1;
-		}
-		if ( pEntryA->peak < pEntryB->peak )
-		{
-			return 1;
-		}
-	}
-	
-	return 0;
+void CL_RecordAddEntity( int entnum )
+{
+	g_EntityReportMgr.Add( entnum );
+}
+
+void CL_RecordEntityBits( int entnum, int bitcount )
+{
+	g_EntityReportMgr.Record( entnum, bitcount );
+}
+
+void CL_RecordLeavePVS( int entnum )
+{
+	g_EntityReportMgr.LeavePVS( entnum );
+}
+
+void CL_RecordDeleteEntity( int entnum, ClientClass *pclass )
+{
+	g_EntityReportMgr.DeleteEntity( entnum, pclass );
 }
 
 //-----------------------------------------------------------------------------
-// Purpose: Zero out structure ( level transition/startup )
+// Purpose: Wipe structure ( level transition/startup )
 //-----------------------------------------------------------------------------
-void CL_ResetEntityBits( void )
+void CEntityReportManager::Reset()
 {
-	memset( s_EntityBits, 0, sizeof( s_EntityBits ) );
+	m_EntityBits.RemoveAll();
 }
 
 //-----------------------------------------------------------------------------
@@ -149,14 +126,16 @@ void CL_ResetEntityBits( void )
 // Input  : entnum - 
 //			bitcount - 
 //-----------------------------------------------------------------------------
-void CL_RecordEntityBits( int entnum, int bitcount )
+void CEntityReportManager::Record( int entnum, int bitcount )
 {
 	if ( entnum < 0 || entnum >= MAX_EDICTS ) 
 	{
 		return;
 	}
 
-	ENTITYBITS *slot = &s_EntityBits[ entnum ];
+	m_EntityBits.EnsureCount( entnum + 1 );
+
+	CEntityBits *slot = &m_EntityBits[ entnum ];
 
 	slot->bits = bitcount;
 	// Update average
@@ -180,14 +159,16 @@ void CL_RecordEntityBits( int entnum, int bitcount )
 // Purpose: Record entity add event
 // Input  : entnum - 
 //-----------------------------------------------------------------------------
-void CL_RecordAddEntity( int entnum )
+void CEntityReportManager::Add( int entnum )
 {
 	if ( !cl_entityreport.GetBool() || entnum < 0 || entnum >= MAX_EDICTS )
 	{
 		return;
 	}
 
-	ENTITYBITS *slot = &s_EntityBits[ entnum ];
+	m_EntityBits.EnsureCount( entnum + 1 );
+
+	CEntityBits *slot = &m_EntityBits[ entnum ];
 	slot->flags = FENTITYBITS_ADD;
 	slot->effectfinishtime = realtime + EFFECT_TIME;
 }
@@ -196,14 +177,16 @@ void CL_RecordAddEntity( int entnum )
 // Purpose: record entity leave event
 // Input  : entnum - 
 //-----------------------------------------------------------------------------
-void CL_RecordLeavePVS( int entnum )
+void CEntityReportManager::LeavePVS( int entnum )
 {
 	if ( !cl_entityreport.GetBool() || entnum < 0 || entnum >= MAX_EDICTS )
 	{
 		return;
 	}
 
-	ENTITYBITS *slot = &s_EntityBits[ entnum ];
+	m_EntityBits.EnsureCount( entnum + 1 );
+
+	CEntityBits *slot = &m_EntityBits[ entnum ];
 	slot->flags = FENTITYBITS_LEAVEPVS;
 	slot->effectfinishtime = realtime + EFFECT_TIME;
 }
@@ -213,17 +196,29 @@ void CL_RecordLeavePVS( int entnum )
 // Input  : entnum - 
 //			*pclass - 
 //-----------------------------------------------------------------------------
-void CL_RecordDeleteEntity( int entnum, ClientClass *pclass )
+void CEntityReportManager::DeleteEntity( int entnum, ClientClass *pclass )
 {
 	if ( !cl_entityreport.GetBool() || entnum < 0 || entnum >= MAX_EDICTS )
 	{
 		return;
 	}
 
-	ENTITYBITS *slot = &s_EntityBits[ entnum ];
+	m_EntityBits.EnsureCount( entnum + 1 );
+
+	CEntityBits *slot = &m_EntityBits[ entnum ];
 	slot->flags = FENTITYBITS_DELETE;
 	slot->effectfinishtime = realtime + EFFECT_TIME;
 	slot->deletedclientclass = pclass;
+}
+
+int CEntityReportManager::Count()
+{
+	return m_EntityBits.Count();
+}
+
+CEntityBits *CEntityReportManager::Base()
+{
+	return m_EntityBits.Base();
 }
 
 //-----------------------------------------------------------------------------
@@ -243,12 +238,16 @@ public:
 	virtual bool	ShouldDraw( void );
 
 	// Helpers
-	void ApplyEffect( ENTITYBITS *entry, int& r, int& g, int& b );
-	bool DrawEntry( int row, int col, int rowheight, int colwidth, int entityIdx );
+	virtual void	ApplyEffect( CEntityBits *entry, int& r, int& g, int& b );
 
 private:
+
+	char const		*MaybeTruncateName( int maxname, char const *pchName );
+
 	// Font to use for drawing
 	vgui::HFont		m_hFont;
+
+	characterset_t		m_BreakSetVowels;
 };
 
 static CEntityReportPanel *g_pEntityReportPanel = NULL;
@@ -270,17 +269,31 @@ CEntityReportPanel::CEntityReportPanel( vgui::Panel *parent ) :
 	CBasePanel( parent, "CEntityReportPanel" )
 {
 	// Need parent here, before loading up textures, so getSurfaceBase 
-	//  will work on this panel ( it's null otherwise )
-	SetSize( videomode->GetModeStereoWidth(), videomode->GetModeStereoHeight() );
-	SetPos( 0, 0 );
+	//  will work on this panel ( it's 0 otherwise )
+	int nWidth = videomode->GetModeWidth();
+	int nHeight = videomode->GetModeHeight();
+
+	if ( IsGameConsole() )
+	{
+		SetSize( ( int )( nWidth * 0.9f ), ( int )( nHeight * 0.9f ) );
+		SetPos( ( int )( nWidth * 0.05f ), ( int )( nHeight * 0.05f ) );
+	}
+	else
+	{
+		SetSize( nWidth, nHeight );
+		SetPos( 0, 0 );
+	}
+	
 	SetVisible( true );
-	SetCursor( null );
+	SetCursor( 0 );
 
 	m_hFont = vgui::INVALID_FONT;
 
 	SetFgColor( Color( 0, 0, 0, 255 ) );
 	SetPaintBackgroundEnabled( false );
 	SetPaintBorderEnabled(false);
+
+	CharacterSetBuild( &m_BreakSetVowels, "aeiou" );
 }
 
 //-----------------------------------------------------------------------------
@@ -296,7 +309,16 @@ void CEntityReportPanel::ApplySchemeSettings( vgui::IScheme *pScheme )
 
 	// If you change this font, be sure to mark it with
 	// $use_in_fillrate_mode in its .vmt file
-	m_hFont = pScheme->GetFont( "DefaultVerySmall", false );
+	if ( IsGameConsole() )
+	{
+		// This is one of the few fonts we have loaded in shipping console builds
+		m_hFont = pScheme->GetFont( "DebugFixed", false );
+	}
+	else
+	{
+		m_hFont = pScheme->GetFont( "DefaultVerySmall", false );
+	}
+	
 	Assert( m_hFont );
 }
 
@@ -343,8 +365,8 @@ static int MungeColorValue( float cycle, int& value )
 		value = 255 - value;
 	}
 
-	value = max( 0, value );
-	value = min( 255, value );
+	value = MAX( 0, value );
+	value = MIN( 255, value );
 	return value;
 }
 
@@ -355,7 +377,7 @@ static int MungeColorValue( float cycle, int& value )
 //			g - 
 //			b - 
 //-----------------------------------------------------------------------------
-void CEntityReportPanel::ApplyEffect( ENTITYBITS *entry, int& r, int& g, int& b )
+void CEntityReportPanel::ApplyEffect( CEntityBits *entry, int& r, int& g, int& b )
 {
 	bool effectactive = ( realtime <= entry->effectfinishtime ) ? true : false;
 	if ( !effectactive )
@@ -364,8 +386,8 @@ void CEntityReportPanel::ApplyEffect( ENTITYBITS *entry, int& r, int& g, int& b 
 	float frequency = 3.0f;
 
 	float frac = ( EFFECT_TIME - ( entry->effectfinishtime - realtime ) ) / EFFECT_TIME;
-	frac = min( 1.f, frac );
-	frac = max( 0.f, frac );
+	frac = MIN( 1.0, frac );
+	frac = MAX( 0.0, frac );
 
 	frac *= 2.0 * M_PI;
 	frac = sin( frequency * frac );
@@ -386,119 +408,46 @@ void CEntityReportPanel::ApplyEffect( ENTITYBITS *entry, int& r, int& g, int& b 
 	}
 }
 
-//-----------------------------------------------------------------------------
-// Purpose: 
-//-----------------------------------------------------------------------------
-bool CEntityReportPanel::DrawEntry( int row, int col, int rowheight, int colwidth, int entityIdx )
+char const *CEntityReportPanel::MaybeTruncateName( int maxname, char const *pchName )
 {
-	IClientNetworkable *pNet;
-	ClientClass			*pClientClass;
-	bool				inpvs;
-	int					r, g, b, a;
-	bool				effectactive;
-	ENTITYBITS			*entry;
+	static char truncated[ 64 ];
 
-	int top = 5;
-	int left = 5;
+	int len = Q_strlen( pchName );
 
-	pNet	= entitylist->GetClientNetworkable( entityIdx );
-	
-	entry = &s_EntityBits[ entityIdx ];
-
-	effectactive = ( realtime <= entry->effectfinishtime ) ? true : false;
-
-	if ( pNet && ((pClientClass = pNet->GetClientClass())) != NULL )
+	if ( *pchName == 'C' )
 	{
-		inpvs = !pNet->IsDormant();
-		if ( inpvs )
-		{
-			if ( entry->average >= 5 )
-			{
-				r = 200; g = 200; b = 250;
-				a = 255;
-			}
-			else
-			{
-				r = 200; g = 255; b = 100;
-				a = 255;
-			}
-		}
-		else
-		{
-			r = 255; g = 150; b = 100;
-			a = 255;
-		}
-
-		ApplyEffect( entry, r, g, b );
-
-		char	text[256];
-		wchar_t unicode[ 256 ];
-
-		Q_snprintf( text, sizeof(text), "(%i) %s", entityIdx, pClientClass->m_pNetworkName );
-		
-		g_pVGuiLocalize->ConvertANSIToUnicode( text, unicode, sizeof( unicode ) );
-
-		DrawColoredText( m_hFont, left + col * colwidth, top + row * rowheight, r, g, b, a, unicode );
-
-		if ( inpvs )
-		{
-			float fracs[ 3 ];
-			fracs[ 0 ] = (float)( entry->bits >> 3 ) / 100.0f;
-			fracs[ 1 ] = (float)( entry->peak >> 3 ) / 100.0f;
-			fracs[ 2 ] = (float)( (int)entry->average >> 3 ) / 100.0f;
-
-			for ( int j = 0; j < 3; j++ )
-			{
-				fracs[ j ] = max( 0.0f, fracs[ j ] );
-				fracs[ j ] = min( 1.0f, fracs[ j ] );
-			}
-
-			int rcright =  left + col * colwidth + colwidth-2;
-			int wide = colwidth / 3;
-			int rcleft = rcright - wide;
-			int rctop = top + row * rowheight;
-			int rcbottom = rctop + rowheight - 1;
-
-			vgui::surface()->DrawSetColor( 63, 63, 63, 127 );
-			vgui::surface()->DrawFilledRect( rcleft, rctop, rcright, rcbottom );
-
-			// draw a box around it
-			vgui::surface()->DrawSetColor( 200, 200, 200, 127 );
-			vgui::surface()->DrawOutlinedRect( rcleft, rctop, rcright, rcbottom );
-
-			// Draw current as a filled rect
-			vgui::surface()->DrawSetColor( 200, 255, 100, 192 );
-			vgui::surface()->DrawFilledRect( rcleft, rctop + rowheight / 2, rcleft + wide * fracs[ 0 ], rcbottom - 1 );
-
-			// Draw average a vertical bar
-			vgui::surface()->DrawSetColor( 192, 192, 192, 255 );
-			vgui::surface()->DrawFilledRect( rcleft + wide * fracs[ 2 ], rctop + rowheight / 2, rcleft + wide * fracs[ 2 ] + 1, rcbottom - 1 );
-
-			// Draw peak as a vertical red tick
-			vgui::surface()->DrawSetColor( 192, 0, 0, 255 );
-			vgui::surface()->DrawFilledRect( rcleft + wide * fracs[ 1 ], rctop + 1, rcleft + wide * fracs[ 1 ] + 1, rctop + rowheight / 2 );
-		}
-
-		// drew something...
-		return true;
+		--len;
+		++pchName;
 	}
-	/*else
+
+	int toRemove = len - maxname;
+
+	char const *in = pchName;
+	char *out = truncated;
+	int outlen = 1;
+	// Strip the vowels and lower case the rest
+	while ( *in && outlen < sizeof( truncated ) )
 	{
-		r = 63; g = 63; b = 63;
-		a = 220;
+		char check = tolower( *in );
 
-		ApplyEffect( entry, r, g, b );
+		if ( toRemove >= 0 &&
+			IN_CHARACTERSET( m_BreakSetVowels, check ) )
+		{
+			++in;
+			--toRemove;
+			continue;
+		}
 
-		wchar_t unicode[ 256 ];
-		g_pVGuiLocalize->ConvertANSIToUnicode( ( effectactive && entry->deletedclientclass ) ? 
-			  entry->deletedclientclass->m_pNetworkName : "unused", unicode, sizeof( unicode ) );
+		++outlen;
+		*out++ = check;
+		++in;
+	}
 
-		DrawColoredText( m_hFont, left + col * colwidth, top + row * rowheight, r, g, b, a, 
-			L"(%i) %s", i, unicode );
-	}*/
+	*out = 0;
 
-	return false;
+	return truncated;
 }
+
 
 //-----------------------------------------------------------------------------
 // Purpose: 
@@ -510,7 +459,7 @@ void CEntityReportPanel::Paint()
 	if ( !m_hFont )
 		return;
 
-	if ( !cl.IsActive() )
+	if ( !GetBaseLocalClient().IsActive() )
 		return;
 
 	if ( !entitylist )
@@ -520,20 +469,35 @@ void CEntityReportPanel::Paint()
 	int left = 5;
 	int row = 0;
 	int col = 0;
-	int colwidth = 160;
+	int colwidth = er_colwidth.GetInt();
+	int maxname = er_maxname.GetInt();
 	int rowheight = vgui::surface()->GetFontTall( m_hFont );
+	int screenw = videomode->GetModeWidth();
+	int screenh = videomode->GetModeHeight();
+
+	if ( IsGameConsole() )
+	{
+		screenw = ( int )( screenw * 0.9f );
+		screenh = ( int )( screenh * 0.9f );
+	}
+
+	float graphfrac = clamp( er_graphwidthfrac.GetFloat(), 0.1f, 1.0f );
 
 	IClientNetworkable *pNet;
+	ClientClass			*pClientClass;
+	bool				inpvs;
+	int					r, g, b, a;
 	bool				effectactive;
-	ENTITYBITS			*entry;
+	CEntityBits			*entry;
 
-	int lastused = entitylist->GetMaxEntities()-1;
+	int lastused = g_EntityReportMgr.Count()-1;
+	CEntityBits			*list = g_EntityReportMgr.Base();
 
 	while ( lastused > 0 )
 	{
 		pNet	= entitylist->GetClientNetworkable( lastused );
 
-		entry = &s_EntityBits[ lastused ];
+		entry = &list[ lastused ];
 
 		effectactive = ( realtime <= entry->effectfinishtime ) ? true : false;
 
@@ -554,53 +518,96 @@ void CEntityReportPanel::Paint()
  		start = cl_entityreport.GetInt();
  	}
 
-	// draw sorted
-	if ( cl_entityreport_sorted.GetInt() != ENTITYSORT_NONE )
+	for ( int i = start; i <= lastused; i++ )
 	{
-		// copy and sort
-		int entityIndices[MAX_EDICTS];
-		int count = lastused - start + 1;
-		for ( int i = 0, entityIdx = start; entityIdx <= lastused; ++i, ++entityIdx )
-		{
-			entityIndices[i] = entityIdx;
-		}
-		qsort( entityIndices, count, sizeof(int), CompareEntityBits );
+		pNet	= entitylist->GetClientNetworkable( i );
 
-		// now draw
-		for ( int i = 0; i < count; ++i )
-		{
-			int entityIdx = entityIndices[i];
+		entry = &list[ i ];
 
-			if ( DrawEntry( row, col, rowheight, colwidth, entityIdx ) )
+		effectactive = ( realtime <= entry->effectfinishtime ) ? true : false;
+
+		if ( pNet && ((pClientClass = pNet->GetClientClass())) != NULL )
+		{
+			inpvs = !pNet->IsDormant();
+			if ( inpvs )
 			{
-				row++;
-				if ( top + row * rowheight > videomode->GetModeStereoHeight() - rowheight )
+ 				if ( entry->average >= 5 )
+ 				{
+ 					r = 200; g = 200; b = 250;
+ 					a = 255;
+ 				}
+ 				else
+ 				{
+ 					r = 200; g = 255; b = 100;
+ 					a = 255;
+ 				}
+			}
+			else
+			{
+				r = 255; g = 150; b = 100;
+				a = 255;
+			}
+
+			ApplyEffect( entry, r, g, b );
+
+			char	text[256];
+			wchar_t unicode[ 256 ];
+
+			Q_snprintf( text, sizeof(text), "%i %s", i, MaybeTruncateName( maxname, pClientClass->m_pNetworkName ) );
+			
+			g_pVGuiLocalize->ConvertANSIToUnicode( text, unicode, sizeof( unicode ) );
+
+			DrawColoredText( m_hFont, left + col * colwidth, top + row * rowheight, r, g, b, a, unicode );
+
+			if ( inpvs )
+			{
+				float fracs[ 3 ];
+				fracs[ 0 ] = (float)( entry->bits >> 3 ) / 100.0f;
+				fracs[ 1 ] = (float)( entry->peak >> 3 ) / 100.0f;
+				fracs[ 2 ] = (float)( (int)entry->average >> 3 ) / 100.0f;
+
+				for ( int j = 0; j < 3; j++ )
 				{
-					row = 0;
-					col++;
-					// No more space anyway, give up
-					if ( left + ( col + 1 ) * 200 > videomode->GetModeStereoWidth() )
-						return;
+					fracs[ j ] = MAX( 0.0f, fracs[ j ] );
+					fracs[ j ] = MIN( 1.0f, fracs[ j ] );
 				}
-			}
-		}
-	}
-	// not sorted, old method with items scattered across the screen
-	else
-	{
-		for ( int i = start; i <= lastused; i++ )
-		{
-			DrawEntry( row, col, rowheight, colwidth, i );
 
-			row++;
-			if ( top + row * rowheight > videomode->GetModeStereoHeight() - rowheight )
-			{
-				row = 0;
-				col++;
-				// No more space anyway, give up
-				if ( left + ( col + 1 ) * 200 > videomode->GetModeStereoWidth() )
-					return;
+				int rcright =  left + col * colwidth + colwidth-2;
+				int wide = MAX( 1, colwidth * graphfrac );
+				int rcleft = rcright - wide;
+				int rctop = top + row * rowheight;
+				int rcbottom = rctop + rowheight - 1;
+
+				vgui::surface()->DrawSetColor( 63, 63, 63, 127 );
+ 				vgui::surface()->DrawFilledRect( rcleft, rctop, rcright, rcbottom );
+
+				// draw a box around it
+				vgui::surface()->DrawSetColor( 200, 200, 200, 127 );
+				vgui::surface()->DrawOutlinedRect( rcleft, rctop, rcright, rcbottom );
+
+				// Draw current as a filled rect
+				vgui::surface()->DrawSetColor( 200, 255, 100, 192 );
+				vgui::surface()->DrawFilledRect( rcleft, rctop + rowheight / 2, rcleft + wide * fracs[ 0 ], rcbottom - 1 );
+
+				// Draw average a vertical bar
+				vgui::surface()->DrawSetColor( 192, 192, 192, 255 );
+				vgui::surface()->DrawFilledRect( rcleft + wide * fracs[ 2 ], rctop + rowheight / 2, rcleft + wide * fracs[ 2 ] + 1, rcbottom - 1 );
+
+				// Draw peak as a vertical red tick
+				vgui::surface()->DrawSetColor( 192, 0, 0, 255 );
+				vgui::surface()->DrawFilledRect( rcleft + wide * fracs[ 1 ], rctop + 1, rcleft + wide * fracs[ 1 ] + 1, rctop + rowheight / 2 );
 			}
+
+		}
+		
+		row++;
+		if ( top + row * rowheight > screenh - rowheight )
+		{
+			row = 0;
+			col++;
+			// No more space anyway, give up
+			if ( left + ( col + 1 ) * colwidth > screenw )
+				return;
 		}
 	}
 }

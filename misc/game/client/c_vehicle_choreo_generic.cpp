@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright � 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -9,11 +9,9 @@
 #include "c_props.h"
 #include "iclientvehicle.h"
 #include <vgui_controls/Controls.h>
-#include <Color.h>
+#include <color.h>
 #include "vehicle_choreo_generic_shared.h"
 #include "vehicle_viewblend_shared.h"
-// NVNT haptic utils
-#include "haptics/haptic_utils.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -78,6 +76,11 @@ public:
 	virtual bool IsSelfAnimating() { return false; };
 
 private:
+	void UpdateViewClamps( void );
+	float				m_flPitchMaxCurrent;
+	float				m_flPitchMinCurrent;
+	float				m_flYawMaxCurrent;
+	float				m_flYawMinCurrent;
 
 	CHandle<C_BasePlayer>	m_hPlayer;
 	CHandle<C_BasePlayer>	m_hPrevPlayer;
@@ -85,6 +88,7 @@ private:
 	bool					m_bEnterAnimOn;
 	bool					m_bExitAnimOn;
 	Vector					m_vecEyeExitEndpoint;
+	bool					m_bForceEyesToAttachment;
 	float					m_flFOV;				// The current FOV (changes during entry/exit anims).
 
 	ViewSmoothingData_t		m_ViewSmoothingData;
@@ -96,6 +100,7 @@ IMPLEMENT_CLIENTCLASS_DT(C_PropVehicleChoreoGeneric, DT_PropVehicleChoreoGeneric
 	RecvPropEHandle( RECVINFO(m_hPlayer) ),
 	RecvPropBool( RECVINFO( m_bEnterAnimOn ) ),
 	RecvPropBool( RECVINFO( m_bExitAnimOn ) ),
+	RecvPropBool( RECVINFO( m_bForceEyesToAttachment ) ),
 	RecvPropVector( RECVINFO( m_vecEyeExitEndpoint ) ),
 	RecvPropBool( RECVINFO( m_vehicleView.bClampEyeAngles ) ),
 	RecvPropFloat( RECVINFO( m_vehicleView.flPitchCurveZero ) ),
@@ -147,21 +152,16 @@ void C_PropVehicleChoreoGeneric::PostDataUpdate( DataUpdateType_t updateType )
 {
 	BaseClass::PostDataUpdate( updateType );
 
-	// NVNT if we have entered this vehicle notify the haptics system
-	if ( m_hPlayer && !m_hPrevPlayer )
+	if ( updateType == DATA_UPDATE_CREATED )
 	{
-#if defined( WIN32 ) && !defined( _X360 )
-		//They have just entered the vehicle.
-		HapticsEnteredVehicle(this,m_hPlayer);
-#endif
+		m_flPitchMaxCurrent = m_vehicleView.flPitchMax;
+		m_flPitchMinCurrent = m_vehicleView.flPitchMin;
+		m_flYawMaxCurrent	= m_vehicleView.flYawMax;
+		m_flYawMinCurrent	= m_vehicleView.flYawMin;
 	}
 
 	if ( !m_hPlayer && m_hPrevPlayer )
 	{
-#if defined( WIN32 ) && !defined( _X360 )
-		// NVNT we have just exited this vehicle so we notify the haptics system
-		HapticsExitedVehicle(this,m_hPrevPlayer);
-#endif
 		// They have just exited the vehicle.
 		// Sometimes we never reach the end of our exit anim, such as if the
 		// animation doesn't have fadeout 0 specified in the QC, so we fail to
@@ -211,7 +211,7 @@ void C_PropVehicleChoreoGeneric::GetVehicleViewPosition( int nRole, Vector *pAbs
 								m_bEnterAnimOn, m_bExitAnimOn, 
 								m_vecEyeExitEndpoint, 
 								&m_ViewSmoothingData, 
-								pFOV );
+								pFOV, m_bForceEyesToAttachment );
 }
 
 
@@ -227,14 +227,16 @@ void C_PropVehicleChoreoGeneric::UpdateViewAngles( C_BasePlayer *pLocalPlayer, C
 	QAngle vehicleEyeAngles;
 	GetAttachmentLocal( eyeAttachmentIndex, vehicleEyeOrigin, vehicleEyeAngles );
 
+	UpdateViewClamps();
+
 	// Limit the yaw.
 	float flAngleDiff = AngleDiff( pCmd->viewangles.y, vehicleEyeAngles.y );
-	flAngleDiff = clamp( flAngleDiff, (float) m_vehicleView.flYawMin, (float) m_vehicleView.flYawMax );
+	flAngleDiff = clamp( flAngleDiff, m_flYawMinCurrent, m_flYawMaxCurrent );
 	pCmd->viewangles.y = vehicleEyeAngles.y + flAngleDiff;
 
 	// Limit the pitch -- don't let them look down into the empty pod!
 	flAngleDiff = AngleDiff( pCmd->viewangles.x, vehicleEyeAngles.x );
-	flAngleDiff = clamp( flAngleDiff, (float) m_vehicleView.flPitchMin, (float) m_vehicleView.flPitchMax );
+	flAngleDiff = clamp( flAngleDiff, m_flPitchMinCurrent, m_flPitchMaxCurrent );
 	pCmd->viewangles.x = vehicleEyeAngles.x + flAngleDiff;
 }
 
@@ -256,4 +258,25 @@ void C_PropVehicleChoreoGeneric::DrawHudElements( )
 {
 }
 
+float InterpolateViewClamp( float flValue, float flDesired )
+{
+	if ( CloseEnough ( flValue, flDesired, 1e-3 ) == false ) 
+	{
+		float delta = flDesired - flValue;
+		delta = delta * ExponentialDecay( 0.2, 0.5, gpGlobals->frametime );
+		return flDesired - delta;
+	}
+	else
+	{
+		return flDesired;
+	}
+}
+
+void C_PropVehicleChoreoGeneric::UpdateViewClamps( void )
+{
+	m_flPitchMaxCurrent = InterpolateViewClamp( m_flPitchMaxCurrent, m_vehicleView.flPitchMax );
+	m_flPitchMinCurrent = InterpolateViewClamp( m_flPitchMinCurrent, m_vehicleView.flPitchMin );
+	m_flYawMaxCurrent = InterpolateViewClamp( m_flYawMaxCurrent, m_vehicleView.flYawMax );
+	m_flYawMinCurrent = InterpolateViewClamp( m_flYawMinCurrent, m_vehicleView.flYawMin );
+}
 

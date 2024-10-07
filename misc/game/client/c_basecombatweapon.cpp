@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright  1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Client side implementation of CBaseCombatWeapon.
 //
@@ -13,25 +13,15 @@
 #include "engine/ivmodelinfo.h"
 #include "tier0/vprof.h"
 #include "hltvcamera.h"
-#include "tier1/KeyValues.h"
+#include "tier1/keyvalues.h"
 #include "toolframework/itoolframework.h"
 #include "toolframework_client.h"
+#if defined( CSTRIKE15 )
+#include "c_cs_player.h"
+#endif
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
-
-//-----------------------------------------------------------------------------
-// Purpose: Gets the local client's active weapon, if any.
-//-----------------------------------------------------------------------------
-C_BaseCombatWeapon *GetActiveWeapon( void )
-{
-	C_BasePlayer *player = C_BasePlayer::GetLocalPlayer();
-
-	if ( !player )
-		return NULL;
-
-	return player->GetActiveWeapon();
-}
 
 //-----------------------------------------------------------------------------
 // Purpose: 
@@ -63,13 +53,12 @@ void C_BaseCombatWeapon::NotifyShouldTransmit( ShouldTransmitState_t state )
 	}
 	else if( state == SHOULDTRANSMIT_START )
 	{
-		if( m_iState == WEAPON_IS_CARRIED_BY_PLAYER )
+		// We don't check the value of m_iState because if the weapon is active, we need the state to match reguardless
+		// of what it was.
+		if( GetOwner() && GetOwner()->GetActiveWeapon() == this )
 		{
-			if( GetOwner() && GetOwner()->GetActiveWeapon() == this )
-			{
-				// Restore the Activeness of the weapon if we client-twiddled it off in the first case above.
-				m_iState = WEAPON_IS_ACTIVE;
-			}
+			// Restore the Activeness of the weapon if we client-twiddled it off in the first case above.
+			m_iState = WEAPON_IS_ACTIVE;
 		}
 	}
 }
@@ -78,12 +67,13 @@ void C_BaseCombatWeapon::NotifyShouldTransmit( ShouldTransmitState_t state )
 //-----------------------------------------------------------------------------
 // Purpose: To wrap PORTAL mod specific functionality into one place
 //-----------------------------------------------------------------------------
-static inline bool ShouldDrawLocalPlayerViewModel( void )
+static inline bool ShouldDrawLocalPlayer( C_BasePlayer *pl )
 {
 #if defined( PORTAL )
-	return false;
+	return true;
 #else
-	return !C_BasePlayer::ShouldDrawLocalPlayer();
+	Assert( pl );
+	return pl->ShouldDrawLocalPlayer();
 #endif
 }
 
@@ -96,27 +86,17 @@ void C_BaseCombatWeapon::OnRestore()
 
 	// if the player is holding this weapon, 
 	// mark it as just restored so it won't show as a new pickup
-	if (GetOwner() == C_BasePlayer::GetLocalPlayer())
+	if ( C_BasePlayer::IsLocalPlayer( GetOwner() ) )
 	{
 		m_bJustRestored = true;
 	}
 }
 
-int C_BaseCombatWeapon::GetWorldModelIndex( void )
+void C_BaseCombatWeapon::UpdateOnRemove( void )
 {
-	if ( GameRules() )
-	{
-		const char *pBaseName = modelinfo->GetModelName( modelinfo->GetModel( m_iWorldModelIndex ) );
-		const char *pTranslatedName = GameRules()->TranslateEffectForVisionFilter( "weapons", pBaseName );
-
-		if ( pTranslatedName != pBaseName )
-		{
-			return modelinfo->GetModelIndex( pTranslatedName );
-		}
-	}
-
-	return m_iWorldModelIndex;
+	BaseClass::UpdateOnRemove();
 }
+
 
 //-----------------------------------------------------------------------------
 // Purpose: 
@@ -124,22 +104,39 @@ int C_BaseCombatWeapon::GetWorldModelIndex( void )
 //-----------------------------------------------------------------------------
 void C_BaseCombatWeapon::OnDataChanged( DataUpdateType_t updateType )
 {
-	BaseClass::OnDataChanged(updateType);
+	// Must update visibility prior to calling OnDataChanged so that
+	// shadows are dealt with correctly.
+	UpdateVisibility();
 
-	CHandle< C_BaseCombatWeapon > handle = this;
+	BaseClass::OnDataChanged( updateType );
+
+	// let the world model know we're updating, in case it wants to as well
+	CBaseWeaponWorldModel *pWeaponWorldModel = GetWeaponWorldModel();
+	if ( pWeaponWorldModel )
+	{
+		pWeaponWorldModel->OnDataChanged( updateType );
+	}
 
 	// If it's being carried by the *local* player, on the first update,
 	// find the registered weapon for this ID
 
-	C_BasePlayer *pPlayer = C_BasePlayer::GetLocalPlayer();
 	C_BaseCombatCharacter *pOwner = GetOwner();
+	C_BasePlayer *pPlayer = ToBasePlayer( pOwner );
 
+#if defined( CSTRIKE15 )
+	C_CSPlayer *pObservedPlayer = GetHudPlayer();
+	// check if weapon was dropped by local player or the player we are observing
+	if ( pObservedPlayer == pPlayer && pObservedPlayer->State_Get() == STATE_ACTIVE )
+#else
 	// check if weapon is carried by local player
-	bool bIsLocalPlayer = pPlayer && pPlayer == pOwner;
-	if ( bIsLocalPlayer && ShouldDrawLocalPlayerViewModel() )		// TODO: figure out the purpose of the ShouldDrawLocalPlayer() test.
+	bool bIsLocalPlayer = C_BasePlayer::IsLocalPlayer( pPlayer );
+	if ( bIsLocalPlayer )
+#endif
 	{
+		ACTIVE_SPLITSCREEN_PLAYER_GUARD( C_BasePlayer::GetSplitScreenSlotForPlayer( pPlayer ) );
+
 		// If I was just picked up, or created & immediately carried, add myself to this client's list of weapons
-		if ( (m_iState != WEAPON_NOT_CARRIED ) && (m_iOldState == WEAPON_NOT_CARRIED) )
+		if ( m_iState != WEAPON_NOT_CARRIED && m_iOldState == WEAPON_NOT_CARRIED )
 		{
 			// Tell the HUD this weapon's been picked up
 			if ( ShouldDrawPickup() )
@@ -149,28 +146,16 @@ void C_BaseCombatWeapon::OnDataChanged( DataUpdateType_t updateType )
 				{
 					pHudSelection->OnWeaponPickup( this );
 				}
-
-				pPlayer->EmitSound( "Player.PickupWeapon" );
 			}
 		}
 	}
-	else // weapon carried by other player or not at all
-	{
-		int overrideModelIndex = CalcOverrideModelIndex();
-		if( overrideModelIndex != -1 && overrideModelIndex != GetModelIndex() )
-		{
-			SetModelIndex( overrideModelIndex );
-		}
-	}
-
-	if ( updateType == DATA_UPDATE_CREATED )
-	{
-		UpdateVisibility();
-	}
+	
+	UpdateVisibility();
 
 	m_iOldState = m_iState;
 
 	m_bJustRestored = false;
+
 }
 
 //-----------------------------------------------------------------------------
@@ -203,10 +188,10 @@ ShadowType_t C_BaseCombatWeapon::ShadowCastType()
 	if (!IsBeingCarried())
 		return SHADOWS_RENDER_TO_TEXTURE;
 
-	if (IsCarriedByLocalPlayer() && !C_BasePlayer::ShouldDrawLocalPlayer())
+	if (IsCarriedByLocalPlayer())
 		return SHADOWS_NONE;
 
-	return SHADOWS_RENDER_TO_TEXTURE;
+	return (m_iState != WEAPON_IS_CARRIED_BY_PLAYER) ? SHADOWS_RENDER_TO_TEXTURE : SHADOWS_NONE;
 }
 
 //-----------------------------------------------------------------------------
@@ -215,24 +200,24 @@ ShadowType_t C_BaseCombatWeapon::ShadowCastType()
 //-----------------------------------------------------------------------------
 void C_BaseCombatWeapon::Redraw()
 {
-	if ( g_pClientMode->ShouldDrawCrosshair() )
+	if ( GetClientMode()->ShouldDrawCrosshair() )
 	{
 		DrawCrosshair();
 	}
 
 	// ammo drawing has been moved into hud_ammo.cpp
 }
-
 //-----------------------------------------------------------------------------
 // Purpose: Draw the weapon's crosshair
 //-----------------------------------------------------------------------------
 void C_BaseCombatWeapon::DrawCrosshair()
 {
+#ifndef INFESTED_DLL
 	C_BasePlayer *player = C_BasePlayer::GetLocalPlayer();
 	if ( !player )
 		return;
 
-	Color clr = gHUD.m_clrNormal;
+	Color clr = GetHud().m_clrNormal;
 /*
 
 	// TEST: if the thing under your crosshair is on a different team, light the crosshair with a different color.
@@ -261,12 +246,12 @@ void C_BaseCombatWeapon::DrawCrosshair()
 	}		 
 */
 
-	CHudCrosshair *pCrosshair = GET_HUDELEMENT( CHudCrosshair );
-	if ( !pCrosshair )
+	CHudCrosshair *crosshair = GET_HUDELEMENT( CHudCrosshair );
+	if ( !crosshair )
 		return;
 
 	// Find out if this weapon's auto-aimed onto a target
-	bool bOnTarget = ( m_iState == WEAPON_IS_ONTARGET );
+	bool bOnTarget = ( m_iState == WEAPON_IS_ACTIVE ) && player->m_fOnTarget;
 	
 	if ( player->GetFOV() >= 90 )
 	{ 
@@ -275,16 +260,16 @@ void C_BaseCombatWeapon::DrawCrosshair()
 		{
 			clr[3] = 255;
 
-			pCrosshair->SetCrosshair( GetWpnData().iconAutoaim, clr );
+			crosshair->SetCrosshair( GetWpnData().iconAutoaim, clr );
 		}
 		else if ( GetWpnData().iconCrosshair )
 		{
 			clr[3] = 255;
-			pCrosshair->SetCrosshair( GetWpnData().iconCrosshair, clr );
+			crosshair->SetCrosshair( GetWpnData().iconCrosshair, clr );
 		}
 		else
 		{
-			pCrosshair->ResetCrosshair();
+			crosshair->ResetCrosshair();
 		}
 	}
 	else
@@ -293,18 +278,18 @@ void C_BaseCombatWeapon::DrawCrosshair()
 
 		// zoomed crosshairs
 		if (bOnTarget && GetWpnData().iconZoomedAutoaim)
-			pCrosshair->SetCrosshair(GetWpnData().iconZoomedAutoaim, white);
+			crosshair->SetCrosshair(GetWpnData().iconZoomedAutoaim, white);
 		else if ( GetWpnData().iconZoomedCrosshair )
-			pCrosshair->SetCrosshair( GetWpnData().iconZoomedCrosshair, white );
+			crosshair->SetCrosshair( GetWpnData().iconZoomedCrosshair, white );
 		else
-			pCrosshair->ResetCrosshair();
+			crosshair->ResetCrosshair();
 	}
+	#endif
 }
-
 //-----------------------------------------------------------------------------
 // Purpose: This weapon is the active weapon, and the viewmodel for it was just drawn.
 //-----------------------------------------------------------------------------
-void C_BaseCombatWeapon::ViewModelDrawn( C_BaseViewModel *pViewModel )
+void C_BaseCombatWeapon::ViewModelDrawn( int nFlags, C_BaseViewModel *pViewModel )
 {
 }
 
@@ -316,19 +301,8 @@ bool C_BaseCombatWeapon::IsCarriedByLocalPlayer( void )
 	if ( !GetOwner() )
 		return false;
 
-	return ( GetOwner() == C_BasePlayer::GetLocalPlayer() );
+	return ( C_BasePlayer::IsLocalPlayer( GetOwner() ) );
 }
-
-
-//-----------------------------------------------------------------------------
-// Purpose: Returns true if this client is carrying this weapon and is
-//			using the view models
-//-----------------------------------------------------------------------------
-bool C_BaseCombatWeapon::ShouldDrawUsingViewModel( void )
-{
-	return IsCarriedByLocalPlayer() && !C_BasePlayer::ShouldDrawLocalPlayer();
-}
-
 
 //-----------------------------------------------------------------------------
 // Purpose: Returns true if this weapon is the local client's currently wielded weapon
@@ -363,10 +337,17 @@ bool C_BaseCombatWeapon::GetShootPosition( Vector &vOrigin, QAngle &vAngles )
 		vAngles.Init();
 	}
 
-	QAngle vDummy;
-	if ( IsActiveByLocalPlayer() && ShouldDrawLocalPlayerViewModel() )
+	C_BasePlayer *player = ToBasePlayer( pEnt );
+	bool bUseViewModel = false;
+	if ( C_BasePlayer::IsLocalPlayer( pEnt ) )
 	{
-		C_BasePlayer *player = ToBasePlayer( pEnt );
+		ACTIVE_SPLITSCREEN_PLAYER_GUARD_ENT( pEnt );
+		bUseViewModel = !player->ShouldDrawLocalPlayer();
+	}
+
+	QAngle vDummy;
+	if ( IsActiveByLocalPlayer() && bUseViewModel )
+	{
 		C_BaseViewModel *vm = player ? player->GetViewModel( 0 ) : NULL;
 		if ( vm )
 		{
@@ -391,6 +372,32 @@ bool C_BaseCombatWeapon::GetShootPosition( Vector &vOrigin, QAngle &vAngles )
 	return false;
 }
 
+bool C_BaseCombatWeapon::ShouldSuppressForSplitScreenPlayer( int nSlot )
+{
+	if ( BaseClass::ShouldSuppressForSplitScreenPlayer( nSlot ) )
+	{
+		return true;
+	}
+	
+	C_BaseCombatCharacter *pOwner = GetOwner();
+	
+	// If the owner of this weapon is not allowed to draw in this split screen slot, then don't draw the weapon either.
+	if ( pOwner && pOwner->ShouldSuppressForSplitScreenPlayer( nSlot ) )
+	{
+		return true;
+	}
+	
+	C_BasePlayer *pLocalPlayer = C_BasePlayer::GetLocalPlayer( nSlot );
+
+	// Carried by local player?
+	// Only draw the weapon if we're in some kind of 3rd person mode because the viewmodel will do that otherwise.
+	if ( pOwner == pLocalPlayer && !pLocalPlayer->ShouldDrawLocalPlayer() )
+	{
+		return true;
+	}
+	
+	return false;
+}
 
 //-----------------------------------------------------------------------------
 // Purpose: 
@@ -398,57 +405,28 @@ bool C_BaseCombatWeapon::GetShootPosition( Vector &vOrigin, QAngle &vAngles )
 //-----------------------------------------------------------------------------
 bool C_BaseCombatWeapon::ShouldDraw( void )
 {
-	if ( m_iWorldModelIndex == 0 )
-		return false;
 
-	// FIXME: All weapons with owners are set to transmit in CBaseCombatWeapon::UpdateTransmitState,
-	// even if they have EF_NODRAW set, so we have to check this here. Ideally they would never
-	// transmit except for the weapons owned by the local player.
 	if ( IsEffectActive( EF_NODRAW ) )
 		return false;
 
-	C_BaseCombatCharacter *pOwner = GetOwner();
-
 	// weapon has no owner, always draw it
-	if ( !pOwner )
+	if ( !GetOwner() && !IsViewModel() )
+	{
 		return true;
-
-	bool bIsActive = ( m_iState == WEAPON_IS_ACTIVE );
-
-	C_BasePlayer *pLocalPlayer = C_BasePlayer::GetLocalPlayer();
-
-	 // carried by local player?
-	if ( pOwner == pLocalPlayer )
+	}
+	else
 	{
-		// Only ever show the active weapon
-		if ( !bIsActive )
-			return false;
-
-		if ( !pOwner->ShouldDraw() )
+		CBaseWeaponWorldModel *pWeaponWorldModel = GetWeaponWorldModel();
+		if ( pWeaponWorldModel )
 		{
-			// Our owner is invisible.
-			// This also tests whether the player is zoomed in, in which case you don't want to draw the weapon.
-			return false;
+			return false; // the weapon world model will render in our place if it exists
 		}
-
-		// 3rd person mode?
-		if ( !ShouldDrawLocalPlayerViewModel() )
-			return true;
-
-		// don't draw active weapon if not in some kind of 3rd person mode, the viewmodel will do that
-		return false;
+		else
+		{
+			// render only if equipped. The holstered model will render for weapons that aren't equipped
+			return ( GetOwner() && GetOwner()->GetActiveWeapon() == this );
+		}
 	}
-
-	// If it's a player, then only show active weapons
-	if ( pOwner->IsPlayer() )
-	{
-		// Show it if it's active...
-		return bIsActive;
-	}
-
-	// FIXME: We may want to only show active weapons on NPCs
-	// These are carried by AIs; always show them
-	return true;
 }
 
 //-----------------------------------------------------------------------------
@@ -464,12 +442,48 @@ bool C_BaseCombatWeapon::ShouldDrawPickup( void )
 
 	return true;
 }
+
+bool C_BaseCombatWeapon::IsFirstPersonSpectated( void )
+{
+	// check if local player chases owner of this weapon in first person
+	C_BasePlayer *localplayer = C_BasePlayer::GetLocalPlayer();
+	if ( localplayer && localplayer->IsObserver() && GetOwner() )
+	{
+		// don't draw weapon if chasing this guy as spectator
+		// we don't check that in ShouldDraw() since this may change
+		// without notification 
+		if ( localplayer->GetObserverMode() == OBS_MODE_IN_EYE &&
+			localplayer->GetObserverTarget() == GetOwner() &&
+			localplayer->GetObserverInterpState() != C_BasePlayer::OBSERVER_INTERP_TRAVELING ) 
+			return true;
+	}
+
+	return false;
+}
 		   
+
+//----------------------------------------------------------------------------
+// Hooks into the fast path render system
+//----------------------------------------------------------------------------
+IClientModelRenderable*	C_BaseCombatWeapon::GetClientModelRenderable()
+{
+	if ( !m_bReadyToDraw )
+		return 0;
+
+	if( IsFirstPersonSpectated() )
+		return NULL;
+
+	VerifyAndSetContextSensitiveWeaponModel();
+
+	return BaseClass::GetClientModelRenderable();
+}
+
+
 //-----------------------------------------------------------------------------
 // Purpose: Render the weapon. Draw the Viewmodel if the weapon's being carried
 //			by this player, otherwise draw the worldmodel.
 //-----------------------------------------------------------------------------
-int C_BaseCombatWeapon::DrawModel( int flags )
+int C_BaseCombatWeapon::DrawModel( int flags, const RenderableInstance_t &instance )
 {
 	VPROF_BUDGET( "C_BaseCombatWeapon::DrawModel", VPROF_BUDGETGROUP_MODEL_RENDERING );
 	if ( !m_bReadyToDraw )
@@ -478,45 +492,162 @@ int C_BaseCombatWeapon::DrawModel( int flags )
 	if ( !IsVisible() )
 		return 0;
 
-	// check if local player chases owner of this weapon in first person
-	C_BasePlayer *localplayer = C_BasePlayer::GetLocalPlayer();
+	if( IsFirstPersonSpectated() )
+		return 0;
 
-	if ( localplayer && localplayer->IsObserver() && GetOwner() )
-	{
-		// don't draw weapon if chasing this guy as spectator
-		// we don't check that in ShouldDraw() since this may change
-		// without notification 
-		
-		if ( localplayer->GetObserverMode() == OBS_MODE_IN_EYE &&
-			 localplayer->GetObserverTarget() == GetOwner() ) 
-			return false;
-	}
-
-	return BaseClass::DrawModel( flags );
+	return BaseClass::DrawModel( flags, instance );
 }
 
+#ifdef _DEBUG
+	ConVar stickers_enabled_thirdperson( "stickers_enabled_thirdperson", "1", FCVAR_DEVELOPMENTONLY, "Enable work-in-progress stickers on worldmodels." );
 
-//-----------------------------------------------------------------------------
-// Allows the client-side entity to override what the network tells it to use for
-// a model. This is used for third person mode, specifically in HL2 where the
-// the weapon timings are on the view model and not the world model. That means the
-// server needs to use the view model, but the client wants to use the world model.
-//-----------------------------------------------------------------------------
-int C_BaseCombatWeapon::CalcOverrideModelIndex() 
-{ 
-	C_BasePlayer *localplayer = C_BasePlayer::GetLocalPlayer();
-	if ( localplayer && 
-		localplayer == GetOwner() &&
-		ShouldDrawLocalPlayerViewModel() )
+	ConVar stickers_debug_thirdperson_constant( "stickers_debug_thirdperson_constant", "0", FCVAR_DEVELOPMENTONLY, "Continually apply stickers on worldmodels. SLOW" );
+	ConVar stickers_debug_thirdperson_ray( "stickers_debug_thirdperson_ray", "0", FCVAR_DEVELOPMENTONLY, "Show worldmodel sticker projection position and direction." );
+	ConVar stickers_debug_thirdperson_ray_duration( "stickers_debug_thirdperson_ray_duration", "0.1", FCVAR_DEVELOPMENTONLY, "Duration to show sticker projection lines." );
+	ConVar stickers_debug_thirdperson_size( "stickers_debug_thirdperson_size", "0", FCVAR_DEVELOPMENTONLY, "Override worldmodel sticker size." );
+
+	extern ConVar stickers_debug_randomize;
+#endif
+
+void C_BaseCombatWeapon::ApplyThirdPersonStickers( C_BaseAnimating *pWeaponModelTargetOverride )
+{
+#ifdef _DEBUG
+	if (stickers_enabled_thirdperson.GetBool() == 0)
+		return;
+#endif
+
+	if ( !IsAbsQueriesValid() )
+		return;
+
+	CEconItemView *pItem = GetEconItemView();
+	if (!pItem)
+		return;
+
+	if ( pItem->GetNumSupportedStickerSlots() == 0 )
+		return;
+	
+	C_BaseAnimating *pTargetModel = pWeaponModelTargetOverride ? pWeaponModelTargetOverride : this;
+
+	if ( !pTargetModel->ShouldDraw() )
+		return;
+	
+	MDLCACHE_CRITICAL_SECTION();
+
+	pTargetModel->CreateModelInstance();
+	if ( pTargetModel->GetModelInstance() != MODEL_INSTANCE_INVALID )
 	{
-		return BaseClass::CalcOverrideModelIndex();
+		if ( modelrender->ModelHasDecals( pTargetModel->GetModelInstance() ) &&
+#ifdef _DEBUG
+			!stickers_debug_thirdperson_constant.GetBool() &&
+#endif
+			pItem->ItemHasAnyStickersApplied() )
+		{
+			return; //decals are already applied
+		}
+		modelrender->RemoveAllDecals( pTargetModel->GetModelInstance() );
 	}
 	else
 	{
-		return GetWorldModelIndex();
+		return; //no model instance
 	}
-}
 
+	matrix3x4_t weaponBoneTransform;
+	
+	const char* const szStickerBoneLookupTable[] = {
+		"sticker_a",
+		"sticker_b",
+		"sticker_c",
+		"sticker_d",
+		"sticker_e"
+	};
+
+	for (int i=0; i<pItem->GetNumSupportedStickerSlots(); i++ )
+	{
+		IMaterial *pStickerMaterialThirdPerson = pItem->GetStickerIMaterialBySlotIndex(i, true);
+
+		if ( !pStickerMaterialThirdPerson )
+		{
+#ifdef _DEBUG
+			if ( stickers_debug_randomize.GetBool() )
+			{
+				pItem->GenerateStickerMaterials();
+				pStickerMaterialThirdPerson = pItem->GetStickerIMaterialBySlotIndex(i, true);
+			}
+			else
+			{
+				continue;
+			}
+#else
+			continue; //sticker material is not valid
+#endif
+		}
+
+		//if the weapon model has world model sticker projection points, use those
+		//otherwise use schema values
+		
+		Vector vecWorldRayOrigin, vecWorldRayDirection;
+
+		bool bWeaponProvidedStickerAttachments = false;
+
+		int nStickerAttachmentBoneIndex = pTargetModel->LookupBone( szStickerBoneLookupTable[i] );
+		if ( nStickerAttachmentBoneIndex != -1 )
+		{
+			pTargetModel->GetBoneTransform( nStickerAttachmentBoneIndex, weaponBoneTransform );
+			MatrixPosition( weaponBoneTransform, vecWorldRayOrigin );
+			Vector a,b;
+			MatrixVectors( weaponBoneTransform, &vecWorldRayDirection, &a, &b );
+			bWeaponProvidedStickerAttachments = true;
+		}
+		else
+		{
+
+			int nBIndex = pTargetModel->LookupBone( pItem->GetStickerWorldModelBoneParentNameBySlotIndex(i) );
+			if ( nBIndex == -1 )
+				continue; //couldn't find the parent bone this sticker slot wanted
+
+			pTargetModel->GetBoneTransform( nBIndex, weaponBoneTransform );
+
+			Ray_t stickerRayLocal;
+			stickerRayLocal.Init( pItem->GetStickerSlotWorldProjectionStartBySlotIndex( i ), 
+									pItem->GetStickerSlotWorldProjectionEndBySlotIndex( i ) );
+
+			VectorTransform( stickerRayLocal.m_Start, weaponBoneTransform, vecWorldRayOrigin );
+			VectorRotate( stickerRayLocal.m_Delta, weaponBoneTransform, vecWorldRayDirection );
+
+		}
+
+#ifdef _DEBUG
+		if ( stickers_debug_thirdperson_ray.GetBool() )
+		{
+			debugoverlay->AddBoxOverlay( vecWorldRayOrigin, Vector(-0.25,-0.25,-0.25), Vector(0.5,0.5,0.5), QAngle(0,0,0), 255, 0, 0, 180, stickers_debug_thirdperson_ray_duration.GetFloat() );
+			debugoverlay->AddLineOverlay( vecWorldRayOrigin, vecWorldRayOrigin + vecWorldRayDirection, 0,255,0, true, stickers_debug_thirdperson_ray_duration.GetFloat() );
+		}
+#endif
+
+		Ray_t stickerRayWorld;
+		stickerRayWorld.Init( vecWorldRayOrigin, vecWorldRayOrigin + (3*vecWorldRayDirection) );
+
+		VMatrix vmatrix_weaponBoneTransform( weaponBoneTransform );
+
+		Vector vecStickerUp = vmatrix_weaponBoneTransform.GetLeft();
+		if ( bWeaponProvidedStickerAttachments )
+		{
+			//content defined sticker attachments are z-up
+			vecStickerUp = -vmatrix_weaponBoneTransform.GetUp();
+		}
+
+#ifdef _DEBUG
+		float flStickerSize = (stickers_debug_thirdperson_size.GetFloat() == 0) ? stickers_debug_thirdperson_size.GetFloat() : 1.2f;
+		pTargetModel->GetBaseEntity()->AddStudioMaterialDecal( stickerRayWorld, pStickerMaterialThirdPerson, flStickerSize, vecStickerUp );
+#else
+		pTargetModel->GetBaseEntity()->AddStudioMaterialDecal( stickerRayWorld, pStickerMaterialThirdPerson, 1.2f, vecStickerUp );
+#endif
+		
+	}
+
+	//Msg( "Applied stickers to: %s\n", this->GetName() );
+	
+}
 
 //-----------------------------------------------------------------------------
 // tool recording
@@ -526,32 +657,5 @@ void C_BaseCombatWeapon::GetToolRecordingState( KeyValues *msg )
 	if ( !ToolsEnabled() )
 		return;
 
-	int nModelIndex = GetModelIndex();
-	int nWorldModelIndex = GetWorldModelIndex();
-	if ( nModelIndex != nWorldModelIndex )
-	{
-		SetModelIndex( nWorldModelIndex );
-	}
-
-	BaseClass::GetToolRecordingState( msg );
-
-	if ( m_iState == WEAPON_NOT_CARRIED )
-	{
-		BaseEntityRecordingState_t *pBaseEntity = (BaseEntityRecordingState_t*)msg->GetPtr( "baseentity" );
-		pBaseEntity->m_nOwner = -1;
-	}
-	else
-	{
-		msg->SetInt( "worldmodel", 1 );
-		if ( m_iState == WEAPON_IS_ACTIVE )
-		{
-			BaseEntityRecordingState_t *pBaseEntity = (BaseEntityRecordingState_t*)msg->GetPtr( "baseentity" );
-			pBaseEntity->m_bVisible = true;
-		}
-	}
-
-	if ( nModelIndex != nWorldModelIndex )
-	{
-		SetModelIndex( nModelIndex );
-	}
+	Assert(false);
 }

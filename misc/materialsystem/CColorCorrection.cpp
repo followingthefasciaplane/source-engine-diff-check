@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: Color correction system
 //
@@ -6,7 +6,7 @@
 
 #if defined (WIN32) && !defined( _X360 )
 #include <windows.h>
-#elif POSIX
+#elif defined( POSIX )
 #define _cdecl
 #endif
 #include "materialsystem/IColorCorrection.h"
@@ -17,6 +17,8 @@
 #include "generichash.h"
 #include "filesystem.h"
 #include "filesystem/IQueuedLoader.h"
+#include "tier2/fileutils.h"
+#include "pixelwriter.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -24,26 +26,78 @@
 class ITextureInternal;
 
 //-----------------------------------------------------------------------------
+// Color correction textures are procedural. Handle the download
+//-----------------------------------------------------------------------------
+class CColorCorrectionRegen : public ITextureRegenerator
+{
+public:
+	CColorCorrectionRegen( ColorCorrectionHandle_t handle ) : m_ColorCorrectionHandle( handle )
+	{
+	}
+
+	virtual void RegenerateTextureBits( ITexture *pTexture, IVTFTexture *pVTFTexture, Rect_t *pSubRect )
+	{
+		int nWidth = pVTFTexture->Width();
+		int nHeight = pVTFTexture->Height();
+		int nDepth = pVTFTexture->Depth();
+		Assert( nWidth == COLOR_CORRECTION_TEXTURE_SIZE && nHeight == COLOR_CORRECTION_TEXTURE_SIZE && nDepth == COLOR_CORRECTION_TEXTURE_SIZE );
+
+		for ( int z = 0; z < nDepth; ++z )
+		{
+			CPixelWriter pixelWriter;
+			pixelWriter.SetPixelMemory( pVTFTexture->Format(), 
+				pVTFTexture->ImageData( 0, 0, 0, 0, 0, z ), pVTFTexture->RowSizeInBytes( 0 ) );
+
+			for ( int y = 0; y < nHeight; ++y )
+			{
+				pixelWriter.Seek( 0, y );
+				for (int x = 0; x < nWidth; ++x)
+				{
+					RGBX5551_t inColor;
+					inColor.r = x;
+					inColor.g = y;
+					inColor.b = z;
+
+					color24 col = ColorCorrectionSystem()->GetLookup( m_ColorCorrectionHandle, inColor );
+					pixelWriter.WritePixel( col.r, col.g, col.b, 255 );
+				}
+			}
+		}
+
+		if ( IsX360() )
+		{
+			g_pColorCorrectionSystem->OnProceduralRegenComplete( m_ColorCorrectionHandle );
+		}
+	}
+
+	virtual void Release() 
+	{
+		delete this;
+	}
+
+private:
+	ColorCorrectionHandle_t	m_ColorCorrectionHandle;
+};
+
+//-----------------------------------------------------------------------------
 //	Holds all the necessary information for a single color correction lookup
 //  function
 //-----------------------------------------------------------------------------
 struct ColorCorrectionLookup_t
 {
-	ColorCorrectionHandle_t m_Handle;
-
-	ITextureInternal	   *m_pColorCorrectionTexture;
-
-	color24 m_pColorCorrection[COLOR_CORRECTION_TEXTURE_SIZE*COLOR_CORRECTION_TEXTURE_SIZE*COLOR_CORRECTION_TEXTURE_SIZE];
-	bool	m_bLocked;
-	float	m_flWeight;
-	bool	m_bResetable;
-
 	ColorCorrectionLookup_t( ColorCorrectionHandle_t handle );
-	~ColorCorrectionLookup_t( );
+	~ColorCorrectionLookup_t();
 
-	void ReleaseTexture();
-	void RestoreTexture();
-	void AllocTexture();
+	void					ReleaseTexture();
+	void					RestoreTexture();
+	void					AllocTexture();
+
+	ColorCorrectionHandle_t m_Handle;
+	ITextureInternal	   *m_pColorCorrectionTexture;
+	color24					*m_pColorCorrection;
+	bool					m_bLocked;
+	float					m_flWeight;
+	bool					m_bResetable;
 };
 
 ColorCorrectionLookup_t::ColorCorrectionLookup_t( ColorCorrectionHandle_t handle )
@@ -53,10 +107,13 @@ ColorCorrectionLookup_t::ColorCorrectionLookup_t( ColorCorrectionHandle_t handle
 	m_flWeight = 1.0f;
 	m_bResetable = true;
 
+	// these are the backing bits for the volume, either the file gets pushed into this or a caller can procedurally build
+	m_pColorCorrection = new color24[COLOR_CORRECTION_TEXTURE_SIZE*COLOR_CORRECTION_TEXTURE_SIZE*COLOR_CORRECTION_TEXTURE_SIZE];
+
 	AllocTexture();
 }
 
-ColorCorrectionLookup_t::~ColorCorrectionLookup_t( )
+ColorCorrectionLookup_t::~ColorCorrectionLookup_t()
 {
 	// We must remove the texture from the active color correction
 	// textures, otherwise we may leak a reference
@@ -74,31 +131,57 @@ ColorCorrectionLookup_t::~ColorCorrectionLookup_t( )
 		ITextureInternal::Destroy( m_pColorCorrectionTexture );
 		m_pColorCorrectionTexture = NULL;
 	}
+
+	delete [] m_pColorCorrection;
 }
 
 void ColorCorrectionLookup_t::AllocTexture()
 {
-	char name[64];
-	sprintf( name, "ColorCorrection - %d", m_Handle );
+	char szFilename[MAX_PATH];
+	char szShortName[MAX_PATH];
+	g_pFullFileSystem->String( (FileNameHandle_t)m_Handle, szFilename, sizeof( szFilename ) );
+	V_FileBase( szFilename, szShortName, sizeof( szShortName ) );
 
-	m_pColorCorrectionTexture = ITextureInternal::CreateProceduralTexture( name, TEXTURE_GROUP_OTHER,
+	char szName[128];
+	V_snprintf( szName, sizeof( szName ), "ColorCorrection (%s)", szShortName );
+
+	m_pColorCorrectionTexture = ITextureInternal::CreateProceduralTexture( szName, TEXTURE_GROUP_OTHER,
 		COLOR_CORRECTION_TEXTURE_SIZE, COLOR_CORRECTION_TEXTURE_SIZE, COLOR_CORRECTION_TEXTURE_SIZE, IMAGE_FORMAT_BGRX8888,
 		TEXTUREFLAGS_NOMIP | TEXTUREFLAGS_NOLOD | TEXTUREFLAGS_SINGLECOPY | TEXTUREFLAGS_CLAMPS | 
 		TEXTUREFLAGS_CLAMPT | TEXTUREFLAGS_CLAMPU | TEXTUREFLAGS_NODEBUGOVERRIDE );
 
-	extern void CreateColorCorrectionTexture( ITextureInternal *pTexture, ColorCorrectionHandle_t handle );
-	CreateColorCorrectionTexture( m_pColorCorrectionTexture, m_Handle );
+	// color correction textures are procedural, provide the download interface
+	ITextureRegenerator *pRegen = new CColorCorrectionRegen( m_Handle );
+	m_pColorCorrectionTexture->SetTextureRegenerator( pRegen );
 
-	m_pColorCorrectionTexture->Download();
+	// xbox needs to defer the real download (only once) to when the volume data is pushed in
+	if ( !IsX360() )
+	{
+		m_pColorCorrectionTexture->Download();
+	}
 }
 
 void ColorCorrectionLookup_t::ReleaseTexture()
 {
-	m_pColorCorrectionTexture->ReleaseMemory();
+	if ( IsX360() )
+	{
+		// there is no release/restore ability on the xbox
+		Assert( 0 );
+		return;
+	}
+
+	m_pColorCorrectionTexture->Release();
 }
 
 void ColorCorrectionLookup_t::RestoreTexture()
 {
+	if ( IsX360() )
+	{
+		// there is no release/restore ability on the xbox
+		Assert( 0 );
+		return;
+	}
+
 	// Put the texture back onto the board
 	m_pColorCorrectionTexture->OnRestore();	// Give render targets a chance to reinitialize themselves if necessary (due to AA changes).
 	m_pColorCorrectionTexture->Download();
@@ -121,7 +204,7 @@ public:
 
 	virtual void LoadLookup( const char *pLookupName );
 	virtual void CopyLookup( const color24 *pSrcColorCorrection );
-	virtual void ResetLookup( );
+	virtual void ResetLookup();
 
 	virtual ColorCorrectionHandle_t AddLookup( const char *pName );
 	virtual bool RemoveLookup( ColorCorrectionHandle_t handle );
@@ -133,24 +216,29 @@ public:
 	virtual void LockLookup( ColorCorrectionHandle_t handle );
 	virtual void SetLookup( ColorCorrectionHandle_t handle, RGBX5551_t inColor, color24 outColor );
 	virtual color24 GetLookup( ColorCorrectionHandle_t handle, RGBX5551_t inColor );
-	virtual void UnlockLookup( ColorCorrectionHandle_t handle );
+	virtual void UnlockLookup( ColorCorrectionHandle_t handle, bool bDownload );
 
 	virtual void LoadLookup( ColorCorrectionHandle_t handle, const char *pLookupName );
 	virtual void CopyLookup( ColorCorrectionHandle_t handle, const color24 *pSrcColorCorrection );
 	virtual void ResetLookup( ColorCorrectionHandle_t handle );
 
-	virtual void ResetLookupWeights( );
+	virtual void ResetLookupWeights();
 
-	virtual void ReleaseTextures( );
-	virtual void RestoreTextures( );
+	virtual void ReleaseTextures();
+	virtual void RestoreTextures();
 
 	virtual color24 ConvertToColor24( RGBX5551_t inColor );
 
-	virtual int GetNumLookups( );
+	virtual int GetNumLookups();
 
 	virtual void SetResetable( ColorCorrectionHandle_t handle, bool bResetable );
 	virtual void GetCurrentColorCorrection( ShaderColorCorrectionInfo_t* pInfo );
 	virtual void EnableColorCorrection( bool bEnable );
+
+	virtual void OnProceduralRegenComplete( ColorCorrectionHandle_t handle );
+
+	// returns NULL if not found
+	virtual ColorCorrectionHandle_t FindLookup( const char *pName );
 
 protected:
 	CUtlVector< ColorCorrectionLookup_t * > m_ColorCorrectionList;
@@ -159,7 +247,7 @@ protected:
 	float m_DefaultColorCorrectionWeight;
 	bool m_bEnabled;
 
-	void SortLookups( );
+	void SortLookups();
 	ColorCorrectionLookup_t *FindLookup( ColorCorrectionHandle_t handle );
 	ColorCorrectionHandle_t GetLookupHandle( const char *pName );
 	void SetLookupPtr( ColorCorrectionLookup_t *lookup, RGBX5551_t inColor, color24 outColor );
@@ -178,13 +266,32 @@ EXPOSE_SINGLE_INTERFACE_GLOBALVAR( CColorCorrectionSystem, IColorCorrectionSyste
 //-----------------------------------------------------------------------------
 //  Wrappers for release/restore functionality
 //-----------------------------------------------------------------------------
-void ReleaseColorCorrection()
+void ReleaseColorCorrection( int nChangeFlags )
 {
+	if ( IsX360() )
+	{
+		// there is no release/restore ability on the xbox
+		Assert( 0 );
+		return;
+	}
+
+	if ( nChangeFlags & MATERIAL_RESTORE_VERTEX_FORMAT_CHANGED )
+		return;
+
 	g_pColorCorrectionSystem->ReleaseTextures();
 }
 
-void RestoreColorCorrection( int changeFlags )
+void RestoreColorCorrection( int nChangeFlags )
 {
+	if ( IsX360() )
+	{
+		// there is no release/restore ability on the xbox
+		Assert( 0 );
+		return;
+	}
+
+	if ( nChangeFlags & MATERIAL_RESTORE_VERTEX_FORMAT_CHANGED )
+		return;
 	g_pColorCorrectionSystem->RestoreTextures();
 }
 
@@ -262,7 +369,7 @@ void CColorCorrectionSystem::UnlockLookup()
 	if ( !lookup )
 		return;
 
-	UnlockLookup( m_UnnamedColorCorrectionHandle );
+	UnlockLookup( m_UnnamedColorCorrectionHandle, true );
 }
 
 //-----------------------------------------------------------------------------
@@ -304,7 +411,7 @@ void CColorCorrectionSystem::CopyLookup( const color24 *pSrcColorCorrection )
 //-----------------------------------------------------------------------------
 //  Reset the "unnamed" color correction lookup
 //-----------------------------------------------------------------------------
-void CColorCorrectionSystem::ResetLookup( )
+void CColorCorrectionSystem::ResetLookup()
 {
 	ColorCorrectionLookup_t *lookup = FindLookup( m_UnnamedColorCorrectionHandle );
 	if ( !lookup )
@@ -329,7 +436,7 @@ int _cdecl CompareLookups( const CCLPtr *lookup_a, const CCLPtr *lookup_b )
 //-----------------------------------------------------------------------------
 //  Sort ColorCorrectionLookup_t vector based on decreasing weight
 //-----------------------------------------------------------------------------
-void CColorCorrectionSystem::SortLookups( )
+void CColorCorrectionSystem::SortLookups()
 {
 	m_ColorCorrectionList.Sort( CompareLookups );
 
@@ -384,22 +491,41 @@ ColorCorrectionHandle_t CColorCorrectionSystem::AddLookup( const char *pName )
 	ColorCorrectionLookup_t	*lookup = FindLookup( handle );
 	if ( lookup )
 	{
-//		Warning( "Cannot have 2 lookups referencing the same name %s\n", pName );
-
-		// NOTE: Cannot use 0xFFFFFFFF because that's the default handle
-		return (ColorCorrectionHandle_t)0xFFFFFFFE;
+		// Already got one by this name
+		return handle;
 	}
 
 	lookup = new ColorCorrectionLookup_t( handle );
 	m_ColorCorrectionList.AddToTail( lookup );
 
+	// xbox needs to defer the real download (only once) to when the volume data is pushed in
+	// the PC downloads becuase that was the legacy behavior (silly to me)
+	bool bDownload = !IsX360();
+	
 	LockLookup( handle );
 	ResetLookup( handle );
-	UnlockLookup( handle );
+	UnlockLookup( handle, bDownload );
 
 	SetLookupWeight( handle, 1.0f );
 
 	return handle;
+}
+
+ColorCorrectionHandle_t CColorCorrectionSystem::FindLookup( const char *pName )
+{
+	ColorCorrectionHandle_t handle = GetLookupHandle( pName );
+	if ( handle == m_DefaultColorCorrectionHandle )
+		return handle;
+
+	ColorCorrectionLookup_t	*pLookup = FindLookup( handle );
+	if ( pLookup )
+	{
+		// Already got one by this name
+		return handle;
+	}
+
+	// not found
+	return (ColorCorrectionHandle_t)0;
 }
 
 //-----------------------------------------------------------------------------
@@ -443,7 +569,7 @@ void CColorCorrectionSystem::SetLookupWeight( ColorCorrectionHandle_t handle, fl
 		lookup->m_flWeight = flWeight;
 	}
 
-	SortLookups( );
+	SortLookups();
 }
 
 //-----------------------------------------------------------------------------
@@ -518,6 +644,14 @@ void CColorCorrectionSystem::SetLookup( ColorCorrectionHandle_t handle, RGBX5551
 void CColorCorrectionSystem::SetLookupPtr( ColorCorrectionLookup_t *lookup, RGBX5551_t inColor, color24 outColor )
 {
 	Assert( lookup->m_bLocked );
+
+	if ( !lookup->m_pColorCorrection )
+	{
+		// Uh oh, contract broken, the backing volume was freed, no access should have occured
+		Assert( 0 );
+		return;
+	}
+
 	lookup->m_pColorCorrection[inColor.r + inColor.g*COLOR_CORRECTION_TEXTURE_SIZE + inColor.b*COLOR_CORRECTION_TEXTURE_SIZE*COLOR_CORRECTION_TEXTURE_SIZE] = outColor;
 }
 
@@ -539,13 +673,21 @@ color24 CColorCorrectionSystem::GetLookup( ColorCorrectionHandle_t handle, RGBX5
 		return col;
 	}
 
+	if ( !lookup->m_pColorCorrection )
+	{
+		// Uh oh, contract broken, the backing volume was freed, no access should have occured
+		Assert( 0 );
+		color24 col; col.r = 0; col.g = 0; col.b = 0;
+		return col;
+	}
+
 	return lookup->m_pColorCorrection[inColor.r + inColor.g*COLOR_CORRECTION_TEXTURE_SIZE + inColor.b*COLOR_CORRECTION_TEXTURE_SIZE*COLOR_CORRECTION_TEXTURE_SIZE];
 }
 
 //-----------------------------------------------------------------------------
 //  Unlock the specified color correction lookup
 //-----------------------------------------------------------------------------
-void CColorCorrectionSystem::UnlockLookup( ColorCorrectionHandle_t handle )
+void CColorCorrectionSystem::UnlockLookup( ColorCorrectionHandle_t handle, bool bDownload )
 {
 	if ( handle == m_DefaultColorCorrectionHandle )
 	{
@@ -558,7 +700,10 @@ void CColorCorrectionSystem::UnlockLookup( ColorCorrectionHandle_t handle )
 
 	lookup->m_bLocked = false;
 
-	lookup->m_pColorCorrectionTexture->Download();
+	if ( bDownload )
+	{
+		lookup->m_pColorCorrectionTexture->Download();
+	}
 }
 
 //-----------------------------------------------------------------------------
@@ -578,9 +723,16 @@ void CColorCorrectionSystem::LoadLookup( ColorCorrectionHandle_t handle, const c
 	Assert( lookup->m_bLocked );
 	Assert( pLookupName );
 
+	char szXboxName[MAX_PATH];
+	if ( IsX360() || IsPS3() )
+	{
+		pLookupName = CreatePlatformFilename( pLookupName, szXboxName, sizeof( szXboxName ) );
+	}
+
 	CUtlBuffer colorBuff;
 	if ( !g_pFullFileSystem->ReadFile( pLookupName, "GAME", colorBuff ) )
 	{
+		Warning( "CColorCorrectionSystem: Missing '%s'\n", pLookupName );
 		return;
 	}
 
@@ -605,47 +757,6 @@ void CColorCorrectionSystem::LoadLookup( ColorCorrectionHandle_t handle, const c
 			for ( int r = 0; r < COLOR_CORRECTION_TEXTURE_SIZE; ++r, ++inColor.r )
 			{
 				color24 vOutColor24 = pColors[colorIndex];
-
-				/* // Still experimenting with this...it looks banded right now so leaving it off.
-				   // I think we need to generate better raw data for the 360 instead of hacking it here.
-				if ( IsX360() )
-				{
-					// We need to adjust the outcolor for the 360's piecewise linear gamma space
-					// So apply SrgbLinearToGamma( X360GammaToLinear( inColor.rgb ) ) to fetch the desired
-					//    srgb outColor assuming a 360 gamma input color and then put that into 360 gamma space as the new outColor
-
-					// Our input is in 360 gamma space
-					color24 inColor24 = ConvertToColor24( inColor );
-					float flInColor360[3] = { float( inColor24.r ) / float( 255 ),
-											  float( inColor24.g ) / float( 255 ),
-											  float( inColor24.b ) / float( 255 ) };
-
-					// Find the srgb gamma color this maps to
-					float flInColorSrgb[3];
-					for ( int i = 0; i < 3; i++ )
-					{
-						flInColorSrgb[i] = SrgbLinearToGamma( X360GammaToLinear( flInColor360[i] ) );
-					}
-
-					int nInColor[3];
-					for ( int i = 0; i < 3; i++ )
-					{
-						nInColor[i] = ( int )( flInColorSrgb[i] * float( COLOR_CORRECTION_TEXTURE_SIZE - 1 ) );
-					}
-
-					// Now convert the sRGB out color into 360 gamma space
-					color24 vOutColor24Srgb = pColors[nInColor[0] + nInColor[1]*COLOR_CORRECTION_TEXTURE_SIZE + nInColor[2]*COLOR_CORRECTION_TEXTURE_SIZE*COLOR_CORRECTION_TEXTURE_SIZE];
-
-					color24 vOutColor24X360;
-					vOutColor24X360.r = ( unsigned char )( X360LinearToGamma( SrgbGammaToLinear( float( vOutColor24Srgb.r ) / float( 255 ) ) ) * float( 255 ) );
-					vOutColor24X360.g = ( unsigned char )( X360LinearToGamma( SrgbGammaToLinear( float( vOutColor24Srgb.g ) / float( 255 ) ) ) * float( 255 ) );
-					vOutColor24X360.b = ( unsigned char )( X360LinearToGamma( SrgbGammaToLinear( float( vOutColor24Srgb.b ) / float( 255 ) ) ) * float( 255 ) );
-
-					// Copy the outColor and pass that to SetLookupPtr() below
-					vOutColor24 = vOutColor24X360;
-				}
-				//*/
-
 				SetLookupPtr( lookup, inColor, vOutColor24 );
 				colorIndex++;
 			}
@@ -669,6 +780,13 @@ void CColorCorrectionSystem::CopyLookup( ColorCorrectionHandle_t handle, const c
 
 	Assert( lookup->m_bLocked );
 	Assert( pSrcColorCorrection );
+
+	if ( !lookup->m_pColorCorrection )
+	{
+		// Uh oh, contract broken, the backing volume was freed, no access should have occured
+		Assert( 0 );
+		return;
+	}
 
 	Q_memcpy( lookup->m_pColorCorrection, pSrcColorCorrection, sizeof(color24)*COLOR_CORRECTION_TEXTURE_SIZE*COLOR_CORRECTION_TEXTURE_SIZE*COLOR_CORRECTION_TEXTURE_SIZE );
 }
@@ -710,7 +828,7 @@ void CColorCorrectionSystem::ResetLookup( ColorCorrectionHandle_t handle )
 //-----------------------------------------------------------------------------
 //  Reset the weight to zero for all lookups
 //-----------------------------------------------------------------------------
-void CColorCorrectionSystem::ResetLookupWeights( )
+void CColorCorrectionSystem::ResetLookupWeights()
 {
     m_DefaultColorCorrectionWeight = 0.0f;
 
@@ -743,8 +861,15 @@ color24 CColorCorrectionSystem::ConvertToColor24( RGBX5551_t inColor )
 //-----------------------------------------------------------------------------
 //  Call ReleaseTexture for all ColorCorrectionLookup_t
 //-----------------------------------------------------------------------------
-void CColorCorrectionSystem::ReleaseTextures( )
+void CColorCorrectionSystem::ReleaseTextures()
 {
+	if ( IsX360() )
+	{
+		// there is no release/restore ability on the xbox
+		Assert( 0 );
+		return;
+	}
+
 	for ( int i=0;i<m_ColorCorrectionList.Count();i++ )
 	{
 		m_ColorCorrectionList[i]->ReleaseTexture();
@@ -754,8 +879,15 @@ void CColorCorrectionSystem::ReleaseTextures( )
 //-----------------------------------------------------------------------------
 //  Call RestoreTexture for all ColorCorrectionLookup_t
 //-----------------------------------------------------------------------------
-void CColorCorrectionSystem::RestoreTextures( )
+void CColorCorrectionSystem::RestoreTextures()
 {
+	if ( IsX360() )
+	{
+		// there is no release/restore ability on the xbox
+		Assert( 0 );
+		return;
+	}
+
 	for ( int i=0;i<m_ColorCorrectionList.Count();i++ )
 	{
 		m_ColorCorrectionList[i]->RestoreTexture();
@@ -768,7 +900,7 @@ void CColorCorrectionSystem::RestoreTextures( )
 void CColorCorrectionSystem::GetNormalizedWeights( float *pDefaultWeight, float *pLookupWeights )
 {
 	float total_weight = 0.0f;
-	int nLoopCount = min( m_ColorCorrectionList.Count(), (int)COLOR_CORRECTION_MAX_TEXTURES );
+	int nLoopCount = MIN( m_ColorCorrectionList.Count(), COLOR_CORRECTION_MAX_TEXTURES );
 	for ( int i=0; i<nLoopCount; i++ )
 	{
 		total_weight += m_ColorCorrectionList[i]->m_flWeight;
@@ -799,7 +931,7 @@ void CColorCorrectionSystem::GetNormalizedWeights( float *pDefaultWeight, float 
 //-----------------------------------------------------------------------------
 //  Returns the number of active lookup
 //-----------------------------------------------------------------------------
-int CColorCorrectionSystem::GetNumLookups( )
+int CColorCorrectionSystem::GetNumLookups()
 {
 	int i;
 	for ( i=0;i<m_ColorCorrectionList.Count()&&i<COLOR_CORRECTION_MAX_TEXTURES;i++ )
@@ -810,7 +942,6 @@ int CColorCorrectionSystem::GetNumLookups( )
 
 	return i;
 }
-
 
 //-----------------------------------------------------------------------------
 // Enables/disables resetting of this lookup
@@ -824,7 +955,6 @@ void CColorCorrectionSystem::SetResetable( ColorCorrectionHandle_t handle, bool 
 	}
 }
 
-
 //-----------------------------------------------------------------------------
 // Returns info for the shaders to control color correction
 //-----------------------------------------------------------------------------
@@ -834,4 +964,29 @@ void CColorCorrectionSystem::GetCurrentColorCorrection( ShaderColorCorrectionInf
 	pInfo->m_bIsEnabled = m_bEnabled && ( GetNumLookups() > 0 || m_DefaultColorCorrectionWeight != 0.0f );
 	pInfo->m_nLookupCount = GetNumLookups();
 	GetNormalizedWeights( &pInfo->m_flDefaultWeight, pInfo->m_pLookupWeights );
+}
+
+void CColorCorrectionSystem::OnProceduralRegenComplete( ColorCorrectionHandle_t handle )
+{
+	if ( !IsX360() )
+	{
+		// xbox only
+		return;
+	}
+
+	ColorCorrectionLookup_t *pLookup = FindLookup( handle );
+	if ( !pLookup )
+	{
+		// huh? should have been there
+		Assert( 0 );
+		return;
+	}
+
+	// Based on nefarious knowledge, the backing volume can be ditched on the xbox.
+	// The xbox only uses file based color correction, and does not support release/restore.
+	// For memory savings on L4D, at 98k per instance, l42_hospita01_aparments with ~20
+	// correction volumes, saves 2MB. The inept design enforces a unique instance per weight/entity.
+	delete [] pLookup->m_pColorCorrection;
+	// mark as free, used to check validity of this hack
+	pLookup->m_pColorCorrection = NULL;
 }

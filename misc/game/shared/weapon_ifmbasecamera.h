@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -13,7 +13,7 @@
 #include "weapon_ifmbase.h"
 
 #ifdef CLIENT_DLL
-#include "materialsystem/MaterialSystemUtil.h"
+#include "materialsystem/materialsystemutil.h"
 #endif
 
 #if defined( CLIENT_DLL )
@@ -38,9 +38,9 @@ public:
 #ifdef CLIENT_DLL
 	// Client code
 public:
-	virtual void	ViewModelDrawn( CBaseViewModel *pBaseViewModel );
+	virtual void	ViewModelDrawn( int nFlags, CBaseViewModel *pBaseViewModel );
 	virtual void	DrawCrosshair( );
-	virtual int		DrawModel( int flags );
+	virtual int		DrawModel( int flags, const RenderableInstance_t &instance );
 	virtual void	OnDataChanged( DataUpdateType_t updateType );
 
 protected:

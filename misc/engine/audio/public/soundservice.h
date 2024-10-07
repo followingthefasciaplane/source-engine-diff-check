@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Applicaton-level hooks for clients of the audio subsystem
 //
@@ -20,6 +20,7 @@ struct SpatializationInfo_t;
 typedef void *FileNameHandle_t;
 struct StartSoundParams_t;
 
+#include "cdll_int.h"
 #include "utlrbtree.h"
 
 //-----------------------------------------------------------------------------
@@ -64,7 +65,7 @@ public:
 
 	//---------------------------------
 	//---------------------------------
-	virtual int GetViewEntity() = 0;
+	virtual int GetViewEntity( int nSlot ) = 0;
 
 	//---------------------------------
 	//---------------------------------
@@ -79,9 +80,15 @@ public:
 	//---------------------------------
 	virtual bool IsPlayer( SoundSource source ) = 0;
 
+	// -1 if local player not spectating anyone, otherwise the index of the player being spectated
+	virtual int GetSpectatorTarget( ClientDLLObserverMode_t *pObserverMode ) = 0;
+
 	//---------------------------------
 	//---------------------------------
-	virtual void OnChangeVoiceStatus( int entity, bool status) = 0;
+	virtual void OnChangeVoiceStatus( int entity, int iSsSlot, bool status) = 0;
+
+	// returns false if the player can't hear the other client due to game rules (eg. the other team)
+	virtual bool GetPlayerAudible( int iPlayerIndex ) = 0;
 
 	// Is the player fully connected (don't do DSP processing if not)
 	virtual bool IsConnected() = 0;
@@ -95,9 +102,6 @@ public:
 
 	// If the game is paused, certain audio will pause, too (anything with phoneme/sentence data for now)
 	virtual bool	IsGamePaused() = 0;
-
-	// If the game is not active, certain audio will pause
-	virtual bool	IsGameActive() = 0;
 
 	// restarts the sound system externally
 	virtual void	RestartSoundSystem() = 0;
@@ -118,10 +122,6 @@ public:
 	virtual void		OnSoundStopped( int guid, int soundsource, int channel, char const *soundname ) = 0;
 
 	virtual bool		GetToolSpatialization( int iUserData, int guid, SpatializationInfo_t& info ) = 0;
-
-#if defined( _XBOX )
-	virtual bool		ShouldSuppressNonUISounds() = 0;
-#endif
 
 	virtual char const *GetUILanguage() = 0;
 };

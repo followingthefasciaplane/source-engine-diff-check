@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -83,7 +83,6 @@ public:
 protected:
 
 	virtual void OnEnteredVehicle( C_BaseCombatCharacter *pPassenger );
-	// NVNT added to notify haptics system of vehicle exit.
 	virtual void OnExitedVehicle( C_BaseCombatCharacter *pPassenger );
 
 	virtual void RestrictView( float *pYawBounds, float *pPitchBounds, float *pRollBounds, QAngle &vecViewAngles );

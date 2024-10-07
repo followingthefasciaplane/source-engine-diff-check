@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve LLC, All rights reserved. ============
 //
 // Purpose: 
 //
@@ -10,6 +10,9 @@
 #include "filmgrain_vs20.inc"
 #include "hsl_filmgrain_pass2_ps20.inc"
 #include "hsl_filmgrain_pass2_ps20b.inc"
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
 
 
 //
@@ -29,12 +32,6 @@ BEGIN_VS_SHADER( hsl_filmgrain_pass2, "Help for Film Grain" )
 
 	SHADER_FALLBACK
 	{
-		// Requires DX9 + above
-		if (!g_pHardwareConfig->SupportsVertexAndPixelShaders())
-		{
-			Assert( 0 );
-			return "Wireframe";
-		}
 		return 0;
 	}
 
@@ -70,7 +67,7 @@ BEGIN_VS_SHADER( hsl_filmgrain_pass2, "Help for Film Grain" )
 
 		DYNAMIC_STATE
 		{
-			BindTexture( SHADER_SAMPLER0, INPUT, -1 );
+			BindTexture( SHADER_SAMPLER0, TEXTURE_BINDFLAGS_NONE, INPUT, -1 );
 
 			DECLARE_DYNAMIC_VERTEX_SHADER( filmgrain_vs20 );
 			SET_DYNAMIC_VERTEX_SHADER( filmgrain_vs20 );

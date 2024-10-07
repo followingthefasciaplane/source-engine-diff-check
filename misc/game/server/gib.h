@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose:			A gib is a chunk of a body, or a piece of wood/metal/rocks/etc.
 //
@@ -36,8 +36,9 @@ class CGib : public CBaseAnimating,
 public:
 	DECLARE_CLASS( CGib, CBaseAnimating );
 
-	void Spawn( const char *szGibModel );
-	void Spawn( const char *szGibModel, float flLifetime );
+	virtual ~CGib( void );
+
+	void Spawn( const char *szGibModel, float flLifetime = 25.0f );
 
 	void InitGib( CBaseEntity *pVictim, float fMaxVelocity, float fMinVelocity );
 	void BounceGibTouch ( CBaseEntity *pOther );
@@ -101,6 +102,14 @@ private:
 
 	EHANDLE m_hSprite;
 	EHANDLE m_hFlame;
+
+	// Limit the max number of extant Gibs (mainly a memory issue):
+#ifdef _GAMECONSOLE
+	static const int MAX_CONCURRENT_GIBS = 25;
+#else
+	static const int MAX_CONCURRENT_GIBS = 75;
+#endif
+	static CUtlVector<EHANDLE> s_ExtantGibs;
 };
 
 class CRagGib : public CBaseAnimating

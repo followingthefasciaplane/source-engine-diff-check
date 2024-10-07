@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -53,7 +53,6 @@ public:
 	virtual int				GetTextureMemoryBytes( void );
 	virtual bool			NeedsLightmapBlendAlpha( void );
 	virtual bool			NeedsSoftwareLighting( void );
-	virtual MorphFormat_t	GetMorphFormat() const;
 
 	//TODO: Investigate if this can change over the course of a frame.
 	virtual void			GetLowResColorSample( float s, float t, float *color ) const;
@@ -67,6 +66,7 @@ public:
 	virtual void			DeleteIfUnreferenced();	
 	virtual void			RecomputeStateSnapshots();
 	virtual bool			IsTranslucent();
+	virtual bool			IsTranslucentUnderModulation( float fAlphaModulation ) const;
 	virtual bool			NeedsPowerOfTwoFrameBufferTexture( bool bCheckSpecificToThisFrame = true );
 	virtual bool			NeedsFullFrameBufferTexture( bool bCheckSpecificToThisFrame = true );
 	virtual void			AlphaModulate( float alpha );
@@ -78,15 +78,13 @@ public:
 	virtual const char *	GetShaderName() const;
 	virtual void			Refresh();
 	virtual void			RefreshPreservingMaterialVars();
-	virtual void			SetUseFixedFunctionBakedLighting( bool bEnable );
 	virtual float			GetAlphaModulation();
 	virtual void			GetColorModulation( float *r, float *g, float *b );
-	virtual void			CallBindProxy( void *proxyData );
-	virtual IMaterial		*CheckProxyReplacement( void *proxyData );
+	virtual void			CallBindProxy( void *proxyData, ICallQueue *pCallQueue );
 	virtual void			PrecacheMappingDimensions( );
 	virtual void			FindRepresentativeTexture( void );
 	virtual bool			WasReloadedFromWhitelist() { return m_pRealTimeVersion->WasReloadedFromWhitelist(); }
-	virtual bool			IsPrecached( ) const { return m_pRealTimeVersion->IsPrecached(); }
+
 
 
 #define QUEUEFRIENDLY_USED_INTERNALLY_ASSERT AssertMsg( 0, "CMaterial_QueueFriendly used internally within materialsystem. Update the calling code to use a realtime CMaterial." )
@@ -95,22 +93,23 @@ public:
 	// IMaterialInternal interfaces. Internal systems should not be using this queue
 	// wrapper class at all. Switch to the real time pointer in the calling code.
 	//------------------------------------------------------------------------------
-	virtual int		GetReferenceCount( ) const { QUEUEFRIENDLY_USED_INTERNALLY_ASSERT; return m_pRealTimeVersion->GetReferenceCount(); }
+	virtual int		GetReferenceCount( ) const { return m_pRealTimeVersion->GetReferenceCount(); }
 	virtual void	SetEnumerationID( int id ) { QUEUEFRIENDLY_USED_INTERNALLY_ASSERT; m_pRealTimeVersion->SetEnumerationID( id ); }
 	virtual void	SetNeedsWhiteLightmap( bool val ) { QUEUEFRIENDLY_USED_INTERNALLY_ASSERT; m_pRealTimeVersion->SetNeedsWhiteLightmap( val ); }
 	virtual bool	GetNeedsWhiteLightmap( ) const { QUEUEFRIENDLY_USED_INTERNALLY_ASSERT; return m_pRealTimeVersion->GetNeedsWhiteLightmap(); }
 	virtual void	Uncache( bool bPreserveVars = false  ) { QUEUEFRIENDLY_USED_INTERNALLY_ASSERT; m_pRealTimeVersion->Uncache( bPreserveVars ); }
 	virtual void	Precache() { QUEUEFRIENDLY_USED_INTERNALLY_ASSERT; m_pRealTimeVersion->Precache(); }
 	// If provided, pKeyValues and pPatchKeyValues should come from LoadVMTFile()
-	virtual bool	PrecacheVars( KeyValues *pKeyValues = NULL, KeyValues *pPatchKeyValues = NULL, CUtlVector<FileNameHandle_t> *pIncludes = NULL, int nFindContext = MATERIAL_FINDCONTEXT_NONE ) { QUEUEFRIENDLY_USED_INTERNALLY_ASSERT; return m_pRealTimeVersion->PrecacheVars( pKeyValues, pPatchKeyValues, pIncludes, nFindContext ); }
+	virtual bool	PrecacheVars( KeyValues *pKeyValues = NULL, KeyValues *pPatchKeyValues = NULL, CUtlVector<FileNameHandle_t> *pIncludes = NULL ) { QUEUEFRIENDLY_USED_INTERNALLY_ASSERT; return m_pRealTimeVersion->PrecacheVars( pKeyValues, pPatchKeyValues, pIncludes ); }
 	virtual void	ReloadTextures() { QUEUEFRIENDLY_USED_INTERNALLY_ASSERT; m_pRealTimeVersion->ReloadTextures(); }
 	virtual void	SetMinLightmapPageID( int pageID ) { QUEUEFRIENDLY_USED_INTERNALLY_ASSERT; m_pRealTimeVersion->SetMinLightmapPageID( pageID ); }
 	virtual void	SetMaxLightmapPageID( int pageID ) { QUEUEFRIENDLY_USED_INTERNALLY_ASSERT; m_pRealTimeVersion->SetMaxLightmapPageID( pageID ); }
 	virtual int		GetMinLightmapPageID( ) const { QUEUEFRIENDLY_USED_INTERNALLY_ASSERT; return m_pRealTimeVersion->GetMinLightmapPageID(); }
 	virtual int		GetMaxLightmapPageID( ) const { QUEUEFRIENDLY_USED_INTERNALLY_ASSERT; return m_pRealTimeVersion->GetMaxLightmapPageID(); }
 	virtual IShader *GetShader() const { QUEUEFRIENDLY_USED_INTERNALLY_ASSERT; return m_pRealTimeVersion->GetShader(); }
+	virtual bool	IsPrecached( ) const { QUEUEFRIENDLY_USED_INTERNALLY_ASSERT; return m_pRealTimeVersion->IsPrecached(); }
 	virtual bool	IsPrecachedVars() const { QUEUEFRIENDLY_USED_INTERNALLY_ASSERT; return m_pRealTimeVersion->IsPrecachedVars(); }
-	virtual void	DrawMesh( VertexCompressionType_t vertexCompression ) { QUEUEFRIENDLY_USED_INTERNALLY_ASSERT; m_pRealTimeVersion->DrawMesh( vertexCompression ); }
+	virtual void	DrawMesh( VertexCompressionType_t vertexCompression, bool bIsAlphaModulating, bool bRenderingPreTessPatchMesh ) { QUEUEFRIENDLY_USED_INTERNALLY_ASSERT; m_pRealTimeVersion->DrawMesh( vertexCompression, bIsAlphaModulating, bRenderingPreTessPatchMesh ); }
 	virtual VertexFormat_t GetVertexUsage() const { QUEUEFRIENDLY_USED_INTERNALLY_ASSERT; return m_pRealTimeVersion->GetVertexUsage(); }
 	virtual bool PerformDebugTrace() const { QUEUEFRIENDLY_USED_INTERNALLY_ASSERT; return m_pRealTimeVersion->PerformDebugTrace(); }
 	virtual bool NoDebugOverride() const { QUEUEFRIENDLY_USED_INTERNALLY_ASSERT; return m_pRealTimeVersion->NoDebugOverride(); }
@@ -138,13 +137,15 @@ public:
 	virtual IMaterialInternal *GetRealTimeVersion( void );
 	virtual IMaterialInternal *GetQueueFriendlyVersion( void );
 
-	void SetRealTimeVersion( IMaterialInternal *pRealTimeVersion )
-	{
-		m_pRealTimeVersion = pRealTimeVersion;
-		m_nReferenceCount = m_pRealTimeVersion->GetReferenceCount();
-	}
+	void SetRealTimeVersion( IMaterialInternal *pRealTimeVersion ) { m_pRealTimeVersion = pRealTimeVersion; }
 	void UpdateToRealTime( void ); //update cached off variables using the real time version as a base.
 
+	virtual void CompactMaterialVars() {}
+
+	// The material system should be asking, and it should be working with the realtime version only.
+	virtual bool HasQueueFriendlyProxies() const { Assert( !"Unexpected call to HasQueueFriendlyProxies" ); return false; }
+
+	virtual bool SetTempExcluded( bool bSet, int nExcludedDimensionLimit ); 
 
 protected:
 	IMaterialInternal *m_pRealTimeVersion; //the material we're wrapping with queued delays
@@ -153,7 +154,6 @@ private:
 	//some calls need to know what state the material would be in right now if the queue had completed.
 	float m_fAlphaModulationOnQueueCompletion;
 	Vector m_vColorModulationOnQueueCompletion;
-	int m_nReferenceCount; // Only ever accessed from the main thread.
 };
 
 

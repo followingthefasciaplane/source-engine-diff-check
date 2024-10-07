@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -29,6 +29,10 @@ BEGIN_VS_SHADER_FLAGS( MorphWeight_DX9, "Help for morphweight", SHADER_NOT_EDITA
 
 	SHADER_FALLBACK
 	{
+		if ( !g_pHardwareConfig->SupportsPixelShaders_3_0() )
+		{
+			return "Wireframe";
+		}
 		return 0;
 	}
 
@@ -44,7 +48,7 @@ BEGIN_VS_SHADER_FLAGS( MorphWeight_DX9, "Help for morphweight", SHADER_NOT_EDITA
 			pShaderShadow->EnableDepthWrites( false );
 			pShaderShadow->EnableAlphaWrites( true );
 			pShaderShadow->EnableCulling( false );
-			pShaderShadow->FogMode( SHADER_FOGMODE_DISABLED );
+			pShaderShadow->FogMode( SHADER_FOGMODE_DISABLED, false );
 
  			DECLARE_STATIC_VERTEX_SHADER( morphweight_vs30 );
  			SET_STATIC_VERTEX_SHADER( morphweight_vs30 );

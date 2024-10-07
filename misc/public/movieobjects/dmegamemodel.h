@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =======
 //
 // Dme version of a game model (MDL)
 //
@@ -12,7 +12,9 @@
 
 #include "movieobjects/dmedag.h"
 #include "movieobjects/dmeoperator.h"
-#include "tier1/utldict.h"
+#include "datacache/imdlcache.h"
+#include "tier1/UtlDict.h"
+#include "toolframework/itoolframework.h"
 
 struct studiohdr_t;
 
@@ -66,8 +68,10 @@ class CDmeGameModel : public CDmeDag
 	DEFINE_ELEMENT( CDmeGameModel, CDmeDag );
 
 public:
+	virtual void OnAttributeChanged( CDmAttribute *pAttribute );
+
 	void AddBone( CDmeTransform* pTransform );
-	void AddBones( studiohdr_t *pStudioHdr, const char *pBaseName, int nFirstBone, int nCount );
+	void AddBones( studiohdr_t *pStudioHdr, int nFirstBone, int nCount );
 	void SetBone( uint index, const Vector& pos, const Quaternion& rot );
 	uint NumBones() const;
 	CDmeTransform *GetBone( uint index ) const;
@@ -79,6 +83,9 @@ public:
 	// Returns false if there is no transform (or if the transforms are identity)
 	bool GetSrcBoneTransforms( matrix3x4_t *pPreTransform, matrix3x4_t *pPostTransform, int nBoneIndex ) const;
 
+	bool GetBoneDefaultPosition( int nBoneIndex, Vector &position ) const;
+	bool GetBoneDefaultOrientation( int nBoneIndex, Quaternion &orientation ) const;
+
 	bool IsRootTransform( int nBoneIndex ) const;
 
 	uint NumFlexWeights() const;
@@ -88,19 +95,18 @@ public:
 	void SetNumFlexWeights( uint nFlexWeights );
 	void SetFlexWeights( uint nFlexWeights, const float* flexWeights );
 
-	const Vector& GetViewTarget() const;
-	void SetViewTarget( const Vector &viewTarget );
-
-	void SetFlags( int nFlags );
-
 	void SetSkin( int nSkin );
 	void SetBody( int nBody );
 	void SetSequence( int nSequence );
+	void SetFlags( int nFlags );
 
 	int GetSkin() const;
 	int GetBody() const;
 	int GetSequence() const;
+	int GetFlags() const;
+
 	const char *GetModelName() const;
+	MDLHandle_t GetModelHandle();
 
 	CDmeGlobalFlexControllerOperator *AddGlobalFlexController( char const *controllerName, int globalIndex );
 	CDmeGlobalFlexControllerOperator *FindGlobalFlexController( int nGlobalIndex );
@@ -112,28 +118,44 @@ public:
 	void AppendGlobalFlexControllerOperators( CUtlVector< IDmeOperator * >& list );
 	studiohdr_t* GetStudioHdr() const;
 
+	void FindFlexControllerDependencies( CUtlVector< CUtlVector< int > > &dependencyList ) const;
+
+	int FindAttachment( const char *pchAttachmentName ) const;
+	Vector ComputeAttachmentPosition( const char *pchAttachmentName ) const;
+	CDmeDag *CreateDagForAttachment( const char *pchAttachmentName ) const;
+
+	void SetComputeBounds( bool bEnable )				{ m_bComputeBounds = bEnable;			}
+	void SetEvaluateProceduralBones( bool bEnable )		{ m_bEvaluateProceduralBones = bEnable;	}
+	bool ShouldComputeBounds() const					{ return m_bComputeBounds;				}
+	bool ShouldEvaluateProceduralBones() const			{ return m_bEvaluateProceduralBones;	}
+
 public:
-	CDmaVar< bool > m_bComputeBounds;
 
 protected:
 	void PopulateExistingDagList( CDmeDag** pDags, int nCount );
+	void UpdateHMDL();
 
 	// This holds the operators which map to the m_flexWeights below
 	CDmaElementArray< CDmeGlobalFlexControllerOperator > m_globalFlexControllers;
 
 	CDmaArray< float > m_flexWeights; // These are global flex weights (so there can be gaps, unused indices)
-	CDmaVar< Vector > m_viewTarget;
 	CDmaString m_modelName;
 	CDmaVar< int > m_skin;
 	CDmaVar< int > m_body;
 	CDmaVar< int > m_sequence;
 	CDmaVar< int > m_flags;
 
+	CDmaVar< bool > m_bComputeBounds;
+	CDmaVar< bool > m_bEvaluateProceduralBones;
+
+
 	// this is different than m_Children - this is ALL transforms in the tree that are used by the model
 	// m_Children holds the roots of that tree
 	CDmaElementArray< CDmeTransform > m_bones;
-};
 
+	MDLHandle_t m_hMDL;
+	bool m_bHMDLDirty;
+};
 
 //-----------------------------------------------------------------------------
 // A class representing a game sprite
@@ -178,7 +200,10 @@ public:
 	CDmaVar< float > m_flStaticAmount;
 	CDmaVar< float > m_flSecondaryStaticAmount;
 	CDmaVar< float > m_flOpenAmount;
+	CDmaVar< float > m_flHalfWidth;
+	CDmaVar< float > m_flHalfHeight;
 	CDmaVar< bool > m_bIsPortal2;
+	CDmaString m_PortalType;
 };
 
 #endif // DMEGAMEMODEL_H

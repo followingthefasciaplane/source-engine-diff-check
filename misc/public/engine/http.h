@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright (c) 1996-2009, Valve Corporation, All rights reserved. ============//
 //
 //=======================================================================================//
 
@@ -15,7 +15,6 @@
  */
 enum HTTPStatus_t
 {
-	HTTP_INVALID = -1,
 	HTTP_CONNECTING = 0,///< This is set in the main thread before the download thread starts.
 	HTTP_FETCH,			///< The download thread sets this when it starts reading data.
 	HTTP_DONE,			///< The download thread sets this if it has read all the data successfully.

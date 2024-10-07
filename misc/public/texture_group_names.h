@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -14,6 +14,9 @@
 #define TEXTURE_GROUP_LIGHTMAP						"Lightmaps"
 #define TEXTURE_GROUP_WORLD							"World textures"
 #define TEXTURE_GROUP_MODEL							"Model textures"
+#define TEXTURE_GROUP_STATIC_PROP					"StaticProp textures"
+#define TEXTURE_GROUP_COMBINED						"Combined Textures"
+#define TEXTURE_GROUP_COMPOSITE						"Composited Textures"
 #define TEXTURE_GROUP_VGUI							"VGUI textures"
 #define TEXTURE_GROUP_PARTICLE						"Particle textures"
 #define TEXTURE_GROUP_DECAL							"Decal textures"
@@ -23,7 +26,6 @@
 #define TEXTURE_GROUP_PRECACHED						"Precached"				// TODO: assign texture groups to the precached materials
 #define TEXTURE_GROUP_CUBE_MAP						"CubeMap textures"
 #define TEXTURE_GROUP_RENDER_TARGET					"RenderTargets"
-#define TEXTURE_GROUP_RUNTIME_COMPOSITE				"Runtime Composite"
 #define TEXTURE_GROUP_UNACCOUNTED					"Unaccounted textures"	// Textures that weren't assigned a texture group.
 //#define TEXTURE_GROUP_STATIC_VERTEX_BUFFER		"Static Vertex"
 #define TEXTURE_GROUP_STATIC_INDEX_BUFFER			"Static Indices"
@@ -40,5 +42,6 @@
 #define TEXTURE_GROUP_VERTEX_SHADERS				"Vertex Shaders"
 #define TEXTURE_GROUP_RENDER_TARGET_SURFACE			"RenderTarget Surfaces"
 #define TEXTURE_GROUP_MORPH_TARGETS					"Morph Targets"
+#define TEXTURE_GROUP_SCALEFORM						"Scaleform textures"
 
 #endif // TEXTURE_GROUP_NAMES_H

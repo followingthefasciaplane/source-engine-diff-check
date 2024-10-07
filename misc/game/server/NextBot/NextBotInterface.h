@@ -1,7 +1,7 @@
 // NextBotInterface.h
 // Interface for NextBot
 // Author: Michael Booth, May 2006
-//========= Copyright Valve Corporation, All rights reserved. ============//
+// Copyright (c) 2006 Turtle Rock Studios, Inc. - All Rights Reserved
 
 #ifndef _NEXT_BOT_INTERFACE_H_
 #define _NEXT_BOT_INTERFACE_H_
@@ -135,7 +135,7 @@ public:
 	virtual const char *GetDebugIdentifier( void ) const;		// return the name of this bot for debugging purposes
 	virtual bool IsDebugFilterMatch( const char *name ) const;	// return true if we match the given debug symbol
 	virtual void DisplayDebugText( const char *text ) const;	// show a line of text on the bot in the world
-	void DebugConColorMsg( NextBotDebugType debugType, const Color &color, PRINTF_FORMAT_STRING const char *fmt, ... );
+	void DebugConColorMsg( NextBotDebugType debugType, const Color &color, const char *fmt, ... );
 
 	enum {
 		MAX_NEXTBOT_DEBUG_HISTORY = 100,

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -307,6 +307,12 @@ public:
 		// A string passed to the game code for interpretation
 		GENERIC,
 
+		// Camera control
+		CAMERA,
+
+		// Script function call
+		SCRIPT,
+
 		// THIS MUST BE LAST!!!
 		NUM_TYPES,
 	} EVENTTYPE;
@@ -455,6 +461,8 @@ public:
 	// Absolute tags
 	typedef enum
 	{
+		INVALID = -1,
+
 		PLAYBACK = 0,	// new timeline		- FIXME: should be stored as an absolute time
 		ORIGINAL,		// original timeline - FIXME: should be stored at a fixed percentage of event
 		
@@ -508,6 +516,7 @@ public:
 	CChoreoScene	*GetSubScene( void );
 
 	bool			IsProcessing( void ) const;
+	bool			HasStopped() const;
 	void			StartProcessing( IChoreoEventCallback *cb, CChoreoScene *scene, float t );
 	void			ContinueProcessing( IChoreoEventCallback *cb, CChoreoScene *scene, float t );
 	void			StopProcessing( IChoreoEventCallback *cb, CChoreoScene *scene, float t );
@@ -690,6 +699,7 @@ public:
 	bool			m_bUsesTag:1;
 	bool			m_bTrackLookupSet:1;
 	bool			m_bProcessing:1;
+	bool			m_bHasStopped : 1;
 	bool			m_bLockBodyFacing:1;
 	// Purely for save/load
 	bool			m_bMarkedForSave:1;

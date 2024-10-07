@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Allows matching of initialization and shutdown function calls
 //
@@ -11,21 +11,11 @@
 #endif
 
 void TraceInit( const char *i, const char *s, int list );
-#ifdef _XBOX
-void TraceInitFinish( const char *i );
-#endif
 void TraceShutdown( const char *s, int list );
 
-#ifndef _XBOX
 #define TRACEINITNUM( initfunc, shutdownfunc, num )	\
 	TraceInit( #initfunc, #shutdownfunc, num );		\
 	initfunc;
-#else
-#define TRACEINITNUM( initfunc, shutdownfunc, num )	\
-	TraceInit( #initfunc, #shutdownfunc, num );		\
-	initfunc;										\
-	TraceInitFinish( #initfunc );
-#endif
 
 #define TRACESHUTDOWNNUM( shutdownfunc, num )	\
 	TraceShutdown( #shutdownfunc, num );		\

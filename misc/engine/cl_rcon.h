@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -20,7 +20,7 @@
 #include "netadr.h"
 #include "sv_remoteaccess.h"
 #include "sv_rcon.h"
-#include "socketcreator.h"
+#include "tier2/socketcreator.h"
 #include "igameserverdata.h"
 #include "ivprofexport.h"
 
@@ -95,6 +95,8 @@ public:
 
 	void TakeScreenshot();
 	void GrabConsoleLog();
+
+	void SendBugRequest();
 
 	void SetPassword( const char *pPassword );
 

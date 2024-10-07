@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose:
 //
@@ -18,25 +18,20 @@
 #define PAINTBUFFER				(g_curpaintbuffer)
 #define REARPAINTBUFFER			(g_currearpaintbuffer)
 #define CENTERPAINTBUFFER		(g_curcenterpaintbuffer)
-
-enum SoundBufferType_t
-{
-	SOUND_BUFFER_PAINT = 0,
-	SOUND_BUFFER_ROOM,
-	SOUND_BUFFER_FACING,
-	SOUND_BUFFER_FACINGAWAY,
-	SOUND_BUFFER_DRY,
-	SOUND_BUFFER_SPEAKER,
-
-	SOUND_BUFFER_BASETOTAL,
-	SOUND_BUFFER_SPECIAL_START = SOUND_BUFFER_BASETOTAL
-};
+#define CPAINTBUFFERS			6
 
 // !!! if this is changed, it much be changed in native assembly too !!!
 struct portable_samplepair_t
 {
 	int left;
 	int right;
+};
+
+// This should match the struct portable_samplepair_t
+enum Channels
+{
+	CHANNEL_LEFT	=	0,
+	CHANNEL_RIGHT	=	1,
 };
 
 // sound mixing buffer
@@ -49,11 +44,7 @@ struct paintbuffer_t
 	bool fsurround;							// if true, mix to front and rear paintbuffers using flags
 	bool fsurround_center;					// if true, mix to front, rear and center paintbuffers using flags
 
-	int idsp_specialdsp;
-	int nPrevSpecialDSP;
-	int nSpecialDSP;
-
-	int flags;								// SOUND_BUSS_ROOM, SOUND_BUSS_FACING, SOUND_BUSS_FACINGAWAY, SOUND_BUSS_SPEAKER, SOUND_BUSS_SPECIAL_DSP, SOUND_BUSS_DRY
+	int flags;								// SOUND_BUSS_ROOM, SOUND_BUSS_FACING, SOUND_BUSS_FACINGAWAY, SOUND_BUSS_SPEAKER, SOUND_BUSS_DRY
 	
 	portable_samplepair_t *pbuf;			// front stereo mix buffer, for 2 or 4 channel mixing
 	portable_samplepair_t *pbufrear;		// rear mix buffer, for 4 channel mixing
@@ -74,12 +65,11 @@ extern portable_samplepair_t *g_paintbuffer;
 // temp paintbuffer - not included in main list of paintbuffers
 extern portable_samplepair_t *g_temppaintbuffer;
 	
-extern CUtlVector< paintbuffer_t > g_paintBuffers;
+extern paintbuffer_t *g_paintBuffers;
 
 extern void MIX_SetCurrentPaintbuffer( int ipaintbuffer );
 extern int MIX_GetCurrentPaintbufferIndex( void );
 extern paintbuffer_t *MIX_GetCurrentPaintbufferPtr( void );
-extern paintbuffer_t *MIX_GetPPaintFromIPaint( int ipaintbuffer );
 extern void MIX_ClearAllPaintBuffers( int SampleCount, bool clearFilters );
 extern bool MIX_InitAllPaintbuffers(void);
 extern void MIX_FreeAllPaintbuffers(void);
@@ -103,5 +93,15 @@ extern portable_samplepair_t *g_curcenterpaintbuffer;
 
 // hard clip input value to -32767 <= y <= 32767
 #define CLIP(x) ((x) > 32767 ? 32767 : ((x) < -32767 ? -32767 : (x)))
+
+// Branch-less version of CLIP on PPC - Much better.
+FORCEINLINE
+int iclip( int nInput )
+{
+	int nResult = iclamp( nInput, -32767, +32767 );			// Interestingly it should actually be -32768 but the old code did not use the correct value. Keep the old value for the moment.
+	Assert( nResult == CLIP( nInput ) );
+	return nResult;
+}
+
 
 #endif // SND_MIX_BUF_H

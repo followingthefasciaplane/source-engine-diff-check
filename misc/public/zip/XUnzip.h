@@ -90,7 +90,7 @@
 #define XUNZIP_H
 
 #if !defined( DWORD )
-#ifdef _WIN32
+#if defined( _WIN32 ) || defined( _PS3 )
 typedef unsigned long DWORD;
 #else
 typedef unsigned int DWORD;
@@ -126,7 +126,7 @@ typedef struct _FILETIME
 } FILETIME, * LPFILETIME, *PFILETIME;
 #endif
 
-#if defined(POSIX)
+#if defined(POSIX) && !defined( _PS3 )
 typedef time_t FILETIME;
 #endif
 

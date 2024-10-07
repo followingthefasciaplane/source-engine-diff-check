@@ -1,7 +1,7 @@
 // NextBotVisionInterface.h
 // Visual information query interface for bots
 // Author: Michael Booth, April 2005
-//========= Copyright Valve Corporation, All rights reserved. ============//
+// Copyright (c) 2005 Turtle Rock Studios, Inc. - All Rights Reserved
 
 #ifndef _NEXT_BOT_VISION_INTERFACE_H_
 #define _NEXT_BOT_VISION_INTERFACE_H_
@@ -28,10 +28,6 @@ public:
 
 	//-- attention/short term memory interface follows ------------------------------------------
 
-	//
-	// WARNING: Do not keep CKnownEntity pointers returned by these methods, as they can be invalidated/freed 
-	//
-
 	/**
 	 * Iterate each interesting entity we are aware of.
 	 * If functor returns false, stop iterating and return false.
@@ -43,8 +39,6 @@ public:
 		virtual bool Inspect( const CKnownEntity &known ) = 0;
 	};
 	virtual bool ForEachKnownEntity( IForEachKnownEntity &func );
-
-	virtual void CollectKnownEntities( CUtlVector< CKnownEntity > *knownVector );	// populate given vector with all currently known entities
 
 	virtual const CKnownEntity *GetPrimaryKnownThreat( bool onlyVisibleThreats = false ) const;	// return the biggest threat to ourselves that we are aware of
 	virtual float GetTimeSinceVisible( int team ) const;				// return time since we saw any member of the given team
@@ -61,8 +55,6 @@ public:
 	// of known entities by being told about them, hearing them, etc.
 	virtual void AddKnownEntity( CBaseEntity *entity );
 
-	virtual void ForgetEntity( CBaseEntity *forgetMe );			// remove the given entity from our awareness (whether we know if it or not)
-	virtual void ForgetAllKnownEntities( void );
 
 	//-- physical vision interface follows ------------------------------------------------------
 
@@ -84,8 +76,8 @@ public:
 	virtual bool IsAbleToSee( CBaseEntity *subject, FieldOfViewCheckType checkFOV, Vector *visibleSpot = NULL ) const;
 	virtual bool IsAbleToSee( const Vector &pos, FieldOfViewCheckType checkFOV ) const;
 
-	virtual bool IsIgnored( CBaseEntity *subject ) const;		// return true to completely ignore this entity (may not be in sight when this is called)
-	virtual bool IsVisibleEntityNoticed( CBaseEntity *subject ) const;		// return true if we 'notice' the subject, even though we have LOS to it
+	virtual bool IsNoticed( CBaseEntity *subject ) const;		// return true if we 'notice' the subject, even if we have clear LOS
+	virtual bool IsIgnored( CBaseEntity *subject ) const;		// return true to completely ignore this entity
 
 	/**
 	 * Check if 'subject' is within the viewer's field of view
@@ -117,27 +109,11 @@ private:
 	CUtlVector< CKnownEntity > m_knownEntityVector;		// the set of enemies/friends we are aware of
 	void UpdateKnownEntities( void );
 	bool IsAwareOf( const CKnownEntity &known ) const;	// return true if our reaction time has passed for this entity
-	mutable CHandle< CBaseEntity > m_primaryThreat;
 
 	float m_lastVisionUpdateTimestamp;
 	IntervalTimer m_notVisibleTimer[ MAX_TEAMS ];		// for tracking interval since last saw a member of the given team
 };
 
-inline void IVision::CollectKnownEntities( CUtlVector< CKnownEntity > *knownVector )
-{
-	if ( knownVector )
-	{
-		knownVector->RemoveAll();
-
-		for( int i=0; i<m_knownEntityVector.Count(); ++i )
-		{
-			if ( !m_knownEntityVector[i].IsObsolete() )
-			{
-				knownVector->AddToTail( m_knownEntityVector[i] );
-			}
-		}
-	}
-}
 
 inline float IVision::GetDefaultFieldOfView( void ) const
 {
@@ -202,7 +178,7 @@ inline bool IVision::ForEachKnownEntity( IVision::IForEachKnownEntity &func )
 	return true;
 }
 
-inline bool IVision::IsVisibleEntityNoticed( CBaseEntity *subject ) const
+inline bool IVision::IsNoticed( CBaseEntity *subject ) const
 {
 	return true;
 }

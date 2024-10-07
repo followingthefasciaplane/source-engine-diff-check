@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Voice / Sentence streaming & parsing code
 //
@@ -53,6 +53,7 @@
 #include "utlsymbol.h"
 #include "utldict.h"
 #include "../../MapReslistGenerator.h"
+#include "../../cl_splitscreen.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -339,7 +340,7 @@ char *VOX_GetDirectory(char *szpath, int maxpath, char *psz)
 
 // get channel volume scale if word
 
-#ifndef SWDS
+#ifndef DEDICATED
 float VOX_GetChanVol(channel_t *ch)
 {
 	if ( !ch->pMixer )
@@ -683,7 +684,7 @@ char * VOX_LookupNumber( char *pGroupName, int ipick )
 	int glen = Q_strlen(pGroupName);
 	int slen = Q_strlen("V_NUMBERS");
 	
-	V_strcpy_safe(sznumbers, "V_NUMBERS");
+	Q_strcpy(sznumbers, "V_NUMBERS");
 
 	// insert type character
 	sznumbers[slen] = pGroupName[glen-1];
@@ -750,7 +751,9 @@ void VOX_LookupRangeHeadingOrGrid( int irhg, char *pGroupName, channel_t *pChann
 	int dmeters = 0;
 	int hundreds, tens, ones;
 
-	VectorSubtract(listener_origin, pChannel->origin, SL);
+	int nSlot = GET_ACTIVE_SPLITSCREEN_SLOT();
+
+	VectorSubtract(listener_origin[ nSlot ], pChannel->origin, SL);
 
 	if (irhg == 0)
 	{
@@ -774,12 +777,12 @@ void VOX_LookupRangeHeadingOrGrid( int irhg, char *pGroupName, channel_t *pChann
 	} else if (irhg == 2)
 	{
 		// get gridx
-		dmeters = (int)(((16384 + listener_origin.x) * 2.54 / 100.0) / 10) % 20;
+		dmeters = (int)(((16384 + listener_origin[ nSlot ].x) * 2.54 / 100.0) / 10) % 20;
 	}
 	else if (irhg == 3)
 	{
 		// get gridy
-		dmeters = (int)(((16384 + listener_origin.y) * 2.54 / 100.0) / 10) % 20;
+		dmeters = (int)(((16384 + listener_origin[ nSlot ].y) * 2.54 / 100.0) / 10) % 20;
 	}
 
 	dmeters = clamp(dmeters, 0, 999);
@@ -992,7 +995,7 @@ char *VOX_LookupGlobalVirtual( int type, SoundSource soundsource, char *pGroupNa
 	
 	for (i = 0; i < CENTNAMESMAX; i++)
 	{
-		if (g_entnames[i].type == type)
+		if ((g_entnames[i].type == type))
 		{
 			if (curtime - g_entnames[i].timestamp[iglobal] <= snd_vox_globaltimeout.GetInt())
 			{
@@ -1036,7 +1039,7 @@ char *VOX_LookupGlobalSeqVirtual( int type, SoundSource soundsource, char *pGrou
 	
 	for (i = 0; i < CENTNAMESMAX; i++)
 	{
-		if (g_entnames[i].type == type)
+		if ((g_entnames[i].type == type))
 		{
 			if (curtime - g_entnames[i].timestampseq[iglobal] <= (snd_vox_seqtimeout.GetInt()/2))
 			{
@@ -1227,16 +1230,11 @@ void VOX_ReplaceVirtualNames( channel_t *pchan )
 				// replace last 2 characters in _MAP__ substring
 				// with imap - this effectively makes all 
 				// '_map_' lookups relative to the mapname
-				if ( imap >= 10 )
-				{
-					pszmaptoken[4] = (imap/10) + '0';
-					pszmaptoken[5] = (imap%10) + '0';
-				}
+				pszmaptoken[4] = '0';
+				if (imap < 10)
+					Q_snprintf( &(pszmaptoken[5]), 1, "%1d", imap );	
 				else
-				{
-					pszmaptoken[4] = '0';
-					pszmaptoken[5] = imap + '0';
-				}
+					Q_snprintf( &(pszmaptoken[4]), 2, "%d", imap );
 			}
 			
 			if ( Q_strstr(szparseword, "V_MYNAME") )
@@ -1287,11 +1285,11 @@ void VOX_ReplaceVirtualNames( channel_t *pchan )
 						// if not found, allocate new ent, give him a name & number, mark as dead
 						char szgroup1[32];
 						char szgroup2[32];
-						V_strcpy_safe(szgroup1, "V_MYNAME");
+						Q_strcpy(szgroup1, "V_MYNAME");
 						szgroup1[8] = chtype;
 						szgroup1[9] = 0;
 
-						V_strcpy_safe(szgroup2, "V_MYNUM");
+						Q_strcpy(szgroup2, "V_MYNUM");
 						szgroup2[7] = chtype;
 						szgroup2[8] = 0;
 
@@ -1520,7 +1518,7 @@ void VOX_PrecacheSentenceGroup( IEngineSound *pSoundSystem, const char *pGroupNa
 // return number of words loaded
 void VOX_LoadSound( channel_t *pchan, const char *pszin )
 {
-#ifndef SWDS
+#ifndef DEDICATED
 	char		buffer[512];
 	int			i, cword;
 	char		pathbuffer[MAX_PATH];
@@ -1681,7 +1679,7 @@ void VOX_AddNumbers( char *pGroupName, CUtlVector< WordBuf >& list )
 		int glen = Q_strlen(pGroupName);
 		int slen = Q_strlen("V_NUMBERS");
 		
-		V_strcpy_safe(sznumbers, "V_NUMBERS");
+		Q_strcpy(sznumbers, "V_NUMBERS");
 
 		// insert type character
 		sznumbers[slen] = pGroupName[glen-1];
@@ -1812,11 +1810,11 @@ void VOX_BuildVirtualNameList( char *word, CUtlVector< WordBuf >& list )
 			// if not found, allocate new ent, give him a name & number, mark as dead
 			char szgroup1[32];
 			char szgroup2[32];
-			V_strcpy_safe(szgroup1, "V_MYNAME");
+			Q_strcpy(szgroup1, "V_MYNAME");
 			szgroup1[8] = chtype;
 			szgroup1[9] = 0;
 
-			V_strcpy_safe(szgroup2, "V_MYNUM");
+			Q_strcpy(szgroup2, "V_MYNUM");
 			szgroup2[7] = chtype;
 			szgroup2[8] = 0;
 
@@ -1898,7 +1896,7 @@ void VOX_BuildVirtualNameList( char *word, CUtlVector< WordBuf >& list )
 
 	}
 
-	if ( Q_strnicmp( szparseword, "V_", 2 ) )
+	if ( !StringHasPrefix( szparseword, "V_" ) )
 	{
 		WordBuf w;
 		w.Set( szparseword );
@@ -1974,7 +1972,7 @@ void VOX_TouchSounds( CUtlDict< int, int >& list, CUtlRBTree< ccpair, int >& ccp
 // return number of words loaded
 void VOX_TouchSound( const char *pszin, CUtlDict< int, int >& filelist, CUtlRBTree< ccpair, int >& ccpairs, bool spewsentences )
 {
-#ifndef SWDS
+#ifndef DEDICATED
 	char		buffer[512];
 	int			i, cword;
 	char		pathbuffer[MAX_PATH];
@@ -2031,7 +2029,7 @@ void VOX_TouchSound( const char *pszin, CUtlDict< int, int >& filelist, CUtlRBTr
 		if ( VOX_ParseWordParams(rgpparseword[i], &rgvoxword[cword], i == 0 ) )
 		{
 			// Iterate all virtuals here...
-			if ( !Q_strnicmp( rgpparseword[i], "V_", 2 ) )
+			if ( StringHasPrefix( rgpparseword[i], "V_" ) )
 			{
 				CUtlVector< WordBuf > list;
 
@@ -2043,7 +2041,7 @@ void VOX_TouchSound( const char *pszin, CUtlDict< int, int >& filelist, CUtlRBTr
 					char name[ 256 ];
 					Q_snprintf( name, sizeof( name ), "%s", list[ j ].word );
 
-					if ( !Q_strnicmp( name, "V_", 2 ) )
+					if ( StringHasPrefix( name, "V_" ) )
 					{
 						Warning( "VOX_TouchSound didn't resolve virtual token %s!\n", name );
 					}
@@ -2103,7 +2101,7 @@ void VOX_TouchSound( const char *pszin, CUtlDict< int, int >& filelist, CUtlRBTr
 		char outbuf[ 1024 ];
 		// Build representative text
 		outbuf[ 0 ] = 0;
-		for ( i = 0; i < rep.Count(); ++i )
+		for ( int i = 0; i < rep.Count(); ++i )
 		{
 			/*
 			if ( !Q_stricmp( rep[ i ].word, "_comma" ) )
@@ -2192,13 +2190,13 @@ void VOX_ParseLineCommands( char *pSentenceData, int sentenceIndex )
 			switch( tolower( *pSentenceData ) )
 			{
 			case 'l':
-				// All commands starting with the letter 'l' here
-				if ( !Q_strnicmp( pSentenceData, "len", 3 ) )
+				// All commands starting with len here
+				if ( StringHasPrefix( pSentenceData, "len" ) )
 				{
 					g_Sentences[sentenceIndex].length = atof( pSentenceData + 3 ) ;
 
 					// "len " len + space
-					pSentenceData += 4;
+					pSentenceData += V_strlen( "len" ) + 1;
 
 					// Skip until next } or whitespace character
 					while ( *pSentenceData && ( *pSentenceData != '}' && !( *pSentenceData <= 32 ) ) )
@@ -2207,11 +2205,11 @@ void VOX_ParseLineCommands( char *pSentenceData, int sentenceIndex )
 				break;
 			case 'c':
 				// This sentence should emit a close caption
-				if ( !Q_strnicmp( pSentenceData, "closecaption", 12 ) )
+				if ( StringHasPrefix( pSentenceData, "closecaption" ) )
 				{
 					g_Sentences[sentenceIndex].closecaption = true;
 
-					pSentenceData += 12;
+					pSentenceData += V_strlen( "closecaption" );
 
 					pSentenceData = (char *)COM_Parse( pSentenceData );
 
@@ -2294,7 +2292,7 @@ int VOX_GroupAdd( const char *pSentenceName )
 	sentencegroup_t *pGroup;
 
 	CUtlSymbol symGroupName = sentencegroup_t::GetSymbol( groupName );
-	int groupCount = g_SentenceGroups.Size();
+	int groupCount = g_SentenceGroups.Count();
 	for ( i = 0; i < groupCount; i++ )
 	{
 		int groupIndex = (i + groupCount-1) % groupCount;
@@ -2361,14 +2359,14 @@ void VOX_GroupInitAllLRUs( void )
 	int i;
 
 	int totalCount = 0;
-	for ( i = 0; i < g_SentenceGroups.Size(); i++ )
+	for ( i = 0; i < g_SentenceGroups.Count(); i++ )
 	{
 		g_SentenceGroups[i].lru = totalCount;
 		totalCount += g_SentenceGroups[i].count;
 	}
 	g_GroupLRU.Purge();
 	g_GroupLRU.EnsureCount( totalCount );
-	for ( i = 0; i < g_SentenceGroups.Size(); i++ )
+	for ( i = 0; i < g_SentenceGroups.Count(); i++ )
 	{
 		VOX_LRUInit( &g_SentenceGroups[i] );
 	}
@@ -2398,7 +2396,7 @@ void VOX_AddSentenceWavesToResList( void )
 		// Walk through all nonvirtual sentences and touch the referenced sounds...
 		sentence_t *pSentence = &g_Sentences[i];
 
-		if ( !Q_strnicmp( pSentence->pName, "V_", 2 ) )
+		if ( StringHasPrefix( pSentence->pName, "V_" ) )
 		{
 			continue;
 		}
@@ -2435,7 +2433,7 @@ int VOX_GroupIndexFromName( const char *pGroupName )
 	{
 		// search rgsentenceg for match on szgroupname
 		CUtlSymbol symGroupName = sentencegroup_t::GetSymbol( pGroupName );
-		for ( i = 0; i < g_SentenceGroups.Size(); i++ )
+		for ( i = 0; i < g_SentenceGroups.Count(); i++ )
 		{
 			if ( symGroupName == g_SentenceGroups[i].GroupNameSymbol() )
 				return i;
@@ -2453,7 +2451,7 @@ int VOX_GroupIndexFromName( const char *pGroupName )
 //-----------------------------------------------------------------------------
 const char *VOX_GroupNameFromIndex( int groupIndex )
 {
-	if ( groupIndex >= 0 && groupIndex < g_SentenceGroups.Size() )
+	if ( groupIndex >= 0 && groupIndex < g_SentenceGroups.Count() )
 		return g_SentenceGroups[groupIndex].GroupName();
 
 	return NULL;
@@ -2470,7 +2468,7 @@ int VOX_GroupPickSequential( int isentenceg, char *szfound, int szfoundLen, int 
 	const char *szgroupname;
 	unsigned char count;
 	
-	if (isentenceg < 0 || isentenceg > g_SentenceGroups.Size())
+	if (isentenceg < 0 || isentenceg > g_SentenceGroups.Count())
 		return -1;
 
 	szgroupname = g_SentenceGroups[isentenceg].GroupName();
@@ -2515,7 +2513,7 @@ int VOX_GroupPick( int isentenceg, char *szfound, int strLen )
 	unsigned char ipick=0;
 	int ffound = FALSE;
 	
-	if (isentenceg < 0 || isentenceg > g_SentenceGroups.Size())
+	if (isentenceg < 0 || isentenceg > g_SentenceGroups.Count())
 		return -1;
 
 	szgroupname = g_SentenceGroups[isentenceg].GroupName();
@@ -2757,7 +2755,7 @@ void VOX_ReadSentenceFile( const char *psentenceFileName )
 		{
 			// Add a new group or increment count of the existing one
 			VOX_GroupAdd( pName );
-			int index = g_Sentences.Size()-1;
+			int index = g_Sentences.Count()-1;
 			// The current sentence has an index of count-1
 			VOX_ParseLineCommands( pSentenceData, index );
 
@@ -2782,13 +2780,13 @@ void VOX_ReadSentenceFile( const char *psentenceFileName )
 //-----------------------------------------------------------------------------
 int VOX_SentenceCount( void )
 {
-	return g_Sentences.Size();
+	return g_Sentences.Count();
 }
 
 
 float VOX_SentenceLength( int sentence_num )
 {
-	if ( sentence_num < 0 || sentence_num > g_Sentences.Size()-1 )
+	if ( sentence_num < 0 || sentence_num > g_Sentences.Count()-1 )
 		return 0.0f;
 	
 	return g_Sentences[ sentence_num ].length;
@@ -2816,7 +2814,7 @@ char *VOX_LookupString(const char *pSentenceName, int *psentencenum, bool *pbEmi
 	}
 
 	int i;
-	int c = g_Sentences.Size();
+	int c = g_Sentences.Count();
 	for (i = 0; i < c; i++)
 	{
 		char const *name = g_Sentences[i].pName;
@@ -2853,7 +2851,7 @@ char *VOX_LookupString(const char *pSentenceName, int *psentencenum, bool *pbEmi
 // Abstraction for sentence name array
 const char *VOX_SentenceNameFromIndex( int sentencenum )
 {
-	if ( sentencenum < g_Sentences.Size() )
+	if ( sentencenum < g_Sentences.Count() )
 		return g_Sentences[sentencenum].pName;
 	return NULL;
 }

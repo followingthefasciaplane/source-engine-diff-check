@@ -1,10 +1,9 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
 //=============================================================================//
 
-#include "tier0/vcrmode.h"
 #undef PROTECT_FILEIO_FUNCTIONS
 #include "tier0/vprof.h"
 #include "utldict.h"
@@ -12,23 +11,14 @@
 #include "cmd.h"
 #include "filesystem_engine.h"
 #include "vprof_record.h"
-
+#include "tier1/byteswap.h"
 
 #ifdef VPROF_ENABLED
 
-#if defined( _XBOX )
+CVProfile *g_pVProfileForDisplay = &g_VProfCurrentProfile;
 
-	extern CVProfile *g_pVProfileForDisplay;
-
-#else
-
-	CVProfile *g_pVProfileForDisplay = &g_VProfCurrentProfile;
-
-	// memdbgon must be the last include file in a .cpp file!!!
-	#include "tier0/memdbgon.h"
-
-#endif
-
+// memdbgon must be the last include file in a .cpp file!!!
+#include "tier0/memdbgon.h"
 
 long GetFileSize( FILE *fp )
 {
@@ -55,11 +45,43 @@ public:
 		m_nQueuedStarts = 0;
 		m_nQueuedStops = 0;
 		m_iPlaybackTick = -1;
+		// Set up byte-swapping for this platform so that we can query later if we need to swap on reading and writing or not.
+		m_Byteswap.SetTargetBigEndian( false );
 	}
 
 	~CVProfRecorder()
 	{
 		Assert( m_Mode == Mode_None );
+	}
+
+	template <typename T> void Write( T *pData )
+	{
+		if ( m_Byteswap.IsSwappingBytes() )
+		{
+			T swapped;
+			m_Byteswap.SwapBuffer( &swapped, pData );
+			g_pFileSystem->Write( &swapped, sizeof( T ), m_hFile );
+		}
+		else
+		{
+			g_pFileSystem->Write( pData, sizeof( T ), m_hFile );
+		}
+	}
+
+	template <typename T> int Read( T *pData )
+	{
+		int ret;
+		if ( m_Byteswap.IsSwappingBytes() )
+		{
+			T tmp;
+			ret = g_pFileSystem->Read( &tmp, sizeof( T ), m_hFile );
+			m_Byteswap.SwapBuffer( pData, &tmp );
+		}
+		else
+		{
+			ret = g_pFileSystem->Read( pData, sizeof( T ), m_hFile );
+		}
+		return ret;
 	}
 
 	void Shutdown()
@@ -117,23 +139,23 @@ public:
 		{
 			// Write the version number.
 			int version = VPROF_FILE_VERSION;
-			g_pFileSystem->Write( &version, sizeof( version ), m_hFile );
+			Write( &version );
 
 			// Write the root node ID.
 			int nodeID = g_VProfCurrentProfile.GetRoot()->GetUniqueNodeID();
-			g_pFileSystem->Write( &nodeID, sizeof( nodeID ), m_hFile );
+			Write( &nodeID );
 
 			++m_nQueuedStarts;
 			
 			// Make sure vprof is recrding.
-			Cbuf_AddText( "vprof_on\n" );
+			Cbuf_AddText( Cbuf_GetCurrentPlayer(), "vprof_on\n" );
 			return true;
 		}
 	}
 
 	void Record_WriteToken( char val )
 	{
-		g_pFileSystem->Write( &val, sizeof( val ), m_hFile );
+		Write( &val );
 	}		
 
 	void Record_MatchTree_R( CVProfNode *pOut, const CVProfNode *pIn, CVProfile *pInProfile )
@@ -164,10 +186,10 @@ public:
 				int nodeID = pToAdd->GetUniqueNodeID();
 				
 				Record_WriteToken( Token_AddNode );
-				g_pFileSystem->Write( &parentNodeID, sizeof( parentNodeID ), m_hFile );						// Parent node ID.
-				g_pFileSystem->Write( pToAdd->m_pszName, strlen( pToAdd->m_pszName ) + 1, m_hFile );	// Name of the new node.
-				g_pFileSystem->Write( &budgetGroupID, sizeof( budgetGroupID ), m_hFile );
-				g_pFileSystem->Write( &nodeID, sizeof( nodeID ), m_hFile );
+				Write( &parentNodeID );						// Parent node ID.
+				WriteString( pToAdd->m_pszName );	// Name of the new node.
+				Write( &budgetGroupID );
+				Write( &nodeID );
 
 				// There's a new one here.
 				const char *pBudgetGroupName = g_VProfCurrentProfile.GetBudgetGroupName( pToAdd->m_BudgetGroupID );
@@ -202,8 +224,8 @@ public:
 			const char *pName = pInProfile->GetBudgetGroupName( i );
 			int flags = pInProfile->GetBudgetGroupFlags( i );
 			Record_WriteToken( Token_AddBudgetGroup );
-			g_pFileSystem->Write( pName, strlen( pName ) + 1, m_hFile );
-			g_pFileSystem->Write( &flags, sizeof( flags ), m_hFile );
+			WriteString( pName );
+			Write( &flags );
 
 			AddBudgetGroupName( pName, flags );
 		}
@@ -211,18 +233,18 @@ public:
 
 	void Record_WriteTimings_R( const CVProfNode *pIn )
 	{
-		unsigned short curCalls = min( pIn->m_nCurFrameCalls, (unsigned)0xFFFF );
+		unsigned short curCalls = MIN( pIn->m_nCurFrameCalls, 0xFFFF );
 		if ( curCalls >= 255 )
 		{
 			unsigned char token = 255;
-			g_pFileSystem->Write( &token, sizeof( token ), m_hFile );
-			g_pFileSystem->Write( &curCalls, sizeof( curCalls ), m_hFile );
+			Write( &token );
+			Write( &curCalls );
 		}
 		else
 		{
 			// Get away with one byte if we can.
 			unsigned char token = (char)curCalls;
-			g_pFileSystem->Write( &token, sizeof( token ), m_hFile );
+			Write( &token );
 		}
 
 		// This allows us to write 2 bytes unless it's > 256 milliseconds (unlikely).
@@ -230,13 +252,13 @@ public:
 		if ( nMicroseconds >= 0xFFFF )
 		{
 			unsigned short token = 0xFFFF;
-			g_pFileSystem->Write( &token, sizeof( token ), m_hFile );
-			g_pFileSystem->Write( &nMicroseconds, sizeof( nMicroseconds ), m_hFile );
+			Write( &token );
+			Write( &nMicroseconds );
 		}
 		else
 		{
 			unsigned short token = (unsigned short)nMicroseconds;
-			g_pFileSystem->Write( &token, sizeof( token ), m_hFile );
+			Write( &token );
 		}
 
 		for ( const CVProfNode *pChild = pIn->m_pChild; pChild; pChild = pChild->m_pSibling )
@@ -252,10 +274,10 @@ public:
 
 		// Record the tick count and start of frame.
 		Record_WriteToken( Token_StartFrame );
-#ifdef SWDS
-		g_pFileSystem->Write( &host_tickcount, sizeof( host_tickcount ), m_hFile );		
+#ifdef DEDICATED
+		Write( &host_tickcount );		
 #else
-		g_pFileSystem->Write( &g_ClientGlobalVariables.tickcount, sizeof( g_ClientGlobalVariables.tickcount ), m_hFile );
+		Write( &g_ClientGlobalVariables.tickcount );
 #endif
 		
 		// Record all the changes to get our tree and budget groups to g_VProfCurrentProfile.
@@ -288,6 +310,7 @@ public:
 		{
 			Stop();
 			Warning( "VPROF PLAYBACK ASSERT (%s, line %d) - stopping playback.\n", __FILE__, iLine );
+			Assert( 0 );
 			return false;
 		}
 	}
@@ -316,17 +339,17 @@ public:
 		else
 		{
 			int version;
-			g_pFileSystem->Read( &version, sizeof( version ), m_hFile );
+			Read( &version );
 			if ( !Playback_Assert( version == VPROF_FILE_VERSION ) )
 				return false;
 
 			// Read the root node ID.
 			int nodeID;
-			g_pFileSystem->Read( &nodeID, sizeof( nodeID ), m_hFile );
+			Read( &nodeID );
 			GetRoot()->SetUniqueNodeID( nodeID );
 
 			m_iSkipPastHeaderPos = g_pFileSystem->Tell( m_hFile );
-			m_iLastTick = -1;	// We don't know the last tick in the file yet.
+			m_bPlaybackFinished = false;	
 			m_FileLen = g_pFileSystem->Size( m_hFile );
 
 			m_enabled = true; // So IsEnabled() returns true..
@@ -357,12 +380,16 @@ public:
 	{
 		Assert( m_Mode == Mode_Playback );
 		char token;
-		if ( g_pFileSystem->Read( &token, 1, m_hFile ) != 1 )
+		if ( Read( &token ) != 1 )
 			token = TOKEN_FILE_FINISHED;
 		
 		return token;
 	}
 
+	void WriteString( const char *pStr )
+	{
+		g_pFileSystem->Write( pStr, strlen( pStr ) + 1, m_hFile );
+	}
 	
 	bool Playback_ReadString( char *pOut, int maxLen )
 	{
@@ -400,7 +427,7 @@ public:
 			return false;
 
 		int flags = 0;
-		g_pFileSystem->Read( &flags, sizeof( flags ), m_hFile );
+		Read( &flags );
 
 		AddBudgetGroupName( name, flags );
 		return true;
@@ -431,11 +458,11 @@ public:
 		
 		char nodeName[512];
 
-		g_pFileSystem->Read( &parentNodeID, sizeof( parentNodeID ), m_hFile );					// Parent node ID.
+		Read( &parentNodeID );					// Parent node ID.
 		if ( !Playback_ReadString( nodeName, sizeof( nodeName ) ) )
 			return false;
-		g_pFileSystem->Read( &budgetGroupID, sizeof( budgetGroupID ), m_hFile );
-		g_pFileSystem->Read( &nodeID, sizeof( nodeID ), m_hFile );
+		Read( &budgetGroupID );
+		Read( &nodeID );
 
 		// Now find the parent node.
 		CVProfNode *pParentNode = FindVProfNodeByID_R( GetRoot(), parentNodeID );
@@ -457,13 +484,13 @@ public:
 	{
 		// Read the timing.
 		unsigned char token;
-		if ( g_pFileSystem->Read( &token, sizeof( token ), m_hFile ) != sizeof( token ) )
+		if ( Read( &token ) != sizeof( token ) )
 			return false;
 
 		if ( token == 255 )
 		{
 			unsigned short curCalls;
-			if ( g_pFileSystem->Read( &curCalls, sizeof( curCalls ), m_hFile ) != sizeof( curCalls ) )
+			if ( Read( &curCalls ) != sizeof( curCalls ) )
 				return false;
 
 			pNode->m_nCurFrameCalls = curCalls;
@@ -476,13 +503,13 @@ public:
 
 		// This allows us to write 2 bytes unless it's > 256 milliseconds (unlikely).
 		unsigned short microsecondsToken;
-		if ( g_pFileSystem->Read( &microsecondsToken, sizeof( microsecondsToken ), m_hFile ) != sizeof( microsecondsToken ) )
+		if ( Read( &microsecondsToken ) != sizeof( microsecondsToken ) )
 			return false;
 
 		if ( microsecondsToken == 0xFFFF )
 		{
 			unsigned long nMicroseconds;
-			if ( g_pFileSystem->Read( &nMicroseconds, sizeof( nMicroseconds ), m_hFile ) != sizeof( nMicroseconds ) )
+			if ( Read( &nMicroseconds ) != sizeof( nMicroseconds ) )
 				return false;
 
 			pNode->m_CurFrameTime.SetMicroseconds( nMicroseconds * 4 );
@@ -520,7 +547,7 @@ public:
 		if ( token == TOKEN_FILE_FINISHED )
 		{
 			Msg( "VPROF playback finished.\n" );
-			m_iLastTick = m_iPlaybackTick;	// Now we know our last tick.
+			m_bPlaybackFinished = true;	// Now we know our last tick.
 			return true;
 		}
 			
@@ -528,7 +555,7 @@ public:
 			return false;
 
 		int iPlaybackTick = m_iPlaybackTick;
-		g_pFileSystem->Read( &iPlaybackTick, sizeof( iPlaybackTick ), m_hFile );
+		Read( &iPlaybackTick );
 		
 		// First test if this tick would go past the number they don't want us to go past.
 		if ( iDontGoPast != -1 && iPlaybackTick > iDontGoPast )
@@ -544,7 +571,7 @@ public:
 
 		while ( 1 )
 		{
-			token = Playback_ReadToken();
+			int token = Playback_ReadToken();
 			if ( token == Token_EndOfFrame )
 				break;
 
@@ -646,12 +673,11 @@ public:
 	{
 		// Remember where we started.
 		unsigned long seekPos = g_pFileSystem->Tell( m_hFile );
-		int iOldLastTick = m_iLastTick;
 		int iOldPlaybackTick = m_iPlaybackTick;
 		
 		// Take the average of the next N ticks.
 		CUtlVector<CNodeAverage> averages;
-		while ( nFrames > 0 && m_iLastTick == -1 )
+		while ( nFrames > 0 && !m_bPlaybackFinished )
 		{
 			Playback_ReadTick();
 			UpdateAverages_R( averages, GetRoot() );
@@ -661,7 +687,6 @@ public:
 		
 		// Now seek back to where we started.
 		g_pFileSystem->Seek( m_hFile, seekPos, FILESYSTEM_SEEK_HEAD );
-		m_iLastTick = iOldLastTick;
 		m_iPlaybackTick = iOldPlaybackTick;
 	}
 
@@ -691,7 +716,7 @@ public:
 		// Now seek forward to the tick they want.
 		while ( m_iPlaybackTick < iTick )
 		{
-			bool bWouldHaveGonePast;
+			bool bWouldHaveGonePast = false;
 			if ( !Playback_ReadTick( iTick, &bWouldHaveGonePast ) )
 				return 0;	// error
 
@@ -701,7 +726,7 @@ public:
 				break;
 			
 			// If we went to the last tick in the file, then stop here.
-			if ( m_iLastTick != -1 && m_iPlaybackTick >= m_iLastTick )
+			if ( m_bPlaybackFinished )
 				return 1 + m_bNodesChanged;
 		}
 
@@ -741,7 +766,7 @@ public:
 				return 0;	// error
 			
 			// If we went to the last tick in the file, then stop here.
-			if ( m_iLastTick != -1 && m_iPlaybackTick >= m_iLastTick )
+			if ( m_bPlaybackFinished )
 				return 1 + m_bNodesChanged; // return 2 if nodes changed
 		}
 
@@ -791,6 +816,10 @@ public:
 	}
 
 
+	bool IsPlaybackFinished()
+	{
+		return m_bPlaybackFinished;
+	}
 private:
 
 	const char* PoolString( const char *pStr )
@@ -833,7 +862,7 @@ private:
 	int m_iLastUniqueNodeID;
 	int m_iPlaybackTick;		// Our current tick.
 	int m_iSkipPastHeaderPos;
-	int m_iLastTick;			// We only know this when we hit the end of the file.
+	bool m_bPlaybackFinished;	
 	int m_FileLen;
 	bool m_bNodesChanged;		// Set if the nodes were added or removed.
 
@@ -841,6 +870,7 @@ private:
 	int m_nQueuedStops;
 
 	bool m_bPlaybackPaused;
+	CByteswap m_Byteswap;
 };
 
 
@@ -848,7 +878,15 @@ private:
 static CVProfRecorder g_VProfRecorder;
 
 
+void VProf_StartRecording( const char *pFilename )
+{
+	g_VProfRecorder.Record_Start( pFilename );
+}
 
+void VProf_StopRecording( void )
+{
+	g_VProfRecorder.Stop();
+}
 
 CON_COMMAND( vprof_record_start, "Start recording vprof data for playback later." )
 {
@@ -866,6 +904,208 @@ CON_COMMAND( vprof_record_stop, "Stop recording vprof data" )
 	Warning( "Stopping vprof recording...\n" );
 	g_VProfRecorder.Stop();
 }
+
+class CVPROFToCSVConverter
+{
+public:
+	CVPROFToCSVConverter()
+	{
+		m_pTokenMap = NULL;
+	}
+
+	void ConvertVPROJFileToCSVFile( const char *szVPROJName, const char *szCSVName )
+	{
+		//
+		// Open output file and early out if file creation fails
+		//
+		m_fileHandle = g_pFileSystem->Open( szCSVName, "w" );
+
+		//
+		// Begin playback and storage of VPROF data into local structures
+		//
+		g_VProfRecorder.Playback_Start( szVPROJName );
+
+		while ( !g_VProfRecorder.IsPlaybackFinished() )
+		{
+			CUtlMap< char *, double > *pTickDataMap = new CUtlMap< char *, double >( DefLessFunc( char * ) );
+			m_dataVector.AddToTail( pTickDataMap );
+			WriteNodeDataToDict( g_VProfRecorder.GetRoot(), pTickDataMap );
+			g_VProfRecorder.Playback_ReadTick();
+		}
+
+		//
+		// Generate output
+		//
+		char szHeaders[1024];
+		char szData[2048];
+
+		WriteHeaders( szHeaders, sizeof( szHeaders ) );
+		g_pFileSystem->FPrintf( m_fileHandle, "%s", szHeaders );
+
+		FOR_EACH_VEC( m_dataVector,  i )
+		{
+			char szTickNum[16];
+
+			V_snprintf( szTickNum, sizeof( szTickNum ), "%d", i+1 );
+			V_strncpy( szData, szTickNum, sizeof( szData ) );
+			V_strncat( szData, ",", sizeof( szData ) );
+
+			FOR_EACH_VEC( m_labelVector, j )
+			{
+				const unsigned short usIndex = m_dataVector[i]->Find( m_labelVector[j] );
+
+				if ( usIndex != m_dataVector[i]->InvalidIndex() )
+				{
+					char szFloatValue[32];
+
+					V_snprintf(szFloatValue, sizeof( szFloatValue ), "%f", m_dataVector[i]->Element( usIndex ) );
+					V_strncat( szData, szFloatValue, sizeof( szData ) );
+				}
+
+				if ( j != ( m_labelVector.Count() - 1 ) )
+				{
+					V_strncat( szData, ",", sizeof( szData ) );
+				}
+			}
+			V_strncat( szData, "\n", sizeof( szData ) );
+			g_pFileSystem->FPrintf( m_fileHandle, "%s", szData );
+		}
+
+		g_pFileSystem->Close( m_fileHandle );
+
+		//
+		// Cleanup
+		//
+		m_labelVector.RemoveAll();
+		m_dataVector.PurgeAndDeleteElements();
+	}
+
+	void SetNodeFilter( CUtlMap<char*, int> *pTokenMap )
+	{
+		m_pTokenMap  = pTokenMap;
+	}
+
+protected:
+	CUtlVector<char *> m_labelVector;
+	CUtlVector< CUtlMap< char *, double > *> m_dataVector;
+	FileHandle_t m_fileHandle;
+	CUtlMap<char*, int> *m_pTokenMap;
+	
+
+	void WriteNodeDataToDict( CVProfNode *pNode, CUtlMap< char *, double > *pTickDataMap )
+	{
+		char *pcNodeName = (char*)pNode->GetName();
+
+		// Don't care about the Root label or data
+		if ( 0 != V_strcmp( pcNodeName, "Root" ) )
+		{
+			// If there is a token filter and it is populated then use it
+			if ( NULL == m_pTokenMap || 0 == m_pTokenMap->Count() ||  ( m_pTokenMap->InvalidIndex() != m_pTokenMap->Find( pcNodeName ) ) )
+			{
+				// Store the label in the label vector if we haven't seen it before
+				if (-1 == m_labelVector.Find( pcNodeName ) )
+				{
+					m_labelVector.AddToTail( pcNodeName );
+				}
+
+				// Store the keyname and value for this VPROF node
+				pTickDataMap->Insert( pcNodeName, pNode->GetCurTime() );
+			}
+		}
+
+		if( pNode->GetSibling() )
+		{
+			WriteNodeDataToDict( pNode->GetSibling(), pTickDataMap );
+		}
+
+		if( pNode->GetChild() )
+		{
+			WriteNodeDataToDict( pNode->GetChild(), pTickDataMap );
+		} 
+	}
+
+	void WriteHeaders( char *szBuffer, int nBufferSize )
+	{
+		V_strncpy( szBuffer, "Tick Number,", nBufferSize );
+
+		// We start at 1 instead of 0 because 'Root' is always the first one
+		for ( int i = 0; i < m_labelVector.Count(); i++ )
+		{
+			V_strncat( szBuffer, m_labelVector[i], nBufferSize );
+
+			// Skip the last comma
+			if ( i !=  ( m_labelVector.Count() - 1 ) )
+			{
+				V_strncat( szBuffer, ",", nBufferSize );
+			}
+		}
+		V_strncat( szBuffer, "\n", nBufferSize );
+	}
+};
+
+
+
+CON_COMMAND( vprof_to_csv, "Convert a recorded .vprof file to .csv." )
+{
+
+	//
+	// Args
+	//
+	if ( args.ArgC() < 2 )
+	{
+		Warning( "vprof_to_csv requires an input filename (.VPROJ) and optional VPROF node names\n" );
+		return;
+	}
+
+	//
+	// Copy filename and parse filters from console
+	//
+
+	// Console parser treats colons as a break, so join all the tokens together here.
+	char szVPROFFilename[MAX_PATH];
+	char szCSVFilename[MAX_PATH];
+	char szArgs[2*MAX_PATH];
+
+	szArgs[0] = NULL;
+
+	for ( int i=1; i < args.ArgC(); i++ )
+	{
+		Q_strncat( szArgs, args[i], sizeof( szArgs ), COPY_ALL_CHARACTERS );
+	}
+
+	//Separate the filter tokens from the arguments
+	CUtlVector<char*, CUtlMemory<char*, int> > argsVector;
+	CUtlMap<char*, int> tokenMap( DefLessFunc( char * ) );
+	V_SplitString( szArgs, "|", argsVector );
+
+	V_strncpy( szVPROFFilename, argsVector[0], MAX_PATH);
+	delete argsVector[0];
+	argsVector.RemoveMultiple( 0, 1 );
+	
+	// Add the remaining arguments to the map of token filters
+	FOR_EACH_VEC( argsVector, i )
+	{
+		tokenMap.Insert(argsVector[i], 0);
+	}
+	
+	// Create CSV filename
+	V_StripExtension( szVPROFFilename, szCSVFilename, sizeof( szCSVFilename ) );
+	V_strncat( szCSVFilename, ".csv", sizeof( szCSVFilename ) );
+
+	//
+	// Perform conversion
+	//
+	CVPROFToCSVConverter converter;
+	converter.SetNodeFilter( &tokenMap );
+	converter.ConvertVPROJFileToCSVFile( szVPROFFilename, szCSVFilename );
+
+	//
+	// Cleanup
+	//
+	argsVector.PurgeAndDeleteElements();
+	tokenMap.RemoveAll();
+}
+
 
 CON_COMMAND( vprof_playback_start, "Start playing back a recorded .vprof file." )
 {
@@ -979,4 +1219,9 @@ int VProfPlayback_StepBack()
 }
 
 
-#endif // VPROF_ENABLED
+#else // VPROF_ENABLED
+
+#define VProf_StartRecording( pFilename )	((void)(0))
+#define VProf_StopRecording()				((void)(0))
+
+#endif

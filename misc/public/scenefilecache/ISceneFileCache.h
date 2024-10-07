@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -11,12 +11,13 @@
 #endif
 
 #include "interface.h"
-#include "appframework/IAppSystem.h"
+#include "appframework/iappsystem.h"
 
 // the file cache can support persisting some calcs
 struct SceneCachedData_t
 {
 	unsigned int	msecs;
+	float			m_fLastSpeakSecs;
 	int				numSounds;
 	int				sceneId;
 };

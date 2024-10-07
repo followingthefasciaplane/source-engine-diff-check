@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======//
 //
 // Purpose: 
 //
@@ -13,7 +13,7 @@
 #endif
 
 #include "dme_controls/BaseAttributeChoicePanel.h"
-#include "vgui_controls/PHandle.h"
+#include "vgui_controls/phandle.h"
 
 
 //-----------------------------------------------------------------------------
@@ -55,6 +55,7 @@ private:
 	vgui::DHANDLE< vgui::Button	>	m_hEdit;
 	CAttributeTextEntry				*m_pData;
 	bool							m_bShowMemoryUsage;
+	bool							m_bShowUniqueID;
 };
 
 

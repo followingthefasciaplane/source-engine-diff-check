@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -15,8 +15,12 @@
 #include "dt_recv.h"
 #include "bitbuf.h"
 #include "dt.h"
+#include "tier1/utlvector.h"
 
 class CStandardSendProxies;
+class CSVCMsg_SendTable;
+
+typedef intp SerializedEntityHandle_t;
 
 // ------------------------------------------------------------------------------------------ //
 // RecvTable functions.
@@ -27,11 +31,10 @@ bool		RecvTable_Init( RecvTable **pTables, int nTables );
 void		RecvTable_Term( bool clearall = true );
 
 // After calling RecvTable_Init to provide the list of RecvTables, call this
-// as the server sends its SendTables over. When bNeedsDecoder is specified,
+// as the server sends its SendTables over. If msg needs decoder
 // it will precalculate the necessary data to actually decode this type of
 // SendTable from the server. nDemoProtocol = 0 means current version.
-bool		RecvTable_RecvClassInfos( bf_read *pBuf, bool bNeedsDecoder, int nDemoProtocol = 0);
-
+bool RecvTable_RecvClassInfos( const CSVCMsg_SendTable& msg, int nDemoProtocol = 0 );
 
 // After ALL the SendTables have been received, call this and it will create CRecvDecoders
 // for all the SendTable->RecvTable matches it finds.
@@ -47,9 +50,8 @@ bool		RecvTable_CreateDecoders( const CStandardSendProxies *pSendProxies, bool b
 bool		RecvTable_Decode( 
 	RecvTable *pTable, 
 	void *pStruct, 
-	bf_read *pIn, 
-	int objectID,
-	bool updateDTI = true
+	SerializedEntityHandle_t handle,
+	int objectID
 	);
 
 // This acts like a RecvTable_Decode() call where all properties are written and all their values are zero.
@@ -59,39 +61,26 @@ void RecvTable_DecodeZeros( RecvTable *pTable, void *pStruct, int objectID );
 //
 // If pOldState is non-null and contains any properties that aren't in pNewState, then
 // those properties are written to the output as well. Returns # of changed props
-int RecvTable_MergeDeltas(
+bool RecvTable_MergeDeltas(
 	RecvTable *pTable,
 
-	bf_read *pOldState,		// this can be null
-	bf_read *pNewState,
-
-	bf_write *pOut,
+	SerializedEntityHandle_t oldState, // Can be invalid
+	SerializedEntityHandle_t newState,
+	SerializedEntityHandle_t mergedState,
 
 	int objectID = - 1,
 	
-	int	*pChangedProps = NULL,
-
-	bool updateDTI = false // enclude merge from newState in the DTI reports
+	CUtlVector< int >	*pChangedProps = NULL
 	);
 
 
-// Just copies the bits from the bf_read into the bf_write (this function is used
-// when you don't know the length of the encoded data).
-void RecvTable_CopyEncoding( 
-	RecvTable *pRecvTable, 
-	bf_read *pIn, 
-	bf_write *pOut,
-	int objectID
+bool RecvTable_ReadFieldList( 
+	RecvTable *pTable, 
+
+	bf_read &buf, 
+	SerializedEntityHandle_t dest, 
+	int nObjectId, 
+	bool bUpdateDTI
 	);
-
-
-
-// ------------------------------------------------------------------------------------------ //
-// Globals
-// ------------------------------------------------------------------------------------------ //
-
-// This is incremented each time a property is decoded.
-extern int g_nPropsDecoded;
-
 
 #endif // DATATABLE_RECV_ENG_H

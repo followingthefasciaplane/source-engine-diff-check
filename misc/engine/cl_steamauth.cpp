@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: steam state machine that handles authenticating steam users
 //
@@ -12,7 +12,9 @@
 #include <netinet/in.h>
 #endif
 
-#include <utlbuffer.h>
+#include "baseclient.h"
+#include "utlvector.h"
+#include "netadr.h"
 #include "cl_steamauth.h"
 #include "interface.h"
 #include "filesystem_engine.h"
@@ -21,11 +23,21 @@
 #include "host.h"
 #include "cmd.h"
 #include "common.h"
-#ifndef SWDS
+#include "inputsystem/iinputsystem.h"
+#include "materialsystem/imaterialsystem.h"
+#ifndef DEDICATED
 #include "vgui_baseui_interface.h"
+#include "server.h"
+#include "matchmaking/imatchframework.h"
 #endif
 
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
+
 #pragma warning( disable: 4355 ) // disables ' 'this' : used in base member initializer list'
+
+extern ConVar cl_hideserverip;
 
 //-----------------------------------------------------------------------------
 // Purpose: singleton accessor
@@ -37,6 +49,18 @@ CSteam3Client  &Steam3Client()
 }
 
 
+static void Callback_SteamAPIWarningMessageHook( int n, const char *sz )
+{
+	if ( n == 0 )
+	{
+		Msg( "[STEAM] %s\n", sz );
+	}
+	else
+	{
+		Warning( "[STEAM] %s\n", sz );
+	}
+}
+
 //-----------------------------------------------------------------------------
 // Purpose: Constructor
 //-----------------------------------------------------------------------------
@@ -47,15 +71,14 @@ CSteam3Client::CSteam3Client()
 			m_CallbackGameServerChangeRequested( this, &CSteam3Client::OnGameServerChangeRequested ),
 			m_CallbackGameOverlayActivated( this, &CSteam3Client::OnGameOverlayActivated ),
 			m_CallbackPersonaStateChanged( this, &CSteam3Client::OnPersonaUpdated ),
-			m_CallbackLowBattery( this, &CSteam3Client::OnLowBattery )
+			m_CallbackLowBattery( this, &CSteam3Client::OnLowBattery ),
+			m_CallbackSteamSocketStatus( this, &CSteam3Client::OnSteamSocketStatus )
 #endif
 {
 	m_bActive = false;
 	m_bGSSecure = false;
-	m_hAuthTicket = k_HAuthTicketInvalid;
-	m_unIP = 0;
-	m_usPort = 0;
-	m_nTicketSize = 0;
+	m_bGameOverlayActive = false;
+	m_bInitialized = false;
 }
 
 
@@ -78,8 +101,12 @@ void CSteam3Client::Shutdown()
 
 	m_bActive = false;	
 #if !defined( NO_STEAM )
-	SteamAPI_Shutdown();
-	Clear(); // clear our interface pointers now they are invalid
+	if( m_bInitialized )
+	{
+		SteamAPI_Shutdown();
+		m_bInitialized = false;
+	}
+	Clear(); // Steam API context shutdown
 #endif
 }
 
@@ -96,9 +123,20 @@ void CSteam3Client::Activate()
 	m_bGSSecure = false;
 
 #if !defined( NO_STEAM )
+
+	#ifndef _PS3
 	SteamAPI_InitSafe(); // ignore failure, that will fall out later when they don't get a valid logon cookie
-	SteamAPI_SetTryCatchCallbacks( false ); // We don't use exceptions, so tell steam not to use try/catch in callback handlers
-	Init(); // Steam API context init
+	#else
+	extern SteamPS3Params_t g_EngineSteamPS3Params;
+	SteamAPI_Init( &g_EngineSteamPS3Params );
+	#endif
+
+	m_bInitialized = Init(); // Steam API context init
+
+	if ( m_bInitialized )
+	{
+		SteamClient()->SetWarningMessageHook( Callback_SteamAPIWarningMessageHook );
+	}
 #endif
 }
 
@@ -106,92 +144,31 @@ void CSteam3Client::Activate()
 //-----------------------------------------------------------------------------
 // Purpose: Get the steam3 logon cookie to use
 //-----------------------------------------------------------------------------
-void CSteam3Client::GetAuthSessionTicket( void *pTicket, int cbMaxTicket, uint32 *pcbTicket, uint32 unIP, uint16 usPort, uint64 unGSSteamID,  bool bSecure )
+void CSteam3Client::GetAuthSessionTicket( void *pTicket, int cbMaxTicket, uint32 *pcbTicket, uint64 unGSSteamID,  bool bSecure )
 {
-#ifdef NO_STEAM
 	m_bGSSecure = bSecure;
-#else
-	CSteamID steamIDGS( unGSSteamID );
 
-	// Assume failure
-	*pcbTicket = 0;
-
-	// We must have interface pointers
+#if !defined( NO_STEAM )
 	if ( !SteamUser() )
-	{
-		Warning( "No SteamUser interface.  Cannot perform steam authentication\n" );
 		return;
-	}
 
-	// Make sure we have a valid Steam ID
+	Assert( m_hAuthTicket == k_HAuthTicketInvalid );
+
 	CSteamID steamID = SteamUser()->GetSteamID();
-	if ( !steamID.IsValid() )
-	{
-		Warning( "Our steam ID %s is not valid.  Steam must be running and you must be logged in\n", steamID.Render() );
-		return;
-	}
+	// prepend the steamID
+	uint64 ulSteamID = steamID.ConvertToUint64();
 
-	// Get a new ticket, if we don't already have one for this server
-	if ( m_hAuthTicket == k_HAuthTicketInvalid
-		|| m_unIP != unIP
-		|| m_usPort != usPort
-		|| m_bGSSecure != bSecure
-		|| m_steamIDGS != steamIDGS
-		|| m_nTicketSize <= 0 )
-	{
+	// use CUtlBuffer to stick 64 bit steamID into the ticket
+	CUtlBuffer buffer( pTicket, cbMaxTicket, 0 );
+	buffer.PutInt64( LittleQWord( ulSteamID ) );
+	Assert( buffer.TellPut() == sizeof( uint64 ));
+	pTicket = (uint8 *)buffer.PeekPut();
+	m_hAuthTicket = SteamUser()->GetAuthSessionTicket( pTicket, cbMaxTicket-sizeof(uint64), pcbTicket );
+	// include the size of the steamID
+	(*pcbTicket) = (*pcbTicket) + sizeof(uint64);
 
-		// Cancel any previously issues ticket
-		if ( m_hAuthTicket != k_HAuthTicketInvalid )
-			SteamUser()->CancelAuthTicket( m_hAuthTicket );
-
-		// Shove the GS ID in the first bits
-		*(uint64*)m_arbTicketData = SteamUser()->GetSteamID().ConvertToUint64();
-
-		// Ask Steam for a ticket
-		m_nTicketSize = 0;
-		m_hAuthTicket = SteamUser()->GetAuthSessionTicket( m_arbTicketData+sizeof(uint64), sizeof(m_arbTicketData)-sizeof(uint64), &m_nTicketSize );
-		if ( m_hAuthTicket == k_HAuthTicketInvalid || m_nTicketSize <= 0 )
-		{
-			// Failed!
-			Assert( m_hAuthTicket != k_HAuthTicketInvalid );
-			Assert( m_nTicketSize > 0 );
-			m_hAuthTicket = k_HAuthTicketInvalid;
-			m_nTicketSize = 0;
-			Warning( "ISteamUser::GetAuthSessionTicket failed to return a valid ticket\n" );
-		}
-		else
-		{
-			// Got valid ticket.  Remember its properties
-			m_nTicketSize += sizeof(uint64);
-			m_unIP = unIP;
-			m_usPort = usPort;
-			m_bGSSecure = bSecure;
-			m_steamIDGS = steamIDGS;
-		}
-	}
-
-	// Give them back the ticket data, if we were able to get one, and it will fit
-	*pcbTicket = 0;
-	if ( m_nTicketSize > 0 )
-	{
-		if ( cbMaxTicket >= (int)m_nTicketSize )
-		{
-			memcpy( pTicket, m_arbTicketData, m_nTicketSize );
-			*pcbTicket = m_nTicketSize;
-		}
-		else
-		{
-			Assert( cbMaxTicket >= (int)m_nTicketSize );
-		}
-	}
-
-	// Tell the steam backend about the server we are playing on - so that it can broadcast this to our friends and they can join.
-	// This may be something that you should NOT do if you are on a listen server - or you know that the game is not joinable
-	// for some reason.
-	#ifdef _DEBUG
-		Msg( "Sending AdvertiseGame %s %s (%s)\n", steamIDGS.Render(), netadr_t(unIP, usPort).ToString(), m_bGSSecure ? "secure" : "insecure" );
-	#endif
-	SteamUser()->AdvertiseGame( steamIDGS, unIP, usPort );
+#else
+	return;
 #endif
 }
 
@@ -208,11 +185,6 @@ void CSteam3Client::CancelAuthTicket()
 #if !defined( NO_STEAM )
 	if ( m_hAuthTicket != k_HAuthTicketInvalid )
 		SteamUser()->CancelAuthTicket( m_hAuthTicket );
-	#ifdef _DEBUG
-		Msg( "Clearing auth ticket, sending void AdvertiseGame\n" );
-	#endif
-	CSteamID steamIDGS; // invalid steamID means not playing anywhere
-	SteamUser()->AdvertiseGame( steamIDGS, 0, 0 );
 	m_hAuthTicket = k_HAuthTicketInvalid;
 #endif
 }
@@ -254,7 +226,10 @@ void CSteam3Client::OnClientGameServerDeny( ClientGameServerDeny_t *pClientGameS
 			case ( k_EDenySteamConnectionLost ) : pszReason = "Steam connection lost"; break;
 			case ( k_EDenySteamConnectionError ) : pszReason = "Steam connection error"; break;
 			case ( k_EDenySteamResponseTimedOut ) : pszReason = "Response timed out"; break;
-			case ( k_EDenySteamValidationStalled ) : pszReason = "Verification failed"; break;
+			
+			// k_EDenySteamValidationStalled is just an informative event, we will receive
+			// a real validation result later, shouldn't kick client for validation stall!
+			case ( k_EDenySteamValidationStalled ) : DevMsg( "Validation stalled\n" ); return;
 		}
 
 		Warning( "Disconnect: %s\n", pszReason );
@@ -271,9 +246,22 @@ extern ConVar	password;
 //-----------------------------------------------------------------------------
 void CSteam3Client::OnGameServerChangeRequested( GameServerChangeRequested_t *pGameServerChangeRequested )
 {
+#ifdef PORTAL2
+	if ( GetSteamUniverse() != k_EUniverseBeta && GetSteamUniverse() != k_EUniverseInternal )
+	{
+		// Portal 2 doesn't support joining pure servers from Steam Overlay
+		return;
+	}
+#endif
+#ifndef DEDICATED
+	if ( g_pMatchFramework )
+	{
+		g_pMatchFramework->CloseSession();	// Make sure we disconnect from our old server
+	}
+#endif
 	password.SetValue( pGameServerChangeRequested->m_rgchPassword );
-	Msg( "Connecting to %s\n", pGameServerChangeRequested->m_rgchServer );
-	Cbuf_AddText( va( "connect %s steam\n", pGameServerChangeRequested->m_rgchServer ) );
+	Msg( "Connecting to %s\n", cl_hideserverip.GetInt()>0 ? "<hidden>" : pGameServerChangeRequested->m_rgchServer );
+	Cbuf_AddText( Cbuf_GetCurrentPlayer(), va( "connect %s\n", pGameServerChangeRequested->m_rgchServer ) );
 }
 
 //-----------------------------------------------------------------------------
@@ -281,19 +269,19 @@ void CSteam3Client::OnGameServerChangeRequested( GameServerChangeRequested_t *pG
 //-----------------------------------------------------------------------------
 void CSteam3Client::OnGameOverlayActivated( GameOverlayActivated_t *pGameOverlayActivated )
 {
-#ifndef SWDS
-	if ( Host_IsSinglePlayerGame() )
+	g_pInputSystem->ResetInputState();
+	m_bGameOverlayActive = !!pGameOverlayActivated->m_bActive;
+	if ( m_bGameOverlayActive )
 	{
-		if ( !EngineVGui()->IsGameUIVisible() && 
-			!EngineVGui()->IsConsoleVisible() )
+#ifndef DEDICATED
+		// Don't activate it if it's already active (a sub window may be active)
+		// Multiplayer doesn't want the UI to appear, since it can't pause anyway
+		if ( !EngineVGui()->IsGameUIVisible() && sv.IsActive() && sv.IsSinglePlayerGame() )
 		{
-			if ( pGameOverlayActivated->m_bActive )
-				Cbuf_AddText( "setpause" );
-			else
-				Cbuf_AddText( "unpause" );
+			Cbuf_AddText( Cbuf_GetCurrentPlayer(), "gameui_activate" );
 		}
-	}
 #endif
+	}
 }
 
 extern void UpdateNameFromSteamID( IConVar *pConVar, CSteamID *pSteamID );
@@ -303,11 +291,15 @@ extern void UpdateNameFromSteamID( IConVar *pConVar, CSteamID *pSteamID );
 //-----------------------------------------------------------------------------
 void CSteam3Client::OnPersonaUpdated( PersonaStateChange_t *pPersonaStateChanged )
 {
-	if ( pPersonaStateChanged->m_nChangeFlags & k_EPersonaChangeName )
+	if ( !SteamUtils() || !SteamFriends() || !SteamUser() || !pPersonaStateChanged )
+		return;
+
+	// Check that something changed about local user
+	CSteamID steamID = SteamUser()->GetSteamID();
+	if ( steamID.ConvertToUint64() == pPersonaStateChanged->m_ulSteamID )
 	{
-		if ( SteamUtils() && SteamFriends() && SteamUser() )
+		if ( pPersonaStateChanged->m_nChangeFlags & k_EPersonaChangeName )
 		{
-			CSteamID steamID = SteamUser()->GetSteamID();
 			IConVar *pConVar = g_pCVar->FindVar( "name" );
 			UpdateNameFromSteamID( pConVar, &steamID );
 		}
@@ -326,12 +318,19 @@ void CSteam3Client::OnLowBattery( LowBatteryPower_t *pLowBat )
 	case 9: 
 	case 5: 
 	case 1: 
-		Cbuf_AddText( "save LowBattery_AutoSave" );
+		Cbuf_AddText( Cbuf_GetCurrentPlayer(), "save LowBattery_AutoSave" );
 		break;
 
 	default:
 		break;
 	}
+}
+
+//-----------------------------------------------------------------------------
+// Purpose: 
+//-----------------------------------------------------------------------------
+void CSteam3Client::OnSteamSocketStatus( SocketStatusCallback_t *pSocketStatus )
+{
 }
 
 #endif

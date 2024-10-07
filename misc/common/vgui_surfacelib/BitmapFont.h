@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright 1996-2005, Valve Corporation, All rights reserved. ======
 //
 // Baked Bitmap fonts
 //
@@ -19,7 +19,7 @@ class CBitmapFont : public font_t
 {
 public:
 	CBitmapFont();
-	virtual ~CBitmapFont();
+	~CBitmapFont();
 
 	// creates the font.  returns false if the compiled font does not exist.
 	virtual bool Create(const char *windowsFontName, float scalex, float scaley, int flags);
@@ -29,12 +29,6 @@ public:
 
 	// gets the abc widths for a character
 	virtual void GetCharABCWidths(int ch, int &a, int &b, int &c);
-
-	// writes the char into the specified 32bpp texture. We're overloading this because
-	// we derive off font_t, and the implementation there doesn't work for bitmap fonts.
-	virtual void GetCharRGBA( wchar_t ch, int rgbaWide, int rgbaTall, unsigned char *prgba );
-
-	// gets the width of ch given its position around before and after chars
 	virtual void GetKernedCharWidth( wchar_t ch, wchar_t chBefore, wchar_t chAfter, float &wide, float &abcA, float &abcC );
 
 	// gets the texture coords in the compiled texture page

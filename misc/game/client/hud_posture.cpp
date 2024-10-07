@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -15,7 +15,7 @@
 #include <vgui/ISurface.h>
 #include <vgui/ILocalize.h>
 #include <vgui_controls/Panel.h>
-#include <vgui/IVGui.h>
+#include <vgui/IVgui.h>
 
 
 using namespace vgui;
@@ -35,10 +35,10 @@ class CHudPosture : public CHudElement, public vgui::Panel
 	DECLARE_CLASS_SIMPLE( CHudPosture, vgui::Panel );
 
 public:
-	CHudPosture( const char *pElementName );
+	explicit CHudPosture( const char *pElementName );
 	bool			ShouldDraw( void );
 
-#ifdef _X360 	// if not xbox 360, don't waste code space on this
+#ifdef _GAMECONSOLE 	// if not xbox 360, don't waste code space on this
 	virtual void	Init( void );
 	virtual void	Reset( void );
 	virtual void	OnTick( void );
@@ -80,12 +80,12 @@ namespace
 //-----------------------------------------------------------------------------
 CHudPosture::CHudPosture( const char *pElementName ) : CHudElement( pElementName ), BaseClass( NULL, "HudPosture" )
 {
-	vgui::Panel *pParent = g_pClientMode->GetViewport();
+	vgui::Panel *pParent = GetClientMode()->GetViewport();
 	SetParent( pParent );
 
 	SetHiddenBits( HIDEHUD_HEALTH | HIDEHUD_PLAYERDEAD | HIDEHUD_NEEDSUIT );
 
-	if( IsX360() )
+	if( IsGameConsole() )
 	{
 		vgui::ivgui()->AddTickSignal( GetVPanel(), (1000/HUD_POSTURE_UPDATES_PER_SECOND) );
 	}
@@ -98,7 +98,7 @@ CHudPosture::CHudPosture( const char *pElementName ) : CHudElement( pElementName
 //-----------------------------------------------------------------------------
 bool CHudPosture::ShouldDraw()
 {
-#ifdef _X360
+#ifdef _GAMECONSOLE
 	return ( m_duckTimeout >= gpGlobals->curtime &&
 		CHudElement::ShouldDraw() );
 #else
@@ -106,7 +106,7 @@ bool CHudPosture::ShouldDraw()
 #endif
 }
 
-#ifdef _X360
+#ifdef _GAMECONSOLE
 
 //-----------------------------------------------------------------------------
 // Purpose: 
@@ -179,7 +179,7 @@ void CHudPosture::Paint()
 	SetPaintBackgroundEnabled( true );
 
 	Color clr;
-	clr = gHUD.m_clrNormal;
+	clr = GetHud().m_clrNormal;
 	clr[3] = 255;
 
 	// Pick the duck character

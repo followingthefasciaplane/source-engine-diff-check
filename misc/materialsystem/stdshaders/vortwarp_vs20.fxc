@@ -1,17 +1,21 @@
-//======= Copyright (c) 1996-2007, Valve Corporation, All rights reserved. ======
+//========== Copyright (c) Valve Corporation, All rights reserved. ==========//
 
-//  STATIC: "HALFLAMBERT"				"0..1"
-//  STATIC: "USE_STATIC_CONTROL_FLOW"	"0..1" [vs20]
+// STATIC: "HALFLAMBERT"					"0..1"
+// STATIC: "FLATTEN_STATIC_CONTROL_FLOW"	"0..1" [vs20] [PC]
+// STATIC: "FLATTEN_STATIC_CONTROL_FLOW"	"0..0" [CONSOLE]
 
-//	DYNAMIC: "COMPRESSED_VERTS"			"0..1"
-//	DYNAMIC: "DOWATERFOG"				"0..1"
-//	DYNAMIC: "SKINNING"					"0..1"
-//  DYNAMIC: "MORPHING"					"0..1" [vs30]
-//  DYNAMIC: "NUM_LIGHTS"				"0..2" [vs20]
+// DYNAMIC: "COMPRESSED_VERTS"				"0..1"
+#include "common_fog_vs_fxc.h"
+// DYNAMIC: "SKINNING"						"0..1"
+
+// DYNAMIC: "MORPHING"						"0..0" [ = false ]
+// DYNAMIC: "NUM_LIGHTS"					"0..2" [vs20] [PC]
+// DYNAMIC: "NUM_LIGHTS"					"0..0" [vs20] [CONSOLE]
 
 // If using static control flow on Direct3D, we should use the NUM_LIGHTS=0 combo
-//  SKIP: $USE_STATIC_CONTROL_FLOW && ( $NUM_LIGHTS > 0 ) [vs20]
-//	SKIP: $DOWATERFOG
+// SKIP: ( $FLATTEN_STATIC_CONTROL_FLOW == 0 ) && ( $NUM_LIGHTS > 0 ) [vs20] [PC]
+
+// SKIP: $DOWATERFOG
 
 #include "vortwarp_vs20_helper.h"
 
@@ -30,7 +34,7 @@ const float4 const4	:  register( SHADER_SPECIFIC_CONST_4 );
 const float3 cMorphTargetTextureDim		: register( SHADER_SPECIFIC_CONST_6 );
 const float4 cMorphSubrect				: register( SHADER_SPECIFIC_CONST_7 );
 
-sampler2D morphSampler					: register( D3DVERTEXTEXTURESAMPLER0, s0 );
+sampler2D morphSampler					: register( s0 );
 #endif
 
 
@@ -70,11 +74,11 @@ struct VS_INPUT
 struct VS_OUTPUT
 {
     float4 projPos					: POSITION;	
-#if !defined( _X360 )
+#if !defined( _X360 ) && !defined( SHADER_MODEL_VS_3_0 )
 	float  fog						: FOG;
 #endif
 
-	HALF4 baseTexCoord2_tangentSpaceVertToEyeVectorXY			: TEXCOORD0;
+	float4 baseTexCoord2_tangentSpaceVertToEyeVectorXY			: TEXCOORD0;
 	// bump mapping and a separate envmap mask texture are mutually exclusive.
 	float4 lightAtten											: TEXCOORD1;
 	float4 worldVertToEyeVectorXYZ_tangentSpaceVertToEyeVectorZ	: TEXCOORD2;
@@ -82,7 +86,6 @@ struct VS_OUTPUT
 	//	     second row											: TEXCOORD4;
 	//	     third row											: TEXCOORD5;
 	float4 worldPos_projPosZ									: TEXCOORD6;
-	float4 fogFactorW											: COLOR1;
 };
 
 //-----------------------------------------------------------------------------
@@ -124,11 +127,11 @@ VS_OUTPUT main( const VS_INPUT v )
 	// Transform into projection space
 	float4 projPos = mul( float4( worldPos, 1 ), cViewProj );
 	o.projPos = projPos;
-	projPos.z = mul( float4( worldPos, 1 ), cViewProjZ );
-	o.fogFactorW = CalcFog( worldPos, projPos, g_FogType );
-#if !defined( _X360 )
-	o.fog = o.fogFactorW;
+	
+#if !defined( _X360 ) && !defined( SHADER_MODEL_VS_3_0 )
+	o.fog = CalcFixedFunctionFog( worldPos, g_FogType );
 #endif
+
  	// Needed for water fog alpha and diffuse lighting 
 	// FIXME: we shouldn't have to compute this all the time.
 	o.worldPos_projPosZ = float4( worldPos, projPos.z );
@@ -137,7 +140,7 @@ VS_OUTPUT main( const VS_INPUT v )
 	// FIXME: We shouldn't have to compute this all the time.
 	o.worldVertToEyeVectorXYZ_tangentSpaceVertToEyeVectorZ.xyz = VSHADER_VECT_SCALE * (cEyePos - worldPos);
 
-#if defined ( SHADER_MODEL_VS_2_0 ) && ( !USE_STATIC_CONTROL_FLOW )
+#if ( defined ( SHADER_MODEL_VS_2_0 ) && ( FLATTEN_STATIC_CONTROL_FLOW ) )
 	o.lightAtten = float4(0,0,0,0);
 	#if ( NUM_LIGHTS > 0 )
 		o.lightAtten.x = GetVertexAttenForLight( worldPos, 0, false );

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -11,3 +11,5 @@ char *g_ppszPortalPassThroughMaterials[] =
 	"lights/light_orange001", 
 	NULL,
 };
+
+int g_nPortal2PromoFlags = 0;

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Parsing of entity network packets.
 //
@@ -20,12 +20,13 @@
 #include "netmessages.h"
 #include "ents_shared.h"
 #include "cl_ents_parse.h"
+#include "serializedentity.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
 static ConVar cl_flushentitypacket("cl_flushentitypacket", "0", FCVAR_CHEAT, "For debugging. Force the engine to flush an entity packet.");
-
+extern ConVar replay_debug;
 // Prints important entity creation/deletion events to console
 #if defined( _DEBUG )
 static ConVar cl_deltatrace( "cl_deltatrace", "0", 0, "For debugging, print entity creation/deletion info to console." );
@@ -114,7 +115,7 @@ void SpewToFile( char const* pFmt, ... )
 // Purpose: Frees the client DLL's binding to the object.
 // Input  : iEnt - 
 //-----------------------------------------------------------------------------
-void CL_DeleteDLLEntity( int iEnt, const char *reason, bool bOnRecreatingAllEntities )
+void CL_DeleteDLLEntity( int iEnt, char *reason, bool bOnRecreatingAllEntities )
 {
 	IClientNetworkable *pNet = entitylist->GetClientNetworkable( iEnt );
 
@@ -122,15 +123,16 @@ void CL_DeleteDLLEntity( int iEnt, const char *reason, bool bOnRecreatingAllEnti
 	{
 		ClientClass *pClientClass = pNet->GetClientClass();
 		TRACE_DELTA( va( "Trace %i (%s): delete (%s)\n", iEnt, pClientClass ? pClientClass->m_pNetworkName : "unknown", reason ) );
-#ifndef _XBOX
+
 		CL_RecordDeleteEntity( iEnt, pClientClass );
-#endif
+
 		if ( bOnRecreatingAllEntities )
 		{
 			pNet->SetDestroyedOnRecreateEntities();
 		}
 
 		pNet->Release();
+		Assert( !entitylist->GetClientNetworkable( iEnt ) );
 	}
 }
 
@@ -148,16 +150,16 @@ IClientNetworkable* CL_CreateDLLEntity( int iEnt, int iClass, int iSerialNum )
 #endif
 
 	ClientClass *pClientClass;
-	if ( ( pClientClass = cl.m_pServerClasses[iClass].m_pClientClass ) != NULL )
+	if ( ( pClientClass = GetBaseLocalClient().m_pServerClasses[iClass].m_pClientClass ) != NULL )
 	{
 		TRACE_DELTA( va( "Trace %i (%s): create\n", iEnt, pClientClass->m_pNetworkName ) );
-#ifndef _XBOX
-		CL_RecordAddEntity( iEnt );
-#endif		
 
-		if ( !cl.IsActive() )
+		CL_RecordAddEntity( iEnt );
+
+		if ( !GetBaseLocalClient().IsActive() )
 		{
 			COM_TimestampedLog( "cl:  create '%s'", pClientClass->m_pNetworkName );
+			EngineVGui()->UpdateProgressBar( PROGRESS_CREATEENTITIES ); 				
 		}
 
 		// Create the entity.
@@ -257,12 +259,12 @@ static inline RecvTable* GetEntRecvTable( int entnum )
 //-----------------------------------------------------------------------------
 static inline bool CL_IsPlayerIndex( int index )
 {
-	return ( index >= 1 && index <= cl.m_nMaxClients );
+	return ( index >= 1 && index <= GetBaseLocalClient().m_nMaxClients );
 }
 
 
 //-----------------------------------------------------------------------------
-// Purpose: Bad data was received, just flushes incoming delta data.
+// Purpose: Bad data was received, just discards incoming delta data.
 //-----------------------------------------------------------------------------
 void CL_FlushEntityPacket( CClientFrame *packet, char const *errorString, ... )
 {
@@ -286,7 +288,7 @@ void CL_FlushEntityPacket( CClientFrame *packet, char const *errorString, ... )
 	Con_NXPrintf( &np, "WARNING:  CL_FlushEntityPacket, %s", str );
 
 	// Free packet memory.
-	delete packet;
+	GetBaseLocalClient().DeleteUnusedClientFrame( packet );
 }
 
 
@@ -302,21 +304,21 @@ void CL_CopyNewEntity(
 {
 	if ( u.m_nNewEntity < 0 || u.m_nNewEntity >= MAX_EDICTS )
 	{
-		Host_Error ("CL_CopyNewEntity: u.m_nNewEntity < 0 || m_nNewEntity >= MAX_EDICTS");
+		Host_Error ("CL_CopyNewEntity: m_nNewEntity >= MAX_EDICTS");
 		return;
 	}
 
 	// If it's new, make sure we have a slot for it.
 	IClientNetworkable *ent = entitylist->GetClientNetworkable( u.m_nNewEntity );
 
-	if( iClass >= cl.m_nServerClasses )
+	if( iClass >= GetBaseLocalClient().m_nServerClasses )
 	{
 		Host_Error("CL_CopyNewEntity: invalid class index (%d).\n", iClass);
 		return;
 	}
 
 	// Delete the entity.
-	ClientClass *pClass = cl.m_pServerClasses[iClass].m_pClientClass;
+	ClientClass *pClass = GetBaseLocalClient().m_pServerClasses[iClass].m_pClientClass;
 	bool bNew = false;
 	if ( ent )
 	{
@@ -334,8 +336,7 @@ void CL_CopyNewEntity(
 		ent = CL_CreateDLLEntity( u.m_nNewEntity, iClass, iSerialNum );
 		if( !ent )
 		{
-			const char *pNetworkName = cl.m_pServerClasses[iClass].m_pClientClass ? cl.m_pServerClasses[iClass].m_pClientClass->m_pNetworkName : "";
-			Host_Error( "CL_ParsePacketEntities:  Error creating entity %s(%i)\n", pNetworkName, u.m_nNewEntity );
+			Host_Error( "CL_ParsePacketEntities:  Error creating entity %s(%i)\n", GetBaseLocalClient().m_pServerClasses[iClass].m_pClientClass->m_pNetworkName, u.m_nNewEntity );
 			return;
 		}
 
@@ -347,59 +348,54 @@ void CL_CopyNewEntity(
 	DataUpdateType_t updateType = bNew ? DATA_UPDATE_CREATED : DATA_UPDATE_DATATABLE_CHANGED;
 	ent->PreDataUpdate( updateType );
 
-	// Get either the static or instance baseline.
-	const void *pFromData;
-	int nFromBits;
+	SerializedEntityHandle_t oldbaseline = SERIALIZED_ENTITY_HANDLE_INVALID;
 
-	PackedEntity *baseline = u.m_bAsDelta ? cl.GetEntityBaseline( u.m_nBaseline, u.m_nNewEntity ) : NULL;
+	// Get either the static or instance baseline.
+	PackedEntity *baseline = u.m_bAsDelta ? GetBaseLocalClient().GetEntityBaseline( u.m_nBaseline, u.m_nNewEntity ) : NULL;
 	if ( baseline && baseline->m_pClientClass == pClass )
 	{
-		Assert( !baseline->IsCompressed() );
-		pFromData = baseline->GetData();
-		nFromBits = baseline->GetNumBits();
+		oldbaseline = baseline->GetPackedData();
 	}
 	else
 	{
 		// Every entity must have a static or an instance baseline when we get here.
 		ErrorIfNot(
-			cl.GetClassBaseline( iClass, &pFromData, &nFromBits ),
+			GetBaseLocalClient().GetClassBaseline( iClass, &oldbaseline ),
 			("CL_CopyNewEntity: GetClassBaseline(%d) failed.", iClass)
 		);
-		
-		nFromBits *= 8; // convert to bits
 	}
 
-	// Delta from baseline and merge to new baseline
-	bf_read fromBuf( "CL_CopyNewEntity->fromBuf", pFromData, Bits2Bytes(nFromBits), nFromBits );
-
 	RecvTable *pRecvTable = GetEntRecvTable( u.m_nNewEntity );
-
 	if( !pRecvTable )
-		Host_Error( "CL_ParseDelta: invalid recv table for ent %d.\n", u.m_nNewEntity );
-
-	if ( u.m_bUpdateBaselines )
 	{
-		// store this baseline in u.m_pUpdateBaselines
-		ALIGN4 char packedData[MAX_PACKEDENTITY_DATA] ALIGN4_POST;
-		bf_write writeBuf( "CL_CopyNewEntity->newBuf", packedData, sizeof(packedData) );
-
-		RecvTable_MergeDeltas( pRecvTable, &fromBuf, u.m_pBuf, &writeBuf, -1, NULL, true );
-
-		// set the other baseline
-		cl.SetEntityBaseline( (u.m_nBaseline==0)?1:0, pClass, u.m_nNewEntity, packedData, writeBuf.GetNumBytesWritten() );
-
-		fromBuf.StartReading( packedData, writeBuf.GetNumBytesWritten() );
-
-		RecvTable_Decode( pRecvTable, ent->GetDataTableBasePtr(), &fromBuf, u.m_nNewEntity, false );
-
+		Host_Error( "CL_ParseDelta: invalid recv table for ent %d.\n", u.m_nNewEntity );
 	}
 	else
 	{
-		// write data from baseline into entity
-		RecvTable_Decode( pRecvTable, ent->GetDataTableBasePtr(), &fromBuf, u.m_nNewEntity, false );
+		RecvTable_ReadFieldList( pRecvTable, *u.m_pBuf, u.m_DecodeEntity, -1, true );
 
-		// Now parse in the contents of the network stream.
-		RecvTable_Decode( pRecvTable, ent->GetDataTableBasePtr(), u.m_pBuf, u.m_nNewEntity, true );
+		if ( u.m_bUpdateBaselines )
+		{
+			// store this baseline in u.m_pUpdateBaselines
+			SerializedEntityHandle_t newbaseline = g_pSerializedEntities->AllocateSerializedEntity( __FILE__, __LINE__ );
+
+			RecvTable_MergeDeltas( pRecvTable, oldbaseline, u.m_DecodeEntity, newbaseline, -1, NULL );
+
+			// set the other baseline
+			GetBaseLocalClient().SetEntityBaseline( (u.m_nBaseline==0)?1:0, pClass, u.m_nNewEntity, newbaseline );
+
+
+			RecvTable_Decode( pRecvTable, ent->GetDataTableBasePtr(), newbaseline, u.m_nNewEntity );
+
+		}
+		else
+		{
+			// write data from baseline into entity
+			RecvTable_Decode( pRecvTable, ent->GetDataTableBasePtr(), oldbaseline, u.m_nNewEntity );
+
+			// Now parse in the contents of the network stream.
+			RecvTable_Decode( pRecvTable, ent->GetDataTableBasePtr(), u.m_DecodeEntity, u.m_nNewEntity );
+		}
 	}
 
 	CL_AddPostDataUpdateCall( u, u.m_nNewEntity, updateType );
@@ -414,13 +410,13 @@ void CL_CopyNewEntity(
 	// Net stats..
 	//
 	int bit_count = u.m_pBuf->GetNumBitsRead() - start_bit;
-#ifndef _XBOX
+
 	if ( cl_entityreport.GetBool() )
 		CL_RecordEntityBits( u.m_nNewEntity, bit_count );
-#endif
+
 	if ( CL_IsPlayerIndex( u.m_nNewEntity ) )
 	{
-		if ( u.m_nNewEntity == cl.m_nPlayerSlot + 1 )
+		if ( u.m_nNewEntity == GetBaseLocalClient().m_nPlayerSlot + 1 )
 		{
 			u.m_nLocalPlayerBits += bit_count;
 		}
@@ -436,17 +432,6 @@ void CL_PreserveExistingEntity( int nOldEntity )
 	IClientNetworkable *pEnt = entitylist->GetClientNetworkable( nOldEntity );
 	if ( !pEnt )
 	{
-		// If you hit this, this is because there's a networked client entity that got released
-		// by some method other than a server update.  This can happen if client code calls
-		// release on a networked entity.
-
-#if defined( STAGING_ONLY )
-		// Try to use the cl_removeentity_backtrace_capture code in cliententitylist.cpp...
-		Msg( "%s: missing client entity %d.\n", __FUNCTION__, nOldEntity );
-		Cbuf_AddText( CFmtStr( "cl_removeentity_backtrace_dump %d\n", nOldEntity ) );
-		Cbuf_Execute();
-#endif // STAGING_ONLY
-
 		Host_Error( "CL_PreserveExistingEntity: missing client entity %d.\n", nOldEntity );
 		return;
 	}
@@ -478,7 +463,14 @@ void CL_CopyExistingEntity( CEntityReadInfo &u )
 		return;
 	}
 
-	RecvTable_Decode( pRecvTable, pEnt->GetDataTableBasePtr(), u.m_pBuf, u.m_nNewEntity );
+	RecvTable_ReadFieldList( pRecvTable, *u.m_pBuf, u.m_DecodeEntity, u.m_nNewEntity, true );
+
+	// BUG: sometimes we get DeltaEnt packets with zero fields in them, for C_WeaponCSBaseGun-derived entities...
+	//      [CSGO, July 2 2012 - repro is to run a classic/hostage online listen server on X360]
+	CSerializedEntity *pEntity; pEntity = reinterpret_cast< CSerializedEntity * >( u.m_DecodeEntity );
+	//Assert( pEntity->GetFieldCount() > 0 );
+
+	RecvTable_Decode( pRecvTable, pEnt->GetDataTableBasePtr(), u.m_DecodeEntity, u.m_nNewEntity );
 
 	CL_AddPostDataUpdateCall( u, u.m_nNewEntity, DATA_UPDATE_DATATABLE_CHANGED );
 
@@ -487,13 +479,13 @@ void CL_CopyExistingEntity( CEntityReadInfo &u )
 	u.m_pTo->transmit_entity.Set( u.m_nNewEntity );
 
 	int bit_count = u.m_pBuf->GetNumBitsRead() - start_bit;
-#ifndef _XBOX
+
 	if ( cl_entityreport.GetBool() )
 		CL_RecordEntityBits( u.m_nNewEntity,  bit_count );
-#endif
+
 	if ( CL_IsPlayerIndex( u.m_nNewEntity ) )
 	{
-		if ( u.m_nNewEntity == cl.m_nPlayerSlot + 1 )
+		if ( u.m_nNewEntity == GetBaseLocalClient().m_nPlayerSlot + 1 )
 		{
 			u.m_nLocalPlayerBits += bit_count;
 		}
@@ -511,40 +503,52 @@ void CL_CopyExistingEntity( CEntityReadInfo &u )
 //-----------------------------------------------------------------------------
 void CL_MarkEntitiesOutOfPVS( CBitVec<MAX_EDICTS> *pvs_flags )
 {
-	int highest_index = entitylist->GetHighestEntityIndex();
+	PREFETCH360(pvs_flags, 0);
+	EntityCacheInfo_t *pInfo = entitylist->GetClientNetworkableArray();
+	int entityMax = entitylist->GetHighestEntityIndex() + 1;
 	// Note that we go up to and including the highest_index
-	for ( int i = 0; i <= highest_index; i++ )
+	bool bReport = cl_entityreport.GetBool();
+	for ( int i = 0; i < entityMax; i++ )
 	{
-		IClientNetworkable *ent = entitylist->GetClientNetworkable( i );
-		if ( !ent )
+#if defined( _X360 ) || defined( _PS3 )
+		if ( !(i & 0xF) )
+		{
+			PREFETCH360(&pInfo[i], 128);
+		}
+#endif
+		if ( !pInfo[i].m_pNetworkable )
 			continue;
 
 		// FIXME: We can remove IClientEntity here if we keep track of the
 		// last frame's entity_in_pvs
-		bool curstate = !ent->IsDormant();
+		bool curstate = !pInfo[i].m_bDormant;
 		bool newstate = pvs_flags->Get( i )  ? true : false;
 
 		if ( !curstate && newstate )
 		{
 			// Inform the client entity list that the entity entered the PVS
-			ent->NotifyShouldTransmit( SHOULDTRANSMIT_START );
+			pInfo[i].m_pNetworkable->NotifyShouldTransmit( SHOULDTRANSMIT_START );
 		}
 		else if ( curstate && !newstate )
 		{
 			// Inform the client entity list that the entity left the PVS
-			ent->NotifyShouldTransmit( SHOULDTRANSMIT_END );
-#ifndef _XBOX
-			CL_RecordLeavePVS( i );
-#endif
+			pInfo[i].m_pNetworkable->NotifyShouldTransmit( SHOULDTRANSMIT_END );
+			if ( bReport )
+			{
+				CL_RecordLeavePVS( i );
+			}
 		}
 	}
 }
 
 static void CL_CallPostDataUpdates( CEntityReadInfo &u )
 {
+	MDLCACHE_CRITICAL_SECTION_(g_pMDLCache);
+	int saveSlot = splitscreen->SetActiveSplitScreenPlayerSlot( 0 );
+
+	bool bSaveResolvable = splitscreen->SetLocalPlayerIsResolvable( __FILE__, __LINE__, false );
 	for ( int i=0; i < u.m_nPostDataUpdateCalls; i++ )
 	{
-		MDLCACHE_CRITICAL_SECTION_(g_pMDLCache);
 		CPostDataUpdateCall *pCall = &u.m_PostDataUpdateCalls[i];
 	
 		IClientNetworkable *pEnt = entitylist->GetClientNetworkable( pCall->m_iEnt );
@@ -553,11 +557,11 @@ static void CL_CallPostDataUpdates( CEntityReadInfo &u )
 
 		pEnt->PostDataUpdate( pCall->m_UpdateType );
 	}
+
+	splitscreen->SetActiveSplitScreenPlayerSlot( saveSlot );
+	splitscreen->SetLocalPlayerIsResolvable( __FILE__, __LINE__, bSaveResolvable );
 }
 
-static float g_flLastPerfRequest = 0.0f;
-
-static ConVar cl_debug_player_perf( "cl_debug_player_perf", "0", 0 );
 
 //-----------------------------------------------------------------------------
 // Purpose: An svc_packetentities has just been parsed, deal with the
@@ -567,14 +571,13 @@ static ConVar cl_debug_player_perf( "cl_debug_player_perf", "0", 0 );
 //			*playerbits - 
 // Output : void CL_ParsePacketEntities
 //-----------------------------------------------------------------------------
-bool CL_ProcessPacketEntities ( SVC_PacketEntities *entmsg )
+bool CL_ProcessPacketEntities( const CSVCMsg_PacketEntities &msg )
 {
 	VPROF( "_CL_ParsePacketEntities" );
 
 	// Packed entities for that frame
 	// Allocate space for new packet info.
-	CClientFrame *newFrame = cl.AllocateFrame();
-	newFrame->Init( cl.GetServerTickCount() );
+	CClientFrame *newFrame = GetBaseLocalClient().AllocateAndInitFrame( GetBaseLocalClient().GetServerTickCount() );
 	CClientFrame *oldFrame = NULL;
 
 	// if cl_flushentitypacket is set to N, the next N entity updates will be flushed
@@ -586,30 +589,19 @@ bool CL_ProcessPacketEntities ( SVC_PacketEntities *entmsg )
 		return false;
 	}
 
-	if ( entmsg->m_bIsDelta )
+	if ( msg.is_delta() )
 	{
-		int nDeltaTicks = cl.GetServerTickCount() - entmsg->m_nDeltaFrom;
-		float flDeltaSeconds = TICKS_TO_TIME( nDeltaTicks );
+		if ( replay_debug.GetInt() > 10 && GetBaseLocalClient().m_nHltvReplayDelay )
+			Msg( "Replay delta-%d update at tick %d, %s bytes\n", GetBaseLocalClient().GetServerTickCount() - msg.delta_from(), GetBaseLocalClient().GetServerTickCount(), V_pretifynum( msg.ByteSize() ) );
 
-		// If we have cl_debug_player_perf set and we see a huge delta between what we've ack'd to the server and where it's at
-		//  ask it for an instantaneous perf snapshot
-		if ( cl_debug_player_perf.GetBool() &&
-			( flDeltaSeconds > 0.5f ) &&							// delta is pretty out of date
-			( ( realtime - g_flLastPerfRequest ) > 5.0f ) )		// haven't requested in a while
-		{
-			g_flLastPerfRequest = realtime;
-			Warning( "Gap in server data, requesting connection perf data\n" );
-			cl.SendStringCmd( "playerperf\n" );
-		}
-
-		if ( cl.GetServerTickCount() == entmsg->m_nDeltaFrom )
+		if ( GetBaseLocalClient().GetServerTickCount() == msg.delta_from() )
 		{
 			Host_Error( "Update self-referencing, connection dropped.\n" );
 			return false;
 		}
 
 		// Otherwise, mark where we are valid to and point to the packet entities we'll be updating from.
-		oldFrame = cl.GetClientFrame( entmsg->m_nDeltaFrom );
+		oldFrame = GetBaseLocalClient().GetClientFrame( msg.delta_from() );
 
 		if ( !oldFrame )
 		{
@@ -618,48 +610,64 @@ bool CL_ProcessPacketEntities ( SVC_PacketEntities *entmsg )
 		}
 	}
 	else
-	{
-		if ( cl_debug_player_perf.GetBool() )
-		{
-			Warning( "Received uncompressed server update\n" );
-		}
+	{	
+		if ( replay_debug.GetBool() )
+			Msg( "Full tick %d update\n", GetBaseLocalClient().GetServerTickCount() );
+		if ( developer.GetInt() != 0 )
+			ConColorMsg( Color( 255, 100, 255 ), "Receiving uncompressed update from server, baseline %d, byte size %d \n", msg.baseline(), msg.ByteSize() );
 
 		// Clear out the client's entity states..
 		for ( int i=0; i <= entitylist->GetHighestEntityIndex(); i++ )
 		{
 			CL_DeleteDLLEntity( i, "ProcessPacketEntities", true );
 		}
+
+		GetBaseLocalClient().FreeEntityBaselines();
+		
+		ClientDLL_FrameStageNotify( FRAME_NET_FULL_FRAME_UPDATE_ON_REMOVE );
 	}
 
 	// signal client DLL that we have started updating entities
 	ClientDLL_FrameStageNotify( FRAME_NET_UPDATE_START );
 
-	g_nPropsDecoded = 0;
+	Assert( msg.baseline() >= 0 && msg.baseline() < 2 );
 
-	Assert( entmsg->m_nBaseline >= 0 && entmsg->m_nBaseline < 2 );
-
-	if ( entmsg->m_bUpdateBaseline )
+	if ( msg.update_baseline() )
 	{
 		// server requested to use this snapshot as baseline update
-		int nUpdateBaseline = (entmsg->m_nBaseline == 0) ? 1 : 0;
-		cl.CopyEntityBaseline( entmsg->m_nBaseline, nUpdateBaseline );
+		int nUpdateBaseline = ( msg.baseline() == 0) ? 1 : 0;
+		GetBaseLocalClient().CopyEntityBaseline( msg.baseline(), nUpdateBaseline );
 
 		// send new baseline acknowledgement(as reliable)
-		cl.m_NetChannel->SendNetMsg( CLC_BaselineAck( cl.GetServerTickCount(), entmsg->m_nBaseline ), true );
-		
+		// Used a (brilliantly named) named temporary because SendNetMsg
+		// takes a non-const reference because INetMessage::WriteToBuffer
+		// is non-const.
+		CCLCMsg_BaselineAck_t namedTemporary;
+		namedTemporary.set_baseline_tick( GetBaseLocalClient().GetServerTickCount() );
+		namedTemporary.set_baseline_nr( msg.baseline() );
+		GetBaseLocalClient().m_NetChannel->SendNetMsg( namedTemporary, true );		
 	}
 
 	CEntityReadInfo u;
-	u.m_pBuf = &entmsg->m_DataIn;
+	bf_read entityBuf( &msg.entity_data()[0], msg.entity_data().size() );
+	u.m_pBuf = &entityBuf;
 	u.m_pFrom = oldFrame;
 	u.m_pTo = newFrame;
-	u.m_bAsDelta = entmsg->m_bIsDelta;
-	u.m_nHeaderCount = entmsg->m_nUpdatedEntries;
-	u.m_nBaseline = entmsg->m_nBaseline;
-	u.m_bUpdateBaselines = entmsg->m_bUpdateBaseline;
+	u.m_bAsDelta = msg.is_delta();
+	u.m_nHeaderCount = msg.updated_entries();
+	u.m_nBaseline = msg.baseline();
+	u.m_bUpdateBaselines = msg.update_baseline();
 	
 	// update the entities
-	cl.ReadPacketEntities( u );
+	{
+		int saveSlot = splitscreen->SetActiveSplitScreenPlayerSlot( 0 );
+		bool bSaveResolvable = splitscreen->SetLocalPlayerIsResolvable( __FILE__, __LINE__, false );
+
+		GetBaseLocalClient().ReadPacketEntities( u );
+
+		splitscreen->SetActiveSplitScreenPlayerSlot( saveSlot );
+		splitscreen->SetLocalPlayerIsResolvable( __FILE__, __LINE__, bSaveResolvable );
+	}
 
 	ClientDLL_FrameStageNotify( FRAME_NET_UPDATE_POSTDATAUPDATE_START );
 
@@ -673,15 +681,15 @@ bool CL_ProcessPacketEntities ( SVC_PacketEntities *entmsg )
 
 	// adjust net channel stats
 
-	cl.m_NetChannel->UpdateMessageStats( INetChannelInfo::LOCALPLAYER, u.m_nLocalPlayerBits );
-	cl.m_NetChannel->UpdateMessageStats( INetChannelInfo::OTHERPLAYERS, u.m_nOtherPlayerBits );
-	cl.m_NetChannel->UpdateMessageStats( INetChannelInfo::ENTITIES, -(u.m_nLocalPlayerBits+u.m_nOtherPlayerBits) );
+	GetBaseLocalClient().m_NetChannel->UpdateMessageStats( INetChannelInfo::LOCALPLAYER, u.m_nLocalPlayerBits );
+	GetBaseLocalClient().m_NetChannel->UpdateMessageStats( INetChannelInfo::OTHERPLAYERS, u.m_nOtherPlayerBits );
+	GetBaseLocalClient().m_NetChannel->UpdateMessageStats( INetChannelInfo::ENTITIES, -(u.m_nLocalPlayerBits+u.m_nOtherPlayerBits) );
 
- 	cl.DeleteClientFrames( entmsg->m_nDeltaFrom );
+ 	GetBaseLocalClient().DeleteClientFrames( msg.delta_from() );
 
 	// If the client has more than 64 frames, the host will start to eat too much memory.
 	// TODO: We should enforce this somehow.
-	if ( MAX_CLIENT_FRAMES < cl.AddClientFrame( newFrame ) )
+	if ( MAX_CLIENT_FRAMES < GetBaseLocalClient().AddClientFrame( newFrame ) )
 	{
 		DevMsg( 1, "CL_ProcessPacketEntities: frame window too big (>%i)\n", MAX_CLIENT_FRAMES );	
 	}
@@ -708,7 +716,7 @@ void CL_PreprocessEntities( void )
 {
 	// Zero latency!!! (single player or listen server?)
 	bool bIsUsingMultiplayerNetworking = NET_IsMultiplayer();
-	bool bLastOutgoingCommandEqualsLastAcknowledgedCommand = cl.lastoutgoingcommand == cl.command_ack;
+	bool bLastOutgoingCommandEqualsLastAcknowledgedCommand = GetBaseLocalClient().lastoutgoingcommand == GetBaseLocalClient().command_ack;
 
 	// We always want to re-run prediction when using the multiplayer networking, or if we're the listen server and we get a packet
 	//  before any frames have run
@@ -716,33 +724,34 @@ void CL_PreprocessEntities( void )
 		bLastOutgoingCommandEqualsLastAcknowledgedCommand )
 	{
 		//Msg( "%i/%i CL_ParseClientdata:  no latency server ack %i\n", 
-		//	host_framecount, cl.tickcount,
+		//	host_framecount, GetBaseLocalClient1().tickcount,
 		//	command_ack );
 		CL_RunPrediction( PREDICTION_SIMULATION_RESULTS_ARRIVING_ON_SEND_FRAME );
 	}
 
 	// Copy some results from prediction back into right spot
 	// Anything not sent over the network from server to client must be specified here.
-	//if ( cl.last_command_ack  )
+	//if ( GetBaseLocalClient().last_command_ack  )
 	{
-		int number_of_commands_executed = ( cl.command_ack - cl.last_command_ack );
+		int number_of_commands_executed = ( GetBaseLocalClient().command_ack - GetBaseLocalClient().last_command_ack );
+		int number_of_simulation_ticks = ( GetBaseLocalClient().GetServerTickCount() - GetBaseLocalClient().last_server_tick );
 
 #if 0
-		COM_Log( "cl.log", "Receiving frame acknowledging %i commands\n",
+		COM_Log( "GetBaseLocalClient().log", "Receiving frame acknowledging %i commands\n",
 			number_of_commands_executed );
 
-		COM_Log( "cl.log", "  last command number executed %i\n",
-			cl.command_ack );
+		COM_Log( "GetBaseLocalClient().log", "  last command number executed %i\n",
+			GetBaseLocalClient().command_ack );
 
-		COM_Log( "cl.log", "  previous last command number executed %i\n",
-			cl.last_command_ack );
+		COM_Log( "GetBaseLocalClient().log", "  previous last command number executed %i\n",
+			GetBaseLocalClient().last_command_ack );
 
-		COM_Log( "cl.log", "  current world frame %i\n",
-			cl.m_nCurrentSequence );
+		COM_Log( "GetBaseLocalClient().log", "  current world frame %i\n",
+			GetBaseLocalClient().m_nCurrentSequence );
 #endif
 
 		// Copy last set of changes right into current frame.
-		g_pClientSidePrediction->PreEntityPacketReceived( number_of_commands_executed, cl.m_nCurrentSequence );
+		g_pClientSidePrediction->PreEntityPacketReceived( number_of_commands_executed, GetBaseLocalClient().m_nCurrentSequence, number_of_simulation_ticks );
 	}
 
 	CDebugOverlay::PurgeServerOverlays();

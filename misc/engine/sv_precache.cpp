@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -13,7 +13,7 @@
 #include "MapReslistGenerator.h"
 #include "DownloadListGenerator.h"
 #include "soundchars.h"
-#ifndef SWDS
+#ifndef DEDICATED
 #include "vgui_baseui_interface.h"
 #endif
 
@@ -145,9 +145,19 @@ int SV_FindOrAddDecal(const char *name, bool preload )
 // Purpose: 
 // Input  : *name - 
 //-----------------------------------------------------------------------------
+void SV_ForceExactFile( const char *name )
+{
+	DownloadListGenerator().ForceExactFile( name, CONSISTENCY_EXACT );
+}
+
+
+//-----------------------------------------------------------------------------
+// Purpose: 
+// Input  : *name - 
+//-----------------------------------------------------------------------------
 void SV_ForceSimpleMaterial( const char *name )
 {
-	DownloadListGenerator().ForceSimpleMaterial( name );
+	DownloadListGenerator().ForceExactFile( name, CONSISTENCY_SIMPLE_MATERIAL );
 }
 
 
@@ -215,7 +225,7 @@ int CGameServer::PrecacheModel( char const *name, int flags, model_t *model /*=N
 	}
 
 	bool bLoadNow;
-	bLoadNow = ( !slot->GetModel() && ( ( flags & RES_PRELOAD ) || IsX360() ) );
+	bLoadNow = ( !slot->GetModel() && ( ( flags & RES_PRELOAD ) || IsGameConsole() ) );
 	if ( CommandLine()->FindParm( "-nopreload" ) ||	CommandLine()->FindParm( "-nopreloadmodels" ))
 	{
 		bLoadNow = false;
@@ -230,8 +240,8 @@ int CGameServer::PrecacheModel( char const *name, int flags, model_t *model /*=N
 		if ( bLoadNow )
 		{
 			slot->SetModel( modelloader->GetModelForName( name, IModelLoader::FMODELLOADER_SERVER ) );
-#ifndef SWDS
-			EngineVGui()->UpdateProgressBar(PROGRESS_PRECACHE); 
+#ifndef DEDICATED
+			EngineVGui()->UpdateProgressBar(PROGRESS_DEFAULT); 
 #endif
 			MapReslistGenerator().OnModelPrecached(name);
 		}
@@ -420,7 +430,6 @@ int CGameServer::PrecacheGeneric( char const *name, int flags )
 	if ( !pExisting )
 	{
 		p.flags = flags;
-
 	}
 	else
 	{
@@ -433,6 +442,13 @@ int CGameServer::PrecacheGeneric( char const *name, int flags )
 
 	CPrecacheItem *slot = &generic_precache[ idx ];
 	slot->SetGeneric( name );
+
+	// just precache particle files now
+	if ( ( flags & RES_PRELOAD ) && serverGameDLL && !V_stricmp( "pcf", V_GetFileExtensionSafe( name ) ) )
+	{
+		serverGameDLL->PrecacheParticleSystemFile( name );
+	}
+
 	return idx;
 }
 
@@ -479,6 +495,7 @@ INetworkStringTable *CGameServer::GetDecalPrecacheTable( void ) const
 {
 	return m_pDecalPrecacheTable;
 }
+
 
 //-----------------------------------------------------------------------------
 // Purpose: 

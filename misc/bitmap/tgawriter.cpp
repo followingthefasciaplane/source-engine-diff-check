@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -7,7 +7,11 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include "tier0/dbg.h"
+#ifndef _PS3
 #include <malloc.h>
+#else
+#include <stdlib.h>
+#endif
 #include "filesystem.h"
 #include "bitmap/tgawriter.h"
 #include "tier1/utlbuffer.h"
@@ -191,7 +195,7 @@ bool WriteDummyFileNoAlloc( const char *fileName, int width, int height, enum Im
 	fp.Write( &tgaHeader, sizeof(TGAHeader_t) );
 
 	// Write out width * height black pixels
-	unsigned char black[4] = { 0x1E, 0x9A, 0xFF, 0x00 };
+	unsigned char black[4] = { 0x00, 0x00, 0x00, 0x00 }; //  Valve Orange would be: { 0x1E, 0x9A, 0xFF, 0x00 }
 	for (int i = 0; i < width * height; i++)
 	{
 		fp.Write( black, nBytesPerPixel );
@@ -278,7 +282,7 @@ bool WriteTGAFile( const char *fileName, int width, int height, enum ImageFormat
 	return true;
 }
 
-
+// This routine writes into a width x height subrect of an existing file at the offset ( nXOrigin, nYOrigin ) where the target image has a stride of nStride
 bool WriteRectNoAlloc( unsigned char *pImageData, const char *fileName, int nXOrigin, int nYOrigin, int width, int height, int nStride, enum ImageFormat srcFormat )
 {
 	Assert( g_pFullFileSystem );
@@ -289,14 +293,11 @@ bool WriteRectNoAlloc( unsigned char *pImageData, const char *fileName, int nXOr
 	FileHandle_t fp;
 	fp = g_pFullFileSystem->Open( fileName, "r+b" );
 
-	//
 	// Read in the targa header
-	//
 	TGAHeader_t tgaHeader;
 	g_pFullFileSystem->Read( &tgaHeader, sizeof(tgaHeader), fp );
 
-
-	int nBytesPerPixel, nPixelSize;
+	int nBytesPerPixel, nImageType, nPixelSize;
 
 	switch( srcFormat )
 	{
@@ -306,14 +307,17 @@ bool WriteRectNoAlloc( unsigned char *pImageData, const char *fileName, int nXOr
 #endif
 		nBytesPerPixel = 3; // 24/32 bit uncompressed TGA
 		nPixelSize = 24;
+		nImageType = 2;
 		break;
 	case IMAGE_FORMAT_BGRA8888:
 		nBytesPerPixel = 4; // 24/32 bit uncompressed TGA
 		nPixelSize = 32;
+		nImageType = 2;
 		break;
 	case IMAGE_FORMAT_I8:
 		nBytesPerPixel = 1; // 8 bit uncompressed TGA
 		nPixelSize = 8;
+		nImageType = 1;
 		break;
 	default:
 		return false;
@@ -326,7 +330,6 @@ bool WriteRectNoAlloc( unsigned char *pImageData, const char *fileName, int nXOr
 		Warning( "TGA doesn't match source data.\n" );
 		return false;
 	}
-
 
 	// Seek to the origin of the target subrect from the beginning of the file
 	g_pFullFileSystem->Seek( fp, nBytesPerPixel * (tgaHeader.width * nYOrigin + nXOrigin), FILESYSTEM_SEEK_CURRENT );
@@ -348,6 +351,146 @@ bool WriteRectNoAlloc( unsigned char *pImageData, const char *fileName, int nXOr
 	g_pFullFileSystem->Close( fp );
 	return true;
 }
+
+
+
+// Returns weight for Source pixel based on its position in the guardbanded source tile
+static float GetSrcWeight( int nFileY, int nFileX, int nFileHeight, int nFileWidth,
+						  int nRow, int nCol, int nHeight, int nWidth, int nGuardBandHeight, int nGuardBandWidth )
+{
+	float flXWeight = 1.0f;
+	float flYWeight = 1.0f;
+
+	if ( nFileX < nGuardBandWidth )							// Left edge of file doesn't feather in X
+	{
+		flXWeight = 1.0f;
+	}
+	else if ( nFileX > ( nFileWidth - nGuardBandWidth )	)	// Right edge of file doesn't feather in X
+	{
+		flXWeight = 1.0f;
+	}
+	else if ( nCol < 2*nGuardBandWidth )					// Left guardband
+	{
+		flXWeight = nCol / ( (float) nGuardBandWidth * 2.0f );
+	}
+	else if ( nCol > nWidth )								// Right guardband
+	{
+		flXWeight = 1.0f - ( ( nCol - nWidth ) / ( (float) nGuardBandWidth * 2.0f ) );
+	}
+
+
+	if ( nFileY < nGuardBandHeight )						// Top edge of file doesn't feather in Y
+	{
+		flYWeight = 1.0f;
+	}
+	else if ( nFileY > ( nFileHeight - nGuardBandHeight ) )	// Bottom edge of file doesn't feather in Y
+	{
+		flYWeight = 1.0f;
+	}
+	else if ( nRow < 2*nGuardBandHeight )						// Top guardband
+	{
+		flYWeight = nRow / ( (float) nGuardBandHeight * 2.0f );
+	}
+	else if ( nRow > nHeight )								// Bottom guardband
+	{
+		flYWeight = 1.0f - ( ( nRow - nHeight ) / ( (float) nGuardBandHeight * 2.0f ) );
+	}
+
+	float flWeight = flXWeight * flYWeight;
+	Assert( ( flWeight >= 0 ) && ( flWeight <= 1.0f ) );
+	return flWeight;
+}
+
+// This flavor of this routine also writes a subrect into an existing file, but it feathers in a ( nGuardBandWidth, nGuardBandHeight ) border,
+bool WriteRectNoAllocFeather( unsigned char *pImageData, const char *fileName, int nXOrigin, int nYOrigin, int width, int height,
+							  int nGuardBandWidth, int nGuardBandHeight, int nStride, enum ImageFormat srcFormat )
+{
+	Assert( g_pFullFileSystem );
+	if( !g_pFullFileSystem )
+		return false;
+
+	FileHandle_t fp;
+	fp = g_pFullFileSystem->Open( fileName, "r+b" );
+
+	// Read in the targa header
+	TGAHeader_t tgaHeader;
+	g_pFullFileSystem->Read( &tgaHeader, sizeof(tgaHeader), fp );
+
+	int nBytesPerPixel, nImageType, nPixelSize;
+
+	switch( srcFormat )
+	{
+	case IMAGE_FORMAT_BGR888:
+#if defined( _X360 )
+	case IMAGE_FORMAT_LINEAR_BGR888:
+#endif
+		nBytesPerPixel = 3; // 24/32 bit uncompressed TGA
+		nPixelSize = 24;
+		nImageType = 2;
+		break;
+	case IMAGE_FORMAT_BGRA8888:
+		nBytesPerPixel = 4; // 24/32 bit uncompressed TGA
+		nPixelSize = 32;
+		nImageType = 2;
+		break;
+	case IMAGE_FORMAT_I8:
+		nBytesPerPixel = 1; // 8 bit uncompressed TGA
+		nPixelSize = 8;
+		nImageType = 1;
+		break;
+	default:
+		return false;
+		break;
+	}
+
+	// Verify src data matches the targa we're going to write into
+	if ( nPixelSize != tgaHeader.pixel_size )
+	{
+		Warning( "TGA doesn't match source data.\n" );
+		return false;
+	}
+
+	// Run through each scanline of the incoming tile, including guardbands
+	for ( int row=0; row < ( height + 2*nGuardBandHeight ) ; row++ )
+	{
+		// Point to start of row
+		unsigned char *pSrc = pImageData + ( row * nBytesPerPixel * nStride );
+		unsigned char filePixel[4] = { 0, 0, 0, 0 };
+
+		// Run through each column of the incoming tile, including guardbands
+		for ( int col=0; col < ( width + 2*nGuardBandWidth ) ; col++ )
+		{
+			// Pixel location in the file
+			int fileX = nXOrigin - nGuardBandWidth + col;
+			int fileY = nYOrigin - nGuardBandHeight + row;
+
+			// If we're within the limits of the file's image
+			if ( ( fileX >= 0 ) && ( fileY >= 0 ) && ( fileX < tgaHeader.width ) && ( fileY < tgaHeader.height ) )
+			{
+				// Always just seek from the head of the file to the pixel in question and read it in
+				g_pFullFileSystem->Seek( fp, sizeof(tgaHeader) + nBytesPerPixel * ( tgaHeader.width * fileY + fileX ), FILESYSTEM_SEEK_HEAD );
+				g_pFullFileSystem->Read( filePixel, 3, fp ); // Just read B, G, R bytes
+
+				// Add weighted src pixel to the data from the file (which should be initialized to be black at start of day)
+				float flWeight = GetSrcWeight(  fileY, fileX, tgaHeader.height, tgaHeader.width, row, col, height, width, nGuardBandHeight, nGuardBandWidth );
+				filePixel[0] = (int) ( flWeight * (float)pSrc[0] + (float)filePixel[0] );
+				filePixel[1] = (int) ( flWeight * (float)pSrc[1] + (float)filePixel[1] );
+				filePixel[2] = (int) ( flWeight * (float)pSrc[2] + (float)filePixel[2] );
+
+				// Jump back to start of current pixel and write over it
+				g_pFullFileSystem->Seek( fp, -3, FILESYSTEM_SEEK_CURRENT );
+				g_pFullFileSystem->Write( filePixel, nBytesPerPixel, fp );
+			}
+
+			// Advance src pointer to next column
+			pSrc += nBytesPerPixel;
+		}
+	}
+
+	g_pFullFileSystem->Close( fp );
+	return true;
+}
+
 
 } // end namespace TGAWriter
 

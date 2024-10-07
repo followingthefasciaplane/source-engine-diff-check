@@ -1,11 +1,13 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright (c) 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
 //===========================================================================//
 
 #include <stdlib.h>
+#ifndef _PS3
 #include <malloc.h>
+#endif
 #include "materialsystem_global.h"
 #include "string.h"
 #include "shaderapi/ishaderapi.h"
@@ -27,20 +29,21 @@
 #include "materialsystem/ishaderapi.h"
 #include "vstdlib/random.h"
 #include "imorphinternal.h"
+#include "isubdinternal.h"
 #include "tier1/utlrbtree.h"
-#include "tier1/utlpair.h"
 #include "ctype.h"
-#include "utlqueue.h"
 #include "tier0/icommandline.h"
-#include "ctexturecompositor.h"
-
-#include "vprof_telemetry.h"
+#include "filesystem/IQueuedLoader.h"
 
 // Need lightmaps access here
+#ifndef _PS3
 #define MATSYS_INTERNAL
+#endif
 #include "cmatlightmaps.h"
 #include "cmaterialsystem.h"
+#ifndef _PS3
 #undef MATSYS_INTERNAL
+#endif
 
 #include "tier0/memdbgon.h"
 
@@ -49,68 +52,8 @@
 #define BLACK_TEXTURE_SIZE				1
 #define GREY_TEXTURE_SIZE				1
 #define NORMALIZATION_CUBEMAP_SIZE		32
-
-struct AsyncLoadJob_t;
-struct AsyncReadJob_t;
-class AsyncLoader;
-class AsyncReader;
-
-#define MAX_READS_OUTSTANDING 2
-
-static ImageFormat GetImageFormatRawReadback( ImageFormat fmt );
-
-#ifdef STAGING_ONLY
-	static ConVar mat_texture_list_dump( "mat_texture_list_dump", "0" );
-#endif
-
-const char* cTextureCachePathDir = "__texture_cache";
-
-// TODO: Relocate this somewhere else. It works like python's "strip" function,
-// removing leading and trailing whitespace, including newlines. Whitespace between
-// non-whitespace characters is preserved.
-void V_StripWhitespace( char* pBuffer )
-{
-	Assert( pBuffer );
-
-	char* pSrc = pBuffer;
-	char* pDst = pBuffer;
-	char* pDstFirstTrailingWhitespace = NULL;
-	
-	// Remove leading whitespace
-	bool leading = true;
-	while ( *pSrc )
-	{
-		if ( leading )
-		{
-			if ( V_isspace( *pSrc ) )
-			{
-				++pSrc;
-				continue;
-			}
-			else
-			{
-				leading = false;
-				// Drop through
-			}
-		}
-
-		if  ( pDst != pSrc )
-			*pDst = *pSrc;
-
-		if ( !leading && V_isspace( *pDst ) && pDstFirstTrailingWhitespace == NULL )
-			pDstFirstTrailingWhitespace = pDst;
-		else if ( !leading && !V_isspace( *pDst ) && pDstFirstTrailingWhitespace != NULL )
-			pDstFirstTrailingWhitespace = NULL;
-
-		++pSrc;
-		++pDst;
-	}
-
-	(*pDst) = 0;
-
-	if ( pDstFirstTrailingWhitespace )
-		( *pDstFirstTrailingWhitespace ) = 0;
-}
+#define SSAO_NOISE_TEXTURE_SIZE			32
+#define ERROR_TEXTURE_IS_SOLID
 
 //-----------------------------------------------------------------------------
 //
@@ -128,8 +71,6 @@ public:
 		m_nCheckerSize( nCheckerSize ), m_Color1(color1), m_Color2(color2)
 	{
 	}
-
-	virtual ~CCheckerboardTexture() { }
 
 	virtual void RegenerateTextureBits( ITexture *pTexture, IVTFTexture *pVTFTexture, Rect_t *pSubRect )
 	{
@@ -184,7 +125,6 @@ static void CreateCheckerboardTexture( ITextureInternal *pTexture, int nCheckerS
 	pTexture->SetTextureRegenerator( pRegen );
 }
 
-
 //-----------------------------------------------------------------------------
 // Creates a solid texture
 //-----------------------------------------------------------------------------
@@ -194,8 +134,6 @@ public:
 	CSolidTexture( color32 color ) : m_Color(color)
 	{
 	}
-
-	virtual ~CSolidTexture() { }
 
 	virtual void RegenerateTextureBits( ITexture *pTexture, IVTFTexture *pVTFTexture, Rect_t *pSubRect )
 	{
@@ -317,6 +255,7 @@ public:
 	virtual void Release() {}
 };
 
+
 //-----------------------------------------------------------------------------
 // Creates a normalization cubemap texture
 //-----------------------------------------------------------------------------
@@ -351,7 +290,7 @@ public:
 					float u = x * flInvWidth - 1.0f;
 					float oow = 1.0f / sqrt( 1.0f + u*u + v*v );
 
-#ifdef DX_TO_GL_ABSTRACTION
+#if defined( DX_TO_GL_ABSTRACTION ) && !defined( _PS3 )
 					float flX = (255.0f * 0.5 * (u*oow + 1.0f) + 0.5f);
 					float flY = (255.0f * 0.5 * (v*oow + 1.0f) + 0.5f);
 					float flZ = (255.0f * 0.5 * (oow + 1.0f) + 0.5f);
@@ -522,63 +461,15 @@ static void CreateSignedNormalizationCubemap( ITextureInternal *pTexture )
 	pTexture->SetTextureRegenerator( &s_SignedNormalizationCubemap );
 }
 
-//-----------------------------------------------------------------------------
-// Creates a color correction texture
-//-----------------------------------------------------------------------------
-class CColorCorrectionTexture : public ITextureRegenerator
+/*
+static void CreateSSAONoiseTexture( ITextureInternal *pTexture )
 {
-public:
-	CColorCorrectionTexture( ColorCorrectionHandle_t handle ) : m_ColorCorrectionHandle(handle)
-	{
-	}
-
-	virtual ~CColorCorrectionTexture() { }
-
-	virtual void RegenerateTextureBits( ITexture *pTexture, IVTFTexture *pVTFTexture, Rect_t *pSubRect )
-	{
-		int nWidth = pVTFTexture->Width();
-		int nHeight = pVTFTexture->Height();
-		int nDepth = pVTFTexture->Depth();
-		Assert( nWidth == COLOR_CORRECTION_TEXTURE_SIZE && nHeight == COLOR_CORRECTION_TEXTURE_SIZE && nDepth == COLOR_CORRECTION_TEXTURE_SIZE );
-
-		for ( int z = 0; z < nDepth; ++z )
-		{
-			CPixelWriter pixelWriter;
-			pixelWriter.SetPixelMemory( pVTFTexture->Format(), 
-				pVTFTexture->ImageData( 0, 0, 0, 0, 0, z ), pVTFTexture->RowSizeInBytes( 0 ) );
-
-			for ( int y = 0; y < nHeight; ++y )
-			{
-				pixelWriter.Seek( 0, y );
-				for (int x = 0; x < nWidth; ++x)
-				{
-					RGBX5551_t inColor;
-					inColor.r = x;
-					inColor.g = y;
-					inColor.b = z;
-
-					color24 col = ColorCorrectionSystem()->GetLookup( m_ColorCorrectionHandle, inColor );
-					pixelWriter.WritePixel( col.r, col.g, col.b, 255 );
-				}
-			}
-		}
-	}
-
-	virtual void Release() 
-	{
-		delete this;
-	}
-
-private:
-	ColorCorrectionHandle_t	m_ColorCorrectionHandle;
-};
-
-
-void CreateColorCorrectionTexture( ITextureInternal *pTexture, ColorCorrectionHandle_t handle )
-{
-	ITextureRegenerator *pRegen = new CColorCorrectionTexture( handle );
-	pTexture->SetTextureRegenerator( pRegen );
+	// NOTE: This texture regenerator is stateless so there's no need to allocate + deallocate
+	static CSSAONoiseMap s_SSAONoiseMap;
+	pTexture->SetTextureRegenerator( &s_SSAONoiseMap );
 }
+*/
+
 
 //-----------------------------------------------------------------------------
 // Implementation of the texture manager
@@ -589,7 +480,7 @@ public:
 	CTextureManager( void );
 
 	// Initialization + shutdown
-	virtual void Init( int nFlags ) OVERRIDE;
+	virtual void Init( int nFlags );
 	virtual void Shutdown();
 
 	virtual void AllocateStandardRenderTargets( );
@@ -597,27 +488,25 @@ public:
 
 	virtual void CacheExternalStandardRenderTargets();
 
-	virtual ITextureInternal *CreateProceduralTexture( const char *pTextureName, const char *pTextureGroupName, int w, int h, int d, ImageFormat fmt, int nFlags, ITextureRegenerator* generator = NULL );
+	virtual ITextureInternal *CreateProceduralTexture( const char *pTextureName, const char *pTextureGroupName, int w, int h, int d, ImageFormat fmt, int nFlags );
 	virtual ITextureInternal *FindOrLoadTexture( const char *textureName, const char *pTextureGroupName, int nAdditionalCreationFlags = 0 );
  	virtual bool IsTextureLoaded( const char *pTextureName );
+	virtual bool GetTextureInformation( char const *szTextureName, MaterialTextureInfo_t &info );
 
 	virtual void AddTextureAlias( const char *pAlias, const char *pRealName );
 	virtual void RemoveTextureAlias( const char *pAlias );
 
-	virtual void SetExcludedTextures( const char *pScriptName );
+	virtual void SetExcludedTextures( const char *pScriptName, bool bUsingWeaponModelCache );
 	virtual void UpdateExcludedTextures();
+	virtual void ClearForceExcludes();
 
 	virtual void ResetTextureFilteringState();
 	void ReloadTextures( void );
 
 	// These are used when we lose our video memory due to a mode switch etc
-	void ReleaseTextures( void );
+	void ReleaseTextures( bool bReleaseManaged = true );
 	void RestoreNonRenderTargetTextures( void );
 	void RestoreRenderTargets( void );
-
-	// Suspend or resume texture streaming requests
-	void SuspendTextureStreaming( void );
-	void ResumeTextureStreaming( void );
 
 	// delete any texture that has a refcount <= 0
 	void RemoveUnusedTextures( void );
@@ -631,11 +520,11 @@ public:
 	virtual ITextureInternal *NormalizationCubemap();
 	virtual ITextureInternal *SignedNormalizationCubemap();
 	virtual ITextureInternal *ShadowNoise2D();
+	virtual ITextureInternal *SSAONoise2D();	
 	virtual ITextureInternal *IdentityLightWarp();
 	virtual ITextureInternal *ColorCorrectionTexture( int i );
 	virtual ITextureInternal *FullFrameDepthTexture();
-	virtual ITextureInternal *DebugLuxels2D();
-
+	virtual ITextureInternal *StereoParamTexture();
 
 	// Generates an error texture pattern
 	virtual void GenerateErrorTexture( ITexture *pTexture, IVTFTexture *pVTFTexture );
@@ -653,10 +542,9 @@ public:
 		ImageFormat fmt, 
 		RenderTargetType_t type, 
 		unsigned int textureFlags, 
-		unsigned int renderTargetFlags );
+		unsigned int renderTargetFlags,
+		bool bMultipleTargets );
 
-	virtual bool HasPendingTextureDestroys() const;
-	virtual void MarkUnreferencedTextureForCleanup( ITextureInternal *pTexture );
 	virtual void RemoveTexture( ITextureInternal *pTexture );
 	virtual void ReloadFilesInList( IFileList *pFilesToReload );
 
@@ -665,67 +553,18 @@ public:
 
 	virtual void ReleaseTempRenderTargetBits( void );
 
-	// Called once per frame by material system "somewhere."
-	virtual void Update();
-
-	// Load a texture asynchronously and then call the provided callback.
-	virtual void AsyncFindOrLoadTexture( const char *pTextureName, const char *pTextureGroupName, IAsyncTextureOperationReceiver* pRecipient, void* pExtraArgs, bool bComplain, int nAdditionalCreationFlags );
-	void CompleteAsyncLoad( AsyncLoadJob_t* pJob );
-
-	virtual void AsyncCreateTextureFromRenderTarget( ITexture* pSrcRt, const char* pDstName, ImageFormat dstFmt, bool bGenMips, int nAdditionalCreationFlags, IAsyncTextureOperationReceiver* pRecipient, void* pExtraArgs );
-	void CompleteAsyncRead( AsyncReadJob_t* pJob );
-
-	ITextureInternal* AcquireReadbackTexture( int w, int h, ImageFormat fmt );
-	void ReleaseReadbackTexture( ITextureInternal* pTex );
-
-	void WarmTextureCache();
-	void CoolTextureCache();
-
-	virtual void RequestAllMipmaps( ITextureInternal* pTex );
-	virtual void EvictAllTextures();
-	virtual void UpdatePostAsync();
-
-	virtual void ReleaseAsyncScratchVTF( IVTFTexture* pScratchVTF );
-
-	virtual bool ThreadInAsyncLoadThread() const;
-	virtual bool ThreadInAsyncReadThread() const;
-
-	virtual bool AddTextureCompositorTemplate( const char* pName, KeyValues* pTmplDesc ) OVERRIDE;
-	virtual bool VerifyTextureCompositorTemplates() OVERRIDE;
-
-	virtual CTextureCompositorTemplate* FindTextureCompositorTemplate( const char* pName ) OVERRIDE;
-
 protected:
 	ITextureInternal *FindTexture( const char *textureName );
-	ITextureInternal *LoadTexture( const char *textureName, const char *pTextureGroupName, int nAdditionalCreationFlags = 0, bool bDownload = true );
-
-	void AsyncLoad( const AsyncLoadJob_t& job );
-	void AsyncReadTexture( AsyncReadJob_t* job );
+	ITextureInternal *LoadTexture( const char *textureName, const char *pTextureGroupName, int nAdditionalCreationFlags = 0 );
 
 	// Restores a single texture
 	void RestoreTexture( ITextureInternal* pTex );
 
-	void CleanupPossiblyUnreferencedTextures();
-
-#ifdef STAGING_ONLY
-	void DumpTextureList( );
-#endif
-
-	void FindFilesToLoad( CUtlDict< int >* pOutFilesToLoad, const char* pFilename );
-	void ReadFilesToLoad( CUtlDict< int >* pOutFilesToLoad, const char* pFilename );
-
 	CUtlDict< ITextureInternal *, unsigned short > m_TextureList;
 	CUtlDict< const char *, unsigned short > m_TextureAliases;
 	CUtlDict< int, unsigned short > m_TextureExcludes;	
-	CUtlDict< CCopyableUtlVector<AsyncLoadJob_t> > m_PendingAsyncLoads;
-	CUtlVector< ITextureInternal* > m_ReadbackTextures;
-	CUtlVector< ITextureInternal* >			m_preloadedTextures;
-	CUtlMap< ITextureInternal*, int >		m_textureStreamingRequests;
-	CTSQueue< ITextureInternal* >			m_asyncStreamingRequests;
-	CTSQueue< ITextureInternal * >			m_PossiblyUnreferencedTextures;
 
-	CUtlDict< CTextureCompositorTemplate *, unsigned short > m_TexCompTemplates;
-
+	bool m_bUsingWeaponModelCache;
 
 	int m_iNextTexID;
 	int m_nFlags;
@@ -739,24 +578,21 @@ protected:
 	ITextureInternal *m_pFullScreenTexture;
 	ITextureInternal *m_pSignedNormalizationCubemap;
 	ITextureInternal *m_pShadowNoise2D;
+	ITextureInternal *m_pSSAONoise2D;
 	ITextureInternal *m_pIdentityLightWarp;
 	ITextureInternal *m_pColorCorrectionTextures[ COLOR_CORRECTION_MAX_TEXTURES ];
 	ITextureInternal *m_pFullScreenDepthTexture;
-	ITextureInternal *m_pDebugLuxels2D;
+	ITextureInternal *m_pStereoParamTexture;
 
 	// Used to generate various error texture patterns when necessary
+#ifdef ERROR_TEXTURE_IS_SOLID
+	CSolidTexture *m_pErrorRegen;
+#else
 	CCheckerboardTexture *m_pErrorRegen;
+#endif
 
-	friend class AsyncLoader;
-	AsyncLoader* m_pAsyncLoader;
-
-	friend class AsyncReader;
-	AsyncReader* m_pAsyncReader;
-
-	uint m_nAsyncLoadThread;
-	uint m_nAsyncReadThread;
-
-	int m_iSuspendTextureStreaming;
+private:
+	bool ParseTextureExcludeScript( const char *pScriptName );
 };
 
 
@@ -766,671 +602,11 @@ protected:
 static CTextureManager s_TextureManager;
 ITextureManager *g_pTextureManager = &s_TextureManager;
 
-struct AsyncLoadJob_t 
-{
-	CUtlString m_TextureName;
-	CUtlString m_TextureGroupName;
-	IAsyncTextureOperationReceiver* m_pRecipient;
-	void* m_pExtraArgs;
-	bool m_bComplain;
-	int m_nAdditionalCreationFlags;
-	ITextureInternal* m_pResultData;
-
-	AsyncLoadJob_t()
-	: m_pRecipient( NULL )
-	, m_pExtraArgs( NULL )
-	, m_bComplain( false )
-	, m_nAdditionalCreationFlags( 0 )
-	, m_pResultData( NULL )
-	{ }
-
-	AsyncLoadJob_t( const char *pTextureName, const char *pTextureGroupName, IAsyncTextureOperationReceiver* pRecipient, void* pExtraArgs, bool bComplain, int nAdditionalCreationFlags )
-	: m_TextureName( pTextureName )
-	, m_TextureGroupName( pTextureGroupName )
-	, m_pRecipient( pRecipient )
-	, m_pExtraArgs( pExtraArgs )
-	, m_bComplain( bComplain )
-	, m_nAdditionalCreationFlags( nAdditionalCreationFlags )
-	, m_pResultData( NULL )
-	{
-
-	}
-};
-
-
-class CAsyncCopyRequest : public IAsyncTextureOperationReceiver
-{
-public:
-	CAsyncCopyRequest()
-	: m_nReferenceCount( 0 )
-	, m_bSignalled( false )
-	{ }
-
-	virtual ~CAsyncCopyRequest() { }
-
-	virtual int AddRef() OVERRIDE{ return ++m_nReferenceCount; }
-	virtual int Release() OVERRIDE
-	{
-		int retVal = --m_nReferenceCount;
-		if ( retVal == 0 )
-			delete this;
-
-		return retVal;
-	}
-
-	virtual int GetRefCount() const OVERRIDE{ return m_nReferenceCount; }
-
-	virtual void OnAsyncCreateComplete( ITexture* pTex, void* pExtraArgs ) OVERRIDE { }
-	virtual void OnAsyncFindComplete( ITexture* pTex, void* pExtraArgs ) OVERRIDE { }
-	virtual void OnAsyncMapComplete( ITexture* pTex, void* pExtraArgs, void* pMemory, int nPitch ) OVERRIDE { }
-	virtual void OnAsyncReadbackBegin( ITexture* pDst, ITexture* pSrc, void* pExtraArgs ) OVERRIDE
-	{
-		m_bSignalled = true;
-	}
-
-	bool IsSignalled() const { return m_bSignalled; }
-
-private:
-	CInterlockedInt m_nReferenceCount;
-	volatile bool m_bSignalled;
-};
-
-class CAsyncMapResult : public IAsyncTextureOperationReceiver
-{
-public:
-	CAsyncMapResult( ITextureInternal* pTex ) 
-	: m_pTexToMap( pTex ) 
-	, m_nReferenceCount( 0 )
-	, m_pMemory( NULL )
-	, m_nPitch( 0 )
-	, m_bSignalled( false )
-	{ }
-
-	virtual ~CAsyncMapResult() { }
-
-	virtual int AddRef() OVERRIDE { return ++m_nReferenceCount; }
-	virtual int Release() OVERRIDE
-	{
-		int retVal = --m_nReferenceCount;
-		if ( retVal == 0 )
-			delete this;
-
-		return retVal;	
-	}
-
-	virtual int GetRefCount() const OVERRIDE{ return m_nReferenceCount; }
-
-	virtual void OnAsyncCreateComplete( ITexture* pTex, void* pExtraArgs ) OVERRIDE { }
-	virtual void OnAsyncFindComplete( ITexture* pTex, void* pExtraArgs ) OVERRIDE { }
-	virtual void OnAsyncMapComplete( ITexture* pTex, void* pExtraArgs, void* pMemory, int nPitch ) OVERRIDE
-	{
-		Assert( pTex == m_pTexToMap );
-		m_pMemory = pMemory;
-		m_nPitch = nPitch;
-		m_bSignalled = true;
-	}
-
-	virtual void OnAsyncReadbackBegin( ITexture* pDst, ITexture* pSrc, void* pExtraArgs ) OVERRIDE { }
-
-
-	bool IsSignalled() const { return m_bSignalled; }
-
-	ITextureInternal* const m_pTexToMap;
-	CInterlockedInt m_nReferenceCount;
-	volatile void* m_pMemory; 
-	volatile int m_nPitch;
-
-private:
-	volatile bool m_bSignalled;
-};
-
-struct AsyncReadJob_t 
-{
-	ITexture* m_pSrcRt;
-	ITextureInternal* m_pSysmemTex;
-	CAsyncCopyRequest* m_pAsyncRead;
-	CAsyncMapResult* m_pAsyncMap;
-	const char* m_pDstName;
-	ImageFormat m_dstFmt;
-	bool m_bGenMips;
-	int m_nAdditionalCreationFlags;
-	IAsyncTextureOperationReceiver* m_pRecipient;
-	void* m_pExtraArgs;
-
-	CUtlMemory<unsigned char> m_finalTexelData;
-
-	AsyncReadJob_t()
-	: m_pSrcRt( NULL )
-	, m_pSysmemTex( NULL )
-	, m_pAsyncRead( NULL )
-	, m_pAsyncMap( NULL )
-	, m_pDstName( NULL )
-	, m_dstFmt( IMAGE_FORMAT_UNKNOWN )
-	, m_bGenMips( false )
-	, m_nAdditionalCreationFlags( 0 )
-	, m_pRecipient( NULL )
-	, m_pExtraArgs( NULL )
-	{ }
-
-	AsyncReadJob_t( ITexture* pSrcRt, const char* pDstName, ImageFormat dstFmt, bool bGenMips, int nAdditionalCreationFlags, IAsyncTextureOperationReceiver* pRecipient, void* pExtraArgs )
-	: m_pSrcRt( pSrcRt )
-	, m_pSysmemTex( NULL )
-	, m_pAsyncRead( NULL )
-	, m_pAsyncMap( NULL )
-	, m_pDstName( pDstName ) // We take ownership of this string.
-	, m_dstFmt( dstFmt )
-	, m_bGenMips( bGenMips )
-	, m_nAdditionalCreationFlags( nAdditionalCreationFlags )
-	, m_pRecipient( pRecipient )
-	, m_pExtraArgs( pExtraArgs )
-	{ 
-	
-	}
-
-	~AsyncReadJob_t()
-	{
-		Assert( ThreadInMainThread() );
-
-		delete [] m_pDstName; 
-
-		SafeRelease( &m_pRecipient );
-
-		if ( m_pSysmemTex )
-		{
-			if ( m_pAsyncMap )
-			{
-				extern CMaterialSystem g_MaterialSystem;
-				g_MaterialSystem.GetRenderContextInternal()->AsyncUnmap( m_pSysmemTex );
-			}
-
-			assert_cast< CTextureManager* >( g_pTextureManager )->ReleaseReadbackTexture( m_pSysmemTex );
-			m_pSysmemTex = NULL;
-		}
-
-		SafeRelease( &m_pAsyncMap );
-	}
-
-};
-
-bool IsJobCancelled( AsyncReadJob_t* pJob )
-{
-	Assert( pJob != NULL );
-
-	// The texture manager holds a reference to the object, so if we're the only one who is holding a ref
-	// then the job has been abandoned. This gives us the opportunity to cleanup and skip some work.
-	if ( pJob->m_pRecipient->GetRefCount() == 1 )
-	{
-		return true;
-	}
-
-	return false;
-}
-
-bool IsJobCancelled( AsyncLoadJob_t* pJob )
-{
-	Assert( pJob != NULL );
-
-	// The texture manager holds a reference to the object, so if we're the only one who is holding a ref
-	// then the job has been abandoned. This gives us the opportunity to cleanup and skip some work.
-	if ( pJob->m_pRecipient->GetRefCount() == 1 )
-	{
-		return true;
-	}
-
-	return false;
-}
-
-//-----------------------------------------------------------------------------
-// Functions can be called from any thread, unless they are prefixed with a thread name. 
-class AsyncLoader
-{
-public:
-	AsyncLoader()
-	: m_bQuit( false )
-	{
-		for ( int i = 0; i < MAX_READS_OUTSTANDING; ++i )
-		{
-			m_asyncScratchVTFs.PushItem( CreateVTFTexture() );
-		}
-
-		// Do this after everything else. 
-		m_LoaderThread = CreateSimpleThread( AsyncLoader::LoaderMain, this );
-	}
-
-	~AsyncLoader()
-	{
-		Assert( m_asyncScratchVTFs.Count() == MAX_READS_OUTSTANDING );
-		while ( m_asyncScratchVTFs.Count() > 0 )
-		{
-			IVTFTexture* pScratchVTF = NULL;
-			m_asyncScratchVTFs.PopItem( &pScratchVTF );
-			delete pScratchVTF;
-		}
-	}
-
-	void AsyncLoad( const AsyncLoadJob_t& job )
-	{
-		tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
-
-		// TODO: This could be made faster by keeping a pool of these things.
-		m_pendingJobs.PushItem( new AsyncLoadJob_t( job ) );
-	}
-
-	void Shutdown()
-	{
-		tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
-
-		m_bQuit = true;
-		ThreadJoin( m_LoaderThread );		
-	}
-
-	void ThreadMain_Update()
-	{
-		Assert( ThreadInMainThread() );
-		tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
-		
-		AsyncLoadJob_t *pJob = NULL;
-		if ( m_completedJobs.PopItem( &pJob ) )
-		{
-			Assert( pJob != NULL );
-
-			tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s - CompleteAsyncLoad", __FUNCTION__ );
-			// Complete the load, then make the callback.
-			assert_cast< CTextureManager* >( g_pTextureManager )->CompleteAsyncLoad( pJob );
-			delete pJob;
-			pJob = NULL;
-		}
-	}
-
-	void ReleaseAsyncReadBuffer( IVTFTexture *pScratchVTF )
-	{
-		Assert( pScratchVTF != NULL );
-		m_asyncScratchVTFs.PushItem( pScratchVTF  );	
-	}
-
-private:
-	inline bool ThreadInLoaderThread() 
-	{
-		return s_TextureManager.ThreadInAsyncLoadThread();
-	}
-
-	void ThreadLoader_Main( )
-	{
-		Assert( ThreadInLoaderThread() );
-
-		while ( !m_bQuit )
-		{
-			AsyncLoadJob_t *pJob = NULL;
-			IVTFTexture *pScratchVTF = NULL;
-			while ( !m_pendingJobs.PopItem( &pJob ) )
-			{
-				// "awhile"
-				ThreadSleep( 8 );
-				if ( m_bQuit )
-					return;
-			}
-			Assert( pJob != NULL );
-
-			while ( !m_asyncScratchVTFs.PopItem( &pScratchVTF ) )
-			{
-				// Also awhile, but not as long..
-				ThreadSleep( 4 );
-				if ( m_bQuit )
-					return;
-			}
-			Assert( pScratchVTF != NULL );
-
-			ThreadLoader_ProcessLoad( pJob, pScratchVTF );
-		}
-	}
-
-	void ThreadLoader_ProcessLoad( AsyncLoadJob_t *pJob, IVTFTexture* pScratchVTF )
-	{
-		Assert( ThreadInLoaderThread() );
-		tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
-
-		Assert( pJob->m_pResultData );
-
-		if ( !pJob->m_pResultData->AsyncReadTextureFromFile( pScratchVTF, pJob->m_nAdditionalCreationFlags ) )
-			m_asyncScratchVTFs.PushItem( pScratchVTF );
-
-		m_completedJobs.PushItem( pJob );
-	}
-
-	static unsigned LoaderMain( void* _this )
-	{
-		ThreadSetDebugName( "Loader" );
-
-		s_TextureManager.m_nAsyncLoadThread = ThreadGetCurrentId();
-		( ( AsyncLoader* )_this )->ThreadLoader_Main();
-		s_TextureManager.m_nAsyncLoadThread = 0xFFFFFFFF;
-		return 0;
-	}
-
-	ThreadHandle_t m_LoaderThread; 
-	volatile bool m_bQuit;
-
-	CTSQueue< AsyncLoadJob_t *> m_pendingJobs;
-	CTSQueue< AsyncLoadJob_t *> m_completedJobs;
-	CTSQueue< IVTFTexture *> m_asyncScratchVTFs;
-};
-
-//-----------------------------------------------------------------------------
-// Functions can be called from any thread, unless they are prefixed with a thread name. 
-class AsyncReader
-{
-public:
-	AsyncReader()
-	: m_bQuit( false )
-	{
-
-		// Do this after everything else. 
-		m_HelperThread = CreateSimpleThread( AsyncReader::ReaderMain, this );
-	}
-
-	void AsyncReadback( AsyncReadJob_t* job )
-	{
-		tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
-
-		m_requestedCopies.PushItem( job );
-	}
-
-	void Shutdown()
-	{
-		tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
-
-		m_bQuit = true;
-		ThreadJoin( m_HelperThread );
-	}
-
-	void ThreadMain_Update()
-	{
-		Assert( ThreadInMainThread() );
-		tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
-
-		while ( !m_queuedMaps.IsEmpty() )
-		{
-			tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "CompleteMap" );
-			AsyncReadJob_t* pMapped = m_queuedMaps.Head();
-			Assert( pMapped != NULL );
-			{
-				if ( IsJobCancelled( pMapped ) )
-				{
-					// Remove the head, which is pMapped
-					m_queuedMaps.RemoveAtHead();
-					delete pMapped;
-					continue;
-				}
-				
-				if ( pMapped->m_pAsyncMap->IsSignalled() )
-				{
-					if ( pMapped->m_pAsyncMap->m_pMemory != 0 && pMapped->m_pAsyncMap->m_nPitch != 0 )
-					{
-						// Stick it in the queue for the other thread to work on it.
-						m_pendingJobs.PushItem( pMapped );
-					}
-					else
-					{
-						Assert( !"Failed to perform a map that shouldn't fail, need to deal with this if it ever happens." );
-						DevWarning( "Failed to perform a map that shouldn't fail, need to deal with this if it ever happens." );
-					}
-					
-					// Remove the head, which is pMapped
-					m_queuedMaps.RemoveAtHead();
-				}
-
-				// Stop as soon as we complete one, regardless of success.
-				break;
-			}
-
-		}
-
-		// This is ugly, but basically we need to do map and unmap on the main thread. Other
-		// stuff can (mostly) happen on the async thread
-		while ( !m_queuedReads.IsEmpty() )
-		{
-			tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "CompleteQueuedRead" );
-
-			AsyncReadJob_t* pRead = NULL;
-			if ( m_queuedReads.RemoveAtHead( pRead ) )
-			{
-				if ( IsJobCancelled( pRead ) )
-				{
-					delete pRead;
-					continue;
-				}
-
-				SafeAssign( &pRead->m_pAsyncMap, new CAsyncMapResult( pRead->m_pSysmemTex ) );
-				// Trigger the map.
-				extern CMaterialSystem g_MaterialSystem;
-				g_MaterialSystem.GetRenderContextInternal()->AsyncMap( pRead->m_pSysmemTex, pRead->m_pAsyncMap, NULL );
-				m_queuedMaps.Insert( pRead );
-
-				// Stop as soon as we complete one successfully.
-				break;
-			}
-		}
-
-		if ( !m_scheduledReads.IsEmpty() )
-		{
-			if ( m_scheduledReads.Head()->m_pAsyncRead->IsSignalled() )
-			{
-				AsyncReadJob_t* pScheduledRead = m_scheduledReads.RemoveAtHead();
-				SafeRelease( &pScheduledRead->m_pAsyncRead );
-
-				m_queuedReads.Insert( pScheduledRead );
-			}
-		}
-
-		AsyncReadJob_t* pRequestCopy = NULL;
-		if ( m_requestedCopies.PopItem( &pRequestCopy ) )
-		{
-			SafeAssign( &pRequestCopy->m_pAsyncRead, new CAsyncCopyRequest );
-			extern CMaterialSystem g_MaterialSystem;
-			g_MaterialSystem.GetRenderContextInternal()->AsyncCopyRenderTargetToStagingTexture( pRequestCopy->m_pSysmemTex, pRequestCopy->m_pSrcRt, pRequestCopy->m_pAsyncRead, NULL );
-
-			m_scheduledReads.Insert( pRequestCopy );
-		}
-		
-		while ( m_completedJobs.Count() > 0 )
-		{
-			tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "CreateTextureFromBits" );
-			
-			AsyncReadJob_t* pCreate = NULL;
-			if ( m_completedJobs.PopItem( &pCreate ) ) 
-			{
-				// Check after we do the unmap, we need to do that here.
-				if ( IsJobCancelled( pCreate ) )
-				{
-					delete pCreate;
-					continue;
-				}
-
-				extern CMaterialSystem g_MaterialSystem;
-				g_MaterialSystem.GetRenderContextInternal()->AsyncUnmap( pCreate->m_pSysmemTex );
-				SafeRelease( &pCreate->m_pAsyncMap );
-
-				assert_cast< CTextureManager* >( g_pTextureManager )->CompleteAsyncRead( pCreate );
-				delete pCreate;
-				pCreate = NULL;
-				// Stop as soon as we complete one successfully.
-				break;
-			}
-		}
-	}
-
-private:
-	inline bool ThreadInReaderThread()
-	{
-		return s_TextureManager.ThreadInAsyncReadThread();
-	}
-
-	void ThreadReader_Main()
-	{
-		Assert( ThreadInReaderThread() );
-
-		while ( !m_bQuit )
-		{
-			AsyncReadJob_t *pJob = NULL;
-			if ( m_pendingJobs.PopItem( &pJob ) )
-			{
-				Assert( pJob != NULL );
-				ThreadReader_ProcessRead( pJob );
-			}
-			else
-			{
-				// "awhile"
-				ThreadSleep( 8 );
-			}
-		}
-	}
-
-	void ThreadReader_ProcessRead( AsyncReadJob_t *pJob )
-	{
-		Assert( ThreadInReaderThread() );
-		tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
-
-		// This code does a few things:
-		// 1. Reads from a previously mapped scratch buffer texture and performs byte swapping (if necessary).
-		// 2. Uses byteswapped data to generate mipmaps
-		// 3. Encodes mipmapped data into the destination format.
-
-		const int h = pJob->m_pSysmemTex->GetActualHeight();
-		const int w = pJob->m_pSysmemTex->GetActualWidth();
-		const ImageFormat srcFmt = pJob->m_pSysmemTex->GetImageFormat();
-
-		// Convert the data
-		CUtlMemory< unsigned char > srcBufferFinestMip;
-		CUtlMemory< unsigned char > srcBufferAllMips;
-		const int srcFinestMemRequired = ImageLoader::GetMemRequired( w, h, 1, srcFmt, false );
-		const int srcAllMemRequired = ImageLoader::GetMemRequired( w, h, 1, srcFmt, pJob->m_bGenMips );
-		const int srcPitch = ImageLoader::GetMemRequired( w, 1, 1, srcFmt, false );
-
-		const ImageFormat dstFmt = pJob->m_dstFmt;
-		CUtlMemory< unsigned char > dstBufferAllMips;
-		const int dstMemRequried = ImageLoader::GetMemRequired( w, h, 1, dstFmt, pJob->m_bGenMips );
-		
-		{
-			tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s-Allocations", __FUNCTION__ );
-			srcBufferFinestMip.EnsureCapacity( srcFinestMemRequired );
-			if ( srcFinestMemRequired != srcAllMemRequired )
-			{
-				srcBufferAllMips.EnsureCapacity( srcAllMemRequired );
-			}
-			else
-			{
-				Assert( !pJob->m_bGenMips );
-			}
-
-			if ( srcFmt != dstFmt )
-			{
-				dstBufferAllMips.EnsureCapacity( dstMemRequried );
-			}
-		}
-
-		// If this fires, you will get data corruption below. We can fix this case, it just doesn't seem
-		// to be needed right now.
-		Assert( pJob->m_pAsyncMap->m_nPitch == srcPitch );
-		srcPitch; // Hush compiler.
-
-		{
-			tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s-ByteSwapInPlace", __FUNCTION__ );
-			ImageLoader::ConvertImageFormat( (unsigned char*) pJob->m_pAsyncMap->m_pMemory, GetImageFormatRawReadback( srcFmt ), srcBufferFinestMip.Base(), srcFmt, w, h );
-		}
-		
-		if ( pJob->m_bGenMips )
-		{
-			GenerateMipmaps( &srcBufferAllMips, srcBufferFinestMip.Base(), w, h, srcFmt );
-		}
-		else
-		{
-			// If we're not generating mips, then allmips == finest mip, but the code below expects everything to 
-			// be in all mips.
-			srcBufferAllMips.Swap( srcBufferFinestMip );
-		}
-
-		// Code below expects that the data is here one way or another.
-		Assert( srcBufferAllMips.Count() == srcAllMemRequired );
-		
-		if ( srcFmt != dstFmt ) 
-		{
-			ConvertTexelData( &dstBufferAllMips, dstFmt, srcBufferAllMips, w, h, srcFmt, pJob->m_bGenMips );
-			pJob->m_finalTexelData.Swap( dstBufferAllMips );
-		}
-		else
-		{
-			// Just swap out the buffers. 
-			pJob->m_finalTexelData.Swap( srcBufferAllMips );
-		}
-
-		// At this point, the data should be ready to go. Quick sanity check.
-		Assert( pJob->m_finalTexelData.Count() == dstMemRequried );
-
-		m_completedJobs.PushItem( pJob );
-	}
-
-	void GenerateMipmaps( CUtlMemory< unsigned char >* outBuffer, unsigned char* pSrc, int w, int h, ImageFormat fmt ) const
-	{
-		tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
-
-		ImageLoader::GenerateMipmapLevelsLQ( pSrc, outBuffer->Base(), w, h, fmt, 0 );
-	}
-
-	void ConvertTexelData( CUtlMemory< unsigned char > *outBuffer, ImageFormat dstFmt, /* const */ CUtlMemory< unsigned char > &inBuffer, int w, int h, ImageFormat srcFmt, bool bGenMips )
-	{
-		tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
-
-		const int mipmapCount = bGenMips ? ImageLoader::GetNumMipMapLevels( w, h ) : 1;
-
-		unsigned char* pSrc = inBuffer.Base();
-		unsigned char* pDst = (*outBuffer).Base();
-		int mip_w = w;
-		int mip_h = h;
-
-		for ( int i = 0; i < mipmapCount; ++i )
-		{
-			ImageLoader::ConvertImageFormat( pSrc, srcFmt, pDst, dstFmt, mip_w, mip_h );
-
-			pSrc += ImageLoader::GetMemRequired( mip_w, mip_h, 1, srcFmt, false );
-			pDst += ImageLoader::GetMemRequired( mip_w, mip_h, 1, dstFmt, false );
-
-			mip_w = Max( 1, mip_w >> 1 );
-			mip_h = Max( 1, mip_h >> 1 );
-		}
-	}
-	static unsigned ReaderMain( void* _this )
-	{
-		ThreadSetDebugName( "Helper" );
-
-		s_TextureManager.m_nAsyncReadThread = ThreadGetCurrentId();
-		( ( AsyncReader* ) _this )->ThreadReader_Main();
-		s_TextureManager.m_nAsyncReadThread = 0xFFFFFFFF;
-		return 0;
-	}
-
-	ThreadHandle_t m_HelperThread;
-	volatile bool m_bQuit;
-
-	CTSQueue< AsyncReadJob_t*> m_requestedCopies;
-	CUtlQueue< AsyncReadJob_t* > m_queuedReads;
-	CUtlQueue< AsyncReadJob_t* > m_scheduledReads;
-	CUtlQueue< AsyncReadJob_t* > m_queuedMaps;
-
-	CTSQueue< AsyncReadJob_t* > m_pendingJobs;
-	CTSQueue< AsyncReadJob_t* > m_completedJobs;
-};
 
 //-----------------------------------------------------------------------------
 // Texture manager
 //-----------------------------------------------------------------------------
-CTextureManager::CTextureManager( void ) 
-: m_TextureList( true )
-, m_TextureAliases( true )
-, m_TextureExcludes( true )
-, m_PendingAsyncLoads( true ) 
-, m_textureStreamingRequests( DefLessFunc( ITextureInternal* ) )
-, m_nAsyncLoadThread( 0xFFFFFFFF )
-, m_nAsyncReadThread( 0xFFFFFFFF )
+CTextureManager::CTextureManager( void ) : m_TextureList( true ), m_TextureAliases( true ), m_TextureExcludes( true )
 {
 	m_pErrorTexture = NULL;
 	m_pBlackTexture = NULL;
@@ -1442,12 +618,11 @@ CTextureManager::CTextureManager( void )
 	m_pFullScreenTexture = NULL;
 	m_pSignedNormalizationCubemap = NULL;
 	m_pShadowNoise2D = NULL;
+	m_pSSAONoise2D = NULL;
 	m_pIdentityLightWarp = NULL;
 	m_pFullScreenDepthTexture = NULL;
-	m_pDebugLuxels2D = NULL;
-	m_pAsyncLoader = new AsyncLoader;
-	m_pAsyncReader = new AsyncReader;
-	m_iSuspendTextureStreaming = 0;
+	m_pStereoParamTexture = NULL;
+	m_bUsingWeaponModelCache = false;
 }
 
 
@@ -1463,39 +638,59 @@ void CTextureManager::Init( int nFlags )
 	// setup the checkerboard generator for failed texture loading
 	color.r = color.g = color.b = 0; color.a = 128;
 	color2.r = color2.b = color2.a = 255; color2.g = 0;
+	
+#ifdef ERROR_TEXTURE_IS_SOLID
+	color32 color_black; color_black.r = color_black.g = color_black.b = 0; color_black.a = 255;
+	m_pErrorRegen = new CSolidTexture( color_black );
+#else
 	m_pErrorRegen = new CCheckerboardTexture( 4, color, color2 );
+#endif
 
 	// Create an error texture
 	m_pErrorTexture = CreateProceduralTexture( "error", TEXTURE_GROUP_OTHER,
-		ERROR_TEXTURE_SIZE, ERROR_TEXTURE_SIZE, 1, IMAGE_FORMAT_BGRA8888, TEXTUREFLAGS_NOMIP | TEXTUREFLAGS_SINGLECOPY );
+		ERROR_TEXTURE_SIZE, ERROR_TEXTURE_SIZE, 1, IMAGE_FORMAT_BGRA8888, TEXTUREFLAGS_NOMIP | TEXTUREFLAGS_SINGLECOPY | TEXTUREFLAGS_SRGB );
+#ifdef ERROR_TEXTURE_IS_SOLID
+	CreateSolidTexture( m_pErrorTexture, color_black );
+#else
 	CreateCheckerboardTexture( m_pErrorTexture, 4, color, color2 );
-	m_pErrorTexture->SetErrorTexture( true );
+#endif
 
 	// Create a white texture
 	m_pWhiteTexture = CreateProceduralTexture( "white", TEXTURE_GROUP_OTHER,
-		WHITE_TEXTURE_SIZE, WHITE_TEXTURE_SIZE, 1, IMAGE_FORMAT_BGRX8888, TEXTUREFLAGS_NOMIP | TEXTUREFLAGS_SINGLECOPY );
+		WHITE_TEXTURE_SIZE, WHITE_TEXTURE_SIZE, 1, IMAGE_FORMAT_BGRX8888, TEXTUREFLAGS_NOMIP | TEXTUREFLAGS_SINGLECOPY | TEXTUREFLAGS_SRGB );
 	color.r = color.g = color.b = color.a = 255;
 	CreateSolidTexture( m_pWhiteTexture, color );
 
 	// Create a black texture
 	m_pBlackTexture = CreateProceduralTexture( "black", TEXTURE_GROUP_OTHER,
-		BLACK_TEXTURE_SIZE, BLACK_TEXTURE_SIZE, 1, IMAGE_FORMAT_BGRX8888, TEXTUREFLAGS_NOMIP | TEXTUREFLAGS_SINGLECOPY );
+		BLACK_TEXTURE_SIZE, BLACK_TEXTURE_SIZE, 1, IMAGE_FORMAT_BGRX8888, TEXTUREFLAGS_NOMIP | TEXTUREFLAGS_SINGLECOPY | TEXTUREFLAGS_SRGB );
 	color.r = color.g = color.b = 0;
 	CreateSolidTexture( m_pBlackTexture, color );
 
 	// Create a grey texture
 	m_pGreyTexture = CreateProceduralTexture( "grey", TEXTURE_GROUP_OTHER,
-		GREY_TEXTURE_SIZE, GREY_TEXTURE_SIZE, 1, IMAGE_FORMAT_BGRA8888, TEXTUREFLAGS_NOMIP | TEXTUREFLAGS_SINGLECOPY );
+		GREY_TEXTURE_SIZE, GREY_TEXTURE_SIZE, 1, IMAGE_FORMAT_BGRA8888, TEXTUREFLAGS_NOMIP | TEXTUREFLAGS_SINGLECOPY | TEXTUREFLAGS_SRGB );
 	color.r = color.g = color.b = 128;
 	color.a = 255;
 	CreateSolidTexture( m_pGreyTexture, color );
 
 	// Create a grey texture
 	m_pGreyAlphaZeroTexture = CreateProceduralTexture( "greyalphazero", TEXTURE_GROUP_OTHER,
-		GREY_TEXTURE_SIZE, GREY_TEXTURE_SIZE, 1, IMAGE_FORMAT_BGRA8888, TEXTUREFLAGS_NOMIP | TEXTUREFLAGS_SINGLECOPY );
+		GREY_TEXTURE_SIZE, GREY_TEXTURE_SIZE, 1, IMAGE_FORMAT_BGRA8888, TEXTUREFLAGS_NOMIP | TEXTUREFLAGS_SINGLECOPY | TEXTUREFLAGS_SRGB );
 	color.r = color.g = color.b = 128;
 	color.a = 0;
 	CreateSolidTexture( m_pGreyAlphaZeroTexture, color );
+
+#ifdef IS_WINDOWS_PC
+	if ( g_pShaderAPI->IsStereoSupported() )
+	{
+		// TODO: Call CreateStereoTexture, which should make a similar call onto the ShaderAPI
+		int stereoWidth = 8;
+		int stereoHeight = 1;
+		m_pStereoParamTexture = CreateProceduralTexture( "stereoparam", TEXTURE_GROUP_OTHER,
+			stereoWidth, stereoHeight, 1, IMAGE_FORMAT_R32F, TEXTUREFLAGS_NOMIP | TEXTUREFLAGS_SINGLECOPY | TEXTUREFLAGS_POINTSAMPLE | TEXTUREFLAGS_DEFAULT_POOL);
+	}
+#endif
 
 	if ( HardwareConfig()->GetMaxDXSupportLevel() >= 80 )
 	{
@@ -1509,71 +704,36 @@ void CTextureManager::Init( int nFlags )
 
 	if ( HardwareConfig()->GetMaxDXSupportLevel() >= 90 )
 	{
-		// In GL, we have poor format support, so we ask for signed float
+		// On MacOS, we have poor format support, so we ask for signed float
 		ImageFormat fmt = IsOpenGL() ? IMAGE_FORMAT_RGBA16161616F : IMAGE_FORMAT_UVWQ8888;
-
-		int nTextureFlags = TEXTUREFLAGS_ENVMAP | TEXTUREFLAGS_NOMIP | TEXTUREFLAGS_NOLOD | TEXTUREFLAGS_SINGLECOPY | TEXTUREFLAGS_CLAMPS | TEXTUREFLAGS_CLAMPT | TEXTUREFLAGS_CLAMPU;
-
-#ifdef OSX
-		// JasonM - ridiculous hack around R500 lameness...we never use this texture on OSX anyways (right?)
-		// Now assuming this was an OSX specific workaround.
-		nTextureFlags |= TEXTUREFLAGS_POINTSAMPLE;
-#endif
-
+		
+		int nFlags = TEXTUREFLAGS_ENVMAP | TEXTUREFLAGS_NOMIP | TEXTUREFLAGS_NOLOD | TEXTUREFLAGS_SINGLECOPY | TEXTUREFLAGS_CLAMPS | TEXTUREFLAGS_CLAMPT | TEXTUREFLAGS_CLAMPU;
+		nFlags |= IsOSXOpenGL() ? TEXTUREFLAGS_POINTSAMPLE : 0; // JasonM - ridiculous hack around R500 lameness...we never use this texture on MacOS anyways (right?)
+		
 		// Create a normalization cubemap
 		m_pSignedNormalizationCubemap = CreateProceduralTexture( "normalizesigned", TEXTURE_GROUP_CUBE_MAP,
-																NORMALIZATION_CUBEMAP_SIZE, NORMALIZATION_CUBEMAP_SIZE, 1, fmt, nTextureFlags );
+																NORMALIZATION_CUBEMAP_SIZE, NORMALIZATION_CUBEMAP_SIZE, 1, fmt, nFlags );
 		CreateSignedNormalizationCubemap( m_pSignedNormalizationCubemap );
 		
 		m_pIdentityLightWarp = FindOrLoadTexture( "dev/IdentityLightWarp", TEXTURE_GROUP_OTHER );
 		m_pIdentityLightWarp->IncrementReferenceCount();
 	}
 
-	// High end hardware needs this texture for shadow mapping
-	if ( HardwareConfig()->ActuallySupportsPixelShaders_2_b() )
-	{
-		m_pShadowNoise2D = FindOrLoadTexture( "engine/NormalizedRandomDirections2D", TEXTURE_GROUP_OTHER );
-		m_pShadowNoise2D->IncrementReferenceCount();
-	}
+	// For safety, always load the shadow noise 2D texture even on 9.0 hardware. (It's not needed in Portal2's flashlight shaders, but I'm leaving it in
+	// because it's referenced all over the place and so the older L4D-style flashlight shadows can be easily re-enabled if needed.)
+	m_pShadowNoise2D = FindOrLoadTexture( "engine/NormalizedRandomDirections2D", TEXTURE_GROUP_OTHER );
+	m_pShadowNoise2D->IncrementReferenceCount();
 
-	m_pDebugLuxels2D = FindOrLoadTexture( "debug/debugluxelsnoalpha", TEXTURE_GROUP_OTHER );
-	m_pDebugLuxels2D->IncrementReferenceCount();
+	if ( HardwareConfig()->GetMaxDXSupportLevel() >= 92 )
+	{
+		m_pSSAONoise2D = FindOrLoadTexture( "engine/SSAOReflectionVectors", TEXTURE_GROUP_OTHER );
+		m_pSSAONoise2D->IncrementReferenceCount();
+	}
 }
 
 void CTextureManager::Shutdown()
 {
-	// Clean up any textures we have hanging around that are waiting to go.
-	CleanupPossiblyUnreferencedTextures();
-
-	// Cool the texture cache first to drop all the refs back to 0 for the streamable things.
-	CoolTextureCache();
-
-	if ( m_pAsyncLoader )
-	{
-		m_pAsyncLoader->Shutdown();
-		delete m_pAsyncLoader;
-		m_pAsyncLoader = NULL;
-	}
-
-	if ( m_pAsyncReader )
-	{
-		m_pAsyncReader->Shutdown();
-		delete m_pAsyncReader;
-		m_pAsyncReader = NULL;
-	}
-
 	FreeStandardRenderTargets();
-
-	FOR_EACH_VEC( m_ReadbackTextures, i )
-	{
-		m_ReadbackTextures[ i ]->Release();
-	}
-
-	if ( m_pDebugLuxels2D )
-	{
-		m_pDebugLuxels2D->DecrementReferenceCount();
-		m_pDebugLuxels2D = NULL;
-	}
 
 	// These checks added because it's possible for shutdown to be called before the material system is 
 	// fully initialized.
@@ -1619,6 +779,12 @@ void CTextureManager::Shutdown()
 		m_pShadowNoise2D = NULL;
 	}
 
+	if ( m_pSSAONoise2D )
+	{
+		m_pSSAONoise2D->DecrementReferenceCount();
+		m_pSSAONoise2D = NULL;
+	}
+
 	if ( m_pIdentityLightWarp )
 	{
 		m_pIdentityLightWarp->DecrementReferenceCount();
@@ -1631,6 +797,12 @@ void CTextureManager::Shutdown()
 		m_pErrorTexture = NULL;
 	}
 
+	if ( m_pStereoParamTexture )
+	{
+		m_pStereoParamTexture->DecrementReferenceCount();
+		m_pStereoParamTexture = NULL;
+	}
+
 	ReleaseTextures();
 
 	if ( m_pErrorRegen )
@@ -1641,7 +813,7 @@ void CTextureManager::Shutdown()
 
 	for ( int i = m_TextureList.First(); i != m_TextureList.InvalidIndex(); i = m_TextureList.Next( i ) )
 	{
-		ITextureInternal::Destroy( m_TextureList[i], true );
+		ITextureInternal::Destroy( m_TextureList[i] );
 	}
 	m_TextureList.RemoveAll();
 
@@ -1670,8 +842,9 @@ void CTextureManager::AllocateStandardRenderTargets( )
 		// A offscreen render target which is the size + format of the back buffer (*not* HDR format!)
 		if ( bAllocateFullscreenTexture )
 		{
-			m_pFullScreenTexture = CreateRenderTargetTexture( "_rt_FullScreen", 1, 1, RT_SIZE_FULL_FRAME_BUFFER_ROUNDED_UP, 
-				MaterialSystem()->GetBackBufferFormat(), RENDER_TARGET, TEXTUREFLAGS_CLAMPS | TEXTUREFLAGS_CLAMPT, 0 );
+			// Ensure the _rt_FullScreen RT is given its own depth-stencil surface (RENDER_TARGET_WITH_DEPTH vs. RENDER_TARGET) on the PC/Mac to work around store rendering glitches between the bot panel and the rest of the store UI.
+			m_pFullScreenTexture = CreateRenderTargetTexture( "_rt_FullScreen", 1, 1, RT_SIZE_FULL_FRAME_BUFFER_ROUNDED_UP, MaterialSystem()->GetBackBufferFormat(), RENDER_TARGET_WITH_DEPTH, TEXTUREFLAGS_CLAMPS | TEXTUREFLAGS_CLAMPT, 0, false );
+						
 			m_pFullScreenTexture->IncrementReferenceCount();
 		}
 
@@ -1697,6 +870,10 @@ void CTextureManager::FreeStandardRenderTargets()
 
 	g_pMorphMgr->FreeMaterials();
 	g_pMorphMgr->FreeScratchTextures();
+
+#if defined( FEATURE_SUBD_SUPPORT )
+	g_pSubDMgr->FreeTextures();
+#endif
 }
 
 
@@ -1741,14 +918,17 @@ void CTextureManager::SetColorCorrectionTexture( int i, ITextureInternal *pTextu
 //-----------------------------------------------------------------------------
 // Releases all textures (cause we've lost video memory)
 //-----------------------------------------------------------------------------
-void CTextureManager::ReleaseTextures( void )
+void CTextureManager::ReleaseTextures( bool bReleaseManaged /*= true*/ )
 {
 	g_pShaderAPI->SetFullScreenTextureHandle( INVALID_SHADERAPI_TEXTURE_HANDLE );
 
 	for ( int i = m_TextureList.First(); i != m_TextureList.InvalidIndex(); i = m_TextureList.Next( i ) )
 	{
-		// Release the texture...
-		m_TextureList[i]->ReleaseMemory();
+		if ( bReleaseManaged || m_TextureList[i]->IsRenderTarget() || m_TextureList[i]->IsDefaultPool() )
+		{
+			// Release the texture...
+			m_TextureList[i]->Release();
+		}
 	}
 }
 
@@ -1779,43 +959,11 @@ void CTextureManager::RestoreTexture( ITextureInternal* pTexture )
 	pTexture->Download();
 }
 
-//-----------------------------------------------------------------------------
-// Purges our complete list of textures that might currently be unreferenced
-//-----------------------------------------------------------------------------
-void CTextureManager::CleanupPossiblyUnreferencedTextures()
-{
-	if ( !ThreadInMainThread() || MaterialSystem()->GetRenderThreadId() != 0xFFFFFFFF )
-	{
-		Assert( !"CTextureManager::CleanupPossiblyUnreferencedTextures should never be called here" );
-		// This is catastrophically bad, don't do this. Someone needs to fix this. See JohnS or McJohn
-		DebuggerBreakIfDebugging_StagingOnly();
-		return;
-	}
-
-	// It is perfectly valid for a texture to become referenced again (it lives on in our texture list, and can be
-	// re-loaded) and then free'd again, so ensure we don't have any duplicates in queue.
-	CUtlVector< ITextureInternal * > texturesToDelete( /* growSize */ 0, /* initialSize */ m_PossiblyUnreferencedTextures.Count() );
-	ITextureInternal *pMaybeUnreferenced = NULL;
-	while ( m_PossiblyUnreferencedTextures.PopItem( &pMaybeUnreferenced ) )
-	{
-		Assert( pMaybeUnreferenced->GetReferenceCount() >= 0 );
-		if ( pMaybeUnreferenced->GetReferenceCount() == 0 && texturesToDelete.Find( pMaybeUnreferenced ) == texturesToDelete.InvalidIndex() )
-		{
-			texturesToDelete.AddToTail( pMaybeUnreferenced );
-		}
-	}
-
-	// Free them
-	FOR_EACH_VEC( texturesToDelete, i )
-	{
-		RemoveTexture( texturesToDelete[ i ] );
-	}
-}
 
 //-----------------------------------------------------------------------------
 // Restore all textures (cause we've got video memory again)
 //-----------------------------------------------------------------------------
-void CTextureManager::RestoreNonRenderTargetTextures( )
+void CTextureManager::RestoreNonRenderTargetTextures()
 {
 	// 360 should not have gotten here
 	Assert( !IsX360() );
@@ -1868,7 +1016,7 @@ void CTextureManager::ReloadTextures()
 
 static void ForceTextureIntoHardware( ITexture *pTexture, IMaterial *pMaterial, IMaterialVar *pBaseTextureVar )
 {
-	if ( IsX360() )
+	if ( IsGameConsole() )
 		return;
 
 	pBaseTextureVar->SetTextureValue( pTexture );
@@ -1910,12 +1058,11 @@ static void ForceTextureIntoHardware( ITexture *pTexture, IMaterial *pMaterial, 
 //-----------------------------------------------------------------------------
 void CTextureManager::ForceAllTexturesIntoHardware( void )
 {
-	if ( IsX360() )
+	if ( IsGameConsole() )
 		return;
-	
+
 	IMaterial *pMaterial = MaterialSystem()->FindMaterial( "engine/preloadtexture", "texture preload" );
 	pMaterial = ((IMaterialInternal *)pMaterial)->GetRealTimeVersion(); //always work with the realtime material internally
-	pMaterial->IncrementReferenceCount();
 	bool bFound;
 	IMaterialVar *pBaseTextureVar = pMaterial->FindVar( "$basetexture", &bFound );
 	if( !bFound )
@@ -1928,7 +1075,6 @@ void CTextureManager::ForceAllTexturesIntoHardware( void )
 		// Put the texture back onto the board
 		ForceTextureIntoHardware( m_TextureList[i], pMaterial, pBaseTextureVar );
 	}
-	pMaterial->DecrementReferenceCount();
 }
 
 //-----------------------------------------------------------------------------
@@ -1954,6 +1100,11 @@ ITextureInternal *CTextureManager::ShadowNoise2D()
 	return m_pShadowNoise2D; 
 }
 
+ITextureInternal *CTextureManager::SSAONoise2D()
+{
+	return m_pSSAONoise2D; 
+}
+
 ITextureInternal *CTextureManager::IdentityLightWarp()
 {
 	return m_pIdentityLightWarp; 
@@ -1964,12 +1115,10 @@ ITextureInternal *CTextureManager::FullFrameDepthTexture()
 	return m_pFullScreenDepthTexture;
 }
 
-ITextureInternal *CTextureManager::DebugLuxels2D()
+ITextureInternal *CTextureManager::StereoParamTexture()
 {
-	return m_pDebugLuxels2D;
+	return m_pStereoParamTexture ? 	m_pStereoParamTexture : m_pErrorTexture;
 }
-
-
 
 //-----------------------------------------------------------------------------
 // Creates a procedural texture
@@ -1981,18 +1130,20 @@ ITextureInternal *CTextureManager::CreateProceduralTexture(
 	int					h, 
 	int					d, 
 	ImageFormat			fmt, 
-	int					nFlags,
-	ITextureRegenerator *generator )
+	int					nFlags )
 {
-	ITextureInternal *pNewTexture = ITextureInternal::CreateProceduralTexture( pTextureName, pTextureGroupName, w, h, d, fmt, nFlags, generator );
+	ITextureInternal *pNewTexture = ITextureInternal::CreateProceduralTexture( pTextureName, pTextureGroupName, w, h, d, fmt, nFlags );
 	if ( !pNewTexture )
 		return NULL;
 
 	// Add it to the list of textures so it can be restored, etc.
 	m_TextureList.Insert( pNewTexture->GetName(), pNewTexture );
 
-	// NOTE: This will download the texture only if the shader api is ready
-	pNewTexture->Download();
+	if ( ( nFlags & TEXTUREFLAGS_SKIP_INITIAL_DOWNLOAD ) != TEXTUREFLAGS_SKIP_INITIAL_DOWNLOAD )
+	{
+		// NOTE: This will download the texture only if the shader api is ready
+		pNewTexture->Download();
+	}
 
 	return pNewTexture;
 }
@@ -2002,7 +1153,7 @@ ITextureInternal *CTextureManager::CreateProceduralTexture(
 // the texture dictionary here. Is it only for files, for example?
 // Texture dictionary...
 //-----------------------------------------------------------------------------
-ITextureInternal *CTextureManager::LoadTexture( const char *pTextureName, const char *pTextureGroupName, int nAdditionalCreationFlags /* = 0 */, bool bDownload /* = true */  )
+ITextureInternal *CTextureManager::LoadTexture( const char *pTextureName, const char *pTextureGroupName, int nAdditionalCreationFlags /* = 0 */  )
 {
 	ITextureInternal *pNewTexture = ITextureInternal::CreateFileTexture( pTextureName, pTextureGroupName );
 	if ( pNewTexture )
@@ -2014,10 +1165,34 @@ ITextureInternal *CTextureManager::LoadTexture( const char *pTextureName, const 
 			int nDimensionsLimit = m_TextureExcludes[iIndex];
 			pNewTexture->MarkAsExcluded( ( nDimensionsLimit == 0 ), nDimensionsLimit );
 		}
+		else if ( m_bUsingWeaponModelCache && g_pQueuedLoader->IsMapLoading() )
+		{
+			// Unfortunate, but the weapon textures get automatically subverted
+			// to avoid ensuring that scripts do not need to be maintained as new weapons occur.
+			// When a weapon texture in not explicitly excluded (which trumps), ensure the exclusion.
+			if ( V_stristr( pNewTexture->GetName(), "weapons/v_models" ) || 
+				V_stristr( pNewTexture->GetName(), "weapons/w_models" ) || 
+				V_stristr( pNewTexture->GetName(), "weapons/shared" ) )
+			{
+				// ALL weapon textures (subject to temp exclusion) are getting pre-excluded down to 16, which matches the weapon model cache
+				// exclusion expectation during loading.
+				//
+				// This is necessary to avoid a horrible memory load pattern where the QL would otherwise load the texture at full-res and then
+				// the weapon model cache would then evict causing a reload as it evicts down to 16.
+				//
+				// This hack is because the QL is blasting these in BEFORE the weapon model cache has any chance to know what are the actual dependent
+				// weapon materials that are subject to initial eviction.
+				//
+				// Instead this gets in front of the QL which will bring in ALL weapon based textures in at the desired reduced state with a single load/free.
+				// Then, there is a fixup by weapon model cache that has then discovered which texture are the REAL dependents and restores the ones
+				// that got broadly classified here (i.e. shared textures that can't be subject to temp evictions). Temp Exclusion abilities cannot
+				// be determined this early, thus the broad classification, and the unfortunate minor fixup
+				pNewTexture->MarkAsExcluded( false, 16, true );
+			}
+		}
 
 		// Stick the texture onto the board
-		if ( bDownload )
-			pNewTexture->Download( NULL, nAdditionalCreationFlags );
+		pNewTexture->Download( NULL, nAdditionalCreationFlags );
 
 		// FIXME: If there's been an error loading, we don't also want this error...
 	}
@@ -2065,6 +1240,19 @@ ITextureInternal *CTextureManager::FindTexture( const char *pTextureName )
 		}
 	}
 
+	// scaleform textures bypass the texture manager
+	if ( !V_strncmp( szCleanName, "scaleform", 9 ) )
+	{
+		ShaderAPITextureHandle_t hTex = g_pShaderAPI->FindTexture( szCleanName );
+		if ( hTex != INVALID_SHADERAPI_TEXTURE_HANDLE )
+		{
+			// Establish the lookup linking in the dictionary
+			ITextureInternal *pTxInt = ITextureInternal::CreateReferenceTextureFromHandle( szCleanName, TEXTURE_GROUP_SCALEFORM, hTex );
+			m_TextureList.Insert( szCleanName, pTxInt );
+			return pTxInt;
+		}
+	}
+
 	return NULL;
 }
 
@@ -2103,9 +1291,93 @@ void CTextureManager::RemoveTextureAlias( const char *pAlias )
 	m_TextureAliases.RemoveAt( index );
 }
 
-void CTextureManager::SetExcludedTextures( const char *pScriptName )
+bool CTextureManager::ParseTextureExcludeScript( const char *pScriptName )
 {
-	// clear all exisiting texture's exclusion
+	// get optional script
+	if ( !pScriptName || !pScriptName[0] )
+		return false;
+
+	CUtlBuffer excludeBuffer( 0, 0, CUtlBuffer::TEXT_BUFFER );
+	if ( !g_pFullFileSystem->ReadFile( pScriptName, NULL, excludeBuffer ) )
+		return false;
+
+	char szToken[MAX_PATH];
+	while ( 1 )
+	{
+		// must support spaces in names without quotes
+		// have to brute force parse up to a valid line
+		while ( 1 )
+		{
+			excludeBuffer.EatWhiteSpace();
+			if ( !excludeBuffer.EatCPPComment() )
+			{
+				// not a comment
+				break;
+			}
+		}
+		excludeBuffer.GetLine( szToken, sizeof( szToken ) );
+		int tokenLength = strlen( szToken );
+		if ( !tokenLength )
+		{
+			// end of list
+			break;
+		}
+
+		// remove all trailing whitespace
+		while ( tokenLength > 0 )
+		{
+			tokenLength--;
+			if ( V_isgraph( szToken[tokenLength] ) )
+			{
+				break;
+			}
+			szToken[tokenLength] = '\0';
+		}
+
+		// first optional token may be a dimension limit hint
+		int nDimensionsLimit = 0;
+		char *pTextureName = szToken;
+		if ( pTextureName[0] != 0 && V_isdigit( pTextureName[0] ) )
+		{
+			nDimensionsLimit = atoi( pTextureName );
+			
+			// skip forward to name
+			for ( ;; )
+			{
+				char ch = *pTextureName;
+				if ( !ch || ( !V_isdigit( ch ) && !V_isspace( ch ) ) )
+				{
+					break;
+				}
+				pTextureName++;
+			}
+		}
+
+		char szCleanName[MAX_PATH];
+		NormalizeTextureName( pTextureName, szCleanName, sizeof( szCleanName ) );
+
+		int iIndex = m_TextureExcludes.Find( szCleanName );
+		if ( m_TextureExcludes.IsValidIndex( iIndex ) )
+		{
+			// do not duplicate, override existing entry
+			m_TextureExcludes[iIndex] = nDimensionsLimit;
+		}
+		else
+		{
+			m_TextureExcludes.Insert( szCleanName, nDimensionsLimit );
+		}
+	}
+
+	return true;
+}
+
+void CTextureManager::SetExcludedTextures( const char *pScriptName, bool bUsingWeaponModelCache )
+{
+	MEM_ALLOC_CREDIT();
+
+	m_bUsingWeaponModelCache = IsGameConsole() && bUsingWeaponModelCache;
+
+	// clear all existing texture's exclusion
 	for ( int i = m_TextureExcludes.First(); i != m_TextureExcludes.InvalidIndex(); i = m_TextureExcludes.Next( i ) )
 	{
 		ITextureInternal *pTexture = FindTexture( m_TextureExcludes.GetElementName( i ) );
@@ -2116,82 +1388,22 @@ void CTextureManager::SetExcludedTextures( const char *pScriptName )
 	}
 	m_TextureExcludes.RemoveAll();
 
-	MEM_ALLOC_CREDIT();
+	// run through exclusions, build final aggregate list
+	// optional global script first
+	ParseTextureExcludeScript( "//MOD/maps/_exclude.lst" );
+	// optional spec'd script further refines
+	ParseTextureExcludeScript( pScriptName );
 
-	// get optional script
-	CUtlBuffer excludeBuffer( 0, 0, CUtlBuffer::TEXT_BUFFER );
-	if ( g_pFullFileSystem->ReadFile( pScriptName, NULL, excludeBuffer ) )
+	// perform exclusions
+	for ( int i = m_TextureExcludes.First(); i != m_TextureExcludes.InvalidIndex(); i = m_TextureExcludes.Next( i ) )
 	{
-		char szToken[MAX_PATH];
-		while ( 1 )
+		// set any existing texture's exclusion
+		// textures that don't exist yet will get caught during their creation path
+		ITextureInternal *pTexture = FindTexture( m_TextureExcludes.GetElementName( i ) );
+		if ( pTexture )
 		{
-			// must support spaces in names without quotes
-			// have to brute force parse up to a valid line
-			while ( 1 )
-			{
-				excludeBuffer.EatWhiteSpace();
-				if ( !excludeBuffer.EatCPPComment() )
-				{
-					// not a comment
-					break;
-				}
-			}
-			excludeBuffer.GetLine( szToken, sizeof( szToken ) );
-			int tokenLength = strlen( szToken );
-			if ( !tokenLength )
-			{
-				// end of list
-				break;
-			}
-
-			// remove all trailing whitespace
-			while ( tokenLength > 0 )
-			{
-				tokenLength--;
-				if ( isgraph( szToken[tokenLength] ) )
-				{
-					break;
-				}
-				szToken[tokenLength] = '\0';
-			}
-
-			// first optional token may be a dimension limit hint
-			int nDimensionsLimit = 0;
-			char *pTextureName = szToken;
-			if ( pTextureName[0] != 0 && isdigit( pTextureName[0] ) )
-			{
-				nDimensionsLimit = atoi( pTextureName );
-				
-				// skip forward to name
-				for ( ;; )
-				{
-					char ch = *pTextureName;
-					if ( !ch || ( !isdigit( ch ) && !isspace( ch ) ) )
-					{
-						break;
-					}
-					pTextureName++;
-				}
-			}
-
-			char szCleanName[MAX_PATH];
-			NormalizeTextureName( pTextureName, szCleanName, sizeof( szCleanName ) );
-
-			if ( m_TextureExcludes.Find( szCleanName ) != m_TextureExcludes.InvalidIndex() )
-			{
-				// avoid duplicates
-				continue;
-			}
-
-			m_TextureExcludes.Insert( szCleanName, nDimensionsLimit );
-
-			// set any existing texture's exclusion
-			// textures that don't exist yet will get caught during their creation path
-			ITextureInternal *pTexture = FindTexture( szCleanName );
-			if ( pTexture )
-			{
-				pTexture->MarkAsExcluded( ( nDimensionsLimit == 0 ), nDimensionsLimit );
-			}
+			int nDimensionsLimit = m_TextureExcludes[i];
+			pTexture->MarkAsExcluded( ( nDimensionsLimit == 0 ), nDimensionsLimit );
 		}
 	}
 }
@@ -2204,11 +1416,36 @@ void CTextureManager::UpdateExcludedTextures( void )
 	}
 }
 
+void CTextureManager::ClearForceExcludes( void )
+{
+	if ( !m_bUsingWeaponModelCache )
+	{
+		// forced excludes are a temp state promoted by the weapon model cache
+		return;
+	}
+
+	for ( int i = m_TextureList.First(); i != m_TextureList.InvalidIndex(); i = m_TextureList.Next( i ) )
+	{
+		if ( m_TextureList[i]->IsForceExcluded() )
+		{
+			m_TextureList[i]->ClearForceExclusion();
+		}
+	}
+}
+
 ITextureInternal *CTextureManager::FindOrLoadTexture( const char *pTextureName, const char *pTextureGroupName, int nAdditionalCreationFlags /* = 0 */ )
 {
 	ITextureInternal *pTexture = FindTexture( pTextureName );
 	if ( !pTexture )
 	{
+#if defined( DEVELOPMENT_ONLY ) || defined( ALLOW_TEXT_MODE )
+		static bool s_bTextMode = CommandLine()->HasParm( "-textmode" );
+		if ( s_bTextMode )
+		{
+			return m_pErrorTexture;
+		}
+#endif
+			
 		pTexture = LoadTexture( pTextureName, pTextureGroupName, nAdditionalCreationFlags );
 		if ( pTexture )
 		{
@@ -2226,6 +1463,12 @@ bool CTextureManager::IsTextureLoaded( const char *pTextureName )
 	return ( pTexture != NULL );
 }
 
+bool CTextureManager::GetTextureInformation( char const *szTextureName, MaterialTextureInfo_t &info )
+{
+	extern bool CTextureImpl_GetTextureInformation( char const *szTextureName, MaterialTextureInfo_t &info );
+	return CTextureImpl_GetTextureInformation( szTextureName, info );
+}
+
 
 //-----------------------------------------------------------------------------
 // Creates a texture that's a render target
@@ -2238,21 +1481,35 @@ ITextureInternal *CTextureManager::CreateRenderTargetTexture(
 	ImageFormat fmt, 
 	RenderTargetType_t type, 
 	unsigned int textureFlags, 
-	unsigned int renderTargetFlags )
+	unsigned int renderTargetFlags,
+	bool bMultipleTargets )
 {
 	MEM_ALLOC_CREDIT_( __FILE__ ": Render target" );
 
 	ITextureInternal *pTexture;
+
 	if ( pRTName )
 	{
 		// caller is re-initing or changing
 		pTexture = FindTexture( pRTName );
+
 		if ( pTexture )
 		{
+
 			// Changing the underlying render target, but leaving the pointer and refcount
 			// alone fixes callers that have exisiting references to this object.
 			ITextureInternal::ChangeRenderTarget( pTexture, w, h, sizeMode, fmt, type, 
 					textureFlags, renderTargetFlags );
+
+#ifdef _PS3
+			if ( pRTName[0] == '^' )
+			{
+				// Alias raw buffer
+				pTexture->Ps3gcmRawBufferAlias( pRTName );
+				return pTexture;
+			}
+#endif
+
 
 			// download if ready
 			pTexture->Download();
@@ -2261,7 +1518,7 @@ ITextureInternal *CTextureManager::CreateRenderTargetTexture(
 	}
  
 	pTexture = ITextureInternal::CreateRenderTarget( pRTName, w, h, sizeMode, fmt, type, 
-											  textureFlags, renderTargetFlags );
+											  textureFlags, renderTargetFlags, bMultipleTargets );
 	if ( !pTexture )
 		return NULL;
 
@@ -2270,7 +1527,17 @@ ITextureInternal *CTextureManager::CreateRenderTargetTexture(
 	m_TextureList.Insert( pTexture->GetName(), pTexture );
 
 	// NOTE: This will download the texture only if the shader api is ready
-	pTexture->Download();
+#ifdef _PS3
+	if ( pRTName && pRTName[0] == '^' )
+	{
+		// Alias raw buffer
+		pTexture->Ps3gcmRawBufferAlias( pRTName );
+	}
+	else
+#endif
+	{
+		pTexture->Download();
+	}
 
 	return pTexture;
 }
@@ -2283,25 +1550,9 @@ void CTextureManager::ResetTextureFilteringState( )
 	}
 }
 
-void CTextureManager::SuspendTextureStreaming( void )
-{
-	m_iSuspendTextureStreaming++;
-}
-
-void CTextureManager::ResumeTextureStreaming( void )
-{
-	AssertMsg( m_iSuspendTextureStreaming, "Mismatched Suspend/Resume texture streaming calls" );
-	if ( m_iSuspendTextureStreaming )
-	{
-		m_iSuspendTextureStreaming--;
-	}
-}
 
 void CTextureManager::RemoveUnusedTextures( void )
 {
-	// First, need to flush all of our textures that are pending cleanup.
-	CleanupPossiblyUnreferencedTextures();
-
 	int iNext;
 	for ( int i = m_TextureList.First(); i != m_TextureList.InvalidIndex(); i = iNext )
 	{
@@ -2321,66 +1572,16 @@ void CTextureManager::RemoveUnusedTextures( void )
 	}
 }
 
-void CTextureManager::MarkUnreferencedTextureForCleanup( ITextureInternal *pTexture )
-{
-	Assert( pTexture->GetReferenceCount() == 0 );
-	m_PossiblyUnreferencedTextures.PushItem( pTexture );
-}
-
 void CTextureManager::RemoveTexture( ITextureInternal *pTexture )
 {
-	TM_ZONE_DEFAULT( TELEMETRY_LEVEL0 );
-
 	Assert( pTexture->GetReferenceCount() <= 0 );
-
-	if ( !ThreadInMainThread() || MaterialSystem()->GetRenderThreadId() != 0xFFFFFFFF )
-	{
-		Assert( !"CTextureManager::RemoveTexture should never be called here");
-		// This is catastrophically bad, don't do this. Someone needs to fix this. 
-		DebuggerBreakIfDebugging_StagingOnly();
-		return;
-	}
-
-	bool bTextureFound = false;
-
-	// If the queue'd rendering thread is running, RemoveTexture() is going to explode. If it isn't, calling
-	// RemoveTexture while still dealing with immediate removal textures seems fishy, but could be legit, in which case
-	// this assert could be softened.
-	int nUnreferencedQueue = m_PossiblyUnreferencedTextures.Count();
-	if ( nUnreferencedQueue )
-	{
-		Assert( !"RemoveTexture() being called while textures sitting in possibly unreferenced queue" );
-		// Assuming that this is all a wholesome main-thread misunderstanding, we can try to continue after filtering
-		// this texture from the queue.
-		ITextureInternal *pPossiblyUnreferenced = NULL;
-		for ( int i = 0; i < nUnreferencedQueue && m_PossiblyUnreferencedTextures.PopItem( &pPossiblyUnreferenced ); i++ )
-		{
-			m_PossiblyUnreferencedTextures.PushItem( pPossiblyUnreferenced );
-
-			if ( pPossiblyUnreferenced == pTexture )
-			{
-				bTextureFound = true;
-				break;
-			}
-		}
-	}
-
-	if ( bTextureFound ) 
-	{
-		Assert( !"CTextureManager::RemoveTexture has been called for a texture that has already requested cleanup. That's a paddlin'." );
-		// This is catastrophically bad, don't do this. Someone needs to fix this. 
-		DebuggerBreakIfDebugging_StagingOnly();
-		return;
-	}
 
 	for ( int i = m_TextureList.First(); i != m_TextureList.InvalidIndex(); i = m_TextureList.Next( i ) )
 	{
 		// search by object
 		if ( m_TextureList[i] == pTexture )
 		{
-			// This code is always sure that the texture we're tryign to clean up is no longer in the the possibly unreferenced list,
-			// So let Destroy work without checking.
-			ITextureInternal::Destroy( m_TextureList[i], true );
+			ITextureInternal::Destroy( m_TextureList[i] );
 			m_TextureList.RemoveAt( i );
 			break;
 		}
@@ -2389,14 +1590,14 @@ void CTextureManager::RemoveTexture( ITextureInternal *pTexture )
 
 void CTextureManager::ReloadFilesInList( IFileList *pFilesToReload )
 {
-	if ( !IsPC() )
-		return;
-
-	for ( int i=m_TextureList.First(); i != m_TextureList.InvalidIndex(); i=m_TextureList.Next( i ) )
+	if ( IsPC() )
 	{
-		ITextureInternal *pTex = m_TextureList[i];
+		for ( int i=m_TextureList.First(); i != m_TextureList.InvalidIndex(); i=m_TextureList.Next( i ) )
+		{
+			ITextureInternal *pTex = m_TextureList[i];
 
-		pTex->ReloadFilesInList( pFilesToReload );
+			pTex->ReloadFilesInList( pFilesToReload );
+		}
 	}
 }
 
@@ -2411,7 +1612,7 @@ void CTextureManager::ReleaseTempRenderTargetBits( void )
 
 			if ( m_TextureList[i]->IsTempRenderTarget() )
 			{
-				m_TextureList[i]->ReleaseMemory();
+				m_TextureList[i]->Release();
 			}
 		}
 	}
@@ -2421,7 +1622,8 @@ void CTextureManager::DebugPrintUsedTextures( void )
 {
 	for ( int i = m_TextureList.First(); i != m_TextureList.InvalidIndex(); i = m_TextureList.Next( i ) )
 	{
-		ITextureInternal *pTexture = m_TextureList[i];
+		ITextureInternal *pTexture;
+		pTexture = m_TextureList[i];
 		Msg( "Texture: '%s' RefCount: %d\n", pTexture->GetName(), pTexture->GetReferenceCount() );
 	}
 
@@ -2437,7 +1639,7 @@ void CTextureManager::DebugPrintUsedTextures( void )
 			// an excluded texture is valid, but forced tiny
 			if ( IsTextureLoaded( pName ) )
 			{
-				Msg( "%s", buff );
+				Msg( "%s\n", buff );
 			}
 			else
 			{
@@ -2471,632 +1673,3 @@ int CTextureManager::FindNext( int iIndex, ITextureInternal **pTexInternal )
 
 	return iIndex;
 }
-
-void CTextureManager::Update()
-{
-	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
-
-	#ifdef STAGING_ONLY
-		if ( mat_texture_list_dump.GetBool() )
-		{
-			DumpTextureList();
-			mat_texture_list_dump.SetValue( 0 );
-		}
-	#endif
-
-	if ( m_pAsyncReader )
-		m_pAsyncReader->ThreadMain_Update();
-}
-
-// Load a texture asynchronously and then call the provided callback.
-void CTextureManager::AsyncFindOrLoadTexture( const char *pTextureName, const char *pTextureGroupName, IAsyncTextureOperationReceiver* pRecipient, void* pExtraArgs, bool bComplain, int nAdditionalCreationFlags )
-{
-	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
-
-	bool bStreamingRequest = ( nAdditionalCreationFlags & TEXTUREFLAGS_STREAMABLE ) != 0;
-
-	ITextureInternal* pLoadedTex = FindTexture( pTextureName );
-	// It'd be weird to indicate that we're streaming and not actually have a texture that already exists.
-	Assert( !bStreamingRequest || pLoadedTex != NULL );
-
-	if ( pLoadedTex )
-	{
-		if ( !bStreamingRequest )
-		{
-			if ( pLoadedTex->IsError() && bComplain )
-				DevWarning( "Texture '%s' not found.\n", pTextureName );
-			pRecipient->OnAsyncFindComplete( pLoadedTex, pExtraArgs );
-			SafeRelease( pRecipient );
-			return;
-		}
-	}
-	
-	AsyncLoadJob_t asyncLoad( pTextureName, pTextureGroupName, pRecipient, pExtraArgs, bComplain, nAdditionalCreationFlags );
-
-	// If this is the first person asking to load this, then remember so we don't load the same thing over and over again.
-	int pendingIndex = m_PendingAsyncLoads.Find( pTextureName );
-	if ( pendingIndex == m_PendingAsyncLoads.InvalidIndex() )
-	{
-		// Create the texture here, we'll load the data in the async thread. Load is a misnomer, because it doesn't actually
-		// load the data--Download does.
-		if ( bStreamingRequest )
-			asyncLoad.m_pResultData = pLoadedTex;
-		else
-			asyncLoad.m_pResultData = LoadTexture( pTextureName, pTextureGroupName, nAdditionalCreationFlags, false );
-		AsyncLoad( asyncLoad );
-		pendingIndex = m_PendingAsyncLoads.Insert( pTextureName );
-	}
-	else 
-	{
-		// If this is a thing we've seen before, just note that we also need it.
-		m_PendingAsyncLoads[ pendingIndex ].AddToTail( asyncLoad );
-	}
-}
-
-void CTextureManager::CompleteAsyncLoad( AsyncLoadJob_t* pJob )
-{
-	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
-
-	Assert( pJob );
-	bool bDownloaded = false;
-
-	if ( !IsJobCancelled( pJob ) )
-	{
-		// Perform the download. We did the read already.
-		pJob->m_pResultData->Download( NULL, pJob->m_nAdditionalCreationFlags );
-		bDownloaded = true;
-	}
-	
-	// Then notify the caller that they're finished.
-	pJob->m_pRecipient->OnAsyncFindComplete( pJob->m_pResultData, pJob->m_pExtraArgs );
-	
-	// Finally, deal with any other stragglers that asked for the same surface we did.
-	int pendingIndex = m_PendingAsyncLoads.Find( pJob->m_TextureName.Get() );
-	Assert( pendingIndex != m_PendingAsyncLoads.InvalidIndex() );
-
-	FOR_EACH_VEC( m_PendingAsyncLoads[ pendingIndex ], i )
-	{
-		AsyncLoadJob_t& straggler = m_PendingAsyncLoads[ pendingIndex ][ i ];
-		straggler.m_pResultData = pJob->m_pResultData;
-
-		if ( !bDownloaded && !IsJobCancelled( &straggler ) )
-		{
-			bDownloaded = true;
-			straggler.m_pResultData->Download( NULL, straggler.m_nAdditionalCreationFlags );
-		}
-
-		straggler.m_pRecipient->OnAsyncFindComplete( straggler.m_pResultData, straggler.m_pExtraArgs );
-		SafeRelease( &straggler.m_pRecipient );
-	}
-
-	// Add ourselves to the list of loaded things.
-	if ( bDownloaded )
-	{
-		// The texture list has to be protected by the materials lock.
-		MaterialLock_t hMaterialLock = materials->Lock();
-
-		// It's possible that the texture wasn't actually unloaded, so we may have reloaded something unnecessarily.
-		// If so, just don't re-add it.
-		if ( m_TextureList.Find( pJob->m_pResultData->GetName() ) == m_TextureList.InvalidIndex() )
-			m_TextureList.Insert( pJob->m_pResultData->GetName(), pJob->m_pResultData );
-
-		materials->Unlock( hMaterialLock );
-	}
-	else
-	{
-		// If we didn't download, need to clean up the leftover file data that we loaded on the other thread
-		pJob->m_pResultData->AsyncCancelReadTexture();
-	}
-
-	// Can't release the Recipient until after we tell the stragglers, because the recipient may be the only
-	// ref to the texture, and cleaning it up may clean up the texture but leave us with a seemingly valid pointer.
-	SafeRelease( &pJob->m_pRecipient );
-
-	// Dump out the whole lot.
-	m_PendingAsyncLoads.RemoveAt( pendingIndex );
-}
-
-void CTextureManager::AsyncLoad( const AsyncLoadJob_t& job )
-{
-	Assert( m_pAsyncLoader );
-	m_pAsyncLoader->AsyncLoad( job );
-}
-
-void CTextureManager::AsyncCreateTextureFromRenderTarget( ITexture* pSrcRt, const char* pDstName, ImageFormat dstFmt, bool bGenMips, int nAdditionalCreationFlags, IAsyncTextureOperationReceiver* pRecipient, void* pExtraArgs )
-{
-	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
-
-	Assert( pSrcRt );
-
-	AsyncReadJob_t* pAsyncRead = new AsyncReadJob_t( pSrcRt, pDstName, dstFmt, bGenMips, nAdditionalCreationFlags, pRecipient, pExtraArgs );
-	AsyncReadTexture( pAsyncRead );
-}
-
-void CTextureManager::CompleteAsyncRead( AsyncReadJob_t* pJob )
-{
-	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
-
-	// Release the texture back into the pool.
-	ReleaseReadbackTexture( pJob->m_pSysmemTex );
-	pJob->m_pSysmemTex = NULL;
-
-	int w = pJob->m_pSrcRt->GetActualWidth();
-	int h = pJob->m_pSrcRt->GetActualHeight();
-
-	int mips = pJob->m_bGenMips ? ImageLoader::GetNumMipMapLevels( w, h ) : 1;
-
-	int nFlags = pJob->m_nAdditionalCreationFlags 
-		       | TEXTUREFLAGS_SINGLECOPY
-			   | TEXTUREFLAGS_IGNORE_PICMIP
-			   | ( mips > 1
-			       ? TEXTUREFLAGS_ALL_MIPS
-				   : TEXTUREFLAGS_NOMIP 
-			     )
-	;
-
-	// Create the texture
-	ITexture* pFinalTex = materials->CreateNamedTextureFromBitsEx( pJob->m_pDstName, TEXTURE_GROUP_RUNTIME_COMPOSITE, w, h, mips, pJob->m_dstFmt, pJob->m_finalTexelData.Count(), pJob->m_finalTexelData.Base(), nFlags );
-	Assert( pFinalTex );
-
-	// Make the callback!
-	pJob->m_pRecipient->OnAsyncCreateComplete( pFinalTex, pJob->m_pExtraArgs );
-	SafeRelease( &pJob->m_pSrcRt );
-	SafeRelease( &pJob->m_pRecipient );
-	SafeRelease( &pFinalTex );
-}
-
-void CTextureManager::AsyncReadTexture( AsyncReadJob_t* pJob )
-{
-	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
-
-	Assert( m_pAsyncReader );
-	Assert( pJob );
-
-	pJob->m_pSysmemTex = AcquireReadbackTexture( pJob->m_pSrcRt->GetActualWidth(), pJob->m_pSrcRt->GetActualHeight(), pJob->m_pSrcRt->GetImageFormat() );
-	Assert( pJob->m_pSysmemTex );
-
-	if ( !pJob->m_pSysmemTex )
-	{
-		Assert( !"Need to deal with this error case" ); // TODOERROR
-		return;
-	}
-
-	m_pAsyncReader->AsyncReadback( pJob );
-}
-
-
-ITextureInternal* CTextureManager::AcquireReadbackTexture( int w, int h, ImageFormat fmt )
-{
-	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s", __FUNCTION__ );
-
-	{
-		tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s-TryExisting", __FUNCTION__ );
-		MaterialLock_t hMaterialLock = materials->Lock();
-
-		FOR_EACH_VEC( m_ReadbackTextures, i )
-		{
-			ITextureInternal* pTex = m_ReadbackTextures[ i ];
-			Assert( pTex );
-
-			if ( pTex->GetActualWidth() == w 
-			  && pTex->GetActualHeight() == h 
-			  && pTex->GetImageFormat() == fmt )
-			{
-				// Found one in the cache already
-				pTex->AddRef();
-				m_ReadbackTextures.Remove( i );
-
-				materials->Unlock( hMaterialLock );
-				return pTex;
-			}
-		}
-
-		materials->Unlock( hMaterialLock );
-	}
-
-	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, "%s-CreateNew", __FUNCTION__ );
-	ITextureInternal* stagingTex = CreateProceduralTexture( "readbacktex", TEXTURE_GROUP_OTHER, w, h, 1, fmt, TEXTUREFLAGS_STAGING_MEMORY | TEXTUREFLAGS_NOMIP | TEXTUREFLAGS_SINGLECOPY | TEXTUREFLAGS_IMMEDIATE_CLEANUP );
-	// AddRef here for caller.
-	stagingTex->AddRef();
-	return stagingTex;
-}
-
-void CTextureManager::ReleaseReadbackTexture( ITextureInternal* pTex )
-{
-	Assert( pTex );
-
-	MaterialLock_t hMaterialLock = materials->Lock();
-	// Release matching AddRef in AcquireReadbackTexture
-	pTex->Release();
-	m_ReadbackTextures.AddToTail( pTex );
-	materials->Unlock( hMaterialLock );
-}
-
-#ifdef STAGING_ONLY
-	static int SortTexturesForDump( const CUtlPair< CUtlString, void* >* sz1, const CUtlPair< CUtlString, void* >* sz2 )
-	{
-		int sortVal = CUtlString::SortCaseSensitive( &sz1->first, &sz2->first );
-		if ( sortVal != 0 )
-			return sortVal;
-
-		return int( ( int ) sz1->second - ( int ) sz2->second );
-	}
-
-	void CTextureManager::DumpTextureList()
-	{
-		CUtlVector< CUtlPair< CUtlString, void* > > textures;
-		MaterialLock_t hMaterialLock = materials->Lock();
-		FOR_EACH_DICT( m_TextureList, i )
-		{
-			textures.AddToTail( MakeUtlPair( CUtlString( m_TextureList[i]->GetName() ), (void*) m_TextureList[i] ) );
-		}
-		materials->Unlock( hMaterialLock );
-
-		// Now dump them out, sorted first by the texture name, then by address.
-		textures.Sort( SortTexturesForDump );
-		FOR_EACH_VEC( textures, i )
-		{
-			CUtlPair< CUtlString, void* >& pair = textures[i]; 
-			Warning( "[%p]: %s\n", pair.second, pair.first.Get() )	;
-		}
-	}
-#endif
-
-//-----------------------------------------------------------------------------
-// Warms the texture cache from a vpk. This will cause coarse mipmaps to be 
-// available all the time, starting with mipmap level 3. This allows us to have
-// all the textures available all the time, but we only pay for fine levels when
-// we actually need them.
-//-----------------------------------------------------------------------------
-void CTextureManager::WarmTextureCache()
-{
-	// Disable cache for osx/linux for now.
-	if ( CommandLine()->CheckParm( "-no_texture_stream" ) )
-		return;
-	MemoryInformation memInfo;
-	if ( GetMemoryInformation( &memInfo ) )
-	{
-		if ( memInfo.m_nPhysicalRamMbTotal <= 3584 )
-			return;
-	}
-
-	COM_TimestampedLog( "WarmTextureCache() - Begin" );
-
-	// If this fires, we need to relocate this elsewhere--there's no point in doing the loading
-	// if we're not going to be able to download them right now.
-	Assert( g_pShaderAPI->CanDownloadTextures() );
-
-	g_pFullFileSystem->AddSearchPath( "tf2_texture_cache.vpk", cTextureCachePathDir, PATH_ADD_TO_TAIL );
-	
-	CUtlDict< int > filesToLoad( k_eDictCompareTypeCaseSensitive );
-	
-	// TODO: Maybe work directly with VPK (still need to add to the filesystem for LoadTexture)?
-	// CPackFile
-
-	// Add the pak and then walk through the contents.
-	FindFilesToLoad( &filesToLoad, "*.*" );
-
-	// Then add the list of files from the cache, which will deal with running without a VPK and also 
-	// allow us to add late stragglers.
-	ReadFilesToLoad( &filesToLoad, "texture_preload_list.txt" );
-
-	if ( filesToLoad.Count() == 0 )
-	{
-		COM_TimestampedLog( "WarmTextureCache() - End (No files loaded)" );
-		return;
-	}
-
-	Assert( filesToLoad.Count() > 0 );
-
-	// Now read all of the files. 
-	// TODO: This needs to read in specific order to ensure peak performance.
-	FOR_EACH_DICT( filesToLoad, i )
-	{
-		const char* pFilename = filesToLoad.GetElementName( i );
-
-		// Load the texture. This will only load the lower mipmap levels because that's the file we'll find now.
-		ITextureInternal* pTex = LoadTexture( pFilename, TEXTURE_GROUP_PRECACHED, TEXTUREFLAGS_STREAMABLE_COARSE );
-		COM_TimestampedLog( "WarmTextureCache(): LoadTexture( %s ): Complete", pFilename );
-
-		if ( ( pTex->GetFlags() & TEXTUREFLAGS_STREAMABLE ) == 0 )
-		{
-			STAGING_ONLY_EXEC( Warning( "%s is listed in texture_preload_list.txt or is otherwise marked for streaming. It cannot be streamed and should be removed from the streaming system.\n", pFilename ) );
-			ITextureInternal::Destroy( pTex );
-			continue;
-		}
-
-		if ( !pTex->IsError() )
-		{
-			m_TextureList.Insert( pTex->GetName(), pTex );
-			pTex->AddRef();
-			m_preloadedTextures.AddToTail( pTex );
-		}
-		else
-		{
-			// Don't preload broken textures
-			ITextureInternal::Destroy( pTex );
-		}
-	}
-
-	g_pFullFileSystem->RemoveSearchPath( "tf2_texture_cache.vpk", cTextureCachePathDir );
-
-	COM_TimestampedLog( "WarmTextureCache() - End" );
-}
-
-//-----------------------------------------------------------------------------
-// Reads the list of files contained in the vpk loaded above, and adds them to the
-// list of files we need to load (passing in as pOutFilesToLoad). The map contains
-// the 
-//-----------------------------------------------------------------------------
-void CTextureManager::FindFilesToLoad( CUtlDict< int >* pOutFilesToLoad, const char* pFilename )
-{
-	Assert( pOutFilesToLoad != NULL );
-
-	FileFindHandle_t fh;
-	pFilename = g_pFullFileSystem->FindFirstEx( pFilename, cTextureCachePathDir, &fh );
-
-	while ( pFilename != NULL )
-	{
-		if ( g_pFullFileSystem->FindIsDirectory( fh ) )
-		{
-			if ( pFilename[0] != '.' ) 
-			{
-				char childFilename[_MAX_PATH];
-				V_sprintf_safe( childFilename, "%s/*.*", pFilename );
-				FindFilesToLoad( pOutFilesToLoad, childFilename );
-			}
-		}
-		else
-		{
-			char filenameNoExtension[_MAX_PATH];
-			V_StripExtension( pFilename, filenameNoExtension, _MAX_PATH );
-			// Add the file to the list, which we will later traverse in order to ensure we're hitting these in the expected order for the VPK. 
-			( *pOutFilesToLoad ).Insert( CUtlString( filenameNoExtension ), 0 );
-		}
-
-		pFilename = g_pFullFileSystem->FindNext( fh );			
-	}
-}
-
-//-----------------------------------------------------------------------------
-// Read the contents of pFilename, which should just be a list of texture names 
-// that we should load.
-//-----------------------------------------------------------------------------
-void CTextureManager::ReadFilesToLoad( CUtlDict< int >* pOutFilesToLoad, const char* pFilename )
-{
-	Assert( pOutFilesToLoad != NULL );
-
-	FileHandle_t fh = g_pFullFileSystem->Open( pFilename, "r" );
-	if ( !fh )
-		return;
-
-	CUtlBuffer fileContents( 0, 0, CUtlBuffer::TEXT_BUFFER ); 
-	if ( !g_pFullFileSystem->ReadToBuffer( fh, fileContents ) )
-		goto cleanup;
-
-	char buffer[_MAX_PATH + 1];
-	while ( 1 ) 
-	{
-		fileContents.GetLine( buffer, _MAX_PATH );
-		if ( buffer[ 0 ] == 0 )
-			break;
-
-		V_StripWhitespace( buffer );
-
-		if ( buffer[ 0 ] == 0 )
-			continue;
-
-		// If it's not in the map already, add it.
-		if ( pOutFilesToLoad->Find( buffer ) == pOutFilesToLoad->InvalidIndex() )
-			( *pOutFilesToLoad ).Insert( buffer, 0 );
-	}
-
-cleanup:
-	g_pFullFileSystem->Close( fh );
-}
-
-void CTextureManager::UpdatePostAsync()
-{
-	TM_ZONE_DEFAULT( TELEMETRY_LEVEL0 );
-
-	// Update the async loader, which affects streaming in (streaming out is handled below).
-	// Both stream in and stream out have to happen while the async job is not running because
-	// they muck with shaderapi texture handles which could be in use if the async job is currently
-	// being run
-	if ( m_pAsyncLoader )
-		m_pAsyncLoader->ThreadMain_Update();
-
-	// First, move everything from the async request queue to active list
-	ITextureInternal* pRequest = NULL;
-	while ( m_asyncStreamingRequests.PopItem( &pRequest ) )
-	{
-		Assert( pRequest != NULL );
-
-		// Update the LOD bias to smoothly stream the texture in. We only need to do this on frames that
-		// we actually have been requested to draw--other frames it doesn't matter (see, because we're not drawing?) 
-		pRequest->UpdateLodBias();
-		m_textureStreamingRequests.InsertOrReplace( pRequest, g_FrameNum );	
-	}
-
-	// Then update streaming
-	const int cThirtySecondsOrSoInFrames = 2000;
-
-	// First, remove old stuff.
-	FOR_EACH_MAP_FAST( m_textureStreamingRequests, i )
-	{
-		if ( m_textureStreamingRequests[ i ] + cThirtySecondsOrSoInFrames < g_FrameNum )
-		{
-			ITextureInternal* pTex = m_textureStreamingRequests.Key( i );
-
-			// It's been awhile since we were asked to full res this texture, so let's evict 
-			// if it's still full res.
-			
-			if ( pTex->GetTargetResidence() == RESIDENT_FULL )
-				pTex->MakeResident( RESIDENT_PARTIAL );
-
-			m_textureStreamingRequests.RemoveAt( i );
-		}
-	}
-
-	// Then, start allowing new stuff to ask for data. 
-	FOR_EACH_MAP_FAST( m_textureStreamingRequests, i )
-	{
-		int requestFrame = m_textureStreamingRequests[ i ];
-
-		if ( g_FrameNum == requestFrame )
-		{
-			ITextureInternal* pTex = m_textureStreamingRequests.Key( i );
-
-			if ( pTex->GetTargetResidence() == RESIDENT_FULL )
-				continue;
-
-			// TODO: What to do if this fails? Auto-reask next frame? 
-			pTex->MakeResident( RESIDENT_FULL );
-		}
-	}
-
-	// Finally, flush any immediate release textures marked for cleanup that are still unreferenced.
-	CleanupPossiblyUnreferencedTextures();
-}
-
-void CTextureManager::ReleaseAsyncScratchVTF( IVTFTexture *pScratchVTF )
-{
-	Assert( m_pAsyncLoader != NULL && pScratchVTF != NULL );
-	m_pAsyncLoader->ReleaseAsyncReadBuffer( pScratchVTF );
-}
-
-bool CTextureManager::ThreadInAsyncLoadThread() const
-{
-	return ThreadGetCurrentId() == m_nAsyncLoadThread;
-}
-
-bool CTextureManager::ThreadInAsyncReadThread() const
-{
-	return ThreadGetCurrentId() == m_nAsyncReadThread;
-}
-
-bool CTextureManager::AddTextureCompositorTemplate( const char* pName, KeyValues* pTmplDesc )
-{
-	Assert( pName && pTmplDesc );
-
-	int ndx = m_TexCompTemplates.Find( pName );
-	if ( ndx != m_TexCompTemplates.InvalidIndex() )
-	{
-		// Later definitions stomp earlier ones. This lets the GC win.
-		delete m_TexCompTemplates[ ndx ];
-		m_TexCompTemplates.RemoveAt( ndx );
-	}
-
-	CTextureCompositorTemplate* pNewTmpl = CTextureCompositorTemplate::Create( pName, pTmplDesc );
-	
-	// If this is the case, the logging has already been done.
-	if ( pNewTmpl == NULL )
-		return false;
-
-	m_TexCompTemplates.Insert( pName, pNewTmpl );
-	return true;
-}
-
-bool CTextureManager::VerifyTextureCompositorTemplates()
-{
-	TM_ZONE_DEFAULT( TELEMETRY_LEVEL1 );
-
-	bool allSuccess = true;
-
-	FOR_EACH_DICT_FAST( m_TexCompTemplates, i )
-	{
-		if ( m_TexCompTemplates[ i ]->ResolveDependencies() )
-		{
-			if ( m_TexCompTemplates[ i ]->HasDependencyCycles() )
-			{
-				allSuccess = false;
-			}
-		}
-		else
-		{
-			allSuccess = false;
-		}
-	}
-
-	return allSuccess;
-}
-
-
-CTextureCompositorTemplate* CTextureManager::FindTextureCompositorTemplate( const char* pName )
-{
-	unsigned short i = m_TexCompTemplates.Find( pName );
-	if ( m_TexCompTemplates.IsValidIndex( i ) )
-		return m_TexCompTemplates[ i ];
-
-	return NULL;
-}
-
-bool CTextureManager::HasPendingTextureDestroys() const
-{
-	return m_PossiblyUnreferencedTextures.Count() != 0;
-}
-
-void CTextureManager::CoolTextureCache()
-{
-	FOR_EACH_VEC( m_preloadedTextures, i )
-	{
-		m_preloadedTextures[ i ]->Release();
-	}
-
-	m_preloadedTextures.RemoveAll();
-}
-
-void CTextureManager::RequestAllMipmaps( ITextureInternal* pTex )
-{
-	Assert( pTex );
-
-	// Don't mark these for load if suspended
-	if ( m_iSuspendTextureStreaming )
-		return;
-
-	unsigned int nTexFlags = pTex->GetFlags();
-
-	// If this isn't a streamable texture or if there are no mipmaps, there's nothing to do. 
-	if ( !( nTexFlags & TEXTUREFLAGS_STREAMABLE ) || ( nTexFlags & TEXTUREFLAGS_NOMIP ) )
-		return;
-
-	m_asyncStreamingRequests.PushItem( pTex );	
-}
-
-void CTextureManager::EvictAllTextures()
-{
-	FOR_EACH_DICT_FAST( m_TextureList, i )
-	{
-		ITextureInternal* pTex = m_TextureList[ i ];
-		if ( !pTex )
-			continue;
-
-		// If the fine mipmaps are present
-		if ( ( ( pTex->GetFlags() & TEXTUREFLAGS_STREAMABLE ) != 0 ) && pTex->GetTargetResidence() == RESIDENT_FULL )
-			pTex->MakeResident( RESIDENT_PARTIAL );
-	}
-}
-
-CON_COMMAND( mat_evict_all, "Evict all fine mipmaps from the gpu" )
-{
-	TextureManager()->EvictAllTextures();
-}
-
-// ------------------------------------------------------------------------------------------------
-// ------------------------------------------------------------------------------------------------
-// ------------------------------------------------------------------------------------------------
-static ImageFormat GetImageFormatRawReadback( ImageFormat fmt )
-{
-	switch ( fmt )
-	{
-	case IMAGE_FORMAT_RGBA8888:
-		return IMAGE_FORMAT_BGRA8888;
-	case IMAGE_FORMAT_BGRA8888:
-		return IMAGE_FORMAT_BGRA8888;
-	default:
-		Assert( !"Unsupported format in GetImageFormatRawReadback, this will likely result in color-swapped textures" );
-	};
-
-	return fmt;
-}
-

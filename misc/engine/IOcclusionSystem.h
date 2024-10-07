@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -33,9 +33,10 @@ public:
 	// Sets the view transform
 	virtual void SetView( const Vector &vecCameraPos, float flFOV, const VMatrix &worldToCamera, 
 		const VMatrix &cameraToProjection, const VPlane &nearClipPlane ) = 0;
+	virtual int GetViewId() const = 0;
 
 	// Test for occlusion (bounds specified in abs space)
-	virtual bool IsOccluded( const Vector &vecAbsMins, const Vector &vecAbsMaxs ) = 0;
+	virtual bool IsOccluded( int occlusionViewId, const Vector &vecAbsMins, const Vector &vecAbsMaxs ) = 0;
 
 	// Sets global occlusion parameters
 	virtual void SetOcclusionParameters( float flMaxOccludeeArea, float flMinOccluderArea ) = 0;

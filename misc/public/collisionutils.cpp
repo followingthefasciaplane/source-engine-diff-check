@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: Common collision utility methods
 //
@@ -130,7 +130,7 @@ float IntersectRayWithTriangle( const Ray_t& ray,
 	if ((t < -boxt) || (t > 1.0f + boxt))
 		return -1.0f;
 
-	return clamp( t, 0.f, 1.f );
+	return clamp( t, 0, 1 );
 }
 
 //-----------------------------------------------------------------------------
@@ -228,7 +228,7 @@ int IntersectTriangleWithPlaneBarycentric( const Vector& org, const Vector& edge
 	{
 		pIntersection[ptIdx].x = - ( orgDotNormal - plane.w + edgeVDotNormal) / 
 			( edgeUDotNormal - edgeVDotNormal);
-		pIntersection[ptIdx].y = 1.0f - pIntersection[ptIdx].x;
+		pIntersection[ptIdx].y = 1.0f - pIntersection[ptIdx].x;;
 		if ((pIntersection[ptIdx].x >= 0.0f) && (pIntersection[ptIdx].x <= 1.0f) &&
 			 (pIntersection[ptIdx].y >= 0.0f) && (pIntersection[ptIdx].y <= 1.0f))
 			++ptIdx;
@@ -542,8 +542,8 @@ bool IsPointInBox( const Vector& pt, const Vector& boxMin, const Vector& boxMax 
 	Assert( boxMin[1] <= boxMax[1] );
 	Assert( boxMin[2] <= boxMax[2] );
 
-	// on x360, force use of SIMD version.
-	if (IsX360())
+	// on x360/PS3, force use of SIMD version.
+	if (IsX360() || IsPS3())
 	{
 		return IsPointInBox( LoadUnaligned3SIMD(pt.Base()), LoadUnaligned3SIMD(boxMin.Base()), LoadUnaligned3SIMD(boxMax.Base()) ) ;
 	}
@@ -659,20 +659,20 @@ bool FASTCALL IsBoxIntersectingRay( const Vector& boxMin, const Vector& boxMax,
 
 	// Check to see if both the origin (start point) and the end point (delta) are on the front side
 	// of any of the box sides - if so there can be no intersection
-	fltx4 startOutMins = CmpLtSIMD(Four_Zeros, offsetMinsExpanded);
-	fltx4 endOutMins = CmpLtSIMD(delta,offsetMinsExpanded);
-	fltx4 minsMask = AndSIMD( startOutMins, endOutMins );
-	fltx4 startOutMaxs = CmpGtSIMD(Four_Zeros, offsetMaxsExpanded);
-	fltx4 endOutMaxs = CmpGtSIMD(delta,offsetMaxsExpanded);
-	fltx4 maxsMask = AndSIMD( startOutMaxs, endOutMaxs );
-	if ( IsAnyNegative(SetWToZeroSIMD(OrSIMD(minsMask,maxsMask))))
+	bi32x4 startOutMins = CmpLtSIMD(Four_Zeros, offsetMinsExpanded);
+	bi32x4 endOutMins = CmpLtSIMD(delta,offsetMinsExpanded);
+	bi32x4 minsMask = AndSIMD( startOutMins, endOutMins );
+	bi32x4 startOutMaxs = CmpGtSIMD(Four_Zeros, offsetMaxsExpanded);
+	bi32x4 endOutMaxs = CmpGtSIMD(delta,offsetMaxsExpanded);
+	bi32x4 maxsMask = AndSIMD( startOutMaxs, endOutMaxs );
+	if ( IsAnyTrue(SetWToZeroSIMD(OrSIMD(minsMask,maxsMask))))
 		return false;
 
 	// now build the per-axis interval of t for intersections
 	fltx4 invDelta = ReciprocalSaturateSIMD(delta);
 	fltx4 tmins = MulSIMD( offsetMinsExpanded, invDelta );
 	fltx4 tmaxs = MulSIMD( offsetMaxsExpanded, invDelta );
-	fltx4 crossPlane = OrSIMD(XorSIMD(startOutMins,endOutMins), XorSIMD(startOutMaxs,endOutMaxs));
+	bi32x4 crossPlane = OrSIMD(XorSIMD(startOutMins,endOutMins), XorSIMD(startOutMaxs,endOutMaxs));
 
 	// only consider axes where we crossed a plane
 	tmins = MaskedAssign( crossPlane, tmins, Four_Negative_FLT_MAX );
@@ -690,13 +690,13 @@ bool FASTCALL IsBoxIntersectingRay( const Vector& boxMin, const Vector& boxMax,
 	lastIn = MaxSIMD(lastIn, Four_Zeros);
 
 	// If the final interval is valid lastIn<firstOut, check for separation
-	fltx4 separation = CmpGtSIMD(lastIn, firstOut);
+	bi32x4 separation = CmpGtSIMD(lastIn, firstOut);
 
 	return IsAllZeros(separation);
 #else
-	// On the x360, we force use of the SIMD functions.
-#if defined(_X360) 
-	if (IsX360())
+	// On the x360/ps3, we force use of the SIMD functions.
+#if defined( _X360 ) || defined( _PS3 )
+	if ( IsX360() || IsPS3() )
 	{
 		fltx4 delta = LoadUnaligned3SIMD(vecDelta.Base());
 		return IsBoxIntersectingRay( 
@@ -780,13 +780,13 @@ bool FASTCALL IsBoxIntersectingRay( const Vector& boxMin, const Vector& boxMax,
 
 	// Check to see if both the origin (start point) and the end point (delta) are on the front side
 	// of any of the box sides - if so there can be no intersection
-	fltx4 startOutMins = CmpLtSIMD(Four_Zeros, boxMins);
-	fltx4 endOutMins = CmpLtSIMD(delta,boxMins);
-	fltx4 minsMask = AndSIMD( startOutMins, endOutMins );
-	fltx4 startOutMaxs = CmpGtSIMD(Four_Zeros, boxMaxs);
-	fltx4 endOutMaxs = CmpGtSIMD(delta,boxMaxs);
-	fltx4 maxsMask = AndSIMD( startOutMaxs, endOutMaxs );
-	if ( IsAnyNegative(SetWToZeroSIMD(OrSIMD(minsMask,maxsMask))))
+	bi32x4 startOutMins = CmpLtSIMD(Four_Zeros, boxMins);
+	bi32x4 endOutMins = CmpLtSIMD(delta,boxMins);
+	bi32x4 minsMask = AndSIMD( startOutMins, endOutMins );
+	bi32x4 startOutMaxs = CmpGtSIMD(Four_Zeros, boxMaxs);
+	bi32x4 endOutMaxs = CmpGtSIMD(delta,boxMaxs);
+	bi32x4 maxsMask = AndSIMD( startOutMaxs, endOutMaxs );
+	if ( IsAnyTrue(SetWToZeroSIMD(OrSIMD(minsMask,maxsMask))))
 		return false;
 
 	// now build the per-axis interval of t for intersections
@@ -798,7 +798,7 @@ bool FASTCALL IsBoxIntersectingRay( const Vector& boxMin, const Vector& boxMax,
 	boxMins = MulSIMD( boxMins, invDelta );
 	boxMaxs = MulSIMD( boxMaxs, invDelta );
 
-	fltx4 crossPlane = OrSIMD(XorSIMD(startOutMins,endOutMins), XorSIMD(startOutMaxs,endOutMaxs));
+	bi32x4 crossPlane = OrSIMD(XorSIMD(startOutMins,endOutMins), XorSIMD(startOutMaxs,endOutMaxs));
 	// only consider axes where we crossed a plane
 	boxMins = MaskedAssign( crossPlane, boxMins, Four_Negative_FLT_MAX );
 	boxMaxs = MaskedAssign( crossPlane, boxMaxs, Four_FLT_MAX );
@@ -815,13 +815,13 @@ bool FASTCALL IsBoxIntersectingRay( const Vector& boxMin, const Vector& boxMax,
 	lastIn = MaxSIMD(lastIn, Four_Zeros);
 
 	// If the final interval is valid lastIn<firstOut, check for separation
-	fltx4 separation = CmpGtSIMD(lastIn, firstOut);
+	bi32x4 separation = CmpGtSIMD(lastIn, firstOut);
 
 	return IsAllZeros(separation);
 #else
-	// On the x360, we force use of the SIMD functions.
-#if defined(_X360) && !defined(PARANOID_SIMD_ASSERTING)
-	if (IsX360())
+	// On the x360/ps3, we force use of the SIMD functions.
+#if (defined(_X360) || defined(_PS3)) && !defined(PARANOID_SIMD_ASSERTING)
+	if (IsX360() || IsPS3())
 	{
 		return IsBoxIntersectingRay( 
 			LoadUnaligned3SIMD(boxMin.Base()), LoadUnaligned3SIMD(boxMax.Base()),
@@ -892,13 +892,13 @@ bool FASTCALL IsBoxIntersectingRay( const Vector& boxMin, const Vector& boxMax,
 //-----------------------------------------------------------------------------
 bool FASTCALL IsBoxIntersectingRay( const Vector& vecBoxMin, const Vector& vecBoxMax, const Ray_t& ray, float flTolerance )
 {
-	// On the x360, we force use of the SIMD functions.
-#if defined(_X360) 
-	if (IsX360())
+	// On the x360/PS3, we force use of the SIMD functions.
+#if defined( _X360 ) || defined( _PS3 )
+	if ( IsX360() || IsPS3() )
 	{
 		return IsBoxIntersectingRay( 
 			LoadUnaligned3SIMD(vecBoxMin.Base()), LoadUnaligned3SIMD(vecBoxMax.Base()),
-			ray, flTolerance);
+			ray, ReplicateX4(flTolerance));
 	}
 #endif
 
@@ -927,7 +927,7 @@ bool FASTCALL IsBoxIntersectingRay( const Vector& vecBoxMin, const Vector& vecBo
 //-----------------------------------------------------------------------------
 
 
-#ifdef _X360
+#if defined( _X360 ) || defined( _PS3 )
 bool FASTCALL IsBoxIntersectingRay( fltx4 boxMin, fltx4 boxMax, 
 								    fltx4 origin, fltx4 delta, fltx4 invDelta, // ray parameters
 									fltx4 vTolerance ///< eg from ReplicateX4(flTolerance)
@@ -943,7 +943,7 @@ bool FASTCALL IsBoxIntersectingRay( const fltx4 &inBoxMin, const fltx4 & inBoxMa
 	// compute the mins/maxs of the box expanded by the ray extents
 	// relocate the problem so that the ray start is at the origin.
 
-#ifdef _X360
+#if defined( _X360 ) || defined( _PS3 )
 	boxMin = SubSIMD(boxMin, origin);
 	boxMax = SubSIMD(boxMax, origin);
 #else
@@ -953,9 +953,9 @@ bool FASTCALL IsBoxIntersectingRay( const fltx4 &inBoxMin, const fltx4 & inBoxMa
 
 	// Check to see if the origin (start point) and the end point (delta) are on the same side
 	// of any of the box sides - if so there can be no intersection
-	fltx4 startOutMins = AndSIMD( CmpLtSIMD(Four_Zeros, boxMin), CmpLtSIMD(delta,boxMin) );
-	fltx4 startOutMaxs = AndSIMD( CmpGtSIMD(Four_Zeros, boxMax), CmpGtSIMD(delta,boxMax) );
-	if ( IsAnyNegative(SetWToZeroSIMD(OrSIMD(startOutMaxs,startOutMins))))
+	bi32x4 startOutMins = AndSIMD( CmpLtSIMD(Four_Zeros, boxMin), CmpLtSIMD(delta,boxMin) );
+	bi32x4 startOutMaxs = AndSIMD( CmpGtSIMD(Four_Zeros, boxMax), CmpGtSIMD(delta,boxMax) );
+	if ( IsAnyTrue(SetWToZeroSIMD(OrSIMD(startOutMaxs,startOutMins))))
 		return false;
 
 	// now build the per-axis interval of t for intersections
@@ -977,16 +977,19 @@ bool FASTCALL IsBoxIntersectingRay( const fltx4 &inBoxMin, const fltx4 & inBoxMa
 	lastIn = MaxSIMD(lastIn, Four_Zeros);
 
 	// If the final interval is valid lastIn<firstOut, check for separation
-	fltx4 separation = CmpGtSIMD(lastIn, firstOut);
+	bi32x4 separation = CmpGtSIMD(lastIn, firstOut);
 
 	return IsAllZeros(separation);
 }
 
-
+#if defined( _X360 ) || defined( _PS3 )
+bool FASTCALL IsBoxIntersectingRay( fltx4 boxMin, fltx4 boxMax, 
+								   const Ray_t& ray, fltx4 fl4Tolerance )
+#else
 bool FASTCALL IsBoxIntersectingRay( const fltx4& boxMin, const fltx4& boxMax, 
-								   const Ray_t& ray, float flTolerance )
+								   const Ray_t& ray, const fltx4 &fl4Tolerance )
+#endif
 {
-	fltx4 vTolerance = ReplicateX4(flTolerance);
 	fltx4 rayStart = LoadAlignedSIMD(ray.m_Start);
 	fltx4 rayExtents = LoadAlignedSIMD(ray.m_Extents);
 	if ( !ray.m_IsSwept )
@@ -995,8 +998,8 @@ bool FASTCALL IsBoxIntersectingRay( const fltx4& boxMin, const fltx4& boxMax,
 		fltx4 rayMins, rayMaxs;
 		rayMins = SubSIMD(rayStart, rayExtents);
 		rayMaxs = AddSIMD(rayStart, rayExtents);
-		rayMins = AddSIMD(rayMins, vTolerance);
-		rayMaxs = AddSIMD(rayMaxs, vTolerance);
+		rayMins = AddSIMD(rayMins, fl4Tolerance);
+		rayMaxs = AddSIMD(rayMaxs, fl4Tolerance);
 
 		VectorAligned vecBoxMin, vecBoxMax, vecRayMins, vecRayMaxs;
 		StoreAlignedSIMD( vecBoxMin.Base(), boxMin );
@@ -1012,7 +1015,7 @@ bool FASTCALL IsBoxIntersectingRay( const fltx4& boxMin, const fltx4& boxMax,
 	vecExpandedBoxMin = SubSIMD( boxMin, rayExtents );
 	vecExpandedBoxMax = AddSIMD( boxMax, rayExtents );
 
-	return IsBoxIntersectingRay( vecExpandedBoxMin, vecExpandedBoxMax, rayStart, rayDelta, ReciprocalSIMD(rayDelta), ReplicateX4(flTolerance) );
+	return IsBoxIntersectingRay( vecExpandedBoxMin, vecExpandedBoxMax, rayStart, rayDelta, ReciprocalSIMD(rayDelta), fl4Tolerance );
 }
 
 
@@ -2140,15 +2143,15 @@ static void ComputeCenterIMatrix( const Vector& origin, const QAngle& angles,
 //-----------------------------------------------------------------------------
 static inline void ComputeAbsMatrix( const matrix3x4_t& in, matrix3x4_t& out )
 {
-	FloatBits(out[0][0]) = FloatAbsBits(in[0][0]);
-	FloatBits(out[0][1]) = FloatAbsBits(in[0][1]);
-	FloatBits(out[0][2]) = FloatAbsBits(in[0][2]);
-	FloatBits(out[1][0]) = FloatAbsBits(in[1][0]);
-	FloatBits(out[1][1]) = FloatAbsBits(in[1][1]);
-	FloatBits(out[1][2]) = FloatAbsBits(in[1][2]);
-	FloatBits(out[2][0]) = FloatAbsBits(in[2][0]);
-	FloatBits(out[2][1]) = FloatAbsBits(in[2][1]);
-	FloatBits(out[2][2]) = FloatAbsBits(in[2][2]);
+	(out[0][0]) = fabsf(in[0][0]);
+	(out[0][1]) = fabsf(in[0][1]);
+	(out[0][2]) = fabsf(in[0][2]);
+	(out[1][0]) = fabsf(in[1][0]);
+	(out[1][1]) = fabsf(in[1][1]);
+	(out[1][2]) = fabsf(in[1][2]);
+	(out[2][0]) = fabsf(in[2][0]);
+	(out[2][1]) = fabsf(in[2][1]);
+	(out[2][2]) = fabsf(in[2][2]);
 }
 
 
@@ -3257,6 +3260,150 @@ bool RayHasFullyContainedIntersectionWithQuad( const Ray_t &ray,
 	}
 
 	return true; //there were lines crossing the quad plane, and every line crossing that plane had its intersection with the plane within the quad's boundaries
+}
+
+//-----------------------------------------------------------------------------
+// Purpose: override how single player rays hit the player
+//-----------------------------------------------------------------------------
+
+bool LineCircleIntersection(const Vector2D &center,
+							const float radius,
+							const Vector2D &vLinePt,
+							const Vector2D &vLineDir,
+							float *fIntersection1,
+							float *fIntersection2)
+{
+	// Line = P + Vt
+	// Sphere = r (assume we've translated to origin)
+	// (P + Vt)^2 = r^2
+	// VVt^2 + 2PVt + (PP - r^2)
+	// Solve as quadratic:  (-b  +/-  sqrt(b^2 - 4ac)) / 2a
+	// If (b^2 - 4ac) is < 0 there is no solution.
+	// If (b^2 - 4ac) is = 0 there is one solution
+	// If (b^2 - 4ac) is > 0 there are two solutions.
+
+	// Translate circle to origin.
+	const Vector2D P( vLinePt - center );
+
+	const float a = vLineDir.Dot(vLineDir);
+	const float b = 2.0f * P.Dot(vLineDir);
+	const float c = P.Dot(P) - (radius * radius);
+
+	const float insideSqr = b*b - 4*a*c;
+
+	// No solution - (b^2 - 4ac) is < 0
+	if( insideSqr < -1.0e-6f )
+	{
+		return false;
+	}
+	else
+	{
+		const float sqr = (float)FastSqrt(insideSqr);
+		const float denom = 1.0 / (2.0f * a);
+		const float t0 = (-b - sqr) * denom;
+		const float t1 = (-b + sqr) * denom;
+
+		// One solution - (b^2 - 4ac) is = 0
+		if( insideSqr < 1.0e-6f )
+		{
+			// a = 0 if the line direction is the zero vector, in which case,
+			// the line starts inside the circle but will never exit. We fudge
+			// it for this case and say it intersects at the origin of the line.
+			// Otherwise, the result is the smallest positive result
+			*fIntersection1 = *fIntersection2 = ( a == 0.0f ) ? 0.0f : ( t0 < 0 ? t1 : t0 );
+			Assert( !IS_NAN(*fIntersection1) );
+
+			// Started inside of the sphere (the only way we get one solution, unless
+			// the ray direction is the zero vector)
+			return c < 0;
+		}
+		// Two solutions - (b^2 - 4ac) is > 0
+		else
+		{
+			*fIntersection1 = t0;
+			*fIntersection2 = t1;
+		}
+
+		return true;
+	}
+}
+
+bool IntersectRayWithAACylinder( const Ray_t &ray, 
+								const Vector &center, float radius, float height, CBaseTrace *pTrace )
+{
+	Assert( ray.m_IsRay );
+	Collision_ClearTrace( ray.m_Start, ray.m_Delta, pTrace );
+
+	// First intersect the ray with the top + bottom planes
+	float halfHeight = height * 0.5;
+
+	// Handle parallel case
+	Vector vStart = ray.m_Start - center;
+	Vector vEnd = vStart + ray.m_Delta;
+
+	float flEnterFrac, flLeaveFrac;
+	if (FloatMakePositive(ray.m_Delta.z) < 1e-8)
+	{
+		if ( (vStart.z < -halfHeight) || (vStart.z > halfHeight) )
+		{
+			return false; // no hit
+		}
+		flEnterFrac = 0.0f; flLeaveFrac = 1.0f;
+	}
+	else
+	{
+		// Clip the ray to the top and bottom of box
+		flEnterFrac = IntersectRayWithAAPlane( vStart, vEnd, 2, 1, halfHeight);
+		flLeaveFrac = IntersectRayWithAAPlane( vStart, vEnd, 2, 1, -halfHeight);
+
+		if ( flLeaveFrac < flEnterFrac )
+		{
+			float temp = flLeaveFrac;
+			flLeaveFrac = flEnterFrac;
+			flEnterFrac = temp;
+		}
+
+		if ( flLeaveFrac < 0 || flEnterFrac > 1)
+		{
+			return false;
+		}
+	}
+
+	// Intersect with circle
+	float flCircleEnterFrac, flCircleLeaveFrac;
+	if ( !LineCircleIntersection( vec3_origin.AsVector2D(), radius,
+		vStart.AsVector2D(), ray.m_Delta.AsVector2D(), &flCircleEnterFrac, &flCircleLeaveFrac ) )
+	{
+		return false; // no hit
+	}
+
+	Assert( flCircleEnterFrac <= flCircleLeaveFrac );
+	if ( flCircleLeaveFrac < 0 || flCircleEnterFrac > 1)
+	{
+		return false;
+	}
+
+	if ( flEnterFrac < flCircleEnterFrac )
+		flEnterFrac = flCircleEnterFrac;
+	if ( flLeaveFrac > flCircleLeaveFrac )
+		flLeaveFrac = flCircleLeaveFrac;
+
+	if ( flLeaveFrac < flEnterFrac )
+		return false;
+
+	VectorMA( ray.m_Start, flEnterFrac , ray.m_Delta, pTrace->endpos );
+	pTrace->fraction = flEnterFrac;
+	pTrace->contents = CONTENTS_SOLID;
+
+	// Calculate the point on our center line where we're nearest the intersection point
+	Vector collisionCenter;
+	CalcClosestPointOnLineSegment( pTrace->endpos, center + Vector( 0, 0, halfHeight ), center - Vector( 0, 0, halfHeight ), collisionCenter );
+
+	// Our normal is the direction from that center point to the intersection point
+	pTrace->plane.normal = pTrace->endpos - collisionCenter;
+	VectorNormalize( pTrace->plane.normal );
+
+	return true;
 }
 
 #endif // !_STATIC_LINKED || _SHARED_LIB

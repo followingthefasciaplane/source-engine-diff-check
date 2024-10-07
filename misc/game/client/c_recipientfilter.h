@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -13,12 +13,12 @@
 
 #include "irecipientfilter.h"
 #include "utlvector.h"
-#include "c_baseentity.h"
 #include "soundflags.h"
 #include "bitvec.h"
 
 class C_BasePlayer;
 class C_Team;
+class C_BaseEntity;
 
 //-----------------------------------------------------------------------------
 // Purpose: 
@@ -58,9 +58,14 @@ public:
 	bool			IgnorePredictionCull( void ) const;
 	void			SetIgnorePredictionCull( bool ignore );
 
-	void			AddPlayersFromBitMask( CBitVec< ABSOLUTE_PLAYER_LIMIT >& playerbits );
+	void			AddPlayersFromBitMask( CPlayerBitVec& playerbits );
 
-//private:
+	void			RemoveSplitScreenPlayers();
+	void			ReplaceSplitScreenPlayersWithOwners();
+
+	void			RemoveDuplicateRecipients();
+
+private:
 
 	bool				m_bReliable;
 	bool				m_bInitMessage;
@@ -78,7 +83,7 @@ public:
 class CSingleUserRecipientFilter : public C_RecipientFilter
 {
 public:
-	CSingleUserRecipientFilter( C_BasePlayer *player )
+	explicit CSingleUserRecipientFilter( C_BasePlayer *player )
 	{
 		AddRecipient( player );
 	}
@@ -114,7 +119,7 @@ public:
 class CPASFilter : public C_RecipientFilter
 {
 public:
-	CPASFilter( const Vector& origin )
+	explicit CPASFilter( const Vector& origin )
 	{
 		AddRecipientsByPAS( origin );
 	}
@@ -146,12 +151,12 @@ public:
 	{
 	}
 
-	CPASAttenuationFilter( C_BaseEntity *entity, const char *lookupSound, HSOUNDSCRIPTHANDLE& handle ) :
+	CPASAttenuationFilter( C_BaseEntity *entity, const char *lookupSound, HSOUNDSCRIPTHASH& handle ) :
 		CPASFilter( entity->GetAbsOrigin() )
 	{
 	}
 
-	CPASAttenuationFilter( const Vector& origin, const char *lookupSound, HSOUNDSCRIPTHANDLE& handle ) :
+	CPASAttenuationFilter( const Vector& origin, const char *lookupSound, HSOUNDSCRIPTHASH& handle ) :
 		CPASFilter( origin )
 	{
 	}
@@ -163,7 +168,7 @@ public:
 class CPVSFilter : public C_RecipientFilter
 {
 public:
-	CPVSFilter( const Vector& origin )
+	explicit CPVSFilter( const Vector& origin )
 	{
 		AddRecipientsByPVS( origin );
 	}
@@ -174,16 +179,5 @@ class CLocalPlayerFilter : public C_RecipientFilter
 public:
 	CLocalPlayerFilter( void );
 };
-
-class CUIFilter : public C_RecipientFilter
-{
-public:
-	CUIFilter( void )
-	{
-		m_Recipients.AddToTail( 1 );
-//		AddRecipient( 0 );
-	}
-};
-
 
 #endif // C_RECIPIENTFILTER_H

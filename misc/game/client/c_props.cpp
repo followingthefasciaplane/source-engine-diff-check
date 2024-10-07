@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -10,7 +10,9 @@
 #include "c_physicsprop.h"
 #include "c_physbox.h"
 #include "c_props.h"
-
+#if defined(CSTRIKE15)
+#include "c_cs_player.h"
+#endif
 #define CPhysBox C_PhysBox
 #define CPhysicsProp C_PhysicsProp
 
@@ -22,9 +24,15 @@ IMPLEMENT_NETWORKCLASS_ALIASED( DynamicProp, DT_DynamicProp )
 
 BEGIN_NETWORK_TABLE( CDynamicProp, DT_DynamicProp )
 	RecvPropBool(RECVINFO(m_bUseHitboxesForRenderBox)),
+
+	RecvPropFloat( RECVINFO(m_flGlowMaxDist) ),
+	RecvPropBool(RECVINFO(m_bShouldGlow)),
+	RecvPropInt( RECVINFO(m_clrGlow), 0, RecvProxy_Int32ToColor32 ),
+	RecvPropInt( RECVINFO(m_nGlowStyle) ),
 END_NETWORK_TABLE()
 
-C_DynamicProp::C_DynamicProp( void )
+C_DynamicProp::C_DynamicProp( void ) : 
+m_GlowObject( this, Vector( 1.0f, 1.0f, 1.0f ), 0.0f, false, false )
 {
 	m_iCachedFrameCount = -1;
 }
@@ -66,6 +74,55 @@ bool C_DynamicProp::TestCollision( const Ray_t &ray, unsigned int fContentsMask,
 		}
 	}
 	return BaseClass::TestCollision( ray, fContentsMask, tr );
+}
+
+void C_DynamicProp::ClientThink( void )
+{
+	BaseClass::ClientThink();
+
+	UpdateGlow();
+}
+
+void C_DynamicProp::UpdateGlow( void )
+{
+	if ( m_bShouldGlow == false )
+	{
+		if ( m_GlowObject.IsRendering() )
+		{
+			m_GlowObject.SetRenderFlags( false, false );
+			m_GlowObject.SetAlpha( 0.0f );
+		}
+		return;
+	}
+
+	Vector glowColor;
+	glowColor.x = (m_clrGlow.r/255.0f);
+	glowColor.y = (m_clrGlow.g/255.0f);
+	glowColor.z = (m_clrGlow.b/255.0f);
+
+	float flAlpha = 0.9f;
+
+#if defined(CSTRIKE15)
+	// fade the alpha based on distace
+	C_CSPlayer *pPlayer = GetLocalOrInEyeCSPlayer();
+	if ( pPlayer && m_bShouldGlow )
+	{
+		float flDistance = 0;
+		flDistance = ( GetAbsOrigin() - pPlayer->GetAbsOrigin() ).Length();
+		flAlpha = clamp( 1.0 - ( flDistance / m_flGlowMaxDist ), 0.0, 0.9 );
+	}
+#endif
+	//m_nGlowStyle
+
+	GlowRenderStyle_t glowstyle = (GlowRenderStyle_t)m_nGlowStyle;
+
+	// Start glowing
+	m_GlowObject.SetRenderFlags( m_bShouldGlow, false );
+	m_GlowObject.SetRenderStyle( glowstyle );
+	m_GlowObject.SetColor( glowColor );
+	m_GlowObject.SetAlpha( m_bShouldGlow ? flAlpha : 0.0f );
+
+	SetNextClientThink( gpGlobals->curtime + 0.1f );
 }
 
 //-----------------------------------------------------------------------------
@@ -116,50 +173,71 @@ unsigned int C_DynamicProp::ComputeClientSideAnimationFlags()
 	return 0;
 }
 
-// ------------------------------------------------------------------------------------------ //
-// ------------------------------------------------------------------------------------------ //
-class C_BasePropDoor : public C_DynamicProp
+void C_DynamicProp::ForceTurnOffGlow( void )
 {
-	DECLARE_CLASS( C_BasePropDoor, C_DynamicProp );
-public:
-	DECLARE_CLIENTCLASS();
+	m_bShouldGlow = false;
 
-	// constructor, destructor
-	C_BasePropDoor( void );
-	virtual ~C_BasePropDoor( void );
+	UpdateGlow();
+}
 
-	virtual void OnDataChanged( DataUpdateType_t type );
+void C_DynamicProp::OnDataChanged( DataUpdateType_t type )
+{
+	BaseClass::OnDataChanged( type );
 
-	virtual bool TestCollision( const Ray_t &ray, unsigned int mask, trace_t& trace );
+//	if ( type == DATA_UPDATE_CREATED )
+	{
+//		if ( m_bShouldGlow )
+		{
+			UpdateGlow();
+		}
+	}
+}
 
-private:
-	C_BasePropDoor( const C_BasePropDoor & );
-};
-
+// ------------------------------------------------------------------------------------------ //
+// ------------------------------------------------------------------------------------------ //
 IMPLEMENT_CLIENTCLASS_DT(C_BasePropDoor, DT_BasePropDoor, CBasePropDoor)
 END_RECV_TABLE()
 
 C_BasePropDoor::C_BasePropDoor( void )
 {
+	m_modelChanged = false;
 }
 
 C_BasePropDoor::~C_BasePropDoor( void )
 {
 }
 
+void C_BasePropDoor::PostDataUpdate( DataUpdateType_t updateType )
+{
+	if ( updateType == DATA_UPDATE_CREATED )
+	{
+		BaseClass::PostDataUpdate( updateType );
+	}
+	else
+	{
+		const model_t *oldModel = GetModel();
+		BaseClass::PostDataUpdate( updateType );
+		const model_t *newModel = GetModel();
+
+		if ( oldModel != newModel )
+		{
+			m_modelChanged = true;
+		}
+	}
+}
+
 void C_BasePropDoor::OnDataChanged( DataUpdateType_t type )
 {
 	BaseClass::OnDataChanged( type );
 
-	if ( type == DATA_UPDATE_CREATED )
+	bool bCreate = (type == DATA_UPDATE_CREATED) ? true : false;
+	if ( VPhysicsGetObject() && m_modelChanged )
 	{
-		SetSolid(SOLID_VPHYSICS);
-		VPhysicsInitShadow( false, false );
+		VPhysicsDestroyObject();
+		m_modelChanged = false;
+		bCreate = true;
 	}
-	else if ( VPhysicsGetObject() )
-	{
-		VPhysicsGetObject()->UpdateShadow( GetAbsOrigin(), GetAbsAngles(), false, TICK_INTERVAL );
-	}
+	VPhysicsShadowDataChanged(bCreate, this);
 }
 
 bool C_BasePropDoor::TestCollision( const Ray_t &ray, unsigned int mask, trace_t& trace )
@@ -167,6 +245,7 @@ bool C_BasePropDoor::TestCollision( const Ray_t &ray, unsigned int mask, trace_t
 	if ( !VPhysicsGetObject() )
 		return false;
 
+	MDLCACHE_CRITICAL_SECTION();
 	CStudioHdr *pStudioHdr = GetModelPtr( );
 	if (!pStudioHdr)
 		return false;
@@ -175,17 +254,32 @@ bool C_BasePropDoor::TestCollision( const Ray_t &ray, unsigned int mask, trace_t
 
 	if ( trace.DidHit() )
 	{
-		trace.surface.surfaceProps = VPhysicsGetObject()->GetMaterialIndex();
+		trace.contents = pStudioHdr->contents();
+		// use the default surface properties
+		trace.surface.name = "**studio**";
+		trace.surface.flags = 0;
+		trace.surface.surfaceProps = pStudioHdr->GetSurfaceProp();
+
 		return true;
 	}
 
 	return false;
 }
 
+//just need to reference by classname in portal
+class C_PropDoorRotating : public C_BasePropDoor
+{
+public:
+	DECLARE_CLASS( C_PropDoorRotating, C_BasePropDoor );
+	DECLARE_CLIENTCLASS();
+};
+
+IMPLEMENT_CLIENTCLASS_DT(C_PropDoorRotating, DT_PropDoorRotating, CPropDoorRotating)
+END_RECV_TABLE()
+
 // ------------------------------------------------------------------------------------------ //
 // Special version of func_physbox.
 // ------------------------------------------------------------------------------------------ //
-#ifndef _XBOX
 class CPhysBoxMultiplayer : public CPhysBox, public IMultiplayerPhysics
 {
 public:
@@ -264,4 +358,3 @@ IMPLEMENT_CLIENTCLASS_DT( CPhysicsPropMultiplayer, DT_PhysicsPropMultiplayer, CP
 	RecvPropVector( RECVINFO( m_collisionMins ) ),
 	RecvPropVector( RECVINFO( m_collisionMaxs ) ),
 END_RECV_TABLE()
-#endif

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -43,7 +43,7 @@ public:
 	} message_t;
 
 	// Construct/destruct
-						CMessageCharsPanel( vgui::VPANEL parent );
+	explicit			CMessageCharsPanel( vgui::VPANEL parent );
 	virtual				~CMessageCharsPanel( void );
 
 	// Add block of text to list
@@ -99,7 +99,7 @@ CMessageCharsPanel::CMessageCharsPanel( vgui::VPANEL parent ) :
 	SetSize( ScreenWidth(), ScreenHeight() );
 	SetPos( 0, 0 );
 	SetVisible( true );
-	SetCursor( null );
+	SetCursor( 0 );
 	SetKeyBoardInputEnabled( false );
 	SetMouseInputEnabled( false );
 	
@@ -235,10 +235,9 @@ int CMessageCharsPanel::AddText(
 
 	Assert( !msg->text );
 
-	int textLength = Q_strlen( data ) + 1;
-	msg->text = new char[ textLength ];
+	msg->text = new char[ Q_strlen( data ) + 1 ];
 	Assert( msg->text );
-	Q_strncpy( msg->text, data, textLength );
+	Q_strncpy( msg->text, data, sizeof( msg->text ) );
 
 	if ( flTime )
 		msg->fTTL = gpGlobals->curtime + flTime;
@@ -378,8 +377,7 @@ public:
 		if ( messageCharsPanel )
 		{
 			messageCharsPanel->SetParent( (vgui::Panel *)NULL );
-			messageCharsPanel->MarkForDeletion();
-			messageCharsPanel = NULL;
+			delete messageCharsPanel;
 		}
 	}
 
@@ -406,7 +404,7 @@ public:
 		int r = 192, g = 192, b = 192;
 
 		va_list argptr;
-		va_start(argptr, messageID);
+		va_start( argptr, messageID );
 		int result = DrawString( hCustomFont, x, y, r, g, b, 255, fmt, messageID, argptr );
 		va_end( argptr );
 		return result;
@@ -420,7 +418,7 @@ public:
 	int DrawString( vgui::HFont hCustomFont, int x, int y, int r, int g, int b, int a, const char *fmt, int messageID, ... )
 	{
 		va_list argptr;
-		va_start(argptr, messageID);
+		va_start( argptr, messageID );
 		int result = DrawStringForTime( 0, hCustomFont, x, y, r, g, b, a, fmt, messageID, argptr );
 		va_end( argptr );
 		return result;
@@ -429,7 +427,7 @@ public:
 	int DrawString( vgui::HFont hCustomFont, int x, int y, const char *fmt, int messageID, ... )
 	{
 		va_list argptr;
-		va_start(argptr, messageID);
+		va_start( argptr, messageID );
 		int result = DrawStringForTime( 0, hCustomFont, x, y, fmt, messageID, argptr );
 		va_end( argptr );
 		return result;

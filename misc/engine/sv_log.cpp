@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -12,13 +12,12 @@
 #include "sv_log.h"
 #include "filesystem.h"
 #include "filesystem_engine.h"
-#include "tier0/vcrmode.h"
 #include "sv_main.h"
 #include "tier0/icommandline.h"
 #include <proto_oob.h>
 #include "GameEventManager.h"
 #include "netadr.h"
-#include "zlib/zlib.h"
+#include "sv_steamauth.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -29,10 +28,10 @@ static ConVar sv_logflush( "sv_logflush", "0", FCVAR_ARCHIVE, "Flush the log fil
 static ConVar sv_logecho( "sv_logecho", "1", FCVAR_ARCHIVE, "Echo log information to the console." );
 static ConVar sv_log_onefile( "sv_log_onefile", "0", FCVAR_ARCHIVE, "Log server information to only one file." );
 static ConVar sv_logbans( "sv_logbans", "0", FCVAR_ARCHIVE, "Log server bans in the server logs." ); // should sv_banid() calls be logged in the server logs?
-static ConVar sv_logsecret( "sv_logsecret", "0", 0, "If set then include this secret when doing UDP logging (will use 0x53 as packet type, not usual 0x52)" ); 
-
-static ConVar sv_logfilename_format( "sv_logfilename_format", "", FCVAR_ARCHIVE, "Log filename format. See strftime for formatting codes." );
-static ConVar sv_logfilecompress( "sv_logfilecompress", "0", FCVAR_ARCHIVE, "Gzip compress logfile and rename to logfilename.log.gz on close." );
+static ConVar sv_logsecret( "sv_logsecret", "0", FCVAR_RELEASE, "If set then include this secret when doing UDP logging (will use 0x53 as packet type, not usual 0x52)" ); 
+static ConVar sv_logsocket( "sv_logsocket", ( new CFmtStr( "%d", NS_SERVER ) )->Access(), FCVAR_RELEASE, "Uses a specific outgoing socket for sv udp logging" );
+static ConVar sv_logsocket2( "sv_logsocket2", "1", FCVAR_RELEASE, "Uses a specific outgoing socket for second source of sv udp logging" );
+static ConVar sv_logsocket2_substr( "sv_logsocket2_substr", "", FCVAR_RELEASE, "Uses a substring match for second source of sv udp logging" );
 
 CLog g_Log;	// global Log object
 
@@ -117,14 +116,14 @@ CON_COMMAND( log, "Enables logging to file, console, and udp < on | off >." )
 }
 
 // changed log_addaddress back to logaddress_add to be consistent with GoldSrc
-CON_COMMAND( logaddress_add, "Set address and port for remote host <ip:port>." )
+static void helper_logaddress_add( const CCommand &args, char const *szCommand, uint64 ullToken )
 {
 	netadr_t adr;
 	const char *pszIP, *pszPort;
 
 	if ( args.ArgC() != 4 && args.ArgC() != 2 )
 	{
-		ConMsg( "Usage:  logaddress_add ip:port\n" );
+		ConMsg( "Usage:  %s ip:port\n", szCommand );
 		return;
 	}
 
@@ -153,13 +152,13 @@ CON_COMMAND( logaddress_add, "Set address and port for remote host <ip:port>." )
 
 	if ( !Q_atoi( pszPort ) )
 	{
-		ConMsg( "logaddress_add:  must specify a valid port\n" );
+		ConMsg( "%s:  must specify a valid port\n", szCommand );
 		return;
 	}
 
 	if ( !pszIP || !pszIP[0] )
 	{
-		ConMsg( "logaddress_add:  unparseable address\n" );
+		ConMsg( "%s:  unparseable address\n", szCommand );
 		return;
 	}
 
@@ -168,19 +167,79 @@ CON_COMMAND( logaddress_add, "Set address and port for remote host <ip:port>." )
 
 	if ( NET_StringToAdr( szAdr, &adr ) )
 	{
-		if ( g_Log.AddLogAddress( adr ) )
+		if ( g_Log.AddLogAddress( adr, ullToken ) )
 		{
-			ConMsg( "logaddress_add:  %s\n", adr.ToString() );
+			if ( ullToken )
+				ConMsg( "%s:  %s [%016llX]\n", szCommand, adr.ToString(), ullToken );
+			else
+				ConMsg( "%s:  %s\n", szCommand, adr.ToString() );
 		}
 		else
 		{
-			ConMsg( "logaddress_add:  %s is already in the list\n", adr.ToString() );
+			ConMsg( "%s:  %s is already in the list\n", szCommand, adr.ToString() );
 		}
 	}
 	else
 	{
-		ConMsg( "logaddress_add:  unable to resolve %s\n", szAdr );
+		ConMsg( "%s:  unable to resolve %s\n", szCommand, szAdr );
 	}
+}
+
+CON_COMMAND( logaddress_add, "Set address and port for remote host <ip:port>." )
+{
+	helper_logaddress_add( args, "logaddress_add", 0ull );
+}
+
+CON_COMMAND( logaddress_add_ex, "Set address and port for remote host <ip:port> and supplies a unique token in the UDP packets." )
+{
+	CRC64_t crcToken;
+	CRC64_Init( &crcToken );
+	
+	const char *szCmdLine = CommandLine()->GetCmdLine();
+	if ( szCmdLine && *szCmdLine )
+		CRC64_ProcessBuffer( &crcToken, szCmdLine, V_strlen( szCmdLine ) );
+
+	const char *szSteamToken = Steam3Server().GetAccountToken();
+	if ( szSteamToken && *szSteamToken )
+		CRC64_ProcessBuffer( &crcToken, szSteamToken, V_strlen( szSteamToken ) );
+
+	const char *szLocalAdr = net_local_adr.ToString();
+	if ( szLocalAdr && *szLocalAdr )
+		CRC64_ProcessBuffer( &crcToken, szLocalAdr, V_strlen( szLocalAdr ) );
+
+	CRC64_Final( &crcToken );
+	if ( !crcToken )
+		crcToken = 1;
+
+	helper_logaddress_add( args, "logaddress_add_ex", crcToken );
+}
+
+static uint64 s_ullLogaddressTokenSecret = 0;
+void FnChangeCallback_logaddress_token_secret( IConVar *var, const char *pOldValue, float flOldValue )
+{
+	ConVarRef cv( var );
+	char const *szstring = cv.GetString();
+	if ( !szstring || !*szstring )
+	{
+		ConMsg( "logaddress_token_secret:  must use a non-empty string for checksum\n" );
+		return;
+	}
+
+	CRC64_ProcessBuffer( &s_ullLogaddressTokenSecret, szstring, V_strlen( szstring ) );
+	if ( !s_ullLogaddressTokenSecret )
+		s_ullLogaddressTokenSecret = 1;
+	ConMsg( "logaddress_token_secret:  token checksum = %016llX\n", s_ullLogaddressTokenSecret );
+}
+ConVar logaddress_token_secret( "logaddress_token_secret", "", FCVAR_RELEASE, "Set a secret string that will be hashed when using logaddress with explicit token hash.", FnChangeCallback_logaddress_token_secret );
+CON_COMMAND( logaddress_add_ts, "Set address and port for remote host <ip:port> and uses a unique checksum from logaddress_token_secret in the UDP packets." )
+{
+	if ( !s_ullLogaddressTokenSecret )
+	{
+		ConMsg( "logaddress_add_ts:  must set logaddress_token_secret before adding this log address\n" );
+		return;
+	}
+
+	helper_logaddress_add( args, "logaddress_add_ts", s_ullLogaddressTokenSecret );
 }
 
 CON_COMMAND( logaddress_delall, "Remove all udp addresses being logged to" )
@@ -262,29 +321,26 @@ CON_COMMAND( logaddress_list, "List all addresses currently being used by logadd
 CLog::CLog()
 {
 	Reset();
+	m_nDebugID = EVENT_DEBUG_ID_INIT;
 }
 
 CLog::~CLog()
 {
-
+	m_nDebugID = EVENT_DEBUG_ID_SHUTDOWN;
 }
 
 void CLog::Reset( void )	// reset all logging streams
 {
-	m_LogAddresses.RemoveAll();
-
+	m_LogAddrDestinations.RemoveAll();
 	m_hLogFile = FILESYSTEM_INVALID_HANDLE;
-	m_LogFilename = NULL;
-
 	m_bActive = false;
 	m_flLastLogFlush = realtime;
 	m_bFlushLog = false;
-#ifndef _XBOX
+
 	if ( CommandLine()->CheckParm( "-flushlog" ) )
 	{
 		m_bFlushLog = true;
 	}
-#endif
 }
 
 void CLog::Init( void )
@@ -321,26 +377,22 @@ void CLog::RunFrame()
 	}
 }
 
-bool CLog::AddLogAddress(netadr_t addr)
+bool CLog::AddLogAddress( netadr_t addr, uint64 ullToken )
 {
-	int i = 0;
-	
-	for ( i = 0; i < m_LogAddresses.Count(); ++i )
+	for ( int i = 0; i < m_LogAddrDestinations.Count(); ++i )
 	{
-		if ( m_LogAddresses.Element(i).CompareAdr(addr, false) )
+		if ( m_LogAddrDestinations.Element(i).m_adr.CompareAdr(addr, false) )
 		{
-			// found!
-			break;
+			if ( m_LogAddrDestinations.Element( i ).m_ullToken == ullToken )
+				return false;
+
+			m_LogAddrDestinations.Element( i ).m_ullToken = ullToken;
+			return true;
 		}
 	}
 
-	if ( i < m_LogAddresses.Count() )
-	{
-		// already in the list
-		return false;
-	}
-
-	m_LogAddresses.AddToTail( addr );
+	LogAddressDestination_t dest = { addr, ullToken };
+	m_LogAddrDestinations.AddToTail( dest );
 	return true;
 }
 
@@ -348,18 +400,18 @@ bool CLog::DelLogAddress(netadr_t addr)
 {
 	int i = 0;
 	
-	for ( i = 0; i < m_LogAddresses.Count(); ++i )
+	for ( i = 0; i < m_LogAddrDestinations.Count(); ++i )
 	{
-		if ( m_LogAddresses.Element(i).CompareAdr(addr, false) )
+		if ( m_LogAddrDestinations.Element(i).m_adr.CompareAdr(addr, false) )
 		{
 			// found!
 			break;
 		}
 	}
 
-	if ( i < m_LogAddresses.Count() )
+	if ( i < m_LogAddrDestinations.Count() )
 	{
-		m_LogAddresses.Remove(i);
+		m_LogAddrDestinations.Remove(i);
 		return true;
 	}
 
@@ -368,9 +420,8 @@ bool CLog::DelLogAddress(netadr_t addr)
 
 void CLog::ListLogAddress( void )
 {
-	netadr_t *pElement;
-	const char *pszAdr;
-	int count = m_LogAddresses.Count();
+	LogAddressDestination_t *pElement;
+	int count = m_LogAddrDestinations.Count();
 
 	if ( count <= 0 )
 	{
@@ -389,25 +440,26 @@ void CLog::ListLogAddress( void )
 
 		for ( int i = 0 ; i < count ; ++i )
 		{
-			pElement = &m_LogAddresses.Element(i);
-			pszAdr = pElement->ToString();
-			
-			ConMsg( "%s\n", pszAdr );
+			pElement = &m_LogAddrDestinations.Element(i);
+			if ( pElement->m_ullToken )
+				ConMsg( "%s [%016llX]\n", pElement->m_adr.ToString(), pElement->m_ullToken );
+			else
+				ConMsg( "%s\n", pElement->m_adr.ToString() );
 		}
 	}
 }
 
 bool CLog::UsingLogAddress( void )
 {
-	return ( m_LogAddresses.Count() > 0 );
+	return ( m_LogAddrDestinations.Count() > 0 );
 }
 
 void CLog::DelAllLogAddress( void )
 {
-	if ( m_LogAddresses.Count() > 0 )
+	if ( m_LogAddrDestinations.Count() > 0 )
 	{
 		ConMsg( "logaddress_delall:  all addresses cleared\n" );
-		m_LogAddresses.RemoveAll();
+		m_LogAddrDestinations.RemoveAll();
 	}
 	else
 	{
@@ -423,8 +475,6 @@ Log_PrintServerVars
 */
 void CLog::PrintServerVars( void )
 {
-	const ConCommandBase	*var;			// Temporary Pointer to cvars
-
 	if ( !IsActive() )
 	{
 		return;
@@ -432,8 +482,10 @@ void CLog::PrintServerVars( void )
 
 	Printf( "server cvars start\n" );
 	// Loop through cvars...
-	for ( var= g_pCVar->GetCommands() ; var ; var=var->GetNext() )
+	ICvar::Iterator iter( g_pCVar );
+	for ( iter.SetFirst() ; iter.IsValid() ; iter.Next() )
 	{
+		ConCommandBase *var = iter.Get();
 		if ( var->IsCommand() )
 			continue;
 
@@ -477,22 +529,25 @@ void CLog::Printf( const char *fmt, ... )
 
 void CLog::Print( const char * text )
 {
+	static char	string[1100];
+
 	if ( !IsActive() || !text || !text[0] )
 	{
 		return;
 	}
 
-	tm today;
-	VCRHook_LocalTime( &today );
-
 	if ( Q_strlen( text ) > 1024 )
 	{
-		// Spew a warning, but continue and print the truncated stuff we have.
 		DevMsg( 1, "CLog::Print: string too long (>1024 bytes)." );
+		return;
 	}
 
-	static char	string[1100];
-	V_sprintf_safe( string, "L %02i/%02i/%04i - %02i:%02i:%02i: %s",
+	serverGameDLL->LogForHTTPListeners( text );
+
+	tm today;
+	Plat_GetLocalTime( &today );
+
+	Q_snprintf( string, sizeof( string ), "L %02i/%02i/%04i - %02i:%02i:%02i: %s",
 		today.tm_mon+1, today.tm_mday, 1900 + today.tm_year,
 		today.tm_hour, today.tm_min, today.tm_sec, text );
 
@@ -513,16 +568,29 @@ void CLog::Print( const char * text )
 	}
 
 	// Echo to UDP port
-	if ( m_LogAddresses.Count() > 0 )
+	if ( m_LogAddrDestinations.Count() > 0 )
 	{
 		// out of band sending
-		for ( int i = 0 ; i < m_LogAddresses.Count() ; i++ )
+		for ( int i = 0 ; i < m_LogAddrDestinations.Count() ; i++ )
 		{
-			if ( sv_logsecret.GetInt() != 0 )
-				NET_OutOfBandPrintf(NS_SERVER, m_LogAddresses.Element(i), "%c%s%s", S2A_LOGSTRING2, sv_logsecret.GetString(), string );
-			else
-				NET_OutOfBandPrintf(NS_SERVER, m_LogAddresses.Element(i), "%c%s", S2A_LOGSTRING, string );
+			int nSocketFrom = sv_logsocket.GetInt();
+			if ( sv_logsocket2_substr.GetString()[0] )
+			{
+				// Check if we should use secondary outgoing socket?
+				if ( V_strstr( m_LogAddrDestinations.Element( i ).m_adr.ToString(), sv_logsocket2_substr.GetString() ) )
+					nSocketFrom = sv_logsocket2.GetInt();
+			}
 			
+			char chTokenBuffer[64] = {};
+			if ( m_LogAddrDestinations.Element( i ).m_ullToken )
+				V_sprintf_safe( chTokenBuffer, "T%016llX ", m_LogAddrDestinations.Element( i ).m_ullToken );
+			else
+				chTokenBuffer[0] = 0;
+
+			if ( sv_logsecret.GetInt() != 0 )
+				NET_OutOfBandPrintf( nSocketFrom, m_LogAddrDestinations.Element(i).m_adr, "%c%s%s%s", S2A_LOGSTRING2, sv_logsecret.GetString(), chTokenBuffer, string );
+			else
+				NET_OutOfBandPrintf( nSocketFrom, m_LogAddrDestinations.Element(i).m_adr, "%c%s%s", S2A_LOGSTRING, chTokenBuffer, string );
 		}
 	}
 }
@@ -530,17 +598,22 @@ void CLog::Print( const char * text )
 void CLog::FireGameEvent( IGameEvent *event )
 {
 	if ( !IsActive() )
+	{
 		return;
+	}
 
 	// log server events
 
 	const char * name = event->GetName();
+
 	if ( !name || !name[0])
+	{
 		return;
+	}
 
 	if ( Q_strcmp(name, "server_spawn") == 0 )
 	{
-		Printf( "Started map \"%s\" (CRC \"%s\")\n", sv.GetMapName(), MD5_Print( sv.worldmapMD5.bits, MD5_DIGEST_LENGTH ) );
+		Printf( "Started map \"%s\" (CRC \"%i\")\n", sv.GetMapName(), ( int ) sv.worldmapCRC );
 	}
 
 	else if ( Q_strcmp(name, "server_shutdown") == 0 )
@@ -644,142 +717,9 @@ void CLog::FireGameEvent( IGameEvent *event )
 	}
 }
 
-struct TempFilename_t
+int CLog::GetEventDebugID( void )
 {
-	bool IsGzip;
-	CUtlString Filename;
-	union
-	{
-		FileHandle_t file;
-		gzFile gzfile;
-	} fh;
-};
-
-// Given a base filename and an extension, try to find a file that doesn't exist which we can use. This is
-//  accomplished by appending 000, 001, etc. Set IsGzip to use gzopen instead of filesystem open.
-static bool CreateTempFilename( TempFilename_t &info, const char *filenameBase, const char *ext, bool IsGzip )
-{
-	// Check if a logfilename format has been specified - if it has, kick in new behavior.
-	const char *logfilename_format = sv_logfilename_format.GetString();
-	bool bHaveLogfilenameFormat = logfilename_format && logfilename_format[ 0 ];
-
-	info.fh.file = NULL;
-	info.fh.gzfile = 0;
-	info.IsGzip = IsGzip;
-
-	CUtlString fname = CUtlString( filenameBase ).StripExtension();
-
-	for ( int i = 0; i < 1000; i++ )
-	{
-		if ( bHaveLogfilenameFormat )
-		{
-			// For the first pass, let's try not adding the index.
-			if ( i == 0 )
-				info.Filename.Format( "%s.%s", fname.Get(), ext );
-			else
-				info.Filename.Format( "%s_%03i.%s", fname.Get(), i - 1, ext );
-		}
-		else
-		{
-			info.Filename.Format( "%s%03i.%s", fname.Get(), i, ext );
-		}
-
-		// Make sure the path exists.
-		info.Filename.FixSlashes();
-		COM_CreatePath( info.Filename );
-
-		if ( !g_pFileSystem->FileExists( info.Filename, "LOGDIR" ) )
-		{
-			// If the path doesn't exist, try opening the file. If that succeeded, return our filehandle and filename.
-			if ( !IsGzip )
-			{
-				info.fh.file = g_pFileSystem->Open( info.Filename, "wt", "LOGDIR" );
-				if ( info.fh.file )
-					return true;
-			}
-			else
-			{
-				info.fh.gzfile = gzopen( info.Filename, "wb6" );
-				if ( info.fh.gzfile )
-					return true;
-			}
-		}
-	}
-
-	info.Filename = NULL;
-	return false;
-}
-
-// Gzip Filename to Filename.gz.
-static bool gzip_file_compress( const CUtlString &Filename )
-{
-	bool bRet = false;
-
-	// Try to find a unique temp filename.
-	TempFilename_t info;
-	bRet = CreateTempFilename( info, Filename, "log.gz", true );
-	if ( !bRet )
-		return false;
-
-	Msg( "Compressing %s to %s...\n", Filename.Get(), info.Filename.Get() );
-
-	FILE *in = fopen( Filename, "rb" );
-	if ( in )
-	{
-		for (;;)
-		{
-			char buf[ 16384 ];
-			size_t len = fread( buf, 1, sizeof( buf ), in );
-			if ( ferror( in ) )
-			{
-				Msg( "%s: fread failed.\n", __FUNCTION__ );
-				break;
-			}
-			if (len == 0)
-			{
-				bRet = true;
-				break;
-			}
-
-			if ( (size_t)gzwrite( info.fh.gzfile, buf, len ) != len )
-			{
-				Msg( "%s: gzwrite failed.\n", __FUNCTION__ );
-				break;
-			}
-		}
-
-		if ( gzclose( info.fh.gzfile ) != Z_OK )
-		{
-			Msg( "%s: gzclose failed.\n", __FUNCTION__ );
-			bRet = false;
-		}
-
-		fclose( in );
-	}
-
-	return bRet;
-}
-
-static void FixupInvalidPathChars( char *filename )
-{
-	if ( !filename )
-		return;
-
-	for ( ; filename[ 0 ]; filename++ )
-	{
-		switch ( filename[ 0 ] )
-		{
-		case ':':
-		case '\n':
-		case '\r':
-		case '\t':
-		case '.':
-		case '\\':
-		case '/':
-			filename[ 0 ] = '_';
-			break;
-		}
-	}
+	return m_nDebugID;
 }
 
 /*
@@ -793,37 +733,11 @@ void CLog::Close( void )
 {
 	if ( m_hLogFile != FILESYSTEM_INVALID_HANDLE )
 	{
-		Printf( "Log file closed.\n" );
+		Printf( "Log file closed\n" );
 		g_pFileSystem->Close( m_hLogFile );
-
-		if ( sv_logfilecompress.GetBool() )
-		{
-			// Try to compress m_LogFilename to m_LogFilename.gz.
-			if ( gzip_file_compress( m_LogFilename ) )
-			{
-				Msg( "  Success. Removing %s.\n", m_LogFilename.Get() );
-				g_pFileSystem->RemoveFile( m_LogFilename, "LOGDIR" );
-			}
-		}
 	}
 
 	m_hLogFile = FILESYSTEM_INVALID_HANDLE;
-	m_LogFilename = NULL;
-}
-
-/*
-====================
-Log_Flush
-
-Flushes the log file to disk
-====================
-*/
-void CLog::Flush( void )
-{
-	if ( m_hLogFile != FILESYSTEM_INVALID_HANDLE )
-	{
-		g_pFileSystem->Flush( m_hLogFile );
-	}
 }
 
 /*
@@ -835,63 +749,85 @@ Open logging file
 */
 void CLog::Open( void )
 {
-	if ( !m_bActive || !sv_logfile.GetBool() )
-		return;
+	char szFileBase[ MAX_OSPATH ];
+	char szTestFile[ MAX_OSPATH ];
+	int i;
+	FileHandle_t fp = 0;
 
-	// Do we already have a log file (and we only want one)?
-	if ( m_hLogFile && sv_log_onefile.GetBool() )
+	if ( !m_bActive || !sv_logfile.GetInt() )
+	{
 		return;
+	}
+
+	// do we already have a log file (and we only want one)?
+	if ( m_hLogFile && sv_log_onefile.GetInt() )
+	{
+		return;		
+	}
 
 	Close();
 
-	// Find a new log file slot.
+	// Find a new log file slot
 	tm today;
-	VCRHook_LocalTime( &today );
+	Plat_GetLocalTime( &today );
+	const char *pszLogsDir = sv_logsdir.GetString();
 
 	// safety check for invalid paths
-	const char *pszLogsDir = sv_logsdir.GetString();
 	if ( !COM_IsValidPath( pszLogsDir ) )
+	{
 		pszLogsDir = "logs";
-
-	// Get the logfilename format string.
-	char szLogFilename[ MAX_OSPATH ];
-	szLogFilename[ 0 ] = 0;
-
-	const char *logfilename_format = sv_logfilename_format.GetString();
-	if ( logfilename_format && logfilename_format[ 0 ] )
-	{
-		// Call strftime with the logfilename format.
-		strftime( szLogFilename, sizeof( szLogFilename ), logfilename_format, &today );
-
-		// Make sure it's nil terminated.
-		szLogFilename[ sizeof( szLogFilename ) - 1 ] = 0;
-
-		// Trim any leading and trailing whitespace.
-		Q_AggressiveStripPrecedingAndTrailingWhitespace( szLogFilename );
 	}
-	if ( !szLogFilename[ 0 ] )
+		
+	// Build a filename that will remain unique even if all games everywhere piled in to the same directory
+	ConVar *hostip = cvar->FindVar( "hostip" );
+	int ip = hostip->GetInt();
+	int ipparts[4];
+	ipparts[0] = (ip >> 24) & 0xff;
+	ipparts[1] = (ip >> 16) & 0xff;
+	ipparts[2] = (ip >> 8) & 0xff;
+	ipparts[3] = (ip) & 0xff;
+	int port = NET_GetUDPPort( NS_SERVER );
+
+	Q_snprintf( szFileBase, sizeof( szFileBase ), "%s/L%03i_%03i_%03i_%03i_%i_%04i%02i%02i%02i%02i_", 
+		pszLogsDir, ipparts[0], ipparts[1], ipparts[2], ipparts[3], port, today.tm_year + 1900, today.tm_mon + 1, today.tm_mday, today.tm_hour, today.tm_min );
+
+	for ( i = 0; i < 1000; i++ )
 	{
-		// If we got nothing, default to old month / day of month behavior.
-		V_sprintf_safe( szLogFilename, "L%02i%02i", today.tm_mon + 1, today.tm_mday );
+		Q_snprintf( szTestFile, sizeof( szTestFile ), "%s%03i.log", szFileBase, i );
+
+		Q_FixSlashes( szTestFile );
+		COM_CreatePath( szTestFile );
+
+		fp = g_pFileSystem->Open( szTestFile, "r", "LOGDIR" );
+		if ( !fp )
+		{
+			COM_CreatePath( szTestFile );
+
+			fp = g_pFileSystem->Open( szTestFile, "wt", "LOGDIR" );
+			if ( !fp )
+			{
+				i = 1000;
+			}
+			else
+			{
+				ConMsg( "Server logging data to file %s\n", szTestFile );
+			}
+			break;
+		}
+		g_pFileSystem->Close( fp );
 	}
 
-	// Replace any screwy characters with underscores.
-	FixupInvalidPathChars( szLogFilename );
-
-	char szFileBase[ MAX_OSPATH ];
-	V_sprintf_safe( szFileBase, "%s/%s", pszLogsDir, szLogFilename );
-
-	// Try to get a free file.
-	TempFilename_t info;
-	if ( !CreateTempFilename( info, szFileBase, "log", false ) )
+	if ( i == 1000 )
 	{
 		ConMsg( "Unable to open logfiles under %s\nLogging disabled\n", szFileBase );
 		return;
 	}
 
-	m_hLogFile = info.fh.file;
-	m_LogFilename = info.Filename;
-
-	ConMsg( "Server logging data to file %s\n", m_LogFilename.Get() );
-	Printf( "Log file started (file \"%s\") (game \"%s\") (version \"%i\")\n", m_LogFilename.Get(), com_gamedir, build_number() );
+	if ( fp )
+	{
+		m_hLogFile = fp;
+	}
+	Printf( "Log file started (file \"%s\") (game \"%s\") (version \"%i\")\n", szTestFile, com_gamedir, build_number() );
 }
+
+

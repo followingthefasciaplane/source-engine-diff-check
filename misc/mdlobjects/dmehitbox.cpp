@@ -1,12 +1,15 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =====//
 //
 // Dme version of a hitbox
 //
 //===========================================================================//
 
-#include "mdlobjects/dmehitbox.h"
+
+// Valve includes
 #include "datamodel/dmelementfactoryhelper.h"
+#include "mdlobjects/dmehitbox.h"
 #include "tier2/renderutils.h"
+
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -23,14 +26,20 @@ IMPLEMENT_ELEMENT_FACTORY( DmeHitbox, CDmeHitbox );
 //-----------------------------------------------------------------------------
 void CDmeHitbox::OnConstruction()
 {
-	m_SurfaceProperty.Init( this, "surfaceProperty" );
-	m_Group.Init( this, "groupName" );
-	m_Bone.Init( this, "boneName" );
-	m_vecMins.Init( this, "minBounds" );
-	m_vecMaxs.Init( this, "maxBounds" );
-	m_RenderColor.InitAndSet( this, "renderColor", Color( 255, 255, 255, 64 ) );
+	m_sSurfaceProperty.Init( this, "surfaceProperty" );
+	m_nGroupId.Init( this, "groupId" );
+	m_sBoneName.Init( this, "boneName" );
+	m_cRenderColor.InitAndSet( this, "renderColor", Color( 255, 255, 255, 64 ) );
+
+	// Set by CDmeBBox to FLT_MAX, -FLT_MAX
+	m_vMinBounds = Vector( 0.0f, 0.0f, 0.0f );
+	m_vMaxBounds = Vector( 0.0f, 0.0f, 0.0f );
 }
 
+
+//-----------------------------------------------------------------------------
+//
+//-----------------------------------------------------------------------------
 void CDmeHitbox::OnDestruction()
 {
 }
@@ -44,6 +53,5 @@ void CDmeHitbox::Draw( const matrix3x4_t &shapeToWorld, CDmeDrawSettings *pDrawS
 	Vector vecOrigin;
 	QAngle angles;
 	MatrixAngles( shapeToWorld, angles, vecOrigin );
-	RenderBox( vecOrigin, angles, m_vecMins, m_vecMaxs, m_RenderColor, true );
+	RenderBox( vecOrigin, angles, m_vMinBounds, m_vMaxBounds, m_cRenderColor, true );
 }
-

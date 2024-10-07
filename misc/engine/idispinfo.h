@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -26,7 +26,6 @@
 #include "engine/ishadowmgr.h"
 #include "getintersectingsurfaces_struct.h"
 #include "surfacehandle.h"
-#include "ivrenderview.h"
 
 struct model_t;
 struct Ray_t;
@@ -115,11 +114,6 @@ int				DispInfo_AddShadowsToMeshBuilder( CMeshBuilder& meshBuilder,
 typedef void* HDISPINFOARRAY;
 
 
-// Init and shutdown for the material system (references global, materials).
-void			DispInfo_InitMaterialSystem();
-void			DispInfo_ShutdownMaterialSystem();
-
-
 // Use these to manage a list of IDispInfos.
 HDISPINFOARRAY	DispInfo_CreateArray( int nElements );
 void			DispInfo_DeleteArray( HDISPINFOARRAY hArray );
@@ -129,10 +123,12 @@ int				DispInfo_ComputeIndex( HDISPINFOARRAY hArray, IDispInfo* pInfo );
 // Clear the tags for all displacements in the array.
 void			DispInfo_ClearAllTags( HDISPINFOARRAY hArray );
 
+
 // Call this to render a list of displacements.
 // If bOrtho is true, then no backface removal is done on dispinfos.
-void			DispInfo_RenderList( int nSortGroup, SurfaceHandle_t *pList, int listCount, bool bOrtho, unsigned long flags, ERenderDepthMode DepthMode );
-
+void			DispInfo_RenderListWorld( class IMatRenderContext *pRenderContext, int nSortGroup, SurfaceHandle_t *pList, int listCount, bool bOrtho, unsigned long flags, int DepthMode );
+void			DispInfo_RenderListDecalsAndOverlays( class IMatRenderContext *pRenderContext, int nSortGroup, SurfaceHandle_t *pList, int listCount, bool bOrtho, unsigned long flags );
+void			DispInfo_RenderListDebug( IMatRenderContext *pRenderContext, SurfaceHandle_t *pList, int listCount );
 
 // This should be called from Map_LoadDisplacements (while the map file is open).
 // It loads the displacement data from the file and prepares the displacements for rendering.

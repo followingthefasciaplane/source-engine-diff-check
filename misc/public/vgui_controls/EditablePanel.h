@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright � 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -37,6 +37,8 @@ public:
 	virtual void LoadControlSettings(const char *dialogResourceName, const char *pathID = NULL, KeyValues *pPreloadedKeyValues = NULL, KeyValues *pConditions = NULL);
 	virtual void ApplySettings(KeyValues *inResourceData);
 
+	virtual void PerformLayout();
+
 	// sets the name of this dialog so it can be saved in the user config area
 	// use dialogID to differentiate multiple instances of the same dialog
 	virtual void LoadUserConfig(const char *configName, int dialogID = 0);
@@ -70,7 +72,7 @@ public:
 	virtual void GetControlString(const char *controlName, char *buf, int bufSize, const char *defaultString = "");
 	// sets the enabled state of a control
 	virtual void SetControlEnabled(const char *controlName, bool enabled);
-	virtual void SetControlVisible(const char *controlName, bool visible, bool bRecurseDown = false );
+	virtual void SetControlVisible(const char *controlName, bool visible);
 
 	// localization variables (used in constructing UI strings)
 	// after the variable is set, causes all the necessary sub-panels to update
@@ -93,7 +95,7 @@ public:
 	// Get the panel with the specified hotkey
 	virtual Panel *HasHotkey(wchar_t key);
 
-	virtual void OnKeyCodePressed( KeyCode code );
+	virtual void OnKeyCodeTyped( KeyCode code );
 
 	// Handle information requests
 	virtual bool RequestInfo(KeyValues *data);
@@ -116,7 +118,6 @@ public:
 	// localization variables - only use this if you need to iterate the variables, use the SetLoc*() to set them
 	KeyValues *GetDialogVariables();
 
-	bool ShouldSkipAutoResize() const { return m_bShouldSkipAutoResize; }
 protected:
 	virtual void PaintBackground();
 
@@ -156,7 +157,6 @@ private:
 	// the wide and tall to which all controls are locked - used for autolayout deltas
 	char *m_pszConfigName;
 	int m_iConfigID;
-	bool m_bShouldSkipAutoResize;
 };
 
 } // namespace vgui

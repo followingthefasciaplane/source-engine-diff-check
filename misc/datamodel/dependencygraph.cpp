@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -67,8 +67,8 @@ bool HashEntryCompareFunc( CAttributeNode *const& lhs, CAttributeNode *const& rh
 
 uint HashEntryKeyFunc( CAttributeNode *const& keyinfo )
 {
-	uint i = (uint)keyinfo->m_attribute;
-	return i >> 2; // since memory is allocated on a 4-byte (at least!) boundary
+	uintp i = (uintp)keyinfo->m_attribute;
+	return uint( i >> 2 ); // since memory is allocated on a 4-byte (at least!) boundary
 }
 
 //-----------------------------------------------------------------------------
@@ -244,6 +244,12 @@ bool CDependencyGraph::CullAndSortOperators()
 	{
 		V_swap( m_operators[ oi ], m_operators[ on - oi - 1 ] );
 	}
+
+	for ( int oi = 0; oi < on; ++oi )
+	{
+		m_operators[ oi ]->SetSortKey( oi );
+	}
+
 	return cycle;
 
 //	return GetOperatorOrdering( m_opLeaves, operators ); // roots to leaves (inputs to outputs)
@@ -327,5 +333,5 @@ CAttributeNode *CDependencyGraph::FindAttrNode( CDmAttribute *pAttr )
 void CDependencyGraph::DBG_PrintOperator( const char *pIndent, IDmeOperator *pOp )
 {
 	CDmElement *pElement = dynamic_cast< CDmElement* >( pOp );
-	Msg( "%s%s <%s> {\n", pIndent, pElement->GetName(), pElement->GetTypeString() );
+	Msg( "%s%s <%s> {\n", pIndent, pElement->GetName(), pElement->GetType().String() );
 }

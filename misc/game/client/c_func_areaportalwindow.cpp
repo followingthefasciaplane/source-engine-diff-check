@@ -1,10 +1,10 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
 // $NoKeywords: $
 //
-//=============================================================================//
+//===========================================================================//
 #include "cbase.h"
 #include "view.h"
 #include "model_types.h"
@@ -25,17 +25,13 @@ public:
 
 // Overrides.
 public:
-
-	virtual void	ComputeFxBlend();
-	virtual bool	IsTransparent();
-	virtual int		DrawModel( int flags );
+	RenderableTranslucencyType_t ComputeTranslucencyType( void );
+	virtual int		DrawModel( int flags, const RenderableInstance_t &instance );
 	virtual bool	ShouldReceiveProjectedTextures( int flags );
 
 private:
 
 	float			GetDistanceBlend();
-
-
 
 public:
 	float			m_flFadeStartDist;	// Distance at which it starts fading (when <= this, alpha=m_flTranslucencyLimit).
@@ -57,26 +53,12 @@ IMPLEMENT_CLIENTCLASS_DT( C_FuncAreaPortalWindow, DT_FuncAreaPortalWindow, CFunc
 END_RECV_TABLE()
 
 
-
-void C_FuncAreaPortalWindow::ComputeFxBlend()
+RenderableTranslucencyType_t C_FuncAreaPortalWindow::ComputeTranslucencyType( void )
 {
-	// We reset our blend down below so pass anything except 0 to the renderer.
-	m_nRenderFXBlend = 255;
-
-#ifdef _DEBUG
-	m_nFXComputeFrame = gpGlobals->framecount;
-#endif
-
+	return RENDERABLE_IS_TRANSLUCENT;
 }
 
-
-bool C_FuncAreaPortalWindow::IsTransparent()
-{
-	return true;
-}
-
-
-int C_FuncAreaPortalWindow::DrawModel( int flags )
+int C_FuncAreaPortalWindow::DrawModel( int flags, const RenderableInstance_t &instance )
 {
 	if ( !m_bReadyToDraw )
 		return 0;
@@ -90,7 +72,11 @@ int C_FuncAreaPortalWindow::DrawModel( int flags )
 		return 0;
 
 	// Draw the fading version.
-	render->SetBlend( GetDistanceBlend() );
+	float flBlendAlpha = GetDistanceBlend(); 
+	if ( flBlendAlpha == 0.0f )
+		return 0;
+
+	render->SetBlend( flBlendAlpha );
 
 	DrawBrushModelMode_t mode = DBM_DRAW_ALL;
 	if ( flags & STUDIO_TWOPASS )
@@ -124,7 +110,6 @@ int C_FuncAreaPortalWindow::DrawModel( int flags )
 
 	return 1;
 }
-
 
 float C_FuncAreaPortalWindow::GetDistanceBlend()
 {

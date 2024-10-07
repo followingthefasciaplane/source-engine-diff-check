@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -41,7 +41,7 @@ public:
 	void DampenEyePosition( Vector &vecVehicleEyePos, QAngle &vecVehicleEyeAngles );
 
 	void OnEnteredVehicle( C_BasePlayer *pPlayer );
-	void Simulate( void );
+	bool Simulate( void );
 
 private:
 

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//======= Copyright 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -6,6 +6,9 @@
 
 #include "bitmap/bitmap.h"
 #include "dbg.h"
+#include "utlbuffer.h"
+#include "bitmap/psd.h"
+#include "bitmap/tgaloader.h"
 
 // Should be last include
 #include "tier0/memdbgon.h"
@@ -387,7 +390,7 @@ void Bitmap_t::Crop( int x0, int y0, int nWidth, int nHeight, const Bitmap_t *pI
 	int nRowSize = m_nWidth * m_nPixelSize;
 	for ( int y = 0 ; y < m_nHeight ; ++y )
 	{
-		memcpy( GetPixel(0,y), pImgSource->GetPixel( x0, y + y0 ), nRowSize );
+		memcpy( GetPixel(y,0), pImgSource->GetPixel( x0, y + y0 ), nRowSize );
 	}
 }
 
@@ -457,5 +460,319 @@ void Bitmap_t::SetPixelData( const Bitmap_t &src, int nSrcX1, int nSrcY1, int nC
 void Bitmap_t::SetPixelData( const Bitmap_t &src, int nDestX1, int nDestY1 )
 {
 	SetPixelData( src, 0, 0, src.Width(), src.Height(), nDestX1, nDestY1 );
+}
+
+//-----------------------------------------------------------------------------
+// Returns true if it's a PFM file
+//-----------------------------------------------------------------------------
+bool IsPFMFile( CUtlBuffer &buf )
+{
+	int nGet = buf.TellGet();
+	char c0 = buf.GetChar();
+	char c1 = buf.GetChar();
+	char c2 = buf.GetChar();
+	buf.SeekGet( CUtlBuffer::SEEK_HEAD, nGet );
+
+	return ( c0 == 'P' && ( c1 == 'F' || c1 == 'f' ) && c2 == 0xA );
+}
+
+
+//-----------------------------------------------------------------------------
+// This reads an integer from a binary CUtlBuffer.
+//-----------------------------------------------------------------------------
+static int ReadIntFromUtlBuffer( CUtlBuffer &buf )
+{
+	int val = 0;
+	int c;
+	while( buf.IsValid() )
+	{
+		c = buf.GetChar();
+		if( c >= '0' && c <= '9' )
+		{
+			val = val * 10 + ( c - '0' );
+		}
+		else
+		{
+			buf.SeekGet( CUtlBuffer::SEEK_CURRENT, -1 );
+			break;
+		}
+	}
+	return val;
+}
+
+static inline bool IsWhitespace( char c )
+{
+	return c == ' ' || c == '\t' || c == 10;
+}
+
+static void EatWhiteSpace( CUtlBuffer &buf )
+{
+	while( buf.IsValid() )
+	{
+		int	c = buf.GetChar();
+		if( !IsWhitespace( c ) )
+		{
+			buf.SeekGet( CUtlBuffer::SEEK_CURRENT, -1 );
+			return;
+		}
+	}
+	return;
+}
+
+
+//-----------------------------------------------------------------------------
+// Reads PFM info + advances to the texture bits
+//-----------------------------------------------------------------------------
+bool PFMGetInfo_AndAdvanceToTextureBits( CUtlBuffer &pfmBuffer, int &nWidth, int &nHeight, ImageFormat &imageFormat )
+{
+	pfmBuffer.SeekGet( CUtlBuffer::SEEK_HEAD, 0 );
+	if( pfmBuffer.GetChar() != 'P' )
+	{
+		Assert( 0 );
+		return false;
+	}
+	char c = pfmBuffer.GetChar();
+	if ( c == 'F' )
+	{
+		imageFormat = IMAGE_FORMAT_RGB323232F;
+	}
+	else if ( c == 'f' )
+	{
+		imageFormat = IMAGE_FORMAT_R32F;
+	}
+	else
+	{
+		Assert( 0 );
+		return false;
+	}
+
+	if( pfmBuffer.GetChar() != 0xa )
+	{
+		Assert( 0 );
+		return false;
+	}
+	nWidth = ReadIntFromUtlBuffer( pfmBuffer );
+	EatWhiteSpace( pfmBuffer );
+	nHeight = ReadIntFromUtlBuffer( pfmBuffer );
+
+	// eat crap until the next newline
+	while( pfmBuffer.IsValid() && pfmBuffer.GetChar() != 0xa )
+	{
+	}
+
+	int nScale = ReadIntFromUtlBuffer( pfmBuffer );
+
+	// eat crap until the next newline
+	while( pfmBuffer.IsValid() && pfmBuffer.GetChar() != 0xa )
+	{
+	}
+
+	if ( nScale > 0 )
+	{
+		pfmBuffer.SetBigEndian( true );
+	}
+
+	// Here, the buffer should be at the start of the texture data
+	return true;
+}
+
+
+//-----------------------------------------------------------------------------
+// Loads a PFM file into a Bitmap_t as RGBA32323232F data
+// PFM source data doesn't have alpha, so we put 1.0f into alpha
+//-----------------------------------------------------------------------------
+bool PFMReadFileRGBA32323232F( CUtlBuffer &fileBuffer, Bitmap_t &bitmap, float pfmScale )
+{
+	int nWidth = 0, nHeight = 0;
+	ImageFormat imageFormat = IMAGE_FORMAT_UNKNOWN;
+	PFMGetInfo_AndAdvanceToTextureBits( fileBuffer, nWidth, nHeight, imageFormat );		// Read the header (advances us to the texture bits)
+	Assert( imageFormat == IMAGE_FORMAT_RGB323232F );
+
+	bitmap.Init( nWidth, nHeight, IMAGE_FORMAT_RGBA32323232F );	// Init the bitmap
+
+	// NOTE: PFMs are displayed *UPSIDE-DOWN* in Photoshop! (as of CS2... HDRShop gets it right)
+	//       Reading rows in reverse order here is the correct thing to do:
+	for( int y = ( nHeight - 1 ); y >= 0; y-- )
+	{
+		Assert( fileBuffer.IsValid() );
+		if ( !fileBuffer.IsValid() )
+			return false;
+
+		float *pOut = ( (float *)bitmap.GetBits() ) + y*nWidth*4;	// Point to output row
+
+		for ( int x = 0; x < nWidth; x++ )						// For every RGB input color
+		{
+			fileBuffer.Get( pOut, sizeof( float ) );			// Get red
+			*pOut *= pfmScale;									// Scale into output
+			pOut++;
+			fileBuffer.Get( pOut, sizeof( float ) );			// Get green
+			*pOut *= pfmScale;									// Scale into output
+			pOut++;
+			fileBuffer.Get( pOut, sizeof( float ) );			// Get blue
+			*pOut *= pfmScale;									// Scale into output
+			pOut++;
+			*pOut = 1.0f;										// 1.0f into alpha
+			pOut++;
+		}
+	}
+
+	return true;
+}
+
+
+//-----------------------------------------------------------------------------
+// Loads a PFM file into a Bitmap_t as RGB323232F data
+//-----------------------------------------------------------------------------
+bool PFMReadFileRGB323232F( CUtlBuffer &fileBuffer, Bitmap_t &bitmap, float pfmScale )
+{
+	// Read the header (advances us to the texture bits)
+	int nWidth = 0, nHeight = 0;
+	ImageFormat imageFormat = IMAGE_FORMAT_UNKNOWN;
+	PFMGetInfo_AndAdvanceToTextureBits( fileBuffer, nWidth, nHeight, imageFormat );
+	Assert( imageFormat == IMAGE_FORMAT_RGB323232F );
+
+	// Init the bitmap
+	bitmap.Init( nWidth, nHeight, IMAGE_FORMAT_RGB323232F );
+
+	// Read the texels
+	for( int y = ( nHeight - 1 ); y >= 0; y-- )
+	{
+		Assert( fileBuffer.IsValid() );
+		if ( !fileBuffer.IsValid() )
+			return false;
+
+		// NOTE: PFMs are displayed *UPSIDE-DOWN* in Photoshop! (as of CS2... HDRShop gets it right)
+		//       Reading rows in reverse order here is the correct thing to do:
+		float *pRow = ( (float *)bitmap.GetBits() ) + y*nWidth*3;
+
+		fileBuffer.Get( pRow, nWidth*3*sizeof( float ) );
+		for ( int x = 0; x < nWidth*3; x++ )
+		{
+			pRow[ x ] *= pfmScale;
+		}
+	}
+
+	return true;
+}
+
+
+//-----------------------------------------------------------------------------
+// Loads the x channel of a PFM file into a Bitmap_t as R32F data
+//-----------------------------------------------------------------------------
+bool PFMReadFileR32F( CUtlBuffer &fileBuffer, Bitmap_t &bitmap, float pfmScale )
+{
+	// Read the header (advances us to the texture bits)
+	int nWidth, nHeight;
+	ImageFormat fileImageFormat; // Format of data in file
+	PFMGetInfo_AndAdvanceToTextureBits( fileBuffer, nWidth, nHeight, fileImageFormat );
+	Assert( fileImageFormat == IMAGE_FORMAT_RGB323232F );
+
+	// Init the bitmap
+	bitmap.Init( nWidth, nHeight, IMAGE_FORMAT_R32F );
+
+	float flMin = FLOAT32_MAX;
+	float flMax = FLOAT32_MIN;
+
+	// Read the texels, snarfing out just the x component
+	for( int y = ( nHeight - 1 ); y >= 0; y-- )
+	{
+		Assert( fileBuffer.IsValid() );
+		if ( !fileBuffer.IsValid() )
+			return false;
+
+		// NOTE: PFMs are displayed *UPSIDE-DOWN* in Photoshop! (as of CS2... HDRShop gets it right)
+		//       Reading rows in reverse order here is the correct thing to do:
+		float *pRow = ( (float *)bitmap.GetBits() ) + y*nWidth;
+
+		for ( int x = 0; x < nWidth; x++ )
+		{
+			fileBuffer.Get( pRow+x, sizeof( float ) );		// Grab x component and scale
+			pRow[x] *= pfmScale;
+
+			flMin = MIN( pRow[x], flMin );
+			flMax = MAX( pRow[x], flMax );
+
+			float flDummy[2];
+			fileBuffer.Get( &flDummy, 2*sizeof( float ) );	// Jump past y and z components in file
+		}
+	}
+
+	printf( "Displacement Range: (%g, %g)\n", flMin, flMax );
+
+	return true;
+}
+
+
+//-----------------------------------------------------------------------------
+// Loads a PFM file into a Bitmap_t
+//-----------------------------------------------------------------------------
+bool PFMReadFile( CUtlBuffer &buf, Bitmap_t *pBitmap )
+{
+	// Read the header (advances us to the texture bits)
+	int nWidth = 0, nHeight = 0;
+	ImageFormat fmt = IMAGE_FORMAT_UNKNOWN;
+	PFMGetInfo_AndAdvanceToTextureBits( buf, nWidth, nHeight, fmt );
+
+	// Init the bitmap
+	pBitmap->Init( nWidth, nHeight, fmt );
+
+	int nRowBytes = ImageLoader::GetMemRequired( nWidth, 1, 1, 1, fmt );
+
+	// Read the texels
+	for( int y = ( nHeight - 1 ); y >= 0; y-- )
+	{
+		Assert( buf.IsValid() );
+		if ( !buf.IsValid() )
+			return false;
+
+		// NOTE: PFMs are displayed *UPSIDE-DOWN* in Photoshop! (as of CS2... HDRShop gets it right)
+		//       Reading rows in reverse order here is the correct thing to do:
+		void *pDest = pBitmap->GetBits() + y * nRowBytes;
+		buf.Get( pDest, nRowBytes );
+	}
+
+	return true;
+}
+
+
+//-----------------------------------------------------------------------------
+// Loads a bitmap from an arbitrary file: could be a TGA, PSD, or PFM.
+// LoadBitmap autodetects which type
+//-----------------------------------------------------------------------------
+BitmapFileType_t LoadBitmapFile( CUtlBuffer &buf, Bitmap_t *pBitmap )
+{
+	if ( IsPSDFile( buf ) )
+	{
+		// FIXME: Make it actually load the true format
+		if ( !PSDReadFileRGBA8888( buf, *pBitmap ) )
+			return BITMAP_FILE_TYPE_UNKNOWN;
+		return BITMAP_FILE_TYPE_PSD;
+	}
+
+	if ( IsPFMFile( buf ) )
+	{
+		if ( !PFMReadFile( buf, pBitmap ) )
+			return BITMAP_FILE_TYPE_UNKNOWN;
+		return BITMAP_FILE_TYPE_PFM;
+	}
+
+	// It's not really possible to detect TGAness.. there's no identifier
+	// Assume TGA file here
+	int nWidth, nHeight;
+	ImageFormat fmt;
+	float flGamma;
+	int nGet = buf.TellGet();
+	bool bOk = TGALoader::GetInfo( buf, &nWidth, &nHeight, &fmt, &flGamma );
+	buf.SeekGet( CUtlBuffer::SEEK_HEAD, nGet );
+	if ( !bOk )
+		return BITMAP_FILE_TYPE_UNKNOWN;
+
+	// FIXME: TGALoader is incredibly inefficient when trying to just get
+	// the bits as-is as it loads into RGBA8888 and then color converts out
+	pBitmap->Init( nWidth, nHeight, fmt );
+	if ( !TGALoader::Load( pBitmap->GetBits(), buf, nWidth, nHeight, fmt, flGamma, false ) )
+		return BITMAP_FILE_TYPE_UNKNOWN;
+
+	return BITMAP_FILE_TYPE_TGA;
 }
 

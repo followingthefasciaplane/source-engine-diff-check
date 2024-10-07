@@ -1,3 +1,7 @@
+// ALL SKIP STATEMENTS THAT AFFECT THIS SHADER!!!
+// ( $DOWATERFOG == 0 ) && ( $DOPIXELFOG && $HARDWAREFOGBLEND )
+// ( $DOWATERFOG == 0 ) && ( $HARDWAREFOGBLEND == 0 ) && ( $DOPIXELFOG == 0 )
+// defined $LIGHTING_PREVIEW && defined $FASTPATH && $LIGHTING_PREVIEW && $FASTPATH
 #include "shaderlib/cshader.h"
 class cloak_vs30_Static_Index
 {
@@ -17,28 +21,82 @@ public:
 	}
 	void SetMODEL( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nMODEL = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bMODEL = true;
 #endif
 	}
+private:
+	int m_nDOPIXELFOG;
+#ifdef _DEBUG
+	bool m_bDOPIXELFOG;
+#endif
 public:
-	cloak_vs30_Static_Index( )
+	void SetDOPIXELFOG( int i )
+	{
+		Assert( i >= 0 && i <= 1 );
+		m_nDOPIXELFOG = i;
+#ifdef _DEBUG
+		m_bDOPIXELFOG = true;
+#endif
+	}
+	void SetDOPIXELFOG( bool i )
+	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
+		m_nDOPIXELFOG = i ? 1 : 0;
+#ifdef _DEBUG
+		m_bDOPIXELFOG = true;
+#endif
+	}
+private:
+	int m_nHARDWAREFOGBLEND;
+#ifdef _DEBUG
+	bool m_bHARDWAREFOGBLEND;
+#endif
+public:
+	void SetHARDWAREFOGBLEND( int i )
+	{
+		Assert( i >= 0 && i <= 0 );
+		m_nHARDWAREFOGBLEND = i;
+#ifdef _DEBUG
+		m_bHARDWAREFOGBLEND = true;
+#endif
+	}
+	void SetHARDWAREFOGBLEND( bool i )
+	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 0 );
+		m_nHARDWAREFOGBLEND = i ? 1 : 0;
+#ifdef _DEBUG
+		m_bHARDWAREFOGBLEND = true;
+#endif
+	}
+public:
+	// CONSTRUCTOR
+	cloak_vs30_Static_Index( IShaderShadow *pShaderShadow, IMaterialVar **params )
 	{
 #ifdef _DEBUG
 		m_bMODEL = false;
 #endif // _DEBUG
 		m_nMODEL = 0;
+#ifdef _DEBUG
+		m_bDOPIXELFOG = true;
+#endif // _DEBUG
+		m_nDOPIXELFOG = g_pHardwareConfig->SupportsPixelShaders_2_b() ;
+#ifdef _DEBUG
+		m_bHARDWAREFOGBLEND = true;
+#endif // _DEBUG
+		m_nHARDWAREFOGBLEND = 0 ;
 	}
 	int GetIndex()
 	{
 		// Asserts to make sure that we aren't using any skipped combinations.
 		// Asserts to make sure that we are setting all of the combination vars.
 #ifdef _DEBUG
-		bool bAllStaticVarsDefined = m_bMODEL;
+		bool bAllStaticVarsDefined = m_bMODEL && m_bDOPIXELFOG && m_bHARDWAREFOGBLEND;
 		Assert( bAllStaticVarsDefined );
 #endif // _DEBUG
-		return ( 16 * m_nMODEL ) + 0;
+		return ( 8 * m_nMODEL ) + ( 16 * m_nDOPIXELFOG ) + ( 32 * m_nHARDWAREFOGBLEND ) + 0;
 	}
 };
 #define shaderStaticTest_cloak_vs30 vsh_forgot_to_set_static_MODEL + 0
@@ -60,6 +118,7 @@ public:
 	}
 	void SetCOMPRESSED_VERTS( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nCOMPRESSED_VERTS = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bCOMPRESSED_VERTS = true;
@@ -81,6 +140,7 @@ public:
 	}
 	void SetDOWATERFOG( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nDOWATERFOG = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bDOWATERFOG = true;
@@ -102,6 +162,7 @@ public:
 	}
 	void SetSKINNING( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 1 );
 		m_nSKINNING = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bSKINNING = true;
@@ -115,7 +176,7 @@ private:
 public:
 	void SetMORPHING( int i )
 	{
-		Assert( i >= 0 && i <= 1 );
+		Assert( i >= 0 && i <= 0 );
 		m_nMORPHING = i;
 #ifdef _DEBUG
 		m_bMORPHING = true;
@@ -123,30 +184,32 @@ public:
 	}
 	void SetMORPHING( bool i )
 	{
+		Assert( ( i ? 1 : 0 ) >= 0 && ( i ? 1 : 0 ) <= 0 );
 		m_nMORPHING = i ? 1 : 0;
 #ifdef _DEBUG
 		m_bMORPHING = true;
 #endif
 	}
 public:
-	cloak_vs30_Dynamic_Index()
+	// CONSTRUCTOR
+	cloak_vs30_Dynamic_Index( IShaderDynamicAPI *pShaderAPI )
 	{
 #ifdef _DEBUG
 		m_bCOMPRESSED_VERTS = false;
 #endif // _DEBUG
 		m_nCOMPRESSED_VERTS = 0;
 #ifdef _DEBUG
-		m_bDOWATERFOG = false;
+		m_bDOWATERFOG = true;
 #endif // _DEBUG
-		m_nDOWATERFOG = 0;
+		m_nDOWATERFOG = ( pShaderAPI->GetSceneFogMode() == MATERIAL_FOG_LINEAR_BELOW_FOG_Z ) ;
 #ifdef _DEBUG
 		m_bSKINNING = false;
 #endif // _DEBUG
 		m_nSKINNING = 0;
 #ifdef _DEBUG
-		m_bMORPHING = false;
+		m_bMORPHING = true;
 #endif // _DEBUG
-		m_nMORPHING = 0;
+		m_nMORPHING = false ;
 	}
 	int GetIndex()
 	{
@@ -159,4 +222,34 @@ public:
 		return ( 1 * m_nCOMPRESSED_VERTS ) + ( 2 * m_nDOWATERFOG ) + ( 4 * m_nSKINNING ) + ( 8 * m_nMORPHING ) + 0;
 	}
 };
-#define shaderDynamicTest_cloak_vs30 vsh_forgot_to_set_dynamic_COMPRESSED_VERTS + vsh_forgot_to_set_dynamic_DOWATERFOG + vsh_forgot_to_set_dynamic_SKINNING + vsh_forgot_to_set_dynamic_MORPHING + 0
+#define shaderDynamicTest_cloak_vs30 vsh_forgot_to_set_dynamic_COMPRESSED_VERTS + vsh_forgot_to_set_dynamic_SKINNING + 0
+
+static const ShaderComboInformation_t s_DynamicComboArray_cloak_vs30[4] = 
+{
+	{ "COMPRESSED_VERTS", 0, 1 },
+	{ "DOWATERFOG", 0, 1 },
+	{ "SKINNING", 0, 1 },
+	{ "MORPHING", 0, 0 },
+};
+
+static const ShaderComboInformation_t s_StaticComboArray_cloak_vs30[3] = 
+{
+	{ "MODEL", 0, 1 },
+	{ "DOPIXELFOG", 0, 1 },
+	{ "HARDWAREFOGBLEND", 0, 0 },
+};
+static const ShaderComboSemantics_t cloak_vs30_combos =
+{
+	"cloak_vs30", s_DynamicComboArray_cloak_vs30, 4, s_StaticComboArray_cloak_vs30, 3 
+};
+
+class ConstructMe_cloak_vs30
+{
+public:
+	ConstructMe_cloak_vs30()
+	{
+		GetShaderDLL()->AddShaderComboInformation( &cloak_vs30_combos );
+	}
+};
+
+static ConstructMe_cloak_vs30 s_ConstructMe_cloak_vs30;

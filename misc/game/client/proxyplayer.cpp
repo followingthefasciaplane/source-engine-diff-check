@@ -1,23 +1,27 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright  1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
 // $NoKeywords: $
 //=============================================================================//
 #include "cbase.h"
-#include <KeyValues.h>
+
+#include <keyvalues.h>
 #include "materialsystem/imaterialvar.h"
 #include "materialsystem/imaterial.h"
 #include "materialsystem/itexture.h"
 #include "materialsystem/imaterialsystem.h"
 #include "functionproxy.h"
-#include "toolframework_client.h"
+#include "c_cs_player.h"
+#include "weapon_csbase.h"
+#include "predicted_viewmodel.h"
+#include "cs_client_gamestats.h"
+#include "econ/econ_item_schema.h"
+#include "cstrike15_gcconstants.h"
 
+#include "imaterialproxydict.h"
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
-
-// forward declarations
-void ToolFramework_RecordMaterialParams( IMaterial *pMaterial );
 
 //-----------------------------------------------------------------------------
 // Returns the proximity of the player to the entity
@@ -58,14 +62,9 @@ void CPlayerProximityProxy::OnBind( void *pC_BaseEntity )
 
 	Assert( m_pResult );
 	SetFloatResult( delta.Length() * m_Factor );
-
-	if ( ToolsEnabled() )
-	{
-		ToolFramework_RecordMaterialParams( GetMaterial() );
-	}
 }
 
-EXPOSE_INTERFACE( CPlayerProximityProxy, IMaterialProxy, "PlayerProximity" IMATERIAL_PROXY_INTERFACE_VERSION );
+EXPOSE_MATERIAL_PROXY( CPlayerProximityProxy, PlayerProximity );
 
 
 //-----------------------------------------------------------------------------
@@ -102,14 +101,9 @@ void CPlayerTeamMatchProxy::OnBind( void *pC_BaseEntity )
 
 	Assert( m_pResult );
 	SetFloatResult( (pEntity->GetTeamNumber() == pPlayer->GetTeamNumber()) ? 1.0 : 0.0 );
-
-	if ( ToolsEnabled() )
-	{
-		ToolFramework_RecordMaterialParams( GetMaterial() );
-	}
 }
 
-EXPOSE_INTERFACE( CPlayerTeamMatchProxy, IMaterialProxy, "PlayerTeamMatch" IMATERIAL_PROXY_INTERFACE_VERSION );
+EXPOSE_MATERIAL_PROXY( CPlayerTeamMatchProxy, PlayerTeamMatch );
 
 
 //-----------------------------------------------------------------------------
@@ -154,14 +148,9 @@ void CPlayerViewProxy::OnBind( void *pC_BaseEntity )
 
 	Assert( m_pResult );
 	SetFloatResult( DotProduct( forward, delta ) * m_Factor );
-
-	if ( ToolsEnabled() )
-	{
-		ToolFramework_RecordMaterialParams( GetMaterial() );
-	}
 }
 
-EXPOSE_INTERFACE( CPlayerViewProxy, IMaterialProxy, "PlayerView" IMATERIAL_PROXY_INTERFACE_VERSION );
+EXPOSE_MATERIAL_PROXY( CPlayerViewProxy, PlayerView );
 
 
 //-----------------------------------------------------------------------------
@@ -195,14 +184,9 @@ void CPlayerSpeedProxy::OnBind( void *pC_BaseEntity )
 
 	Assert( m_pResult );
 	SetFloatResult( pPlayer->GetLocalVelocity().Length() * m_Factor );
-
-	if ( ToolsEnabled() )
-	{
-		ToolFramework_RecordMaterialParams( GetMaterial() );
-	}
 }
 
-EXPOSE_INTERFACE( CPlayerSpeedProxy, IMaterialProxy, "PlayerSpeed" IMATERIAL_PROXY_INTERFACE_VERSION );
+EXPOSE_MATERIAL_PROXY( CPlayerSpeedProxy, PlayerSpeed );
 
 
 //-----------------------------------------------------------------------------
@@ -239,14 +223,9 @@ void CPlayerPositionProxy::OnBind( void *pC_BaseEntity )
 	Vector res;
 	VectorMultiply( pPlayer->WorldSpaceCenter(), m_Factor, res ); 
 	m_pResult->SetVecValue( res.Base(), 3 );
-
-	if ( ToolsEnabled() )
-	{
-		ToolFramework_RecordMaterialParams( GetMaterial() );
-	}
 }
 
-EXPOSE_INTERFACE( CPlayerPositionProxy, IMaterialProxy, "PlayerPosition" IMATERIAL_PROXY_INTERFACE_VERSION );
+EXPOSE_MATERIAL_PROXY( CPlayerPositionProxy, PlayerPosition );
 
 
 //-----------------------------------------------------------------------------
@@ -269,14 +248,9 @@ void CEntitySpeedProxy::OnBind( void *pC_BaseEntity )
 
 	Assert( m_pResult );
 	m_pResult->SetFloatValue( pEntity->GetLocalVelocity().Length() );
-
-	if ( ToolsEnabled() )
-	{
-		ToolFramework_RecordMaterialParams( GetMaterial() );
-	}
 }
 
-EXPOSE_INTERFACE( CEntitySpeedProxy, IMaterialProxy, "EntitySpeed" IMATERIAL_PROXY_INTERFACE_VERSION );
+EXPOSE_MATERIAL_PROXY( CEntitySpeedProxy, EntitySpeed );
 
 
 //-----------------------------------------------------------------------------
@@ -314,211 +288,521 @@ void CEntityRandomProxy::OnBind( void *pC_BaseEntity )
 
 	Assert( m_pResult );
 	m_pResult->SetFloatValue( pEntity->ProxyRandomValue() * m_Factor.GetFloat() );
-
-	if ( ToolsEnabled() )
-	{
-		ToolFramework_RecordMaterialParams( GetMaterial() );
-	}
 }
 
-EXPOSE_INTERFACE( CEntityRandomProxy, IMaterialProxy, "EntityRandom" IMATERIAL_PROXY_INTERFACE_VERSION );
+EXPOSE_MATERIAL_PROXY( CEntityRandomProxy, EntityRandom );
 
 #include "utlrbtree.h"
 
 //-----------------------------------------------------------------------------
-// Returns the player speed
+// StatTrak 'kill odometer' support: given a numerical value expressed as a string, pick a texture frame to represent a given digit
 //-----------------------------------------------------------------------------
-class CPlayerLogoProxy : public IMaterialProxy
+class CStatTrakDigitProxy : public CResultProxy
 {
 public:
-	CPlayerLogoProxy();
-
-	virtual bool Init( IMaterial* pMaterial, KeyValues *pKeyValues );
+	virtual bool Init( IMaterial *pMaterial, KeyValues *pKeyValues );
 	virtual void OnBind( void *pC_BaseEntity );
-	virtual void Release()
-	{
-		if ( m_pDefaultTexture )
-		{
-			m_pDefaultTexture->DecrementReferenceCount();
-		}
 
-		int c = m_Logos.Count();
-		int i;
-		for ( i = 0; i < c ; i++ )
-		{
-			PlayerLogo *logo = &m_Logos[ i ];
-			if( logo->texture )
-			{
-				logo->texture->DecrementReferenceCount();
-			}
-		}
-
-		m_Logos.RemoveAll();
-	}
-
-	virtual IMaterial *GetMaterial();
-
-protected:
-	virtual void	OnLogoBindInternal( int playerindex );
+	virtual bool HelperOnBindGetStatTrakScore( void *pC_BaseEntity, int *piScore );
 
 private:
-	IMaterialVar *m_pBaseTextureVar;
-
-	struct PlayerLogo
-	{
-		unsigned int			crc;
-		ITexture			*texture;
-	};
-
-	static bool LogoLessFunc( const PlayerLogo& src1, const PlayerLogo& src2 )
-	{
-		return src1.crc < src2.crc;
-	}
-
-	CUtlRBTree< PlayerLogo >	m_Logos;
-	ITexture					*m_pDefaultTexture;
-
+	CFloatInput	m_flDisplayDigit; // the particular digit we want to display
+	CFloatInput	m_flTrimZeros;
 };
 
-//-----------------------------------------------------------------------------
-// Purpose: 
-//-----------------------------------------------------------------------------
-CPlayerLogoProxy::CPlayerLogoProxy()
-: m_Logos( 0, 0, LogoLessFunc )
-{
-	m_pDefaultTexture = NULL;
-}
 
-#define DEFAULT_DECAL_NAME "decals/YBlood1"
-
-bool CPlayerLogoProxy::Init( IMaterial *pMaterial, KeyValues *pKeyValues )
+bool CStatTrakDigitProxy::Init( IMaterial *pMaterial, KeyValues *pKeyValues )
 {
-	bool found = false;
-	m_pBaseTextureVar = pMaterial->FindVar( "$basetexture", &found );
-	if ( !found )
+	if (!CResultProxy::Init( pMaterial, pKeyValues ))
 		return false;
 
-	m_pDefaultTexture = materials->FindTexture( DEFAULT_DECAL_NAME, TEXTURE_GROUP_DECAL );
-	if ( IsErrorTexture( m_pDefaultTexture ) )
+	if (!m_flDisplayDigit.Init( pMaterial, pKeyValues, "displayDigit", 0 ))
 		return false;
 
-	m_pDefaultTexture->IncrementReferenceCount();
+	if (!m_flTrimZeros.Init( pMaterial, pKeyValues, "trimZeros", 0 ))
+		return false;
 
 	return true;
 }
 
-void CPlayerLogoProxy::OnBind( void *pC_BaseEntity )
+#include "c_cs_player.h"
+#include "weapon_csbase.h"
+#include "predicted_viewmodel.h"
+
+bool CStatTrakDigitProxy::HelperOnBindGetStatTrakScore( void *pC_BaseEntity, int *piScore )
 {
-	// Decal's are bound with the player index as the passed in paramter
-	int playerindex = (int)pC_BaseEntity;
+	if ( !pC_BaseEntity )
+		return false;
 
-	if ( playerindex <= 0 )
-		return;
+	if ( !piScore )
+		return false;
 
-	if ( playerindex > gpGlobals->maxClients )
-		return;
-
-	if ( !m_pBaseTextureVar )
-		return;
-
-	OnLogoBindInternal( playerindex );
-}
-
-void CPlayerLogoProxy::OnLogoBindInternal( int playerindex )
-{
-	// Find player
-	player_info_t info;
-	engine->GetPlayerInfo( playerindex, &info );
-
-	if ( !info.customFiles[0] ) 
-		return;
-
-	// So we don't trash this too hard
-
-	ITexture *texture = NULL;
-
-	PlayerLogo logo;
-	logo.crc = (unsigned int)info.customFiles[0];
-	logo.texture = NULL;
-
-	int lookup = m_Logos.Find( logo );
-	if ( lookup == m_Logos.InvalidIndex() )
+	C_BaseEntity *pEntity = BindArgToEntity( pC_BaseEntity );
+	if ( pEntity )
 	{
-		char crcfilename[ 512 ];
-		char logohex[ 16 ];
-		Q_binarytohex( (byte *)&info.customFiles[0], sizeof( info.customFiles[0] ), logohex, sizeof( logohex ) );
-
-		Q_snprintf( crcfilename, sizeof( crcfilename ), "temp/%s", logohex );
-
-		texture = materials->FindTexture( crcfilename, TEXTURE_GROUP_DECAL, false );
-		if ( texture )
+		// StatTrak modules are children of their accompanying viewmodels
+		C_BaseViewModel *pViewModel = dynamic_cast< C_BaseViewModel* >( pEntity->GetMoveParent() );
+		if ( pViewModel )
 		{
-			// Make sure it doesn't get flushed
-			texture->IncrementReferenceCount();
-			logo.texture = texture;
+			C_CSPlayer *pPlayer = ToCSPlayer( pViewModel->GetPredictionOwner() );
+			if ( pPlayer )
+			{
+				CWeaponCSBase *pWeap = pPlayer->GetActiveCSWeapon();
+				if ( pWeap )
+				{
+					if ( CEconItemView *pItemView = pWeap->GetEconItemView() )
+					{
+						// Always get headshot-trak(TM)
+						*piScore = pItemView->GetKillEaterValueByType( 0 );
+					}
+				}
+			}
 		}
-
-		m_Logos.Insert( logo );
 	}
-	else
-	{
-		texture = m_Logos[ lookup ].texture;
-	}
-
-	if ( texture )
-	{
-		m_pBaseTextureVar->SetTextureValue( texture );
-	}
-	else if ( m_pDefaultTexture )
-	{
-		m_pBaseTextureVar->SetTextureValue( m_pDefaultTexture );
-	}
-
-	if ( ToolsEnabled() )
-	{
-		ToolFramework_RecordMaterialParams( GetMaterial() );
-	}
+	return true;
 }
 
-IMaterial *CPlayerLogoProxy::GetMaterial()
+void CStatTrakDigitProxy::OnBind( void *pC_BaseEntity )
 {
-	return m_pBaseTextureVar->GetOwningMaterial();
+	int nKillEaterAltScore = 0;
+	bool bHasScoreToDisplay = HelperOnBindGetStatTrakScore( pC_BaseEntity, &nKillEaterAltScore );
+	if ( !bHasScoreToDisplay )
+	{	// Force flashing numbers
+		SetFloatResult( (int) fmod( gpGlobals->curtime, 10.0f ) );
+		return;
+	}
+
+	int iDesiredDigit = (int)m_flDisplayDigit.GetFloat();
+
+	// trim preceding zeros
+	if ( m_flTrimZeros.GetFloat() > 0 )
+	{
+		if ( pow( 10.0f, iDesiredDigit ) > nKillEaterAltScore )
+		{
+			SetFloatResult( 10.0f ); //assumed blank frame
+			return;
+		}
+	}
+
+	// get the [0-9] value of the digit we want
+	int iDigitCount = MIN( iDesiredDigit, 10 );
+	for ( int i=0; i<iDigitCount; i++ )
+	{
+		nKillEaterAltScore /= 10;
+	}
+	nKillEaterAltScore %= 10;
+
+	SetFloatResult( nKillEaterAltScore );
 }
 
-EXPOSE_INTERFACE( CPlayerLogoProxy, IMaterialProxy, "PlayerLogo" IMATERIAL_PROXY_INTERFACE_VERSION );
+EXPOSE_MATERIAL_PROXY( CStatTrakDigitProxy, StatTrakDigit );
 
-/* @note Tom Bui: This is here for reference, but we don't want people to use it!
+
 //-----------------------------------------------------------------------------
-// 
+// StatTrak 'kill odometer' support: given a numerical value expressed as a string, pick a texture frame to represent a given digit
 //-----------------------------------------------------------------------------
-class CPlayerLogoOnModelProxy : public CPlayerLogoProxy
+class CStatTrakDigitProxyForModelWeaponPreviewPanel : public CStatTrakDigitProxy
 {
 public:
-	virtual void OnBind( void *pC_BaseEntity );
+	virtual bool HelperOnBindGetStatTrakScore( void *pC_BaseEntity, int *puiScore ) OVERRIDE
+	{
+		/* Removed for partner depot */
+		return false;
+	}
+};
+EXPOSE_MATERIAL_PROXY( CStatTrakDigitProxyForModelWeaponPreviewPanel, StatTrakDigitForModelWeaponPreview );
+
+#ifdef IRONSIGHT
+//-----------------------------------------------------------------------------
+// IronSightAmount proxy
+//-----------------------------------------------------------------------------
+class CIronSightAmountProxy : public CResultProxy
+{
+public:
+	virtual bool Init(IMaterial *pMaterial, KeyValues *pKeyValues);
+	virtual void OnBind(void *pC_BaseEntity);
+private:
+	bool bInvert;
 };
 
-void CPlayerLogoOnModelProxy::OnBind( void *pC_BaseEntity )
+
+bool CIronSightAmountProxy::Init(IMaterial *pMaterial, KeyValues *pKeyValues)
 {
-	if ( pC_BaseEntity )
+	if (!CResultProxy::Init(pMaterial, pKeyValues))
+		return false;
+
+	bInvert = false;
+	CFloatInput	m_flInvert;
+	if ( m_flInvert.Init( pMaterial, pKeyValues, "invert" ) )
+		bInvert = ( m_flInvert.GetFloat() > 0 );
+
+	return true;
+}
+
+void CIronSightAmountProxy::OnBind(void *pC_BaseEntity)
+{
+
+	if (!pC_BaseEntity)
+		return;
+	
+	C_BaseEntity *pEntity = BindArgToEntity(pC_BaseEntity);
+	if (pEntity)
 	{
-		IClientRenderable *pRend = (IClientRenderable *)pC_BaseEntity;
-		C_BaseEntity *pEntity = pRend->GetIClientUnknown()->GetBaseEntity();
-		if ( pEntity )
+		C_BaseViewModel *pViewModel = dynamic_cast<C_BaseViewModel*>(pEntity);
+		if (pViewModel)
 		{
-			if ( !pEntity->IsPlayer() )
+			C_CSPlayer *pPlayer = ToCSPlayer(pViewModel->GetPredictionOwner());
+			if (pPlayer)
 			{
-				pEntity = pEntity->GetRootMoveParent();
-			}
-
-			if ( pEntity && pEntity->IsPlayer() )
-			{
-				int iPlayerIndex = pEntity->entindex();
-
-				OnLogoBindInternal( iPlayerIndex );
+				CWeaponCSBase *pWeapon = pPlayer->GetActiveCSWeapon();
+				if ( pWeapon && pWeapon->GetIronSightController() )
+				{
+					if ( bInvert )
+					{
+						SetFloatResult(Bias( 1.0f - pWeapon->GetIronSightController()->GetIronSightAmount(), 0.2f));
+					}
+					else
+					{
+						SetFloatResult(Bias(pWeapon->GetIronSightController()->GetIronSightAmount(), 0.2f));
+					}
+				}
 			}
 		}
 	}
+
 }
 
-EXPOSE_INTERFACE( CPlayerLogoOnModelProxy, IMaterialProxy, "PlayerLogoOnModel" IMATERIAL_PROXY_INTERFACE_VERSION );
-*/
+
+EXPOSE_MATERIAL_PROXY(CIronSightAmountProxy, IronSightAmount);
+#endif //IRONSIGHT
+
+//-----------------------------------------------------------------------------
+// StatTrakIllum proxy
+//-----------------------------------------------------------------------------
+class CStatTrakIllumProxy : public CResultProxy
+{
+public:
+	virtual bool Init( IMaterial *pMaterial, KeyValues *pKeyValues );
+	virtual void OnBind( void *pC_BaseEntity );
+
+private:
+	CFloatInput	m_flMinVal;
+	CFloatInput	m_flMaxVal;
+};
+
+
+bool CStatTrakIllumProxy::Init( IMaterial *pMaterial, KeyValues *pKeyValues )
+{
+	if (!CResultProxy::Init( pMaterial, pKeyValues ))
+		return false;
+
+	if (!m_flMinVal.Init( pMaterial, pKeyValues, "minVal", 0.5 ))
+		return false;
+
+	if (!m_flMaxVal.Init( pMaterial, pKeyValues, "maxVal", 1 ))
+		return false;
+
+	return true;
+}
+
+void CStatTrakIllumProxy::OnBind( void *pC_BaseEntity )
+{
+
+	if (!pC_BaseEntity)
+		return;
+
+	C_BaseEntity *pEntity = BindArgToEntity( pC_BaseEntity );
+	if ( pEntity )
+	{
+		// StatTrak modules are children of their accompanying viewmodels
+		C_BaseViewModel *pViewModel = dynamic_cast< C_BaseViewModel* >( pEntity->GetMoveParent() );
+		if ( pViewModel )
+		{
+			SetFloatResult( Lerp( pViewModel->GetStatTrakGlowMultiplier(), m_flMinVal.GetFloat(), m_flMaxVal.GetFloat() ) );
+			return;
+		}
+	}
+
+}
+
+
+EXPOSE_MATERIAL_PROXY( CStatTrakIllumProxy, StatTrakIllum );
+
+
+//-----------------------------------------------------------------------------
+// WeaponLabelTextProxy
+//-----------------------------------------------------------------------------
+class CWeaponLabelTextProxy : public CResultProxy
+{
+public:
+	bool Init( IMaterial *pMaterial, KeyValues *pKeyValues );
+	void OnBind( void *pC_BaseEntity );
+	virtual bool HelperOnBindGetLabel( void *pC_BaseEntity, const char **p_szLabel );
+
+private:
+	CFloatInput	m_flDisplayDigit;
+	IMaterialVar *m_pTextureOffsetVar;
+};
+
+bool CWeaponLabelTextProxy::Init( IMaterial *pMaterial, KeyValues *pKeyValues )
+{
+
+	if (!m_flDisplayDigit.Init( pMaterial, pKeyValues, "displayDigit", 0 ))
+		return false;
+
+	bool foundVar;
+	m_pTextureOffsetVar = pMaterial->FindVar( "$basetexturetransform", &foundVar, false );
+	if( !foundVar )
+		return false;
+
+	return true;
+}
+
+bool CWeaponLabelTextProxy::HelperOnBindGetLabel( void *pC_BaseEntity, const char **p_szLabel )
+{
+	if ( !pC_BaseEntity )
+		return false;
+
+	C_BaseEntity *pEntity = BindArgToEntity( pC_BaseEntity );
+	if ( pEntity )
+	{
+		// uid modules are children of their accompanying viewmodels
+		C_BaseViewModel *pViewModel = dynamic_cast< C_BaseViewModel* >( pEntity->GetMoveParent() );
+		if ( pViewModel )
+		{
+			CBaseCombatWeapon *pWeapon = pViewModel->GetWeapon();
+			if ( pWeapon )
+			{
+				CEconItemView *pItem = pWeapon->GetEconItemView();
+				if ( pItem )
+				{
+					*p_szLabel = pItem->GetCustomName();
+					return true;
+				}
+			}
+		}
+	}
+
+	return false;
+}
+
+void CWeaponLabelTextProxy::OnBind( void *pC_BaseEntity )
+{
+
+	const char *p_szLabel = NULL;
+	bool bHasLabel = HelperOnBindGetLabel( pC_BaseEntity, &p_szLabel );
+	if (!bHasLabel || !p_szLabel)
+		return;
+
+	//get the digit index we need to display
+	int nDigit = (int)m_flDisplayDigit.GetFloat();
+
+	//center the text within NUM_UID_CHARS
+	int nStrLen = (int)strlen( p_szLabel );
+	int nPrependSpaces = ( NUM_UID_CHARS - nStrLen ) / 2;
+	nDigit -= nPrependSpaces;
+
+	int nCharIndex = 0;
+	if ( nDigit >= 0 && nDigit < nStrLen )
+	{
+		nCharIndex = p_szLabel[nDigit] - 32;
+	}
+
+	int nIndexHoriz = fmod( nCharIndex, 12.0f );
+	int nIndexVertical = nCharIndex / 12;
+
+	float flOffsetX = 0.083333f * nIndexHoriz;
+	float flOffsetY =    0.125f * nIndexVertical;
+
+	VMatrix mat( 1.0f,	0.0f,	0.0f,	flOffsetX,
+		0.0f,	1.0f,	0.0f,	flOffsetY,
+		0.0f,	0.0f,	1.0f,	0.0f,
+		0.0f,	0.0f,	0.0f,	1.0f );
+
+	m_pTextureOffsetVar->SetMatrixValue( mat );
+}
+
+EXPOSE_MATERIAL_PROXY( CWeaponLabelTextProxy, WeaponLabelText );
+
+
+class CWeaponLabelTextProxyForModelWeaponPreviewPanel : public CWeaponLabelTextProxy
+{
+public:
+	virtual bool HelperOnBindGetLabel( void *pC_BaseEntity, const char **p_szLabel )
+	{
+		/* Removed for partner depot */
+		return false;
+	}
+};
+EXPOSE_MATERIAL_PROXY( CWeaponLabelTextProxyForModelWeaponPreviewPanel, WeaponLabelTextPreview );
+
+
+int g_HighlightedSticker = -1;
+int g_PeelSticker = -1;
+
+void CC_HighlightSticker(const CCommand& args)
+{
+	int nParam = atoi(args[1]);
+	if ( nParam >= 0 && nParam <= 4 )
+	{
+		g_HighlightedSticker = nParam;
+	}
+}
+static ConCommand highlight_sticker("highlight_sticker", CC_HighlightSticker, "", FCVAR_CHEAT | FCVAR_DEVELOPMENTONLY );
+
+void CC_PeelSticker(const CCommand& args)
+{
+	int nParam = atoi(args[1]);
+	if (nParam >= 0 && nParam <= 4)
+	{
+		g_PeelSticker = nParam;
+	}
+}
+static ConCommand peel_sticker("peel_sticker", CC_PeelSticker, "", FCVAR_CHEAT | FCVAR_DEVELOPMENTONLY);
+
+//-----------------------------------------------------------------------------
+// Sticker selection proxy
+//-----------------------------------------------------------------------------
+class CStickerSelectionProxy : public CResultProxy
+{
+public:
+	virtual bool Init(IMaterial *pMaterial, KeyValues *pKeyValues);
+	virtual void OnBind(void *pC_BaseEntity);
+	virtual void CheckMyGlobal( void );
+	
+	int m_nStickerIndex;
+	float m_flSelectedness;
+};
+
+bool CStickerSelectionProxy::Init(IMaterial *pMaterial, KeyValues *pKeyValues)
+{
+	if (!CResultProxy::Init(pMaterial, pKeyValues))
+		return false;
+
+	CFloatInput flStickerIndex;
+	if (!flStickerIndex.Init(pMaterial, pKeyValues, "stickerindex", 0))
+		return false;
+	m_nStickerIndex = (int)flStickerIndex.GetFloat();
+
+	m_flSelectedness = 0.0f;
+
+	return true;
+}
+
+void CStickerSelectionProxy::CheckMyGlobal( void )
+{
+	if (g_HighlightedSticker > -1 && m_nStickerIndex == g_HighlightedSticker)
+	{
+		m_flSelectedness = 1.0f;
+		g_HighlightedSticker = -1;
+	}
+}
+
+void CStickerSelectionProxy::OnBind(void *pC_BaseEntity)
+{
+
+	//if (!pC_BaseEntity)
+	//	return;
+
+	CheckMyGlobal();
+
+	if ( m_flSelectedness > 0.01f )
+	{
+		m_flSelectedness = Approach( 0.0f, m_flSelectedness, gpGlobals->frametime * 0.5f );
+		SetFloatResult( m_flSelectedness );
+	}
+	else if ( m_flSelectedness > 0.0f )
+	{
+		SetFloatResult( 0.0f );
+	}
+
+}
+
+EXPOSE_MATERIAL_PROXY(CStickerSelectionProxy, StickerSelection);
+
+class CStickerPeelProxy : public CStickerSelectionProxy
+{
+public:
+	virtual void CheckMyGlobal( void );
+};
+
+void CStickerPeelProxy::CheckMyGlobal(void)
+{
+	if (g_PeelSticker > -1 && m_nStickerIndex == g_PeelSticker)
+	{
+		m_flSelectedness = 1.0f;
+		g_PeelSticker = -1;
+	}
+}
+
+EXPOSE_MATERIAL_PROXY(CStickerPeelProxy, StickerPeel);
+
+
+//-----------------------------------------------------------------------------
+// CrosshairColor proxy
+//-----------------------------------------------------------------------------
+extern ConVar cl_crosshaircolor_r;
+extern ConVar cl_crosshaircolor_g;
+extern ConVar cl_crosshaircolor_b;
+class CCrossHairColorProxy : public CResultProxy
+{
+public:
+	virtual bool Init(IMaterial *pMaterial, KeyValues *pKeyValues);
+	virtual void OnBind(void *pC_BaseEntity);
+
+	Vector m_vecLocalCrossHairColor;
+};
+
+bool CCrossHairColorProxy::Init(IMaterial *pMaterial, KeyValues *pKeyValues)
+{
+	if (!CResultProxy::Init(pMaterial, pKeyValues))
+		return false;
+	m_vecLocalCrossHairColor.Init();
+	return true;
+}
+
+void CCrossHairColorProxy::OnBind(void *pC_BaseEntity)
+{
+	if ( m_vecLocalCrossHairColor.x != cl_crosshaircolor_r.GetFloat() || 
+		 m_vecLocalCrossHairColor.y != cl_crosshaircolor_g.GetFloat() || 
+		 m_vecLocalCrossHairColor.z != cl_crosshaircolor_b.GetFloat() )
+	{
+
+		m_vecLocalCrossHairColor.x = cl_crosshaircolor_r.GetFloat();
+		m_vecLocalCrossHairColor.y = cl_crosshaircolor_g.GetFloat();
+		m_vecLocalCrossHairColor.z = cl_crosshaircolor_b.GetFloat();
+
+		SetVecResult(   (float)m_vecLocalCrossHairColor.x * 0.0039,
+						(float)m_vecLocalCrossHairColor.y * 0.0039,
+						(float)m_vecLocalCrossHairColor.z * 0.0039, 1);
+	}
+}
+
+EXPOSE_MATERIAL_PROXY(CCrossHairColorProxy, CrossHairColor);
+
+
+float g_flEconInspectPreviewTime = 0;
+
+class CEconInspectPreviewTimeProxy : public CResultProxy
+{
+public:
+	bool Init( IMaterial *pMaterial, KeyValues *pKeyValues );
+	void OnBind( void *pC_BaseEntity );
+};
+
+bool CEconInspectPreviewTimeProxy::Init( IMaterial *pMaterial, KeyValues *pKeyValues )
+{
+	if ( !CResultProxy::Init( pMaterial, pKeyValues ) )
+		return false;
+
+	return true;
+}
+
+void CEconInspectPreviewTimeProxy::OnBind( void *pC_BaseEntity )
+{
+	Assert( m_pResult );
+	SetFloatResult( gpGlobals->curtime - g_flEconInspectPreviewTime );
+}
+
+EXPOSE_MATERIAL_PROXY( CEconInspectPreviewTimeProxy, EconInspectPreviewTime );
+

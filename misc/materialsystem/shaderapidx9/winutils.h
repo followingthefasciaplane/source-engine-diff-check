@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//================ Copyright (c) 1996-2009 Valve Corporation. All Rights Reserved. =================
 //
 //
 //
@@ -6,7 +6,7 @@
 #ifndef WINUTILS_H
 #define WINUTILS_H
 
-#include "togl/rendermechanism.h" // for win types
+#include "togl/rendermechanism.h"
 
 #if !defined(_WIN32)
 

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose:
 //
@@ -20,6 +20,10 @@ static Vector CAM_HULL_MAX( CAM_HULL_OFFSET, CAM_HULL_OFFSET, CAM_HULL_OFFSET);
 
 
 extern const ConVar *sv_cheats;
+
+extern ConVar cam_idealdist;
+extern ConVar cam_idealdistright;
+extern ConVar cam_idealdistup;
 
 void CAM_ToThirdPerson(void);
 void CAM_ToFirstPerson(void);
@@ -43,7 +47,7 @@ void ThirdPersonChange( IConVar *pConVar, const char *pOldValue, float flOldValu
 	ToggleThirdPerson( var.GetBool() );
 }
 
-ConVar cl_thirdperson( "cl_thirdperson", "0", FCVAR_NOT_CONNECTED | FCVAR_USERINFO | FCVAR_ARCHIVE | FCVAR_DEVELOPMENTONLY, "Enables/Disables third person", ThirdPersonChange  );
+ConVar cl_thirdperson( "cl_thirdperson", "0", FCVAR_NOT_CONNECTED | FCVAR_ARCHIVE | FCVAR_DEVELOPMENTONLY, "Enables/Disables third person", ThirdPersonChange  );
 
 #endif
 
@@ -78,10 +82,12 @@ void CThirdPersonManager::Update( void )
 		sv_cheats = cvar->FindVar( "sv_cheats" );
 	}
 
+	bool bIsThirdPerson = input->CAM_IsThirdPerson() != 0;
+
 	// If cheats have been disabled, pull us back out of third-person view.
 	if ( sv_cheats && !sv_cheats->GetBool() && GameRules() && GameRules()->AllowThirdPersonCamera() == false )
 	{
-		if ( (bool)input->CAM_IsThirdPerson() == true )
+		if ( bIsThirdPerson )
 		{
 			input->CAM_ToFirstPerson();
 		}
@@ -90,13 +96,24 @@ void CThirdPersonManager::Update( void )
 
 	if ( IsOverridingThirdPerson() == false )
 	{
-		if ( (bool)input->CAM_IsThirdPerson() != ( cl_thirdperson.GetBool() || m_bForced ) && GameRules() && GameRules()->AllowThirdPersonCamera() == true )
+		
+		if ( bIsThirdPerson != ( cl_thirdperson.GetBool() || m_bForced ) && GameRules() && GameRules()->AllowThirdPersonCamera() == true )
 		{
 			ToggleThirdPerson( m_bForced || cl_thirdperson.GetBool() );
 		}
 	}
 #endif
 
+}
+
+Vector CThirdPersonManager::GetDesiredCameraOffset( void )
+{ 
+	if ( IsOverridingThirdPerson() == true )
+	{
+		return Vector( cam_idealdist.GetFloat(), cam_idealdistright.GetFloat(), cam_idealdistup.GetFloat() );
+	}
+
+	return m_vecDesiredCameraOffset; 
 }
 
 Vector CThirdPersonManager::GetFinalCameraOffset( void )
@@ -143,7 +160,7 @@ Vector CThirdPersonManager::GetDistanceFraction( void )
 	return Vector( flFraction, flFraction, flUpFraction );
 }
 
-void CThirdPersonManager::PositionCamera( CBasePlayer *pPlayer, const QAngle& angles )
+void CThirdPersonManager::PositionCamera( CBasePlayer *pPlayer, QAngle angles )
 {
 	if ( pPlayer )
 	{
@@ -156,7 +173,7 @@ void CThirdPersonManager::PositionCamera( CBasePlayer *pPlayer, const QAngle& an
 		origin += pPlayer->GetViewOffset();
 
 		AngleVectors( angles, &camForward, &camRight, &camUp );
-	
+
 		Vector endPos = origin;
 
 		Vector vecCamOffset = endPos + (camForward * - GetDesiredCameraOffset()[DIST_FORWARD]) + (camRight * GetDesiredCameraOffset()[ DIST_RIGHT ]) + (camUp * GetDesiredCameraOffset()[ DIST_UP ] );
@@ -164,7 +181,7 @@ void CThirdPersonManager::PositionCamera( CBasePlayer *pPlayer, const QAngle& an
 		// use our previously #defined hull to collision trace
 		CTraceFilterSimple traceFilter( pPlayer, COLLISION_GROUP_NONE );
 		UTIL_TraceHull( endPos, vecCamOffset, CAM_HULL_MIN, CAM_HULL_MAX, MASK_SOLID & ~CONTENTS_MONSTER, &traceFilter, &trace );
-		
+
 		if ( trace.fraction != m_flTargetFraction )
 		{
 			m_flLerpTime = gpGlobals->curtime;
@@ -179,7 +196,7 @@ void CThirdPersonManager::PositionCamera( CBasePlayer *pPlayer, const QAngle& an
 			m_flFraction = m_flTargetFraction;
 			m_flLerpTime = gpGlobals->curtime;
 		}
-	
+
 
 		// move the camera closer if it hit something
 		if( trace.fraction < 1.0  )

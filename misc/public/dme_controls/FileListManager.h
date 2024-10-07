@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2002, Valve LLC, All rights reserved. ============
 //
 // Purpose: 
 //
@@ -14,7 +14,7 @@
 
 #include "datamodel/idatamodel.h"
 #include "vgui_controls/listpanel.h"
-#include "vgui_controls/Frame.h"
+#include "vgui_controls/frame.h"
 #include "vgui/KeyCode.h"
 
 

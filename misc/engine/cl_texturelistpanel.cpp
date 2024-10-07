@@ -1,10 +1,15 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright � 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
 //=============================================================================//
 
 #include "client_pch.h"
+#ifdef _PS3
+void CL_CreateTextureListPanel( vgui::Panel * ) {}
+void CL_TextureListPanel_ClearState() {}
+void VGui_UpdateTextureListPanel() {}
+#else
 #include "ivideomode.h"
 #include "client_class.h"
 #include "icliententitylist.h"
@@ -20,7 +25,7 @@
 #include <vgui_controls/TreeViewListControl.h>
 #include <vgui/ISystem.h>
 #include "tier0/vprof.h"
-#include "KeyValues.h"
+#include "keyvalues.h"
 #include "vgui_helpers.h"
 #include "utlsymbol.h"
 #include "tier1/UtlStringMap.h"
@@ -43,11 +48,6 @@
 #include "igame.h"
 
 #include "client.h"
-
-#include "tier2/p4helpers.h"
-#include "p4lib/ip4.h"
-#include "ivtex.h"
-#include "tier2/fileutils.h"
 
 // For character manipulations isupper/tolower
 #include <ctype.h>
@@ -77,6 +77,12 @@ CON_COMMAND( mat_get_textures, "VXConsole command" )
 
 static ConVar mat_texture_list( "mat_texture_list", "0", FCVAR_CHEAT, "For debugging, show a list of used textures per frame" );
 
+static inline void MatTextureModificationRecorded()
+{
+	extern void Host_DisallowSecureServers();
+	Host_DisallowSecureServers();
+}
+
 static enum TxListPanelRequest
 {
 	TXR_NONE,
@@ -85,11 +91,6 @@ static enum TxListPanelRequest
 	TXR_HIDE
 } s_eTxListPanelRequest = TXR_NONE;
 
-IVTex* VTex_Load( CSysModule** pModule );
-void VTex_Unload( CSysModule *pModule );
-void* CubemapsFSFactory( const char *pName, int *pReturnCode );
-bool StripDirName( char *pFilename );
-
 // These are here so you can bind a key to +mat_texture_list and toggle it on and off.
 void mat_texture_list_on_f();
 void mat_texture_list_off_f();
@@ -97,9 +98,10 @@ void mat_texture_list_off_f();
 ConCommand mat_texture_list_on( "+mat_texture_list", mat_texture_list_on_f );
 ConCommand mat_texture_list_off( "-mat_texture_list", mat_texture_list_off_f );
 
-ConVar mat_texture_list_all( "mat_texture_list_all", "0", FCVAR_NEVER_AS_STRING|FCVAR_CHEAT, "If this is nonzero, then the texture list panel will show all currently-loaded textures." );
+ConVar mat_texture_list_all( "mat_texture_list_all", "0", FCVAR_NEVER_AS_STRING, "If this is nonzero, then the texture list panel will show all currently-loaded textures." );
+ConVar mat_texture_list_all_frames( "mat_texture_list_all_frames", "2", 0, "How many frames to sample texture memory for all textures." );
 
-ConVar mat_texture_list_view( "mat_texture_list_view", "1", FCVAR_NEVER_AS_STRING|FCVAR_CHEAT, "If this is nonzero, then the texture list panel will render thumbnails of currently-loaded textures." );
+ConVar mat_texture_list_view( "mat_texture_list_view", "1", FCVAR_NEVER_AS_STRING, "If this is nonzero, then the texture list panel will render thumbnails of currently-loaded textures." );
 
 ConVar mat_show_texture_memory_usage( "mat_show_texture_memory_usage", "0", FCVAR_NEVER_AS_STRING|FCVAR_CHEAT, "Display the texture memory usage on the HUD." );
 
@@ -107,12 +109,10 @@ ConVar mat_show_texture_memory_usage( "mat_show_texture_memory_usage", "0", FCVA
 static int g_warn_texkbytes = 1499;
 static int g_warn_texdimensions = 1024;
 static bool g_warn_enable = true;
-static bool g_cursorset = false;
 
 class CTextureListPanel;
 static CTextureListPanel *g_pTextureListPanel = NULL;
 static bool g_bRecursiveRequestToShowTextureList = false;
-static int g_nSaveQueueState = INT_MIN;
 
 
 //
@@ -520,8 +520,7 @@ static bool ShallWarnTx( KeyValues *kv, ITexture *tx )
  		return true;
 
 	if ( stricmp( "DXT1", kv->GetString( KEYNAME_FORMAT ) )  && stricmp( "DXT5", kv->GetString( KEYNAME_FORMAT ) ) &&
-		 stricmp( "ATI1N", kv->GetString( KEYNAME_FORMAT ) ) && stricmp( "ATI2N", kv->GetString( KEYNAME_FORMAT ) ) &&
-		 stricmp( "DXT5_RUNTIME", kv->GetString( KEYNAME_FORMAT ) ) )
+		 stricmp( "ATI1N", kv->GetString( KEYNAME_FORMAT ) ) && stricmp( "ATI2N", kv->GetString( KEYNAME_FORMAT ) ) )
 		return true;
 
 	if ( kv->GetInt( KEYNAME_SIZE ) > g_warn_texkbytes )
@@ -562,11 +561,22 @@ namespace
 
 }; // end `anonymous` namespace
 
+ConVar mat_texture_list_exclude_editing( "mat_texture_list_exclude_editing", "0" );
+
 bool CanAdjustTextureSize( char const *szTextureName, bool bMoveSizeUp )
 {
 	ITexture *pMatTexture = materials->FindTexture( szTextureName, "", false );
 	if ( !pMatTexture )
 		return false;
+
+	if ( mat_texture_list_exclude_editing.GetInt() > 0 )
+	{
+		MaterialTextureInfo_t txInfo;
+		if ( !materials->GetTextureInformation( szTextureName, txInfo ) )
+			return false;
+		if ( txInfo.iExcludeInformation == 0 )
+			return false;
+	}
 
 	// Determine the texture current size
 	if ( !bMoveSizeUp )
@@ -582,20 +592,103 @@ bool CanAdjustTextureSize( char const *szTextureName, bool bMoveSizeUp )
 
 bool AdjustTextureSize( char const *szTextureName, bool bMoveSizeUp )
 {
+	MatTextureModificationRecorded();
+
 	ITexture *pMatTexture = materials->FindTexture( szTextureName, "", false );
 
 	if ( !pMatTexture )
 		return false;
 
-	pMatTexture->ForceLODOverride( bMoveSizeUp ? +1 : -1 );
+	if ( mat_texture_list_exclude_editing.GetInt() > 0 )
+	{
+		int iOverride = MAX( pMatTexture->GetActualWidth(), pMatTexture->GetActualHeight() );
+		if ( bMoveSizeUp )
+			iOverride <<= 1;
+		else
+			iOverride >>= 1;
+		pMatTexture->ForceExcludeOverride( iOverride );
+	}
+	else
+	{
+		pMatTexture->ForceLODOverride( bMoveSizeUp ? +1 : -1 );
+	}
+
 	return true;
+}
+
+bool AdjustTextureExclude( char const *szTextureName, bool bExclude )
+{
+	MatTextureModificationRecorded();
+
+	ITexture *pMatTexture = materials->FindTexture( szTextureName, "", false );
+
+	if ( !pMatTexture )
+		return false;
+
+	if ( mat_texture_list_exclude_editing.GetInt() > 0 )
+	{
+		int iOverride = bExclude ? 0 : -1;
+		pMatTexture->ForceExcludeOverride( iOverride );
+		return true;
+	}
+	else
+	{
+		return false;
+	}
+}
+
+bool CanAdjustTextureExclude( char const *szTextureName )
+{
+	if ( mat_texture_list_exclude_editing.GetInt() <= 0 )
+		return false;
+
+	ITexture *pMatTexture = materials->FindTexture( szTextureName, "", false );
+
+	if ( !pMatTexture )
+		return false;
+
+	return true;
+}
+
+bool IsTextureExcluded( char const *szTextureName )
+{
+	if ( mat_texture_list_exclude_editing.GetInt() <= 0 )
+		return false;
+
+	ITexture *pMatTexture = materials->FindTexture( szTextureName, "", false );
+
+	if ( !pMatTexture )
+		return false;
+
+	MaterialTextureInfo_t txInfo;
+	if ( !materials->GetTextureInformation( szTextureName, txInfo ) )
+		return false;
+	
+	if ( txInfo.iExcludeInformation == 0 )
+		return true;
+	else
+		return false;
 }
 
 CON_COMMAND_F( mat_texture_list_txlod, "Adjust LOD of the last viewed texture +1 to inc resolution, -1 to dec resolution", FCVAR_DONTRECORD )
 {
 	if ( args.ArgC() == 2 )
 	{
-		int iAdjustment = atoi( args.Arg( 1 ) );
+		char const *szArg = args.Arg( 1 );
+
+		if ( !stricmp( szArg, "exclude" ) || !stricmp( szArg, "noexclude" ) )
+		{
+			bool bExclude = !stricmp( szArg, "exclude" );
+			if ( !CanAdjustTextureExclude( s_chLastViewedTextureBuffer ) )
+				Warning( "mat_texture_list_txlod cannot adjust exclude for '%s'\n", s_chLastViewedTextureBuffer );
+			else if ( !AdjustTextureExclude( s_chLastViewedTextureBuffer, bExclude ) )
+				Warning( "mat_texture_list_txlod failed %sexcluding '%s'\n", bExclude ? "" : "no", s_chLastViewedTextureBuffer );
+			else
+				Msg( "mat_texture_list_txlod %sexcluded '%s'\n", bExclude ? "" : "no", s_chLastViewedTextureBuffer );
+			return;
+		}
+
+		int iAdjustment = atoi( szArg );
 		switch ( iAdjustment )
 		{
 			case 1:
@@ -615,27 +708,6 @@ CON_COMMAND_F( mat_texture_list_txlod, "Adjust LOD of the last viewed texture +1
 	Warning( "Usage: 'mat_texture_list_txlod +1' to inc lod | 'mat_texture_list_txlod -1' to dec lod\n" );
 }
 
-static bool SaveTextureImage( char const *szTextureName )
-{
-	bool bRet;
-	char fileName[ MAX_PATH ];
-	char baseName[ MAX_PATH ];
-	ITexture *pMatTexture = materials->FindTexture( szTextureName, "", false );
-
-	if ( !pMatTexture )
-	{
-		Msg( "materials->FindTexture( '%s' ) failed.\n", szTextureName );
-		return false;
-	}
-
-	V_FileBase( szTextureName, baseName, ARRAYSIZE( baseName ) );
-	Q_snprintf( fileName, ARRAYSIZE( fileName ), "//MOD/tex_%s.tga", baseName );
-
-	bRet = pMatTexture->SaveToFile( fileName );
-
-	Msg( "SaveTextureImage( '%s' ): %s\n", fileName, bRet ? "succeeded" : "failed" );
-	return bRet;
-}
 
 namespace MatViewOverride
 {
@@ -716,7 +788,8 @@ void DisplaySelectedTextures()
 		// Wait for the flash-time
 		float fCurTime = Plat_FloatTime();
 		if ( fCurTime >= s_viewParamsLast.flTime &&
-			 fCurTime < s_viewParamsLast.flTime + 0.4 )
+			 fCurTime < s_viewParamsLast.flTime + 0.4 &&
+			 s_viewParamsReq.lstMaterials.Count() )
 			 return;
 
 		s_viewParamsLast.flTime = fCurTime;
@@ -827,6 +900,15 @@ void DisplaySelectedTextures()
 }; // end namespace MatViewOverride
 
 
+void CL_TextureListPanel_ClearState()
+{
+	MatViewOverride::RequestSelectNone();
+	MatViewOverride::DisplaySelectedTextures();
+}
+
+
+
+
 //////////////////////////////////////////////////////////////////////////
 //
 // Custom text entry with "Open" for vmt's
@@ -883,140 +965,6 @@ void CVmtTextEntry::OpenVmtSelected()
 	}
 }
 
-#ifdef IS_WINDOWS_PC
-bool IsSpaceOrQuote( char val )
-{
-	return (isspace(val) || val == '\"');
-}
-
-static bool SetBufferValue( char *chTxtFileBuffer, char const *szLookupKey, char const *szNewValue )
-{
-	bool bResult = false;
-
-	size_t lenTmp = strlen( szNewValue );
-	size_t nTxtFileBufferLen = strlen( chTxtFileBuffer );
-
-	for ( char *pch = chTxtFileBuffer;
-		( NULL != ( pch = strstr( pch, szLookupKey ) ) );
-		++ pch )
-	{
-		char *val = pch + strlen( szLookupKey );
-		if ( !IsSpaceOrQuote( *val ) )
-			continue;
-		else
-			++ val;
-
-		// Skip over the whitespace and quotes
-		while ( *val && IsSpaceOrQuote( *val ) )
-			++ val;
-		char *pValStart = val;
-
-		// Okay, here comes the value
-		while ( *val && IsSpaceOrQuote( *val ) )
-			++ val;
-		while ( *val && !IsSpaceOrQuote( *val ) )
-			++ val;
-
-		char *pValEnd = val; // Okay, here ends the value
-
-		memmove( pValStart + lenTmp, pValEnd, chTxtFileBuffer + nTxtFileBufferLen + 1 - pValEnd );
-		memcpy( pValStart, szNewValue, lenTmp );
-
-		nTxtFileBufferLen += ( lenTmp - ( pValEnd - pValStart ) );
-		bResult = true;
-	}
-
-	if ( !bResult )
-	{
-		char *pchAdd = chTxtFileBuffer + nTxtFileBufferLen;
-		strcpy( pchAdd + strlen( pchAdd ), "\n" );
-		strcpy( pchAdd + strlen( pchAdd ), szLookupKey );
-		strcpy( pchAdd + strlen( pchAdd ), " " );
-		strcpy( pchAdd + strlen( pchAdd ), szNewValue );
-		strcpy( pchAdd + strlen( pchAdd ), "\n" );
-		bResult = true;
-	}
-
-	return bResult;
-}
-
-// Replaces the first occurrence of "szFindData" with "szNewData"
-// Returns the remaining buffer past the replaced data or NULL if
-// no replacement occurred.
-static char * BufferReplace( char *buf, char const *szFindData, char const *szNewData )
-{
-	size_t len = strlen( buf ), lFind = strlen( szFindData ), lNew = strlen( szNewData );
-	if ( char *pBegin = strstr( buf, szFindData ) )
-	{
-		memmove( pBegin + lNew, pBegin + lFind, buf + len - ( pBegin + lFind ) );
-		memmove( pBegin, szNewData, lNew );
-		return pBegin + lNew;
-	}
-	return NULL;
-}
-
-class CP4Requirement
-{
-public:
-	CP4Requirement();
-	~CP4Requirement();
-
-protected:
-	bool m_bLoadedModule;
-	CSysModule *m_pP4Module;
-};
-
-CP4Requirement::CP4Requirement() :
-	m_bLoadedModule( false ),
-	m_pP4Module( NULL )
-{
-#ifdef STAGING_ONLY
-	if ( p4 )
-		return;
-
-	// load the p4 lib
-	m_pP4Module = Sys_LoadModule( "p4lib" );
-	m_bLoadedModule = true;
-		
-	if ( m_pP4Module )
-	{
-		CreateInterfaceFn factory = Sys_GetFactory( m_pP4Module );
-		if ( factory )
-		{
-			p4 = ( IP4 * )factory( P4_INTERFACE_VERSION, NULL );
-
-			if ( p4 )
-			{
-				extern CreateInterfaceFn g_AppSystemFactory;
-				p4->Connect( g_AppSystemFactory );
-				p4->Init();
-			}
-		}
-	}
-#endif // STAGING_ONLY
-
-	if ( !p4 )
-	{
-		Warning( "Can't load p4lib.dll\n" );
-	}
-}
-
-CP4Requirement::~CP4Requirement()
-{
-	if ( m_bLoadedModule && m_pP4Module )
-	{
-		if ( p4 )
-		{
-			p4->Shutdown();
-			p4->Disconnect();
-		}
-
-		Sys_UnloadModule( m_pP4Module );
-		m_pP4Module = NULL;
-		p4 = NULL;
-	}
-}
-#endif // #ifdef IS_WINDOWS_PC
 
 //////////////////////////////////////////////////////////////////////////
 //
@@ -1065,14 +1013,8 @@ protected:
 	CVmtTextEntry		*m_pMaterials;
 	vgui::Button		*m_pExplore;
 	vgui::Button		*m_pReload;
-	vgui::Button		*m_pRebuild;
-	vgui::Button		*m_pToggleNoMip;
-	vgui::Button		*m_pCopyTxt;
-#ifndef POSIX
-	vgui::Button		*m_pCopyImg;
-#endif
-	vgui::Button		*m_pSaveImg;
-	vgui::Button		*m_pSizeControls[2];
+	vgui::Button		*m_pCopyTxt, *m_pCopyImg;
+	vgui::Button		*m_pSizeControls[3];
 	vgui::Button		*m_pFlashBtn;
 	KeyValues			*m_pInfo;
 	CUtlBuffer			m_bufInfoText;
@@ -1100,28 +1042,22 @@ CRenderTextureEditor::CRenderTextureEditor( vgui::Panel *parent, char const *szN
 	m_pReload = vgui::SETUP_PANEL( new vgui::Button( this, "Reload", "Reload", this, "Reload" ) );
 	m_pReload->SetVisible( true );
 
-	m_pRebuild = vgui::SETUP_PANEL( new vgui::Button( this, "RebuildVTF", "Rebuild VTF", this, "RebuildVTF" ) );
-	m_pRebuild->SetVisible( true );
-
-	m_pToggleNoMip = vgui::SETUP_PANEL( new vgui::Button( this, "ToggleNoMip", "ToggleNoMip", this, "ToggleNoMip" ) );
-	m_pToggleNoMip->SetVisible( true );
-
 	m_pCopyTxt = vgui::SETUP_PANEL( new vgui::Button( this, "CopyTxt", "Copy Text", this, "CopyTxt" ) );
 	m_pCopyTxt->SetVisible( true );
 
-#ifndef POSIX
 	m_pCopyImg = vgui::SETUP_PANEL( new vgui::Button( this, "CopyImg", "Copy Image", this, "CopyImg" ) );
 	m_pCopyImg->SetVisible( true );
-#endif
-
-	m_pSaveImg = vgui::SETUP_PANEL( new vgui::Button( this, "SaveImg", "Save Image", this, "SaveImg" ) );
-	m_pSaveImg->SetVisible( true );
 
 	m_pFlashBtn = vgui::SETUP_PANEL( new vgui::Button( this, "FlashBtn", "Flash in Game", this, "FlashBtn" ) );
 	m_pFlashBtn->SetVisible( true );
 
 	m_pSizeControls[0] = vgui::SETUP_PANEL( new vgui::Button( this, "--", "--", this, "size-" ) );
 	m_pSizeControls[1] = vgui::SETUP_PANEL( new vgui::Button( this, "+", "+", this, "size+" ) );
+	
+	m_pSizeControls[2] = vgui::SETUP_PANEL( new vgui::CheckButton( this, "Exclude", "Exclude" ) );
+	m_pSizeControls[2]->AddActionSignalTarget( this );
+	m_pSizeControls[2]->SetCommand( "Exclude" );
+
 }
 
 CRenderTextureEditor::~CRenderTextureEditor()
@@ -1228,26 +1164,9 @@ void CRenderTextureEditor::SetDispInfo( KeyValues *kv, int iHint )
 		bufText.Printf( "\n%s", arrMaterials.String( k ) );
 	}
 
-	m_pSaveImg->SetVisible( false );
-
 	// Set text except for the cases when m_pInfo and no materials found
 	if ( !( m_pInfo && !arrMaterials.GetNumStrings() ) )
 	{
-		if ( kv )
-		{
-			int iTxWidth = kv->GetInt( KEYNAME_WIDTH );
-			int iTxHeight = kv->GetInt( KEYNAME_HEIGHT );
-			char const *szTxFormat = kv->GetString( KEYNAME_FORMAT );
-
-			bufText.Printf( "\n%dx%d Format:%s", iTxWidth, iTxHeight, szTxFormat );
-
-			// We support saving the 8888 formats right now: "RGBA8888", "ABGR8888", "ARGB8888", "BGRA8888", "BGRX8888"
-			if( Q_strstr( szTxFormat, "8888" ) )
-			{
-				m_pSaveImg->SetVisible( true );
-			}
-		}
-
 		m_pMaterials->SetText( ( char const * ) bufText.Base() );
 
 		m_lstMaterials.RemoveAll();
@@ -1294,17 +1213,10 @@ void CRenderTextureEditor::PerformLayout()
 	m_pReload->SetWide( 60 );
 	m_pReload->SetVisible( m_lstMaterials.Count() > 0 );
 
-	m_pRebuild->SetPos( 2 * TILE_BORDER + TILE_SIZE - 50 - 65 - 95, 2 * TILE_BORDER );
-	m_pRebuild->SetWide( 90 );
-	m_pRebuild->SetVisible( m_lstMaterials.Count() > 0 );
-
-	m_pToggleNoMip->SetPos( 2 * TILE_BORDER + TILE_SIZE - 50 - 95, (2 * TILE_BORDER) + m_pReload->GetTall() + 1 );
-	m_pToggleNoMip->SetWide( 90 );
-	m_pToggleNoMip->SetVisible( m_lstMaterials.Count() > 0 );
-
 	m_pExplore->SetVisible( false );
 	m_pSizeControls[0]->SetVisible( false );
 	m_pSizeControls[1]->SetVisible( false );
+	m_pSizeControls[2]->SetVisible( false );
 
 	if ( m_pInfo )
 	{
@@ -1316,13 +1228,21 @@ void CRenderTextureEditor::PerformLayout()
 			m_pExplore->SetVisible( true );
 		}
 
+		char const *szKeyName = m_pInfo->GetString( KEYNAME_NAME );
+
 		if ( !m_pInfo->GetInt( "SpecialTx" ) )
 		{
 			m_pSizeControls[0]->SetVisible( true );
 			m_pSizeControls[1]->SetVisible( true );
 
-			m_pSizeControls[0]->SetEnabled( CanAdjustTextureSize( m_pInfo->GetString( KEYNAME_NAME ), false ) );
-			m_pSizeControls[1]->SetEnabled( CanAdjustTextureSize( m_pInfo->GetString( KEYNAME_NAME ), true ) );
+			if ( CanAdjustTextureExclude( szKeyName ) )
+			{
+				m_pSizeControls[2]->SetVisible( true );
+				m_pSizeControls[2]->SetSelected( IsTextureExcluded( szKeyName ) );
+			}
+
+			m_pSizeControls[0]->SetEnabled( CanAdjustTextureSize( szKeyName, false ) );
+			m_pSizeControls[1]->SetEnabled( CanAdjustTextureSize( szKeyName, true ) );
 
 			int posX, posY;
 			m_pExplore->GetPos( posX, posY );
@@ -1330,6 +1250,10 @@ void CRenderTextureEditor::PerformLayout()
 			m_pSizeControls[0]->SetWide( m_pExplore->GetWide() / 2 );
 			m_pSizeControls[1]->SetPos( posX + m_pSizeControls[0]->GetWide() + 1, posY + m_pExplore->GetTall() + 1 );
 			m_pSizeControls[1]->SetWide( m_pExplore->GetWide() - ( m_pSizeControls[0]->GetWide() + 1 ) );
+
+			int iExcludeWidth = 80;
+			m_pSizeControls[2]->SetPos( posX - iExcludeWidth - 1, posY + m_pExplore->GetTall() + 1 );
+			m_pSizeControls[2]->SetWide( iExcludeWidth );
 		}
 	}
 
@@ -1340,14 +1264,8 @@ void CRenderTextureEditor::PerformLayout()
 		posX += m_pExplore->GetWide();
 
 		posX -= 80;
-		m_pSaveImg->SetPos( posX, posY );
-		m_pSaveImg->SetWide( 80 );
-
-#ifndef POSIX
-		posX -= 80 + 5;
 		m_pCopyImg->SetPos( posX, posY );
 		m_pCopyImg->SetWide( 80 );
-#endif
 
 		posX -= 80 + 5;
 		m_pCopyTxt->SetPos( posX, posY );
@@ -1359,44 +1277,11 @@ void CRenderTextureEditor::PerformLayout()
 	}
 }
 
-#ifdef IS_WINDOWS_PC
-bool GetTextureContentPath( const char *pszVTF, char *szTextureContentPath, int nBufSize )
-{
-	char vhRelVTF[MAX_PATH];
-	Q_snprintf( vhRelVTF, sizeof( vhRelVTF ) - 1, "materials/%s.vtf", pszVTF );
-
-	ConVarRef mat_texture_list_content_path( "mat_texture_list_content_path" );
-	if ( !mat_texture_list_content_path.GetString()[0] )
-	{
-		szTextureContentPath = const_cast< char * >( g_pFileSystem->RelativePathToFullPath( vhRelVTF, "game", szTextureContentPath, nBufSize - 1 ) );
-
-		if ( !szTextureContentPath )
-		{
-			Warning( " texture '%s' is not loaded from file system.\n", pszVTF );
-			return false;
-		}
-		if ( !BufferReplace( szTextureContentPath, "\\game\\", "\\content\\" ) ||
-			!BufferReplace( szTextureContentPath, "\\materials\\", "\\materialsrc\\" ) )
-		{
-			Warning( " texture '%s' cannot be mapped to content directory.\n", pszVTF );
-			return false;
-		}
-	}
-	else
-	{
-		V_strncpy( szTextureContentPath, mat_texture_list_content_path.GetString(), MAX_PATH );
-		V_strncat( szTextureContentPath, "/", MAX_PATH );
-		V_strncat( szTextureContentPath, pszVTF, MAX_PATH );
-		V_strncat( szTextureContentPath, ".vtf", MAX_PATH );
-	}
-
-	return true;
-}
-#endif // #ifdef IS_WINDOWS_PC
-
 void CRenderTextureEditor::OnCommand( const char *command )
 {
 	BaseClass::OnCommand( command );
+
+	MatTextureModificationRecorded();
 
 	if ( !stricmp( command, "Explore" ) && m_pInfo )
 	{
@@ -1443,7 +1328,7 @@ void CRenderTextureEditor::OnCommand( const char *command )
 			bufCommand.Printf( "\"\n" );
 			bufCommand.PutChar( 0 );
 
-			Cbuf_AddText( ( char const * ) bufCommand.Base() );
+			Cbuf_AddText( Cbuf_GetCurrentPlayer(), ( char const * ) bufCommand.Base() );
 			bufCommand.Clear();
 			Cbuf_Execute();
 		}
@@ -1466,11 +1351,6 @@ void CRenderTextureEditor::OnCommand( const char *command )
 		vgui::system()->SetClipboardImage( pMainWnd, x, y, x + GetWide(), y + GetTall() );
 	}
 
-	if ( !stricmp( command, "SaveImg" ) )
-	{
-		SaveTextureImage( m_pInfo->GetString( KEYNAME_NAME ) );
-	}
-
 	if ( !stricmp( command, "FlashBtn" ) )
 	{
 		MatViewOverride::RequestSelectNone();
@@ -1491,170 +1371,17 @@ void CRenderTextureEditor::OnCommand( const char *command )
 		InvalidateLayout();
 	}
 
-	if ( !stricmp( command, "ToggleNoMip" ) )
+	if ( !stricmp( command, "Exclude" ) )
 	{
-#ifdef IS_WINDOWS_PC
-		CP4Requirement p4req;
-		if ( !p4 )
-			g_p4factory->SetDummyMode( true );
-
-		char const *szTextureFile = m_pInfo->GetString( KEYNAME_NAME );
-		char const *szTextureGroup = m_pInfo->GetString( KEYNAME_TEXTURE_GROUP );
-
-		ITexture *pMatTexture = NULL;
-		if ( *szTextureFile )
-			pMatTexture = materials->FindTexture( szTextureFile, szTextureGroup, false );
-		if ( !pMatTexture )
-			pMatTexture = materials->FindTexture( "debugempty", "", false );
-
-		bool bNewNoMip = !(pMatTexture->GetFlags() & TEXTUREFLAGS_NOMIP);
-
-		char szFileName[MAX_PATH];
-		if ( !GetTextureContentPath( szTextureFile, szFileName, sizeof(szFileName) ) )
-			return;
-
-		// Figure out what kind of source content is there:
-		// 1. look for TGA - if found, get the txt file (if txt file missing, create one)
-		// 2. otherwise look for PSD - affecting psdinfo
-		// 3. else error
-		char *pExtPut = szFileName + strlen( szFileName ) - strlen( ".vtf" ); // compensating the TEXTURE_FNAME_EXTENSION(.vtf) extension
-
-		// 1.tga
-		sprintf( pExtPut, ".tga" );
-		if ( g_pFullFileSystem->FileExists( szFileName ) )
+		bool bExclude = m_pSizeControls[2]->IsSelected();
+		bool bResult = AdjustTextureExclude( m_pInfo->GetString( KEYNAME_NAME ), bExclude );
+		if ( bResult )
 		{
-			// Have tga - pump in the txt file
-			sprintf( pExtPut, ".txt" );
-
-			CUtlBuffer bufTxtFileBuffer( 0, 0, CUtlBuffer::TEXT_BUFFER );
-			g_pFullFileSystem->ReadFile( szFileName, 0, bufTxtFileBuffer );
-			for ( int k = 0; k < 1024; ++ k ) bufTxtFileBuffer.PutChar( 0 );
-
-			// Now fix maxwidth/maxheight settings
-			SetBufferValue( ( char * ) bufTxtFileBuffer.Base(), "nomip", bNewNoMip ? "1" : "0" );
-			bufTxtFileBuffer.SeekPut( CUtlBuffer::SEEK_HEAD, strlen( ( char * ) bufTxtFileBuffer.Base() ) );
-
-			// Check out or add the file
-			g_p4factory->SetOpenFileChangeList( "Texture LOD Autocheckout" );
-			CP4AutoEditFile autop4_edit( szFileName );
-
-			// Save the file contents
-			if ( g_pFullFileSystem->WriteFile( szFileName, 0, bufTxtFileBuffer ) )
-			{
-				Msg(" '%s' : saved.\n", szFileName );
-				CP4AutoAddFile autop4_add( szFileName );
-			}
-			else
-			{
-				Warning( " '%s' : failed to save - toggle \"nomip\" manually.\n",
-					szFileName );
-			}
-		}
-		else
-		{
-			// 2.psd
-			sprintf( pExtPut, ".psd" );
-			if ( g_pFullFileSystem->FileExists( szFileName ) )
-			{
-				char chCommand[MAX_PATH];
-				char szTxtFileName[MAX_PATH] = {0};
-				GetModSubdirectory( "tmp_lod_psdinfo.txt", szTxtFileName, sizeof( szTxtFileName ) );
-				sprintf( chCommand, "/C psdinfo \"%s\" > \"%s\"", szFileName, szTxtFileName);
-				vgui::system()->ShellExecuteEx( "open", "cmd.exe", chCommand );
-				Sys_Sleep( 200 );
-
-				CUtlBuffer bufTxtFileBuffer( 0, 0, CUtlBuffer::TEXT_BUFFER );
-				g_pFullFileSystem->ReadFile( szTxtFileName, 0, bufTxtFileBuffer );
-				for ( int k = 0; k < 1024; ++ k ) bufTxtFileBuffer.PutChar( 0 );
-
-				// Now fix maxwidth/maxheight settings
-				SetBufferValue( ( char * ) bufTxtFileBuffer.Base(), "nomip", bNewNoMip ? "1" : "0" );
-				bufTxtFileBuffer.SeekPut( CUtlBuffer::SEEK_HEAD, strlen( ( char * ) bufTxtFileBuffer.Base() ) );
-
-				// Check out or add the file
-				// Save the file contents
-				if ( g_pFullFileSystem->WriteFile( szTxtFileName, 0, bufTxtFileBuffer ) )
-				{
-					g_p4factory->SetOpenFileChangeList( "Texture LOD Autocheckout" );
-					CP4AutoEditFile autop4_edit( szFileName );
-
-					sprintf( chCommand, "/C psdinfo -write \"%s\" < \"%s\"", szFileName, szTxtFileName );
-					Sys_Sleep( 200 );
-					vgui::system()->ShellExecuteEx( "open", "cmd.exe", chCommand );
-					Sys_Sleep( 200 );
-
-					Msg(" '%s' : saved.\n", szFileName );
-					CP4AutoAddFile autop4_add( szFileName );
-				}
-				else
-				{
-					Warning( " '%s' : failed to save - toggle \"nomip\" manually.\n",
-						szFileName );
-				}
-			}
-			else
-			{
-				// 3. - error
-				sprintf( pExtPut, "" );
-				Warning( " '%s' : doesn't specify a valid TGA or PSD file!\n", szFileName );
-				return;
-			}
+			CAutoPushPop<bool> auto_g_bRecursiveRequestToShowTextureList( g_bRecursiveRequestToShowTextureList, true );
+			mat_texture_list_on_f();
 		}
 
-		// Now reload the texture
-		OnCommand( "RebuildVTF" );
-#endif // #ifdef IS_WINDOWS_PC
-	}
-	
-	if ( !stricmp( command, "RebuildVTF" ) )
-	{
-#ifdef IS_WINDOWS_PC
-		CP4Requirement p4req;
-		if ( !p4 )
-			g_p4factory->SetDummyMode( true );
-
-		CSysModule *pModule;
-		IVTex *pIVTex = VTex_Load( &pModule );
-		if ( !pIVTex )
-			return;
-
-		char const *szTextureFile = m_pInfo->GetString( KEYNAME_NAME );
-
-		char szContentFilename[MAX_PATH];
-		if ( !GetTextureContentPath( szTextureFile, szContentFilename, sizeof(szContentFilename) ) )
-			return;
-
-		char pGameDir[MAX_OSPATH];
-		COM_GetGameDir( pGameDir, sizeof( pGameDir ) );
-
-		// Check out the VTF
-		char szVTFFilename[MAX_PATH];
-		Q_snprintf( szVTFFilename, sizeof( szVTFFilename ) - 1, "%s/materials/%s.vtf", pGameDir, szTextureFile );
-		g_p4factory->SetOpenFileChangeList( "Texture LOD Autocheckout" );
-		CP4AutoEditFile autop4_edit( szVTFFilename );
-
-		// Get the directory for the outdir
-		StripDirName( szVTFFilename );
-
-		// Now we've modified the source, rebuild the texture
-		char *argv[64];
-		int iArg = 0;
-		argv[iArg++] = "";
-		argv[iArg++] = "-quiet";
-		argv[iArg++] = "-UseStandardError";	// These are only here for the -currently released- version of vtex.dll.
-		argv[iArg++] = "-WarningsAsErrors";
-		argv[iArg++] = "-outdir";
-		argv[iArg++] = szVTFFilename;
-		argv[iArg++] = szContentFilename;
-		pIVTex->VTex( CubemapsFSFactory, pGameDir, iArg, argv );
-
-		VTex_Unload( pModule );
-
-		Sys_Sleep( 200 );
-
-		// Now reload the texture
-		OnCommand( "Reload" );
-#endif // #ifdef IS_WINDOWS_PC
+		InvalidateLayout();
 	}
 }
 
@@ -1743,8 +1470,8 @@ void CRenderTextureEditor::Paint()
 	iDrawHeight = iDrawHeight / ( float( TILE_TEXTURE_SIZE ) / float( TILE_SIZE ) );
 	iDrawWidth = iDrawWidth / ( float( TILE_TEXTURE_SIZE ) / float( TILE_SIZE ) );
 
-	iDrawHeight = max( iDrawHeight, 4 );
-	iDrawWidth = max( iDrawWidth, 4 );
+	iDrawHeight = MAX( iDrawHeight, 4 );
+	iDrawWidth = MAX( iDrawWidth, 4 );
 
 	//
 	// Draw frame
@@ -1821,6 +1548,8 @@ void CRenderTextureEditor::Paint()
 			sprintf( chLine1 + strlen( chLine1 ), "  NoMip" );
 		if ( pMatTexture->GetFlags() & TEXTUREFLAGS_ONEBITALPHA )
 			sprintf( chLine1 + strlen( chLine1 ), "  OneBitAlpha" );
+		if ( pMatTexture->IsVolumeTexture() )
+			sprintf( chLine1 + strlen( chLine1 ), "  Volume" );
 
 		//
 		// Line 2
@@ -1834,7 +1563,7 @@ void CRenderTextureEditor::Paint()
 			if ( wact > 4 || hact > 4 )
 			{
 				char chbuf[50];
-				int mem = ImageLoader::GetMemRequired( max( min( wact, 4 ), wact / 2 ), max( min( hact, 4 ), hact / 2 ), max( 1, dact / 2 ), fmt, true );
+				int mem = ImageLoader::GetMemRequired( MAX( MIN( wact, 4 ), wact / 2 ), MAX( MIN( hact, 4 ), hact / 2 ), MAX( 1, dact / 2 ), fmt, true );
 				mem = ( mem + 511 ) / 1024;
 				FmtCommaNumber( chbuf, mem );
 				
@@ -1844,7 +1573,7 @@ void CRenderTextureEditor::Paint()
 			if ( wmap > wact || hmap > hact || dmap > dact )
 			{
 				char chbuf[ 50 ];
-				int mem = ImageLoader::GetMemRequired( min( wmap, wact * 2 ), min( hmap, hact * 2 ), min( dmap, dact * 2 ), fmt, true );
+				int mem = ImageLoader::GetMemRequired( MIN( wmap, wact * 2 ), MIN( hmap, hact * 2 ), MIN( dmap, dact * 2 ), fmt, true );
 				mem = ( mem + 511 ) / 1024;
 				FmtCommaNumber( chbuf, mem );
 
@@ -1855,7 +1584,7 @@ void CRenderTextureEditor::Paint()
 		if ( chLine1[0] )
 		{
 			g_pMatSystemSurface->DrawSetColor( 200, 0, 0, 255 );
-			g_pMatSystemSurface->DrawFilledRect( x - TILE_BORDER/2, y + TILE_TEXT/2, x + TILE_BORDER/2 + (TILE_SIZE * 0.5), y + TILE_TEXT/2 + TILE_TEXT/4 );
+			g_pMatSystemSurface->DrawFilledRect( x - TILE_BORDER/2, y + TILE_TEXT/2, x + TILE_BORDER/2 + TILE_SIZE, y + TILE_TEXT/2 + TILE_TEXT/4 );
 			g_pMatSystemSurface->DrawColoredTextRect( GetFont(), x, y + TILE_TEXT/2, TILE_SIZE, TILE_TEXT / 4,
 				255, 255, 255, 255,
 				"%s", chLine1 );
@@ -1926,14 +1655,17 @@ void CRenderTextureEditor::Paint()
 		{
 			orgTxX += orgTxXA;
 			orgTxY += orgTxYA;
-			if ( IMaterial *pMaterialDebug = UseDebugMaterial( "debug/debugtexturealpha", pMatTexture, &auto_matsysdebugmode ) )
+			if ( IMaterial *pMaterial = UseDebugMaterial( "debug/debugtexturealpha", pMatTexture, &auto_matsysdebugmode ) )
 			{
 				g_pMatSystemSurface->DrawOutlinedRect( x + orgTxX + ( extTxWidth - iDrawWidth ) / 2 - IMG_FRAME_OFF, y + orgTxY + ( extTxHeight - iDrawHeight ) / 2 - IMG_FRAME_OFF,
 					x + orgTxX + ( extTxWidth + iDrawWidth ) / 2 + IMG_FRAME_OFF, y + orgTxY + ( extTxHeight + iDrawHeight ) / 2 + IMG_FRAME_OFF );
-				RenderTexturedRect( this, pMaterialDebug,
+				RenderTexturedRect( this, pMaterial,
 					x + orgTxX + ( extTxWidth - iDrawWidth ) / 2, y + orgTxY + ( extTxHeight - iDrawHeight ) / 2,
 					x + orgTxX + ( extTxWidth + iDrawWidth ) / 2, y + orgTxY + ( extTxHeight + iDrawHeight ) / 2 );
 			}
+			
+			orgTxX -= orgTxXA;
+			orgTxY -= orgTxYA;
 		}
 	}
 	else
@@ -1942,6 +1674,25 @@ void CRenderTextureEditor::Paint()
 		g_pMatSystemSurface->DrawFilledRect(
 			x + orgTxX + ( extTxWidth - iDrawWidth ) / 2, y + orgTxY + ( extTxWidth - iDrawHeight ) / 2,
 			x + orgTxX + ( extTxWidth + iDrawWidth ) / 2, y + orgTxY + ( extTxWidth + iDrawHeight ) / 2 );
+	}
+
+	if ( IsTextureExcluded( szTextureFile ) )
+	{
+		g_pMatSystemSurface->DrawSetColor( 200, 0, 0, 255 );
+		g_pMatSystemSurface->DrawFilledRect(
+			x + orgTxX + ( extTxWidth - iDrawWidth ) / 2 - IMG_FRAME_OFF,
+			y + orgTxY + ( extTxHeight - iDrawHeight ) / 2 - IMG_FRAME_OFF,
+			x + orgTxX + ( extTxWidth + iDrawWidth ) / 2 + IMG_FRAME_OFF,
+			y + orgTxY + ( extTxHeight + iDrawHeight ) / 2 + IMG_FRAME_OFF );
+
+		g_pMatSystemSurface->DrawColoredTextRect( GetFont(),
+			x + orgTxX + ( extTxWidth - iDrawWidth ) / 2,
+			y + orgTxY + ( extTxHeight - iDrawHeight ) / 2,
+			iDrawWidth,
+			iDrawHeight,
+			255, 255, 255, 255,
+			"EXCLUDED"
+			);
 	}
 
 	y += TILE_SIZE + TILE_BORDER;
@@ -2193,8 +1944,8 @@ fmtlenreduce:
 	iDrawHeight = iDrawHeight / ( float( TILE_TEXTURE_SIZE ) / float( TILE_SIZE ) );
 	iDrawWidth = iDrawWidth / ( float( TILE_TEXTURE_SIZE ) / float( TILE_SIZE ) );
 
-	iDrawHeight = max( iDrawHeight, 4 );
-	iDrawWidth = max( iDrawWidth, 4 );
+	iDrawHeight = MAX( iDrawHeight, 4 );
+	iDrawWidth = MAX( iDrawWidth, 4 );
 
 	//
 	// Draw frame
@@ -2338,15 +2089,18 @@ fmtlenreduce:
 		{
 			orgTxX += orgTxXA;
 			orgTxY += orgTxYA;
-			if ( IMaterial *pMaterialDebug = UseDebugMaterial( "debug/debugtexturealpha", pMatTexture, &auto_matsysdebugmode ) )
+			if ( IMaterial *pMaterial = UseDebugMaterial( "debug/debugtexturealpha", pMatTexture, &auto_matsysdebugmode ) )
 			{
 				g_pMatSystemSurface->DrawOutlinedRect( x + orgTxX + ( extTxWidth - iDrawWidth ) / 2 - IMG_FRAME_OFF, y + orgTxY + ( extTxHeight - iDrawHeight ) / 2 - IMG_FRAME_OFF,
 					x + orgTxX + ( extTxWidth + iDrawWidth ) / 2 + IMG_FRAME_OFF, y + orgTxY + ( extTxHeight + iDrawHeight ) / 2 + IMG_FRAME_OFF );
-				RenderTexturedRect( this, pMaterialDebug,
+				RenderTexturedRect( this, pMaterial,
 					x + orgTxX + ( extTxWidth - iDrawWidth ) / 2, y + orgTxY + ( extTxHeight - iDrawHeight ) / 2,
 					x + orgTxX + ( extTxWidth + iDrawWidth ) / 2, y + orgTxY + ( extTxHeight + iDrawHeight ) / 2,
 					2, 1 );
 			}
+
+			orgTxX -= orgTxXA;
+			orgTxY -= orgTxYA;
 		}
 	}
 	else
@@ -2355,6 +2109,25 @@ fmtlenreduce:
 		g_pMatSystemSurface->DrawFilledRect(
 			x + orgTxX + ( extTxWidth - iDrawWidth ) / 2, y + orgTxY + ( extTxWidth - iDrawHeight ) / 2,
 			x + orgTxX + ( extTxWidth + iDrawWidth ) / 2, y + orgTxY + ( extTxWidth + iDrawHeight ) / 2 );
+	}
+
+	if ( IsTextureExcluded( szTextureFile ) )
+	{
+		g_pMatSystemSurface->DrawSetColor( 200, 0, 0, 255 );
+		g_pMatSystemSurface->DrawFilledRect(
+			x + orgTxX + ( extTxWidth - iDrawWidth ) / 2 - IMG_FRAME_OFF,
+			y + orgTxY + ( extTxHeight - iDrawHeight ) / 2 - IMG_FRAME_OFF,
+			x + orgTxX + ( extTxWidth + iDrawWidth ) / 2 + IMG_FRAME_OFF,
+			y + orgTxY + ( extTxHeight + iDrawHeight ) / 2 + IMG_FRAME_OFF );
+
+		g_pMatSystemSurface->DrawColoredTextRect( GetFont(),
+			x + orgTxX + ( extTxWidth - iDrawWidth ) / 2,
+			y + orgTxY + ( extTxHeight - iDrawHeight ) / 2,
+			iDrawWidth,
+			iDrawHeight,
+			255, 255, 255, 255,
+			"-X-"
+			);
 	}
 
  	y += TILE_SIZE + TILE_BORDER;
@@ -2424,14 +2197,9 @@ private:
 	vgui::CheckButton *m_pAlpha;
 	vgui::CheckButton *m_pThumbWarnings;
 	
-	vgui::CheckButton *m_pHideMipped;
 	vgui::CheckButton *m_pFilteringChk;
 	vgui::TextEntry *m_pFilteringText;
 	int				m_numDisplayedSizeKB;
-
-	vgui::Button	*m_pReloadAllMaterialsButton;
-	vgui::Button	*m_pCommitChangesButton;
-	vgui::Button	*m_pDiscardChangesButton;
 
 	vgui::Label *m_pCVarListLabel;
 	vgui::Label *m_pTotalUsageLabel;
@@ -2467,7 +2235,16 @@ private:
 	CSmartTextureKeyValues& operator = ( CSmartTextureKeyValues const &x );
 
 public:
-	CSmartTextureKeyValues() : m_p( NULL ) { if ( KeyValues *p = g_pMaterialSystemDebugTextureInfo->GetDebugTextureList() ) m_p = p->MakeCopy(); }
+	CSmartTextureKeyValues() : m_p( NULL )
+	{
+		// Copy the texture list if it is available.  It won't be availabe while it's being
+		// constructed on another thread.  Remember to release when done.
+		if ( KeyValues *p = g_pMaterialSystemDebugTextureInfo->LockDebugTextureList() )
+		{
+			m_p = p->MakeCopy();
+			g_pMaterialSystemDebugTextureInfo->UnlockDebugTextureList();
+		}
+	}
 	~CSmartTextureKeyValues() { if ( m_p ) m_p->deleteThis(); m_p = NULL; }
 
 	KeyValues * Get() const { return m_p; };
@@ -2486,11 +2263,11 @@ CTextureListPanel::CTextureListPanel( vgui::Panel *parent ) :
 	m_numDisplayedSizeKB( 0 )
 {
 	// Need parent here, before loading up textures, so getSurfaceBase 
-	//  will work on this panel ( it's null otherwise )
-	SetSize( videomode->GetModeStereoWidth() - 20, videomode->GetModeStereoHeight() - 20 );
+	//  will work on this panel ( it's 0 otherwise )
+	SetSize( videomode->GetModeWidth() - 20, videomode->GetModeHeight() - 20 );
 	SetPos( 10, 10 );
 	SetVisible( true );
-	SetCursor( null );
+	SetCursor( 0 );
 
 	SetTitle( "Texture list", false );
 	SetMenuButtonVisible( false );
@@ -2558,12 +2335,6 @@ CTextureListPanel::CTextureListPanel( vgui::Panel *parent ) :
 	m_pThumbWarnings->SetSelected( g_warn_enable );
 
 	// Filtering
-	m_pHideMipped = vgui::SETUP_PANEL( new vgui::CheckButton( this, "HideMipped", "Hide Mipped" ) );
-	m_pHideMipped->AddActionSignalTarget( this );
-	m_pHideMipped->SetCommand( "HideMipped" );
-	m_pHideMipped->SetSelected( false );
-
-	// Filtering
 	m_pFilteringChk = vgui::SETUP_PANEL( new vgui::CheckButton( this, "FilteringChk", "Filter: " ) );
 	m_pFilteringChk->AddActionSignalTarget( this );
 	m_pFilteringChk->SetCommand( "FilteringChk" );
@@ -2571,25 +2342,6 @@ CTextureListPanel::CTextureListPanel( vgui::Panel *parent ) :
 
 	m_pFilteringText = vgui::SETUP_PANEL( new vgui::TextEntry( this, "FilteringTxt" ) );
 	m_pFilteringText->AddActionSignalTarget( this );
-
-	m_pReloadAllMaterialsButton = vgui::SETUP_PANEL( new vgui::Button( this, "ReloadAllMaterials", "Reload All Materials" ) );
-	if ( m_pReloadAllMaterialsButton )
-	{
-		m_pReloadAllMaterialsButton->AddActionSignalTarget( this );
-		m_pReloadAllMaterialsButton->SetCommand( "ReloadAllMaterials" );
-	}
-	m_pCommitChangesButton = vgui::SETUP_PANEL( new vgui::Button( this, "CommitChanges", "Commit Changes" ) );
-	if ( m_pCommitChangesButton )
-	{
-		m_pCommitChangesButton->AddActionSignalTarget( this );
-		m_pCommitChangesButton->SetCommand( "CommitChanges" );
-	}
-	m_pDiscardChangesButton = vgui::SETUP_PANEL( new vgui::Button( this, "DiscardChanges", "Discard Changes" ) );
-	if ( m_pDiscardChangesButton )
-	{
-		m_pDiscardChangesButton->AddActionSignalTarget( this );
-		m_pDiscardChangesButton->SetCommand( "DiscardChanges" );
-	}
 
 	// Create the tree control itself.
 	m_pListPanel = vgui::SETUP_PANEL( new vgui::ListPanel( this, "List Panel" ) );
@@ -2691,7 +2443,6 @@ void CTextureListPanel::PerformLayout()
 		m_pAllTextures,
 		m_pViewTextures,
 		m_pFilteringChk,
-		m_pHideMipped,
 		m_pResolveTexturePath,
 		m_pCopyToClipboardButton };
 
@@ -2741,19 +2492,15 @@ void CTextureListPanel::PerformLayout()
 			{ m_pViewTextures, 170 },
 			{ m_pAlpha, 60 },
 			{ m_pAllTextures, 135 },
-			{ m_pHideMipped, 100 },
 			{ m_pFilteringChk, 60 },
-			{ m_pFilteringText, 130 },
-			{ m_pReloadAllMaterialsButton, 130 },
-			{ m_pCommitChangesButton, 130 },
-			{ m_pDiscardChangesButton, 130 },
+			{ m_pFilteringText, 130 }
 		};
 
 		for ( int k = 0; k < ARRAYSIZE( layout ); ++ k )
 		{
 			layout[ k ].pPanel->SetPos( xOffset, 2 );
 			iWidth = layout[ k ].iWidth;
-			iWidth = min( w - xOffset - 30, iWidth );
+			iWidth = MIN( w - xOffset - 30, iWidth );
 			layout[ k ].pPanel->SetWide( iWidth );
 			layout[ k ].pPanel->SetVisible( iWidth > 50 );
 			
@@ -2819,8 +2566,7 @@ static inline void ToLowerInplace( char *chBuffer )
 void KeepSpecialKeys( KeyValues *textureList, bool bServiceKeys )
 {
 	KeyValues *pNext;
-
-	for ( KeyValues *pCur = textureList->GetFirstSubKey(); pCur; pCur=pNext )
+	for ( KeyValues *pCur=textureList->GetFirstSubKey(); pCur; pCur=pNext )
 	{
 		pNext = pCur->GetNextKey();
 
@@ -2873,26 +2619,6 @@ void KeepKeysMatchingFilter( KeyValues *textureList, char const *szFilter )
 		if ( !strstr( chName, chFilter ) )
 		{
 			textureList->RemoveSubKey( pCur );
-		}
-	}
-}
-
-void KeepKeysMarkedNoMip( KeyValues *textureList )
-{
-	KeyValues *pNext;
-	for ( KeyValues *pCur=textureList->GetFirstSubKey(); pCur; pCur=pNext )
-	{
-		pNext = pCur->GetNextKey();
-
-		char const *szTextureFile = pCur->GetString( KEYNAME_NAME );
-		char const *szTextureGroup = pCur->GetString( KEYNAME_TEXTURE_GROUP );
-		if ( *szTextureFile )
-		{
-			ITexture *pMatTexture = materials->FindTexture( szTextureFile, szTextureGroup, false );
-			if ( pMatTexture && !(pMatTexture->GetFlags() & TEXTUREFLAGS_NOMIP) )
-			{
-				textureList->RemoveSubKey( pCur );
-			}
 		}
 	}
 }
@@ -2964,27 +2690,6 @@ void CTextureListPanel::OnCommand( const char *command )
 	if ( !Q_stricmp( command, COPYTOCLIPBOARD_CMDNAME ) )
 	{
 		CopyListPanelToClipboard( m_pListPanel );
-		return;
-	}
-
-	if ( !Q_stricmp( command, "ReloadAllMaterials" ) )
-	{
-		Cbuf_AddText( "mat_reloadallmaterials" );
-		Cbuf_Execute();
-		return;
-	}
-
-	if ( !Q_stricmp( command, "CommitChanges" ) )
-	{
-		Cbuf_AddText( "mat_texture_list_txlod_sync save" );
-		Cbuf_Execute();
-		return;
-	}
-
-	if ( !Q_stricmp( command, "DiscardChanges" ) )
-	{
-		Cbuf_AddText( "mat_texture_list_txlod_sync reset" );
-		Cbuf_Execute();
 		return;
 	}
 
@@ -3072,9 +2777,6 @@ void CTextureListPanel::OnTurnedOn()
 
 	if ( CRenderTextureEditor *pRe = m_pViewPanel->GetRenderTxEditor() )
 		pRe->Close();
-
-	MakePopup( false, false );
-	MoveToFront();
 }
 
 void CTextureListPanel::Close()
@@ -3106,6 +2808,8 @@ void CTextureListPanel::Paint()
 
 	if ( !mat_texture_list.GetBool() )
 		return;
+
+	MatTextureModificationRecorded();
 
 	if ( !g_pMaterialSystemDebugTextureInfo->IsDebugTextureListFresh( 1 ) )
 		return;
@@ -3149,14 +2853,20 @@ void CTextureListPanel::Paint()
 	// If we are fetching all textures, then stop loading material system:
 	if ( mat_texture_list_all.GetBool() )
 	{
+		static int s_nFramesForAllTextures = 0;
+
 		if ( s_eTxListPanelRequest == TXR_RUNNING )
 		{
-			mat_texture_list.SetValue( 0 );
-			s_eTxListPanelRequest = TXR_SHOW; // Keep displaying our panel
+			if ( -- s_nFramesForAllTextures <= 0 )
+			{
+				mat_texture_list.SetValue( 0 );
+				s_eTxListPanelRequest = TXR_SHOW; // Keep displaying our panel
+			}
 		}
 		else
 		{
 			s_eTxListPanelRequest = TXR_RUNNING;
+			s_nFramesForAllTextures = mat_texture_list_all_frames.GetInt();
 		}
 	}
 	else
@@ -3185,16 +2895,31 @@ void CTextureListPanel::Paint()
 		KeepKeysMatchingFilter( textureList.Get(), chFilterString );
 	}
 
-	// If we're to hide mipped, remove anything that isn't marked nomip
-	if ( m_pHideMipped->IsSelected() )
+	// Remove scaleform texture
+	if ( 1 )
 	{
-		KeepKeysMarkedNoMip( textureList.Get() );
+		KeyValues *pNext;
+		for ( KeyValues *pCur=textureList.Get()->GetFirstSubKey(); pCur; pCur=pNext )
+		{
+			pNext = pCur->GetNextKey();
+
+			char const *szName = pCur->GetString( KEYNAME_NAME );
+
+			char chName[MAX_PATH] = {0};
+			Q_strncpy( chName, szName, sizeof( chName ) - 1 );
+			ToLowerInplace( chName );
+
+			if ( V_stristr( chName, "ScaleformDynamic" ) )
+			{
+				textureList.Get()->RemoveSubKey( pCur );
+			}
+		}
 	}
 
 	// Compute the total size of the displayed textures
 	int cbTotalDisplayedSizeInBytes = 0;
 	
-	for ( KeyValues *pCur = textureList.Get()->GetFirstSubKey(); pCur; pCur=pCur->GetNextKey() )
+	for ( KeyValues *pCur=textureList.Get()->GetFirstSubKey(); pCur; pCur=pCur->GetNextKey() )
 	{
 		int sizeInBytes = pCur->GetInt( KEYNAME_SIZE );
 
@@ -3307,39 +3032,11 @@ void CL_CreateTextureListPanel( vgui::Panel *parent )
 	g_pTextureListPanel = new CTextureListPanel( parent );
 }
 
-CON_COMMAND( mat_texture_save_fonts, "Save all font textures" )
-{
-	for( int i = 0; i < 8192; i++ )
-	{
-		char szTextureName[ MAX_PATH ];
-
-		Q_snprintf( szTextureName, ARRAYSIZE( szTextureName ), "__font_page_%d.tga", i );
-
-		if( !materials->IsTextureLoaded( szTextureName ) )
-			break;
-
-		ITexture *pMatTexture = materials->FindTexture( szTextureName, "", false );
-		if( pMatTexture && !pMatTexture->IsError() )
-		{
-			bool bRet = SaveTextureImage( szTextureName );
-			Msg( "SaveTextureImage( '%s' ): %s\n", szTextureName, bRet ? "succeeded" : "failed" );
-		}
-	}
-}
-
+extern ConVar sv_cheats;
 void mat_texture_list_on_f()
 {
-	ConVarRef sv_cheats( "sv_cheats" );
-	if ( sv_cheats.IsValid() && !sv_cheats.GetBool() )
+	if ( !sv_cheats.GetBool() )
 		return;
-
-	ConVarRef mat_queue_mode( "mat_queue_mode" );
-
-	if( mat_queue_mode.IsValid() && ( g_nSaveQueueState == INT_MIN ) )
-	{
-		g_nSaveQueueState = mat_queue_mode.GetInt();
-		mat_queue_mode.SetValue( 0 );
-	}
 
 	mat_texture_list.SetValue( 1 );
 	s_eTxListPanelRequest = TXR_SHOW;
@@ -3347,34 +3044,11 @@ void mat_texture_list_on_f()
 	g_pTextureListPanel->OnTurnedOn();
 
 	MatViewOverride::RequestSelectNone();
-
-	// On Linux, the mouse gets recentered when it's hidden. So if you bring up the texture list
-	//	dialog while the game is running, we need to make sure the mouse is shown. Otherwise it's
-	//	very tough to use when your mouse keeps getting recentered.
-	if( !g_cursorset && g_pVGuiSurface )
-	{
-		g_pVGuiSurface->SetCursorAlwaysVisible( true );
-		g_cursorset = true;
-	}
 }
 void mat_texture_list_off_f()
 {
 	mat_texture_list.SetValue( 0 );
 	s_eTxListPanelRequest = TXR_HIDE;
-
-	if( g_cursorset )
-	{
-		g_pVGuiSurface->SetCursorAlwaysVisible( false );
-		g_cursorset = false;
-	}
-
-	if( g_nSaveQueueState != INT_MIN )
-	{
-		ConVarRef mat_queue_mode( "mat_queue_mode" );
-
-		mat_queue_mode.SetValue( g_nSaveQueueState );
-		g_nSaveQueueState = INT_MIN;
-	}
 }
 
-
+#endif

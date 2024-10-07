@@ -189,20 +189,18 @@ int VoiceRecord_OpenAL::GetRecordedData(short *pOut, int nSamples )
 
 
 
-IVoiceRecord* CreateVoiceRecord_OpenAL(int sampleRate)
+IVoiceRecord* CreateVoiceRecord_DSound(int sampleRate)
 {
 	VoiceRecord_OpenAL *pRecord = new VoiceRecord_OpenAL;
-	if ( pRecord && pRecord->Init(sampleRate) )
+	if(pRecord && pRecord->Init(sampleRate))
 	{
 		return pRecord;
 	}
 	else
 	{
-		if ( pRecord )
-		{
+		if(pRecord)
 			pRecord->Release();
-		}
-
+		
 		return NULL;
 	}
 }

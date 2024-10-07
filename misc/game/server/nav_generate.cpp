@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright � 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -17,6 +17,7 @@
 #include "viewport_panel_names.h"
 //#include "terror/TerrorShared.h"
 #include "fmtstr.h"
+#include "usermessages.h"
 
 #ifdef TERROR
 #include "func_simpleladder.h"
@@ -39,7 +40,6 @@ ConVar nav_slope_tolerance( "nav_slope_tolerance", "0.1", FCVAR_CHEAT, "The grou
 ConVar nav_displacement_test( "nav_displacement_test", "10000", FCVAR_CHEAT, "Checks for nodes embedded in displacements (useful for in-development maps)" );
 ConVar nav_generate_fencetops( "nav_generate_fencetops", "1", FCVAR_CHEAT, "Autogenerate nav areas on fence and obstacle tops" );
 ConVar nav_generate_fixup_jump_areas( "nav_generate_fixup_jump_areas", "1", FCVAR_CHEAT, "Convert obsolete jump areas into 2-way connections" );
-ConVar nav_generate_jump_connections( "nav_generate_jump_connections", "1", FCVAR_CHEAT, "If disabled, don't generate jump connections from jump areas" );
 ConVar nav_generate_incremental_range( "nav_generate_incremental_range", "2000", FCVAR_CHEAT );
 ConVar nav_generate_incremental_tolerance( "nav_generate_incremental_tolerance", "0", FCVAR_CHEAT, "Z tolerance for adding new nav areas." );
 ConVar nav_area_max_size( "nav_area_max_size", "50", FCVAR_CHEAT, "Max area size created in nav generation" );
@@ -498,11 +498,6 @@ class JumpConnector
 public:
 	bool operator()( CNavArea *jumpArea )
 	{
-		if ( !nav_generate_jump_connections.GetBool() )
-		{
-			return true;
-		}
-
 		if ( !(jumpArea->GetAttributes() & NAV_MESH_JUMP) )
 		{
 			return true;
@@ -865,7 +860,7 @@ void CNavMesh::RaiseAreasWithInternalObstacles()
 				corner[SOUTH_EAST].y = corner[NORTH_EAST].y + obstacleEndDist;
 				corner[NORTH_WEST].y += obstacleStartDist;
 				corner[NORTH_EAST].y += obstacleStartDist;
-				::V_swap( obstacleZ[0], obstacleZ[1] );			// swap left and right Z heights for obstacle so we can run common code below
+				V_swap( obstacleZ[0], obstacleZ[1] );			// swap left and right Z heights for obstacle so we can run common code below
 				break;
 			case EAST:
 				corner[NORTH_EAST].x = corner[NORTH_WEST].x + obstacleEndDist;
@@ -877,7 +872,7 @@ void CNavMesh::RaiseAreasWithInternalObstacles()
 				corner[SOUTH_WEST].x = corner[SOUTH_EAST].x - obstacleEndDist;				
 				corner[NORTH_EAST].x -= obstacleStartDist;
 				corner[SOUTH_EAST].x -= obstacleStartDist;
-				::V_swap( obstacleZ[0], obstacleZ[1] );			// swap left and right Z heights for obstacle so we can run common code below
+				V_swap( obstacleZ[0], obstacleZ[1] );			// swap left and right Z heights for obstacle so we can run common code below
 				break;
 			}
 
@@ -888,11 +883,9 @@ void CNavMesh::RaiseAreasWithInternalObstacles()
 			corner[SOUTH_WEST].z = obstacleZ[0];
 			
 			// move the area
-			RemoveNavArea( area );
 			area->Build( corner[NORTH_WEST], corner[NORTH_EAST], corner[SOUTH_EAST], corner[SOUTH_WEST] );
 			Assert( !area->IsDegenerate() );
-			AddNavArea( area );
-
+//			AddToSelectedSet( area );
 			// remove side-to-side connections if there are any so AI does try to do things like run along fencetops
 			area->RemoveOrthogonalConnections( obstacleDir );
 			area->SetAttributes( area->GetAttributes() | NAV_MESH_NO_MERGE | NAV_MESH_OBSTACLE_TOP );
@@ -1090,8 +1083,8 @@ bool CNavMesh::CreateObstacleTopAreaIfNecessary( CNavArea *area, CNavArea *areaO
 			// for south and west, swap "start" and "end" values of edges so we can use common code below
 			if ( dir == SOUTH || dir == WEST )
 			{
-				::V_swap( obstacleHeightStart, obstacleHeightEnd );
-				::V_swap( zStart, zEnd );
+				V_swap( obstacleHeightStart, obstacleHeightEnd );
+				V_swap( zStart, zEnd );
 			}					
 
 			// Enforce min area width for new area
@@ -1235,9 +1228,6 @@ void CNavMesh::RemoveOverlappingObstacleTopAreas()
 
 static void CommandNavCheckStairs( void )
 {
-	if ( !UTIL_IsCommandIssuedByServerAdmin() )
-		return;
-
 	TheNavMesh->MarkStairAreas();
 }
 static ConCommand nav_check_stairs( "nav_check_stairs", CommandNavCheckStairs, "Update the nav mesh STAIRS attribute", FCVAR_CHEAT );
@@ -1454,9 +1444,6 @@ bool CNavArea::TestStairs( void )
 //--------------------------------------------------------------------------------------------------------------
 CON_COMMAND_F( nav_test_stairs, "Test the selected set for being on stairs", FCVAR_CHEAT )
 {
-	if ( !UTIL_IsCommandIssuedByServerAdmin() )
-		return;
-
 	int count = 0;
 
 	const NavAreaVector &selectedSet = TheNavMesh->GetSelectedSet();
@@ -1801,11 +1788,6 @@ inline bool testJumpDown( const Vector *fromPos, const Vector *toPos )
 //--------------------------------------------------------------------------------------------------------------
 inline CNavArea *findJumpDownArea( const Vector *fromPos, NavDirType dir )
 {
-	if ( !nav_generate_jump_connections.GetBool() )
-	{
-		return NULL;
-	}
-
 	Vector start( fromPos->x, fromPos->y, fromPos->z + HalfHumanHeight );
 	AddDirectionVector( &start, dir, GenerationStepSize/2.0f );
 
@@ -1826,8 +1808,6 @@ void CNavMesh::StitchAreaIntoMesh( CNavArea *area, NavDirType dir, Functor &func
 	Vector corner1, corner2;
 	switch ( dir )
 	{
-		default:
-			Assert(0);
 		case NORTH:
 			corner1 = area->GetCorner( NORTH_WEST );
 			corner2 = area->GetCorner( NORTH_EAST );
@@ -3373,7 +3353,11 @@ void CNavMesh::CreateNavAreasFromNodes( void )
 	SplitAreasUnderOverhangs();
 	SquareUpAreas();
 	MarkStairAreas();
+
+#ifndef CSTRIKE_DLL	// CSBots use jump areas
 	StichAndRemoveJumpAreas();
+#endif
+
 	HandleObstacleTopAreas();
 	FixUpGeneratedAreas();
 
@@ -3542,6 +3526,12 @@ void CNavMesh::BeginAnalysis( bool quitWhenFinished )
 		}
 	}
 
+	CBaseEntity* pEnt = NULL;
+	while ( (pEnt = gEntList.FindEntityByClassname( pEnt, "point_hiding_spot" )) != NULL )
+	{
+		UTIL_Remove( pEnt );
+	}
+
 	DestroyHidingSpots();
 	m_generationState = FIND_HIDING_SPOTS;
 	m_generationIndex = 0;
@@ -3573,19 +3563,23 @@ void ShowViewPortPanelToAll( const char * name, bool bShow, KeyValues *data )
 		subkey = data->GetFirstSubKey(); // reset 
 	}
 
-	UserMessageBegin( filter, "VGUIMenu" );
-		WRITE_STRING( name ); // menu name
-		WRITE_BYTE( bShow?1:0 );
-		WRITE_BYTE( count );
-		
-		// write additional data (be careful not more than 192 bytes!)
-		while ( subkey )
-		{
-			WRITE_STRING( subkey->GetName() );
-			WRITE_STRING( subkey->GetString() );
-			subkey = subkey->GetNextKey();
-		}
-	MessageEnd();
+	CCSUsrMsg_VGUIMenu msg;
+
+	msg.set_name( name );
+	msg.set_show( bShow );
+
+	// write additional data (be careful not more than 192 bytes!)
+	while ( subkey )
+	{
+		CCSUsrMsg_VGUIMenu::Subkey *pMsgSubkey = msg.add_subkeys();
+
+		pMsgSubkey->set_name( subkey->GetName() );
+		pMsgSubkey->set_str( subkey-> GetString() );
+
+		subkey = subkey->GetNextKey();
+	}
+
+	SendUserMessage( filter, CS_UM_VGUIMenu, msg );
 }
 
 
@@ -3782,10 +3776,26 @@ bool CNavMesh::UpdateGeneration( float maxTime )
 
 			Msg( "Finding sniper spots...DONE\n" );
 
-			m_generationState = COMPUTE_MESH_VISIBILITY;
-			m_generationIndex = 0;
-			BeginVisibilityComputations();
-			Msg( "Computing mesh visibility...\n" );
+
+			if ( IsMeshVisibilityGenerated() )
+			{
+				m_generationState = COMPUTE_MESH_VISIBILITY;
+				m_generationIndex = 0;
+				BeginVisibilityComputations();
+				Msg( "Computing mesh visibility...\n" );
+			}
+			else
+			{
+				// no visibility data desired - skip directly to next analyze step
+				FOR_EACH_VEC( TheNavAreas, it )
+				{
+					CNavArea *area = TheNavAreas[ it ];
+					area->ResetPotentiallyVisibleAreas();
+				}
+
+				m_generationState = FIND_EARLIEST_OCCUPY_TIMES;
+				m_generationIndex = 0;
+			}
 		
 			return true;
 		}
@@ -3986,6 +3996,7 @@ bool CNavMesh::UpdateGeneration( float maxTime )
 			m_generationIndex = 0;
 			ConVarRef mat_queue_mode( "mat_queue_mode" );
 			mat_queue_mode.SetValue( -1 );
+
 			host_thread_mode.SetValue( m_hostThreadModeRestoreValue );	// restore this
 			return true;
 		}
@@ -4691,7 +4702,7 @@ bool IsWalkableTraceLineClear( const Vector &from, const Vector &to, unsigned in
 	const int maxTries = 50;
 	for( int t=0; t<maxTries; ++t )
 	{
-		UTIL_TraceLine( useFrom, to, MASK_NPCSOLID, &traceFilter, &result );
+		UTIL_TraceLine( useFrom, to, MASK_PLAYERSOLID, &traceFilter, &result );
 
 		// if we hit a walkable entity, try again
 		if (result.fraction != 1.0f && IsEntityWalkable( result.m_pEnt, flags ))
@@ -4714,6 +4725,28 @@ bool IsWalkableTraceLineClear( const Vector &from, const Vector &to, unsigned in
 
 	return false;
 }
+
+
+//--------------------------------------------------------------------------------------------------------------
+/**
+ * Trace a hull, ignoring any entities that we can walk through
+ */
+bool IsWalkableTraceHullClear( const Vector &from, const Vector &to, const Vector &mins, const Vector &maxs, unsigned int flags )
+{
+	trace_t result;
+	CTraceFilterWalkableEntities traceFilter( NULL, COLLISION_GROUP_NONE, flags );
+
+	UTIL_TraceHull( from, to, mins, maxs, MASK_PLAYERSOLID, &traceFilter, &result );
+
+	if ( result.DidHitNonWorldEntity() && IsEntityWalkable( result.m_pEnt, flags ) )
+	{
+		return true;
+	}
+
+	return !result.DidHit();
+}
+
+
 
 
 //--------------------------------------------------------------------------------------------------------------
@@ -4949,8 +4982,5 @@ void CNavMesh::PostProcessCliffAreas()
 
 CON_COMMAND_F( nav_gen_cliffs_approx, "Mark cliff areas, post-processing approximation", FCVAR_CHEAT )
 {
-	if ( !UTIL_IsCommandIssuedByServerAdmin() )
-		return;
-
 	TheNavMesh->PostProcessCliffAreas();
 }

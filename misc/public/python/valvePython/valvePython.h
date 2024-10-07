@@ -23,6 +23,19 @@
 #include "tier1/utlstring.h"
 
 //-----------------------------------------------------------------------------
+// Call instead of Py_Initialize(), it will call Py_Initialize() after doing
+// a sanity check and possible repair of the PYTHONHOME environment variable
+//-----------------------------------------------------------------------------
+void Valve_Py_Initialize();
+
+
+//-----------------------------------------------------------------------------
+// Sets things up so python will print to Valve's "Spew" system
+//-----------------------------------------------------------------------------
+void PythonToSpew();
+
+
+//-----------------------------------------------------------------------------
 // Finds the GetAppFactory function in the specified python module and returns
 // the app factory handle or NULL on error
 //-----------------------------------------------------------------------------
@@ -35,6 +48,13 @@ CreateInterfaceFn ValvePythonAppFactory( const char *pGetAppFactory = "GetAppFac
 //
 //=============================================================================
 bool ValvePythonInit( CreateInterfaceFn pInFactory = NULL );
+
+//=============================================================================
+//
+// Without DataModel
+//
+//=============================================================================
+bool ValvePythonInitNoDataModel( CreateInterfaceFn pInFactory = NULL );
 
 
 //=============================================================================
@@ -111,20 +131,21 @@ class CValvePythonSubModule
 public:
 	typedef void ( *PythonInitFunc_t )( void );
 
-	// Constructor
 	CValvePythonSubModule( const char *pName, PythonInitFunc_t pInitFunc )
-	: m_name( "_" )
+	: m_name( pName )
 	, m_pInitFunc( pInitFunc )
 	{
-		m_name += pName;
 		m_pNextFactory = s_pFirstFactory;
 		s_pFirstFactory = this;
 	}
 
+	// Only Registers _<mod>.pyd
 	static void Register( PyObject *pPackage );
 
+	// Registers both the _<mod>.pyd & <mod>.py
+	static void FullRegister( PyObject *pPackage );
+
 private:
-	// The next factory
 	CValvePythonSubModule *m_pNextFactory;
 	static CValvePythonSubModule *s_pFirstFactory;
 
@@ -140,9 +161,30 @@ private:
 //
 // PYTHON_COMMAND( foo, METH_VARARGS, "The documentation for foo" )
 //-----------------------------------------------------------------------------
+#ifndef SWIGEXPORT
+# if defined(_WIN32) || defined(__WIN32__) || defined(__CYGWIN__)
+#   if defined(STATIC_LINKED)
+#     define SWIGEXPORT
+#   else
+#     define SWIGEXPORT __declspec(dllexport)
+#   endif
+# else
+#   if defined(__GNUC__) && defined(GCC_HASCLASSVISIBILITY)
+#     define SWIGEXPORT __attribute__ ((visibility("default")))
+#   else
+#     define SWIGEXPORT
+#   endif
+# endif
+#endif
+
 #define PYTHON_SUBMODULE( _name ) \
-	extern "C" void init_##_name( void ); \
-	static CValvePythonSubModule _name##_submodule( #_name, init_##_name );
+	extern "C" SWIGEXPORT void init_##_name( void ); \
+	static CValvePythonSubModule _name##_submodule( #_name, init_##_name ); \
+	CValvePythonSubModule *g_p##_name##LinkerHack = NULL;
+
+#define REFERENCE_PYTHON_SUBMODULE( _name, _suffix ) \
+	extern CValvePythonSubModule *g_p##_name##LinkerHack; \
+	CValvePythonSubModule *g_p##_name##_suffix##PullInModule = g_p##_name##LinkerHack;
 
 
 // Support for implemented extended python commands which can take multiple position arguments and specified keyword arguments
@@ -160,6 +202,7 @@ typedef enum _pytypes
 	PY_FIELD_QUATERNION,		// A quaternion
 	PY_FIELD_VMATRIX,			// a Vmatrix (output coords are NOT worldspace)
 	PY_FIELD_MATRIX3X4,			// matrix3x4_t
+	PY_FIELD_OBJECT,			// generic object pointer
 
 	PY_FIELD_TYPECOUNT,			// MUST BE LAST
 } pytype_t;

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright � 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -10,9 +10,8 @@
 #pragma once
 #endif
 
-// an error will cause the entire program to exit and upload a minidump to us
+// an error will cause the entire program to exit
 void Sys_Error(PRINTF_FORMAT_STRING const char *psz, ...) FMTFUNCTION( 1, 2 );
-// kill the process with an error but don't send us a minidump, its not a bug but a user config problem
+// an error will cause the entire program to exit but WITHOUT uploading a report to the crash backend, so for fatal but user controlled error
 void Sys_Exit( PRINTF_FORMAT_STRING const char *error, ... ) FMTFUNCTION( 1, 2 );
-
 #endif // SYSEXTERNAL_H

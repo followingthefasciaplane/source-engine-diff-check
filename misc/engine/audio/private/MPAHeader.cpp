@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -9,6 +9,9 @@
 #endif
 #include "tier0/platform.h"
 #include "MPAFile.h"
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
 
 
 // static variables
@@ -118,9 +121,9 @@ m_pMPAFile( pMPAFile ), m_dwSyncOffset( dwExpectedOffset ), m_dwRealFrameSize( 0
 			if( nStep > m_dwTolerance )
 			{
 				// out of tolerance range
-				throw CMPAException( CMPAException::NoFrameInTolerance, pMPAFile->GetFilename() ? pMPAFile->GetFilename() : "??" );
+				throw CMPAException( CMPAException::NoFrameInTolerance, pMPAFile->GetFilename() );
 			}
-
+			
 			// look around dwExpectedOffset with increasing steps (+1,-1,+2,-2,...)
 			if( m_dwSyncOffset <= dwExpectedOffset )
 			{
@@ -141,7 +144,8 @@ m_pMPAFile( pMPAFile ), m_dwSyncOffset( dwExpectedOffset ), m_dwRealFrameSize( 0
 		if( nSyncOffset < 0 || nSyncOffset > (int)((pMPAFile->m_dwEnd - pMPAFile->m_dwBegin) - MPA_HEADER_SIZE) || abs( (long)(nSyncOffset-dwExpectedOffset) ) > m_dwMaxRange )
 		{
 			// out of tolerance range
-			throw CMPAException( CMPAException::NoFrame, pMPAFile->GetFilename() ? pMPAFile->GetFilename() : "??" );
+			throw CMPAException( CMPAException::NoFrame, pMPAFile->GetFilename() );
+			
 		}
 		m_dwSyncOffset = nSyncOffset;
 
@@ -268,7 +272,7 @@ CMPAHeader::HeaderError CMPAHeader::IsSync( uint32 dwOffset,  bool bExtended  )
 			if( bExtended )
 			{	
 				// recursive call (offset for next frame header)
-				dwOffset = m_dwSyncOffset+m_dwComputedFrameSize;
+				uint32 dwOffset = m_dwSyncOffset+m_dwComputedFrameSize;
 				try
 				{
 					CMPAHeader m_SubsequentFrame( m_pMPAFile, dwOffset, true );	

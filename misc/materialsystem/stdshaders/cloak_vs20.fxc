@@ -1,20 +1,23 @@
-//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
+//========== Copyright (c) Valve Corporation, All rights reserved. ==========//
 //
 // Purpose: 
 //
-//=============================================================================
+//===========================================================================//
 
-//  STATIC: "MODEL"						"0..1"
-//  STATIC: "USE_STATIC_CONTROL_FLOW"	"0..1" [vs20]
+// STATIC: "MODEL"							"0..1"
+// STATIC: "FLATTEN_STATIC_CONTROL_FLOW"	"0..1" [vs20] [PC]
+// STATIC: "FLATTEN_STATIC_CONTROL_FLOW"	"0..0" [CONSOLE]
 
-//	DYNAMIC: "COMPRESSED_VERTS"			"0..1"
-//	DYNAMIC: "DOWATERFOG"				"0..1"
-//	DYNAMIC: "SKINNING"					"0..1"
-//  DYNAMIC: "MORPHING"					"0..1" [vs30]
-//  DYNAMIC: "NUM_LIGHTS"				"0..2" [vs20]
+// DYNAMIC: "COMPRESSED_VERTS"				"0..1"
+#include "common_fog_vs_fxc.h"
+// DYNAMIC: "SKINNING"						"0..1"
+
+// DYNAMIC: "MORPHING"						"0..0" [ = false ]
+// DYNAMIC: "NUM_LIGHTS"					"0..2" [vs20] [PC]
+// DYNAMIC: "NUM_LIGHTS"					"0..0" [vs20] [CONSOLE]
 
 // If using static control flow on Direct3D, we should use the NUM_LIGHTS=0 combo
-//  SKIP: $USE_STATIC_CONTROL_FLOW && ( $NUM_LIGHTS > 0 ) [vs20]
+//  SKIP: ( $FLATTEN_STATIC_CONTROL_FLOW == 0 )&& ( $NUM_LIGHTS > 0 ) [vs20] [PC]
 
 #include "common_vs_fxc.h"
 
@@ -27,7 +30,7 @@ static const int g_FogType			= DOWATERFOG;
 const float3 cMorphTargetTextureDim			: register( SHADER_SPECIFIC_CONST_6 );
 const float4 cMorphSubrect					: register( SHADER_SPECIFIC_CONST_7 );
 
-sampler2D morphSampler : register( D3DVERTEXTEXTURESAMPLER0, s0 );
+sampler2D morphSampler : register( s0 );
 #endif
 
 struct VS_INPUT
@@ -50,8 +53,10 @@ struct VS_INPUT
 
 struct VS_OUTPUT
 {
-    float4 vSetupProjPos			: POSITION;	
-	float  fFog						: FOG;
+    float4 vSetupProjPos			: POSITION;
+#if !defined( _X360 ) && !defined( SHADER_MODEL_VS_3_0 )
+	float  fog						: FOG;
+#endif
 	float2 vBaseTexCoord			: TEXCOORD0;
 	float3x3 tangentSpaceTranspose	: TEXCOORD1;
 	//	     second row				: TEXCOORD2;
@@ -59,7 +64,6 @@ struct VS_OUTPUT
 	float3 worldPos					: TEXCOORD4;
 	float3 projPos					: TEXCOORD5;
 	float4 lightAtten				: TEXCOORD6;
-	float3 vRefract					: TEXCOORD7;
 };
 
 VS_OUTPUT main( const VS_INPUT v )
@@ -93,7 +97,6 @@ VS_OUTPUT main( const VS_INPUT v )
 
 	// Projected position
 	float4 vProjPos = mul( float4( worldPos, 1 ), cViewProj );
-	o.vSetupProjPos = vProjPos;
 
 	// Map projected position to the refraction texture
 	float2 vRefractPos;
@@ -101,7 +104,15 @@ VS_OUTPUT main( const VS_INPUT v )
 	vRefractPos.y = -vProjPos.y; // invert Y
 	vRefractPos = (vRefractPos + vProjPos.w) * 0.5f;
 
-#if defined ( SHADER_MODEL_VS_2_0 ) && ( !USE_STATIC_CONTROL_FLOW )
+#ifdef _PS3
+	// Account for OpenGL's flipped y coordinate and expanded z range [-1,1] instead of [0,1]
+	vProjPos.y = -vProjPos.y;
+	vProjPos.z = 2.0f * vProjPos.z - vProjPos.w;
+#endif // _PS3
+
+	o.vSetupProjPos = vProjPos;
+
+#if defined ( SHADER_MODEL_VS_2_0 ) && ( FLATTEN_STATIC_CONTROL_FLOW )
 	o.lightAtten = float4(0,0,0,0);
 	#if ( NUM_LIGHTS > 0 )
 		o.lightAtten.x = GetVertexAttenForLight( worldPos, 0, false );
@@ -124,9 +135,10 @@ VS_OUTPUT main( const VS_INPUT v )
 #endif
 
 	// Compute fog based on the position
-	float3 vWorldPos = mul( v.vPos, cModel[0] );
-#if !defined( _X360 )
-	o.fFog = CalcFog( vWorldPos, vProjPos, FOGTYPE_RANGE );
+	float3 vWorldPos = mul4x3( v.vPos, cModel[0] );
+	
+#if !defined( _X360 ) && !defined( SHADER_MODEL_VS_3_0 )
+	o.fog = CalcFixedFunctionFog( vWorldPos, g_FogType );
 #endif
 
 	// World position
@@ -136,7 +148,7 @@ VS_OUTPUT main( const VS_INPUT v )
 	o.projPos = float3(vRefractPos.x, vRefractPos.y, vProjPos.w);
 
 	// Tranform bump coordinates
-	o.vBaseTexCoord = v.vBaseTexCoord;
+	o.vBaseTexCoord = v.vBaseTexCoord.xy;
 
 	// Tangent space transform
 	o.tangentSpaceTranspose[0] = float3( worldTangentS.x, worldTangentT.x, worldNormal.x );

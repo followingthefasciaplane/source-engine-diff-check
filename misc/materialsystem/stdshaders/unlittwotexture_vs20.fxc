@@ -1,14 +1,20 @@
+//========== Copyright (c) Valve Corporation, All rights reserved. ==========//
+
 //	DYNAMIC: "COMPRESSED_VERTS"		"0..1"
-//	DYNAMIC: "DOWATERFOG"			"0..1"
+#include "common_fog_vs_fxc.h"
 //	DYNAMIC: "SKINNING"				"0..1"
+//	DYNAMIC: "WORLD_NORMAL"			"0..1"	[PC]
+//	DYNAMIC: "WORLD_NORMAL"			"0..0"	[CONSOLE]
 
 #include "common_vs_fxc.h"
 
 static const bool g_bSkinning		= SKINNING ? true : false;
 static const int  g_FogType			= DOWATERFOG;
 
-const float4 cBaseTexCoordTransform[2]			:  register( SHADER_SPECIFIC_CONST_0 );
-const float4 cBaseTexCoordTransform2[2]			:  register( SHADER_SPECIFIC_CONST_2 );
+const float4 cBaseTexCoordTransform[2]	:  register( SHADER_SPECIFIC_CONST_0 ); // 0 & 1
+const float4 cBaseTexCoordTransform2[2]	:  register( SHADER_SPECIFIC_CONST_2 ); // 2 & 3
+
+const float4 g_vEyeVector				:  register( SHADER_SPECIFIC_CONST_4 );
 
 struct VS_INPUT
 {
@@ -22,15 +28,14 @@ struct VS_INPUT
 struct VS_OUTPUT
 {
     float4 projPos					: POSITION;			// Projection-space position	
-#if !defined( _X360 )
+#if !defined( _X360 ) && !defined( SHADER_MODEL_VS_3_0 )
 	float  fog						: FOG;
 #endif
-	HALF2 baseTexCoord				: TEXCOORD0;		// Base texture coordinate
-	HALF2 baseTexCoord2				: TEXCOORD1;		// Base texture coordinate
+	float2 baseTexCoord				: TEXCOORD0;		// Base texture coordinate
+	float2 baseTexCoord2				: TEXCOORD1;		// Base texture coordinate
 	float4 worldPos_projPosZ		: TEXCOORD7;		// Necessary for water fog dest alpha
 	
 	float4 vColor					: COLOR0;
-	float4 fogFactorW				: COLOR1;
 };
 
 VS_OUTPUT main( const VS_INPUT v )
@@ -41,30 +46,34 @@ VS_OUTPUT main( const VS_INPUT v )
 
 	// Perform skinning
 	float3 worldNormal, worldPos;
-	SkinPosition( 
-		g_bSkinning, 
-		vPosition,
-		v.vBoneWeights, v.vBoneIndices,
-		worldPos );
+	SkinPosition( g_bSkinning, vPosition, v.vBoneWeights, v.vBoneIndices, worldPos );
 
 	// Transform into projection space
-	float4 vProjPos = mul( float4( worldPos, 1 ), cViewProj );
-	o.projPos = vProjPos;
-	vProjPos.z = dot( float4( worldPos, 1 ), cViewProjZ );
-	o.fogFactorW.w = CalcFog( worldPos, vProjPos, g_FogType );
-#if !defined( _X360 )
-	o.fog = o.fogFactorW.w;
-#endif	
+	float4 projPos = mul( float4( worldPos, 1 ), cViewProj );
+	o.projPos = projPos;
+	
+#ifdef _PS3
+	// Account for OpenGL's flipped y coordinate and expanded z range [-1,1] instead of [0,1]
+	o.projPos.y = -o.projPos.y;
+	o.projPos.z = 2.0f * o.projPos.z - o.projPos.w;
+#endif // _PS3
+	
+#if !defined( _X360 ) && !defined( SHADER_MODEL_VS_3_0 )
+	o.fog = CalcFixedFunctionFog( worldPos, g_FogType );
+#endif
+
 	// Needed for water fog alpha; 
-	// FIXME: we shouldn't have to compute this all thie time.
-	o.worldPos_projPosZ = float4( worldPos.xyz, vProjPos.z );
+	o.worldPos_projPosZ = float4( worldPos.xyz, o.projPos.z );	// FIXME: we shouldn't have to compute this all thie time.
 
-	// Base texture coordinates
-	o.baseTexCoord.x = dot( v.vTexCoord0, cBaseTexCoordTransform[0] );
+	#if WORLD_NORMAL
+	{
+		o.worldPos_projPosZ.w = dot( g_vEyeVector, worldPos.xyz - cEyePos.xyz );	// Linear depth
+	}
+	#endif
+
+	o.baseTexCoord.x = dot( v.vTexCoord0, cBaseTexCoordTransform[0] );		// Base texture coordinates
 	o.baseTexCoord.y = dot( v.vTexCoord0, cBaseTexCoordTransform[1] );
-
-	// Base texture coordinates
-	o.baseTexCoord2.x = dot( v.vTexCoord0, cBaseTexCoordTransform2[0] );
+	o.baseTexCoord2.x = dot( v.vTexCoord0, cBaseTexCoordTransform2[0] );	// Secondary texture coordinates
 	o.baseTexCoord2.y = dot( v.vTexCoord0, cBaseTexCoordTransform2[1] );
 	
 	o.vColor = cModulationColor;

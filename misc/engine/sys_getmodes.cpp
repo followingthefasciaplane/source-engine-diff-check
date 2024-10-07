@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -13,6 +13,9 @@
 #if defined( _WIN32 ) && !defined( _X360 )
 #include "winlite.h"
 #elif defined(POSIX)
+	#ifdef OSX
+		#include <Carbon/Carbon.h>
+	#endif
 typedef void *HDC;
 #endif
 
@@ -43,32 +46,28 @@ typedef void *HDC;
 #include "materialsystem/imaterialsystemhardwareconfig.h"
 #include "jpeglib/jpeglib.h"
 #include "vgui/ISurface.h"
+#include "vgui/IScheme.h"
 #include "vgui_controls/Controls.h"
 #include "gl_shader.h"
 #include "sys_dll.h"
 #include "materialsystem/imaterial.h"
 #include "IHammer.h"
-#include "sourcevr/isourcevirtualreality.h"
+#include "avi/iavi.h"
 #include "tier2/tier2.h"
 #include "tier2/renderutils.h"
-#include "tier0/etwprof.h"
+#include "LoadScreenUpdate.h"
 #if defined( _X360 )
 #include "xbox/xbox_win32stubs.h"
+#include "xbox/xbox_launch.h"
 #else
 #include "xbox/xboxstubs.h"
 #endif
-#include "video/ivideoservices.h"
 #if !defined(NO_STEAM)
 #include "cl_steamauth.h"
 #endif
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
-
-//-----------------------------------------------------------------------------
-
-void CL_GetBackgroundLevelName(char *pszBackgroundName, int bufSize, bool bMapName);
-void ClientDLL_HudVidInit( void );
 
 ConVar cl_savescreenshotstosteam( "cl_savescreenshotstosteam", "0", FCVAR_HIDDEN, "Saves screenshots to the Steam's screenshot library" );
 ConVar cl_screenshotusertag( "cl_screenshotusertag", "", FCVAR_HIDDEN, "User to tag in the screenshot" );
@@ -97,63 +96,60 @@ static void PFMWrite( float *pFloatImage, const char *pFilename, int width, int 
 class CVideoMode_Common : public IVideoMode
 {
 public:
-                        CVideoMode_Common( void );
-    virtual             ~CVideoMode_Common( void );
+						CVideoMode_Common( void );
+	virtual 			~CVideoMode_Common( void );
 
-    // Methods of IVideoMode
-    virtual bool        Init( );
-    virtual void        Shutdown( void );
-    virtual vmode_t     *GetMode( int num );
-    virtual int         GetModeCount( void );
-    virtual bool        IsWindowedMode( void ) const;
-    virtual void        UpdateWindowPosition( void );
-    virtual void        RestoreVideo( void );
-    virtual void        ReleaseVideo( void );
-    virtual void        DrawNullBackground( void *hdc, int w, int h );
-    virtual void        InvalidateWindow();
-    virtual void        DrawStartupGraphic();
-    virtual bool        CreateGameWindow( int nWidth, int nHeight, bool bWindowed );
-    virtual int         GetModeWidth( void ) const;
-    virtual int         GetModeHeight( void ) const;
-	virtual int			GetModeStereoWidth() const;
-	virtual int			GetModeStereoHeight() const;
-	virtual int			GetModeUIWidth() const  OVERRIDE;
-	virtual int			GetModeUIHeight() const OVERRIDE;
-    virtual const vrect_t &GetClientViewRect( ) const;
-    virtual void        SetClientViewRect( const vrect_t &viewRect );
-    virtual void        MarkClientViewRectDirty();
-    virtual void        TakeSnapshotTGA( const char *pFileName );
-    virtual void        TakeSnapshotTGARect( const char *pFilename, int x, int y, int w, int h, int resampleWidth, int resampleHeight, bool bPFM, CubeMapFaceIndex_t faceIndex );
-    virtual void        WriteMovieFrame( const MovieInfo_t& info );
-    virtual void        TakeSnapshotJPEG( const char *pFileName, int quality );
-    virtual bool        TakeSnapshotJPEGToBuffer( CUtlBuffer& buf, int quality );
+	// Methods of IVideoMode
+	virtual bool		Init( );
+	virtual void		Shutdown( void );
+	virtual vmode_t		*GetMode( int num );
+	virtual int			GetModeCount( void );
+	virtual bool		IsWindowedMode( void ) const;
+	virtual	bool		NoWindowBorder() const;
+	virtual void		UpdateWindowPosition( void );
+	virtual void		RestoreVideo( void );
+	virtual void		ReleaseVideo( void );
+	virtual void		DrawNullBackground( void *hdc, int w, int h );
+	virtual void		InvalidateWindow();
+	virtual void		DrawStartupGraphic();
+	virtual bool		CreateGameWindow( int nWidth, int nHeight, bool bWindowed, bool bNoWindowBorder );
+	virtual int			GetModeWidth( void ) const;
+	virtual int			GetModeHeight( void ) const;
+	virtual const vrect_t &GetClientViewRect( ) const;
+	virtual void		SetClientViewRect( const vrect_t &viewRect );
+	virtual void		MarkClientViewRectDirty();
+	virtual void		TakeSnapshotTGA( const char *pFileName );
+	virtual void		TakeSnapshotTGARect( const char *pFilename, int x, int y, int w, int h, int resampleWidth, int resampleHeight, bool bPFM, CubeMapFaceIndex_t faceIndex );
+	virtual void		WriteMovieFrame( const MovieInfo_t& info );
+	virtual void		TakeSnapshotJPEG( const char *pFileName, int quality );
+	virtual bool		TakeSnapshotJPEGToBuffer( CUtlBuffer& buf, int quality );
 protected:
-    bool                GetInitialized( ) const;
-    void                SetInitialized( bool init );
-    void                AdjustWindow( int nWidth, int nHeight, int nBPP, bool bWindowed );
-    void                ResetCurrentModeForNewResolution( int width, int height, bool bWindowed );
-    int                 GetModeBPP( ) const { return 32; }
-    void                DrawStartupVideo();
-    void                ComputeStartupGraphicName( char *pBuf, int nBufLen );
+	bool				GetInitialized( ) const;
+	void				SetInitialized( bool init );
+	void				AdjustWindow( int nWidth, int nHeight, int nBPP, bool bWindowed, bool bNoWindowBorder );
+	void				ResetCurrentModeForNewResolution( int width, int height, bool bWindowed, bool bNoWindowBorder );
+	int					GetModeBPP( ) const { return 32; }
+	void				DrawStartupVideo();
+	void				ComputeStartupGraphicName( char *pBuf, int nBufLen );
 	void				WriteScreenshotToSteam( uint8 *pImage, int cubImage, int width, int height );
 	void				AddScreenshotToSteam( const char *pchFilenameJpeg, int width, int height );
 #if !defined(NO_STEAM)
 	void				ApplySteamScreenshotTags( ScreenshotHandle hScreenshot );
 #endif
 
-    // Finds the video mode in the list of video modes 
-    int                 FindVideoMode( int nDesiredWidth, int nDesiredHeight, bool bWindowed );
+	// Finds the video mode in the list of video modes 
+	int					FindVideoMode( int nDesiredWidth, int nDesiredHeight, bool bWindowed );
 
-    // Purpose: Returns the optimal refresh rate for the specified mode
-    int                 GetRefreshRateForMode( const vmode_t *pMode );
+	// Purpose: Returns the optimal refresh rate for the specified mode
+	int					GetRefreshRateForMode( const vmode_t *pMode );
 
-    // Inline accessors
-    vmode_t&            DefaultVideoMode();
-    vmode_t&            RequestedWindowVideoMode();
+	// Inline accessors
+	vmode_t&			DefaultVideoMode();
+	vmode_t&			RequestedWindowVideoMode();
 
 private:
     // Purpose: Loads the startup graphic
-    void                SetupStartupGraphic();
+    bool                SetupStartupGraphic();
     void                CenterEngineWindow(void *hWndCenter, int width, int height);
     void                DrawStartupGraphic( HWND window );
     void                BlitGraphicToHDC(HDC hdc, byte *rgba, int imageWidth, int imageHeight, int x0, int y0, int x1, int y1);
@@ -163,7 +159,7 @@ private:
 
     // Overridden by derived classes
     virtual void        ReleaseFullScreen( void );
-    virtual void        ChangeDisplaySettingsToFullscreen( int nWidth, int nHeight, int nBPP );
+    virtual void        ChangeDisplaySettingsToFullscreen( int nWidth, int nHeight, int nBPP, bool bDesktopFriendlyFullscreen );
     virtual void        ReadScreenPixels( int x, int y, int w, int h, void *pBuffer, ImageFormat format );
 
     // PFM screenshot methods
@@ -174,53 +170,48 @@ private:
     void TakeSnapshotPFMRect( const char *pFilename, int x, int y, int w, int h, int resampleWidth, int resampleHeight, CubeMapFaceIndex_t faceIndex );
 
 protected:
-    enum
-    {
+	enum
+	{
 #if !defined( _X360 )
-        MAX_MODE_LIST = 512
+		MAX_MODE_LIST =	512
 #else
-        MAX_MODE_LIST = 2
+		MAX_MODE_LIST =	2
 #endif
-    };
+	};
 
-    enum
-    {
-        VIDEO_MODE_DEFAULT = -1,
-        VIDEO_MODE_REQUESTED_WINDOW_SIZE = -2,
-        CUSTOM_VIDEO_MODES = 2
-    };
+	enum
+	{
+		VIDEO_MODE_DEFAULT = -1,
+		VIDEO_MODE_REQUESTED_WINDOW_SIZE = -2,
+		CUSTOM_VIDEO_MODES = 2
+	};
 
-    // Master mode list
-    int                 m_nNumModes;
-    vmode_t             m_rgModeList[MAX_MODE_LIST];
-    vmode_t             m_nCustomModeList[CUSTOM_VIDEO_MODES];
-    bool                m_bInitialized;
-    bool                m_bPlayedStartupVideo;
+	// Master mode list
+	int					m_nNumModes;
+	vmode_t				m_rgModeList[MAX_MODE_LIST];
+	vmode_t				m_nCustomModeList[CUSTOM_VIDEO_MODES];
+	bool				m_bInitialized;
+ 	bool				m_bPlayedStartupVideo;
 
-    // Renderable surface information
-    int                 m_nModeWidth;
-    int                 m_nModeHeight;
-    int                 m_nStereoWidth;
-    int                 m_nStereoHeight;
-    int                 m_nUIWidth;
-    int                 m_nUIHeight;
-	int					m_nVROverrideX;
-	int					m_nVROverrideY;
+	// Renderable surface information
+	int					m_nModeWidth;
+	int					m_nModeHeight;
 #if defined( USE_SDL )
 	int					m_nRenderWidth;
 	int					m_nRenderHeight;
 #endif
-    bool                m_bWindowed;
-    bool                m_bSetModeOnce;
-	bool				m_bVROverride;
+ 	bool				m_bWindowed;
+	bool				m_bNoWindowBorder;
+	bool				m_bSetModeOnce;
 
-    // Client view rectangle
-    vrect_t             m_ClientViewRect;
-    bool                m_bClientViewRectDirty;
+	// Client view rectangle
+	vrect_t				m_ClientViewRect;
+	bool				m_bClientViewRectDirty;
 
-    // loading image
-    IVTFTexture         *m_pBackgroundTexture;
-    IVTFTexture         *m_pLoadingTexture;
+	// loading image
+	IVTFTexture			*m_pBackgroundTexture;
+	IVTFTexture			*m_pLoadingTexture;
+	IVTFTexture			*m_pTitleTexture;
 };
 
 
@@ -246,8 +237,17 @@ CVideoMode_Common::CVideoMode_Common( void )
     m_nNumModes    = 0;
     m_bInitialized = false;
 
-    DefaultVideoMode().width  = 640;
-    DefaultVideoMode().height = 480;
+	if ( IsOSX() )
+	{
+		DefaultVideoMode().width  = 1024;
+		DefaultVideoMode().height = 768;
+	}
+	else 
+	{
+		DefaultVideoMode().width  = 640;
+		DefaultVideoMode().height = 480;
+	}
+
     DefaultVideoMode().bpp    = 32;
     DefaultVideoMode().refreshRate = 0;
 
@@ -259,10 +259,10 @@ CVideoMode_Common::CVideoMode_Common( void )
     m_bClientViewRectDirty = false;
     m_pBackgroundTexture   = NULL;
     m_pLoadingTexture      = NULL;
+	m_pTitleTexture        = NULL;
     m_bWindowed            = false;
     m_nModeWidth           = IsPC() ? 1024 : 640;
     m_nModeHeight          = IsPC() ? 768 : 480;
-	m_bVROverride = false;
 }
 
 //-----------------------------------------------------------------------------
@@ -296,7 +296,12 @@ void CVideoMode_Common::SetInitialized( bool init )
 //-----------------------------------------------------------------------------
 bool CVideoMode_Common::IsWindowedMode( void ) const
 {
-    return m_bWindowed;
+	return m_bWindowed;
+}
+
+bool CVideoMode_Common::NoWindowBorder() const
+{
+	return m_bNoWindowBorder;
 }
 
 
@@ -311,35 +316,6 @@ int CVideoMode_Common::GetModeWidth( void ) const
 int CVideoMode_Common::GetModeHeight( void ) const
 {
     return m_nModeHeight;
-}
-
-
-//-----------------------------------------------------------------------------
-// Returns the video mode width + height for one stereo view.
-//-----------------------------------------------------------------------------
-int CVideoMode_Common::GetModeStereoWidth( void ) const
-{
-	return m_nStereoWidth;
-}
-
-int CVideoMode_Common::GetModeStereoHeight( void ) const
-{
-	return m_nStereoHeight;
-}
-
-
-//-----------------------------------------------------------------------------
-// Returns the video mode full screen UI width + height.
-//-----------------------------------------------------------------------------
-
-int CVideoMode_Common::GetModeUIWidth( void ) const
-{
-	return m_nUIWidth;
-}
-
-int CVideoMode_Common::GetModeUIHeight( void ) const
-{
-    return m_nUIHeight;
 }
 
 
@@ -497,7 +473,7 @@ int CVideoMode_Common::FindVideoMode( int nDesiredWidth, int nDesiredHeight, boo
     // No match, use mode 0
     if ( i >= m_nNumModes )
     {
-        if ( iOK != VIDEO_MODE_DEFAULT )
+        if ( ( iOK != VIDEO_MODE_DEFAULT ) && !bWindowed )
         {
             i = iOK;
         }
@@ -514,102 +490,34 @@ int CVideoMode_Common::FindVideoMode( int nDesiredWidth, int nDesiredHeight, boo
 //-----------------------------------------------------------------------------
 // Choose the actual video mode based on the available modes
 //-----------------------------------------------------------------------------
-void CVideoMode_Common::ResetCurrentModeForNewResolution( int nWidth, int nHeight, bool bWindowed )
+void CVideoMode_Common::ResetCurrentModeForNewResolution( int nWidth, int nHeight, bool bWindowed, bool bNoWindowBorder )
 {
-    // Fill in vid structure for the mode
-    int nGameMode = FindVideoMode( nWidth, nHeight, bWindowed );
-    vmode_t *pMode = GetMode( nGameMode );
+	// Fill in vid structure for the mode
+	int nFoundMode = FindVideoMode( nWidth, nHeight, bWindowed );
+	vmode_t videoMode = *GetMode( nFoundMode );
 
-	// default to non-VR values
+	if ( bWindowed && ( nFoundMode == 0 ) && ( videoMode.width != nWidth || videoMode.height != nHeight ) )
+	{
+		// Setting a custom windowed size
+		videoMode.width = nWidth;
+		videoMode.height = nHeight;
+	}
+
 	m_bWindowed = bWindowed;
-	m_nModeWidth = pMode->width;
-	m_nModeHeight = pMode->height;
-	m_nUIWidth = pMode->width;
-	m_nUIHeight = pMode->height;
-	m_nStereoWidth = pMode->width;
-	m_nStereoHeight = pMode->height;
-
-	// assume we won't be overriding the position
-	m_bVROverride = false;
-
-	if ( UseVR() || ShouldForceVRActive() )
-	{
-		g_pSourceVR->GetViewportBounds( ISourceVirtualReality::VREye_Left, NULL, NULL, &m_nStereoWidth, &m_nStereoHeight );
-		VRRect_t vrBounds;
-		if( g_pSourceVR->GetDisplayBounds( &vrBounds ) )
-		{
-			ConVarRef vr_force_windowed( "vr_force_windowed" );
-
-			RequestedWindowVideoMode().width = m_nModeWidth = vrBounds.nWidth;
-			RequestedWindowVideoMode().height = m_nModeHeight = vrBounds.nHeight;
-			m_bVROverride = true;
-			m_bWindowed = vr_force_windowed.GetBool();
-
-
-			// This is the smallest size the the UI in source games can handle.
-			m_nUIWidth =	640;
-			m_nUIHeight =	480;
-
-#if defined( WIN32 ) && !defined( USE_SDL )
-			m_nVROverrideX = vrBounds.nX;
-			m_nVROverrideY = vrBounds.nY;
-#elif defined( USE_SDL )
-			for ( int i = 0; i < SDL_GetNumVideoDisplays(); i++ )
-			{
-				SDL_Rect sdlRect;
-				SDL_GetDisplayBounds( i, &sdlRect );
-
-				if( sdlRect.x == vrBounds.nX && sdlRect.y == vrBounds.nY 
-					&& sdlRect.w == vrBounds.nWidth && sdlRect.h == vrBounds.nHeight )
-				{
-					static ConVarRef sdl_displayindex( "sdl_displayindex" );
-					sdl_displayindex.SetValue( i );
-					break;
-				}
-			}
-#endif
-		}
-	}
-	else if( materials->GetCurrentConfigForVideoCard().m_nVRModeAdapter == materials->GetCurrentAdapter() )
-	{
-		// if we aren't in VR mode but we do have a VR mode adapter set, we must not be full
-		// screen because that would show up on the HMD
-		m_bWindowed = true;
-	}
+	m_nModeWidth = videoMode.width;
+	m_nModeHeight = videoMode.height;
+	m_bNoWindowBorder = bNoWindowBorder;
 }
 
 
 //-----------------------------------------------------------------------------
 // Creates the game window, plays the startup movie
 //-----------------------------------------------------------------------------
-bool CVideoMode_Common::CreateGameWindow( int nWidth, int nHeight, bool bWindowed )
+bool CVideoMode_Common::CreateGameWindow( int nWidth, int nHeight, bool bWindowed, bool bNoWindowBorder )
 {
     COM_TimestampedLog( "CVideoMode_Common::Init  CreateGameWindow" );
 
-	if ( ShouldForceVRActive() )
-	{
-		// First make sure we're running a compatible version of DirectX
-		ConVarRef mat_dxlevel( "mat_dxlevel" );
-		if ( mat_dxlevel.IsValid() )
-		{
-			if ( mat_dxlevel.GetInt() < 90 )
-			{
-				Msg( "VR mode does not work with DirectX8.\nPlease use at least \"-dxlevel 90\" or higher.\n" );
-				return false;
-			}
-		}
-
-		VRRect_t bounds;
-		g_pSourceVR->GetDisplayBounds( &bounds );
-
-		nWidth = bounds.nWidth;
-		nHeight = bounds.nHeight;
-
-		m_nVROverrideX = bounds.nX;
-		m_nVROverrideY = bounds.nY;
-	}
-
-	// This allows you to have a window of any size.
+    // This allows you to have a window of any size.
     // Requires you to set both width and height for the window and
     // that you start in windowed mode
     if ( bWindowed && nWidth && nHeight )
@@ -624,20 +532,29 @@ bool CVideoMode_Common::CreateGameWindow( int nWidth, int nHeight, bool bWindowe
     {
         // Fill in vid structure for the mode.
         // Note: ModeWidth/Height may *not* match requested nWidth/nHeight
-        ResetCurrentModeForNewResolution( nWidth, nHeight, bWindowed );
+		ResetCurrentModeForNewResolution( nWidth, nHeight, bWindowed, bNoWindowBorder );
 
 		COM_TimestampedLog( "CreateGameWindow - Start" );
+
+		if( IsPS3QuitRequested() )
+			return false;
+
         // When running in stand-alone mode, create your own window 
         if ( !game->CreateGameWindow() )
             return false;
+
 		COM_TimestampedLog( "CreateGameWindow - Finish" );
 
+		if( IsPS3QuitRequested() )
+			return false;
+
         // Re-size and re-center the window
-        AdjustWindow( GetModeWidth(), GetModeHeight(), GetModeBPP(), IsWindowedMode() );
+		AdjustWindow( GetModeWidth(), GetModeHeight(), GetModeBPP(), IsWindowedMode(), NoWindowBorder() );
 
 		COM_TimestampedLog( "SetMode - Start" );
+
         // Set the mode and let the materialsystem take over
-        if ( !SetMode( GetModeWidth(), GetModeHeight(), IsWindowedMode() ) )
+		if ( !SetMode( GetModeWidth(), GetModeHeight(), IsWindowedMode(), NoWindowBorder() ) )
             return false;
 
 #if defined( USE_SDL ) && 0
@@ -652,14 +569,16 @@ bool CVideoMode_Common::CreateGameWindow( int nWidth, int nHeight, bool bWindowe
 		}
 #endif
 
-		COM_TimestampedLog( "SetMode - Finish" );
-
-        // Play our videos for the background after the render device has been initialized
-        DrawStartupVideo();
+		if( IsPS3QuitRequested() )
+			return false;
 
 		COM_TimestampedLog( "DrawStartupGraphic - Start" );
-        // Play our videos or display our temp image for the background
+
+        // Display the image for the background during the remainder of startup
         DrawStartupGraphic();
+
+		if( IsPS3QuitRequested() )
+			return false;
 
 		COM_TimestampedLog( "DrawStartupGraphic - Finish" );
     }
@@ -690,24 +609,54 @@ IVTFTexture *CVideoMode_Common::LoadVTF( CUtlBuffer &temp, const char *szFileNam
 //-----------------------------------------------------------------------------
 void CVideoMode_Common::ComputeStartupGraphicName( char *pBuf, int nBufLen )
 {
-    char szBackgroundName[_MAX_PATH];
-    CL_GetBackgroundLevelName( szBackgroundName, sizeof(szBackgroundName), false );
+	// get the image to load
+	char startupName[MAX_PATH];
+	CL_GetStartupImage( startupName, sizeof( startupName ) );
+	Q_snprintf( pBuf, nBufLen, "materials/%s.vtf", startupName );
+}
 
-    float aspectRatio = (float)GetModeStereoWidth() / GetModeStereoHeight();
-    if ( aspectRatio >= 1.6f )
-    {
-        // use the widescreen version
-        Q_snprintf( pBuf, nBufLen, "materials/console/%s_widescreen.vtf", szBackgroundName );
-    }
-    else
-    {
-        Q_snprintf( pBuf, nBufLen, "materials/console/%s.vtf", szBackgroundName );
-    }
+bool CVideoMode_Common::SetupStartupGraphic()
+{
+	COM_TimestampedLog( "CVideoMode_Common::Init  SetupStartupGraphic" );
 
-    if ( !g_pFileSystem->FileExists( pBuf, "GAME" ) )
-    {
-        Q_strncpy( pBuf, ( aspectRatio >= 1.6f ) ? "materials/console/background01_widescreen.vtf" : "materials/console/background01.vtf", nBufLen );
-    }
+	char startupName[MAX_PATH];
+	ComputeStartupGraphicName( startupName, sizeof( startupName ) );
+
+	// load in the background vtf
+	CUtlBuffer buf;
+	m_pBackgroundTexture = LoadVTF( buf, startupName );
+	if ( !m_pBackgroundTexture )
+	{
+		Error( "Can't find background image '%s'\n", startupName );
+		return false;
+	}
+
+	// loading vtf
+	// added this Clear() because we saw cases where LoadVTF was not emptying the buf fully in the above section
+	buf.Clear();
+	const char *pLoadingName = "materials/console/startup_loading.vtf";
+	m_pLoadingTexture = LoadVTF( buf, pLoadingName );
+	if ( !m_pLoadingTexture )
+	{
+		Error( "Can't find background image %s\n", pLoadingName );
+		return false;
+	}
+
+	buf.Clear();
+#if defined( PORTAL2 )
+	const char *pTitleName = "materials/vgui/portal2logo.vtf";
+#else
+	const char *pTitleName = "materials/console/logo.vtf";
+#endif
+		
+	m_pTitleTexture = LoadVTF( buf, pTitleName );
+	if ( !m_pTitleTexture )
+	{
+		Error( "Can't find title image %s\n", pTitleName );
+		return false;
+	}
+
+	return true;
 }
 
 
@@ -779,53 +728,6 @@ void CVideoMode_Common::ApplySteamScreenshotTags( ScreenshotHandle hScreenshot )
 }
 #endif
 
-void CVideoMode_Common::SetupStartupGraphic()
-{
-    COM_TimestampedLog( "CVideoMode_Common::Init  SetupStartupGraphic" );
-
-    char szBackgroundName[_MAX_PATH];
-    CL_GetBackgroundLevelName( szBackgroundName, sizeof(szBackgroundName), false );
-
-    // get the image to load
-    char material[_MAX_PATH];
-    CUtlBuffer buf;
-
-    float aspectRatio = (float)GetModeWidth() / GetModeHeight();
-    if ( aspectRatio >= 1.6f )
-    {
-        // use the widescreen version
-        Q_snprintf( material, sizeof(material), 
-            "materials/console/%s_widescreen.vtf", szBackgroundName );
-    }
-    else
-    {
-        Q_snprintf( material, sizeof(material), 
-            "materials/console/%s.vtf", szBackgroundName );
-    }
-
-    // load in the background vtf
-	buf.Clear();
-    m_pBackgroundTexture = LoadVTF( buf, material );
-    if ( !m_pBackgroundTexture )
-    {
-        // fallback to opening just the default background
-        m_pBackgroundTexture = LoadVTF( buf, ( aspectRatio >= 1.6f ) ? "materials/console/background01_widescreen.vtf" : "materials/console/background01.vtf" );
-        if ( !m_pBackgroundTexture )
-        {
-            Error( "Can't find background image '%s'\n", material );
-            return;
-        }
-    }
-
-    // loading.vtf
-	buf.Clear();	// added this Clear() because we saw cases where LoadVTF was not emptying the buf fully in the above section
-    m_pLoadingTexture = LoadVTF( buf, "materials/console/startup_loading.vtf" );
-    if ( !m_pLoadingTexture )
-    {
-        Error( "Can't find background image materials/console/startup_loading.vtf\n" );
-        return;
-    }
-}
 
 
 //-----------------------------------------------------------------------------
@@ -833,13 +735,16 @@ void CVideoMode_Common::SetupStartupGraphic()
 //-----------------------------------------------------------------------------
 void CVideoMode_Common::DrawStartupVideo()
 {
-    if ( IsX360() )
-        return;
-
-	CETWScope timer( "CVideoMode_Common::DrawStartupGraphic" );
+#if defined( _X360 )
+	if ( ( XboxLaunch()->GetLaunchFlags() & LF_WARMRESTART ) )
+	{
+		// xbox does not play intro startup videos if it restarted itself
+		return;
+	}
+#endif
 
     // render an avi, if we have one
-	if ( !m_bPlayedStartupVideo && !InEditMode() && !ShouldForceVRActive() )
+    if ( !m_bPlayedStartupVideo && !InEditMode() )
     {
         game->PlayStartupVideos();
         m_bPlayedStartupVideo = true;
@@ -852,14 +757,16 @@ void CVideoMode_Common::DrawStartupVideo()
 //-----------------------------------------------------------------------------
 void CVideoMode_Common::DrawStartupGraphic()
 {
-    if ( IsX360() )
+    if ( IsGameConsole() )
+	{
+		// For TCRs the game consoles must maintain a steady refresh with the startup background.
+		// This system already has already been supplied the components. This just starts it.
+		BeginLoadingUpdates( MATERIAL_NON_INTERACTIVE_MODE_STARTUP );
+		g_pMaterialSystem->RefreshFrontBufferNonInteractive();
         return;
+	}
 
-	char debugstartup = CommandLine()->FindParm("-debugstartupscreen");
-
-    SetupStartupGraphic();
-
-    if ( !m_pBackgroundTexture || !m_pLoadingTexture )
+	if ( !SetupStartupGraphic() )
         return;
 
     CMatRenderContextPtr pRenderContext( g_pMaterialSystem );
@@ -867,13 +774,6 @@ void CVideoMode_Common::DrawStartupGraphic()
     char pStartupGraphicName[MAX_PATH];
     ComputeStartupGraphicName( pStartupGraphicName, sizeof(pStartupGraphicName) );
 
-	if(debugstartup)
-	{
-		// slam the startup graphic name for sanity - take your pick
-		strcpy( pStartupGraphicName, "materials/console/background01.vtf");
-		//strcpy( pStartupGraphicName, "materials/console/testramp.vtf");
-	}
-	
     // Allocate a white material
     KeyValues *pVMTKeyValues = new KeyValues( "UnlitGeneric" );
     pVMTKeyValues->SetString( "$basetexture", pStartupGraphicName + 10 );
@@ -884,7 +784,7 @@ void CVideoMode_Common::DrawStartupGraphic()
     IMaterial *pMaterial = g_pMaterialSystem->CreateMaterial( "__background", pVMTKeyValues );
 
     pVMTKeyValues = new KeyValues( "UnlitGeneric" );
-    pVMTKeyValues->SetString( "$basetexture", "Console/startup_loading.vtf" );
+    pVMTKeyValues->SetString( "$basetexture", "console/startup_loading.vtf" );
     pVMTKeyValues->SetInt( "$translucent", 1 );
     pVMTKeyValues->SetInt( "$ignorez", 1 );
     pVMTKeyValues->SetInt( "$nofog", 1 );
@@ -892,16 +792,35 @@ void CVideoMode_Common::DrawStartupGraphic()
     pVMTKeyValues->SetInt( "$nocull", 1 );
     IMaterial *pLoadingMaterial = g_pMaterialSystem->CreateMaterial( "__loading", pVMTKeyValues );
 
-    int w = GetModeStereoWidth();
-    int h = GetModeStereoHeight();
+// Don't draw the title text for CSS15
+#if !defined( CSTRIKE15 )
+
+	pVMTKeyValues = new KeyValues( "UnlitGeneric" );
+#if defined( PORTAL2 )
+	pVMTKeyValues->SetString( "$basetexture", "vgui/portal2logo.vtf" );
+#else
+	pVMTKeyValues->SetString( "$basetexture", "console/logo.vtf" );
+#endif // defined( PORTAL2 )
+	pVMTKeyValues->SetInt( "$translucent", 1 );
+	pVMTKeyValues->SetInt( "$ignorez", 1 );
+	pVMTKeyValues->SetInt( "$nofog", 1 );
+	pVMTKeyValues->SetInt( "$no_fullbright", 1 );
+	pVMTKeyValues->SetInt( "$nocull", 1 );
+	IMaterial *pTitleMaterial = g_pMaterialSystem->CreateMaterial( "__title", pVMTKeyValues );
+
+#endif // CSTRIKE15
+
+    int w = GetModeWidth();
+    int h = GetModeHeight();
     int tw = m_pBackgroundTexture->Width();
     int th = m_pBackgroundTexture->Height();
     int lw = m_pLoadingTexture->Width();
     int lh = m_pLoadingTexture->Height();
 
+	char debugstartup = CommandLine()->FindParm("-debugstartupscreen");
 	if (debugstartup)
 	{
-		for ( int repeat = 0; repeat<100000; repeat++)
+		for ( int repeat = 0; repeat<1000; repeat++)
 		{
 			pRenderContext->Viewport( 0, 0, w, h );
 			pRenderContext->DepthRange( 0, 1 );
@@ -917,9 +836,6 @@ void CVideoMode_Common::DrawStartupGraphic()
 				{
 					slide = 200-slide;		// aka 100-(slide-100).
 				}
-				
-				// stop sliding about
-				slide = 0;
 				
 				DrawScreenSpaceRectangle( pMaterial, 0, 0+slide, w, h-50, 0, 0, tw-1, th-1, tw, th, NULL,1,1,depth );
 				DrawScreenSpaceRectangle( pLoadingMaterial, w-lw, h-lh+slide/2, lw, lh, 0, 0, lw-1, lh-1, lw, lh, NULL,1,1,depth-0.1 );
@@ -957,22 +873,55 @@ void CVideoMode_Common::DrawStartupGraphic()
 	{
 		pRenderContext->Viewport( 0, 0, w, h );
 		pRenderContext->DepthRange( 0, 1 );
+		pRenderContext->ClearColor3ub( 0, 0, 0 );
+		pRenderContext->ClearBuffers( true, true, true );
 		pRenderContext->SetToneMappingScaleLinear( Vector(1,1,1) );
 		
 		float depth = 0.5f;
 
-		// Make sure we clear both front & back buffer.
-		for (int i = 0; i < 2; ++i)
-		{
-			pRenderContext->ClearColor3ub( 0, 0, 0 );
-			pRenderContext->ClearBuffers( true, true, true );
-			DrawScreenSpaceRectangle( pMaterial, 0, 0, w, h, 0, 0, tw-1, th-1, tw, th, NULL,1,1,depth );
-			DrawScreenSpaceRectangle( pLoadingMaterial, w-lw, h-lh, lw, lh, 0, 0, lw-1, lh-1, lw, lh, NULL,1,1,depth );
-			g_pMaterialSystem->SwapBuffers();
-		}
+#if defined( CSTRIKE15 )
+		// Apply a custom scaling that mirrors the way we draw the Scaleform background texture
+		Assert( tw == th );
+
+		// VTFs are forced to be square, even if the source texture is non 1:1.  Rescale the
+		//		texture to assume its actually in 16:9, as it was authored
+		float convertTH = th * 720.0f / 1280.0f;
+
+		// Now, determine the scale between the texture and the viewport in height
+		float heightScale = (float)h / convertTH;
+
+		int scaledTH = (int)( heightScale * (float) convertTH );
+		int scaledTW = (int)( heightScale * (float) tw );
+
+		int halfH = h / 2;
+		int halfW = w / 2;
+
+		int halfTH = scaledTH / 2;
+		int halfTW = scaledTW / 2;
+
+		DrawScreenSpaceRectangle( pMaterial, halfW - halfTW, halfH - halfTH, scaledTW, scaledTH, 0, 0, tw-1, th-1, tw, th, NULL,1,1,depth );
+#else
+		
+		DrawScreenSpaceRectangle( pMaterial, 0, 0, w, h, 0, 0, tw-1, th-1, tw, th, NULL,1,1,depth );
+//		DrawScreenSpaceRectangle( pLoadingMaterial, w-lw, h-lh, lw, lh, 0, 0, lw-1, lh-1, lw, lh, NULL,1,1,depth );
+
+#endif // CSTRIKE15
+
+// Don't draw the title text for CSS15
+#if !defined( CSTRIKE15 )
+		// center align at bottom
+		int title_y = vgui::scheme()->GetProportionalScaledValue( 390 );
+		int title_w = vgui::scheme()->GetProportionalScaledValue( 240 );
+		int title_h = vgui::scheme()->GetProportionalScaledValue( 60 );
+		int title_x = (w/2 - title_w/2);
+
+		DrawScreenSpaceRectangle( pTitleMaterial, title_x, title_y, title_w, title_h, 0, 0, title_w-1, title_h-1, title_w, title_h, NULL,1,1,depth );
+#endif // CSTRIKE15
+
+		g_pMaterialSystem->SwapBuffers();
 	}
 
-#ifdef DX_TO_GL_ABSTRACTION
+#if defined( DX_TO_GL_ABSTRACTION ) && !defined( _GAMECONSOLE )
 	g_pMaterialSystem->DoStartupShaderPreloading();
 #endif
 
@@ -984,6 +933,8 @@ void CVideoMode_Common::DrawStartupGraphic()
     m_pBackgroundTexture = NULL;
     DestroyVTFTexture( m_pLoadingTexture );
     m_pLoadingTexture = NULL;
+	DestroyVTFTexture( m_pTitleTexture );
+	m_pTitleTexture = NULL;
 }
 
 //-----------------------------------------------------------------------------
@@ -1028,89 +979,105 @@ void CVideoMode_Common::InvalidateWindow()
 {
     if ( CommandLine()->FindParm( "-noshaderapi" ) )
     {
-#if defined( USE_SDL )
-		SDL_Event fake;
-		memset(&fake, '\0', sizeof (SDL_Event));
-		fake.type = SDL_WINDOWEVENT;
-		fake.window.windowID = SDL_GetWindowID( (SDL_Window *) g_pLauncherMgr->GetWindowRef() );
-		fake.window.event = SDL_WINDOWEVENT_EXPOSED;
-		SDL_PushEvent(&fake);
+#if USE_SDL
+        SDL_Event fake;
+        memset(&fake, '\0', sizeof (SDL_Event));
+        fake.type = SDL_WINDOWEVENT;
+        fake.window.windowID = SDL_GetWindowID((SDL_Window *) game->GetMainWindow());
+        fake.window.event = SDL_WINDOWEVENT_EXPOSED;
+        SDL_PushEvent(&fake);
+#elif defined( WIN32 ) 
+        InvalidateRect( (HWND)game->GetMainWindow(), NULL, FALSE );
+#elif defined( OSX ) && defined( PLATFORM_64BITS )
+	// Do nothing, we'll move to SDL or we'll port the below.
+	Assert( !"OSX-64 unimpl" );
+#elif OSX
+        int x,y,w,t;
+        game->GetWindowRect( &x,&y,&w,&t);
+        Rect bounds = { 0,0,w,t}; // inval is in local co-ords
+        InvalWindowRect( (WindowRef)game->GetMainWindow(), &bounds );
+#elif defined( _PS3 )
 #else
-		InvalidateRect( (HWND)game->GetMainWindow(), NULL, FALSE );
+#error
 #endif
     }
 }
 
 void CVideoMode_Common::DrawNullBackground( void *hHDC, int w, int h )
 {
+	if ( IsX360() )
+		return;
+
+	HDC hdc = (HDC)hHDC;
+
+	// Show a message if running without renderer..
+	if ( CommandLine()->FindParm( "-noshaderapi" ) )
+	{
 #ifdef WIN32
-    if ( IsX360() )
-        return;
+		HFONT fnt = CreateFontA( -12, 
+		 0,
+		 0,
+		 0,
+		 FW_NORMAL,
+		 FALSE,
+		 FALSE,
+		 FALSE,
+		 ANSI_CHARSET,
+		 OUT_TT_PRECIS,
+		 CLIP_DEFAULT_PRECIS,
+		 ANTIALIASED_QUALITY,
+		 DEFAULT_PITCH,
+		 "Arial" );
 
-    HDC hdc = (HDC)hHDC;
+		HFONT oldFont = (HFONT)SelectObject( hdc, fnt );
+		int oldBkMode = SetBkMode( hdc, TRANSPARENT );
+		COLORREF oldFgColor = SetTextColor( hdc, RGB( 255, 255, 255 ) );
 
-    // Show a message if running without renderer..
-    if ( CommandLine()->FindParm( "-noshaderapi" ) )
-    {
-        HFONT fnt = CreateFontA( -18, 
-         0,
-         0,
-         0,
-         FW_NORMAL,
-         FALSE,
-         FALSE,
-         FALSE,
-         ANSI_CHARSET,
-         OUT_TT_PRECIS,
-         CLIP_DEFAULT_PRECIS,
-         ANTIALIASED_QUALITY,
-         DEFAULT_PITCH,
-         "Arial" );
+		HBRUSH br = CreateSolidBrush( RGB( 0, 0, 0  ) );
+		HBRUSH oldBr = (HBRUSH)SelectObject( hdc, br );
+		Rectangle( hdc, 0, 0, w, h );
+		
+		RECT rc;
+		rc.left = 0;
+		rc.top = 0;
+		rc.right = w;
+		rc.bottom = h;
 
-        HFONT oldFont = (HFONT)SelectObject( hdc, fnt );
-        int oldBkMode = SetBkMode( hdc, TRANSPARENT );
-        COLORREF oldFgColor = SetTextColor( hdc, RGB( 255, 255, 255 ) );
+		DrawText( hdc, "Running with -noshaderapi", -1, &rc, DT_NOPREFIX | DT_VCENTER | DT_CENTER | DT_SINGLELINE  );
 
-        HBRUSH br = CreateSolidBrush( RGB( 0, 0, 0  ) );
-        HBRUSH oldBr = (HBRUSH)SelectObject( hdc, br );
-        Rectangle( hdc, 0, 0, w, h );
-        
-        RECT rc;
-        rc.left = 0;
-        rc.top = 0;
-        rc.right = w;
-        rc.bottom = h;
+		rc.top = rc.bottom - 30;
 
-        DrawText( hdc, "Running with -noshaderapi", -1, &rc, DT_NOPREFIX | DT_VCENTER | DT_CENTER | DT_SINGLELINE  );
+		if ( host_state.worldmodel != NULL )
+		{
+			rc.left += 10;
+			DrawText( hdc, modelloader->GetName( host_state.worldmodel ), -1, &rc, DT_NOPREFIX | DT_VCENTER | DT_SINGLELINE  );
+		}
 
-        rc.top = rc.bottom - 30;
+		SetTextColor( hdc, oldFgColor );
 
-        if ( host_state.worldmodel != NULL )
-        {
-            rc.left += 10;
-            DrawText( hdc, modelloader->GetName( host_state.worldmodel ), -1, &rc, DT_NOPREFIX | DT_VCENTER | DT_SINGLELINE  );
-        }
+		SelectObject( hdc, oldBr );
+		SetBkMode( hdc, oldBkMode );
+		SelectObject( hdc, oldFont );
 
-        SetTextColor( hdc, oldFgColor );
-
-        SelectObject( hdc, oldBr );
-        SetBkMode( hdc, oldBkMode );
-        SelectObject( hdc, oldFont );
-
-        DeleteObject( br );
-        DeleteObject( fnt );
-    }
+		DeleteObject( br );
+		DeleteObject( fnt );
 #else
-    Assert( !"Impl me" );
+		printf ( "%s\n",  modelloader->GetName( host_state.worldmodel ) );
 #endif
-
+	}
 }
 
-#ifndef _WIN32
+#if !defined( _WIN32 ) && !defined( _PS3 )
 
 typedef unsigned char BYTE;
-typedef signed long LONG;
-typedef unsigned long ULONG;
+
+#if !defined( OSX ) || defined( PLATFORM_64BITS )
+        typedef unsigned int ULONG;
+        typedef int LONG;
+#else
+        typedef unsigned long ULONG;
+        typedef long LONG;
+#endif
 
 typedef char * LPSTR;
 
@@ -1149,16 +1116,6 @@ typedef struct tagRGBQUAD {
 #define BI_RLE4       2L
 #define BI_BITFIELDS  3L
 
-#if 0
-typedef struct _GUID
-{
-    unsigned long Data1;
-    unsigned short Data2;
-    unsigned short Data3;
-    unsigned char Data4[8];
-} GUID;
-
-#endif
 typedef GUID UUID;
 
 #endif //WIN32
@@ -1319,7 +1276,7 @@ void CVideoMode_Common::UpdateWindowPosition( void )
     // esp. in Resizing window mode.
 }
 
-void CVideoMode_Common::ChangeDisplaySettingsToFullscreen( int nWidth, int nHeight, int nBPP )
+void CVideoMode_Common::ChangeDisplaySettingsToFullscreen( int nWidth, int nHeight, int nBPP, bool bDesktopFriendlyFullscreen )
 {
 }
 
@@ -1350,90 +1307,133 @@ int CVideoMode_Common::GetRefreshRateForMode( const vmode_t *pMode )
 // Input  : *mode - 
 // Output : Returns true on success, false on failure.
 //-----------------------------------------------------------------------------
-void CVideoMode_Common::AdjustWindow( int nWidth, int nHeight, int nBPP, bool bWindowed )
+void CVideoMode_Common::AdjustWindow( int nWidth, int nHeight, int nBPP, bool bWindowed, bool bNoWindowBorder )
 {
-	if ( g_bTextMode )
+	if ( IsPS3() )
+	{
+		if ( game )
+			game->SetWindowSize( nWidth, nHeight );
 		return;
+	}
 
-	// Use Change Display Settings to go full screen
-	ChangeDisplaySettingsToFullscreen( nWidth, nHeight, nBPP );
+    if ( g_bTextMode )
+        return;
+    
+    // Use Change Display Settings to go full screen
+    ChangeDisplaySettingsToFullscreen( nWidth, nHeight, nBPP, bNoWindowBorder );
 
-	RECT WindowRect;
-	WindowRect.top      = 0;
-	WindowRect.left     = 0;
-	WindowRect.right    = nWidth;
-	WindowRect.bottom   = nHeight;
+    RECT WindowRect;
+    WindowRect.top      = 0;
+    WindowRect.left     = 0;
+    WindowRect.right    = nWidth;
+    WindowRect.bottom   = nHeight;
 
-#ifndef USE_SDL
+#if defined( WIN32 ) && !defined( USE_SDL )
 #ifndef _X360
 	// Get window style
-	DWORD style = GetWindowLong( (HWND)game->GetMainWindow(), GWL_STYLE );
-	DWORD exStyle = GetWindowLong( (HWND)game->GetMainWindow(), GWL_EXSTYLE );
+    DWORD style = GetWindowLong( (HWND)game->GetMainWindow(), GWL_STYLE );
+    DWORD exStyle = GetWindowLong( (HWND)game->GetMainWindow(), GWL_EXSTYLE );
 
-	if ( bWindowed )
-	{
-		// Give it a frame (pretty much WS_OVERLAPPEDWINDOW except for we do not modify the
-		// flags corresponding to resizing-frame and maximize-box)
-		if( !CommandLine()->FindParm( "-noborder" ) && !m_bVROverride )
-		{
-			style |= WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-		}
-		else
-		{
-			style &= ~WS_OVERLAPPEDWINDOW;
-		}
+    if ( bWindowed )
+    {
+        // Give it a frame (pretty much WS_OVERLAPPEDWINDOW except for we do not modify the
+        // flags corresponding to resizing-frame and maximize-box)
+		if( !CommandLine()->FindParm( "-noborder" ) && !bNoWindowBorder )
+        {
+            style |= WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+        }
+        else
+        {
+            style &= ~WS_OVERLAPPEDWINDOW;
+        }
 
-		// remove topmost flag
-		exStyle &= ~WS_EX_TOPMOST;
-		SetWindowLong( (HWND)game->GetMainWindow(), GWL_EXSTYLE, exStyle );
-	}
-	else
-	{
-		// Remove window border going into fullscreen mode to avoid Vista sizing issues when DWM is enabled
-		style &= ~WS_OVERLAPPEDWINDOW;
-	}
+        // remove topmost flag
+        exStyle &= ~WS_EX_TOPMOST;
+        SetWindowLong( (HWND)game->GetMainWindow(), GWL_EXSTYLE, exStyle );
+    }
+    else
+    {
+        // Remove window border going into fullscreen mode to avoid Vista sizing issues when DWM is enabled
+        style &= ~WS_OVERLAPPEDWINDOW;
+    }
 
-	SetWindowLong( (HWND)game->GetMainWindow(), GWL_STYLE, style );
+    SetWindowLong( (HWND)game->GetMainWindow(), GWL_STYLE, style );
 
-	// Compute rect needed for that size client area based on window style
-	AdjustWindowRectEx( &WindowRect, style, FALSE, exStyle );
+    // Compute rect needed for that size client area based on window style
+    AdjustWindowRectEx( &WindowRect, style, FALSE, exStyle );
 #endif
 
-	// Prepare to set window pos, which is required when toggling between topmost and not window flags
-	HWND hWndAfter = NULL;
-	DWORD dwSwpFlags = 0;
+    // Prepare to set window pos, which is required when toggling between topmost and not window flags
+    HWND hWndAfter = NULL;
+    DWORD dwSwpFlags = 0;
 #ifndef _X360
-	{
-		if ( bWindowed )
-		{
-			hWndAfter = HWND_NOTOPMOST;
-		}
-		else
-		{
-			hWndAfter = HWND_TOPMOST;
-		}
-		dwSwpFlags = SWP_FRAMECHANGED;
-	}
+    {
+        if ( bWindowed )
+        {
+            hWndAfter = HWND_NOTOPMOST;
+        }
+        else
+        {
+            hWndAfter = HWND_TOPMOST;
+        }
+        dwSwpFlags = SWP_FRAMECHANGED;
+    }
 #else
-	{
-		dwSwpFlags = SWP_NOZORDER;
-	}
+    {
+        dwSwpFlags = SWP_NOZORDER;
+    }
 #endif
 
-	// Move the window to 0, 0 and the new true size
-	SetWindowPos( (HWND)game->GetMainWindow(),
-		hWndAfter,
-		0, 0, WindowRect.right - WindowRect.left,
-		WindowRect.bottom - WindowRect.top,
-		SWP_NOREDRAW | dwSwpFlags );
-#endif // !USE_SDL
-
+    // Move the window to 0, 0 and the new true size
+    SetWindowPos( (HWND)game->GetMainWindow(),
+                 hWndAfter,
+                 0, 0, WindowRect.right - WindowRect.left,
+                 WindowRect.bottom - WindowRect.top,
+                 SWP_NOREDRAW | dwSwpFlags );
+#endif // WIN32 && !USE_SDL
+	
 	// Now center
 	CenterEngineWindow( game->GetMainWindow(),
-		WindowRect.right - WindowRect.left,
-		WindowRect.bottom - WindowRect.top );
-#if defined( USE_SDL )
-	g_pLauncherMgr->SetWindowFullScreen( !bWindowed, WindowRect.right - WindowRect.left, WindowRect.bottom - WindowRect.top );
+					   WindowRect.right - WindowRect.left,
+					   WindowRect.bottom - WindowRect.top );
+	
+
+
+#if defined(USE_SDL)
+	g_pLauncherMgr->SetWindowFullScreen( !bWindowed, nWidth, nHeight, bNoWindowBorder );
+
+	MaterialVideoMode_t vidMode;
+
+	// Mid-2015 MBP with Intel and AMD GPUs can fail to set the resolution correctly the first time when
+	// transitioning to fullscreen. The low level driver seems to throw an error but moves past it. Terrifying.
+	// In the meantime, we workaround this by trying again--because trying a second time generally seems to 
+	// be successful. If it isn't, then we punt on exclusive fullscreen mode and do non-exclusive fs instead.
+	// We can't fix this in sdlmgr.cpp (which would be less ugly) because SDL caches window and display
+	// information, and so it thinks everything worked great. We need to get the resolution of the desktop
+	// back from the firehose, and calling into the material system from sdlmgr would insert a dependency
+	// on materialsystem into every dll we build (since sdlmgr lives in appframework).
+	if ( IsOSX() && !bWindowed && !bNoWindowBorder )
+	{
+		// Did we set the size correctly?
+		materials->GetDisplayMode( vidMode );
+		if ( vidMode.m_Width != nWidth || vidMode.m_Height != nHeight )
+		{
+			Msg( "Requested full screen window of %dx%d, but got %dx%d. Trying again.\n", nWidth, nHeight, vidMode.m_Width, vidMode.m_Height );
+			g_pLauncherMgr->SetWindowFullScreen( false, nWidth, nHeight, bNoWindowBorder );
+			g_pLauncherMgr->SetWindowFullScreen( true, nWidth, nHeight, bNoWindowBorder );
+		}
+
+		// If still not, then force non-exclusive mode. 
+		materials->GetDisplayMode( vidMode );
+		if ( vidMode.m_Width != nWidth || vidMode.m_Height != nHeight )
+		{
+			Msg( "Requested full screen window of %dx%d, but got %dx%d. Disabling exclusive mode and trying again.\n", nWidth, nHeight, vidMode.m_Width, vidMode.m_Height );
+			CommandLine()->RemoveParm( "-exclusivefs" );
+			CommandLine()->AppendParm( "-noexclusivefs", nullptr );
+			g_pLauncherMgr->SetWindowFullScreen( false, nWidth, nHeight, bNoWindowBorder );
+			g_pLauncherMgr->SetWindowFullScreen( true, nWidth, nHeight, bNoWindowBorder );
+		}
+	}
 
 	CenterEngineWindow( game->GetMainWindow(),
 		WindowRect.right - WindowRect.left,
@@ -1441,22 +1441,28 @@ void CVideoMode_Common::AdjustWindow( int nWidth, int nHeight, int nBPP, bool bW
 
 	g_pLauncherMgr->SizeWindow( WindowRect.right - WindowRect.left, WindowRect.bottom - WindowRect.top );
 
+#elif defined( WIN32 )
+#elif defined(OSX)
+
+	g_pLauncherMgr->SizeWindow( WindowRect.right - WindowRect.left, WindowRect.bottom - WindowRect.top );
+
+#ifdef LINUX
 	if( bWindowed )
 	{
 		SDL_Window* win = (SDL_Window*)g_pLauncherMgr->GetWindowRef();
-		if ( m_bVROverride || CommandLine()->FindParm( "-noborder" ) )
-			SDL_SetWindowBordered( win, SDL_FALSE );
-		else
-			SDL_SetWindowBordered( win, SDL_TRUE );
-			
+		SDL_SetWindowBordered( win, ( CommandLine()->FindParm( "-noborder" ) ) ? SDL_FALSE : SDL_TRUE );
 	}
 #endif
 
-	game->SetWindowSize( nWidth, nHeight );
+#else
+    Assert( !"Impl me" );
+#endif
 
-	// Make sure we have updated window information
-	UpdateWindowPosition();
-	MarkClientViewRectDirty();
+    game->SetWindowSize( nWidth, nHeight );
+
+    // Make sure we have updated window information
+    UpdateWindowPosition();
+    MarkClientViewRectDirty();
 }
 
 
@@ -1539,15 +1545,14 @@ void CVideoMode_Common::CenterEngineWindow( void *hWndCenter, int width, int hei
 
 #if defined(USE_SDL)
 	// Get the displayindex, and center our window on that display.
-	static ConVarRef sdl_displayindex( "sdl_displayindex" );
-	int displayindex = sdl_displayindex.IsValid() ? sdl_displayindex.GetInt() : 0;
+	int displayindex = g_pLauncherMgr->GetActiveDisplayIndex();
 
 	SDL_DisplayMode mode;
 	SDL_GetCurrentDisplayMode( displayindex, &mode );
 
 	const int wide = mode.w;
 	const int tall = mode.h;
-
+	
 	CenterX = (wide - width) / 2;
 	CenterY = (tall - height) / 2;
 	CenterX = (CenterX < 0) ? 0: CenterX;
@@ -1556,7 +1561,7 @@ void CVideoMode_Common::CenterEngineWindow( void *hWndCenter, int width, int hei
 	// tweak the x and w positions if the user species them on the command-line
 	CenterX = CommandLine()->ParmValue( "-x", CenterX );
 	CenterY = CommandLine()->ParmValue( "-y", CenterY );
-
+	
 	// also check for the negated form (since it is hard to say "-x -1000")
 	int negx = CommandLine()->ParmValue( "-negx", 0 ); 
 	if (negx > 0)
@@ -1568,7 +1573,7 @@ void CVideoMode_Common::CenterEngineWindow( void *hWndCenter, int width, int hei
 	{
 		CenterY = -negy;
 	}
-
+	
 	SDL_Rect rect = { 0, 0, 0, 0 };
 	SDL_GetDisplayBounds( displayindex, &rect );
 
@@ -1577,7 +1582,7 @@ void CVideoMode_Common::CenterEngineWindow( void *hWndCenter, int width, int hei
 
 	game->SetWindowXY( CenterX, CenterY );
 	g_pLauncherMgr->MoveWindow( CenterX, CenterY );
-#else
+#elif defined( WIN32 ) 
    if ( IsPC() )
     {
         // In windowed mode go through game->GetDesktopInfo because system metrics change
@@ -1586,11 +1591,11 @@ void CVideoMode_Common::CenterEngineWindow( void *hWndCenter, int width, int hei
 
         int cxScreen = 0, cyScreen = 0, refreshRate = 0;
 
-        if ( !( WS_EX_TOPMOST & ::GetWindowLong( (HWND)hWndCenter, GWL_EXSTYLE ) ) && m_bWindowed )
+        if ( !( WS_EX_TOPMOST & ::GetWindowLong( (HWND)hWndCenter, GWL_EXSTYLE ) ) )
         {
             game->GetDesktopInfo( cxScreen, cyScreen, refreshRate );
         }
-        
+		
         if ( !cxScreen || !cyScreen )
         {
             cxScreen = GetSystemMetrics(SM_CXSCREEN);
@@ -1609,12 +1614,6 @@ void CVideoMode_Common::CenterEngineWindow( void *hWndCenter, int width, int hei
         CenterY = 0;
     }
 
-	if( m_bVROverride )
-	{
-		CenterX = m_nVROverrideX;
-		CenterY = m_nVROverrideY;
-	}
-
     // tweak the x and w positions if the user species them on the command-line
     CenterX = CommandLine()->ParmValue( "-x", CenterX );
     CenterY = CommandLine()->ParmValue( "-y", CenterY );
@@ -1623,6 +1622,46 @@ void CVideoMode_Common::CenterEngineWindow( void *hWndCenter, int width, int hei
 
     SetWindowPos ( (HWND)hWndCenter, NULL, CenterX, CenterY, 0, 0,
                   SWP_NOSIZE | SWP_NOZORDER | SWP_SHOWWINDOW | SWP_DRAWFRAME);
+#elif defined(OSX)
+	CGDisplayCount maxDisplays = 1;
+	CGDirectDisplayID activeDspys[1];
+	CGDisplayErr error;
+	short i;
+	CGDisplayCount newDspyCnt = 0;
+	
+	error = CGGetActiveDisplayList(maxDisplays, activeDspys, &newDspyCnt);
+	if (error || newDspyCnt < 1) 
+		return;
+	
+	CGRect displayRect = CGDisplayBounds (activeDspys[0]);
+	int wide = displayRect.size.width;
+	int tall = displayRect.size.height;
+	
+	CenterX = (wide - width) / 2;
+	CenterY = (tall - height) / 2;
+	CenterX = (CenterX < 0) ? 0: CenterX;
+	CenterY = (CenterY < 0) ? 0: CenterY;
+
+	// tweak the x and w positions if the user species them on the command-line
+    CenterX = CommandLine()->ParmValue( "-x", CenterX );
+    CenterY = CommandLine()->ParmValue( "-y", CenterY );
+	
+	// also check for the negated form (since it is hard to say "-x -1000")
+	int negx = CommandLine()->ParmValue( "-negx", 0 ); 
+	if (negx > 0)
+	{
+		CenterX = -negx;
+	}
+	int negy = CommandLine()->ParmValue( "-negy", 0 ); 
+	if (negy > 0)
+	{
+		CenterY = -negy;
+	}
+	
+	game->SetWindowXY( CenterX, CenterY );
+	g_pLauncherMgr->MoveWindow( CenterX, CenterY );
+#else
+	Assert( !"Impl me" );
 #endif
 
 }
@@ -1655,28 +1694,40 @@ void CVideoMode_Common::ReadScreenPixels( int x, int y, int w, int h, void *pBuf
 void CVideoMode_Common::TakeSnapshotTGA( const char *pFilename )
 {
     // bitmap bits
-    uint8 *pImage = new uint8[ GetModeStereoWidth() * 3 * GetModeStereoHeight() ];
+    uint8 *pImage = new uint8[ GetModeWidth() * 3 * GetModeHeight() ];
 
     // Get Bits from the material system
-    ReadScreenPixels( 0, 0, GetModeStereoWidth(), GetModeStereoHeight(), pImage, IMAGE_FORMAT_RGB888 );
+    ReadScreenPixels( 0, 0, GetModeWidth(), GetModeHeight(), pImage, IMAGE_FORMAT_RGB888 );
+
+	// this xbox screenshot path is not meant as an exact framebuffer image
+	// need to correct for srgb disparity for proper comparison with PC screenshots
+	if ( IsX360() )
+	{
+		// process as 3 byte tuples
+		for ( int i = 0; i < GetModeWidth() * GetModeHeight() * 3; i++ )
+		{
+			pImage[i] = ( unsigned char )( SrgbLinearToGamma( X360GammaToLinear( (float)pImage[i] / 255.0f ) ) * 255.0f );
+		}
+	}
 
     CUtlBuffer outBuf;
-    if ( TGAWriter::WriteToBuffer( pImage, outBuf, GetModeStereoWidth(), GetModeStereoHeight(), IMAGE_FORMAT_RGB888,
+    if ( TGAWriter::WriteToBuffer( pImage, outBuf, GetModeWidth(), GetModeHeight(), IMAGE_FORMAT_RGB888,
         IMAGE_FORMAT_RGB888 ) )
     {
         if ( !g_pFileSystem->WriteFile( pFilename, NULL, outBuf ) )
         {
             Warning( "Couldn't write bitmap data snapshot to file %s.\n", pFilename );
-        }
+		}
 		else
 		{
 			char szPath[MAX_PATH];
 			szPath[0] = 0;
 			if ( g_pFileSystem->GetLocalPath( pFilename, szPath, sizeof(szPath) ) )
 			{
-				AddScreenshotToSteam( szPath, GetModeStereoWidth(), GetModeStereoHeight() );
+				AddScreenshotToSteam( szPath, GetModeWidth(), GetModeHeight() );
 			}
 		}
+
     }
 
     delete[] pImage;
@@ -1944,7 +1995,7 @@ static void VID_ProcessMovieFrame( const MovieInfo_t& info, bool jpeg, const cha
         if ( !g_pFileSystem->WriteFile( filename, NULL, outBuf ) )
         {
             Warning( "Couldn't write movie snapshot to file %s.\n", filename );
-            Cbuf_AddText( "endmovie\n" );
+			Cbuf_AddText( Cbuf_GetCurrentPlayer(), "endmovie\n" );
         }
     }
 }
@@ -1953,10 +2004,10 @@ static void VID_ProcessMovieFrame( const MovieInfo_t& info, bool jpeg, const cha
 // Purpose: Store current frame to numbered .bmp file
 // Input  : *pFilename - 
 //-----------------------------------------------------------------------------
-extern IVideoRecorder *g_pVideoRecorder;
-
 void CVideoMode_Common::WriteMovieFrame( const MovieInfo_t& info )
 {
+	if ( IsX360() )
+		return;
     char const *pMovieName = info.moviename;
     int nMovieFrame = info.movieframe;
 
@@ -1965,12 +2016,12 @@ void CVideoMode_Common::WriteMovieFrame( const MovieInfo_t& info )
 
     if ( !pMovieName[0] )
     {
-        Cbuf_AddText( "endmovie\n" );
+		Cbuf_AddText( Cbuf_GetCurrentPlayer(), "endmovie\n" );
         ConMsg( "Tried to write movie buffer with no filename set!\n" );
         return;
     }
 
-    int imagesize = GetModeStereoWidth() * GetModeStereoHeight();
+    int imagesize = GetModeWidth() * GetModeHeight();
     BGR888_t *hp = new BGR888_t[ imagesize ];
     if ( hp == NULL )
     {
@@ -1978,24 +2029,24 @@ void CVideoMode_Common::WriteMovieFrame( const MovieInfo_t& info )
     }
 
     // Get Bits from material system
-    ReadScreenPixels( 0, 0, GetModeStereoWidth(), GetModeStereoHeight(), hp, IMAGE_FORMAT_BGR888 );
+    ReadScreenPixels( 0, 0, GetModeWidth(), GetModeHeight(), hp, IMAGE_FORMAT_BGR888 );
 
     // Store frame to disk
     if ( info.DoTga() )
     {
         VID_ProcessMovieFrame( info, false, va( "%s%04d.tga", pMovieName, nMovieFrame ), 
-            GetModeStereoWidth(), GetModeStereoHeight(), (unsigned char*)hp );
+            GetModeWidth(), GetModeHeight(), (unsigned char*)hp );
     }
 
     if ( info.DoJpg() )
     {
         VID_ProcessMovieFrame( info, true, va( "%s%04d.jpg", pMovieName, nMovieFrame ), 
-            GetModeStereoWidth(), GetModeStereoHeight(), (unsigned char*)hp );
+            GetModeWidth(), GetModeHeight(), (unsigned char*)hp );
     }
 
-    if ( info.DoVideo() )
+    if ( info.DoAVI() )
     {
-		g_pVideoRecorder->AppendVideoFrame( hp );
+        avi->AppendMovieFrame( g_hCurrentAVI, hp );
     }
 
     delete[] hp;
@@ -2102,7 +2153,7 @@ GLOBAL(void) jpeg_UtlBuffer_dest (j_compress_ptr cinfo, CUtlBuffer *pBuffer )
 
 bool CVideoMode_Common::TakeSnapshotJPEGToBuffer( CUtlBuffer& buf, int quality )
 {
-#if !defined( _X360 )
+#if !defined( _GAMECONSOLE )
     if ( g_LostVideoMemory )
         return false;
 
@@ -2110,15 +2161,15 @@ bool CVideoMode_Common::TakeSnapshotJPEGToBuffer( CUtlBuffer& buf, int quality )
     quality = clamp( quality, 1, 100 );
 
     // Allocate space for bits
-    uint8 *pImage = new uint8[ GetModeStereoWidth() * 3 * GetModeStereoHeight() ];
+    uint8 *pImage = new uint8[ GetModeWidth() * 3 * GetModeHeight() ];
     if ( !pImage )
     {
-        Msg( "Unable to allocate %i bytes for image\n", GetModeStereoWidth() * 3 * GetModeStereoHeight() );
+        Msg( "Unable to allocate %i bytes for image\n", GetModeWidth() * 3 * GetModeHeight() );
         return false;
     }
 
     // Get Bits from the material system
-    ReadScreenPixels( 0, 0, GetModeStereoWidth(), GetModeStereoHeight(), pImage, IMAGE_FORMAT_RGB888 );
+    ReadScreenPixels( 0, 0, GetModeWidth(), GetModeHeight(), pImage, IMAGE_FORMAT_RGB888 );
 
     JSAMPROW row_pointer[1];     // pointer to JSAMPLE row[s]
     int row_stride;              // physical row width in image buffer
@@ -2129,7 +2180,7 @@ bool CVideoMode_Common::TakeSnapshotJPEGToBuffer( CUtlBuffer& buf, int quality )
     // compression data structure
     struct jpeg_compress_struct cinfo;
 
-    row_stride = GetModeStereoWidth() * 3; // JSAMPLEs per row in image_buffer
+    row_stride = GetModeWidth() * 3; // JSAMPLEs per row in image_buffer
 
     // point at stderr
     cinfo.err = jpeg_std_error(&jerr);
@@ -2141,8 +2192,8 @@ bool CVideoMode_Common::TakeSnapshotJPEGToBuffer( CUtlBuffer& buf, int quality )
     jpeg_UtlBuffer_dest(&cinfo, &buf );
 
     // image width and height, in pixels
-    cinfo.image_width = GetModeStereoWidth();
-    cinfo.image_height = GetModeStereoHeight();
+    cinfo.image_width = GetModeWidth();
+    cinfo.image_height = GetModeHeight();
     // RGB is 3 componnent
     cinfo.input_components = 3;
     // # of color components per pixel
@@ -2202,11 +2253,11 @@ void CVideoMode_Common::TakeSnapshotJPEG( const char *pFilename, int quality )
 // Show info to console.
     char orig[ 64 ];
     char final[ 64 ];
-    Q_strncpy( orig, Q_pretifymem( GetModeStereoWidth() * 3 * GetModeStereoHeight(), 2 ), sizeof( orig ) );
+    Q_strncpy( orig, Q_pretifymem( GetModeWidth() * 3 * GetModeHeight(), 2 ), sizeof( orig ) );
     Q_strncpy( final, Q_pretifymem( finalSize, 2 ), sizeof( final ) );
 
     Msg( "Wrote '%s':  %s (%dx%d) compresssed (quality %i) to %s\n",
-        pFilename, orig, GetModeStereoWidth(), GetModeStereoHeight(), quality, final );
+        pFilename, orig, GetModeWidth(), GetModeHeight(), quality, final );
 
 	if ( finalSize > 0 )
 	{
@@ -2214,7 +2265,7 @@ void CVideoMode_Common::TakeSnapshotJPEG( const char *pFilename, int quality )
 		szPath[0] = 0;
 		if ( g_pFileSystem->GetLocalPath( pFilename, szPath, sizeof(szPath) ) )
 		{
-			AddScreenshotToSteam( szPath, GetModeStereoWidth(), GetModeStereoHeight() );
+			AddScreenshotToSteam( szPath, GetModeWidth(), GetModeHeight() );
 		}
 	}
 
@@ -2236,7 +2287,7 @@ public:
     virtual bool        Init( );
     virtual void        Shutdown( void );
     virtual void        SetGameWindow( void *hWnd );
-    virtual bool        SetMode( int nWidth, int nHeight, bool bWindowed );
+	virtual bool		SetMode( int nWidth, int nHeight, bool bWindowed, bool bNoWindowBorder );
     virtual void        ReleaseVideo( void );
     virtual void        RestoreVideo( void );
     virtual void        AdjustForModeChange( void );
@@ -2244,14 +2295,7 @@ public:
 
 private:
     virtual void        ReleaseFullScreen( void );
-    virtual void        ChangeDisplaySettingsToFullscreen( int nWidth, int nHeight, int nBPP );
-
-#ifdef WIN32
-	int m_nLastCDSWidth;
-	int m_nLastCDSHeight;
-	int m_nLastCDSBPP;
-	int m_nLastCDSFreq;
-#endif
+    virtual void        ChangeDisplaySettingsToFullscreen( int nWidth, int nHeight, int nBPP, bool bDesktopFriendlyFullscreen );
 };
 
 static void VideoMode_AdjustForModeChange( void )
@@ -2265,12 +2309,6 @@ static void VideoMode_AdjustForModeChange( void )
 //-----------------------------------------------------------------------------
 CVideoMode_MaterialSystem::CVideoMode_MaterialSystem( )
 {
-#ifdef WIN32
-	m_nLastCDSWidth = 0;
-	m_nLastCDSHeight = 0;
-	m_nLastCDSBPP = 0;
-	m_nLastCDSFreq = 0;
-#endif
 }
 
 
@@ -2314,26 +2352,13 @@ bool CVideoMode_MaterialSystem::Init( )
         {
             if ( info.m_Width == m_rgModeList[ j ].width && info.m_Height == m_rgModeList[ j ].height )
             {
+                // choose the highest refresh rate available for each mode up to the desktop rate
 
-				// in VR mode we want the highest refresh rate, without regard for the desktop refresh rate
-				if ( UseVR() || ShouldForceVRActive() )
-				{
-					if ( info.m_RefreshRate > m_rgModeList[j].refreshRate )
-					{
-						m_rgModeList[j].refreshRate = info.m_RefreshRate;
-					}
-				}
-				else
-				{
-					// choose the highest refresh rate available for each mode up to the desktop rate
-
-					// if the new mode is valid and current is invalid or not as high, choose the new one
-					if ( info.m_RefreshRate <= nDesktopRefresh && (m_rgModeList[j].refreshRate > nDesktopRefresh || m_rgModeList[j].refreshRate < info.m_RefreshRate) )
-					{
-						m_rgModeList[j].refreshRate = info.m_RefreshRate;
-					}
-				}
-
+                // if the new mode is valid and current is invalid or not as high, choose the new one
+                if ( info.m_RefreshRate <= nDesktopRefresh && (m_rgModeList[j].refreshRate > nDesktopRefresh || m_rgModeList[j].refreshRate < info.m_RefreshRate) )
+                {
+                    m_rgModeList[j].refreshRate = info.m_RefreshRate;
+                }
                 bAlreadyInList = true;
                 break;
             }
@@ -2375,42 +2400,42 @@ void CVideoMode_MaterialSystem::Shutdown()
 //-----------------------------------------------------------------------------
 // Sets the video mode
 //-----------------------------------------------------------------------------
-bool CVideoMode_MaterialSystem::SetMode( int nWidth, int nHeight, bool bWindowed )
+bool CVideoMode_MaterialSystem::SetMode( int nWidth, int nHeight, bool bWindowed, bool bNoWindowBorder )
 {
+	extern void S_ClearBuffer();
+
+	// if the sound engine is running, make it silent since this will take a while
+	S_ClearBuffer();
+
     // Necessary for mode selection to work
     int nFoundMode = FindVideoMode( nWidth, nHeight, bWindowed );
-    vmode_t *pMode = GetMode( nFoundMode );
+	vmode_t videoMode = *GetMode( nFoundMode );
+	
+	if ( bWindowed && ( nFoundMode == 0 ) && ( videoMode.width != nWidth || videoMode.height != nHeight ) )
+	{
+		// Setting a custom windowed size
+		videoMode.width = nWidth;
+		videoMode.height = nHeight;
+	}
 
     // update current video state
     MaterialSystem_Config_t config = *g_pMaterialSystemConfig;
-    config.m_VideoMode.m_Width = pMode->width;
-    config.m_VideoMode.m_Height = pMode->height;
+	config.m_VideoMode.m_Width = videoMode.width;
+	config.m_VideoMode.m_Height = videoMode.height;
 
-	// make sure VR mode is up to date
-	config.SetFlag( MATSYS_VIDCFG_FLAGS_VR_MODE, UseVR() || ShouldForceVRActive() );
-
-	if ( ShouldForceVRActive() )
-	{
-		config.m_nVRModeAdapter = materials->GetCurrentAdapter();
-	}
-
-#ifdef SWDS
+#ifdef DEDICATED
     config.m_VideoMode.m_RefreshRate = 60;
 #else
-    config.m_VideoMode.m_RefreshRate = GetRefreshRateForMode( pMode );
+	config.m_VideoMode.m_RefreshRate = GetRefreshRateForMode( &videoMode );
 #endif
     
     config.SetFlag( MATSYS_VIDCFG_FLAGS_WINDOWED, bWindowed );
+	config.SetFlag( MATSYS_VIDCFG_FLAGS_NO_WINDOW_BORDER, bNoWindowBorder );
 
 #if defined( _X360 )
-    XVIDEO_MODE videoMode;
-    XGetVideoMode( &videoMode );
-    if ( videoMode.fIsWideScreen )
-    {
-        extern ConVar r_aspectratio;
-        r_aspectratio.SetValue( 16.0f/9.0f );
-    }
-    config.SetFlag( MATSYS_VIDCFG_FLAGS_SCALE_TO_OUTPUT_RESOLUTION, (DWORD)nWidth != videoMode.dwDisplayWidth || (DWORD)nHeight != videoMode.dwDisplayHeight );
+	XVIDEO_MODE xvideoMode;
+	XGetVideoMode( &xvideoMode );
+	config.SetFlag( MATSYS_VIDCFG_FLAGS_SCALE_TO_OUTPUT_RESOLUTION, (DWORD)nWidth != xvideoMode.dwDisplayWidth || (DWORD)nHeight != xvideoMode.dwDisplayHeight );
     if ( nHeight == 480 || nWidth == 576 )
     {
         // Use 2xMSAA for standard def (see mat_software_aa_strength for fake hi-def aa)
@@ -2426,7 +2451,7 @@ bool CVideoMode_MaterialSystem::SetMode( int nWidth, int nHeight, bool bWindowed
     {
 		//Debugger();
 		
-        if ( !materials->SetMode( (void*)game->GetMainDeviceWindow(), config ) )
+        if ( !materials->SetMode( (void*)game->GetMainWindow(), config ) )
             return false;
 
         m_bSetModeOnce = true;
@@ -2450,27 +2475,37 @@ void CVideoMode_MaterialSystem::AdjustForModeChange( void )
         return;
 
     // get previous size
-	int nOldUIWidth = GetModeUIWidth();
-	int nOldUIHeight = GetModeUIHeight();
+    int nOldWidth = GetModeWidth();
+    int nOldHeight = GetModeHeight();
 
     // Get the new mode info from the config record
     int nNewWidth = g_pMaterialSystemConfig->m_VideoMode.m_Width;
     int nNewHeight = g_pMaterialSystemConfig->m_VideoMode.m_Height;
     bool bWindowed = g_pMaterialSystemConfig->Windowed();
+	bool bNoWindowBorder = g_pMaterialSystemConfig->NoWindowBorder();
 
     // reset the window size
     CMatRenderContextPtr pRenderContext( materials );
 
-    ResetCurrentModeForNewResolution( nNewWidth, nNewHeight, bWindowed );
-    AdjustWindow( GetModeWidth(), GetModeHeight(), GetModeBPP(), IsWindowedMode() );
+#if ( !defined( _GAMECONSOLE ) && defined ( WIN32 ) )
+	if ( !IsGameConsole() && !IsWindowedMode() && bWindowed )
+	{
+		// Release fullscreen before going from windowed to fullscreen to avoid the case on Vista where we go from 
+		// fullscreen 640x480 to a higher reswindowed, but the rendertarget stays at 640x480 and the window is sized arbitrarily.
+		ReleaseFullScreen( );
+		ShowWindow( (HWND)game->GetMainWindow(), SW_SHOWNORMAL );
+	}
+#endif
+
+	ResetCurrentModeForNewResolution( nNewWidth, nNewHeight, bWindowed, bNoWindowBorder );
+	AdjustWindow( GetModeWidth(), GetModeHeight(), GetModeBPP(), IsWindowedMode(), NoWindowBorder() );
     MarkClientViewRectDirty();
-    pRenderContext->Viewport( 0, 0, GetModeStereoWidth(), GetModeStereoHeight() );
+    pRenderContext->Viewport( 0, 0, GetModeWidth(), GetModeHeight() );
 
     // fixup vgui
-    vgui::surface()->OnScreenSizeChanged( nOldUIWidth, nOldUIHeight );
-    
-    // Re-init the HUD
-    ClientDLL_HudVidInit();
+    vgui::surface()->OnScreenSizeChanged( nOldWidth, nOldHeight );
+	
+	game->OnScreenSizeChanged( nOldWidth, nOldHeight );
 }
 
 
@@ -2496,8 +2531,9 @@ void CVideoMode_MaterialSystem::SetGameWindow( void *hWnd )
     m_bWindowed = true;
     m_nModeWidth = mode.m_Width;
     m_nModeHeight = mode.m_Height;
+	m_bNoWindowBorder = false;
 
-    materials->SetView( game->GetMainDeviceWindow() );
+    materials->SetView( game->GetMainWindow() );
 }
 
 
@@ -2512,7 +2548,7 @@ void CVideoMode_MaterialSystem::ReleaseVideo( void )
     if ( IsWindowedMode() )
         return;
 
-	ReleaseFullScreen();
+    ReleaseFullScreen();
 }
 
 
@@ -2527,12 +2563,21 @@ void CVideoMode_MaterialSystem::RestoreVideo( void )
     if ( IsWindowedMode() )
         return;
 
-#if defined( USE_SDL )
-	SDL_ShowWindow( (SDL_Window*)game->GetMainWindow() );
+#if defined( WIN32 ) && !defined( USE_SDL )
+    ShowWindow( (HWND)game->GetMainWindow(), SW_SHOWNORMAL );
+#elif defined( OSX ) && defined( PLATFORM_64BITS )
+    Assert( !"OSX-64 unimpl" );
+#elif OSX
+    ShowWindow( (WindowRef)game->GetMainWindow() );
+    CollapseWindow( (WindowRef)game->GetMainWindow(), false );
+#elif LINUX
+// 	XMapWindow( g_pLauncherMgr->GetDisplay(), (Window)game->GetMainWindow() );
+// !!! FIXME: Mapping isn't really what we want here.
+#elif _WIN32
 #else
-	ShowWindow( (HWND)game->GetMainWindow(), SW_SHOWNORMAL );
+#error
 #endif
-    AdjustWindow( GetModeWidth(), GetModeHeight(), GetModeBPP(), IsWindowedMode() );
+	AdjustWindow( GetModeWidth(), GetModeHeight(), GetModeBPP(), IsWindowedMode(), NoWindowBorder() );
 }
 
 
@@ -2541,21 +2586,32 @@ void CVideoMode_MaterialSystem::RestoreVideo( void )
 //-----------------------------------------------------------------------------
 void CVideoMode_MaterialSystem::ReleaseFullScreen( void )
 {
-    if ( IsX360() )
+    if ( IsGameConsole() )
         return;
 
     if ( IsWindowedMode() )
         return;
 
-#if !defined( USE_SDL )
+#if defined( WIN32 ) && !defined( USE_SDL )
     // Hide the main window
-	if ( m_nLastCDSWidth != 0 )
-		ChangeDisplaySettings( NULL, 0 );
-	ShowWindow( (HWND)game->GetMainWindow(), SW_MINIMIZE );
-	m_nLastCDSWidth = 0;
-	m_nLastCDSHeight = 0;
-	m_nLastCDSBPP = 0;
-	m_nLastCDSFreq = 0;
+    ChangeDisplaySettings( NULL, 0 );
+    ShowWindow( (HWND)game->GetMainWindow(), SW_MINIMIZE );
+#elif defined( OSX ) && defined( PLATFORM_64BITS )
+    Assert( !"OSX-64 unimpl" );
+#elif OSX
+    CollapseWindow( (WindowRef)game->GetMainWindow(), true );
+
+	if (!CommandLine()->FindParm("-keepmousehooked"))
+	{
+		 //CGAssociateMouseAndMouseCursorPosition (TRUE);
+	}
+	CGDisplayShowCursor (kCGDirectMainDisplay);
+#elif LINUX
+//	XUnmapWindow( g_pLauncherMgr->GetDisplay(), (Window)game->GetMainWindow() );
+// !!! FIXME: Unmapping isn't really what we want here.
+#elif _WIN32
+#else
+#error
 #endif
 }
 
@@ -2563,16 +2619,18 @@ void CVideoMode_MaterialSystem::ReleaseFullScreen( void )
 //-----------------------------------------------------------------------------
 // Purpose: Use Change Display Settings to go Full Screen
 //-----------------------------------------------------------------------------
-void CVideoMode_MaterialSystem::ChangeDisplaySettingsToFullscreen( int nWidth, int nHeight, int nBPP )
+void CVideoMode_MaterialSystem::ChangeDisplaySettingsToFullscreen( int nWidth, int nHeight, int nBPP, bool bDesktopFriendlyFullscreen )
 {
-    if ( IsX360() )
+	if ( IsGameConsole() )
         return;
 
     if ( IsWindowedMode() )
         return;
 
-#if defined( WIN32 ) && !defined( USE_SDL )
-	DEVMODE dm;
+#if defined( USE_SDL )
+	g_pLauncherMgr->SetWindowFullScreen( true, nWidth, nHeight, bDesktopFriendlyFullscreen );
+#elif defined( WIN32 )
+    DEVMODE dm;
     memset(&dm, 0, sizeof(dm));
 
     dm.dmSize       = sizeof( dm );
@@ -2589,33 +2647,11 @@ void CVideoMode_MaterialSystem::ChangeDisplaySettingsToFullscreen( int nWidth, i
         dm.dmFields |= DM_DISPLAYFREQUENCY;
     }
 
-#if defined(IS_WINDOWS_PC)
-	DEVMODE dmCurrent;
-	if ( EnumDisplaySettings( materials->GetDisplayDeviceName(), ENUM_CURRENT_SETTINGS, &dmCurrent ) &&
-		 dmCurrent.dmBitsPerPel == dm.dmBitsPerPel &&
-		 dmCurrent.dmPelsWidth == dm.dmPelsWidth &&
-		 dmCurrent.dmPelsHeight == dm.dmPelsHeight &&
-		 ( (dm.dmFields & DM_DISPLAYFREQUENCY) == 0 || dmCurrent.dmDisplayFrequency == dm.dmDisplayFrequency ) )
-	{
-		return;
-	}
-#endif
-
-	if ( nWidth == m_nLastCDSWidth && nHeight == m_nLastCDSHeight && nBPP == m_nLastCDSBPP && freq == m_nLastCDSFreq )
-		return;
-
-	m_nLastCDSWidth = nWidth;
-	m_nLastCDSHeight = nHeight;
-	m_nLastCDSBPP = nBPP;
-	m_nLastCDSFreq = freq;
-
-    ChangeDisplaySettingsEx( materials->GetDisplayDeviceName(),  &dm, NULL, CDS_FULLSCREEN, NULL );
-#elif defined( USE_SDL )
-	g_pLauncherMgr->SetWindowFullScreen( true, nWidth, nHeight );
+    ChangeDisplaySettings( &dm, CDS_FULLSCREEN );
 #else
-	if ( !HushAsserts() )
+	if (!CommandLine()->FindParm("-hushasserts"))
 	{
-		Assert( !"Impl me" );
+	Assert( !"Impl me" );
 	}
 #endif
 }
@@ -2625,7 +2661,7 @@ void CVideoMode_MaterialSystem::ReadScreenPixels( int x, int y, int w, int h, vo
     if ( !g_LostVideoMemory )
     {
         bool bReadPixelsFromFrontBuffer = g_pMaterialSystemHardwareConfig->ReadPixelsFromFrontBuffer();
-        if( bReadPixelsFromFrontBuffer )
+        if( IsPS3() || bReadPixelsFromFrontBuffer )
         {
             Shader_SwapBuffers();
         }
@@ -2640,7 +2676,7 @@ void CVideoMode_MaterialSystem::ReadScreenPixels( int x, int y, int w, int h, vo
 
         pRenderContext->ReadPixelsAndStretch( &rect, &rect, (unsigned char*)pBuffer, format, w * ImageLoader::SizeInBytes( format ) );
 
-        if( bReadPixelsFromFrontBuffer )
+		if( IsPS3() || bReadPixelsFromFrontBuffer )
         {
             Shader_SwapBuffers();
         }

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: Dialog used to edit properties of a particle system definition
 //
@@ -10,7 +10,7 @@
 #pragma once
 #endif
 
-#include "vgui_controls/EditablePanel.h"
+#include "vgui_controls/editablepanel.h"
 #include "tier1/utlstring.h"
 #include "datamodel/dmehandle.h"
 #include "particles/particles.h"
@@ -55,25 +55,30 @@ public:
 
 	// Sets the particle system to look at
 	void SetParticleSystem( CDmeParticleSystemDefinition *pParticleSystem );
+	CDmeParticleSystemDefinition *GetParticleSystem( );
 
 	// Refreshes display
 	void Refresh( bool bValuesOnly = true );
+
+	void DeleteSelectedFunctions( );
 
 private:
 	// For inheriting classes to get notified without having to listen to messages
 	virtual void OnParticleSystemModified() {}
 
-	MESSAGE_FUNC( OnTextChanged, "TextChanged" );	
 	MESSAGE_FUNC_PARAMS( OnDmeElementChanged, "DmeElementChanged", params );
 	MESSAGE_FUNC( OnParticleSystemModifiedInternal, "ParticleSystemModified" );
 	MESSAGE_FUNC_PARAMS( OnParticleFunctionSelChanged, "ParticleFunctionSelChanged", params );
 
+	MESSAGE_FUNC( OnPasteFuncs, "PasteFuncs" );
+	MESSAGE_FUNC( OnCopy, "OnCopy" );
+	KEYBINDING_FUNC_NODECLARE( edit_copy, KEY_C, vgui::MODIFIER_CONTROL, OnCopy, "#edit_copy_help", 0 );
+
 	IParticleSystemPropertiesPanelQuery *m_pQuery;
 
 	vgui::Splitter *m_pSplitter;
-	vgui::ComboBox *m_pFunctionTypeCombo;
 	vgui::EditablePanel *m_pFunctionBrowserArea;
-	CParticleFunctionBrowser *m_pParticleFunctionBrowser[PARTICLE_FUNCTION_COUNT];
+	CParticleFunctionBrowser *m_pParticleFunctionBrowser;
 
 	CDmeElementPanel *m_pParticleFunctionProperties;
 

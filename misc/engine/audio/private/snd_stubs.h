@@ -1,4 +1,3 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
 
 #ifndef SND_STUBS_H
 #define SND_STUBS_H
@@ -11,7 +10,7 @@ public:
 	virtual bool IsHeadsetPresent( int iController ) { return false; }
 	virtual bool IsLocalPlayerTalking( int iController ) { return false; }
 
-	virtual void AddPlayerToVoiceList( XUID xPlayer, int iController ) {}
+	virtual void AddPlayerToVoiceList( XUID xPlayer, int iController, uint64 uiFlags ) {}
 	virtual void RemovePlayerFromVoiceList( XUID xPlayer, int iController ) {}
 
 	virtual void GetRemoteTalkers( int *pNumTalkers, XUID *pRemoteTalkers )

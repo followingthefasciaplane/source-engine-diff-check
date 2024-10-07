@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -49,7 +49,7 @@ public:
 class CSimple3DEmitter : public CSimpleEmitter
 {
 public:
-	CSimple3DEmitter( const char *pDebugName ) : CSimpleEmitter( pDebugName ) {}
+	explicit CSimple3DEmitter( const char *pDebugName ) : CSimpleEmitter( pDebugName ) {}
 	
 	static CSmartPtr<CSimple3DEmitter>	Create( const char *pDebugName );
 

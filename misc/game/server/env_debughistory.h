@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -23,7 +23,11 @@ enum debughistorycategories_t
 	MAX_HISTORY_CATEGORIES,
 };
 
+#if 0//!( defined(_X360) || defined(_PS3) )
+#undef DISABLE_DEBUG_HISTORY
+#elif !defined(DISABLE_DEBUG_HISTORY)
 #define DISABLE_DEBUG_HISTORY
+#endif
 
 #if defined(DISABLE_DEBUG_HISTORY)
 #define ADD_DEBUG_HISTORY( category, line )		((void)0)
@@ -31,5 +35,7 @@ enum debughistorycategories_t
 #define ADD_DEBUG_HISTORY( category, line )		AddDebugHistoryLine( category, line )
 void AddDebugHistoryLine( int iCategory, const char *pszLine );
 #endif
+
+void ClearDebugHistory();
 
 #endif // ENV_DEBUGHISTORY_H

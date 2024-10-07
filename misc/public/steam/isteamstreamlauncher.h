@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright � 1996-2013, Valve Corporation, All rights reserved. =======
 //
 // Purpose: interface to streaming launcher functions in Steam
 //

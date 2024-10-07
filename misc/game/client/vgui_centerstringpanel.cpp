@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -10,21 +10,37 @@
 #include <stdarg.h>
 #include "vguicenterprint.h"
 #include "ivrenderview.h"
-#include <vgui/IVGui.h>
+#include "vgui/IVGui.h"
 #include "VGuiMatSurface/IMatSystemSurface.h"
-#include <vgui_controls/Label.h>
-#include <vgui_controls/Controls.h>
-#include <vgui/ISurface.h>
-#include <vgui/IScheme.h>
+#include "vgui_controls/Label.h"
+#include "vgui_controls/Controls.h"
+#include "vgui/ISurface.h"
+#include "vgui/IScheme.h"
+#include "vgui/IPanel.h"
+
+#if defined ( CSTRIKE15 )
+#include "Scaleform/HUD/sfhudinfopanel.h"
+#endif // CSTRIKE15
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
+// [jason] Forward the message to the Scaleform info panel
+#if defined ( CSTRIKE15 )
+#define FORWARD_PRIORITY_MSG( x )												\
+		{																		\
+			CHudElement *pElement = GetHud().FindElement( "SFHudInfoPanel" );	\
+			if ( pElement )														\
+			{																	\
+				((SFHudInfoPanel *)pElement)->SetPriorityText( x );				\
+			}																	\
+		}
+#endif // CSTRIKE15
 
 #ifdef TF_CLIENT_DLL
 static ConVar		scr_centertime( "scr_centertime", "5" );
 #else
-static ConVar		scr_centertime( "scr_centertime", "2" );
+static ConVar		scr_centertime( "scr_centertime", "4" );
 #endif
 
 //-----------------------------------------------------------------------------
@@ -35,7 +51,7 @@ class CCenterStringLabel : public vgui::Label
 	DECLARE_CLASS_SIMPLE( CCenterStringLabel, vgui::Label );
 
 public:
-						CCenterStringLabel( vgui::VPANEL parent );
+	explicit 			CCenterStringLabel( vgui::VPANEL parent );
 	virtual				~CCenterStringLabel( void );
 
 	// vgui::Panel
@@ -72,10 +88,11 @@ CCenterStringLabel::CCenterStringLabel( vgui::VPANEL parent ) :
 	SetParent( parent );
 	ComputeSize();
 	SetVisible( false );
-	SetCursor( null );
+	SetCursor( 0 );
 	SetKeyBoardInputEnabled( false );
 	SetMouseInputEnabled( false );
 	SetContentAlignment( vgui::Label::a_center );
+	SetScheme( "ClientScheme" );
 
 	m_hFont = 0;
 	SetFgColor( Color( 255, 255, 255, 255 ) );
@@ -109,13 +126,14 @@ void CCenterStringLabel::OnScreenSizeChanged(int iOldWide, int iOldTall)
 void CCenterStringLabel::ComputeSize( void )
 {
 	int w, h;
-	w = ScreenWidth();
-	h = ScreenHeight();
+	if ( GetVParent() )
+	{
+		vgui::ipanel()->GetSize( GetVParent(), w, h );
 
-	int iHeight = (int)(h * 0.3);
-
-	SetSize( w, iHeight );
-	SetPos( 0, ( h * 0.35 ) - ( iHeight / 2 ) );
+		int iHeight = (int)(h * 0.3);
+		SetSize( w, iHeight );
+		SetPos( 0, ( h * 0.35 ) - ( iHeight / 2 ) );
+	}
 }
 
 void CCenterStringLabel::ApplySchemeSettings(vgui::IScheme *pScheme)
@@ -123,16 +141,11 @@ void CCenterStringLabel::ApplySchemeSettings(vgui::IScheme *pScheme)
 	BaseClass::ApplySchemeSettings(pScheme);
 
 	// Use a large font
-	m_hFont = pScheme->GetFont( "Trebuchet24" );
-	assert( m_hFont );
+	m_hFont = pScheme->GetFont( "Default" );
+	Assert( m_hFont );
 	SetFont( m_hFont );
 
-	int w, h;
-	w = ScreenWidth();
-	h = ScreenHeight();
-	int iHeight = (int)(h * 0.3);
-	SetSize( w, iHeight );
-	SetPos( 0, ( h * 0.35 ) - ( iHeight / 2 ) );
+	ComputeSize();
 }
 
 //-----------------------------------------------------------------------------
@@ -212,6 +225,11 @@ void CCenterStringLabel::OnTick( void )
 //-----------------------------------------------------------------------------
 bool CCenterStringLabel::ShouldDraw( void )
 {
+	// [jason] This element only exists to forward center print messages to the Scaleform InfoPanel
+#if defined ( CSTRIKE15 )
+	return false;
+#endif
+
 	if ( engine->IsDrawingLoadingImage() )
 	{
 		return false;
@@ -246,6 +264,12 @@ void CCenterPrint::SetTextColor( int r, int g, int b, int a )
 
 void CCenterPrint::Print( char *text )
 {
+	// [jason] Forward the message to the Scaleform info panel
+#if defined ( CSTRIKE15 )
+	FORWARD_PRIORITY_MSG( text );
+	return;
+#endif
+
 	if ( vguiCenterString )
 	{
 		vguiCenterString->ColorPrint( 255, 255, 255, 255, text );
@@ -254,6 +278,12 @@ void CCenterPrint::Print( char *text )
 
 void CCenterPrint::Print( wchar_t *text )
 {
+	// [jason] Forward the message to the Scaleform info panel
+#if defined ( CSTRIKE15 )
+	FORWARD_PRIORITY_MSG( text );
+	return;
+#endif
+
 	if ( vguiCenterString )
 	{
 		vguiCenterString->ColorPrint( 255, 255, 255, 255, text );
@@ -262,6 +292,12 @@ void CCenterPrint::Print( wchar_t *text )
 
 void CCenterPrint::ColorPrint( int r, int g, int b, int a, char *text )
 {
+	// [jason] Forward the message to the Scaleform info panel
+#if defined ( CSTRIKE15 )
+	FORWARD_PRIORITY_MSG( text );
+	return;
+#endif
+
 	if ( vguiCenterString )
 	{
 		vguiCenterString->ColorPrint( r, g, b, a, text );
@@ -270,6 +306,12 @@ void CCenterPrint::ColorPrint( int r, int g, int b, int a, char *text )
 
 void CCenterPrint::ColorPrint( int r, int g, int b, int a, wchar_t *text )
 {
+	// [jason] Forward the message to the Scaleform info panel
+#if defined ( CSTRIKE15 )
+	FORWARD_PRIORITY_MSG( text );
+	return;
+#endif
+
 	if ( vguiCenterString )
 	{
 		vguiCenterString->ColorPrint( r, g, b, a, text );
@@ -278,6 +320,12 @@ void CCenterPrint::ColorPrint( int r, int g, int b, int a, wchar_t *text )
 
 void CCenterPrint::Clear( void )
 {
+	// [jason] Forward the message to the Scaleform info panel
+#if defined ( CSTRIKE15 )
+	FORWARD_PRIORITY_MSG( static_cast<wchar_t*>(NULL) );
+	return;
+#endif
+
 	if ( vguiCenterString )
 	{
 		vguiCenterString->Clear();
@@ -304,7 +352,9 @@ void CCenterPrint::Destroy( void )
 	}
 }
 
-static CCenterPrint g_CenterString;
-CCenterPrint *internalCenterPrint = &g_CenterString;
-
-EXPOSE_SINGLE_INTERFACE_GLOBALVAR( CCenterPrint, ICenterPrint, VCENTERPRINT_INTERFACE_VERSION, g_CenterString );
+static CCenterPrint g_CenterString[ MAX_SPLITSCREEN_PLAYERS ];
+CCenterPrint *GetCenterPrint()
+{
+	ASSERT_LOCAL_PLAYER_RESOLVABLE();
+	return &g_CenterString[ GET_ACTIVE_SPLITSCREEN_SLOT() ];
+}

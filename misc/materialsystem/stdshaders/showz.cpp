@@ -1,11 +1,11 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright (c) 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: Visualize shadow z buffers.  Designed to be used when drawing a screen-aligned
 //          quad with a floating-point z-buffer so that the large z-range is divided down
 //          into visual range of grayscale colors.
 //
 // $NoKeywords: $
-//=============================================================================//
+//===========================================================================//
 
 #include "convar.h"
 #include "BaseVSShader.h"
@@ -34,8 +34,6 @@ BEGIN_VS_SHADER_FLAGS( showz, "Help for ShowZ", SHADER_NOT_EDITABLE )
 
 	SHADER_FALLBACK
 	{
-//		if ( g_pHardwareConfig->GetDXSupportLevel() < 90 )
-//			return "Wireframe";
 		return 0;
 	}
 
@@ -52,9 +50,12 @@ BEGIN_VS_SHADER_FLAGS( showz, "Help for ShowZ", SHADER_NOT_EDITABLE )
 			DECLARE_STATIC_VERTEX_SHADER( showz_vs20 );
 			SET_STATIC_VERTEX_SHADER( showz_vs20 );
 
+			ShadowFilterMode_t nShadowFilterMode = g_pHardwareConfig->GetShadowFilterMode( false /* bForceLowQuality */, false /* bPS30 */ );	// Based upon vendor and device dependent formats
+
 			if( g_pHardwareConfig->SupportsPixelShaders_2_b() )
 			{
 				DECLARE_STATIC_PIXEL_SHADER( showz_ps20b );
+				SET_STATIC_PIXEL_SHADER_COMBO( FLASHLIGHTDEPTHFILTERMODE, nShadowFilterMode );
 				SET_STATIC_PIXEL_SHADER_COMBO( DEPTH_IN_ALPHA, params[ALPHADEPTH]->GetIntValue() );
 				SET_STATIC_PIXEL_SHADER( showz_ps20b );
 			}
@@ -71,7 +72,7 @@ BEGIN_VS_SHADER_FLAGS( showz, "Help for ShowZ", SHADER_NOT_EDITABLE )
 		}
 		DYNAMIC_STATE
 		{
-			BindTexture( SHADER_SAMPLER0, BASETEXTURE, FRAME );	// Bind shadow depth map
+			BindTexture( SHADER_SAMPLER0, TEXTURE_BINDFLAGS_NONE, BASETEXTURE, FRAME );	// Bind shadow depth map
 
 			DECLARE_DYNAMIC_VERTEX_SHADER( showz_vs20 );
 			SET_DYNAMIC_VERTEX_SHADER( showz_vs20 );

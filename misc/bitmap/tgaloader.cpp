@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: 
 //
@@ -13,6 +13,7 @@
 #include "tier1/utlbuffer.h"
 #include "filesystem.h"
 #include "tier2/tier2.h"
+#include "byteswap.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -74,8 +75,10 @@ static unsigned char g_ColorMap[TGA_MAX_COLORMAP_SIZE];
 static bool g_IsRunLengthPacket;
 static int g_PixelsLeftInPacket;
 
+#ifndef _PS3
 static unsigned char g_SrcGammaTable[256];
 static unsigned char g_DstGammaTable[256];
+#endif
 
 typedef CUtlMemory<unsigned char> CTempImage;
 
@@ -132,6 +135,22 @@ static bool ReadFile( char const* pFileName, CTempImage& image, int maxbytes = -
 static void ReadHeader( CUtlBuffer& buf, TGAHeader_t& header )
 {
 	buf.Get( &header, sizeof(TGAHeader_t) );
+
+	if ( CByteswap::IsMachineBigEndian() )
+	{
+		CByteswap bs;
+		bs.ActivateByteSwapping( true ); // Assume that TGAs are Win32-little-endian
+
+#pragma warning( push )
+#pragma warning( disable : 4366 ) // warning C4366: The result of the unary '&' operator may be unaligned
+		bs.SwapBuffer( &header.colormap_index );
+		bs.SwapBuffer( &header.colormap_length );
+		bs.SwapBuffer( &header.x_origin );
+		bs.SwapBuffer( &header.y_origin );
+		bs.SwapBuffer( &header.width );
+		bs.SwapBuffer( &header.height );
+#pragma warning( pop )
+	}
 }
 
 
@@ -409,6 +428,7 @@ void OutputRowBGRX5551( CUtlBuffer& buf, TGAHeader_t const& header, unsigned cha
 	}
 }
 
+#ifndef _PS3
 static OutputRowFunc_t GetOutputRowFunc( ImageFormat imageFormat )
 {
 	switch( imageFormat )
@@ -455,7 +475,6 @@ static OutputRowFunc_t GetOutputRowFunc( ImageFormat imageFormat )
 	}
 }
 
-#if 0
 static void InitSourceGammaConversionTable( float srcGamma )
 {
 	static float lastSrcGamma = -1;
@@ -476,6 +495,7 @@ static void InitDestGammaConversionTable( float dstGamma )
 	ImageLoader::ConstructGammaTable( g_DstGammaTable, 1.0f, dstGamma );
 }
 #endif
+
 
 //-----------------------------------------------------------------------------
 // Reads an 8-bit palettized TGA image
@@ -846,7 +866,8 @@ static bool ReadSourceImage( CUtlBuffer& buf, TGAHeader_t& header, CTempImage& i
 	return true;
 }
 
-#if 0
+
+#ifndef _PS3
 //-----------------------------------------------------------------------------
 // Outputs the final image
 //-----------------------------------------------------------------------------
@@ -870,6 +891,7 @@ static bool OutputImage( CTempImage& image, TGAHeader_t& header,
 	return true;
 }
 #endif
+
 
 //-----------------------------------------------------------------------------
 // Parses the lovely bits previously read from disk

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========== Copyright © 2005, Valve Corporation, All rights reserved. ========
 //
 // Purpose:
 //
@@ -35,7 +35,6 @@ public:
 		m_MaterialDict( 0, 256, MaterialLessFunc ),
 		m_MissingList( 0, 32, MissingMaterialLessFunc )
 	{
-		Assert( ThreadInMainThread() );
 	}
 
 	void Shutdown();
@@ -62,6 +61,7 @@ public:
 	IMaterialInternal*  AddMaterialSubRect( const char* pName, const char *pTextureGroupName, KeyValues *pKeyValues, KeyValues *pPatchKeyValues ); 
 
 	bool				NoteMissing( const char *pszName );
+	bool				IsMissing( const char *pszName );
 
 protected: /*private:*/
 	void				RemoveAllMaterials();
@@ -100,19 +100,16 @@ protected: /*private:*/
 //-----------------------------------------------------------------------------
 inline MaterialHandle_t CMaterialDict::FirstMaterial() const
 {
-	Assert( ThreadInMainThread() );
 	return m_MaterialDict.FirstInorder();
 }
 
 inline MaterialHandle_t CMaterialDict::NextMaterial( MaterialHandle_t h ) const
 {
-	Assert( ThreadInMainThread() );
 	return m_MaterialDict.NextInorder(h);
 }
 
 inline int CMaterialDict::GetNumMaterials( )	const
 {
-	Assert( ThreadInMainThread() );
 	return m_MaterialDict.Count();
 }
 
@@ -122,7 +119,6 @@ inline int CMaterialDict::GetNumMaterials( )	const
 //-----------------------------------------------------------------------------
 inline MaterialHandle_t CMaterialDict::InvalidMaterial() const
 {
-	Assert( ThreadInMainThread() );
 	return m_MaterialDict.InvalidIndex();
 }
 
@@ -132,20 +128,17 @@ inline MaterialHandle_t CMaterialDict::InvalidMaterial() const
 //-----------------------------------------------------------------------------
 inline IMaterial* CMaterialDict::GetMaterial( MaterialHandle_t idx ) const
 {
-	Assert( ThreadInMainThread() );
 	return m_MaterialDict[idx].m_pMaterial;
 }
 
 inline IMaterialInternal* CMaterialDict::GetMaterialInternal( MaterialHandle_t idx ) const
 {
-	Assert( ThreadInMainThread() );
 	Assert( (m_MaterialDict[idx].m_pMaterial == NULL) || m_MaterialDict[idx].m_pMaterial->IsRealTimeVersion() );	
 	return m_MaterialDict[idx].m_pMaterial;
 }
 
 inline IMaterialInternal* CMaterialDict::FindMaterial( const char *pszName, bool bManuallyCreated ) const
 {
-	Assert( ThreadInMainThread() );
 	MaterialLookup_t lookup;
 	lookup.m_Name = pszName;
 	lookup.m_bManuallyCreated = bManuallyCreated;	// This causes the search to find only file-created materials
@@ -160,9 +153,18 @@ inline IMaterialInternal* CMaterialDict::FindMaterial( const char *pszName, bool
 	return NULL;
 }
 
+
+inline bool CMaterialDict::IsMissing( const char *pszName )
+{
+	MissingMaterial_t missing;
+	missing.m_Name = pszName;
+	if ( m_MissingList.Find( missing ) != m_MissingList.InvalidIndex() )
+		return true;
+	return false;
+}
+
 inline bool CMaterialDict::NoteMissing( const char *pszName )
 {
-	Assert( ThreadInMainThread() );
 	MissingMaterial_t missing;
 	missing.m_Name = pszName;
 	if ( m_MissingList.Find( missing ) != m_MissingList.InvalidIndex() )

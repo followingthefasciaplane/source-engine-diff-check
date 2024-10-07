@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//===== Copyright © 1996-2005, Valve Corporation, All rights reserved. ======//
 //
 // Purpose: This is an entity that represents a vgui screen
 //
@@ -20,7 +20,7 @@
 IMPLEMENT_SERVERCLASS_ST(CVGuiScreen, DT_VGuiScreen)
 	SendPropFloat(SENDINFO(m_flWidth),	0, SPROP_NOSCALE ),
 	SendPropFloat(SENDINFO(m_flHeight),	0, SPROP_NOSCALE ),
-	SendPropInt(SENDINFO(m_nAttachmentIndex), 5, SPROP_UNSIGNED ),
+	SendPropIntWithMinusOneFlag(SENDINFO(m_nAttachmentIndex), 6 ),
 	SendPropInt(SENDINFO(m_nPanelName), MAX_VGUI_SCREEN_STRING_BITS, SPROP_UNSIGNED ),
 	SendPropInt(SENDINFO(m_fScreenFlags), VGUI_SCREEN_MAX_BITS, SPROP_UNSIGNED ),
 	SendPropInt(SENDINFO(m_nOverlayMaterial), MAX_MATERIAL_STRING_BITS, SPROP_UNSIGNED ),
@@ -43,6 +43,7 @@ BEGIN_DATADESC( CVGuiScreen )
 	DEFINE_FIELD( m_fScreenFlags, FIELD_INTEGER ),
 	DEFINE_KEYFIELD( m_flWidth, FIELD_FLOAT, "width" ),
 	DEFINE_KEYFIELD( m_flHeight, FIELD_FLOAT, "height" ),
+	DEFINE_KEYFIELD( m_bIsTransparent, FIELD_BOOLEAN, "IsTransparent" ),
 	DEFINE_KEYFIELD( m_strOverlayMaterial, FIELD_STRING, "overlaymaterial" ),
 	DEFINE_FIELD( m_hPlayerOwner, FIELD_EHANDLE ),
 
@@ -58,7 +59,8 @@ END_DATADESC()
 CVGuiScreen::CVGuiScreen()
 {
 	m_nOverlayMaterial = OVERLAY_MATERIAL_INVALID_STRING;
-	m_hPlayerOwner = NULL;
+	m_hPlayerOwner = INVALID_EHANDLE;
+	m_bIsTransparent = true;
 }
 
 
@@ -136,6 +138,8 @@ void CVGuiScreen::Spawn()
 
 	m_takedamage = DAMAGE_NO;
 	AddFlag( FL_NOTARGET );
+
+	SetTransparency( m_bIsTransparent );
 }
 
 //-----------------------------------------------------------------------------
@@ -153,7 +157,7 @@ void CVGuiScreen::Activate()
 
 void CVGuiScreen::OnRestore()
 {
-	UpdateTransmitState();
+	DispatchUpdateTransmitState();
 
 	BaseClass::OnRestore();
 }

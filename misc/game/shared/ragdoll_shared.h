@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -25,6 +25,7 @@ class CBoneAccessor;
 
 #include "mathlib/vector.h"
 #include "bone_accessor.h"
+#include "vcollide_parse.h"
 
 // UNDONE: Remove and make dynamic?
 #define RAGDOLL_MAX_ELEMENTS	24
@@ -43,18 +44,9 @@ struct ragdollelement_t
 	int					parentIndex;
 };
 
-struct ragdollanimatedfriction_t
-{
-	float					flFrictionTimeIn;
-	float					flFrictionTimeOut;
-	float					flFrictionTimeHold;
-	int						iMinAnimatedFriction;
-	int						iMaxAnimatedFriction;
-};
-
 struct ragdoll_t
 {
-	int					listCount;
+	int						listCount;
 	bool					allowStretch;
 	bool					unused;
 	IPhysicsConstraintGroup *pGroup;
@@ -79,6 +71,20 @@ struct ragdollparams_t
 	bool		fixedConstraints;
 };
 
+class CRagdollEntry
+{
+public:
+	CRagdollEntry( CBaseAnimating *pRagdoll, float flForcedRetireTime ) : m_hRagdoll( pRagdoll ), m_flForcedRetireTime( flForcedRetireTime )
+	{
+	}
+	CBaseAnimating* Get() { return m_hRagdoll.Get(); }
+	float GetForcedRetireTime() { return m_flForcedRetireTime; }
+
+private:
+	CHandle<CBaseAnimating> m_hRagdoll;
+	float m_flForcedRetireTime;
+};
+
 //-----------------------------------------------------------------------------
 // This hooks the main game systems callbacks to allow the AI system to manage memory
 //-----------------------------------------------------------------------------
@@ -94,7 +100,7 @@ public:
 	virtual void FrameUpdatePostEntityThink( void );
 
 	// Move it to the top of the LRU
-	void MoveToTopOfLRU( CBaseAnimating *pRagdoll, bool bImportant = false );
+	void MoveToTopOfLRU( CBaseAnimating *pRagdoll, bool bImportant = false, float flForcedRetireTime = 0.0f );
 	void SetMaxRagdollCount( int iMaxCount ){ m_iMaxRagdolls = iMaxCount; }
 
 	virtual void LevelInitPreEntity( void );
@@ -102,8 +108,8 @@ public:
 
 private:
 	typedef CHandle<CBaseAnimating> CRagdollHandle;
-	CUtlLinkedList< CRagdollHandle > m_LRU; 
-	CUtlLinkedList< CRagdollHandle > m_LRUImportantRagdolls; 
+	CUtlLinkedList< CRagdollEntry > m_LRU; 
+	CUtlLinkedList< CRagdollEntry > m_LRUImportantRagdolls; 
 
 	int m_iMaxRagdolls;
 	int m_iSimulatedRagdollCount;
@@ -146,6 +152,7 @@ int RagdollExtractBoneIndices( int *boneIndexOut, CStudioHdr *pStudioHdr, vcolli
 
 // computes an exact bbox of the ragdoll's physics objects
 void RagdollComputeExactBbox( const ragdoll_t &ragdoll, const Vector &origin, Vector &outMins, Vector &outMaxs );
+void RagdollComputeApproximateBbox( const ragdoll_t &ragdoll, const Vector &origin, Vector &outMins, Vector &outMaxs );
 bool RagdollIsAsleep( const ragdoll_t &ragdoll );
 void RagdollSetupAnimatedFriction( IPhysicsEnvironment *pPhysEnv, ragdoll_t *ragdoll, int iModelIndex );
 

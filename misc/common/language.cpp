@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2004, Valve Corporation, All rights reserved. =======
 //
 // Purpose: languages definition
 //
@@ -55,8 +55,6 @@ static const Language_t s_LanguageNames[] =
 	{	"Czech",				"czech",		"#GameUI_Language_Czech",				"cs_CZ",	k_Lang_Czech,		1029 } ,
 	{	"Brazilian",			"brazilian",	"#GameUI_Language_Brazilian",			"pt_BR",	k_Lang_Brazilian,	1046 } ,
 	{	"Bulgarian",			"bulgarian",	"#GameUI_Language_Bulgarian",			"bg_BG",	k_Lang_Bulgarian,	1026 } ,
-	{	"Greek",				"greek",		"#GameUI_Language_Greek",				"el_GR",	k_Lang_Greek,		1032 },
-	{	"Ukrainian",			"ukrainian",	"#GameUI_Language_Ukrainian",			"uk_UA",	k_Lang_Ukrainian,	1058 },
 };	
 
 //-----------------------------------------------------------------------------
@@ -79,7 +77,7 @@ int GetLanguageCodeID(ELanguage eLang)
 //-----------------------------------------------------------------------------
 ELanguage PchLanguageToELanguage( const char *pchShortName, ELanguage eDefault )
 {
-	Assert( Q_ARRAYSIZE(s_LanguageNames) == k_Lang_MAX + 1 );
+	COMPILE_TIME_ASSERT( Q_ARRAYSIZE(s_LanguageNames) == k_Lang_MAX + 1 );
 	if ( !pchShortName )
 		return eDefault;
 
@@ -95,12 +93,13 @@ ELanguage PchLanguageToELanguage( const char *pchShortName, ELanguage eDefault )
 	return eDefault;
 }
 
+
 //-----------------------------------------------------------------------------
 // Purpose: find the language by ICU short code
 //-----------------------------------------------------------------------------
 ELanguage PchLanguageICUCodeToELanguage( const char *pchICUCode, ELanguage eDefault )
 {
-	Assert( Q_ARRAYSIZE(s_LanguageNames) == k_Lang_MAX + 1 );
+	COMPILE_TIME_ASSERT( Q_ARRAYSIZE(s_LanguageNames) == k_Lang_MAX + 1 );
 	if ( !pchICUCode )
 		return eDefault;
 
@@ -137,13 +136,13 @@ const char *GetLanguageShortName( ELanguage eLang )
 	COMPILE_TIME_ASSERT( Q_ARRAYSIZE(s_LanguageNames) == k_Lang_MAX + 1 );
 	if ( s_LanguageNames[ eLang + 1 ].m_ELanguage == eLang )
 	{
-		Assert( eLang + 1 < ARRAYSIZE(s_LanguageNames) );
 		return s_LanguageNames[ eLang + 1 ].m_pchShortName;
 	}
 
 	Assert( !"enum ELanguage order mismatched from Language_t s_LanguageNames, fix it!" );
 	return s_LanguageNames[0].m_pchShortName;
 }
+
 
 //-----------------------------------------------------------------------------
 // Purpose: return the ICU code used for this language by SteamUI
@@ -153,7 +152,6 @@ const char *GetLanguageICUName( ELanguage eLang )
 	COMPILE_TIME_ASSERT( Q_ARRAYSIZE(s_LanguageNames) == k_Lang_MAX + 1 );
 	if ( s_LanguageNames[ eLang + 1 ].m_ELanguage == eLang )
 	{
-		Assert( eLang + 1 < ARRAYSIZE(s_LanguageNames) );
 		return s_LanguageNames[ eLang + 1 ].m_pchICUName;
 	}
 
@@ -208,7 +206,6 @@ const char *GetLanguageVGUILocalization( ELanguage eLang )
 	COMPILE_TIME_ASSERT( Q_ARRAYSIZE(s_LanguageNames) == k_Lang_MAX + 1 );
 	if ( s_LanguageNames[ eLang + 1 ].m_ELanguage == eLang )
 	{
-		Assert( eLang + 1 < ARRAYSIZE(s_LanguageNames) );
 		return s_LanguageNames[ eLang + 1 ].m_pchVGUILocalizationName;
 	}
 

@@ -1,6 +1,7 @@
-# Source Engine Game Movement Evolution
+# Source Engine Diff Checker
 
-This repository tracks the evolution of game movement code in the Source engine.
+This repository tracks the evolution of game movement code in the Source engine.  
+Additionally, a more comprehensive misc directory contains updates from the TF2 engine branch to the CS:GO engine branch.
 
 ## Repository Structure
 
@@ -30,10 +31,18 @@ Contains the commit history showing the evolution of game movement code for Coun
 
 ### `cstrike-vs-csgo/`
 
-Contains a specialized commit history that:
+Contains a specialized commit history that shows the evolution of game movement code from Counter-Strike: Source to Counter-Strike: Global Offensive:
 1. Starts with HL2 Source 2018
 2. Updates to CSGO Source 2018
 3. Includes mod-specific overrides for Counter-Strike: Source and Counter-Strike: Global Offensive
+
+### `misc/`
+
+Contains a specialized commit history that:
+1. Starts with HL2 Source 2018
+2. Updates to CSGO Source 2018
+3. Contains complete structure, without overwriting cstrike with cstrike15 content
+- This is primarily directories of interest to me for back-porting maps and other various curiosities.
 
 ## Usage
 

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -37,12 +37,25 @@ CStatTime	g_StatTime;
 CEngineStats::CEngineStats() : m_InFrame( false )
 {
 	m_bInRun = false;
+	m_szVProfStatsFileName[0] = '\0';
 }
+
+#ifdef VPROF_ENABLED 
+extern void VProf_StartRecording( const char *pFilename );
+extern void VProf_StopRecording( void );
+#endif
 
 void CEngineStats::BeginRun( void )
 {
 	m_bInRun = true;
 	m_totalNumFrames = 0;
+
+#ifdef VPROF_ENABLED 
+	if ( m_szVProfStatsFileName[0] != '\0' )
+	{
+		VProf_StartRecording( m_szVProfStatsFileName );
+	}
+#endif
 
 	// frame timing data
 	m_runStartTime = Sys_FloatTime();
@@ -53,6 +66,14 @@ void CEngineStats::EndRun( void )
 {
 	m_runEndTime = Sys_FloatTime();
 	m_bInRun = false;
+
+#ifdef VPROF_ENABLED 
+	if ( m_szVProfStatsFileName[0] != '\0' )
+	{
+		VProf_StopRecording();
+		m_szVProfStatsFileName[0] = '\0';
+	}
+#endif
 }
 
 void CEngineStats::BeginFrame( void )
@@ -129,3 +150,7 @@ double CEngineStats::GetRunTime( void )
 	return m_runEndTime - m_runStartTime;
 }
 
+void CEngineStats::EnableVProfStatsRecording( const char *pFileName )
+{
+	Q_strncpy( m_szVProfStatsFileName, pFileName, sizeof( m_szVProfStatsFileName ) );
+}

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright � 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -10,6 +10,10 @@
 #include "screenspaceeffect_vs20.inc"
 #include "IntroScreenSpaceEffect_ps20.inc"
 #include "IntroScreenSpaceEffect_ps20b.inc"
+
+// NOTE: This has to be the last file included!
+#include "tier0/memdbgon.h"
+
 
 BEGIN_VS_SHADER_FLAGS( IntroScreenSpaceEffect, "Help for IntroScreenSpaceEffect", SHADER_NOT_EDITABLE )
 	BEGIN_SHADER_PARAMS
@@ -33,9 +37,6 @@ BEGIN_VS_SHADER_FLAGS( IntroScreenSpaceEffect, "Help for IntroScreenSpaceEffect"
 	
 	SHADER_FALLBACK
 	{
-		// Requires DX9 + above
-		if ( IsWindows() && ( g_pHardwareConfig->GetDXSupportLevel() < 90 || g_pHardwareConfig->PreferReducedFillrate() ) )
-			return "IntroScreenSpaceEffect_dx80";
 		return 0;
 	}
 
@@ -46,7 +47,7 @@ BEGIN_VS_SHADER_FLAGS( IntroScreenSpaceEffect, "Help for IntroScreenSpaceEffect"
 			pShaderShadow->EnableTexture( SHADER_SAMPLER0, true );
 			pShaderShadow->EnableTexture( SHADER_SAMPLER1, true );
 
-			// On OpenGL OSX, we MUST do sRGB reads from the bloom and full framebuffer textures AND sRGB writes on the way out to the framebuffer.
+			// On OSX OpenGL, we MUST do sRGB reads from the bloom and full framebuffer textures AND sRGB writes on the way out to the framebuffer.
 			if ( params[ENABLESRGB]->GetIntValue() || IsOSX() )
 			{
 				pShaderShadow->EnableSRGBRead( SHADER_SAMPLER0, true );
@@ -61,7 +62,7 @@ BEGIN_VS_SHADER_FLAGS( IntroScreenSpaceEffect, "Help for IntroScreenSpaceEffect"
 
 			DECLARE_STATIC_VERTEX_SHADER( screenspaceeffect_vs20 );
 			SET_STATIC_VERTEX_SHADER( screenspaceeffect_vs20 );
-			
+
 			if ( g_pHardwareConfig->SupportsPixelShaders_2_b() || g_pHardwareConfig->ShouldAlwaysUseShaderModel2bShaders() ) // GL always goes the ps2b way for this shader, even on "ps20" parts
 			{
 				DECLARE_STATIC_PIXEL_SHADER( introscreenspaceeffect_ps20b );
@@ -79,12 +80,12 @@ BEGIN_VS_SHADER_FLAGS( IntroScreenSpaceEffect, "Help for IntroScreenSpaceEffect"
 		}
 		DYNAMIC_STATE
 		{
-			pShaderAPI->BindStandardTexture( SHADER_SAMPLER0, TEXTURE_FRAME_BUFFER_FULL_TEXTURE_0 );
-			pShaderAPI->BindStandardTexture( SHADER_SAMPLER1, TEXTURE_FRAME_BUFFER_FULL_TEXTURE_1 );
+			pShaderAPI->BindStandardTexture( SHADER_SAMPLER0, TEXTURE_BINDFLAGS_SRGBREAD, TEXTURE_FRAME_BUFFER_FULL_TEXTURE_0 );
+			pShaderAPI->BindStandardTexture( SHADER_SAMPLER1, TEXTURE_BINDFLAGS_SRGBREAD, TEXTURE_FRAME_BUFFER_FULL_TEXTURE_1 );
 			DECLARE_DYNAMIC_VERTEX_SHADER( screenspaceeffect_vs20 );
 			SET_DYNAMIC_VERTEX_SHADER( screenspaceeffect_vs20 );
 
-			if ( g_pHardwareConfig->SupportsPixelShaders_2_b() || g_pHardwareConfig->ShouldAlwaysUseShaderModel2bShaders() ) // Posix always goes the ps2b way for this shader, even on "ps20" parts
+			if ( g_pHardwareConfig->SupportsPixelShaders_2_b() || g_pHardwareConfig->ShouldAlwaysUseShaderModel2bShaders() ) // GL always goes the ps2b way for this shader, even on "ps20" parts
 			{
 				DECLARE_DYNAMIC_PIXEL_SHADER( introscreenspaceeffect_ps20b );
 				SET_DYNAMIC_PIXEL_SHADER_COMBO( MODE, params[MODE]->GetIntValue() );

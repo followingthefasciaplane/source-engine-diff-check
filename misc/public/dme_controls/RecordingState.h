@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -17,6 +17,7 @@ enum RecordingState_t
 	AS_PREVIEW,
 	AS_RECORD,
 	AS_PLAYBACK,
+	AS_CURVEEDIT,
 
 	NUM_AS_RECORDING_STATES,
 };

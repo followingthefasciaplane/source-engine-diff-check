@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: XMA Decoding
 //
@@ -6,17 +6,15 @@
 
 #include "audio_pch.h"
 #include "tier1/mempool.h"
-#include "circularbuffer.h"
+#include "tier1/circularbuffer.h"
 #include "tier1/utllinkedlist.h"
+#include "tier1/utlmap.h"
+#include "filesystem/iqueuedloader.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
 //#define DEBUG_XMA
-
-// Failed attempt to allow mixer to request data that is immediately discarded
-// to support < 0 delay samples
-//#define ALLOW_SKIP_SAMPLES
 
 // XMA is supposed to decode at an ideal max of 512 mono samples every 4msec.
 // XMA can only peel a max of 1984 stereo samples per poll request (if available).
@@ -49,8 +47,8 @@
 // each potential channel must be able to peel 2 buffers for driving xma decoder
 #define XMA_PHYSICAL_HEAP_SIZE		( 2 * MAX_CHANNELS * XMA_INPUT_BUFFER_SIZE )
 
-// in millseconds
-#define MIX_IO_DATA_TIMEOUT			2000	// async i/o from dvd could be very late
+// in milliseconds
+#define MIX_IO_DATA_TIMEOUT			10000	// async i/o from dvd could be very late
 #define MIX_DECODER_TIMEOUT			3000	// decoder might be very busy
 #define MIX_DECODER_POLLING_LATENCY	5		// not faster than 5ms, or decoder will sputter
 
@@ -66,6 +64,7 @@
 #define ERROR_XMA_CANTRESUME		-9	// hw not acting as expected
 #define ERROR_XMA_NO_PCM_DATA		-10	// no xma decoded pcm data ready
 #define ERROR_NULL_BUFFER			-11	// logic flaw, expected buffer is null 
+#define ERROR_XMA_NOPLAYBACKOBJECT	-12	// failed to create xma playback object
 
 const char *g_XMAErrorStrings[] =
 {
@@ -81,8 +80,10 @@ const char *g_XMAErrorStrings[] =
 	"XMA Cannot Resume",			// ERROR_XMA_CANTRESUME
 	"XMA No PCM Data Ready",		// ERROR_XMA_NO_PCM_DATA
 	"NULL Buffer",					// ERROR_NULL_BUFFER
+	"XMA Cannot Create Object",		// ERROR_XMA_NOPLAYBACKOBJECT
 };
 
+MEMALLOC_DEFINE_EXTERNAL_TRACKING(CXMAAllocator);
 class CXMAAllocator
 {
 public:
@@ -90,21 +91,25 @@ public:
 	{
 		MEM_ALLOC_CREDIT();
 
-		return XMemAlloc( bytes, 
+		void *retval = XMemAlloc( bytes, 
 			MAKE_XALLOC_ATTRIBUTES( 
-				0, 
-				false, 
-				TRUE, 
-				FALSE, 
-				eXALLOCAllocatorId_XAUDIO,
-				XALLOC_PHYSICAL_ALIGNMENT_4K, 
-				XALLOC_MEMPROTECT_WRITECOMBINE_LARGE_PAGES, 
-				FALSE,
-				XALLOC_MEMTYPE_PHYSICAL ) );
+			0, 
+			false, 
+			TRUE, 
+			FALSE, 
+			eXALLOCAllocatorId_XAUDIO,
+			XALLOC_PHYSICAL_ALIGNMENT_4K, 
+			XALLOC_MEMPROTECT_WRITECOMBINE_LARGE_PAGES, 
+			FALSE,
+			XALLOC_MEMTYPE_PHYSICAL ) );
+
+		MemAlloc_RegisterExternalAllocation( CXMAAllocator, retval, XPhysicalSize( retval ) ); 
+		return retval;
 	}
 
 	static void Free( void *p )
 	{
+		MemAlloc_RegisterExternalDeallocation( CXMAAllocator, p, XPhysicalSize( p ) ); 
 		XMemFree( p, 
 			MAKE_XALLOC_ATTRIBUTES( 
 				0, 
@@ -127,10 +132,23 @@ ConVar snd_xma_spew_startup( "snd_xma_spew_startup", "0" );
 ConVar snd_xma_spew_mixers( "snd_xma_spew_mixers", "0" );
 ConVar snd_xma_spew_decode( "snd_xma_spew_decode", "0" );
 ConVar snd_xma_spew_drain( "snd_xma_spew_drain", "0" );
+ConVar snd_xma_recover_from_exhausted_stream( "snd_xma_recover_from_exhausted_stream", "1", 0, "If 1, recovers when the stream is exhausted when playing XMA sounds (prevents music or ambiance sounds to stop if too many sounds are played). Set to 0, to stop the sound otherwise." );
+
 #ifdef DEBUG_XMA
 ConVar snd_xma_record( "snd_xma_record", "0" );
 ConVar snd_xma_spew_errors( "snd_xma_spew_errors", "0" );
 #endif
+
+extern ConVar snd_report_loop_sound;
+extern ConVar snd_delay_for_choreo_enabled;
+extern ConVar snd_mixahead;
+extern float g_fDelayForChoreo;
+extern uint32 g_nDelayForChoreoLastCheckInMs;
+extern int g_nDelayForChoreoNumberOfSoundsPlaying;
+extern ConVar snd_async_stream_spew_delayed_start_time;
+extern ConVar snd_async_stream_spew_delayed_start_filter;
+extern ConVar snd_async_stream_spew_exhausted_buffer;
+extern ConVar snd_async_stream_spew_exhausted_buffer_time;
 
 //-----------------------------------------------------------------------------
 // Purpose: Mixer for ADPCM encoded audio
@@ -140,13 +158,14 @@ class CAudioMixerWaveXMA : public CAudioMixerWave
 public:
 	typedef CAudioMixerWave BaseClass;
 
-	CAudioMixerWaveXMA( IWaveData *data, int initialStreamPosition );
-	~CAudioMixerWaveXMA( void );
+	CAudioMixerWaveXMA( IWaveData *data, int initialStreamPosition, int skipInitialSamples, bool bUpdateDelayForChoreo );
+	virtual ~CAudioMixerWaveXMA( void );
 	
 	virtual void			Mix( IAudioDevice *pDevice, channel_t *pChannel, void *pData, int outputOffset, int inputOffset, fixedint fracRate, int outCount, int timecompress );
 
 	virtual int				GetOutputData( void **pData, int sampleCount, char copyBuf[AUDIOSOURCE_COPYBUF_SIZE] );
 
+	virtual bool			IsSetSampleStartSupported() const;
 	virtual void			SetSampleStart( int newPosition );
 	virtual int				GetPositionForSave();
 	virtual void			SetPositionFromSaved( int savedPosition );
@@ -161,6 +180,7 @@ private:
 	int						UpdatePositionForLooping( int *pNumRequestedSamples );
 	int						ServiceXMADecoder( bool bForceUpdate );
 	int						GetPCMSamples( int numRequested, char *pData );
+	bool					GetPlaybackInitialized();
 
 	XMAPLAYBACK				*m_pXMAPlayback;
 
@@ -185,22 +205,25 @@ private:
 	// total bytes of data
 	int						m_TotalBytes;
 
-#if defined( ALLOW_SKIP_SAMPLES )
-	// number of samples to throwaway
-	int						m_SkipSamples;
-#endif
+	// Numbers of samples to skip at first
+	int						m_SkipInitialSamples;
 
 	// timers
 	unsigned int			m_StartTime;
+	unsigned int			m_LastSuccessfulStreamTime;
+	unsigned int			m_LastDecodingStartTime;
 	unsigned int			m_LastDrainTime;
 	unsigned int			m_LastPollTime;
 
 	int						m_hMixerList;
 	int						m_Error;
 
-	unsigned int			m_bStartedMixing : 1;
-	unsigned int			m_bFinished : 1;
-	unsigned int			m_bLooped : 1;
+	int8					m_LastSample[4];
+
+	bool					m_bStartedMixing : 1;
+	bool					m_bFinished : 1;
+	bool					m_bLooped : 1;
+	bool					m_bUpdateDelayForChoreo : 1;
 };
 
 CUtlFixedLinkedList< CAudioMixerWaveXMA * >	g_XMAMixerList;
@@ -208,18 +231,19 @@ CUtlFixedLinkedList< CAudioMixerWaveXMA * >	g_XMAMixerList;
 CON_COMMAND( snd_xma_info, "Spew XMA Info" )
 {
 	Msg( "XMA Memory:\n" );
-	Msg( " Blocks Allocated: %d\n", g_XMAMemoryPool.NumAllocated() );
-	Msg( " Blocks Free:      %d\n", g_XMAMemoryPool.NumFree() );
-	Msg( " Total Bytes:      %d\n", g_XMAMemoryPool.BytesTotal() );
-	Msg( "Active XMA Mixers: %d\n", g_XMAMixerList.Count() );
+	Msg( "  Blocks Allocated: %d\n", g_XMAMemoryPool.NumAllocated() );
+	Msg( "  Blocks Free:      %d\n", g_XMAMemoryPool.NumFree() );
+	Msg( "  Pool Size:        %.2f MB\n", g_XMAMemoryPool.BytesTotal() / ( 1024.0f * 1024.0f ) );
+	Msg( "Active XMA Mixers:  %d\n", g_XMAMixerList.Count() );
+	char nameBuf[MAX_PATH];
 	for ( int hMixer = g_XMAMixerList.Head(); hMixer != g_XMAMixerList.InvalidIndex(); hMixer = g_XMAMixerList.Next( hMixer ) )
 	{
 		CAudioMixerWaveXMA *pXMAMixer = g_XMAMixerList[hMixer];
-		Msg( "  rate:%5d ch:%1d '%s'\n", pXMAMixer->GetSource()->SampleRate(), pXMAMixer->GetSource()->IsStereoWav() ? 2 : 1, pXMAMixer->GetSource()->GetFileName() );
+		Msg( "  rate:%5d ch:%1d '%s'\n", pXMAMixer->GetSource()->SampleRate(), pXMAMixer->GetSource()->IsStereoWav() ? 2 : 1, pXMAMixer->GetSource()->GetFileName(nameBuf, sizeof(nameBuf)) );
 	}
 }
 
-CAudioMixerWaveXMA::CAudioMixerWaveXMA( IWaveData *data, int initialStreamPosition ) : CAudioMixerWave( data ) 
+CAudioMixerWaveXMA::CAudioMixerWaveXMA( IWaveData *data, int initialStreamPosition, int skipInitialSamples, bool bUpdateDelayForChoreo ) : CAudioMixerWave( data ) 
 {
 	Assert( dynamic_cast<CAudioSourceWave *>(&m_pData->Source()) != NULL );
 
@@ -230,10 +254,7 @@ CAudioMixerWaveXMA::CAudioMixerWaveXMA( IWaveData *data, int initialStreamPositi
 	m_bLooped = m_pData->Source().IsLooped();
 	m_SampleCount = m_pData->Source().SampleCount();
 	m_TotalBytes = m_pData->Source().DataSize();
-
-#if defined( ALLOW_SKIP_SAMPLES )
-	m_SkipSamples = 0;
-#endif
+	m_SkipInitialSamples = skipInitialSamples;
 
 	m_LastDataOffset = initialStreamPosition;
 	m_DataOffset = initialStreamPosition;
@@ -242,16 +263,32 @@ CAudioMixerWaveXMA::CAudioMixerWaveXMA( IWaveData *data, int initialStreamPositi
 	{
 		m_SamplePosition = m_pData->Source().StreamToSamplePosition( initialStreamPosition );
 
+		// IMPORTANT: When initial stream position is requested we need
+		// to make the XMA mixer obeys rules of how CAudioMixerWave::GetSampleLoadRequest
+		// is using its members "m_fsample_index", "m_sample_loaded_index" and "m_sample_max_loaded"
+		// If the implementation of CAudioMixerWave::GetSampleLoadRequest changes, then
+		// XMA mixer should be changed accordingly. 
+
+		CAudioMixerWave::m_fsample_index = m_SamplePosition;
 		CAudioMixerWave::m_sample_loaded_index = m_SamplePosition;
 		CAudioMixerWave::m_sample_max_loaded = m_SamplePosition + 1;
 	}
 
 	m_bStartedMixing = false;
 	m_bFinished = false;
+	m_bUpdateDelayForChoreo = bUpdateDelayForChoreo;
 
-	m_StartTime = 0;
+	m_StartTime = Plat_MSTime();
+	m_LastSuccessfulStreamTime = 0;
+	m_LastDecodingStartTime = 0;
 	m_LastPollTime = 0;
 	m_LastDrainTime = 0;
+
+	if ( m_bUpdateDelayForChoreo )							// Do not test for enabled here as we want g_nDelayForChoreoNumberOfSoundsPlaying to be always accurate
+	{
+		++g_nDelayForChoreoNumberOfSoundsPlaying;
+		g_nDelayForChoreoLastCheckInMs = m_StartTime;		// Not necessary as g_nDelayForChoreoNumberOfSoundsPlaying != 0 prevents the Reset, but does not hurt either
+	}
 
 	m_pXMAPlayback = NULL;
 	m_pPCMSamples = NULL;
@@ -259,6 +296,8 @@ CAudioMixerWaveXMA::CAudioMixerWaveXMA( IWaveData *data, int initialStreamPositi
 	m_pXMABuffers[0] = NULL;
 	m_pXMABuffers[1] = NULL;
 	m_XMABufferIndex = 0;
+
+	V_memset( m_LastSample, 0, sizeof( m_LastSample ) );
 
 	m_hMixerList = g_XMAMixerList.AddToTail( this );
 
@@ -271,12 +310,20 @@ CAudioMixerWaveXMA::CAudioMixerWaveXMA( IWaveData *data, int initialStreamPositi
 
 	if ( snd_xma_spew_mixers.GetBool() )
 	{
-		Msg( "XMA: 0x%8.8x (%2d), Mixer Alloc, '%s'\n", (unsigned int)this, g_XMAMixerList.Count(), m_pData->Source().GetFileName() );
+		char nameBuf[MAX_PATH];
+		Msg( "XMA: 0x%8.8x (%2d), Mixer Alloc, '%s'\n", (unsigned int)this, g_XMAMixerList.Count(), m_pData->Source().GetFileName(nameBuf, sizeof(nameBuf)) );
 	}
 }
 
 CAudioMixerWaveXMA::~CAudioMixerWaveXMA( void )
 {
+	if ( m_bUpdateDelayForChoreo )										// Do not test for enabled here as we want g_nDelayForChoreoNumberOfSoundsPlaying to be always accurate
+	{
+		--g_nDelayForChoreoNumberOfSoundsPlaying;
+		Assert( g_nDelayForChoreoNumberOfSoundsPlaying >= 0 );
+		g_nDelayForChoreoLastCheckInMs = Plat_MSTime();					// Critical to make sure that we are reseting the latency at least N ms after the last choreo sound
+	}
+
 	if ( m_pXMAPlayback )
 	{
 		XMAPlaybackDestroy( m_pXMAPlayback );
@@ -297,7 +344,8 @@ CAudioMixerWaveXMA::~CAudioMixerWaveXMA( void )
 
 	if ( snd_xma_spew_mixers.GetBool() )
 	{
-		Msg( "XMA: 0x%8.8x (%2d), Mixer Freed, '%s'\n", (unsigned int)this, g_XMAMixerList.Count(), m_pData->Source().GetFileName() );
+		char nameBuf[MAX_PATH];
+		Msg( "XMA: 0x%8.8x (%2d), Mixer Freed, '%s'\n", (unsigned int)this, g_XMAMixerList.Count(), m_pData->Source().GetFileName(nameBuf, sizeof(nameBuf)) );
 	}
 }
 
@@ -347,6 +395,12 @@ int CAudioMixerWaveXMA::UpdatePositionForLooping( int *pNumRequestedSamples )
 	}
 	else if ( numRemainingSamples == 0 )
 	{
+		if ( snd_report_loop_sound.GetBool() )
+		{
+			char nameBuf[MAX_PATH];
+			Warning( "[Sound] Sound \"%s\" just looped.\n", m_pData->Source().GetFileName(nameBuf, sizeof( nameBuf ) ) );
+		}
+
 		// at exact end of desired data, snap the sample position back
 		// the position will be correct AFTER discarding decoded trailing and leading samples
 		m_SamplePosition = loopSampleStart;
@@ -439,16 +493,19 @@ int CAudioMixerWaveXMA::GetXMABlocksAndSubmitToDecoder( bool bDecoderIsLocked )
 	// pump to get all of requested data
 	char *pData;
 	int total = 0;
+	int nDataOffset = m_DataOffset;
 	while ( total < bufferSize )
 	{
-		int available = m_pData->ReadSourceData( (void **)&pData, m_DataOffset, bufferSize - total, NULL );
+		int available = m_pData->ReadSourceData( (void **)&pData, nDataOffset, bufferSize - total, NULL );
 		if ( !available )
+		{
 			break;
+		}
 
 		// aggregate into hw buffer
 		V_memcpy( pXMABuffer + total, pData, available );
 
-		m_DataOffset += available;
+		nDataOffset += available;
 		total += available;
 	}	
 	if ( total != bufferSize )
@@ -461,10 +518,14 @@ int CAudioMixerWaveXMA::GetXMABlocksAndSubmitToDecoder( bool bDecoderIsLocked )
 		else
 		{
 			// failed to get complete xma block(s)
-			status = ERROR_IO_TRUNCATED_BLOCK;
+			// Do not set an error state, we will try later.
 		}
 		goto cleanUp;
 	}
+
+	m_DataOffset = nDataOffset;		// Now that it is successful, update m_DataOffset
+									// It allows us to handle more gracefully partial xma blocks
+	m_LastSuccessfulStreamTime = Plat_MSTime();
 
 	// track the currently submitted offset
 	// this is used as a cheap method for save/restore because an XMA seek table is not available
@@ -479,6 +540,8 @@ int CAudioMixerWaveXMA::GetXMABlocksAndSubmitToDecoder( bool bDecoderIsLocked )
 		goto cleanUp;
 	}
 
+	m_LastDecodingStartTime = Plat_MSTime();
+
 	// decode submitted
 	status = 1;
 
@@ -487,7 +550,8 @@ int CAudioMixerWaveXMA::GetXMABlocksAndSubmitToDecoder( bool bDecoderIsLocked )
 
 	if ( snd_xma_spew_decode.GetBool() )
 	{
-		Msg( "XMA: 0x%8.8x, XMABuffer: 0x%8.8x, BufferSize: %d, NextDataOffset: %d, %s\n", (unsigned int)this, pXMABuffer, bufferSize, m_DataOffset, m_pData->Source().GetFileName() );
+		char nameBuf[MAX_PATH];
+		Msg( "XMA: 0x%8.8x, XMABuffer: 0x%8.8x, BufferSize: %d, NextDataOffset: %d, %s\n", (unsigned int)this, pXMABuffer, bufferSize, m_DataOffset, m_pData->Source().GetFileName(nameBuf, sizeof(nameBuf)) );
 	}
 
 cleanUp:
@@ -510,14 +574,21 @@ cleanUp:
 //-----------------------------------------------------------------------------
 int CAudioMixerWaveXMA::ServiceXMADecoder( bool bForceUpdate )
 {
+	uint32 nCurrentTime = Plat_MSTime();
+
 	// allow decoder to work without being polled (lock causes a decoding stall)
 	// decoder must be allowed minimum operating latency
 	// the buffers are sized to compensate for the operating latency
-	if ( !bForceUpdate && ( Plat_MSTime() - m_LastPollTime <= MIX_DECODER_POLLING_LATENCY ) )
+	if ( !bForceUpdate && ( nCurrentTime - m_LastPollTime <= MIX_DECODER_POLLING_LATENCY ) )
 	{
 		return 0;
 	}
-	m_LastPollTime = Plat_MSTime();
+	m_LastPollTime = nCurrentTime;
+
+	if ( GetPlaybackInitialized() == false )
+	{
+		return -1;
+	}
 
 	// lock and pause the decoder to gain access
 	HRESULT hr = XMAPlaybackRequestModifyLock( m_pXMAPlayback );
@@ -539,7 +610,8 @@ int CAudioMixerWaveXMA::ServiceXMADecoder( bool bForceUpdate )
 	{
 		if ( snd_xma_spew_warnings.GetBool() )
 		{
-			Warning( "XMA: 0x%8.8x, Decoder Error, Parse: %d, '%s'\n", (unsigned int)this, dwParseError, m_pData->Source().GetFileName() );
+			char nameBuf[MAX_PATH];
+			Warning( "XMA: 0x%8.8x, Decoder Error, Parse: %d, '%s'\n", (unsigned int)this, dwParseError, m_pData->Source().GetFileName(nameBuf, sizeof(nameBuf)) );
 		}
 		m_Error = ERROR_XMA_PARSE;
 		return -1;
@@ -551,7 +623,8 @@ int CAudioMixerWaveXMA::ServiceXMADecoder( bool bForceUpdate )
 		DWORD dwError = XMAPlaybackGetErrorBits( m_pXMAPlayback, 0 );
 		if ( dwError )
 		{
-			Warning( "XMA: 0x%8.8x, Playback Error: %d, '%s'\n", (unsigned int)this, dwError, m_pData->Source().GetFileName() );
+			char nameBuf[MAX_PATH];
+			Warning( "XMA: 0x%8.8x, Playback Error: %d, '%s'\n", (unsigned int)this, dwError, m_pData->Source().GetFileName(nameBuf, sizeof(nameBuf)) );
 		}
 	}
 #endif
@@ -564,8 +637,20 @@ int CAudioMixerWaveXMA::ServiceXMADecoder( bool bForceUpdate )
 		char *pPCMData = NULL;
 		int numSamplesDecoded = XMAPlaybackConsumeDecodedData( m_pXMAPlayback, 0, numSamples, (void**)&pPCMData );
 
-		// put into staging buffer, ready for mixer to drain
-		m_pPCMSamples->Write( pPCMData, numSamplesDecoded*m_NumChannels*sizeof( short ) );
+		if ( numSamplesDecoded > m_SkipInitialSamples )
+		{
+			pPCMData += m_SkipInitialSamples * m_NumChannels * sizeof( short );
+			int numSamplesToCopy = numSamplesDecoded - m_SkipInitialSamples;
+
+			// put into staging buffer, ready for mixer to drain
+			m_pPCMSamples->Write( pPCMData, numSamplesToCopy*m_NumChannels*sizeof( short ) );
+
+			m_SkipInitialSamples = 0;
+		}
+		else
+		{
+			m_SkipInitialSamples -= numSamplesDecoded;
+		}
 		
 		numSamples -= numSamplesDecoded;
 		numNewSamples -= numSamplesDecoded;
@@ -574,7 +659,7 @@ int CAudioMixerWaveXMA::ServiceXMADecoder( bool bForceUpdate )
 	// queue up more blocks for the decoder
 	// the decoder will always finish ahead of the mixer, submit nothing, and the mixer will still be draining
 	int decodeStatus = GetXMABlocksAndSubmitToDecoder( true );
-	if ( decodeStatus < 0 )
+	if ( decodeStatus < 0 && decodeStatus != ERROR_IO_NO_XMA_DATA )
 	{
 		m_Error = decodeStatus;
 		return -1;
@@ -625,9 +710,10 @@ int CAudioMixerWaveXMA::GetPCMSamples( int numSamplesToCopy, char *pData )
 
 	if ( snd_xma_spew_drain.GetBool() )
 	{
+		char nameBuf[MAX_PATH];
 		char *pOperation = ( numSamplesToCopy && !pData ) ? "Flushed" : "Copied";
 		Msg( "XMA: 0x%8.8x, SamplePosition: %d, Ready: %d, Requested: %d, %s: %d, Elapsed: %d ms '%s'\n", 
-			(unsigned int)this, m_SamplePosition, numReadySamples, numSamplesToCopy, pOperation, numCopiedSamples, Plat_MSTime() - m_LastDrainTime, m_pData->Source().GetFileName() );
+			(unsigned int)this, m_SamplePosition, numReadySamples, numSamplesToCopy, pOperation, numCopiedSamples, Plat_MSTime() - m_LastDrainTime, m_pData->Source().GetFileName(nameBuf, sizeof(nameBuf)) );
 	}
 	m_LastDrainTime = Plat_MSTime();
 
@@ -646,27 +732,8 @@ int CAudioMixerWaveXMA::GetPCMSamples( int numSamplesToCopy, char *pData )
 	return 0;
 }
 
-//-----------------------------------------------------------------------------
-// Stall mixing until initial buffer of decoded samples are available.
-//-----------------------------------------------------------------------------
-bool CAudioMixerWaveXMA::IsReadyToMix()
+bool CAudioMixerWaveXMA::GetPlaybackInitialized()
 {
-	// XMA mixing cannot be driven from the main thread
-	Assert( ThreadInMainThread() == false );
-
-	if ( m_Error )
-	{
-		// error has been set
-		// let mixer try to get unavailable samples, which casues the real abort
-		return true;
-	}
-
-	if ( m_bStartedMixing )
-	{
-		// decoding process has started
-		return true;
-	}
-
 	if ( !m_pXMAPlayback )
 	{
 		// first time, finish setup
@@ -686,17 +753,23 @@ bool CAudioMixerWaveXMA::IsReadyToMix()
 		// pool should have buffers available
 		if ( g_XMAMemoryPool.BytesAllocated() != numBuffers * g_XMAMemoryPool.ChunkSize() )
 		{
-			for ( int i = 0; i < numBuffers; i++ )
-			{
-				m_pXMABuffers[i] = (byte*)g_XMAMemoryPool.Alloc();
-			}
-
 			XMA_PLAYBACK_INIT xmaPlaybackInit = { 0 };
 			xmaPlaybackInit.sampleRate = m_SampleRate;
 			xmaPlaybackInit.channelCount = m_NumChannels;
 			xmaPlaybackInit.subframesToDecode = 4;
 			xmaPlaybackInit.outputBufferSizeInSamples = ( m_NumChannels == 2 ) ? XMA_STEREO_OUTPUT_BUFFER_SAMPLES : XMA_MONO_OUTPUT_BUFFER_SAMPLES;
 			XMAPlaybackCreate( 1, &xmaPlaybackInit, 0, &m_pXMAPlayback );
+			if ( !m_pXMAPlayback )
+			{
+				m_Error = ERROR_XMA_NOPLAYBACKOBJECT;
+				Assert( 0 );
+				return false;
+			}
+
+			for ( int i = 0; i < numBuffers; i++ )
+			{
+				m_pXMABuffers[i] = (byte*)g_XMAMemoryPool.Alloc();
+			}
 
 			int stagingSize = PCM_STAGING_BUFFER_TIME * m_SampleRate * m_NumChannels * sizeof( short ) * 0.001f;
 			m_pPCMSamples = AllocateCircularBuffer( AlignValue( stagingSize, 4 ) );
@@ -705,10 +778,38 @@ bool CAudioMixerWaveXMA::IsReadyToMix()
 		{
 			// too many sounds playing, no xma buffers free
 			m_Error = ERROR_OUT_OF_MEMORY;
-			return true;
+			Assert( 0 );
+			return false;
 		}
+	}
+	return true;
+}
 
-		m_StartTime = Plat_MSTime();
+//-----------------------------------------------------------------------------
+// Stall mixing until initial buffer of decoded samples are available.
+//-----------------------------------------------------------------------------
+bool CAudioMixerWaveXMA::IsReadyToMix()
+{
+	// XMA mixing cannot be driven from the main thread
+	Assert( ThreadInMainThread() == false );
+
+	if ( m_Error )
+	{
+		// error has been set
+		// let mixer try to get unavailable samples, which causes the real abort
+		return true;
+	}
+
+	if ( m_bStartedMixing )
+	{
+		// decoding process has started
+		return true;
+	}
+
+	if ( GetPlaybackInitialized() == false )
+	{
+		// An error has been set.
+		return true;
 	}
 
 	// waiting for samples
@@ -717,7 +818,6 @@ bool CAudioMixerWaveXMA::IsReadyToMix()
 	{
 		return false;
 	}
-	m_LastPollTime = Plat_MSTime();
 
 	// must have buffers in flight before mixing can begin
 	if ( m_DataOffset == m_LastDataOffset )
@@ -732,9 +832,12 @@ bool CAudioMixerWaveXMA::IsReadyToMix()
 		else if ( !decodeStatus || decodeStatus == ERROR_IO_NO_XMA_DATA )
 		{
 			// async streaming latency could be to blame, check watchdog
-			if ( Plat_MSTime() - m_StartTime >= MIX_IO_DATA_TIMEOUT )
+			if ( m_LastSuccessfulStreamTime != 0 )
 			{
-				m_Error = ERROR_IO_DATA_TIMEOUT;
+				if ( Plat_MSTime() - m_LastSuccessfulStreamTime >= MIX_IO_DATA_TIMEOUT )
+				{
+					m_Error = ERROR_IO_DATA_TIMEOUT;
+				}
 			}
 			return false;
 		}
@@ -748,25 +851,64 @@ bool CAudioMixerWaveXMA::IsReadyToMix()
 
 	// can't mix until we have a minimum threshold of data or the decoder is finished
 	int minSamplesNeeded = m_bFinished ? 0 : MIN_READYTOMIX * m_SampleRate;
-#if defined( ALLOW_SKIP_SAMPLES )
-	minSamplesNeeded += m_bFinished ? 0 : m_SkipSamples;
-#endif
-
 	int numReadySamples = GetPCMSamples( 0, NULL );
-	if ( numReadySamples > minSamplesNeeded )
+	if ( numReadySamples >= minSamplesNeeded )
 	{
 		// decoder has samples ready for draining
 		m_bStartedMixing = true;
-		if ( snd_xma_spew_startup.GetBool() )
+		int nTimeSinceStart = Plat_MSTime() - m_StartTime;
+
+		bool bDisplayStartupLatencyWarning = snd_xma_spew_startup.GetBool();
+
+		char nameBuf[MAX_PATH];
+		m_pData->Source().GetFileName( nameBuf, sizeof(nameBuf) );
+
+		if ( nTimeSinceStart > snd_async_stream_spew_delayed_start_time.GetInt() )
 		{
-			Msg( "XMA: 0x%8.8x, Startup Latency: %d ms, Samples Ready: %d, '%s'\n", (unsigned int)this, Plat_MSTime() - m_StartTime, numReadySamples, m_pData->Source().GetFileName() );
+			const char * pFilter = snd_async_stream_spew_delayed_start_filter.GetString();
+			if ( *pFilter != '\0' )
+			{
+				bDisplayStartupLatencyWarning |= ( V_stristr( nameBuf, pFilter ) != NULL );
+			}
+			else
+			{
+				bDisplayStartupLatencyWarning = true;
+			}
+		}
+		if ( bDisplayStartupLatencyWarning )
+		{
+			Warning( "XMA: Startup Latency: %d ms, Samples Ready: %d, '%s'\n", nTimeSinceStart, numReadySamples, nameBuf );
+		}
+
+		if ( m_bUpdateDelayForChoreo && snd_delay_for_choreo_enabled.GetBool() )
+		{
+			// We are playing a VO, update the choreo system accordingly for any startup latency. That way future VO will be pushed back by the same amount, so cut off will not occur.
+
+			float fNewValue = ( ( float )( nTimeSinceStart ) / 1000.0f );
+			fNewValue -= snd_mixahead.GetFloat();							// Remove the mix-ahead latency so it does not accumulate over time.
+
+			if ( fNewValue > 0.0f )
+			{
+				g_fDelayForChoreo += fNewValue;								// And we accumulate the error over time.
+																			// If the 1st sound sound is late 1 second, we are going to play the 2nd sound with 1 second delay.
+																			// However, if the 2nd sound is 2 seconds late, then the 3rd sound will have to be played with a delay of 3 seconds (or cut the 2nd delay too early).
+																			// When choreo does not play sounds for a while (currently 0.5 seconds), this counter will be reset to zero.
+				if ( bDisplayStartupLatencyWarning )
+				{
+					Msg( "XMA: Updated IO latency compensation for VCD to %f seconds, due to startup time for sound '%s' taking %d ms.\n", g_fDelayForChoreo, nameBuf, nTimeSinceStart );
+				}
+			}
+			Assert( g_nDelayForChoreoNumberOfSoundsPlaying >= 1 );			// Let's make sure the counter is not zero, as it will prevent the reset of the latency.
 		}
 		return true;
 	}
 
-	if ( Plat_MSTime() - m_StartTime >= MIX_DECODER_TIMEOUT )
+	if ( m_LastDecodingStartTime != 0 )
 	{
-		m_Error = ERROR_DECODER_TIMEOUT;
+		if ( Plat_MSTime() - m_LastDecodingStartTime >= MIX_DECODER_TIMEOUT )
+		{
+			m_Error = ERROR_DECODER_TIMEOUT;
+		}
 	}
 
 	// on startup error, let mixer start and get unavailable samples, and abort
@@ -780,8 +922,9 @@ bool CAudioMixerWaveXMA::IsReadyToMix()
 //-----------------------------------------------------------------------------
 bool CAudioMixerWaveXMA::ShouldContinueMixing()
 {
-	if ( !IsRetail() && m_Error && snd_xma_spew_warnings.GetBool() )
+	if ( m_Error && snd_xma_spew_warnings.GetBool() )
 	{
+		char nameBuf[MAX_PATH];
 		const char *pErrorString;
 		if ( m_Error < 0 && -m_Error < ARRAYSIZE( g_XMAErrorStrings ) )
 		{
@@ -792,7 +935,7 @@ bool CAudioMixerWaveXMA::ShouldContinueMixing()
 			pErrorString = g_XMAErrorStrings[0];
 		}
 		Warning( "XMA: 0x%8.8x, Mixer Aborted: %s, SamplePosition: %d/%d, DataOffset: %d/%d, '%s'\n", 
-			(unsigned int)this, pErrorString, m_SamplePosition, m_SampleCount, m_DataOffset, m_TotalBytes, m_pData->Source().GetFileName() );
+			(unsigned int)this, pErrorString, m_SamplePosition, m_SampleCount, m_DataOffset, m_TotalBytes, m_pData->Source().GetFileName(nameBuf, sizeof(nameBuf)) );
 	}
 
 	// an error condition is fatal to mixer
@@ -813,23 +956,7 @@ int CAudioMixerWaveXMA::GetOutputData( void **pData, int numSamplesToCopy, char 
 		return 0;
 	}
 
-	if ( !m_bStartedMixing )
-	{
-#if defined( ALLOW_SKIP_SAMPLES )
-		int numMaxSamples =  AUDIOSOURCE_COPYBUF_SIZE/( m_NumChannels * sizeof( short ) );
-		numSamplesToCopy = min( numSamplesToCopy, numMaxSamples );
-		m_SkipSamples += numSamplesToCopy;
-
-		// caller requesting data before mixing has commenced
-		V_memset( copyBuf, 0, numSamplesToCopy );
-		*pData = (void*)copyBuf;
-		return numSamplesToCopy;
-#else
-		// not allowed, GetOutputData() should only be called by the mixing loop
-		Assert( 0 );
-		return 0;
-#endif
-	}
+	// This function can get called in some cases directly when the mixing did not start (when there is a delay but no seek table in the sound).
 
 	// XMA mixing cannot be driven from the main thread
 	Assert( ThreadInMainThread() == false );
@@ -839,22 +966,6 @@ int CAudioMixerWaveXMA::GetOutputData( void **pData, int numSamplesToCopy, char 
 	{
 		return 0;
 	}
-
-#if defined( ALLOW_SKIP_SAMPLES )
-	if ( m_SkipSamples > 0 )
-	{		
-		// flush whatever is available
-		// ignore
-		m_SkipSamples -= GetPCMSamples( m_SkipSamples, NULL );
-		if ( m_SkipSamples != 0 )
-		{
-			// not enough decoded data ready to flush
-			// must flush these samples to maintain proper position
-			m_Error = ERROR_XMA_NO_PCM_DATA;
-			return 0;
-		}
-	}
-#endif
 
 	// loopback may require flushing some decoded samples
 	int numRequestedSamples = numSamplesToCopy;
@@ -867,8 +978,12 @@ int CAudioMixerWaveXMA::GetOutputData( void **pData, int numSamplesToCopy, char 
 		{
 			// not enough decoded data ready to flush
 			// must flush these samples to achieve looping
-			m_Error = ERROR_XMA_NO_PCM_DATA;
-			return 0;
+			if ( snd_xma_recover_from_exhausted_stream.GetBool() == false )
+			{
+				m_Error = ERROR_XMA_NO_PCM_DATA;
+				return 0;
+			}
+			// If we try to recover, the sound is not going to loop properly here...
 		}
 	}
 
@@ -894,6 +1009,9 @@ int CAudioMixerWaveXMA::GetOutputData( void **pData, int numSamplesToCopy, char 
 			WaveFixupTmpFile( "debug.wav" );
 		}
 #endif
+
+		// We copy the last sample in case we have to recover later of an exhausted streamer
+		V_memcpy( &m_LastSample, &copyBuf[ ( numCopiedSamples - 1) * m_NumChannels * sizeof(short) ], m_NumChannels * sizeof(short) );
 	}
 	else
 	{
@@ -901,15 +1019,56 @@ int CAudioMixerWaveXMA::GetOutputData( void **pData, int numSamplesToCopy, char 
 		if ( !m_bFinished && numRequestedSamples )
 		{
 			// XMA latency error occurs when decoder not finished (not at EOF) and caller wanted samples but can't get any
-			if ( snd_xma_spew_warnings.GetInt() )
+			if ( snd_xma_recover_from_exhausted_stream.GetBool() )
 			{
-				Warning( "XMA: 0x%8.8x, No Decoded Data Ready: %d samples needed, '%s'\n", (unsigned int)this, numSamplesToCopy, m_pData->Source().GetFileName() );
+				// Try to recover by using the last sample (to reduce potential pop).
+				numCopiedSamples = numRequestedSamples;
+				// Code not optimized, but hopefully is not needed in normal cases.
+				for ( int i = 0 ; i < numCopiedSamples ; ++i )
+				{
+					V_memcpy( &copyBuf[ i * m_NumChannels * sizeof(short) ], &m_LastSample, m_NumChannels * sizeof(short) );
+				}
+				*pData = (void*)copyBuf;
+
+				// Update some information used to calculate how much sound has been updated.
+				// When there are some constant big latencies (testing extreme cases, like 500 ms), failure to update these will
+				// create snowballing effect and force update of more and more samples (even if they are actually discarded at the end).
+				// A visible consequence will be major slow down of the game, getting worse over time until the sound is finished / timed out.
+				CAudioMixerWave::m_sample_max_loaded += numCopiedSamples;
+				CAudioMixerWave::m_sample_loaded_index += numCopiedSamples;
+
+				if ( snd_async_stream_spew_exhausted_buffer.GetBool()  && ( g_pQueuedLoader->IsMapLoading() == false ) )
+				{
+					static uint sOldTime = 0;
+					uint nCurrentTime = Plat_MSTime();
+					if ( nCurrentTime >= sOldTime + snd_async_stream_spew_exhausted_buffer_time.GetInt() )
+					{
+						char nameBuf[MAX_PATH];
+						Warning( "XMA: The stream buffer is exhausted for sound '%s'. Except after loading, fill a bug to have the number of sounds played reduced.\n", m_pData->Source().GetFileName(nameBuf, sizeof(nameBuf)) );
+						sOldTime = nCurrentTime;
+					}
+				}
 			}
-			m_Error = ERROR_XMA_NO_PCM_DATA;
+			else
+			{
+				// We do not want to recover from the late streamer, the sound is going to stop (very noticeable for music and background ambiance sound).
+				m_Error = ERROR_XMA_NO_PCM_DATA;
+
+				if ( snd_xma_spew_warnings.GetInt() )
+				{
+					char nameBuf[MAX_PATH];
+					Warning( "XMA: 0x%8.8x, No Decoded Data Ready: %d samples needed, '%s'\n", (unsigned int)this, numSamplesToCopy, m_pData->Source().GetFileName(nameBuf, sizeof(nameBuf)) );
+				}
+			}
 		}
 	}
 
 	return numCopiedSamples;
+}
+
+bool CAudioMixerWaveXMA::IsSetSampleStartSupported() const
+{
+	return false;
 }
 
 //-----------------------------------------------------------------------------
@@ -920,11 +1079,9 @@ int CAudioMixerWaveXMA::GetOutputData( void **pData, int numSamplesToCopy, char 
 //-----------------------------------------------------------------------------
 void CAudioMixerWaveXMA::SetSampleStart( int newPosition )
 {
-	// cannot support this
-	// this should be unused and thus not supporting
+	// Implementation not supported
 	Assert( 0 );
 }
-
 
 int CAudioMixerWaveXMA::GetPositionForSave()
 {
@@ -953,7 +1110,7 @@ void CAudioMixerWaveXMA::SetPositionFromSaved( int savedPosition )
 //-----------------------------------------------------------------------------
 // Purpose: Abstract factory function for XMA mixers
 //-----------------------------------------------------------------------------
-CAudioMixer *CreateXMAMixer( IWaveData *data, int initialStreamPosition )
+CAudioMixer *CreateXMAMixer( IWaveData *data, int initialStreamPosition, int skipInitialSamples, bool bUpdateDelayForChoreo )
 {
-	return new CAudioMixerWaveXMA( data, initialStreamPosition );
+	return new CAudioMixerWaveXMA( data, initialStreamPosition, skipInitialSamples, bUpdateDelayForChoreo );
 }

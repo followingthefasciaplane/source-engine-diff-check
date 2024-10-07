@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -39,6 +39,7 @@ enum DataUpdateType_t
 //	DATA_UPDATE_LEFT_PVS,
 //	DATA_UPDATE_DESTROYED,		// FIXME: Could enable this, but it's a little worrying
 								// since it changes a bunch of existing code
+	DATA_UPDATE_POST_UPDATE,
 };
 
 abstract_class IClientNetworkable
@@ -80,10 +81,11 @@ public:
 	// Only low-level entities should need to know about these.
 	virtual void			PreDataUpdate( DataUpdateType_t updateType ) = 0;
 	virtual void			PostDataUpdate( DataUpdateType_t updateType ) = 0;
+	virtual void			OnDataUnchangedInPVS() = 0;
 
 
 	// Objects become dormant on the client if they leave the PVS on the server.
-	virtual bool			IsDormant( void ) = 0;
+	virtual bool			IsDormant( void ) const = 0;
 
 	// Ent Index is the server handle used to reference this entity.
 	// If the index is < 0, that indicates the entity is not known to the server
@@ -99,8 +101,6 @@ public:
 	// Tells the entity that it's about to be destroyed due to the client receiving
 	// an uncompressed update that's caused it to destroy all entities & recreate them.
 	virtual void			SetDestroyedOnRecreateEntities( void ) = 0;
-
-	virtual void			OnDataUnchangedInPVS() = 0;
 };
 
 

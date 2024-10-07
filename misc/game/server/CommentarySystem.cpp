@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: The system for handling director's commentary style production info in-game.
 //
@@ -7,11 +7,10 @@
 
 #include "cbase.h"
 
-#ifndef _XBOX
 #include "tier0/icommandline.h"
 #include "igamesystem.h"
 #include "filesystem.h"
-#include <KeyValues.h>
+#include <keyvalues.h>
 #include "in_buttons.h"
 #include "engine/IEngineSound.h"
 #include "soundenvelope.h"
@@ -19,9 +18,11 @@
 #include "isaverestore.h"
 #include "eventqueue.h"
 #include "saverestore_utlvector.h"
-#include "gamestats.h"
+#include "GameStats.h"
 #include "ai_basenpc.h"
 #include "Sprite.h"
+#include "point_template.h"
+#include "mapentities.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -33,6 +34,7 @@ static const char *s_pCommentaryUpdateViewThink = "CommentaryUpdateViewThink";
 
 extern ConVar commentary;
 ConVar commentary_available("commentary_available", "0", FCVAR_NONE, "Automatically set by the game when a commentary file is available for the current map." );
+extern ConVar rr_remarkables_enabled;
 
 enum teleport_stages_t
 {
@@ -59,6 +61,10 @@ bool IsInCommentaryMode( void )
 	return g_bInCommentaryMode;
 }
 
+PRECACHE_REGISTER_BEGIN( GLOBAL, PrecachePointCommentaryNode )
+	PRECACHE( MODEL, "models/extras/info_speech.mdl" )
+PRECACHE_REGISTER_END()
+
 //-----------------------------------------------------------------------------
 // Purpose: An entity that marks a spot for a piece of commentary
 //-----------------------------------------------------------------------------
@@ -68,6 +74,7 @@ class CPointCommentaryNode : public CBaseAnimating
 public:
 	DECLARE_DATADESC();
 	DECLARE_SERVERCLASS();
+	CPointCommentaryNode();
 
 	void Spawn( void );
 	void Precache( void );
@@ -255,6 +262,7 @@ public:
 	CCommentarySystem() : CAutoGameSystemPerFrame( "CCommentarySystem" )
 	{
 		m_iCommentaryNodeCount = 0;
+		m_pkvSavedModifications = NULL;
 	}
 
 	virtual void LevelInitPreEntity()
@@ -283,6 +291,7 @@ public:
 			{
 				g_bInCommentaryMode = true;
 			}
+
 		}
 		else
 		{
@@ -341,7 +350,10 @@ public:
 
 	virtual void LevelInitPostEntity( void )
 	{
-		if ( !IsInCommentaryMode() )
+		// Previously, we would bail out immediately. However if info_remarkables are enabled,
+		// there is the possiblity that they are defined in the commentary file, because it was a 
+		// more convenient markup tool for the writers than Hammer. Therefore we must load it.
+		if ( !IsInCommentaryMode() && !rr_remarkables_enabled.GetBool() )
 			return;
 
 		// Don't spawn commentary entities when loading a savegame
@@ -351,8 +363,11 @@ public:
 		m_bCommentaryEnabledMidGame = false;
 		InitCommentary();
 
-		IGameEvent *event = gameeventmanager->CreateEvent( "playing_commentary" );
-		gameeventmanager->FireEventClientSide( event );
+		if ( IsInCommentaryMode() )
+		{
+			IGameEvent *event = gameeventmanager->CreateEvent( "playing_commentary" );
+			gameeventmanager->FireEventClientSide( event );
+		}
 	}
 
 	CPointCommentaryNode *GetNodeUnderCrosshair()
@@ -420,7 +435,11 @@ public:
 			// Detect press events to start/stop commentary nodes
 			if (buttonsPressed & COMMENTARY_BUTTONS) 
 			{
+#ifdef PORTAL2
+				if ( buttonsPressed & IN_REMOTE_VIEW && (V_stristr( MapName(), "coop" ) != NULL) )
+#else
 				if ( buttonsPressed & IN_ATTACK2 )
+#endif
 				{
 					if ( !(GetActiveNode() && GetActiveNode()->CannotBeStopped()) )
 					{
@@ -578,6 +597,7 @@ public:
 
 	void InitCommentary( void )
 	{
+		MEM_ALLOC_CREDIT();
 		// Install the global cvar callback
 		cvar->InstallGlobalChangeCallback( CV_GlobalChange_Commentary );
 
@@ -591,10 +611,18 @@ public:
 			return;
 
 		// Spawn the commentary semaphore entity
-		CBaseEntity *pSemaphore = CreateEntityByName( "info_target" );
-		pSemaphore->SetName( MAKE_STRING(COMMENTARY_SPAWNED_SEMAPHORE) );
+		static CGameString infoTargetStr( "info_target" );
+		static CGameString commentarySpawnedSemaphoreName( COMMENTARY_SPAWNED_SEMAPHORE );
+		CBaseEntity *pSemaphore = CreateEntityByName( infoTargetStr );
+		pSemaphore->SetName( commentarySpawnedSemaphoreName );
 
 		bool oldLock = engine->LockNetworkStringTables( false );
+
+		if ( m_pkvSavedModifications != NULL )
+		{
+			m_pkvSavedModifications->deleteThis();
+			m_pkvSavedModifications = NULL;
+		}
 
 		// Find the commentary file
 		char szFullName[512];
@@ -604,6 +632,20 @@ public:
 		{
 			Msg( "Commentary: Loading commentary data from %s. \n", szFullName );
 
+			unsigned int iFileSize = filesystem->Size( szFullName, "MOD" );
+			Assert( iFileSize > 0 );
+			
+			CPointTemplate *PointTemplates[MAX_EDICTS];
+			int iPointTemplateCount = 0;
+			HierarchicalSpawnMapData_t SpawnData[MAX_EDICTS]; //for point templates
+
+			//to avoid rewriting a bunch of code, I'm leaving the keyvalue parsing as is. But to get point_templates to work, I need the keyvalues as strings. So we go file->KeyValues->String.
+			char *pKVToStringBuffer = (char *)stackalloc( sizeof(char *) * iFileSize );
+			char TempKeyBuffer[20 * 1024];
+			CUtlBuffer SpawnKeyValuesBackToString( TempKeyBuffer, 20 * 1024 );
+			int iKVStringBufferIndex = 0;
+
+
 			// Load each commentary block, and spawn the entities
 			KeyValues *pkvNode = pkvFile->GetFirstSubKey();
 			while ( pkvNode )
@@ -612,7 +654,7 @@ public:
 				const char *pNodeName = pkvNode->GetName();
 
 				// Skip the trackinfo
-				if ( !Q_strncmp( pNodeName, "trackinfo", 9 ) )
+				if ( StringHasPrefixCaseSensitive( pNodeName, "trackinfo" ) )
 				{
 					pkvNode = pkvNode->GetNextKey();
 					continue;
@@ -625,22 +667,84 @@ public:
 					pNodeName = pClassname->GetString();
 				}
 
+				if ( rr_remarkables_enabled.GetBool() )
+				{
+					bool bModifyBlock = !Q_strcmp( pkvNode->GetName(), "modify_entity" );
+
+					// in L4D, we hijack the commentary system to create 
+					// info_remarkable nodes. If we are here with commentary
+					// disabled, load only those nodes.
+					// We also hijack it for map updates (exploits/etc.) on 360
+
+					KeyValues *pUpdateFlag = pkvNode->FindKey( "mapupdate", false );
+					if ( !IsInCommentaryMode() &&
+						 !StringHasPrefixCaseSensitive( pNodeName, "info_remarkable" ) && 
+						 !pUpdateFlag && !bModifyBlock )
+					{
+						// Move to next entity
+						pkvNode = pkvNode->GetNextKey();
+						continue;
+					}
+
+					if ( bModifyBlock )
+					{
+						if ( m_pkvSavedModifications == NULL )
+						{
+							m_pkvSavedModifications = new KeyValues("Entities");
+						}
+						m_pkvSavedModifications->AddSubKey( pkvNode->MakeCopy() );
+					}
+				}
+				
 				// Spawn the commentary entity
 				CBaseEntity *pNode = CreateEntityByName( pNodeName );
 				if ( pNode )
 				{
 					ParseEntKVBlock( pNode, pkvNode );
-					DispatchSpawn( pNode );
 
 					EHANDLE hHandle;
 					hHandle = pNode;
-					m_hSpawnedEntities.AddToTail( hHandle );
+					int iAddIndex = m_hSpawnedEntities.AddToTail( hHandle );
+
+					SpawnKeyValuesBackToString.SeekPut( CUtlBuffer::SEEK_HEAD, 0 );
+					pkvNode->RecursiveSaveToFile( SpawnKeyValuesBackToString, 0 );
+					int iLength = SpawnKeyValuesBackToString.TellPut() - 1;
+
+					//trim off the start and end that we don't care about
+					while( TempKeyBuffer[iLength] != '}' )
+					{
+						--iLength;
+					}
+					--iLength;
+
+					char *pStart = TempKeyBuffer;
+					while( *pStart != '{' )
+					{
+						++pStart;
+					}
+					pStart += 2; //RecursiveSaveToFile saves "name"\n{\n. We're skipping past that final \n
+					iLength -= (pStart - TempKeyBuffer);
+
+					//don't need to null terminate or space at all
+					memcpy( &pKVToStringBuffer[iKVStringBufferIndex], pStart, iLength );
+
+					SpawnData[iAddIndex].m_pMapData = &pKVToStringBuffer[iKVStringBufferIndex];
+					SpawnData[iAddIndex].m_iMapDataLength = iLength;
+
+					iKVStringBufferIndex += iLength;
 
 					CPointCommentaryNode *pCommNode = dynamic_cast<CPointCommentaryNode*>(pNode);
 					if ( pCommNode )
 					{
 						m_iCommentaryNodeCount++;
 						pCommNode->SetNodeNumber( m_iCommentaryNodeCount );
+					}
+
+					CPointTemplate *pPointTemplate = dynamic_cast<CPointTemplate*>(pNode);
+					if ( pPointTemplate )
+					{
+						PointTemplates[iPointTemplateCount] = pPointTemplate;
+						++iPointTemplateCount;
 					}
 				}
 				else
@@ -651,6 +755,39 @@ public:
 				// Move to next entity
 				pkvNode = pkvNode->GetNextKey();
 			}
+
+			ApplyCommentaryModifications();
+
+			if( iPointTemplateCount != 0 )
+			{
+				CBaseEntity **pSpawnedEntities = NULL;
+				int iSpawnedEntityCount = m_hSpawnedEntities.Count();
+				if( iSpawnedEntityCount != 0 )
+				{
+					pSpawnedEntities = (CBaseEntity **)stackalloc( sizeof(CBaseEntity *) * m_hSpawnedEntities.Count() );
+
+					for( int i = 0; i != iSpawnedEntityCount; ++i )
+					{
+						pSpawnedEntities[i] = m_hSpawnedEntities[i].Get();
+					}
+				}
+			
+				MapEntity_ParseAllEntites_SpawnTemplates( PointTemplates, iPointTemplateCount, pSpawnedEntities, SpawnData, iSpawnedEntityCount );
+
+				for( int i = iSpawnedEntityCount; --i >= 0; )
+				{
+					//remove any entities that were nullified in the point template parsing process
+					if( pSpawnedEntities[i] == NULL )
+						m_hSpawnedEntities.Remove(i);
+				}
+			}
+
+			for( int i = 0; i != m_hSpawnedEntities.Count(); ++i )
+			{
+				DispatchSpawn( m_hSpawnedEntities[i] );
+			}
+
+			PrecachePointTemplates();			
 
 			// Then activate all the entities
 			for ( int i = 0; i < m_hSpawnedEntities.Count(); i++ )
@@ -663,7 +800,91 @@ public:
 			Msg( "Commentary: Could not find commentary data file '%s'. \n", szFullName );
 		}
 
+		pkvFile->deleteThis();
+
 		engine->LockNetworkStringTables( oldLock );
+	}
+
+	void ApplyCommentaryModifications()
+	{
+		KeyValues *pkvNode = m_pkvSavedModifications ? m_pkvSavedModifications->GetFirstSubKey() : NULL;
+		while ( pkvNode )
+		{
+			// See if this section has a modify sub group in it.
+			KeyValues *pModifyBlock = pkvNode->FindKey( "modify" );
+			if ( pModifyBlock )
+			{
+				// find entities with model name
+				KeyValues *pFindByModelname = pkvNode->FindKey( "find_by_modelname" );
+				if ( pFindByModelname )
+				{
+					CBaseEntity *pEnt = gEntList.FindEntityByModel( NULL, pFindByModelname->GetString() );
+					while ( pEnt )
+					{
+						KeyValues *pKey = pModifyBlock->GetFirstSubKey();
+						while( pKey )
+						{
+							pEnt->KeyValue( pKey->GetName(), pKey->GetString() );
+							pKey = pKey->GetNextKey();
+						}
+
+						pEnt = gEntList.FindEntityByModel( pEnt, pFindByModelname->GetString() );
+					}
+				}
+
+				KeyValues *pFindByTargetname = pkvNode->FindKey( "find_by_targetname" );
+				if ( pFindByTargetname )
+				{
+					CBaseEntity *pTarget = gEntList.FindEntityByTarget( NULL, pFindByTargetname->GetString() );
+
+					while ( pTarget )
+					{
+						KeyValues *pKey = pModifyBlock->GetFirstSubKey();
+						while( pKey )
+						{
+							pTarget->KeyValue( pKey->GetName(), pKey->GetString() );
+							pKey = pKey->GetNextKey();
+						}
+
+						pTarget = gEntList.FindEntityByTarget( pTarget, pFindByTargetname->GetString() );
+					}
+				}
+				
+				KeyValues *pFindByClassname = pkvNode->FindKey( "find_by_classname" );
+				if ( pFindByClassname )
+				{
+					const char *className = pFindByClassname->GetString();
+					KeyValues *pCurrKey = pkvNode->GetFirstSubKey();
+					CBaseEntity* ent = NULL;
+					// Walk through and select as many entities of this class as number of modify groups in this modify_entity block.
+					while ( ( ent = gEntList.FindEntityByClassname( ent, className ) ) != NULL && pCurrKey )
+					{
+						// We're on the next entity in the game that is of this class.
+						// Find the next modify block in this group.
+						while ( pCurrKey && V_stricmp( pCurrKey->GetName(), "modify" ) )
+						{
+							pCurrKey = pCurrKey->GetNextKey();
+						}
+
+						if ( NULL != pCurrKey )
+						{
+							// If we have a valid modify block, copy the values from the block into this entity.
+							KeyValues *pKey = pCurrKey->GetFirstSubKey();
+							while( pKey )
+							{
+								ent->KeyValue( pKey->GetName(), pKey->GetString() );
+								pKey = pKey->GetNextKey();
+							}
+							// Advance to the next key to see if it's a "modify" group in the next loop iteration.
+							pCurrKey = pCurrKey->GetNextKey();
+						}
+					}
+				}
+			}
+
+			// Move to next entity
+			pkvNode = pkvNode->GetNextKey();
+		}
 	}
 
 	void ShutDownCommentary( void )
@@ -704,6 +925,12 @@ public:
 			}
 		}
 		m_ModifiedConvars.Purge();
+
+		if ( m_pkvSavedModifications )
+		{
+			m_pkvSavedModifications->deleteThis();
+		}
+		m_pkvSavedModifications = NULL;
 
 		m_hCurrentNode = NULL;
 		m_hActiveCommentaryNode = NULL;
@@ -790,14 +1017,47 @@ private:
 	float	m_flNextTeleportTime;
 	int		m_iTeleportStage;
 
+	KeyValues *m_pkvSavedModifications;
+
 	CUtlVector< modifiedconvars_t > m_ModifiedConvars;
 	CUtlVector<EHANDLE>				m_hSpawnedEntities;
 	CHandle<CPointCommentaryNode>	m_hCurrentNode;
 	CHandle<CPointCommentaryNode>	m_hActiveCommentaryNode;
 	CHandle<CPointCommentaryNode>	m_hLastCommentaryNode;
+
+	friend bool Commentary_IsCommentaryEntity( CBaseEntity *pEntity );
 };
 
 CCommentarySystem	g_CommentarySystem;
+
+void ApplyCommentaryModifications()
+{
+	g_CommentarySystem.ApplyCommentaryModifications();
+}
+
+bool Commentary_IsCommentaryEntity( CBaseEntity *pEntity )
+{
+	for( int i = 0; i != g_CommentarySystem.m_hSpawnedEntities.Count(); ++i )
+	{
+		if( pEntity == g_CommentarySystem.m_hSpawnedEntities[i].Get() )
+			return true;
+	}
+
+	if( pEntity->GetEntityName() == MAKE_STRING( COMMENTARY_SPAWNED_SEMAPHORE ) )
+	{
+		return true;
+	}
+
+	return false;
+}
+
+void Commentary_AbortCurrentNode( void )
+{
+	if ( g_CommentarySystem.GetActiveNode() )
+	{
+		g_CommentarySystem.GetActiveNode()->AbortPlaying();
+	}
+}
 
 void CommentarySystem_PePlayerRunCommand( CBasePlayer *player, CUserCmd *ucmd )
 {
@@ -839,7 +1099,7 @@ void CC_CommentaryChanged( IConVar *pConVar, const char *pOldString, float flOld
 		g_CommentarySystem.SetCommentaryMode( var.GetBool() );
 	}
 }
-ConVar commentary( "commentary", "0", FCVAR_NONE, "Desired commentary mode state.", CC_CommentaryChanged );
+ConVar commentary("commentary", "0", 0, "Desired commentary mode state.", CC_CommentaryChanged );
 
 //-----------------------------------------------------------------------------
 // Purpose: We need to revert back any convar changes that are made by the
@@ -875,6 +1135,11 @@ bool IsListeningToCommentary( void )
 // COMMENTARY NODES
 //===========================================================================================================
 
+CPointCommentaryNode::CPointCommentaryNode()
+	: m_iNodeNumber( 0 )
+{
+}
+
 //-----------------------------------------------------------------------------
 // Purpose: 
 //-----------------------------------------------------------------------------
@@ -900,7 +1165,6 @@ void CPointCommentaryNode::Spawn( void )
 	SetThink( &CPointCommentaryNode::SpinThink );
 	SetNextThink( gpGlobals->curtime + 0.1f ); 
 
-	m_iNodeNumber = 0;
 	m_iNodeNumberMax = 0;
 
 	SetDisabled( m_bDisabled );
@@ -1022,7 +1286,9 @@ void CPointCommentaryNode::SpinThink( void )
 //------------------------------------------------------------------------------
 void CPointCommentaryNode::PlayerActivated( void )
 {
+	#ifndef _GAMECONSOLE
 	gamestats->Event_Commentary();
+	#endif
 
 	if ( m_bActive )
 	{
@@ -1122,7 +1388,7 @@ void CPointCommentaryNode::StartCommentary( void )
 	if ( m_iszPreCommands != NULL_STRING )
 	{
 		g_CommentarySystem.SetCommentaryConvarsChanging( true );
-		engine->ClientCommand( pPlayer->edict(), STRING(m_iszPreCommands) );
+		engine->ClientCommand( pPlayer->edict(), "%s", STRING(m_iszPreCommands) );
 		engine->ClientCommand( pPlayer->edict(), "commentary_cvarsnotchanging\n" );
 	}
 
@@ -1244,7 +1510,7 @@ void CPointCommentaryNode::UpdateViewThink( void )
 
 		// Blend to the target position over time. 
  		float flCurTime = (gpGlobals->curtime - m_flStartTime);
- 		float flBlendPerc = clamp( flCurTime * 0.5f, 0.f, 1.f );
+ 		float flBlendPerc = clamp( flCurTime / 2.0, 0, 1 );
 
 		// Figure out the current view position
 		Vector vecCurEye;
@@ -1269,7 +1535,7 @@ void CPointCommentaryNode::UpdateViewPostThink( void )
  		// Blend back to the player's position over time.
    		float flCurTime = (gpGlobals->curtime - m_flFinishedTime);
 		float flTimeToBlend = MIN( 2.0, m_flFinishedTime - m_flStartTime ); 
- 		float flBlendPerc = 1.0f - clamp( flCurTime / flTimeToBlend, 0.f, 1.f );
+ 		float flBlendPerc = 1.0 - clamp( flCurTime / flTimeToBlend, 0, 1 );
 
 		//Msg("OUT: CurTime %.2f, BlendTime: %.2f, Blend: %.3f\n", flCurTime, flTimeToBlend, flBlendPerc );
 
@@ -1321,7 +1587,7 @@ void CPointCommentaryNode::FinishCommentary( bool bBlendOut )
 	if ( m_iszPostCommands != NULL_STRING )
 	{
 		g_CommentarySystem.SetCommentaryConvarsChanging( true );
-		engine->ClientCommand( pPlayer->edict(), STRING(m_iszPostCommands) );
+		engine->ClientCommand( pPlayer->edict(), "%s", STRING(m_iszPostCommands) );
 		engine->ClientCommand( pPlayer->edict(), "commentary_cvarsnotchanging\n" );
 	}
 
@@ -1640,12 +1906,3 @@ void CCommentaryAuto::InputMultiplayerSpawned( inputdata_t &inputdata )
 {
 	m_OnCommentaryMultiplayerSpawn.FireOutput( NULL, this );
 }
-
-#else
-
-bool IsInCommentaryMode( void )
-{
-	return false;
-}
-
-#endif

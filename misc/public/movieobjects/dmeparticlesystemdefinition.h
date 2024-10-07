@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: A particle system definition
 //
@@ -14,8 +14,14 @@
 #include "datamodel/dmattribute.h"
 #include "datamodel/dmattributevar.h"
 #include "datamodel/dmehandle.h"
+#include "datamodel/dmattributevar.h"
 #include "particles/particles.h"
 
+
+// key names for clipboard keyvalues entries
+#define PARTICLE_CLIPBOARD_FUNCTIONS_STR "fnc"
+#define PARTICLE_CLIPBOARD_DEFINITION_STR "pcf"
+#define PARTICLE_CLIPBOARD_DEF_BODY_STR "def"
 
 //-----------------------------------------------------------------------------
 // Forward declarations
@@ -47,12 +53,15 @@ public:
 	// from recompiling themselves a zillion times
 	void MarkNewInstance();
 
+	// should be called if a function was shallow-copied, so it has its own type dictionary
+	void InstanceTypeDictionary();
+
 protected:
 	void UpdateAttributes( const DmxElementUnpackStructure_t *pUnpack );
 
 private:
 	// Defines widgets to edit this bad boy
-	CDmeHandle< CDmeEditorTypeDictionary > m_hTypeDictionary;
+	CDmaElement< CDmeEditorTypeDictionary > m_hTypeDictionary;
 	bool m_bSkipNextResolve;
 };
 
@@ -108,9 +117,10 @@ public:
 
 	// Add, remove
 	CDmeParticleFunction* AddOperator( ParticleFunctionType_t type, const char *pFunctionName );
+	CDmeParticleFunction* AddCopyOfOperator( CDmeParticleFunction *pFunc );
 	CDmeParticleFunction* AddChild( CDmeParticleSystemDefinition *pChild );
 	void RemoveFunction( ParticleFunctionType_t type, CDmeParticleFunction *pParticleFunction );
-	void RemoveFunction( ParticleFunctionType_t type, int nIndex );
+	void OverrideAttributesFromOtherDefinition( CDmeParticleSystemDefinition *pDef );
 
 	// Find
 	int FindFunction( ParticleFunctionType_t type, CDmeParticleFunction *pParticleFunction );
@@ -138,6 +148,11 @@ public:
 	// Should we use name-based lookup?
 	bool UseNameBasedLookup() const;
 
+	void RemoveInvalidFunctions();
+
+	// Remove DM attributes that aren't needed
+	void Compact();
+
 private:
 	CDmaElementArray< CDmeParticleFunction > m_ParticleFunction[PARTICLE_FUNCTION_COUNT];
 	CDmaVar< bool > m_bPreventNameBasedLookup;
@@ -160,6 +175,30 @@ inline bool CDmeParticleSystemDefinition::UseNameBasedLookup() const
 // Human readable string for the particle functions
 //-----------------------------------------------------------------------------
 const char *GetParticleFunctionTypeName( ParticleFunctionType_t type );
+
+//-----------------------------------------------------------------------------
+// Helper function
+
+template<class T> T* ReadParticleClassFromKV( KeyValues *pKV, const char *pKeyName )
+{
+	const char *pData = pKV->GetString( pKeyName );
+	int nLen = pData ? Q_strlen( pData ) : 0;
+	if ( nLen )
+	{
+		CUtlBuffer buf( pData, nLen, CUtlBuffer::TEXT_BUFFER | CUtlBuffer::READ_ONLY );
+
+		DmElementHandle_t hRoot;
+		if ( !g_pDataModel->Unserialize( buf, "keyvalues2", "pcf", NULL, "paste", CR_FORCE_COPY, hRoot ) )
+		{
+			return NULL;
+		}
+
+		return GetElement<T>( hRoot );
+	}
+
+	return NULL;
+}
+
 
 
 #endif // DMEPARTICLESYSTEMDEFINITION_H

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 2011, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: common helpers for reuse among various Utl containers
 //
@@ -9,6 +9,8 @@
 #ifndef UTLCOMMON_H
 #define UTLCOMMON_H
 #pragma once
+
+#include "strtools.h"
 
 //-----------------------------------------------------------------------------
 // Henry Goffin (henryg) was here. Questions? Bugs? Go slap him around a bit.
@@ -116,11 +118,22 @@ template <typename T> struct ArgumentTypeInfo;
 
 
 // Some fundamental building-block functors...
-struct StringLessFunctor { bool operator()( const char *a, const char *b ) const { return Q_strcmp( a, b ) < 0; } };
-struct StringEqualFunctor { bool operator()( const char *a, const char *b ) const { return Q_strcmp( a, b ) == 0; } };
-struct CaselessStringLessFunctor { bool operator()( const char *a, const char *b ) const { return Q_strcasecmp( a, b ) < 0; } };
-struct CaselessStringEqualFunctor { bool operator()( const char *a, const char *b ) const { return Q_strcasecmp( a, b ) == 0; } };
+struct StringLessFunctor 
+{ 
+	StringLessFunctor( int i ) {};
+	StringLessFunctor( void ) {};
+	inline bool operator!() const { return false; }
 
+	bool operator()( const char *a, const char *b ) const 
+	{ 
+		return V_strcmp( a, b ) < 0; 
+	} 
+};
+struct StringEqualFunctor { bool operator()( const char *a, const char *b ) const { return V_strcmp( a, b ) == 0; } };
+struct CaselessStringLessFunctor { bool operator()( const char *a, const char *b ) const { return V_strcasecmp( a, b ) < 0; } };
+struct CaselessStringEqualFunctor { bool operator()( const char *a, const char *b ) const { return V_strcasecmp( a, b ) == 0; } };
+
+struct IdentityHashFunctor { unsigned int operator() ( uint32 s ) const { return s; } };
 struct Mix32HashFunctor { unsigned int operator()( uint32 s ) const; };
 struct Mix64HashFunctor { unsigned int operator()( uint64 s ) const; };
 struct StringHashFunctor { unsigned int operator()( const char* s ) const; };
@@ -192,6 +205,7 @@ template < typename T > class CUtlConstStringBase;
 
 template <> struct DefaultLessFunctor<CUtlString> : StringLessFunctor { };
 template <> struct DefaultHashFunctor<CUtlString> : StringHashFunctor { };
+template <> struct DefaultEqualFunctor<CUtlString> : StringEqualFunctor {};
 template < typename T > struct DefaultLessFunctor< CUtlConstStringBase<T> > : StringLessFunctor { };
 template < typename T > struct DefaultHashFunctor< CUtlConstStringBase<T> > : StringHashFunctor { };
 
